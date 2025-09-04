@@ -463,6 +463,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        if enable_eplb:
+            assert expert_load_view is not None
+            assert logical_to_physical_map is not None
+            assert logical_replica_count is not None
+            assert isinstance(layer, FusedMoE)
 
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
@@ -481,7 +486,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             expert_map=expert_map,
             expert_load_view=expert_load_view,
             logical_to_physical_map=logical_to_physical_map,
-            logical_replica_count=logical_replica_count)
+            logical_replica_count=logical_replica_count,
+            fused_experts_method=self.fused_experts
+            )
 
         if self.rocm_aiter_moe_enabled:
             return self.rocm_aiter_fused_experts(
@@ -508,6 +515,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
+                expert_load_view=expert_load_view,
             )
         else:
             assert fused_experts is not None
@@ -1444,6 +1452,7 @@ class FusedMoE(CustomOp):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
+        fused_experts_method: Optional[Callable] = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Route the input hidden states to the top-k experts based on the
@@ -1526,34 +1535,44 @@ class FusedMoE(CustomOp):
 
             # 2. Record expert load metrics.
 
-            # TODO(bowen): When using `FusedMoEModularKernel`, this
-            # can be done in a more unified way, since
-            # `FusedMoEPrepareAndFinalize` will return the expert
-            # token count, in some cases directly from the kernel.
-            # However, now there are many code paths not using
-            # the modular kernel, e.g. calling `fused_experts`,
-            # so we decide to keep the logic here.
-            #
-            # If later refactor moved all the MoE kernel calls
-            # to the modular kernel, we can move this logic there
-            # to achieve better efficiency.
+            # When using FusedMoEModularKernel, 
+            # expert load statistics are handled directly in the kernel using 
+            # ExpertTokensMetadata.expert_num_tokens for better performance.
+            # For other implementations or when metadata is not available, 
+            # we fall back to scatter_add_.
+            
+            # Check if we're using FusedMoEModularKernel and 
+            # if it has already processed the load.
+            # If not, use the traditional scatter_add_ approach.
 
-            # `expert_load_view`: (num_physical_experts,)
+            # There is no expert_num_tokens in 
+            # expert_tokens_meta of DeepEPHTPrepareAndFinalize
+            # so it is not supported DeepEPHTPrepareAndFinalize for now. 
+            # TODO: Maybe it is better to support DeepEPHTPrepareAndFinalize.
+            skip_expert_load_scatter_add = ((fused_experts_method is not None) and 
+                isinstance(fused_experts_method, FusedMoEModularKernel) and 
+                (fused_experts_method.prepare_finalize.__class__ != 
+                "DeepEPHTPrepareAndFinalize"))
 
-            topk_ids_flatten = topk_ids.flatten()
+            if not skip_expert_load_scatter_add:
+                logger.debug("expert_load_view update from topk_ids through scatter_add_.")
+                # Fallback to scatter_add_ for non-modular kernel implementations
+                topk_ids_flatten = topk_ids.flatten()
 
-            # Performance optimization:
-            # `masked_fill` is significantly faster than `masked_select`
-            invalid_mask = topk_ids_flatten < 0
-            # Replace invalid expert ids with 0 (just a dummy position)
-            # to avoid out-of-bounds errors in scatter_add_
-            index = topk_ids_flatten.masked_fill_(invalid_mask, 0)
-            # `src` is the valid mask, which is 1 for valid and 0 for invalid
-            src = ~invalid_mask
+                # Performance optimization:
+                # `masked_fill` is significantly faster than `masked_select`
+                invalid_mask = topk_ids_flatten < 0
+                # Replace invalid expert ids with 0 (just a dummy position)
+                # to avoid out-of-bounds errors in scatter_add_
+                index = topk_ids_flatten.masked_fill_(invalid_mask, 0)
+                # `src` is the valid mask, which is 1 for valid and 0 for invalid
+                src = ~invalid_mask
 
-            expert_load_view.scatter_add_(dim=0,
-                                          index=index.long(),
-                                          src=src.to(expert_load_view))
+                expert_load_view.scatter_add_(dim=0,
+                                              index=index.long(),
+                                              src=src.to(expert_load_view))
+            else:
+                logger.debug("expert_load_view update in modular_kernel through add_.")
 
             topk_ids = topk_ids.to(dtype=indices_type)
 
@@ -1856,6 +1875,18 @@ class FusedMoE(CustomOp):
 
         return s
 
+    def update_map(self, new_expert_map):
+        self.expert_map = new_expert_map
+
+    def get_map(self):
+        return self.expert_map
+
+    def get_log2phy_map(self):
+        return self.logical_to_physical_map
+
+    def clear_expert_load_view(self):
+        if self.expert_load_view is not None:
+            self.expert_load_view.zero_()
 
 def moe_forward(
     hidden_states: torch.Tensor,

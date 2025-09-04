@@ -755,6 +755,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         a1_scale: Optional[torch.Tensor] = None,
         a2_scale: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
+        expert_load_view: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """
         This function computes a Mixture of Experts (MoE) layer using two sets
@@ -787,6 +788,9 @@ class FusedMoEModularKernel(torch.nn.Module):
         - apply_router_weight_on_input (bool): When true, the topk weights are
           applied directly on the inputs. This is only applicable when topk is
           1.
+        - expert_load_view (Optional[torch.Tensor]): Optional tensor for tracking
+          expert load statistics. If provided, the kernel will update it using
+          ExpertTokensMetadata.expert_num_tokens for better performance.
 
         Returns:
         - torch.Tensor: The output tensor after applying the MoE layer.
@@ -839,6 +843,15 @@ class FusedMoEModularKernel(torch.nn.Module):
 
             (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
              _expert_topk_weights) = receiver()
+
+        # Process expert load statistics if we have the necessary components
+        # This provides a more efficient alternative to scatter_add_ in select_experts
+        if (expert_tokens_meta is not None and expert_load_view is not None and
+            expert_tokens_meta.expert_num_tokens is not None):
+                # Use pre-computed expert token counts from metadata
+                expert_load_view.scatter_add_(dim=0, 
+                                              index=torch.nonzero(expert_map != -1, as_tuple=False).squeeze(),
+                                              src=expert_tokens_meta.expert_num_tokens)
 
         # Maybe prepare gathered topk_ids and topk_weights from other EP ranks.
         topk_ids = topk_ids if _expert_topk_ids is None else _expert_topk_ids
