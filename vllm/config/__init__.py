@@ -1424,7 +1424,8 @@ class ModelConfig:
             return self.hf_text_config.head_dim
 
         # NOTE: Some models (such as PLaMo2.1) use `hidden_size_per_head`
-        if getattr(self.hf_text_config, "hidden_size_per_head", None) is not None:
+        if getattr(self.hf_text_config, "hidden_size_per_head",
+                   None) is not None:
             return self.hf_text_config.hidden_size_per_head
 
         # FIXME(woosuk): This may not be true for all models.
