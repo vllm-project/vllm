@@ -513,7 +513,7 @@ steps:
   commands:
     - pytest -v -s models/test_transformers.py
 
-- label: Basic Models Test (Registry) # 24min
+- label: Basic Models Test (Registry)
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
@@ -522,7 +522,7 @@ steps:
   commands:
     - pytest -v -s models/test_registry.py
 
-- label: Basic Models Test (Utils) # 24min
+- label: Basic Models Test (Utils)
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
@@ -531,7 +531,7 @@ steps:
   commands:
     - pytest -v -s models/test_utils.py
 
-- label: Basic Models Test (Vision) # 24min
+- label: Basic Models Test (Vision)
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
@@ -540,7 +540,7 @@ steps:
   commands:
     - pytest -v -s models/test_vision.py
 
-- label: Basic Models Test (Initialization) # 24min
+- label: Basic Models Test (Initialization)
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
@@ -548,26 +548,6 @@ steps:
   - tests/models/test_initialization.py
   commands:
     - pytest -v -s models/test_initialization.py
-
-- label: Language Models Test (Common) (Standard)
-  mirror_hardwares: [amdexperimental]
-  torch_nightly: true
-  source_file_dependencies:
-  - vllm/
-  - tests/models/language/generation/test_common.py
-  commands:
-    - pip freeze | grep -E 'torch'
-    - pytest -v -s models/language/generation/test_common.py -m core_model
-
-- label: Language Models Test (Embedding) (Standard)
-  mirror_hardwares: [amdexperimental]
-  torch_nightly: true
-  source_file_dependencies:
-  - vllm/
-  - tests/models/language/pooling/test_embedding.py
-  commands:
-    - pip freeze | grep -E 'torch'
-    - pytest -v -s models/language/pooling/test_embedding.py -m core_model
 
 - label: Language Models Test (Standard)
   mirror_hardwares: [amdexperimental]
@@ -577,7 +557,27 @@ steps:
   - tests/models/language
   commands:
     - pip freeze | grep -E 'torch'
-    - pytest -v -s models/language -m core_model
+    - pytest -v -s models/language -m "core_model and not (embedding_model or common_model)"
+
+- label: Language Models Test (Common) (Standard)
+  mirror_hardwares: [amdexperimental]
+  torch_nightly: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/language/generation/test_common.py
+  commands:
+    - pip freeze | grep -E 'torch'
+    - pytest -v -s models/language/generation/test_common.py -m common_model
+
+- label: Language Models Test (Embedding) (Standard)
+  mirror_hardwares: [amdexperimental]
+  torch_nightly: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/language/pooling/test_embedding.py
+  commands:
+    - pip freeze | grep -E 'torch'
+    - pytest -v -s models/language/pooling/test_embedding.py -m embedding_model
 
 - label: Language Models Test (Hybrid) # 35 min
   mirror_hardwares: [amdexperimental]
