@@ -323,7 +323,7 @@ def test_free_kv_cache_block_queue_get_all_free_blocks():
         blocks[1:2] + blocks[3:] + [block_to_remove]
 
 
-def test_generate_block_hash_extra_keys():
+def test_generate_block_hash_extra_keys(with_init_none_hash):
     request = make_request(
         request_id="0",
         prompt_token_ids=[_ for _ in range(20)],
@@ -355,7 +355,8 @@ def test_generate_block_hash_extra_keys():
     assert next_mm_idx == 2
 
 
-def test_generate_block_hash_extra_keys_no_mm_inputs():
+def test_generate_block_hash_extra_keys_no_mm_inputs(with_init_none_hash):
+    init_none_hash(hash)
     request = make_request(
         request_id="0",
         prompt_token_ids=[_ for _ in range(6)],
@@ -368,7 +369,8 @@ def test_generate_block_hash_extra_keys_no_mm_inputs():
     assert next_mm_idx == 0
 
 
-def test_generate_block_hash_extra_keys_cache_salt():
+def test_generate_block_hash_extra_keys_cache_salt(with_init_none_hash):
+    init_none_hash(hash)
     request = make_request(
         request_id="0",
         prompt_token_ids=[_ for _ in range(6)],

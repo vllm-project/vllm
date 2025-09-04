@@ -42,6 +42,7 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
 from vllm.sequence import Logprob
 from vllm.transformers_utils.utils import maybe_model_redirect
+from vllm.v1.core.kv_cache_utils import init_none_hash
 
 logger = init_logger(__name__)
 
@@ -1375,3 +1376,8 @@ def image_urls(request, local_asset_server) -> list[str]:
     """Indirect fixture: takes a list of names, returns list of full URLs."""
     names: list[str] = request.param
     return [local_asset_server.url_for(name) for name in names]
+
+
+@pytest.fixture
+def with_init_none_hash():
+    init_none_hash(hash)
