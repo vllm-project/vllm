@@ -1769,10 +1769,10 @@ class ModelConfig:
         # such as the lm_head in a generation model,
         # or the score or classifier in a classification model.
         # the default head_dtype based on runner_type.
-        #   - The pooling model defaults to using fp32 head,
-        # you can use head_dtype="" to disable it.
-        #   - The generate model defaults to not using fp32 head,
-        # you can use head_dtype=float32 to enable it.
+        # - The pooling model defaults to using fp32 head,
+        # you can use --hf-overrides '{"head_dtype": "model"}' to disable it.
+        # - The generate model defaults to not using fp32 head,
+        # you can use --hf-overrides '{"head_dtype": "float32"}' to enable it.
         return self._head_dtype
 
     def get_and_verify_max_len(self, max_model_len: int):
@@ -2921,7 +2921,7 @@ def _get_head_dtype(config: PretrainedConfig, dtype: torch.dtype,
                                torch.dtype]] = getattr(config, "head_dtype",
                                                        None)
 
-    if head_dtype == "":
+    if head_dtype == "model":
         return dtype
     elif isinstance(head_dtype, str):
         head_dtype = head_dtype.lower()
