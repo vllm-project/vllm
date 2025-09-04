@@ -184,9 +184,11 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/distributed/eplb
-  - tests/distributed/test_eplb_async_thread.py
+  - tests/distributed/test_eplb_async_process.py
+  - tests/distributed/test_eplb_async_process_integration.py
   commands:
-  - pytest -v -s distributed/test_eplb_async_thread.py
+  - pytest -v -s distributed/test_eplb_async_process.py
+  - pytest -v -s distributed/test_eplb_async_process_integration.py
 
 - label: EPLB Execution Test # 5min
   working_dir: "/vllm-workspace/tests"

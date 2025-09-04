@@ -26,12 +26,9 @@ MoE layer. If we have 32 EP ranks, then each GPU will hold 288 / 32 = 9 local
 physical experts.
 """
 
-import threading
 from collections.abc import Sequence
-from contextlib import suppress
 from dataclasses import dataclass
-from queue import Empty, Queue
-from typing import Any, Callable, Optional, Union
+from typing import Optional, Union
 
 import torch
 from torch.distributed import ProcessGroup, all_reduce
@@ -42,183 +39,12 @@ from vllm.distributed.parallel_state import (get_ep_group, get_node_count,
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
+from .eplb_process import EPLBProcess
 
 from .rebalance_algo import rebalance_experts
 from .rebalance_execute import rearrange_expert_weights_inplace
 
 logger = init_logger(__name__)
-
-
-class EPLBThread:
-    """
-    Encapsulates lifecycle management for asynchronous expert
-    rearrangement threads
-    """
-
-    def __init__(self, target_func: Callable, num_wait_worker_iterations: int):
-        """
-        Initialize asynchronous thread manager
-        Args:
-            target_func: Target function to execute in asynchronous thread
-                (e.g., rebalance_experts)
-            num_wait_worker_iterations: Number of steps to wait before
-                checking results
-        """
-        self.target_func = target_func
-        self._num_wait_worker_iterations = num_wait_worker_iterations
-
-        # Thread management related
-        self._thread: Optional[threading.Thread] = None
-        self._input_queue: Optional[Queue] = None
-        self._result_queue: Optional[Queue] = None
-        self._exception_queue: Optional[Queue] = None
-        self._step_counter = 0
-        self._result: Optional[tuple] = None
-        self._args: Optional[tuple] = None
-        self._is_running = False
-
-        # Save parameters needed for post-processing
-        self._post_process_args: Optional[dict[str, Any]] = None
-
-    def start(self, args: tuple, post_process_args: dict[str, Any]) -> bool:
-        """
-        Start asynchronous thread
-        Args:
-            args: Tuple of arguments to pass to the target function
-            post_process_args: Parameters needed for subsequent
-                processing (e.g., model, ep_group)
-        Returns:
-            True if thread started successfully, False otherwise
-        """
-        # Ensure previous thread is cleaned up
-        self.cleanup()
-
-        try:
-            # Initialize queues
-            self._input_queue = Queue()
-            self._result_queue = Queue()
-            self._exception_queue = Queue()
-            self._step_counter = 0
-            self._result = None
-            self._args = args
-            self._post_process_args = post_process_args
-
-            # Put arguments and start thread
-            self._input_queue.put(args)
-            self._thread = threading.Thread(target=self._worker,
-                                            args=(self._input_queue,
-                                                  self._result_queue,
-                                                  self._exception_queue),
-                                            daemon=True)
-            self._thread.start()
-            self._is_running = True
-            return True
-        except Exception as e:
-            logger.error("Failed to start asynchronous thread: %s", str(e))
-            self.cleanup()
-            return False
-
-    def _worker(self, input_queue: Queue, output_queue: Queue,
-                exception_queue: Queue) -> None:
-        """Subthread worker function"""
-        try:
-            # Get arguments
-            args = input_queue.get()
-
-            # Execute target function
-            result = self.target_func(*args)
-            output_queue.put(result)
-        except Exception as e:
-            output_queue.put(None)
-            if hasattr(e, "add_note"):
-                import traceback
-                e.add_note(traceback.format_exc())
-            exception_queue.put(e)
-            logger.exception("Asynchronous thread execution failed")
-
-    def step(self) -> bool:
-        """
-        Increment step counter and check if results need processing
-        Returns:
-            Whether results have been processed
-        """
-        if not self._is_running:
-            return False
-
-        self._step_counter += 1
-
-        # Check for exceptions first
-        if self._exception_queue and not self._exception_queue.empty():
-            try:
-                error_msg = self._exception_queue.get_nowait()
-                self.cleanup()
-                raise RuntimeError(f"Asynchronous thread failed: {error_msg}")
-            except Empty:
-                pass
-
-        # Check if processing conditions are met
-        if self._should_process():
-            self._fetch_result()
-            self.cleanup()
-            return True
-
-        return False
-
-    def _should_process(self) -> bool:
-        """Determine if results need processing"""
-        if not self._thread or not self._result_queue:
-            return True
-
-        return (self._step_counter >= self._num_wait_worker_iterations
-                or not self._thread.is_alive()
-                or not self._result_queue.empty())
-
-    def _fetch_result(self) -> None:
-        """Retrieve subthread results"""
-        if self._result_queue and not self._result_queue.empty():
-            try:
-                self._result = self._result_queue.get_nowait()
-            except Empty:
-                self._result = None
-        else:
-            self._result = None
-            logger.warning(
-                "Asynchronous thread completed but no result was returned")
-
-    def cleanup(self) -> None:
-        """Clean up thread resources"""
-        # Threads can't be terminated, so we just mark it as not running
-        self._is_running = False
-        self._thread = None
-
-        # Clear queues
-        for q in (self._input_queue, self._result_queue,
-                  self._exception_queue):
-            if q:
-                with suppress(Empty):
-                    while not q.empty():
-                        q.get_nowait()
-
-        self._input_queue = None
-        self._result_queue = None
-        self._exception_queue = None
-
-    @property
-    def is_running(self) -> bool:
-        """Return whether the thread is running"""
-        if not self._is_running or self._thread is None:
-            return False
-        return self._thread.is_alive()
-
-    @property
-    def result(self) -> Optional[tuple]:
-        """Return processing results"""
-        return self._result
-
-    @property
-    def post_process_args(self) -> Optional[dict[str, Any]]:
-        """Return post-processing arguments"""
-        return self._post_process_args
 
 
 @dataclass
@@ -336,9 +162,9 @@ class EplbState:
     Number of iterations to wait before applying a redistribution plan
     """
 
-    _async_processor: Optional[EPLBThread] = None
-    """  
-    Asynchronous thread manager  
+    _async_processor: Optional[EPLBProcess] = None
+    """
+    Asynchronous process manager
     """
 
     @staticmethod
@@ -513,8 +339,8 @@ class EplbState:
         )
 
     def __post_init__(self):
-        # Initialize asynchronous thread manager
-        self._async_processor = EPLBThread(
+        # Initialize asynchronous process manager
+        self._async_processor = EPLBProcess(
             target_func=rebalance_experts,
             num_wait_worker_iterations=self.num_wait_worker_iterations)
 
@@ -601,7 +427,8 @@ class EplbState:
             self.expert_rearrangement_step = 0
             self.rearrange(model)
 
-        if self._async_processor:
+        if self._async_processor and self._async_processor.has_pending_task:
+            logger.error("EPLBState step1")
             try:
                 if self._async_processor.step():
                     # Process results
@@ -611,14 +438,12 @@ class EplbState:
                              str(e))
                 self._async_processor.cleanup()
 
-    def rearrange(
-        self,
-        model: MixtureOfExperts,
-        is_profile: bool = False,
-        execute_shuffle: bool = True,
-        global_expert_load: Optional[torch.Tensor] = None,
-        rank_mapping: Optional[dict[int,
-                                    int]] = None) -> Optional[torch.Tensor]:
+    def rearrange(self,
+                  model: MixtureOfExperts,
+                  is_profile: bool = False,
+                  execute_shuffle: bool = True,
+                  global_expert_load: Optional[torch.Tensor] = None,
+                  rank_mapping: Optional[dict[int, int]] = None) -> None:
         """
         Rearrange the experts according to the current load.
         """
@@ -711,32 +536,37 @@ class EplbState:
             "device": self.physical_to_logical_map.device
         }
 
-        # Start asynchronous thread
+        # Submit task to asynchronous process
         if self._async_processor is None:
             logger.error(
-                "Async processor is not initialized, cannot start thread")
-            return None
+                "Async processor is not initialized, cannot submit task")
+            return
 
-        if self._async_processor.is_running:
+        if self._async_processor.has_pending_task:
             logger.info(
-                "EPLB async thread is already running, skipping new launch")
-            return None
+                "EPLB async process already has a pending task, skipping new submission")
+            return
+
+        if self._async_processor.is_post_processing:
+            logger.info(
+                "EPLB async process is pending post processing task, skipping "
+                "new submission")
+            return
 
         try:
-            success = self._async_processor.start(
+            success = self._async_processor.submit_task(
                 args=input_args, post_process_args=post_process_args)
         except Exception as e:
-            logger.error("Error starting async thread: %s", str(e))
+            logger.error("Error submitting task to async process: %s", str(e))
             success = False
 
         if success:
-            logger.info_once(
-                "rebalance_experts has started in async thread, "
+            logger.info(
+                "rebalance_experts task has been submitted to async process, "
                 "will check results after maximum %s steps",
                 str(self.num_wait_worker_iterations))
         else:
-            logger.error("Failed to start async rebalance thread")
-        return None
+            logger.error("Failed to submit rebalance task to async process")
 
     def _process_async_result(self):
         """Process asynchronously returned results"""
@@ -745,12 +575,11 @@ class EplbState:
 
         result = self._async_processor.result
         post_args = self._async_processor.post_process_args
-
         if not result or not post_args:
-            logger.error("Async thread did not return valid results, "
+            logger.error("Async process did not return valid results, "
                          "skipping post-processing")
             return
-
+        self._async_processor.is_post_processing = True
         # Parse parameters and results
         model = post_args["model"]
         ep_group = post_args["ep_group"]
@@ -760,7 +589,6 @@ class EplbState:
 
         (new_physical_to_logical_map, new_logical_to_physical_map,
          new_logical_replica_count) = result
-
         # Restore tensors to original device
         new_physical_to_logical_map = new_physical_to_logical_map.to(device)
         new_logical_to_physical_map = new_logical_to_physical_map.to(device)
@@ -779,7 +607,7 @@ class EplbState:
         if not is_profile:
             # Update state mappings
             if self.physical_to_logical_map.shape[
-                    1] != new_physical_to_logical_map.shape[1]:
+                1] != new_physical_to_logical_map.shape[1]:
                 self.physical_to_logical_map = new_physical_to_logical_map
             else:
                 self.physical_to_logical_map.copy_(new_physical_to_logical_map)
@@ -794,9 +622,8 @@ class EplbState:
             )
             self.logical_to_physical_map.copy_(new_logical_to_physical_map)
             self.logical_replica_count.copy_(new_logical_replica_count)
-
-        logger.info_once("rearrange_expert_weights_inplace "
-                         "processing completed")
+        self._async_processor.is_post_processing = False
+        logger.info("rebalance_experts result processing completed")
 
     @staticmethod
     def recv_state() -> tuple[torch.Tensor, torch.Tensor]:
@@ -826,6 +653,11 @@ class EplbState:
                                     group_src=0)
 
         return global_expert_load, old_global_expert_indices
+
+    def __del__(self):
+        """Clean up async process resources"""
+        if self._async_processor:
+            self._async_processor.cleanup()
 
 
 def _node_count_with_rank_mapping(
