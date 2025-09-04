@@ -40,6 +40,7 @@ from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
 from vllm.model_executor.models.interfaces import (is_mixture_of_experts,
                                                    supports_eagle3,
+                                                   supports_mrope,
                                                    supports_transcription)
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling, is_pooling_model, is_text_generation_model)
@@ -590,16 +591,28 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if mm_input.get("use_audio_in_video") is True:
                 use_audio_in_video = True
 
-        req_state.mrope_positions, req_state.mrope_position_delta = \
-            MRotaryEmbedding.get_input_positions_tensor(
-                req_state.prompt_token_ids,
-                hf_config=self.model_config.hf_config,
-                image_grid_thw=image_grid_thw,
-                video_grid_thw=video_grid_thw,
-                second_per_grid_ts=second_per_grid_ts,
-                audio_feature_lengths=audio_feature_lengths,
-                use_audio_in_video=use_audio_in_video,
-            )
+        if supports_mrope(self.model):
+            req_state.mrope_positions, req_state.mrope_position_delta = \
+                self.model.get_input_positions_tensor(
+                    req_state.prompt_token_ids,
+                    hf_config=self.model_config.hf_config,
+                    image_grid_thw=image_grid_thw,
+                    video_grid_thw=video_grid_thw,
+                    second_per_grid_ts=second_per_grid_ts,
+                    audio_feature_lengths=audio_feature_lengths,
+                    use_audio_in_video=use_audio_in_video,
+                )
+        else:
+            req_state.mrope_positions, req_state.mrope_position_delta = \
+                MRotaryEmbedding.get_input_positions_tensor(
+                    req_state.prompt_token_ids,
+                    hf_config=self.model_config.hf_config,
+                    image_grid_thw=image_grid_thw,
+                    video_grid_thw=video_grid_thw,
+                    second_per_grid_ts=second_per_grid_ts,
+                    audio_feature_lengths=audio_feature_lengths,
+                    use_audio_in_video=use_audio_in_video,
+                )
 
     def _extract_mm_kwargs(
         self,
@@ -1002,14 +1015,22 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # compute completion's mrope_positions on-the-fly
                 dst_start = mrope_pos_ptr
                 dst_end = mrope_pos_ptr + completion_part_len
-
-                MRotaryEmbedding.get_next_input_positions_tensor(
-                    out=self.mrope_positions.np,
-                    out_offset=dst_start,
-                    mrope_position_delta=req.mrope_position_delta,
-                    context_len=num_computed_tokens + prompt_part_len,
-                    num_new_tokens=completion_part_len,
-                )
+                if supports_mrope(self.model):
+                    self.model.get_input_positions_tensor(
+                        out=self.mrope_positions.np,
+                        out_offset=dst_start,
+                        mrope_position_delta=req.mrope_position_delta,
+                        context_len=num_computed_tokens + prompt_part_len,
+                        num_new_tokens=completion_part_len,
+                    )
+                else:
+                    MRotaryEmbedding.get_next_input_positions_tensor(
+                        out=self.mrope_positions.np,
+                        out_offset=dst_start,
+                        mrope_position_delta=req.mrope_position_delta,
+                        context_len=num_computed_tokens + prompt_part_len,
+                        num_new_tokens=completion_part_len,
+                    )
 
                 mrope_pos_ptr += completion_part_len
 
