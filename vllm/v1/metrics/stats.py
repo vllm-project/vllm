@@ -87,9 +87,14 @@ class FinishedRequestStats:
 class IterationStats:
     """Stats associated with a single set of EngineCoreOutputs."""
 
+    """Minimum number of historical records for being valid."""
     MIN_HISTORY_LEN: int = 10
 
+    """Maximum number of historical records to be considered."""
     MAX_HISTORY_LEN: int = 100
+
+    """Minimum number of computed_prefill_tokens for being valid."""
+    MIN_COMPUTED_PREFILL_TOKENS: int = 20
 
     def __init__(self, prefill_tps_history: Optional[Deque] = None):
         self.iteration_timestamp = time.time()
@@ -180,7 +185,8 @@ class IterationStats:
 
         computed_prefill_tokens = num_prompt_tokens - num_cached_tokens
         if (self.prefill_tps_history is not None and
-                prefill_time > 0 and computed_prefill_tokens > 0):
+                prefill_time > 0 and
+                computed_prefill_tokens > self.MIN_COMPUTED_PREFILL_TOKENS):
             self.prefill_tps_history.append(computed_prefill_tokens / prefill_time)
 
         finished_req = \
