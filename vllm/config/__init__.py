@@ -49,7 +49,8 @@ from vllm.transformers_utils.config import (
     try_get_tokenizer_config, uses_mrope)
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
-from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS, LayerBlockType,
+from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
+                        STR_DUAL_CHUNK_FLASH_ATTN_VAL, LayerBlockType,
                         LazyLoader, common_broadcastable_dtype, random_uuid)
 
 if TYPE_CHECKING:
@@ -1306,6 +1307,10 @@ class ModelConfig:
                         self.hf_config.dual_chunk_attention_config:
                     self.hf_config.dual_chunk_attention_config[
                         "sparse_attention_enabled"] = True
+
+            if envs.VLLM_ATTENTION_BACKEND != STR_DUAL_CHUNK_FLASH_ATTN_VAL:
+                raise ValueError("please set VLLM_ATTENTION_BACKEND to "
+                                 f"{STR_DUAL_CHUNK_FLASH_ATTN_VAL}")
 
     def verify_async_output_proc(self, parallel_config, speculative_config,
                                  device_config) -> None:
@@ -2654,24 +2659,46 @@ class PoolerConfig:
     ## for embeddings models
     normalize: Optional[bool] = None
     """
-    Whether to normalize the embeddings outputs.
+    Whether to normalize the embeddings outputs. Defaults to True.
     """
     dimensions: Optional[int] = None
     """
     Reduce the dimensions of embeddings if model
-    support matryoshka representation.
+    support matryoshka representation. Defaults to None.
+    """
+    enable_chunked_processing: Optional[bool] = None
+    """
+    Whether to enable chunked processing for long inputs that exceed the model's
+    maximum position embeddings. When enabled, long inputs will be split into
+    chunks, processed separately, and then aggregated using weighted averaging.
+    This allows embedding models to handle arbitrarily long text without CUDA
+    errors. Defaults to False.
+    """
+    max_embed_len: Optional[int] = None
+    """
+    Maximum input length allowed for embedding generation. When set, allows
+    inputs longer than max_embed_len to be accepted for embedding models.
+    When an input exceeds max_embed_len, it will be handled according to 
+    the original max_model_len validation logic. 
+    Defaults to None (i.e. set to max_model_len).
     """
 
     ## for classification models
     activation: Optional[bool] = None
     """
     Whether to apply activation function to the classification outputs.
+    Defaults to True.
+    """
+    logit_bias: Optional[float] = None
+    """
+    If provided, apply classification logit biases. Defaults to None.
     """
 
     ## for reward models
     softmax: Optional[bool] = None
     """
     Whether to apply softmax to the reward outputs.
+    Defaults to True.
     """
     step_tag_id: Optional[int] = None
     """
@@ -2684,25 +2711,6 @@ class PoolerConfig:
     A list of indices for the vocabulary dimensions to be extracted,
     such as the token IDs of ``good_token`` and ``bad_token`` in the
     ``math-shepherd-mistral-7b-prm`` model.
-    """
-
-    enable_chunked_processing: Optional[bool] = None
-    """
-    Whether to enable chunked processing for long inputs that exceed the model's
-    maximum position embeddings. When enabled, long inputs will be split into
-    chunks, processed separately, and then aggregated using weighted averaging.
-    This allows embedding models to handle arbitrarily long text without CUDA
-    errors. Defaults to False.
-    """
-
-    max_embed_len: Optional[int] = None
-    """
-    Maximum input length allowed for embedding generation. When set, allows
-    inputs longer than max_embed_len to be accepted for embedding models.
-    This parameter enables accepting long inputs without requiring
-    VLLM_ALLOW_LONG_MAX_MODEL_LEN environment variable. When an input exceeds
-    max_embed_len, it will be handled according to the original max_model_len
-    validation logic. Defaults to None (i.e. set to max_model_len).
     """
 
     def compute_hash(self) -> str:
@@ -3242,7 +3250,7 @@ class KVTransferConfig:
 
     kv_parallel_size: int = 1
     """The number of parallel instances for KV cache transfer. For
-    PyNcclConnector, this should be 2."""
+    P2pNcclConnector, this should be 2."""
 
     kv_ip: str = "127.0.0.1"
     """The KV connector ip, used to build distributed connection."""
