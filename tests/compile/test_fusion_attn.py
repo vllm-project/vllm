@@ -69,13 +69,17 @@ def test_attention_fusion(example_prompts, monkeypatch, model: str,
         backend="tests.compile.test_fusion_attn.backend_unfused",
         custom_ops=["+quant_fp8"],
     )
-    vllm_config = VllmConfig(compilation_config=compile_config)
+    vllm_config = VllmConfig(compilation_config=compile_config,
+                             model_config=ModelConfig(
+                                 model=model,
+                                 dtype=torch.bfloat16,
+                             ))
     backend_unfused = TestBackend(NoOpEliminationPass(vllm_config))
 
     llm = LLM(model,
               enforce_eager=True,
               compilation_config=compile_config,
-              gpu_memory_utilization=0.9,
+              gpu_memory_utilization=0.5,
               max_model_len=2048)
 
     sampling_params = SamplingParams(temperature=0.0,
@@ -93,7 +97,11 @@ def test_attention_fusion(example_prompts, monkeypatch, model: str,
         backend="tests.compile.test_fusion_attn.backend",
         custom_ops=["+quant_fp8"],
     )
-    vllm_config = VllmConfig(compilation_config=compile_config)
+    vllm_config = VllmConfig(compilation_config=compile_config,
+                             model_config=ModelConfig(
+                                 model=model,
+                                 dtype=torch.bfloat16,
+                             ))
 
     # AttnFusionPass needs attention layers to be registered in config upon init
     # so we initialize it during compilation.
@@ -102,7 +110,7 @@ def test_attention_fusion(example_prompts, monkeypatch, model: str,
     llm2 = LLM(model,
                enforce_eager=True,
                compilation_config=compile_config,
-               gpu_memory_utilization=0.9,
+               gpu_memory_utilization=0.5,
                max_model_len=2048)
 
     # check support
