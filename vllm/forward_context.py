@@ -26,6 +26,11 @@ batchsize_logging_interval: float = envs.VLLM_LOG_BATCHSIZE_INTERVAL
 batchsize_forward_time: defaultdict = defaultdict(list)
 
 
+@dataclass
+class ALoRAMetadata:
+    mask1d: torch.Tensor
+
+
 class BatchDescriptor(NamedTuple):
     """
     Batch descriptor for cudagraph dispatching. We should keep the num of
@@ -173,6 +178,7 @@ class ForwardContext:
     virtual_engine: int  # set dynamically for each forward pass
     # set dynamically for each forward pass
     dp_metadata: Optional[DPMetadata] = None
+    alora_metadata: Optional[ALoRAMetadata] = None
     # determine the cudagraph style at runtime to be FULL, PIECEWISE, or NONE.
     # by default NONE, no cudagraph is used.
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE
@@ -203,7 +209,8 @@ def set_forward_context(
         num_tokens: Optional[int] = None,
         num_tokens_across_dp: Optional[torch.Tensor] = None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-        batch_descriptor: Optional[BatchDescriptor] = None):
+        batch_descriptor: Optional[BatchDescriptor] = None,
+        alora_metadata: Optional[ALoRAMetadata] = None):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     Here we can inject common logic for every model forward pass.
@@ -227,6 +234,7 @@ def set_forward_context(
         virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
         dp_metadata=dp_metadata,
+        alora_metadata=alora_metadata,
         cudagraph_runtime_mode=cudagraph_runtime_mode,
         batch_descriptor=batch_descriptor,
     )
