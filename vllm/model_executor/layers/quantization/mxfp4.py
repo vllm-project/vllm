@@ -11,9 +11,9 @@ from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
                                                   FusedMoEMethodBase)
+from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig, mxfp4_w4a4_moe_quant_config)
-from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.trtllm_moe import TrtLlmGenExperts
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
@@ -668,6 +668,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     "gemm1_alpha": layer.gemm1_alpha,
                     "gemm1_beta": layer.gemm1_beta,
                     "gemm1_clamp_limit": layer.gemm1_clamp_limit,
+                    # TODO(bnell): part of quant_config
                     "w13_bias": layer.w13_bias,
                     "w2_bias": layer.w2_bias,
                     "max_capture_size": self.max_capture_size,

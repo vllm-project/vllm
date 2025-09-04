@@ -110,6 +110,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
         prepare_finalize: Optional[FusedMoEPrepareAndFinalize] = None
 
+        # TODO: could allow this now
         assert not moe.use_flashinfer_cutlass_kernels, \
             "Must be created in modelopt.py"
 
@@ -980,6 +981,7 @@ class FusedMoE(CustomOp):
         self.batched_router_logits: Optional[torch.Tensor] = None
         if (self.moe_parallel_config.use_pplx_kernels
                 or self.moe_parallel_config.use_deepep_ll_kernels
+                # TODO: this is probably not quite right
                 or self.moe_config.use_flashinfer_cutlass_kernels):
             self.batched_hidden_states = torch.zeros(
                 (moe.max_num_tokens, self.hidden_size),
@@ -1038,7 +1040,9 @@ class FusedMoE(CustomOp):
 
     @property
     def use_flashinfer_cutlass_kernels(self):
-        return self.moe_config.use_flashinfer_cutlass_kernels
+        return (self.moe_quant_config is not None
+                and self.moe_quant_config.quant_dtype == "nvfp4"
+                and self.moe_config.use_flashinfer_cutlass_kernels)
 
     def update_expert_map(self):
         # ep_size and ep_rank should already be updated
@@ -1798,12 +1802,12 @@ class FusedMoE(CustomOp):
 
         # Route to the chunked forward path using the FlashInfer Cutlass kernel
         # only when data parallelism (DP) is enabled.
-        use_flashinfer_cutlass_kernels = (
-            self.dp_size > 1
-            and self.moe_config.use_flashinfer_cutlass_kernels)
+        _use_flashinfer_cutlass_kernels = (self.dp_size > 1 and
+                                           self.use_flashinfer_cutlass_kernels)
+
         if (self.moe_parallel_config.use_pplx_kernels
                 or self.moe_parallel_config.use_deepep_ll_kernels
-                or use_flashinfer_cutlass_kernels):
+                or _use_flashinfer_cutlass_kernels):
             return self.forward_impl_chunked(hidden_states, router_logits)
 
         do_naive_dispatch_combine: bool = (
