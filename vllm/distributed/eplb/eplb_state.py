@@ -39,8 +39,8 @@ from vllm.distributed.parallel_state import (get_ep_group, get_node_count,
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
-from .eplb_process import EPLBProcess
 
+from .eplb_process.eplb_process import EPLBProcess
 from .rebalance_algo import rebalance_experts
 from .rebalance_execute import rearrange_expert_weights_inplace
 
@@ -540,18 +540,19 @@ class EplbState:
         if self._async_processor is None:
             logger.error(
                 "Async processor is not initialized, cannot submit task")
-            return
+            return None
 
         if self._async_processor.has_pending_task:
             logger.info(
-                "EPLB async process already has a pending task, skipping new submission")
-            return
+                "EPLB async process already has a pending task, skipping "
+                "new submission")
+            return None
 
         if self._async_processor.is_post_processing:
             logger.info(
                 "EPLB async process is pending post processing task, skipping "
                 "new submission")
-            return
+            return None
 
         try:
             success = self._async_processor.submit_task(
@@ -567,6 +568,7 @@ class EplbState:
                 str(self.num_wait_worker_iterations))
         else:
             logger.error("Failed to submit rebalance task to async process")
+        return None
 
     def _process_async_result(self):
         """Process asynchronously returned results"""
@@ -607,7 +609,7 @@ class EplbState:
         if not is_profile:
             # Update state mappings
             if self.physical_to_logical_map.shape[
-                1] != new_physical_to_logical_map.shape[1]:
+                    1] != new_physical_to_logical_map.shape[1]:
                 self.physical_to_logical_map = new_physical_to_logical_map
             else:
                 self.physical_to_logical_map.copy_(new_physical_to_logical_map)
