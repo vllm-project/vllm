@@ -141,6 +141,22 @@ class HarmonyContext(ConversationContext):
         self._messages.extend(output_msgs)
 
     def _update_prefill_token_usage(self, output: RequestOutput) -> None:
+        """Update token usage statistics for the prefill phase of generation.
+        
+        The prefill phase processes the input prompt tokens. This method:
+        1. Counts the prompt tokens for this turn
+        2. Calculates tool output tokens for multi-turn conversations
+        3. Updates cached token counts
+        4. Tracks state for next turn calculations
+        
+        Tool output tokens are calculated as:
+        current_prompt_tokens - last_turn_prompt_tokens - 
+        last_turn_output_tokens
+        This represents tokens added between turns (typically tool responses).
+        
+        Args:
+            output: The RequestOutput containing prompt token information
+        """
         if output.prompt_token_ids is not None:
             this_turn_input_tokens = len(output.prompt_token_ids)
         else:
@@ -165,6 +181,22 @@ class HarmonyContext(ConversationContext):
         self.num_last_turn_input_tokens = this_turn_input_tokens
 
     def _update_decode_token_usage(self, output: RequestOutput) -> int:
+        """Update token usage statistics for the decode phase of generation.
+        
+        The decode phase processes the generated output tokens. This method:
+        1. Counts output tokens from all completion outputs
+        2. Updates the total output token count
+        3. Tracks tokens generated in the current turn
+        
+        In streaming mode, this is called for each token generated.
+        In non-streaming mode, this is called once with all output tokens.
+        
+        Args:
+            output: The RequestOutput containing generated token information
+            
+        Returns:
+            int: Number of output tokens processed in this call
+        """
         updated_output_token_count = 0
         if output.outputs:
             for completion_output in output.outputs:
