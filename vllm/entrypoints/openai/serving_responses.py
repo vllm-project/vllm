@@ -460,11 +460,6 @@ class OpenAIServingResponses(OpenAIServing):
         if self.use_harmony:
             assert isinstance(context, HarmonyContext)
             output = self._make_response_output_items_with_harmony(context)
-            # TODO: these are all 0 for now!
-            num_prompt_tokens = context.num_prompt_tokens
-            num_generated_tokens = context.num_output_tokens
-            num_cached_tokens = context.num_cached_tokens
-            num_reasoning_tokens = context.num_reasoning_tokens
             num_tool_output_tokens = context.num_tool_output_tokens
         else:
             assert isinstance(context, SimpleContext)
@@ -478,12 +473,13 @@ class OpenAIServingResponses(OpenAIServing):
 
             # Calculate usage.
             assert final_res.prompt_token_ids is not None
+            num_tool_output_tokens = 0
+
         assert isinstance(context, (SimpleContext, HarmonyContext))
         num_prompt_tokens = context.num_prompt_tokens
         num_generated_tokens = context.num_output_tokens
         num_cached_tokens = context.num_cached_tokens
         num_reasoning_tokens = context.num_reasoning_tokens
-            num_tool_output_tokens = 0
 
         usage = ResponseUsage(
             input_tokens=num_prompt_tokens,
@@ -907,7 +903,7 @@ class OpenAIServingResponses(OpenAIServing):
             response.status = "cancelled"
 
         # Abort the request.
-        if (task := self.background_tasks.get(response_id)):
+        if task := self.background_tasks.get(response_id):
             task.cancel()
             try:
                 await task

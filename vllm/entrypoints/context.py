@@ -109,21 +109,21 @@ class HarmonyContext(ConversationContext):
 
     def _update_num_cached_tokens(self, output: RequestOutput):
         if output.num_cached_tokens is not None:
-            #Similar to num_prompt_tokens
+            # Similar to num_prompt_tokens
             self.num_cached_tokens += output.num_cached_tokens
 
     def _update_num_output_tokens(self, token_ids: Sequence[int]):
         self.num_output_tokens += len(token_ids)
 
-    def _update_num_reasoning_tokens(self, token_ids: Sequence[int]):
+    def _update_num_reasoning_tokens(self):
         # Count tokens that are part of reasoning content (analysis channel
         # or tool-directed messages like python/browser calls)
         is_analysis = self.parser.current_channel == "analysis"
-        is_tool_call = (self.parser.current_recipient is not None and
-                        (self.parser.current_recipient.startswith("python") or
-                         self.parser.current_recipient.startswith("browser.")))
+        is_tool_call = self.parser.current_recipient is not None and (
+            self.parser.current_recipient.startswith("python")
+            or self.parser.current_recipient.startswith("browser."))
         if is_analysis or is_tool_call:
-            self.num_reasoning_tokens += len(token_ids)
+            self.num_reasoning_tokens += 1
 
     def append_output(self, output) -> None:
         if isinstance(output, RequestOutput):
@@ -132,7 +132,7 @@ class HarmonyContext(ConversationContext):
             for token_id in output_token_ids:
                 self.parser.process(token_id)
                 # Check if the current token is part of reasoning content
-                self._update_num_reasoning_tokens([token_id])
+                self._update_num_reasoning_tokens()
             output_msgs = self.parser.messages
             self._update_token_usage(output)
         else:
@@ -148,14 +148,15 @@ class HarmonyContext(ConversationContext):
             logger.error(
                 "RequestOutput appended contains no prompt_token_ids.")
 
-        if self.first_turn: 
+        if self.first_turn:
             self.first_turn = False
         else:
             # start counting tool after first turn
-            # tool tokens = this turn prefill - last turn prefill - last turn decode
-            this_turn_tool_tokens = this_turn_input_tokens \
-                - self.num_last_turn_input_tokens \
-                - self.num_last_turn_output_tokens
+            # tool tokens = this turn prefill - last turn prefill -
+            # last turn decode
+            this_turn_tool_tokens = (this_turn_input_tokens -
+                                     self.num_last_turn_input_tokens -
+                                     self.num_last_turn_output_tokens)
             self.num_tool_output_tokens += this_turn_tool_tokens
 
         self.num_prompt_tokens += this_turn_input_tokens
@@ -166,7 +167,8 @@ class HarmonyContext(ConversationContext):
             this_turn_output_token_count = 0
             for completion_output in output.outputs:
                 # only keep last round
-                this_turn_output_token_count += len(completion_output.token_ids)
+                this_turn_output_token_count += len(
+                    completion_output.token_ids)
             self.num_output_tokens += this_turn_output_token_count
             self.num_last_turn_output_tokens = this_turn_output_token_count
 
@@ -227,10 +229,12 @@ class HarmonyContext(ConversationContext):
         author = Author(role=Role.TOOL, name="python")
 
         return [
-            Message(author=author,
-                    content=[content],
-                    channel=last_msg.channel,
-                    recipient=Role.ASSISTANT)
+            Message(
+                author=author,
+                content=[content],
+                channel=last_msg.channel,
+                recipient=Role.ASSISTANT,
+            )
         ]
 
     async def init_tool_sessions(self, tool_server: Optional[ToolServer],
@@ -238,9 +242,9 @@ class HarmonyContext(ConversationContext):
         if tool_server:
             for tool_name in self.available_tools:
                 if tool_name not in self._tool_sessions:
-                    self._tool_sessions[
-                        tool_name] = await exit_stack.enter_async_context(
-                            tool_server.new_session(tool_name))
+                    self._tool_sessions[tool_name] = (
+                        await exit_stack.enter_async_context(
+                            tool_server.new_session(tool_name)))
 
 
 class StreamingHarmonyContext(HarmonyContext):
@@ -274,7 +278,7 @@ class StreamingHarmonyContext(HarmonyContext):
                 self.parser.process(tok)
             self._update_num_output_tokens(output.outputs[0].token_ids)
             # Check if the current token is part of reasoning content
-            self._update_num_reasoning_tokens(output.outputs[0].token_ids)
+            self._update_num_reasoning_tokens()
             self.last_tok = tok
         else:
             # Handle the case of tool output in direct message format
