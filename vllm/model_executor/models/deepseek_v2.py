@@ -47,6 +47,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.shared_fused_moe import SharedFusedMoE
@@ -492,72 +493,41 @@ class DeepseekV2MLAAttention(nn.Module):
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
             self.scaling = self.scaling * mscale * mscale
 
-        # In the MLA backend, kv_cache includes both k_c and
-        # pe (i.e. decoupled position embeddings). In particular,
-        # the concat_and_cache_mla op requires
-        #     k_c.size(1) + k_pe.size(1) == kv_cache.size(2)
-        # i.e.
-        #     kv_lora_rank + qk_rope_head_dim == head_size
-        self.mla_attn = Attention(
-            num_heads=self.num_local_heads,
-            head_size=self.kv_lora_rank + self.qk_rope_head_dim,
-            scale=self.scaling,
-            num_kv_heads=1,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.attn",
-            use_mla=True,
-            # MLA Args
-            q_lora_rank=self.q_lora_rank,
-            kv_lora_rank=self.kv_lora_rank,
-            qk_nope_head_dim=self.qk_nope_head_dim,
-            qk_rope_head_dim=self.qk_rope_head_dim,
-            qk_head_dim=self.qk_head_dim,
-            v_head_dim=self.v_head_dim,
+        mla_modules = MLAModules(
+            kv_a_layernorm=self.kv_a_layernorm,
             kv_b_proj=self.kv_b_proj,
+            rotary_emb=self.rotary_emb,
+            o_proj=self.o_proj,
+            fused_qkv_a_proj=self.fused_qkv_a_proj
+            if self.q_lora_rank is not None else None,
+            kv_a_proj_with_mqa=self.kv_a_proj_with_mqa
+            if self.q_lora_rank is None else None,
+            q_a_layernorm=self.q_a_layernorm
+            if self.q_lora_rank is not None else None,
+            q_b_proj=self.q_b_proj if self.q_lora_rank is not None else None,
+            q_proj=self.q_proj if self.q_lora_rank is None else None,
         )
-
-        self.prefix = prefix
-        self.debug_layer_idx = int(self.prefix.split(".")[-2])
+        self.mla_attn = MultiHeadLatentAttention(
+            self.hidden_size,
+            self.num_local_heads,
+            self.scaling,
+            self.qk_nope_head_dim,
+            self.qk_rope_head_dim,
+            self.v_head_dim,
+            self.q_lora_rank,
+            self.kv_lora_rank,
+            mla_modules,
+            cache_config,
+            quant_config,
+            prefix,
+        )
 
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        q_c = None
-        kv_lora = None
-
-        if self.q_lora_rank is not None:
-            qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
-            q_c, kv_lora = qkv_lora.split(
-                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
-                dim=-1,
-            )
-            q_c = self.q_a_layernorm(q_c)
-            q = self.q_b_proj(q_c)[0]
-        else:
-            kv_lora = self.kv_a_proj_with_mqa(hidden_states)[0]
-            q = self.q_proj(hidden_states)[0]
-
-        kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim],
-                                   dim=-1)
-        kv_c_normed = self.kv_a_layernorm(kv_c)
-
-        q = q.view(-1, self.num_local_heads, self.qk_head_dim)
-        # Add head dim of 1 to k_pe
-        k_pe = k_pe.unsqueeze(1)
-
-        q[..., self.qk_nope_head_dim:], k_pe = self.rotary_emb(
-            positions, q[..., self.qk_nope_head_dim:], k_pe)
-
-        attn_out = self.mla_attn(
-            q,
-            kv_c_normed,
-            k_pe,
-            output_shape=(hidden_states.shape[0],
-                          self.num_local_heads * self.v_head_dim))
-        return self.o_proj(attn_out)[0]
+        return self.mla_attn(positions, hidden_states)
 
 
 class DeepseekV2DecoderLayer(nn.Module):

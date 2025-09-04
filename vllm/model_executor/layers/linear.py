@@ -9,7 +9,6 @@ import torch
 import torch.nn as nn
 from torch.nn.parameter import Parameter, UninitializedParameter
 
-from vllm import envs
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               split_tensor_along_last_dim,
@@ -200,26 +199,10 @@ class UnquantizedLinearMethod(LinearMethodBase):
         set_weight_attrs(weight, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # special postprocessing for CPU SGL
-        if current_platform.is_cpu() and envs.VLLM_CPU_SGL_KERNEL:
-            from vllm.model_executor.layers.utils import check_cpu_sgl_kernel
-            N, K = layer.weight.size()
-            dtype = layer.weight.dtype
-            if check_cpu_sgl_kernel(N, K, dtype):
-                packed_weight = torch.ops._C.convert_weight_packed(
-                    layer.weight)
-                assert packed_weight.size() == layer.weight.size()
-                layer.weight.copy_(packed_weight)
-                if layer.bias is not None:
-                    layer.bias = Parameter(layer.bias.to(torch.float32),
-                                           requires_grad=False)
-                layer.use_cpu_sgl = True
-            else:
-                logger.warning(
-                    "CPU SGL kernels require Intel AMX support,"
-                    " bf16/fp16/int8 weight, IC and OC are divisible by "
-                    "32 and 16.")
-                layer.use_cpu_sgl = False
+        if current_platform.is_cpu():
+            from vllm.model_executor.layers.utils import (
+                dispatch_cpu_unquantized_gemm)
+            dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
 
     def apply(self,
               layer: torch.nn.Module,

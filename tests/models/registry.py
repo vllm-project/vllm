@@ -6,10 +6,11 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
 
 import pytest
+import torch
 from packaging.version import Version
 from transformers import __version__ as TRANSFORMERS_VERSION
 
-from vllm.config import TokenizerMode
+from vllm.config import ModelDType, TokenizerMode
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,23 @@ class _HfExamplesInfo:
     The reason for the minimum/maximum version requirement.
     """
 
+    skip_tokenizer_init: bool = False
+    """
+    If true, skip initialization of tokenizer and detokenizer. 
+    """
+
+    dtype: ModelDType = "auto"
+    """
+    The data type for the model weights and activations.
+    """
+
+    enforce_eager: bool = False
+    """
+    Whether to enforce eager execution. If True, we will
+    disable CUDA graph and always execute the model in eager mode.
+    If False, we will use CUDA graph and eager execution in hybrid.
+    """
+
     is_available_online: bool = True
     """
     Set this to ``False`` if the name of this architecture no longer exists on
@@ -75,6 +93,9 @@ class _HfExamplesInfo:
     The specific revision (commit hash, tag, or branch) to use for the model.
     If not specified, the default revision will be used.
     """
+
+    max_num_seqs: Optional[int] = None
+    """Maximum number of sequences to be processed in a single iteration."""
 
     def check_transformers_version(
         self,
@@ -361,8 +382,21 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "Phi3VForCausalLM": _HfExamplesInfo("TIGER-Lab/VLM2Vec-Full",
                                          trust_remote_code=True),
     "Qwen2VLForConditionalGeneration": _HfExamplesInfo("MrLight/dse-qwen2-2b-mrl-v1"), # noqa: E501
-    "PrithviGeoSpatialMAE": _HfExamplesInfo("ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11", # noqa: E501
-                                            is_available_online=False),  # noqa: E501
+    "PrithviGeoSpatialMAE": _HfExamplesInfo("mgazz/Prithvi-EO-2.0-300M-TL-Sen1Floods11", # noqa: E501
+                                            dtype=torch.float16,
+                                            enforce_eager=True,
+                                            skip_tokenizer_init=True,
+                                            # This is to avoid the model
+                                            # going OOM in CI
+                                            max_num_seqs=32,
+                                            ),
+    "Terratorch": _HfExamplesInfo("mgazz/Prithvi-EO-2.0-300M-TL-Sen1Floods11",
+                                  dtype=torch.float16,
+                                  enforce_eager=True,
+                                  skip_tokenizer_init=True,
+                                  # This is to avoid the model going OOM in CI
+                                  max_num_seqs=32,
+                                  ),
 }
 
 _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
@@ -460,6 +494,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                       max_transformers_version="4.48",  # noqa: E501
                                                       transformers_version_reason="HF model is not compatible.",  # noqa: E501
                                                       hf_overrides={"architectures": ["MantisForConditionalGeneration"]}),  # noqa: E501
+    "MiDashengLMModel": _HfExamplesInfo("mispeech/midashenglm-7b",
+                            trust_remote_code=True),
     "MiniCPMO": _HfExamplesInfo("openbmb/MiniCPM-o-2_6",
                                 trust_remote_code=True),
     "MiniCPMV": _HfExamplesInfo("openbmb/MiniCPM-Llama3-V-2_5",

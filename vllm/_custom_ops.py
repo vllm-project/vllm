@@ -1928,6 +1928,35 @@ class CPUDNNLGEMMHandler:
             torch.ops._C.release_dnnl_matmul_handler(self.handler)
 
 
+if hasattr(torch.ops._C, "create_onednn_mm_handler"):
+    _supports_onednn = True
+else:
+    _supports_onednn = False
+
+
+def create_onednn_mm(
+    weight: torch.Tensor,  # [K, N]
+    primitive_cache_size: int = 128,
+) -> CPUDNNLGEMMHandler:
+    handler = CPUDNNLGEMMHandler()
+    handler.k, handler.n = weight.size()
+    handler.handler = torch.ops._C.create_onednn_mm_handler(
+        weight, primitive_cache_size)
+    return handler
+
+
+def onednn_mm(
+    dnnl_handler: CPUDNNLGEMMHandler,
+    x: torch.Tensor,
+    bias: Optional[torch.Tensor],
+) -> torch.Tensor:
+    output = torch.empty((*x.shape[0:-1], dnnl_handler.n), dtype=x.dtype)
+    torch.ops._C.onednn_mm(output, x.reshape(-1, dnnl_handler.k), bias,
+                           dnnl_handler.handler)
+
+    return output
+
+
 def create_onednn_scaled_mm(
     weight: torch.Tensor,  # [K, N]
     weight_scales: torch.Tensor,
