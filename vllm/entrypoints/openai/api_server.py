@@ -616,14 +616,23 @@ async def create_responses(request: ResponsesRequest, raw_request: Request):
 
 
 @router.get("/v1/responses/{response_id}")
-async def retrieve_responses(response_id: str, raw_request: Request):
+async def retrieve_responses(
+    response_id: str,
+    raw_request: Request,
+    starting_after: Optional[int] = None,
+    stream: Optional[bool] = False,
+):
     handler = responses(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(
             message="The model does not support Responses API")
 
     try:
-        response = await handler.retrieve_responses(response_id)
+        response = await handler.retrieve_responses(
+            response_id,
+            starting_after=starting_after,
+            stream=stream,
+        )
     except Exception as e:
         raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
                             detail=str(e)) from e
@@ -631,6 +640,9 @@ async def retrieve_responses(response_id: str, raw_request: Request):
     if isinstance(response, ErrorResponse):
         return JSONResponse(content=response.model_dump(),
                             status_code=response.error.code)
+    elif stream:
+        return StreamingResponse(content=response,
+                                 media_type="text/event-stream")
     return JSONResponse(content=response.model_dump())
 
 
