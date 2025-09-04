@@ -2911,7 +2911,7 @@ def _get_head_dtype(config: PretrainedConfig, dtype: torch.dtype,
     elif fp32_head:
         return torch.float32
 
-    # fp32_head being True means the use of fp32_head
+    # fp32_head being True means using fp32_head
     # fp32_head being False means fp32_head is not used
     # fp32_head being None means choosing
     # the default head_dtype based on runner_type.
