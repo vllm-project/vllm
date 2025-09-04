@@ -13,10 +13,8 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import (  # yapf: disable
     _resize_cache, count_expert_num_tokens)
 from vllm.utils import cdiv
-from vllm.v1.worker.ubatching import (dbo_enabled,
-                                      dbo_yield,
-                                      dbo_maybe_run_recv_hook,
-                                      dbo_register_recv_hook)
+from vllm.v1.worker.ubatching import (dbo_enabled, dbo_maybe_run_recv_hook,
+                                      dbo_register_recv_hook, dbo_yield)
 
 #
 # This file defines a set of base classes used to make MoE kernels more modular.
@@ -501,12 +499,14 @@ def _chunk_scales(scales: Optional[torch.Tensor], start: int,
 
 
 class SharedResizableBuffer:
+
     def __init__(self):
         self.buffer = None
-  
+
     # NOTE: Assumes the first call to get() is the largest shape,
     #  this is usually true due to the profile run.
-    def get(self, shape: tuple[int, ...], device: torch.device, dtype: torch.dtype):
+    def get(self, shape: tuple[int, ...], device: torch.device,
+            dtype: torch.dtype):
         shape_numel = prod(shape)
         if self.buffer is None or self.buffer.numel() < shape_numel:
             self.buffer = torch.empty(shape_numel, device=device, dtype=dtype)
@@ -583,14 +583,12 @@ class FusedMoEModularKernel(torch.nn.Module):
 
         # We can reuse the memory between cache1 and cache3 because by the
         # time we need cache3, we're done with cache1.
-        workspace13 = self.workspace13_buffer.get(
-          workspace13_shape,
-          device=a1.device,
-          dtype=workspace_dtype)
-        workspace2 = self.workspace2_buffer.get(
-          workspace2_shape,
-          device=a1.device,
-          dtype=workspace_dtype)
+        workspace13 = self.workspace13_buffer.get(workspace13_shape,
+                                                  device=a1.device,
+                                                  dtype=workspace_dtype)
+        workspace2 = self.workspace2_buffer.get(workspace2_shape,
+                                                device=a1.device,
+                                                dtype=workspace_dtype)
 
         assert fused_out is None or fused_out.shape == fused_out_shape, (
             f"fused_out {fused_out.shape} but expected {fused_out_shape}")
@@ -682,10 +680,9 @@ class FusedMoEModularKernel(torch.nn.Module):
         (_, _, fused_out_shape, _) = self.fused_experts.workspace_shapes(
             a1, a1q, M, N, K, top_k, global_num_experts, local_num_experts,
             expert_tokens_meta)
-        fused_out = self.fused_out_buffer.get(
-          fused_out_shape,
-          device=a1q.device,
-          dtype=a1.dtype)
+        fused_out = self.fused_out_buffer.get(fused_out_shape,
+                                              device=a1q.device,
+                                              dtype=a1.dtype)
 
         def slice_input_tensors(
             chunk_idx: int
@@ -852,7 +849,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         else:
             # Overlap shared expert compute with all2all dispatch.
             dbo_maybe_run_recv_hook()
-            hook, receiver = self.prepare_finalize.prepare_async(
+            prepare_ret = self.prepare_finalize.prepare_async(
                 a1,
                 a1_scale,
                 a2_scale,
@@ -868,14 +865,22 @@ class FusedMoEModularKernel(torch.nn.Module):
             if self.shared_experts is not None:
                 shared_output = self.shared_experts(a1)
 
-            dbo_register_recv_hook(hook)
-            dbo_yield()
-
-            if dbo_enabled():
+            if isinstance(prepare_ret, tuple):
+                hook, receiver = prepare_ret
+            else:
                 hook = None
+                receiver = prepare_ret
 
-            (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
-             _expert_topk_weights) = receiver(hook)
+            if hook is not None:
+                dbo_register_recv_hook(hook)
+                dbo_yield()
+                if dbo_enabled():
+                    hook = None
+                (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
+                 _expert_topk_weights) = receiver(hook)
+            else:
+                (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
+                 _expert_topk_weights) = receiver()
 
         # Maybe prepare gathered topk_ids and topk_weights from other EP ranks.
         topk_ids = topk_ids if _expert_topk_ids is None else _expert_topk_ids
