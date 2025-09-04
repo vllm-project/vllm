@@ -33,6 +33,7 @@ class BatchDescriptor(NamedTuple):
     batch for cudagraph.
     """
     num_tokens: int
+    enable_prompt_embeds: bool = False
     uniform_decode: bool = False
     """
     False can also be used for an uniform decode batch to dispatch to the 
@@ -44,7 +45,9 @@ class BatchDescriptor(NamedTuple):
         """
         Return a non-uniform version of current batch descriptor.
         """
-        return BatchDescriptor(self.num_tokens, uniform_decode=False)
+        return BatchDescriptor(self.num_tokens,
+                               enable_prompt_embeds=self.enable_prompt_embeds,
+                               uniform_decode=False)
 
 
 def _compute_chunked_local_num_tokens(num_tokens_across_dp_cpu: list[int],

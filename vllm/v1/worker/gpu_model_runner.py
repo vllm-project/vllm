@@ -5,7 +5,7 @@ import gc
 import itertools
 import time
 from collections import defaultdict
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, Literal, Optional, Union, cast, overload
@@ -1624,6 +1624,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         uniform_decode = (max_query_len == self.uniform_decode_query_len) and (
             num_scheduled_tokens == self.input_batch.num_reqs * max_query_len)
         batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
+                                           enable_prompt_embeds=inputs_embeds
+                                           is not None,
                                            uniform_decode=uniform_decode)
         cudagraph_runtime_mode, batch_descriptor = \
             self.cudagraph_dispatcher.dispatch(batch_descriptor)
@@ -2222,13 +2224,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             return {}
 
     @contextmanager
-    def maybe_randomize_inputs(self, input_ids: torch.Tensor):
+    def maybe_randomize_inputs(self, input_ids: Optional[torch.Tensor]):
         """
         Randomize input_ids if VLLM_RANDOMIZE_DP_DUMMY_INPUTS is set.
         This is to help balance expert-selection
          - during profile_run
          - during DP rank dummy run
         """
+        if input_ids is None:
+            # We cannot randomize None inputs
+            yield
+            return
         dp_size = self.vllm_config.parallel_config.data_parallel_size
         randomize_inputs = envs.VLLM_RANDOMIZE_DP_DUMMY_INPUTS and dp_size > 1
         if not randomize_inputs:
@@ -2281,6 +2287,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _dummy_run(
         self,
         num_tokens: int,
+        enable_prompt_embeds: bool,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         force_attention: bool = False,
         uniform_decode: bool = False,
@@ -2393,7 +2400,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens, remove_lora):
-            if self.supports_mm_inputs:
+            if self.supports_mm_inputs or enable_prompt_embeds:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds.gpu[:num_tokens]
                 model_kwargs = {
@@ -2429,6 +2436,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 _cg_mode, batch_descriptor = \
                     self.cudagraph_dispatcher.dispatch(
                         BatchDescriptor(num_tokens=num_tokens,
+                                        enable_prompt_embeds=enable_prompt_embeds,
                                         uniform_decode=uniform_decode))
                 # sanity check
                 assert cudagraph_runtime_mode == _cg_mode, (
@@ -2665,7 +2673,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Add `is_profile` here to pre-allocate communication buffers
         hidden_states, last_hidden_states \
-            = self._dummy_run(self.max_num_tokens, is_profile=True)
+            = self._dummy_run(self.max_num_tokens,
+                              enable_prompt_embeds=False, is_profile=True)
         if get_pp_group().is_last_rank:
             if self.is_pooling_model:
                 output = self._dummy_pooler_run(hidden_states)
@@ -2716,7 +2725,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
                 cudagraph_runtime_mode = cudagraph_mode.mixed_mode()
 
-                compilation_cases = list(reversed(self.cudagraph_batch_sizes))
+                batch_sizes = reversed(self.cudagraph_batch_sizes)
+                enable_prompt_embeds = [
+                    True, False
+                ] if self.enable_prompt_embeds else [False]
+                compilation_cases = list(
+                    itertools.product(batch_sizes, enable_prompt_embeds))
                 self._capture_cudagraphs(
                     compilation_cases,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
@@ -2732,8 +2746,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     x for x in self.cudagraph_batch_sizes if
                     x <= max_num_tokens and x >= self.uniform_decode_query_len
                 ]
+                batch_sizes_decode = reversed(decode_cudagraph_batch_sizes)
+                enable_prompt_embeds_decode = [
+                    True, False
+                ] if self.enable_prompt_embeds else [False]
                 compilation_cases_decode = list(
-                    reversed(decode_cudagraph_batch_sizes))
+                    itertools.product(batch_sizes_decode,
+                                      enable_prompt_embeds_decode))
                 self._capture_cudagraphs(
                     compilation_cases=compilation_cases_decode,
                     cudagraph_runtime_mode=CUDAGraphMode.FULL,
@@ -2754,7 +2773,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
                     elapsed_time, cuda_graph_size / (1 << 30))
 
-    def _capture_cudagraphs(self, compilation_cases: list[int],
+    def _capture_cudagraphs(self, compilation_cases: Sequence[tuple[int,
+                                                                    bool]],
                             cudagraph_runtime_mode: CUDAGraphMode,
                             uniform_decode: bool):
         assert cudagraph_runtime_mode != CUDAGraphMode.NONE and \
@@ -2770,7 +2790,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     "decode" if uniform_decode else "mixed prefill-decode",
                     cudagraph_runtime_mode.name))
         # We skip EPLB here since we don't want to record dummy metrics
-        for num_tokens in compilation_cases:
+        for num_tokens, enable_prompt_embeds in compilation_cases:
             for _ in range(self.compilation_config.cudagraph_num_of_warmups):
                 # Use CUDAGraphRuntimeStyle.NONE (default) for warmup.
                 # But be careful, warm up with `NONE`is orthogonal to
@@ -2780,12 +2800,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 force_attention = (
                     cudagraph_runtime_mode == CUDAGraphMode.FULL)
                 self._dummy_run(num_tokens,
+                                enable_prompt_embeds=False,
                                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
                                 force_attention=force_attention,
                                 uniform_decode=uniform_decode,
                                 skip_eplb=True,
                                 remove_lora=False)
             self._dummy_run(num_tokens,
+                            enable_prompt_embeds=enable_prompt_embeds,
                             cudagraph_runtime_mode=cudagraph_runtime_mode,
                             uniform_decode=uniform_decode,
                             skip_eplb=True,
@@ -2923,7 +2945,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Trigger cudagraph dispatching keys initialization here (after
         # initializing attn backends).
         self.cudagraph_dispatcher.initialize_cudagraph_keys(
-            self.compilation_config.cudagraph_mode,
+            self.compilation_config.cudagraph_mode, self.enable_prompt_embeds,
             self.uniform_decode_query_len)
 
     def calculate_reorder_batch_threshold(self) -> None:

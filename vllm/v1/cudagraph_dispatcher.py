@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import itertools
 from typing import Optional
 
 from vllm.config import CompilationLevel, CUDAGraphMode, VllmConfig
@@ -57,6 +58,7 @@ class CudagraphDispatcher:
         self.cudagraph_keys[runtime_mode].add(batch_descriptor)
 
     def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode,
+                                  enable_prompt_embeds: bool,
                                   uniform_decode_query_len: int):
         # This should be called only after attention backend is initialized.
 
@@ -68,10 +70,14 @@ class CudagraphDispatcher:
         # CompilationConfig.cudagraph_mode. In addition, if we allow lazy
         # capturing in future PR, some keys may never be triggered.
         if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
-            for bs in self.compilation_config.cudagraph_capture_sizes:
+            batchsizes = self.compilation_config.cudagraph_capture_sizes
+            embeds = [True, False] if enable_prompt_embeds else [False]
+            for bs, embed in itertools.product(batchsizes, embeds):
                 self.add_cudagraph_key(
                     cudagraph_mode.mixed_mode(),
-                    BatchDescriptor(num_tokens=bs, uniform_decode=False))
+                    BatchDescriptor(num_tokens=bs,
+                                    enable_prompt_embeds=embed,
+                                    uniform_decode=False))
 
         # if decode cudagraph mode is FULL, and we don't already have mixed
         # mode full cudagraphs then add them here.
@@ -83,10 +89,14 @@ class CudagraphDispatcher:
                 x for x in self.compilation_config.cudagraph_capture_sizes
                 if x <= max_num_tokens and x >= uniform_decode_query_len
             ]
-            for bs in cudagraph_capture_sizes_for_decode:
+            embeds = [True, False] if enable_prompt_embeds else [False]
+            for bs, embed in itertools.product(
+                    cudagraph_capture_sizes_for_decode, embeds):
                 self.add_cudagraph_key(
                     CUDAGraphMode.FULL,
-                    BatchDescriptor(num_tokens=bs, uniform_decode=True))
+                    BatchDescriptor(num_tokens=bs,
+                                    enable_prompt_embeds=embed,
+                                    uniform_decode=True))
         self.keys_initialized = True
 
     def dispatch(

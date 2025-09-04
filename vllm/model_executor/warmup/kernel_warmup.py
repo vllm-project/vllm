@@ -53,5 +53,6 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
         # operations for all number of tokens up to m.
         # So we only need to run with the max number of tokens.
         runner._dummy_run(runner.scheduler_config.max_num_batched_tokens,
+                          enable_prompt_embeds=False,
                           skip_eplb=True,
                           is_profile=True)

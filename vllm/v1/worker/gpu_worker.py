@@ -3,6 +3,7 @@
 """A GPU worker class."""
 import copy
 import gc
+import itertools
 import os
 from contextlib import AbstractContextManager, nullcontext
 from typing import TYPE_CHECKING, Any, Optional
@@ -305,12 +306,22 @@ class Worker(WorkerBase):
                 x for x in warmup_sizes if x not in
                 self.vllm_config.compilation_config.cudagraph_capture_sizes
             ]
+        warmup_sizes = sorted(warmup_sizes, reverse=True)
+        warmup_enable_embeds = [
+            True, False
+        ] if self.model_config.enable_prompt_embeds else [False]
+        warmup_conditions = itertools.product(warmup_sizes,
+                                              warmup_enable_embeds)
         # We skip EPLB here since we don't want to record dummy metrics
-        for size in sorted(warmup_sizes, reverse=True):
-            logger.info("Compile and warming up model for size %d", size)
-            self.model_runner._dummy_run(size,
-                                         skip_eplb=True,
-                                         remove_lora=False)
+        for size, warmup_enable_embed in warmup_conditions:
+            logger.info(("Compile and warming up model for size %d and "
+                         "with prompt_embeds=%s"), size,
+                        str(warmup_enable_embed))
+            self.model_runner._dummy_run(
+                size,
+                enable_prompt_embeds=warmup_enable_embed,
+                skip_eplb=True,
+                remove_lora=False)
         self.model_runner.maybe_remove_all_loras(self.model_runner.lora_config)
 
         # Warmup and tune the kernels used during model execution before
@@ -333,6 +344,7 @@ class Worker(WorkerBase):
             hidden_states, last_hidden_states = \
                 self.model_runner._dummy_run(
                     num_tokens=max_num_reqs,
+                    enable_prompt_embeds=False,
                     skip_eplb=True,
                 )
             if self.model_runner.is_pooling_model:
@@ -406,7 +418,7 @@ class Worker(WorkerBase):
                     sort_by="self_cuda_time_total"))
 
     def execute_dummy_batch(self) -> None:
-        self.model_runner._dummy_run(1)
+        self.model_runner._dummy_run(1, False)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
