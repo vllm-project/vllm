@@ -177,8 +177,10 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     Idx_t stride_ys_g, Idx_t stride_counts_e,
 
     // quant params
-    float fp8_min, float fp8_max) {
-  static constexpr float EPS = 1e-10;
+    float fp8_min_fp32, float fp8_max_fp32) {
+  __nv_bfloat16 fp8_min = fp8_min_fp32;
+  __nv_bfloat16 fp8_max = fp8_max_fp32;
+  static constexpr float EPS = 1e-10f;
   static constexpr uint32_t S_NUM_128 =
       2 * (GROUP_SIZE / 8) * NUM_WARPS * NUM_STAGES;
   static constexpr auto THREAD_COUNT = NUM_WARPS * WARP_SIZE;
@@ -293,8 +295,8 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 
   Idx_t stage_id{};
   for (Idx_t t = n_tokens_lower; t < n_tokens_upper; ++t) {
-    float y_max = EPS;
-    float results[4];
+    __nv_bfloat16 y_max_bf16 = EPS;
+    __nv_bfloat162 results_bf162[2];
 
     cp_async_wait<NUM_STAGES - 2>();
     __syncthreads();
@@ -316,28 +318,34 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
       float2 gate = silu2(__bfloat1622float2(*s_gate_compute_32));
       float2 upv = __bfloat1622float2(*s_up_compute_32);
 
-      results[2 * i] = gate.x * upv.x;
-      results[2 * i + 1] = gate.y * upv.y;
+      results_bf162[i] = make_bfloat162(__float2bfloat16(gate.x * upv.x),
+                                        __float2bfloat16(gate.y * upv.y));
 
-      y_max =
-          fmaxf(y_max, fmaxf(fabsf(results[2 * i]), fabsf(results[2 * i + 1])));
       ++s_gate_compute_32;
       ++s_up_compute_32;
     }
 
-    float y_s = warp_max(y_max) / fp8_max;
+    auto _y_max2 =
+        __hmax2(__habs2(results_bf162[0]), __habs2(results_bf162[1]));
+
+    y_max_bf16 = __hmax(_y_max2.x, _y_max2.y);
+
+    __nv_bfloat16 y_s = warp_max(y_max_bf16) / fp8_max;
 
     if constexpr (USE_UE8M0) {
-      y_s = exp2f(ceilf(log2f(y_s)));
+      // y_s = exp2f(ceilf(__log2f(y_s)));
     }
+
+    auto y_s2 = make_bfloat162(y_s, y_s);
 
 #pragma unroll
-    for (Idx_t i = 0; i < 4; ++i) {
-      results[i] = clip(results[i] / y_s, fp8_min, fp8_max);
+    for (Idx_t i = 0; i < 2; ++i) {
+      results_bf162[i] =
+          clip(__h2div(results_bf162[i], y_s2), __bfloat162bfloat162(fp8_min),
+               __bfloat162bfloat162(fp8_max));
     }
 
-    const float4* r4 = reinterpret_cast<const float4*>(results);
-    auto fp8x4 = __nv_fp8x4_e4m3(*r4);
+    auto fp8x4 = __nv_fp8x4_e4m3(results_bf162[0], results_bf162[1]);
     *reinterpret_cast<__nv_fp8x4_e4m3*>(y_q_ptr) = fp8x4;
 
     y_q_ptr += stride_yq_t;
