@@ -850,7 +850,10 @@ class FusedMoEModularKernel(torch.nn.Module):
         """
 
         a1 = hidden_states
-        output = a1 if inplace else torch.zeros_like(a1)
+        if inplace and self.shared_experts is None:
+            output = a1
+        else:
+            output = torch.zeros_like(a1)
 
         local_num_experts = w1.size(0)
         if global_num_experts == -1:
