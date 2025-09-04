@@ -862,7 +862,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 ))
                 use_cascade_attn |= getattr(attn_metadata_i, "use_cascade",
                                             False)
-                
+
                 for layer_name in attn_group.layer_names:
                     attn_metadata[layer_name] = attn_metadata_i
 
