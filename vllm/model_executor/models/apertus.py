@@ -25,15 +25,11 @@
 # limitations under the License.
 """Inference-only Apertus model compatible with HuggingFace weights."""
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import Any, Optional, Union
 
 import torch
 from torch import nn
-
-if TYPE_CHECKING:
-    from transformers import ApertusConfig
-else:
-    ApertusConfig = Any
+from transformers import ApertusConfig
 
 from vllm.attention import Attention, AttentionType
 from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
