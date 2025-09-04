@@ -216,28 +216,6 @@ def get_config_parser(config_format: str) -> ConfigParserBase:
 
 
 def register_config_parser(config_format: str):
-    """Register a customized vllm model loader.
-    When a load format is not supported by vllm, you can register a customized
-    model loader to support it.
-    Args:
-        load_format (str): The model loader format name.
-    Examples:
-        >>> from vllm.config import LoadConfig
-        >>> from vllm.model_executor.model_loader import get_model_loader, register_model_loader
-        >>> from vllm.model_executor.model_loader.base_loader import BaseModelLoader
-        >>>
-        >>> @register_model_loader("my_loader")
-        ... class MyModelLoader(BaseModelLoader):
-        ...     def download_model(self):
-        ...         pass
-        ...
-        ...     def load_weights(self):
-        ...         pass
-        >>>
-        >>> load_config = LoadConfig(load_format="my_loader")
-        >>> type(get_model_loader(load_config))
-        <class 'MyModelLoader'>
-    """  # noqa: E501
 
     def _wrapper(config_parser_cls):
         if config_format in _CONFIG_FORMAT_TO_CONFIG_PARSER:
