@@ -138,8 +138,7 @@ def sequence_parallel_chunk(x: torch.Tensor) -> torch.Tensor:
 
     chunk = x.shape[0] // tp_size
     start = tp_rank * chunk
-    #TODO: is the contiguous necessary?
-    return torch.narrow(x, 0, start, chunk).contiguous()
+    return torch.narrow(x, 0, start, chunk)
 
 
 def sequence_parallel_chunk_fake(x: torch.Tensor) -> torch.Tensor:
@@ -322,9 +321,8 @@ class DeepseekV2MoE(nn.Module):
             final_hidden_states += shared_output
 
         if self.is_sequence_parallel:
-            # TODO: Do we need the .contiguous call?
             final_hidden_states = tensor_model_parallel_all_gather(
-                final_hidden_states, 0).contiguous()
+                final_hidden_states, 0)
             final_hidden_states = final_hidden_states[:num_tokens]
         elif self.tp_size > 1:
             final_hidden_states = (
