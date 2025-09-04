@@ -198,7 +198,7 @@ class IterationStats:
     def get_avg_prefill_tps(self):
         if (not self.prefill_tps_history or
                 len(self.prefill_tps_history) < self.MIN_HISTORY_LEN):
-            return -1.0
+            return 0
         return sum(self.prefill_tps_history) / len(self.prefill_tps_history)
 
 class LoRARequestStates:
