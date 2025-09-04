@@ -142,8 +142,6 @@ class Scheduler(SchedulerInterface):
             scheduler_config=vllm_config.scheduler_config,
             mm_registry=mm_registry,
         )
-        logger.info("Encoder compute budget: %s", encoder_compute_budget)
-        logger.info("Encoder cache size: %s", encoder_cache_size)
 
         # NOTE(woosuk): Here, "encoder" includes the vision encoder (and
         # projector if needed) for MM models as well as encoder-decoder
