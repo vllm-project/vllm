@@ -1320,7 +1320,8 @@ class Scheduler(SchedulerInterface):
             is_affected = False
             marked_invalid_block = False
             req_id = request.request_id
-            req_block_ids = self.kv_cache_manager.get_block_ids(req_id)[0]
+            # TODO (davidb): add support for hybrid memory allocator
+            (req_block_ids, ) = self.kv_cache_manager.get_block_ids(req_id)
             # We iterate only over blocks that may contain externally computed
             # tokens
             if request.num_cached_tokens > 0:
