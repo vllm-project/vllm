@@ -344,7 +344,7 @@ steps:
   source_file_dependencies:
   - vllm/lora
   - tests/lora
-  command:
+  commands:
     - pytest -v -s lora \
       --shard-id=$$BUILDKITE_PARALLEL_JOB \
       --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT \
