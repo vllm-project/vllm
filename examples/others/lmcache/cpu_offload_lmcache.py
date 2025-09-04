@@ -189,9 +189,11 @@ def main():
     print(f"Second run time: {second_run_time:.2f} seconds")
 
     # Print speedup
-    if first_run_time > 0:
+    if second_run_time > 0:
         speedup = first_run_time / second_run_time
         print(f"\nSpeedup (first run / second run): {speedup:.2f}x")
+    else:
+        print("\nSecond run was too fast to measure, cannot calculate speedup.")
 
     # Cleanup if LMCache was enabled
     if args.enable_lmcache:
