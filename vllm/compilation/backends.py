@@ -80,7 +80,8 @@ class CompilerManager:
     """
 
     def __init__(self, compilation_config: CompilationConfig):
-        self.cache: dict[tuple[int | None, int, str], Any] = dict()
+        self.cache: dict[tuple[tuple[int, int] | None, int, str],
+                         Any] = (dict())
         self.is_cache_updated = False
         self.compilation_config = compilation_config
         self.compiler = make_compiler(compilation_config)
@@ -89,11 +90,11 @@ class CompilerManager:
         return self.compiler.compute_hash(vllm_config)
 
     @contextmanager
-    def compile_context(self, runtime_shape: int | None = None):
+    def compile_context(self, compile_range: tuple[int, int] | None = None):
         """Provide compilation context for the duration of compilation to set
         any torch global properties we want to scope to a single Inductor
         compilation (e.g. partition rules, pass context)."""
-        with pass_context(runtime_shape):
+        with pass_context(compile_range):
             if self.compilation_config.use_inductor_graph_partition:
                 inductor_partition_ops = resolve_defined_ops(
                     self.compilation_config.splitting_ops
@@ -150,29 +151,25 @@ class CompilerManager:
         graph: fx.GraphModule,
         example_inputs: list[Any],
         graph_index: int,
-        runtime_shape: int | None = None,
+        compile_range: tuple[int, int] | None = None,
     ) -> Callable | None:
-        if (runtime_shape, graph_index, self.compiler.name) not in self.cache:
+        if (compile_range, graph_index, self.compiler.name) not in self.cache:
             return None
-        handle = self.cache[(runtime_shape, graph_index, self.compiler.name)]
-        compiled_graph = self.compiler.load(
-            handle, graph, example_inputs, graph_index, runtime_shape
-        )
-        if runtime_shape is None:
+        handle = self.cache[(compile_range, graph_index, self.compiler.name)]
+        compiled_graph = self.compiler.load(handle, graph, example_inputs,
+                                            graph_index, compile_range)
+        if compile_range is None:
             logger.debug(
-                "Directly load the %s-th graph for dynamic shape from %s via handle %s",
+                "Directly load the %s-th graph for dynamic compile range from %s via handle %s",
                 graph_index,
                 self.compiler.name,
                 handle,
             )
         else:
             logger.debug(
-                "Directly load the %s-th graph for shape %s from %s via handle %s",
-                graph_index,
-                str(runtime_shape),
-                self.compiler.name,
-                handle,
-            )
+                "Directly load the %s-th graph for compile range %s from %s via "
+                "handle %s", graph_index, str(compile_range),
+                self.compiler.name, handle)
         return compiled_graph
 
     def compile(
@@ -183,7 +180,7 @@ class CompilerManager:
         compilation_config: CompilationConfig,
         graph_index: int = 0,
         num_graphs: int = 1,
-        runtime_shape: int | None = None,
+        compile_range: tuple[int, int] | None = None,
     ) -> Any:
         if graph_index == 0:
             # before compiling the first graph, record the start time
@@ -195,15 +192,15 @@ class CompilerManager:
         compiled_graph = None
 
         # try to load from the cache
-        compiled_graph = self.load(graph, example_inputs, graph_index, runtime_shape)
+        compiled_graph = self.load(graph, example_inputs, graph_index,
+                                   compile_range)
         if compiled_graph is not None:
             if graph_index == num_graphs - 1:
                 # after loading the last graph for this shape, record the time.
                 # there can be multiple graphs due to piecewise compilation.
                 now = time.time()
                 elapsed = now - compilation_start_time
-                compilation_config.compilation_time += elapsed
-                if runtime_shape is None:
+                if compile_range is None:
                     logger.info(
                         "Directly load the compiled graph(s) for dynamic shape "
                         "from the cache, took %.3f s",
@@ -211,11 +208,9 @@ class CompilerManager:
                     )
                 else:
                     logger.info(
-                        "Directly load the compiled graph(s) for shape %s "
-                        "from the cache, took %.3f s",
-                        str(runtime_shape),
-                        elapsed,
-                    )
+                        "Directly load the compiled graph(s) for compile range %s "
+                        "from the cache, took %.3f s", str(compile_range),
+                        elapsed)
             return compiled_graph
 
         # no compiler cached the graph, or the cache is disabled,
@@ -224,48 +219,40 @@ class CompilerManager:
             # Let compile_fx generate a key for us
             maybe_key = None
         else:
-            maybe_key = f"artifact_shape_{runtime_shape}_subgraph_{graph_index}"
-
-        with self.compile_context(runtime_shape):
-            compiled_graph, handle = self.compiler.compile(
-                graph,
-                example_inputs,
-                additional_inductor_config,
-                runtime_shape,
-                maybe_key,
-            )
+            maybe_key = \
+                f"artifact_compile_range_{compile_range}_subgraph_{graph_index}"
+        compiled_graph, handle = self.compiler.compile(
+            graph, example_inputs, additional_inductor_config, compile_range,
+            maybe_key)
 
         assert compiled_graph is not None, "Failed to compile the graph"
 
         # store the artifact in the cache
         if not envs.VLLM_DISABLE_COMPILE_CACHE and handle is not None:
-            self.cache[(runtime_shape, graph_index, self.compiler.name)] = handle
+            self.cache[(compile_range, graph_index,
+                        self.compiler.name)] = handle
             compilation_counter.num_cache_entries_updated += 1
             self.is_cache_updated = True
             if graph_index == 0:
                 # adds some info logging for the first graph
-                if runtime_shape is None:
+                if compile_range is None:
                     logger.info_once(
-                        "Cache the graph for dynamic shape for later use", scope="local"
-                    )
+                        "Cache the graph for dynamic shape for later use")
                 else:
-                    logger.info_once(
-                        "Cache the graph of shape %s for later use",
-                        str(runtime_shape),
-                        scope="local",
-                    )
-            if runtime_shape is None:
+                    logger.info_once("Cache the graph of compile range %s for later use",
+                                str(compile_range))
+            if compile_range is None:
                 logger.debug(
-                    "Store the %s-th graph for dynamic shape from %s via handle %s",
+                    "Store the %s-th graph for dynamic compile range from %s via handle %s",
                     graph_index,
                     self.compiler.name,
                     handle,
                 )
             else:
                 logger.debug(
-                    "Store the %s-th graph for shape %s from %s via handle %s",
+                    "Store the %s-th graph for compile range %s from %s via handle %s",
                     graph_index,
-                    str(runtime_shape),
+                    str(compile_range),
                     self.compiler.name,
                     handle,
                 )
@@ -275,19 +262,16 @@ class CompilerManager:
             now = time.time()
             elapsed = now - compilation_start_time
             compilation_config.compilation_time += elapsed
-            if runtime_shape is None:
+            if compile_range is None:
                 logger.info_once(
-                    "Compiling a graph for dynamic shape takes %.2f s",
+                    "Compiling a graph for dynamic compile range takes %.2f s",
+                           
                     elapsed,
                     scope="local",
                 )
             else:
-                logger.info_once(
-                    "Compiling a graph for shape %s takes %.2f s",
-                    runtime_shape,
-                    elapsed,
-                    scope="local",
-                )
+                logger.info_once("Compiling a graph for compile range %s takes %.2f s",
+                            str(compile_range), elapsed, scope="local")
 
         return compiled_graph
 
@@ -408,7 +392,6 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 i for i, x in enumerate(args) if isinstance(x, torch.SymInt)
             ]
             global compilation_start_time
-
             compiled_graph_for_dynamic_shape = (
                 self.vllm_backend.compiler_manager.compile(
                     submod,
@@ -417,9 +400,8 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                     self.compilation_config,
                     graph_index=index,
                     num_graphs=len(self.compile_submod_names),
-                    runtime_shape=None,
-                )
-            )
+                    compile_range=None,
+                ))
             # Lazy import here to avoid circular import
             from .piecewise_backend import PiecewiseBackend
 

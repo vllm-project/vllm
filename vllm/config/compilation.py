@@ -214,6 +214,8 @@ class CompilationConfig:
     - Inductor compilation:
         - [`use_inductor`][vllm.config.CompilationConfig.use_inductor]
         - [`compile_sizes`][vllm.config.CompilationConfig.compile_sizes]
+        - [`compile_ranges_split_points`]
+            [vllm.config.CompilationConfig.compile_ranges_split_points]
         - [`inductor_compile_config`]
         [vllm.config.CompilationConfig.inductor_compile_config]
         - [`inductor_passes`][vllm.config.CompilationConfig.inductor_passes]
@@ -331,6 +333,16 @@ class CompilationConfig:
     """Sizes to compile for inductor. In addition
     to integers, it also supports "cudagraph_capture_sizes" to
     specify the sizes for cudagraph capture."""
+    compile_ranges_split_points: Optional[list[int]] = None
+    """Split points that represent compile ranges for inductor.
+    The compile ranges are 
+    [1, split_points[0]), 
+    [split_points[0], split_points[1]), ..., 
+    [split_points[-1], max_num_batched_tokens + 1).
+    Compile sizes are also used single element ranges:
+    [compile_sizes[i], compile_sizes[i] + 1).
+    """
+
     inductor_compile_config: dict = field(default_factory=dict)
     """Additional configurations for inductor.
     - None: use default configurations."""
@@ -914,3 +926,24 @@ class CompilationConfig:
                     enable_str,
                     op,
                 )
+
+    def get_compile_ranges(self) -> list[tuple[int, int]]:
+        """Get the compile ranges for the compilation config."""
+        compile_ranges_split_points = self.compile_ranges_split_points
+        compile_ranges = []
+        # max_num_batched_tokens + 1
+        max_split_point = max(compile_ranges_split_points)
+        compile_sizes = set(self.compile_sizes)
+        split_points = sorted(
+            compile_sizes.union(set(self.compile_ranges_split_points)))
+        # filter out split points that are greater
+        # than max_num_batched_tokens + 1
+        split_points = [x for x in split_points if x <= max_split_point]
+        for i, s in enumerate(split_points):
+            if i == 0:
+                compile_ranges.append((1, s))
+            else:
+                compile_ranges.append((split_points[i - 1], s))
+            if s in compile_sizes and s != 1:
+                compile_ranges.append((s, s))
+        return sorted(compile_ranges)
