@@ -57,12 +57,13 @@ def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
     if not _valid_deep_gemm_shape(M, N, K):
         logger.debug_once(
             "DeepGemm disabled due to unaligned problem size. "
-            "M: %s, N: %s, K: %s. M should >= align size "
-            "and N and K must be multiples of %s."
+            "M: %s, N: %s, K: %s. M should >= %s "
+            "and N and K must be multiples of %s. "
             "This is not an error and we will fall back to triton.",
             M,
             N,
             K,
+            align,
             align,
         )
         return False
