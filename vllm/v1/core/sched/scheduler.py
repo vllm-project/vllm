@@ -361,7 +361,7 @@ class Scheduler(SchedulerInterface):
                     skipped_waiting_requests.prepend_request(request)
                     continue
 
-                num_connector_cached_tokens = 0
+                num_extra_tokens_from_connector = 0
                 load_kv_async = False
 
                 # Get already-cached tokens.
@@ -373,13 +373,13 @@ class Scheduler(SchedulerInterface):
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
-                        num_connector_cached_tokens, load_kv_async = (
+                        num_extra_tokens_from_connector, load_kv_async = (
                             self.connector.get_num_new_matched_tokens(
                                 request, num_new_local_computed_tokens))
 
                     # Total computed tokens (local + external).
                     num_computed_tokens = (num_new_local_computed_tokens +
-                                           num_connector_cached_tokens)
+                                           num_extra_tokens_from_connector)
                 # KVTransfer: WAITING reqs have num_computed_tokens > 0
                 # after async KV recvs are completed.
                 else:
@@ -393,7 +393,7 @@ class Scheduler(SchedulerInterface):
 
                 # KVTransfer: loading remote KV, do not allocate for new work.
                 if load_kv_async:
-                    assert num_connector_cached_tokens > 0
+                    assert num_extra_tokens_from_connector > 0
                     num_new_tokens = 0
                 # Number of tokens to be scheduled.
                 else:
@@ -453,52 +453,29 @@ class Scheduler(SchedulerInterface):
                 else:
                     num_encoder_tokens = 0
 
-                if all([
-                        self.connector is not None,
-                        num_connector_cached_tokens > 0,
-                        # Fall back to normal allocation on multi-modal
-                        # models as it is not tested yet.
-                        num_encoder_tokens == 0,
-                ]):
-                    # NOTE(Kuntai): the current implementation of
-                    # `allocate_slots` cannot allocate for the request
-                    # with very long prefix cache cached in connector.
-                    # This is because it will allocate for all tokens
-                    # in the prefix cache for all layers, which wastes
-                    # a lot of memory for sliding window or Mamba.
-                    # So we have a new function
-                    # `allocate_slots_for_connector` to handle this case.
-                    manager = self.kv_cache_manager
-                    new_blocks = manager.allocate_slots_for_connector(
-                        request,
-                        num_new_tokens,
-                        num_connector_cached_tokens,
-                        num_new_local_computed_tokens,
-                        new_computed_blocks,
-                        num_lookahead_tokens=effective_lookahead_tokens,
-                        delay_cache_blocks=load_kv_async,
-                        num_encoder_tokens=num_encoder_tokens,
-                    )
-
-                    # FIXME(Kuntai): need to handle rollback when allocation
-                    # fails.
-                    if new_blocks is None:
-                        # The request cannot be scheduled.
-                        break
-
-                else:
-                    new_blocks = self.kv_cache_manager.allocate_slots(
-                        request,
-                        num_new_tokens + num_connector_cached_tokens,
-                        num_new_local_computed_tokens,
-                        new_computed_blocks,
-                        num_lookahead_tokens=effective_lookahead_tokens,
-                        delay_cache_blocks=load_kv_async,
-                        num_encoder_tokens=num_encoder_tokens,
-                    )
-                    if new_blocks is None:
-                        # The request cannot be scheduled.
-                        break
+                # new_blocks = self.kv_cache_manager.allocate_slots(
+                #     request,
+                #     num_new_tokens,
+                #     num_new_local_computed_tokens,
+                #     new_computed_blocks,
+                #     num_extra_tokens_from_connector,
+                #     num_lookahead_tokens=effective_lookahead_tokens,
+                #     delay_cache_blocks=load_kv_async,
+                #     num_encoder_tokens=num_encoder_tokens,
+                # )
+                new_blocks = self.kv_cache_manager.allocate_slots(
+                    request,
+                    num_new_tokens,
+                    num_new_local_computed_tokens,
+                    new_computed_blocks,
+                    num_extra_tokens_from_connector,
+                    num_lookahead_tokens=effective_lookahead_tokens,
+                    delay_cache_blocks=load_kv_async,
+                    num_encoder_tokens=num_encoder_tokens,
+                )
+                if new_blocks is None:
+                    # The request cannot be scheduled.
+                    break
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
@@ -508,7 +485,7 @@ class Scheduler(SchedulerInterface):
                     self.connector.update_state_after_alloc(
                         request,
                         self.kv_cache_manager.get_blocks(request.request_id),
-                        num_connector_cached_tokens,
+                        num_extra_tokens_from_connector,
                     )
 
                 # Request was already popped from self.waiting

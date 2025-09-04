@@ -183,7 +183,7 @@ class KVCacheManager:
         self,
         request: Request,
         num_new_tokens: int,
-        new_computed_blocks: list[KVCacheBlock],
+        new_computed_blocks: tuple[list[KVCacheBlock], ...],
         num_extra_tokens_from_connector: int = 0,
         num_lookahead_tokens: int = 0,
         num_encoder_tokens: int = 0,
@@ -254,7 +254,6 @@ class KVCacheManager:
         """
             Check if we can allocate for this request.
         """
-
         if not self._can_allocate(
                 request,
                 num_new_tokens,
@@ -276,7 +275,6 @@ class KVCacheManager:
             to save the KV cache of all new tokens to be computed
             for prefix caching purpose.
         """
-
         # Append new computed blocks to the request and increase their
         # `ref_cnt` since they are now referenced by this request.
         # This will also increase the `ref_cnt` for blocks outside the
@@ -318,6 +316,7 @@ class KVCacheManager:
                 # When they are inside sliding window:
                 # - Allocate them.
                 num_extra_tokens_from_connector,
+                num_encoder_tokens,
             ))
 
         # For new blocks to be computed, we just allocate them normally.

@@ -126,6 +126,17 @@ class BlockPool:
         new_hashes: Optional[list[int]] = ([] if self.enable_kv_cache_events
                                            else None)
         for i, blk in enumerate(new_full_blocks):
+            if blk.is_null:
+                # We don't need to process for null block.
+                # This is necessary to avoid the assertion error
+                # down below. Because in hybrid allocator + connector
+                # case, the newly-allocated blocks might be null blocks
+                # (e.g. for those tokens that are 1. prefix cache hit
+                # from the connector but 2. outside sliding window).
+                # If we don't skip these blocks, they will be assigned
+                # some block hash and next time when we reuse null blocks
+                # for other purposes it will trigger an assertion error.
+                continue
             assert blk.block_hash is None
             block_hash = new_block_hashes[i]
 
@@ -248,7 +259,8 @@ class BlockPool:
         # Materialize the iterable to allow multiple passes.
         blocks_list = list(ordered_blocks)
         for block in blocks_list:
-            block.ref_cnt -= 1
+            if not block.is_null:
+                block.ref_cnt -= 1
         self.free_block_queue.append_n([
             block for block in blocks_list
             if block.ref_cnt == 0 and not block.is_null

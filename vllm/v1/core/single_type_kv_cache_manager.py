@@ -74,6 +74,15 @@ class SingleTypeKVCacheManager(ABC):
             The number of blocks.
         """
 
+        # Here we implement the behavior of full attention
+        # The reason is that full attention layer requires
+        # allocating more blocks than other attention mechanisms
+        # as all prefix blocks are necessary for computation, which is
+        # not true for other attention mechanisms.
+        # As a result, the return value serves as one of the UPPER BOUND
+        # of the number of blocks needed to be allocated by all attention
+        # mechanisms.
+
         num_required_blocks = cdiv(
             # For full attention, both new tokens to be computed and
             # extra tokens from connector needs to be allocated
@@ -235,7 +244,6 @@ class SingleTypeKVCacheManager(ABC):
 
         raise NotImplementedError
 
-    @abstractmethod
     def remove_skipped_and_allocate_necessary(
         self,
         request_id: str,
@@ -396,7 +404,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         request_id: str,
         num_computed_tokens: int,
         num_extra_tokens_from_connector: int = 0,
-    ) -> None:
+    ) -> list[KVCacheBlock]:
         # Free the blocks that are outside sliding window, and pad
         # with null blocks.
         last_useful_token = num_computed_tokens +\
@@ -406,11 +414,11 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         blocks = self.req_to_blocks[request_id]
         removed_blocks: list[KVCacheBlock] = []
         for i in range(min(last_useful_block - 1, len(blocks) - 1), -1, -1):
-            if blocks[i] == self._null_block:
+            if blocks[i].is_null:
                 # If the block is already a null block, the blocks before it
                 # should also have been set to null blocks by the previous calls
                 # to this function.
-                break
+                continue
             removed_blocks.append(blocks[i])
             blocks[i] = self._null_block
         self.block_pool.free_blocks(removed_blocks)
@@ -421,6 +429,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                 [self._null_block] * (last_useful_block - 1 - len(blocks)))
 
         # allocate for new tokens from the connector.
+        # TODO(Kuntai): cap this value to max model len.
         return self.allocate_new_blocks(
             request_id, num_computed_tokens + num_extra_tokens_from_connector)
 
@@ -547,7 +556,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         request_id: str,
         num_computed_tokens: int,
         num_extra_tokens_from_connector: int = 0,
-    ) -> None:
+    ) -> list[KVCacheBlock]:
         # Remove the blocks that are no longer be in the chunked attention
         # window and skipped during the attention computation.
 
@@ -664,7 +673,7 @@ class MambaManager(SingleTypeKVCacheManager):
         request_id: str,
         num_computed_tokens: int,
         num_extra_tokens_from_connector: int = 0,
-    ) -> None:
+    ) -> list[KVCacheBlock]:
         return self.allocate_new_blocks(
             request_id, num_computed_tokens + num_extra_tokens_from_connector)
 
@@ -742,7 +751,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         request_id: str,
         num_computed_tokens: int,
         num_extra_tokens_from_connector: int = 0,
-    ) -> None:
+    ) -> list[KVCacheBlock]:
         # Cross-attention blocks represent encoder states which are needed
         # for the entire decoding process, so no blocks should be skipped
         return self.allocate_new_blocks(
