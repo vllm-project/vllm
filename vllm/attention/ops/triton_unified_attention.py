@@ -12,7 +12,6 @@ import torch
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 float8_info = torch.finfo(current_platform.fp8_dtype())
@@ -667,8 +666,8 @@ def unified_attention(
     k_descale,
     v_descale,
     alibi_slopes=None,
-    qq_bias=None,
     output_scale=None,
+    qq_bias=None,
     # Optional tensor for sinks
     sinks=None,
 ):
