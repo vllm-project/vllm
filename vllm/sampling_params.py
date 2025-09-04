@@ -8,7 +8,6 @@ from functools import cached_property
 from typing import Annotated, Any, Optional, Union
 
 import msgspec
-from pydantic import BaseModel
 
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
@@ -28,7 +27,7 @@ class SamplingType(IntEnum):
 
 # maybe make msgspec?
 @dataclass
-class GuidedDecodingParams:
+class StructuredOutputsParams:
     """One of these fields will be used to build a logit processor."""
     json: Optional[Union[str, dict]] = None
     regex: Optional[str] = None
@@ -36,52 +35,22 @@ class GuidedDecodingParams:
     grammar: Optional[str] = None
     json_object: Optional[bool] = None
     """These are other options that can be set"""
-    backend: Optional[str] = None
-    backend_was_auto: bool = False
     disable_fallback: bool = False
     disable_any_whitespace: bool = False
     disable_additional_properties: bool = False
     whitespace_pattern: Optional[str] = None
     structural_tag: Optional[str] = None
 
-    @staticmethod
-    def from_optional(
-        json: Optional[Union[dict, BaseModel, str]] = None,
-        regex: Optional[str] = None,
-        choice: Optional[list[str]] = None,
-        grammar: Optional[str] = None,
-        json_object: Optional[bool] = None,
-        backend: Optional[str] = None,
-        whitespace_pattern: Optional[str] = None,
-        structural_tag: Optional[str] = None,
-    ) -> Optional["GuidedDecodingParams"]:
-        if all(arg is None for arg in (json, regex, choice, grammar,
-                                       json_object, structural_tag)):
-            return None
-        # Extract json schemas from pydantic models
-        if isinstance(json, (BaseModel, type(BaseModel))):
-            json = json.model_json_schema()
-        return GuidedDecodingParams(
-            json=json,
-            regex=regex,
-            choice=choice,
-            grammar=grammar,
-            json_object=json_object,
-            backend=backend,
-            whitespace_pattern=whitespace_pattern,
-            structural_tag=structural_tag,
-        )
-
     def __post_init__(self):
         """Validate that some fields are mutually exclusive."""
-        guide_count = sum([
+        count = sum([
             self.json is not None, self.regex is not None, self.choice
             is not None, self.grammar is not None, self.json_object is not None
         ])
-        if guide_count > 1:
+        if count > 1:
             raise ValueError(
-                "You can only use one kind of guided decoding but multiple are "
-                f"specified: {self.__dict__}")
+                "You can only use one kind of structured outputs constraint "
+                f"but multiple are specified: {self.__dict__}")
 
 
 class RequestOutputKind(Enum):
@@ -195,9 +164,8 @@ class SamplingParams(
     _all_stop_token_ids: set[int] = msgspec.field(default_factory=set)
 
     # Fields used to construct logits processors
-    guided_decoding: Optional[GuidedDecodingParams] = None
-    """If provided, the engine will construct a guided decoding logits
-    processor from these parameters."""
+    structured_outputs: Optional[StructuredOutputsParams] = None
+    """Parameters for configuring structured outputs."""
     logit_bias: Optional[dict[int, float]] = None
     """If provided, the engine will construct a logits processor that applies
     these logit biases."""
@@ -245,7 +213,7 @@ class SamplingParams(
                                                    msgspec.Meta(
                                                        ge=-1)]] = None,
         output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE,
-        guided_decoding: Optional[GuidedDecodingParams] = None,
+        structured_outputs: Optional[StructuredOutputsParams] = None,
         logit_bias: Optional[Union[dict[int, float], dict[str, float]]] = None,
         allowed_token_ids: Optional[list[int]] = None,
         extra_args: Optional[dict[str, Any]] = None,
@@ -287,7 +255,7 @@ class SamplingParams(
             logits_processors=logits_processors,
             truncate_prompt_tokens=truncate_prompt_tokens,
             output_kind=output_kind,
-            guided_decoding=guided_decoding,
+            structured_outputs=structured_outputs,
             logit_bias=logit_bias,
             allowed_token_ids=allowed_token_ids,
             extra_args=extra_args,
@@ -556,7 +524,7 @@ class SamplingParams(
             "spaces_between_special_tokens="
             f"{self.spaces_between_special_tokens}, "
             f"truncate_prompt_tokens={self.truncate_prompt_tokens}, "
-            f"guided_decoding={self.guided_decoding}, "
+            f"structured_outputs={self.structured_outputs}, "
             f"extra_args={self.extra_args})")
 
 

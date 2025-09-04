@@ -10,11 +10,11 @@ vLLM currently supports the following reasoning models:
 
 | Model Series | Parser Name | Structured Output Support | Tool Calling |
 |--------------|-------------|------------------|-------------|
-| [DeepSeek R1 series](https://huggingface.co/collections/deepseek-ai/deepseek-r1-678e1e131c0169c0bc89728d) | `deepseek_r1` | `guided_json`, `guided_regex` | ❌ |
-| [QwQ-32B](https://huggingface.co/Qwen/QwQ-32B) | `deepseek_r1` | `guided_json`, `guided_regex` | ✅ |
+| [DeepSeek R1 series](https://huggingface.co/collections/deepseek-ai/deepseek-r1-678e1e131c0169c0bc89728d) | `deepseek_r1` | `json`, `regex` | ❌ |
+| [QwQ-32B](https://huggingface.co/Qwen/QwQ-32B) | `deepseek_r1` | `json`, `regex` | ✅ |
 | [IBM Granite 3.2 language models](https://huggingface.co/collections/ibm-granite/granite-32-language-models-67b3bc8c13508f6d064cff9a) | `granite` | ❌ | ❌ |
-| [Qwen3 series](https://huggingface.co/collections/Qwen/qwen3-67dd247413f0e2e4f653967f) | `qwen3` | `guided_json`, `guided_regex` | ✅ |
-| [Hunyuan A13B series](https://huggingface.co/collections/tencent/hunyuan-a13b-685ec38e5b46321e3ea7c4be) | `hunyuan_a13b` | `guided_json`, `guided_regex` | ✅ |
+| [Qwen3 series](https://huggingface.co/collections/Qwen/qwen3-67dd247413f0e2e4f653967f) | `qwen3` | `json`, `regex` | ✅ |
+| [Hunyuan A13B series](https://huggingface.co/collections/tencent/hunyuan-a13b-685ec38e5b46321e3ea7c4be) | `hunyuan_a13b` | `json`, `regex` | ✅ |
 
 !!! note
     IBM Granite 3.2 reasoning is disabled by default; to enable it, you must also pass `thinking=True` in your `chat_template_kwargs`.
@@ -22,11 +22,11 @@ vLLM currently supports the following reasoning models:
 
 ## Quickstart
 
-To use reasoning models, you need to specify the `--reasoning-parser` flags when making a request to the chat completion endpoint. The `--reasoning-parser` flag specifies the reasoning parser to use for extracting reasoning content from the model output.
+To use reasoning models, you need to specify the `--structured-outputs-config.reasoning_parser` flags when making a request to the chat completion endpoint. The `--structured-outputs-config.reasoning_parser` flag specifies the reasoning parser to use for extracting reasoning content from the model output.
 
 ```bash
 vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
-    --reasoning-parser deepseek_r1
+    --structured-outputs-config.reasoning_parser deepseek_r1
 ```
 
 Next, make a request to the model that should return the reasoning content in the response.
@@ -208,7 +208,7 @@ You can add a new `ReasoningParser` similar to <gh-file:vllm/reasoning/deepseek_
 
     # define a reasoning parser and register it to vllm
     # the name list in register_module can be used
-    # in --reasoning-parser.
+    # in --structured-outputs-config.reasoning_parser.
     @ReasoningParserManager.register_module(["example"])
     class ExampleParser(ReasoningParser):
         def __init__(self, tokenizer: AnyTokenizer):
@@ -283,8 +283,8 @@ Additionally, to enable structured output, you'll need to create a new `Reasoner
 
 The structured output engine like [xgrammar](https://github.com/mlc-ai/xgrammar) will use `end_token_id` to check if the reasoning content is present in the model output and skip the structured output if it is the case.
 
-Finally, you can enable reasoning for the model by using the `--reasoning-parser` flags.
+Finally, you can enable reasoning for the model by using the `--structured-outputs-config.reasoning_parser` flags.
 
 ```bash
-vllm serve <model_tag> --reasoning-parser example
+vllm serve <model_tag> --structured-outputs-config.reasoning_parser example
 ```

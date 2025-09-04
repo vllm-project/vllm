@@ -45,8 +45,8 @@ from vllm.entrypoints.score_utils import (ScoreContentPartParam,
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
-                                  RequestOutputKind, SamplingParams)
+from vllm.sampling_params import (BeamSearchParams, RequestOutputKind,
+                                  SamplingParams, StructuredOutputsParams)
 from vllm.utils import random_uuid, resolve_obj_by_qualname
 
 logger = init_logger(__name__)
@@ -344,11 +344,12 @@ class ResponsesRequest(OpenAIBaseModel):
         stop_token_ids = default_sampling_params.get("stop_token_ids")
 
         # Structured output
-        guided_decoding = None
+        structured_outputs = None
         if self.text is not None and self.text.format is not None:
             response_format = self.text.format
-            if response_format.type == "json_schema":
-                guided_decoding = GuidedDecodingParams.from_optional(
+            if (response_format.type == "json_schema"
+                    and response_format.schema_ is not None):
+                structured_outputs = StructuredOutputsParams(
                     json=response_format.schema_)
             elif response_format.type == "json_object":
                 raise NotImplementedError("json_object is not supported")
@@ -363,7 +364,7 @@ class ResponsesRequest(OpenAIBaseModel):
             stop_token_ids=stop_token_ids,
             output_kind=(RequestOutputKind.DELTA
                          if self.stream else RequestOutputKind.FINAL_ONLY),
-            guided_decoding=guided_decoding,
+            structured_outputs=structured_outputs,
         )
 
     def is_include_output_logprobs(self) -> bool:
@@ -518,42 +519,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
     )
-    guided_json: Optional[Union[str, dict, BaseModel]] = Field(
+    structured_outputs: Optional[dict[str, Any]] = Field(
         default=None,
-        description=("If specified, the output will follow the JSON schema."),
-    )
-    guided_regex: Optional[str] = Field(
-        default=None,
-        description=(
-            "If specified, the output will follow the regex pattern."),
-    )
-    guided_choice: Optional[list[str]] = Field(
-        default=None,
-        description=(
-            "If specified, the output will be exactly one of the choices."),
-    )
-    guided_grammar: Optional[str] = Field(
-        default=None,
-        description=(
-            "If specified, the output will follow the context free grammar."),
-    )
-    structural_tag: Optional[str] = Field(
-        default=None,
-        description=(
-            "If specified, the output will follow the structural tag schema."),
-    )
-    guided_decoding_backend: Optional[str] = Field(
-        default=None,
-        description=(
-            "If specified, will override the default guided decoding backend "
-            "of the server for this specific request. If set, must be either "
-            "'outlines' / 'lm-format-enforcer'"),
-    )
-    guided_whitespace_pattern: Optional[str] = Field(
-        default=None,
-        description=(
-            "If specified, will override the default whitespace pattern "
-            "for guided json decoding."),
+        description="Additional kwargs for structured outputs",
     )
     priority: int = Field(
         default=0,
@@ -672,31 +640,28 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if prompt_logprobs is None and self.echo:
             prompt_logprobs = self.top_logprobs
 
-        guided_json_object = None
-        if self.response_format is not None:
-            if self.response_format.type == "json_object":
-                guided_json_object = True
-            elif self.response_format.type == "json_schema":
-                json_schema = self.response_format.json_schema
-                assert json_schema is not None
-                self.guided_json = json_schema.json_schema
-            elif self.response_format.type == "structural_tag":
-                structural_tag = self.response_format
-                assert structural_tag is not None and isinstance(
-                    structural_tag, StructuralTagResponseFormat)
-                s_tag_obj = structural_tag.model_dump(by_alias=True)
-                self.structural_tag = json.dumps(s_tag_obj)
+        structured_outputs = None
+        if (self.structured_outputs is not None
+                and any(v is not None
+                        for v in self.structured_outputs.values())):
+            structured_outputs = StructuredOutputsParams(
+                **self.structured_outputs)
 
-        guided_decoding = GuidedDecodingParams.from_optional(
-            json=self._get_guided_json_from_tool() or self.guided_json,
-            regex=self.guided_regex,
-            choice=self.guided_choice,
-            grammar=self.guided_grammar,
-            json_object=guided_json_object,
-            backend=self.guided_decoding_backend,
-            whitespace_pattern=self.guided_whitespace_pattern,
-            structural_tag=self.structural_tag,
-        )
+            if self.response_format is not None:
+                if self.response_format.type == "json_object":
+                    structured_outputs.json_object = True
+                elif self.response_format.type == "json_schema":
+                    json_schema = self.response_format.json_schema
+                    assert json_schema is not None
+                    structured_outputs.json = json_schema.json_schema
+                elif self.response_format.type == "structural_tag":
+                    structural_tag = self.response_format
+                    assert structural_tag is not None and isinstance(
+                        structural_tag, StructuralTagResponseFormat)
+                    s_tag_obj = structural_tag.model_dump(by_alias=True)
+                    structured_outputs.structural_tag = json.dumps(s_tag_obj)
+            if structured_outputs_json := self._get_json_schema_from_tool():
+                structured_outputs.json = structured_outputs_json
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
@@ -728,15 +693,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             output_kind=RequestOutputKind.DELTA if self.stream \
                 else RequestOutputKind.FINAL_ONLY,
-            guided_decoding=guided_decoding,
+            structured_outputs=structured_outputs,
             logit_bias=self.logit_bias,
             bad_words= self.bad_words,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
         )
 
-    def _get_guided_json_from_tool(
-            self) -> Optional[Union[str, dict, BaseModel]]:
+    def _get_json_schema_from_tool(self) -> Optional[Union[str, dict]]:
         # user has chosen to not use any tool
         if self.tool_choice == "none" or self.tools is None:
             return None
@@ -842,28 +806,37 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def check_guided_decoding_count(cls, data):
+    def check_structured_outputs_count(cls, data):
         if isinstance(data, ValueError):
             raise data
 
-        guide_count = sum([
-            "guided_json" in data and data["guided_json"] is not None,
-            "guided_regex" in data and data["guided_regex"] is not None,
-            "guided_choice" in data and data["guided_choice"] is not None
+        if "structured_outputs" not in data:
+            return data
+
+        structured_outputs_kwargs = data['structured_outputs']
+
+        count = sum([
+            "json" in structured_outputs_kwargs
+            and structured_outputs_kwargs["json"] is not None,
+            "regex" in structured_outputs_kwargs
+            and structured_outputs_kwargs["regex"] is not None,
+            "choice" in structured_outputs_kwargs
+            and structured_outputs_kwargs["choice"] is not None
         ])
-        # you can only use one kind of guided decoding
-        if guide_count > 1:
+        # you can only use one kind of constraints for structured outputs
+        if count > 1:
             raise ValueError(
-                "You can only use one kind of guided decoding "
-                "('guided_json', 'guided_regex' or 'guided_choice').")
-        # you can only either use guided decoding or tools, not both
-        if guide_count > 1 and data.get("tool_choice", "none") not in (
+                "You can only use one kind of constraints for structured "
+                "outputs ('json', 'regex' or 'choice').")
+        # you can only either use structured outputs or tools, not both
+        if count > 1 and data.get("tool_choice", "none") not in (
                 "none",
                 "auto",
                 "required",
         ):
             raise ValueError(
-                "You can only either use guided decoding or tools, not both.")
+                "You can only either use constraints for structured outputs "
+                "or tools, not both.")
         return data
 
     @model_validator(mode="before")
@@ -1016,37 +989,9 @@ class CompletionRequest(OpenAIBaseModel):
             ", {'type': 'structural_tag'}, or {'type': 'text' } is supported."
         ),
     )
-    guided_json: Optional[Union[str, dict, BaseModel]] = Field(
+    structured_outputs: Optional[dict[str, Any]] = Field(
         default=None,
-        description="If specified, the output will follow the JSON schema.",
-    )
-    guided_regex: Optional[str] = Field(
-        default=None,
-        description=(
-            "If specified, the output will follow the regex pattern."),
-    )
-    guided_choice: Optional[list[str]] = Field(
-        default=None,
-        description=(
-            "If specified, the output will be exactly one of the choices."),
-    )
-    guided_grammar: Optional[str] = Field(
-        default=None,
-        description=(
-            "If specified, the output will follow the context free grammar."),
-    )
-    guided_decoding_backend: Optional[str] = Field(
-        default=None,
-        description=(
-            "If specified, will override the default guided decoding backend "
-            "of the server for this specific request. If set, must be one of "
-            "'outlines' / 'lm-format-enforcer'"),
-    )
-    guided_whitespace_pattern: Optional[str] = Field(
-        default=None,
-        description=(
-            "If specified, will override the default whitespace pattern "
-            "for guided json decoding."),
+        description="Additional kwargs for structured outputs",
     )
     priority: int = Field(
         default=0,
@@ -1177,20 +1122,15 @@ class CompletionRequest(OpenAIBaseModel):
 
         echo_without_generation = self.echo and self.max_tokens == 0
 
-        guided_json_object = None
-        if (self.response_format is not None
-                and self.response_format.type == "json_object"):
-            guided_json_object = True
-
-        guided_decoding = GuidedDecodingParams.from_optional(
-            json=self.guided_json,
-            regex=self.guided_regex,
-            choice=self.guided_choice,
-            grammar=self.guided_grammar,
-            json_object=guided_json_object,
-            backend=self.guided_decoding_backend,
-            whitespace_pattern=self.guided_whitespace_pattern,
-        )
+        structured_outputs = None
+        if (self.structured_outputs is not None
+                and any(v is not None
+                        for v in self.structured_outputs.values())):
+            structured_outputs = StructuredOutputsParams(
+                **self.structured_outputs)
+            if (self.response_format is not None
+                    and self.response_format.type == "json_object"):
+                structured_outputs.json_object = True
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
@@ -1222,7 +1162,7 @@ class CompletionRequest(OpenAIBaseModel):
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             output_kind=RequestOutputKind.DELTA if self.stream \
                 else RequestOutputKind.FINAL_ONLY,
-            guided_decoding=guided_decoding,
+            structured_outputs=structured_outputs,
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
@@ -1230,16 +1170,23 @@ class CompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def check_guided_decoding_count(cls, data):
-        guide_count = sum([
-            "guided_json" in data and data["guided_json"] is not None,
-            "guided_regex" in data and data["guided_regex"] is not None,
-            "guided_choice" in data and data["guided_choice"] is not None
+    def check_structured_outputs_count(cls, data):
+        if "structured_outputs" not in data:
+            return data
+
+        structured_outputs_kwargs = data['structured_outputs']
+        count = sum([
+            "json" in structured_outputs_kwargs
+            and structured_outputs_kwargs["json"] is not None,
+            "regex" in structured_outputs_kwargs
+            and structured_outputs_kwargs["regex"] is not None,
+            "choice" in structured_outputs_kwargs
+            and structured_outputs_kwargs["choice"] is not None
         ])
-        if guide_count > 1:
+        if count > 1:
             raise ValueError(
-                "You can only use one kind of guided decoding "
-                "('guided_json', 'guided_regex' or 'guided_choice').")
+                "You can only use one kind of constraints for structured "
+                "outputs ('json', 'regex' or 'choice').")
         return data
 
     @model_validator(mode="before")
@@ -2097,7 +2044,7 @@ class DetokenizeResponse(OpenAIBaseModel):
 
 class TokenizerInfoResponse(OpenAIBaseModel):
     """
-    Response containing tokenizer configuration 
+    Response containing tokenizer configuration
     equivalent to tokenizer_config.json
     """
 

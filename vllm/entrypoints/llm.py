@@ -15,8 +15,8 @@ import vllm.envs as envs
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence,
                               create_sort_beams_key_function)
-from vllm.config import (CompilationConfig, ModelDType, TokenizerMode,
-                         is_init_field)
+from vllm.config import (CompilationConfig, ModelDType,
+                         StructuredOutputsConfig, TokenizerMode, is_init_field)
 from vllm.engine.arg_utils import (ConvertOption, EngineArgs, HfOverrides,
                                    PoolerConfig, RunnerOption)
 from vllm.engine.llm_engine import LLMEngine
@@ -184,6 +184,8 @@ class LLM:
         hf_overrides: Optional[HfOverrides] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         override_pooler_config: Optional[PoolerConfig] = None,
+        structured_outputs_config: Optional[Union[dict[
+            str, Any], StructuredOutputsConfig]] = None,
         compilation_config: Optional[Union[int, dict[str, Any],
                                            CompilationConfig]] = None,
         logits_processors: Optional[list[Union[str,
@@ -235,6 +237,20 @@ class LLM:
         else:
             compilation_config_instance = CompilationConfig()
 
+        if structured_outputs_config is not None:
+            if isinstance(structured_outputs_config, dict):
+                predicate = lambda x: is_init_field(StructuredOutputsConfig, x[
+                    0])
+                structured_outputs_instance = StructuredOutputsConfig(**dict(
+                    filter(
+                        predicate,
+                        structured_outputs_config.items(),
+                    )))
+            else:
+                structured_outputs_instance = structured_outputs_config
+        else:
+            structured_outputs_instance = StructuredOutputsConfig()
+
         engine_args = EngineArgs(
             model=model,
             runner=runner,
@@ -261,6 +277,7 @@ class LLM:
             hf_overrides=hf_overrides,
             mm_processor_kwargs=mm_processor_kwargs,
             override_pooler_config=override_pooler_config,
+            structured_outputs_config=structured_outputs_instance,
             compilation_config=compilation_config_instance,
             logits_processors=logits_processors,
             **kwargs,
