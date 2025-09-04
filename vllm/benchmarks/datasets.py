@@ -422,20 +422,19 @@ class RandomDataset(BenchmarkDataset):
         vocab_size = tokenizer.vocab_size
 
         requests = []
+        prompts, total_input_lens = self.generate_token_sequence_batch(
+            tokenizer=tokenizer,
+            prefix_token_ids=prefix_token_ids,
+            prefix_len=prefix_len,
+            vocab_size=vocab_size,
+            input_lens=input_lens,
+            offsets=offsets,
+        )
         for i in range(num_requests):
-            prompt, total_input_len = self.generate_token_sequence(
-                tokenizer=tokenizer,
-                prefix_token_ids=prefix_token_ids,
-                prefix_len=prefix_len,
-                vocab_size=vocab_size,
-                input_len=int(input_lens[i]),
-                offset=int(offsets[i]),
-                index=i,
-            )
             requests.append(
                 SampleRequest(
-                    prompt=prompt,
-                    prompt_len=total_input_len,
+                    prompt=prompts[i],
+                    prompt_len=total_input_lens[i],
                     expected_output_len=int(output_lens[i]),
                     request_id=request_id_prefix + str(i),
                 )
@@ -560,6 +559,51 @@ class RandomDataset(BenchmarkDataset):
         total_input_len = len(re_encoded_sequence)
 
         return prompt, total_input_len
+
+    def generate_token_sequence_batch(
+        self,
+        *,
+        tokenizer: PreTrainedTokenizerBase,
+        prefix_token_ids: list[int],
+        prefix_len: int,
+        vocab_size: int,
+        input_lens: np.ndarray,
+        offsets: np.ndarray,
+    ) -> tuple[list[str], list[int]]:
+        """
+        Returns (prompts, total_input_lens).
+
+        NOTE: After decoding the prompt we have to encode and decode it again.
+        This is done because in some cases N consecutive tokens
+        give a string tokenized into != N number of tokens.
+        For example for GPT2Tokenizer:
+        [6880, 6881] -> ['Ġcalls', 'here'] ->
+        [1650, 939, 486] -> ['Ġcall', 'sh', 'ere']
+        To avoid uncontrolled change of the prompt length,
+        the encoded sequence is truncated before being decode again.
+        """
+        token_sequences = []
+        for input_len, offset, index in zip(
+            input_lens, offsets, range(len(input_lens))
+        ):
+            inner_seq = (
+                (offset + index + np.arange(input_len)) % vocab_size
+            ).tolist()
+            token_sequences.append(prefix_token_ids + inner_seq)
+
+        prompts = tokenizer.backend_tokenizer.decode_batch(token_sequences)
+        total_input_lens = prefix_len + input_lens
+
+        re_encoded_sequences = tokenizer.backend_tokenizer.encode_batch_fast(
+            prompts, add_special_tokens=False
+        )
+        re_encoded_sequences = [
+            seq.ids[:total_len]
+            for seq, total_len in zip(re_encoded_sequences, total_input_lens)
+        ]
+
+        prompts = tokenizer.backend_tokenizer.decode_batch(re_encoded_sequences)
+        return prompts, total_input_lens
 
 
 # -----------------------------------------------------------------------------
