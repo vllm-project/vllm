@@ -163,6 +163,7 @@ class DeepseekV2MoE(nn.Module):
             prefix=f"{prefix}.experts",
             scoring_func=config.scoring_func,
             # we do scaling outside, set factor to 1.0 to avoid double mul
+            # aiter applies routed_scaling_factor internally
             routed_scaling_factor=1.0
             if is_rocm_aiter_moe_enabled() else self.routed_scaling_factor,
             e_score_correction_bias=self.gate.e_score_correction_bias,
