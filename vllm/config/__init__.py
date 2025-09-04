@@ -756,7 +756,7 @@ class ModelConfig:
             is_pooling_model=self.runner_type == "pooling",
             revision=self.revision,
         )
-        self.head_dtype = _get_head_dtype(config=self.hf_config,
+        self._head_dtype = _get_head_dtype(config=self.hf_config,
                                           dtype=self.dtype,
                                           runner_type=self.runner_type)
 
@@ -1762,6 +1762,22 @@ class ModelConfig:
         # cross_encoder models defaults to using pad_token.
         # `llm as reranker` models defaults to not using pad_token.
         return getattr(self.hf_config, "use_pad_token", True)
+
+    @property
+    def head_dtype(self) -> torch.dtype:
+        # "head" refers to the last Linear layer(s) of an LLM,
+        # such as the lm_head in a generation model,
+        # or the score or classifier in a classification model.
+        # - using_fp32_head being True means using fp32 head
+        # - using_fp32_head being False means fp32 head is not used
+        # - using_fp32_head being None means choosing
+        # the default head_dtype based on runner_type.
+        #   - The pooling model defaults to using fp32 head,
+        # you can use using_fp32_head=False to disable it.
+        #   - The generate model defaults to not using fp32 head,
+        # you can use using_fp32_head=True to enable it.
+        return self._head_dtype
+
 
     def get_and_verify_max_len(self, max_model_len: int):
         # Consider max_model_len in tokenizer_config only when
@@ -2911,21 +2927,8 @@ def _get_head_dtype(config: PretrainedConfig, dtype: torch.dtype,
     elif using_fp32_head:
         return torch.float32
 
-    # "head" refers to the last Linear layer(s) of an LLM,
-    # such as the lm_head in a generation model,
-    # or the score or classifier in a classification model.
-    # - using_fp32_head being True means using fp32 head
-    # - using_fp32_head being False means fp32 head is not used
-    # - using_fp32_head being None means choosing
-    # the default head_dtype based on runner_type.
-
-    # The pooling model defaults to using fp32 head,
-    # you can use using_fp32_head=False to disable it.
     if runner_type == "pooling":
         return torch.float32
-
-    # The generate model defaults to not using fp32 head,
-    # you can use using_fp32_head=True to enable it.
     return dtype
 
 
