@@ -41,6 +41,7 @@ from transformers.models.whisper import WhisperFeatureExtractor
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VisionTransformer, Qwen2_5_VLImageEmbeddingInputs,
     Qwen2_5_VLImageInputs, Qwen2_5_VLImagePixelInputs,
@@ -66,10 +67,12 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import decode_tokens, encode_tokens
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP, SupportsLoRA
+from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
+                         SupportsMultiModal, SupportsPP)
 from .utils import (AutoWeightsLoader, WeightsMapper,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
+
 try:
     import flash_attn
 except (ImportError, ModuleNotFoundError):
@@ -634,6 +637,7 @@ class Qwen2_5OmniConditionalGenerationMixin:
         audio_hashes: list[str] = None,
         cached_audio_features: torch.Tensor = None,
     ) -> torch.Tensor:
+
         input_features = audio_input["input_features"]
         audio_feature_lengths = audio_input["audio_feature_lengths"]
         if input_features.ndim == 3:
@@ -717,9 +721,9 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
-    
-    # For multimodal models, vLLM currently only supports adding LoRA to language model
-    # Map the embedding module to the language model's embed_tokens
+
+    # For multimodal models, vLLM currently only supports adding LoRA to
+    # language model. Map the embedding module to language model's embed_tokens
     embedding_modules = {
         "embed_tokens": "language_model.model.embed_tokens",
     }
@@ -808,14 +812,14 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
 
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
-    
-    def get_mm_mapping(self) -> "MultiModelKeys":
-        """Get the module prefix for multimodal models to properly filter LoRA modules."""
-        from vllm.model_executor.models.module_mapping import MultiModelKeys
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """Get module prefix for multimodal models to filter LoRA modules."""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector=[],  # No explicit connector in this model
-            tower_model=["visual", "audio_tower"],  # Exclude vision and audio towers
+            tower_model=["visual",
+                         "audio_tower"],  # Exclude vision and audio towers
         )
 
     def get_multimodal_embeddings(self,
