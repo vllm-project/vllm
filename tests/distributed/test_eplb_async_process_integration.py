@@ -1,6 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from unittest.mock import Mock, patch
+
 import pytest
 import torch
-from unittest.mock import Mock, patch
 
 from vllm.distributed.eplb.eplb_state import EplbState
 
@@ -47,16 +50,22 @@ def mock_ep_group():
 def mock_distributed_env():
     """Mock distributed environment"""
     with patch(
-            'vllm.distributed.eplb.eplb_state.get_ep_group') as mock_get_ep_group, \
-            patch(
-                'vllm.distributed.eplb.eplb_state.get_node_count') as mock_get_node_count, \
-            patch(
-                'vllm.distributed.eplb.eplb_state.all_reduce') as mock_all_reduce, \
-            patch(
-                'vllm.distributed.eplb.eplb_state.in_the_same_node_as') as mock_in_the_same_node_as:
+        'vllm.distributed.eplb.eplb_state.get_ep_group'
+    ) as mock_get_ep_group, \
+         patch(
+             'vllm.distributed.eplb.eplb_state.get_node_count'
+         ) as mock_get_node_count, \
+         patch(
+             'vllm.distributed.eplb.eplb_state.all_reduce'
+         ) as mock_all_reduce, \
+         patch(
+             'vllm.distributed.eplb.eplb_state.in_the_same_node_as'
+         ) as mock_in_the_same_node_as:
         # Set mock return values
         mock_get_node_count.return_value = 1  # Mock 1 node
-        mock_in_the_same_node_as.return_value = [True] * 2  # Mock 2 ranks on same node
+        mock_in_the_same_node_as.return_value = [
+            True
+        ] * 2  # Mock 2 ranks on same node
 
         # Create mock EP group
         mock_ep_group = Mock()
@@ -82,23 +91,21 @@ def test_eplb_state_initialization(mock_model, mock_parallel_config,
     device = torch.device('cpu')
 
     # Create EplbState
-    state = EplbState.build(
-        model=mock_model,
-        device=device,
-        parallel_config=mock_parallel_config
-    )
+    state = EplbState.build(model=mock_model,
+                            device=device,
+                            parallel_config=mock_parallel_config)
 
     # Verify basic attributes
-    assert state.physical_to_logical_map.shape == (2,
-                                                   6)  # 2 layers, 6 physical experts
-    assert state.logical_to_physical_map.shape == (2, 4,
-                                                   1024)  # 2 layers, 4 logical experts, max redundancy+1
-    assert state.logical_replica_count.shape == (2,
-                                                 4)  # 2 layers, 4 logical experts
-    assert state.expert_load_pass.shape == (2,
-                                            6)  # 2 layers, 6 physical experts
-    assert state.expert_load_window.shape == (10, 2,
-                                              6)  # window size 10, 2 layers, 6 physical experts
+    assert state.physical_to_logical_map.shape == (
+        2, 6)  # 2 layers, 6 physical experts
+    assert state.logical_to_physical_map.shape == (
+        2, 4, 1024)  # 2 layers, 4 logical experts, max redundancy+1
+    assert state.logical_replica_count.shape == (
+        2, 4)  # 2 layers, 4 logical experts
+    assert state.expert_load_pass.shape == (2, 6
+                                            )  # 2 layers, 6 physical experts
+    assert state.expert_load_window.shape == (
+        10, 2, 6)  # window size 10, 2 layers, 6 physical experts
     assert state.expert_load_window_size == 10
     assert state.expert_rearrangement_step_interval == 100
     assert state.num_wait_worker_iterations == 5
@@ -108,15 +115,14 @@ def test_eplb_state_initialization(mock_model, mock_parallel_config,
     assert state._async_processor.target_func.__name__ == 'rebalance_experts'
 
 
-def test_eplb_state_step_without_rearrangement(mock_model, mock_parallel_config,
+def test_eplb_state_step_without_rearrangement(mock_model,
+                                               mock_parallel_config,
                                                mock_distributed_env):
     """Test EplbState step method (without triggering rearrangement)"""
     device = torch.device('cpu')
-    state = EplbState.build(
-        model=mock_model,
-        device=device,
-        parallel_config=mock_parallel_config
-    )
+    state = EplbState.build(model=mock_model,
+                            device=device,
+                            parallel_config=mock_parallel_config)
 
     # Set initial step to ensure no rearrangement is triggered
     state.expert_rearrangement_step = 50  # Less than interval 100
@@ -140,11 +146,9 @@ def test_eplb_state_step_with_rearrangement(mock_model, mock_parallel_config,
                                             mock_distributed_env):
     """Test EplbState step method (triggering rearrangement)"""
     device = torch.device('cpu')
-    state = EplbState.build(
-        model=mock_model,
-        device=device,
-        parallel_config=mock_parallel_config
-    )
+    state = EplbState.build(model=mock_model,
+                            device=device,
+                            parallel_config=mock_parallel_config)
 
     # Set initial step to ensure rearrangement is triggered
     state.expert_rearrangement_step = 99  # Next step will equal interval 100
@@ -170,11 +174,9 @@ def test_eplb_state_rearrange_method(mock_model, mock_parallel_config,
                                      mock_distributed_env):
     """Test EplbState rearrange method"""
     device = torch.device('cpu')
-    state = EplbState.build(
-        model=mock_model,
-        device=device,
-        parallel_config=mock_parallel_config
-    )
+    state = EplbState.build(model=mock_model,
+                            device=device,
+                            parallel_config=mock_parallel_config)
 
     # Mock async processor's submit_task method
     original_submit_task = state._async_processor.submit_task
@@ -203,26 +205,23 @@ def test_eplb_state_process_async_result(mock_model, mock_parallel_config,
     """Test EplbState async result processing"""
     # Mock rearrange_expert_weights_inplace function
     with patch(
-            'vllm.distributed.eplb.eplb_state.rearrange_expert_weights_inplace') as mock_rearrange:
+            'vllm.distributed.eplb.eplb_state.rearrange_expert_weights_inplace'
+    ) as mock_rearrange:
         device = torch.device('cpu')
-        state = EplbState.build(
-            model=mock_model,
-            device=device,
-            parallel_config=mock_parallel_config
-        )
+        state = EplbState.build(model=mock_model,
+                                device=device,
+                                parallel_config=mock_parallel_config)
 
         # Create mock rearrangement results
-        new_physical_to_logical_map = torch.tensor(
-            [[0, 1, 2, 3, 0, 1], [0, 1, 2, 3, 0, 1]])
+        new_physical_to_logical_map = torch.tensor([[0, 1, 2, 3, 0, 1],
+                                                    [0, 1, 2, 3, 0, 1]])
         new_logical_to_physical_map = torch.full((2, 4, 1024), -1)
         new_logical_replica_count = torch.tensor([[2, 2, 1, 1], [2, 2, 1, 1]])
 
         # Set mock results
-        state._async_processor._result = (
-            new_physical_to_logical_map,
-            new_logical_to_physical_map,
-            new_logical_replica_count
-        )
+        state._async_processor._result = (new_physical_to_logical_map,
+                                          new_logical_to_physical_map,
+                                          new_logical_replica_count)
 
         state._async_processor._post_process_args = {
             "model": mock_model,
@@ -251,11 +250,9 @@ def test_eplb_state_cleanup(mock_model, mock_parallel_config,
                             mock_distributed_env):
     """Test EplbState cleanup functionality"""
     device = torch.device('cpu')
-    state = EplbState.build(
-        model=mock_model,
-        device=device,
-        parallel_config=mock_parallel_config
-    )
+    state = EplbState.build(model=mock_model,
+                            device=device,
+                            parallel_config=mock_parallel_config)
 
     # Mock async processor's cleanup method
     original_cleanup = state._async_processor.cleanup

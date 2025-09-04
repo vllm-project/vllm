@@ -1,10 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import multiprocessing as mp
+from contextlib import suppress
 from multiprocessing import Queue
-from typing import Callable, Optional, Any
+from typing import Any, Callable, Optional
 
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
 
 class EPLBProcess:
     """
@@ -80,9 +84,6 @@ class EPLBProcess:
                     # Execute target function
                     result = self.target_func(*args)
                     output_queue.put(result)
-                except mp.queues.Empty:
-                    # Timeout, check if we should continue
-                    continue
                 except Exception as e:
                     output_queue.put(None)
                     if hasattr(e, "add_note"):
@@ -97,8 +98,8 @@ class EPLBProcess:
         finally:
             logger.debug("EPLB worker process exiting")
 
-    def submit_task(self, args: tuple,
-                    post_process_args: dict[str, Any]) -> bool:
+    def submit_task(self, args: tuple, post_process_args: dict[str,
+                                                               Any]) -> bool:
         """
         Submit a task to the asynchronous process
 
@@ -116,6 +117,10 @@ class EPLBProcess:
 
         if self._has_pending_task:
             logger.warning("Cannot submit task: already has a pending task")
+            return False
+
+        if not self._input_queue:
+            logger.error("Cannot submit task: input queue is not initialized")
             return False
 
         try:
@@ -181,10 +186,8 @@ class EPLBProcess:
         """Clean up process resources"""
         # Send sentinel value to stop the process
         if self._input_queue:
-            try:
+            with suppress(Exception):
                 self._input_queue.put(None)
-            except:
-                pass
 
         if self._process:
             if self._process.is_alive():
@@ -195,14 +198,11 @@ class EPLBProcess:
         for q in (self._input_queue, self._result_queue,
                   self._exception_queue):
             if q:
-                try:
+                with suppress(Exception):
                     q.close()
-                except:
-                    pass
-                try:
+                with suppress(Exception):
                     q.join_thread()
-                except:
-                    pass
+
         self._input_queue = None
         self._result_queue = None
         self._exception_queue = None

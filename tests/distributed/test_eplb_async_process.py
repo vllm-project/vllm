@@ -1,5 +1,8 @@
-import pytest
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
+
+import pytest
 
 from vllm.distributed.eplb import EPLBProcess
 
@@ -11,10 +14,8 @@ def dummy_target_function(arg1, arg2):
 
 def test_eplb_process_initialization():
     """Test EPLBProcess initialization"""
-    process = EPLBProcess(
-        target_func=dummy_target_function,
-        num_wait_worker_iterations=5
-    )
+    process = EPLBProcess(target_func=dummy_target_function,
+                          num_wait_worker_iterations=5)
 
     assert process.target_func == dummy_target_function
     assert process._num_wait_worker_iterations == 5
@@ -32,16 +33,12 @@ def test_eplb_process_initialization():
 
 def test_eplb_process_submit_task():
     """Test task submission functionality"""
-    process = EPLBProcess(
-        target_func=dummy_target_function,
-        num_wait_worker_iterations=3
-    )
+    process = EPLBProcess(target_func=dummy_target_function,
+                          num_wait_worker_iterations=3)
 
     # Submit task
-    success = process.submit_task(
-        args=(10, 5),
-        post_process_args={"test": "data"}
-    )
+    success = process.submit_task(args=(10, 5),
+                                  post_process_args={"test": "data"})
 
     assert success is True
     assert process._has_pending_task is True
@@ -54,22 +51,16 @@ def test_eplb_process_submit_task():
 
 def test_eplb_process_submit_task_when_busy():
     """Test submitting new task when existing task is pending"""
-    process = EPLBProcess(
-        target_func=dummy_target_function,
-        num_wait_worker_iterations=3
-    )
+    process = EPLBProcess(target_func=dummy_target_function,
+                          num_wait_worker_iterations=3)
 
     # Submit first task
-    success1 = process.submit_task(
-        args=(10, 5),
-        post_process_args={"test": "data1"}
-    )
+    success1 = process.submit_task(args=(10, 5),
+                                   post_process_args={"test": "data1"})
 
     # Attempt to submit second task
-    success2 = process.submit_task(
-        args=(20, 10),
-        post_process_args={"test": "data2"}
-    )
+    success2 = process.submit_task(args=(20, 10),
+                                   post_process_args={"test": "data2"})
 
     assert success1 is True
     assert success2 is False  # Should fail because task is pending
@@ -80,10 +71,8 @@ def test_eplb_process_submit_task_when_busy():
 
 def test_eplb_process_step_without_pending_task():
     """Test step method without pending task"""
-    process = EPLBProcess(
-        target_func=dummy_target_function,
-        num_wait_worker_iterations=3
-    )
+    process = EPLBProcess(target_func=dummy_target_function,
+                          num_wait_worker_iterations=3)
 
     # Call step without submitting task
     result = process.step()
@@ -102,10 +91,7 @@ def test_eplb_process_step_with_pending_task():
     )
 
     # Submit task
-    process.submit_task(
-        args=(10, 5),
-        post_process_args={"test": "data"}
-    )
+    process.submit_task(args=(10, 5), post_process_args={"test": "data"})
 
     # Wait for task to complete
     time.sleep(0.5)  # Give process time to execute
@@ -130,9 +116,8 @@ def test_eplb_process_step_before_completion():
 
     # Submit task
     process.submit_task(
-        args=(0.2,),  # Sleep for 0.2 seconds
-        post_process_args={"test": "data"}
-    )
+        args=(0.2, ),  # Sleep for 0.2 seconds
+        post_process_args={"test": "data"})
 
     # Call step immediately (task should not be completed yet)
     result = process.step()
@@ -150,16 +135,11 @@ def test_eplb_process_exception_handling():
     def failing_function():
         raise ValueError("Test exception")
 
-    process = EPLBProcess(
-        target_func=failing_function,
-        num_wait_worker_iterations=3
-    )
+    process = EPLBProcess(target_func=failing_function,
+                          num_wait_worker_iterations=3)
 
     # Submit task that will fail
-    process.submit_task(
-        args=(),
-        post_process_args={"test": "data"}
-    )
+    process.submit_task(args=(), post_process_args={"test": "data"})
 
     # Wait for task to complete
     time.sleep(0.5)
@@ -174,10 +154,8 @@ def test_eplb_process_exception_handling():
 
 def test_eplb_process_cleanup():
     """Test cleanup functionality"""
-    process = EPLBProcess(
-        target_func=dummy_target_function,
-        num_wait_worker_iterations=3
-    )
+    process = EPLBProcess(target_func=dummy_target_function,
+                          num_wait_worker_iterations=3)
 
     # Ensure process is running
     assert process._is_running is True
