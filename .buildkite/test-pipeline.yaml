@@ -504,17 +504,49 @@ steps:
 
 #####  models test  #####
 
-- label: Basic Models Test # 24min
+- label: Basic Models Test (Transformers)
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
   - vllm/
-  - tests/models
+  - tests/models/test_transformers.py
   commands:
     - pytest -v -s models/test_transformers.py
+
+- label: Basic Models Test (Registry) # 24min
+  mirror_hardwares: [amdexperimental]
+  torch_nightly: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/test_registry.py
+  commands:
     - pytest -v -s models/test_registry.py
+
+- label: Basic Models Test (Utils) # 24min
+  mirror_hardwares: [amdexperimental]
+  torch_nightly: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/test_utils.py
+  commands:
     - pytest -v -s models/test_utils.py
+
+- label: Basic Models Test (Vision) # 24min
+  mirror_hardwares: [amdexperimental]
+  torch_nightly: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/test_vision.py
+  commands:
     - pytest -v -s models/test_vision.py
+
+- label: Basic Models Test (Initialization) # 24min
+  mirror_hardwares: [amdexperimental]
+  torch_nightly: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/test_initialization.py
+  commands:
     - pytest -v -s models/test_initialization.py
 
 - label: Language Models Test (Common) (Standard)
