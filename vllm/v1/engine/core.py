@@ -138,8 +138,7 @@ class EngineCore:
         # schedule and execute batches, and is required by pipeline parallelism
         # to eliminate pipeline bubbles.
         self.batch_queue_size = self.model_executor.max_concurrent_batches
-        self.batch_queue: Optional[deque[Union[tuple[Future[ModelRunnerOutput],
-                                                     SchedulerOutput],
+        self.batch_queue: Optional[deque[tuple[Future[ModelRunnerOutput],
                                                SchedulerOutput]]] = None
         if self.batch_queue_size > 1:
             logger.info("Batch queue is enabled with size %d",
@@ -320,8 +319,7 @@ class EngineCore:
         batch in the job queue is finished.
         3. Update the scheduler from the output.
         """
-        batch_queue: Optional[deque[tuple[Future[ModelRunnerOutput],
-                                          SchedulerOutput]]] = self.batch_queue
+        batch_queue = self.batch_queue
         assert batch_queue is not None
 
         # Try to schedule a new batch if the batch queue is not full, but
@@ -363,7 +361,7 @@ class EngineCore:
         """Make asynchronous schedule in single process."""
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
-        batch_queue: Optional[deque[SchedulerOutput]] = self.batch_queue
+        batch_queue = self.batch_queue
         assert batch_queue is not None
         if not self.scheduler.has_requests():
             return {}, False
@@ -371,7 +369,7 @@ class EngineCore:
         model_output = None
         scheduler_output = self.scheduler.schedule()
         if scheduler_output.total_num_scheduled_tokens > 0:
-            batch_queue.appendleft(scheduler_output)
+            batch_queue.appendleft(scheduler_output)  # type: ignore
             model_output = self.execute_model_with_error_logging(
                 self.model_executor.execute_model,  # type: ignore
                 scheduler_output)
