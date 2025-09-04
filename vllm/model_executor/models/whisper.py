@@ -4,7 +4,7 @@
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import nullcontext
-from typing import Optional, TypedDict, Union, cast
+from typing import Annotated, Literal, Optional, Union, cast
 
 import numpy as np
 import torch
@@ -33,13 +33,14 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, NestedTensors
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs)
+                                    MultiModalKwargsItems)
 from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
 from vllm.multimodal.processing import (BaseProcessingInfo,
                                         EncDecMultiModalProcessor,
                                         PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.transformers_utils.processor import cached_get_processor
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (MultiModalEmbeddings, SupportsMultiModal,
                          SupportsTranscription, SupportsV0Only)
@@ -111,9 +112,16 @@ ISO639_1_SUPPORTED_LANGS = {
 }
 
 
-class WhisperAudioInputs(TypedDict):
-    input_features: NestedTensors
-    """Shape: `(batch_size, 128, M)`"""
+class WhisperAudioInputs(TensorSchema):
+    """
+    Dimensions:
+        - b: Batch size
+        - nmb: Number of mel bins
+        - t: Time frames (M)
+    """
+
+    input_features: Annotated[Optional[NestedTensors],
+                              TensorShape("b", "nmb", "t")]
 
 
 class WhisperPositionalEmbedding(nn.Embedding):
@@ -728,7 +736,7 @@ class WhisperMultiModalProcessor(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         num_tokens = self.info.get_num_audio_tokens()
         return [
@@ -783,8 +791,9 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
             model_config: ModelConfig,  # not needed here
             stt_config: SpeechToTextConfig,
             language: Optional[str],
-            task_type: str,
-            request_prompt: str) -> PromptType:
+            task_type: Literal["transcribe", "translate"],
+            request_prompt: str,
+            to_language: Optional[str]) -> PromptType:
         if language is None:
             raise ValueError(
                 "Language must be specified when creating the Whisper prompt")

@@ -19,7 +19,7 @@
 """ PyTorch Ovis model."""
 import math
 from collections.abc import Iterable, Mapping
-from typing import Literal, Optional, TypedDict, Union
+from typing import Annotated, Literal, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -42,13 +42,14 @@ from vllm.model_executor.models.utils import (AutoWeightsLoader, flatten_bn,
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs)
+                                    MultiModalKwargsItems)
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processors.ovis import OvisProcessor
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import merge_multimodal_embeddings
@@ -201,25 +202,22 @@ class VisualTokenizer(torch.nn.Module):
         return tokens
 
 
-class OvisImagePatchInputs(TypedDict):
+class OvisImagePatchInputs(TensorSchema):
+    """
+    Dimensions:
+        - batch_patches: Batch size * number of patches
+        - patch_size: patch_size_x * patch_size_y * num_channels
+        - patch_indicators: Batch size * (number of patches + 1)
+        - patches_per_image: List of number of total patches for each image
+          in the batch.
+    """
     type: Literal["image_patches"]
-    flat_data: torch.Tensor
-    """
-    Shape: 
-    `(batch_size * num_patches, patch_size_x * patch_size_y * num_channels)`
-    """
-
-    inducator_tokens: torch.Tensor
-    """
-    Shape: 
-    `(batch_size * (num_patches + 1))`
-    """
-
-    patches_per_image: list[int]
-    """
-    List of number of total patches for each image in the batch.
-    This is used to restore the first two dimensions of `flat_data`.
-    """
+    flat_data: Annotated[torch.Tensor,
+                         TensorShape("batch_patches", "patch_size")]
+    indicator_tokens: Annotated[torch.Tensor, TensorShape("patch_indicators")]
+    patches_per_image: Annotated[list[int],
+                                 TensorShape("num_patches_per_image")]
+    # This is used to restore the first two dimensions of `flat_data`.
 
 
 class VisualEmbedding(torch.nn.Embedding):
@@ -375,11 +373,12 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> list[PromptReplacement]:
 
-        def get_replacement_ovis(item_idx):
-            grid = out_mm_kwargs["grids"][item_idx]
+        def get_replacement_ovis(item_idx: int):
+            out_item = out_mm_kwargs["image"][item_idx]
+            grid = out_item["grids"].data
 
             hf_processor = self.info.get_hf_processor()
             return hf_processor.construct_image_placeholders(grid)
@@ -457,9 +456,12 @@ class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
                 raise ValueError("Incorrect type of indicator_tokens. "
                                  f"Got type: {type(pixel_values)}")
 
+            flat_data = flatten_bn(pixel_values, concat=True)
+            if flat_data.ndim >= 3:
+                flat_data = flat_data.flatten(start_dim=1)
             return OvisImagePatchInputs(
                 type="image_patches",
-                flat_data=flatten_bn(flatten_bn(pixel_values), concat=True),
+                flat_data=flat_data,
                 patches_per_image=[
                     x.shape[0] for x in flatten_bn(pixel_values)
                 ],
@@ -543,7 +545,7 @@ class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
                                                       vision_embeddings)
             input_ids = None
 
-        # up until here we have a inputs_embeds 100% numerical identity
+        # up until here we have an inputs_embeds 100% numerical identity
         # between the OG HF Transformers implementation and ours
         hidden_states = self.llm(
             input_ids=input_ids,

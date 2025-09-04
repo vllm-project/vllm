@@ -18,7 +18,7 @@ from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sequence import Logprob, SampleLogprobs
 
 from ....utils import VLLM_PATH, large_gpu_test
-from ...utils import check_logprobs_close
+from ...utils import check_logprobs_close, dummy_hf_overrides
 
 if TYPE_CHECKING:
     from _typeshed import StrPath
@@ -29,10 +29,10 @@ MISTRAL_SMALL_3_1_ID = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
 MODELS = [PIXTRAL_ID, MISTRAL_SMALL_3_1_ID]
 
 IMG_URLS = [
-    "https://picsum.photos/id/237/400/300",
-    "https://picsum.photos/id/231/200/300",
-    "https://picsum.photos/id/27/500/500",
-    "https://picsum.photos/id/17/150/600",
+    "237-400x300.jpg",  # "https://huggingface.co/datasets/Isotr0py/mistral-test-images/resolve/main/237-400x300.jpg",
+    "231-200x300.jpg",  # "https://huggingface.co/datasets/Isotr0py/mistral-test-images/resolve/main/237-400x300.jpg",
+    "27-500x500.jpg",  # "https://huggingface.co/datasets/Isotr0py/mistral-test-images/resolve/main/237-400x300.jpg",
+    "17-150x600.jpg",  # "https://huggingface.co/datasets/Isotr0py/mistral-test-images/resolve/main/237-400x300.jpg",
 ]
 PROMPT = "Describe each image in one short sentence."
 
@@ -105,17 +105,6 @@ def _create_engine_inputs_hf(urls: list[str]) -> TextPrompt:
     return engine_inputs
 
 
-MSGS = [
-    _create_msg_format(IMG_URLS[:1]),
-    _create_msg_format(IMG_URLS[:2]),
-    _create_msg_format(IMG_URLS),
-]
-ENGINE_INPUTS = [
-    _create_engine_inputs(IMG_URLS[:1]),
-    _create_engine_inputs(IMG_URLS[:2]),
-    _create_engine_inputs(IMG_URLS),
-]
-
 SAMPLING_PARAMS = SamplingParams(max_tokens=512, temperature=0.0, logprobs=5)
 LIMIT_MM_PER_PROMPT = dict(image=4)
 
@@ -161,12 +150,8 @@ def load_outputs_w_logprobs(filename: "StrPath") -> OutputsLogprobs:
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_model_len", MAX_MODEL_LEN)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
-def test_chat(
-    vllm_runner,
-    max_model_len: int,
-    model: str,
-    dtype: str,
-) -> None:
+def test_chat(vllm_runner, max_model_len: int, model: str, dtype: str,
+              local_asset_server) -> None:
     EXPECTED_CHAT_LOGPROBS = load_outputs_w_logprobs(
         FIXTURE_LOGPROBS_CHAT[model])
     with vllm_runner(
@@ -179,7 +164,14 @@ def test_chat(
             limit_mm_per_prompt=LIMIT_MM_PER_PROMPT,
     ) as vllm_model:
         outputs = []
-        for msg in MSGS:
+
+        urls_all = [local_asset_server.url_for(u) for u in IMG_URLS]
+        msgs = [
+            _create_msg_format(urls_all[:1]),
+            _create_msg_format(urls_all[:2]),
+            _create_msg_format(urls_all),
+        ]
+        for msg in msgs:
             output = vllm_model.llm.chat(msg, sampling_params=SAMPLING_PARAMS)
 
             outputs.extend(output)
@@ -195,16 +187,25 @@ def test_chat(
                          name_1="output")
 
 
-@large_gpu_test(min_gb=48)
-@pytest.mark.parametrize("prompt,expected_ranges",
-                         [(_create_engine_inputs_hf(IMG_URLS[:1]),
-                           [PlaceholderRange(offset=11, length=494)]),
-                          (_create_engine_inputs_hf(IMG_URLS[1:4]), [
-                              PlaceholderRange(offset=11, length=266),
-                              PlaceholderRange(offset=277, length=1056),
-                              PlaceholderRange(offset=1333, length=418)
-                          ])])
-def test_multi_modal_placeholders(vllm_runner, prompt,
+@pytest.fixture
+def prompt(request, local_asset_server) -> TextPrompt:
+    names = request.param
+    urls = [local_asset_server.url_for(n) for n in names]
+    return _create_engine_inputs_hf(urls)
+
+
+@pytest.mark.parametrize(
+    "prompt,expected_ranges",
+    [
+        pytest.param(IMG_URLS[:1], [PlaceholderRange(offset=11, length=494)]),
+        pytest.param(IMG_URLS[1:4], [
+            PlaceholderRange(offset=11, length=266),
+            PlaceholderRange(offset=277, length=1056),
+            PlaceholderRange(offset=1333, length=418)
+        ])
+    ],
+)
+def test_multi_modal_placeholders(vllm_runner, prompt: TextPrompt,
                                   expected_ranges: list[PlaceholderRange],
                                   monkeypatch) -> None:
 
@@ -215,6 +216,8 @@ def test_multi_modal_placeholders(vllm_runner, prompt,
             "mistral-community/pixtral-12b",
             max_model_len=8192,
             limit_mm_per_prompt=LIMIT_MM_PER_PROMPT,
+            load_format="dummy",
+            hf_overrides=dummy_hf_overrides,
     ) as vllm_model:
         outputs = vllm_model.llm.generate(prompt)
 
@@ -230,5 +233,7 @@ def test_multi_modal_placeholders(vllm_runner, prompt,
             expected_ranges), f"{image_placeholder_ranges=}"
         for real_range, expected_range in zip(image_placeholder_ranges,
                                               expected_ranges):
-            assert real_range == expected_range, \
+            assert real_range.offset == expected_range.offset, \
+                f"{real_range=} {expected_range=}"
+            assert real_range.length == expected_range.length, \
                 f"{real_range=} {expected_range=}"

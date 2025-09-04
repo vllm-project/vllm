@@ -64,11 +64,11 @@ struct IsPersistent {
   static const bool value = v;
 };
 
-template <typename T, bool IsPaged128, typename PersistenceOption = IsPersistent<true>>
+template <typename T, typename TOut, bool IsPaged128, typename PersistenceOption = IsPersistent<true>>
 struct MlaSm100 {
   using Element = T;
   using ElementAcc = float;
-  using ElementOut = T;
+  using ElementOut = TOut;
 
   using TileShape = Shape<_128, _128, Shape<_512, _64>>;
   using TileShapeH = cute::tuple_element_t<0, TileShape>;
@@ -167,7 +167,7 @@ typename T::Fmha::Arguments args_from_options(
       // TODO(trevor-m): Change split_kv back to -1 when
       // https://github.com/NVIDIA/cutlass/issues/2274 is fixed. Split_kv=1 will
       // perform worse with larger context length and smaller batch sizes.
-      num_kv_splits, // split_kv
+      static_cast<int>(num_kv_splits), // split_kv
       nullptr,       // is_var_split_kv
   };
   // TODO(kaixih@nvidia): When split_kv=-1 and is_var_split_kv=false, we compute
@@ -178,7 +178,7 @@ typename T::Fmha::Arguments args_from_options(
   return arguments;
 }
 
-template <typename Element, bool IsPaged128, typename PersistenceOption>
+template <typename Element, typename ElementOut, bool IsPaged128, typename PersistenceOption>
 void runMla(
     at::Tensor const& out,
     at::Tensor const& q_nope,
@@ -190,7 +190,7 @@ void runMla(
     double sm_scale,
     int64_t num_kv_splits,
     cudaStream_t stream) {
-  using MlaSm100Type = MlaSm100<Element, IsPaged128, PersistenceOption>;
+  using MlaSm100Type = MlaSm100<Element, ElementOut, IsPaged128, PersistenceOption>;
   typename MlaSm100Type::Fmha fmha;
   auto arguments = args_from_options<MlaSm100Type>(out, q_nope, q_pe, kv_c_and_k_pe_cache, seq_lens, page_table, sm_scale, num_kv_splits);
 
@@ -233,13 +233,13 @@ void sm100_cutlass_mla_decode(
   DISPATCH_BOOL(page_size == 128, IsPaged128, [&] {
     DISPATCH_BOOL(num_kv_splits <= 1, NotManualSplitKV, [&] {
       if (in_dtype == at::ScalarType::Half) {
-        runMla<cutlass::half_t, IsPaged128, IsPersistent<NotManualSplitKV>>(
+        runMla<cutlass::half_t, cutlass::half_t, IsPaged128, IsPersistent<NotManualSplitKV>>(
           out, q_nope, q_pe, kv_c_and_k_pe_cache, seq_lens, page_table, workspace, sm_scale, num_kv_splits, stream);
       } else if (in_dtype == at::ScalarType::BFloat16) {
-        runMla<cutlass::bfloat16_t, IsPaged128, IsPersistent<NotManualSplitKV>>(
+        runMla<cutlass::bfloat16_t, cutlass::bfloat16_t, IsPaged128, IsPersistent<NotManualSplitKV>>(
           out, q_nope, q_pe, kv_c_and_k_pe_cache, seq_lens, page_table, workspace, sm_scale, num_kv_splits, stream);
       } else if (in_dtype == at::ScalarType::Float8_e4m3fn) {
-        runMla<cutlass::float_e4m3_t, IsPaged128, IsPersistent<NotManualSplitKV>>(
+        runMla<cutlass::float_e4m3_t, cutlass::bfloat16_t, IsPaged128, IsPersistent<NotManualSplitKV>>(
           out, q_nope, q_pe, kv_c_and_k_pe_cache, seq_lens, page_table, workspace, sm_scale, num_kv_splits, stream);
       } else {
         TORCH_CHECK(false, "Unsupported input data type of MLA");
@@ -253,7 +253,7 @@ void sm100_cutlass_mla_decode(
 int64_t sm100_cutlass_mla_get_workspace_size(int64_t max_seq_len, int64_t num_batches, int64_t sm_count, int64_t num_kv_splits) {
   // Workspace size depends on ElementAcc and ElementLSE (same as ElementAcc)
   // which are float, so Element type here doesn't matter.
-  using MlaSm100Type = MlaSm100<cutlass::half_t, true>;
+  using MlaSm100Type = MlaSm100<cutlass::half_t, cutlass::half_t, true>;
 
   // Get split kv. Requires problem shape and sm_count only.
   typename MlaSm100Type::Fmha::Arguments arguments;
@@ -264,7 +264,7 @@ int64_t sm100_cutlass_mla_get_workspace_size(int64_t max_seq_len, int64_t num_ba
   // Assumes device 0 when getting sm_count.
   arguments.hw_info.sm_count =
       sm_count <= 0 ? cutlass::KernelHardwareInfo::query_device_multiprocessor_count(/*device_id=*/0) : sm_count;
-  arguments.split_kv = num_kv_splits;
+  arguments.split_kv = static_cast<int>(num_kv_splits);
   MlaSm100Type::Fmha::set_split_kv(arguments);
 
   return MlaSm100Type::Fmha::get_workspace_size(arguments);

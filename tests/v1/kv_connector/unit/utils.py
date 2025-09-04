@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import tempfile
 from collections import defaultdict
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import torch
 
@@ -14,6 +14,8 @@ from vllm.distributed.kv_transfer.kv_connector.factory import (
 from vllm.distributed.kv_transfer.kv_connector.v1.shared_storage_connector import (  # noqa
     SharedStorageConnector)
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_utils import (get_request_block_hasher,
+                                         init_none_hash)
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec)
@@ -40,7 +42,6 @@ def assert_scheduler_empty(scheduler: Scheduler):
     # KVCache Manager.
     assert len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].
                req_to_blocks) == 0
-    assert len(scheduler.kv_cache_manager.req_to_block_hashes) == 0
     assert len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].
                num_cached_block) == 0
     num_free_blocks = (
@@ -115,16 +116,23 @@ def create_scheduler(
     )
 
 
-def create_request(
-    request_id: int,
-    num_tokens: int = 10,
-    max_tokens: int = 16,
-    do_remote_decode: bool = False,
-    do_remote_prefill: bool = False,
-    use_all_1s_for_prompt_tokens: bool = False,
-    num_remote_blocks: int = 3,
-) -> Request:
+_none_hash_initialized = False
+
+
+def create_request(request_id: int,
+                   num_tokens: int = 10,
+                   max_tokens: int = 16,
+                   do_remote_decode: bool = False,
+                   do_remote_prefill: bool = False,
+                   use_all_1s_for_prompt_tokens: bool = False,
+                   num_remote_blocks: int = 3,
+                   block_size: int = 16,
+                   hash_fn: Callable = hash) -> Request:
     """Make dummy request for testing."""
+    global _none_hash_initialized
+    if not _none_hash_initialized:
+        init_none_hash(hash)
+        _none_hash_initialized = True
 
     kv_transfer_params: Optional[dict[str, Any]] = None
 
@@ -154,10 +162,9 @@ def create_request(
         prompt_token_ids=prompt_token_ids,
         sampling_params=sampling_params,
         pooling_params=None,
-        multi_modal_inputs=None,
-        multi_modal_placeholders=None,
-        multi_modal_hashes=None,
+        mm_features=None,
         eos_token_id=EOS_TOKEN_ID,
+        block_hasher=get_request_block_hasher(block_size, hash_fn),
     )
     req.kv_transfer_params = kv_transfer_params
     return req
@@ -179,19 +186,22 @@ def create_model_runner_output(
     sampled_token = EOS_TOKEN_ID if use_eos else 0
     sampled_token_ids = [[sampled_token] for _ in req_ids]
 
+    kv_connector_output = None if (
+        finished_sending is None
+        and finished_recving is None) else KVConnectorOutput(
+            finished_sending=finished_sending,
+            finished_recving=finished_recving,
+        )
+
     # Make output data structure.
     return ModelRunnerOutput(
         req_ids=req_ids,
         req_id_to_index=req_id_to_index,
         sampled_token_ids=sampled_token_ids,
-        spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=None,
-        kv_connector_output=KVConnectorOutput(
-            finished_sending=finished_sending,
-            finished_recving=finished_recving,
-        ),
+        kv_connector_output=kv_connector_output,
     )
 
 

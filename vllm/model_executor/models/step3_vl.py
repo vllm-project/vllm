@@ -21,18 +21,20 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
+                                               ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs, NestedTensors)
+                                    MultiModalKwargsItems, NestedTensors)
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate, PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.multimodal.utils import run_dp_sharded_vision_model
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import Step3VisionEncoderConfig
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -518,20 +520,18 @@ class Step3VLMultiModalProcessor(BaseMultiModalProcessor[Step3VLProcessingInfo]
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, Any],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_placeholder_token_id = hf_processor.image_token_id
-        batch_num_patches = out_mm_kwargs["num_patches"].tolist()
 
         def get_replacement_step1o(item_idx: int):
-            img_out = out_mm_kwargs.get_item("image", item_idx)
-            num_patches = batch_num_patches[item_idx]
+            out_item = out_mm_kwargs["image"][item_idx]
+            num_patches = int(out_item["num_patches"].data)
             if num_patches > 0:
-                patch_newline_mask = img_out["patch_newline_mask"].data.tolist(
-                )
+                patch_newline_mask = out_item["patch_newline_mask"].data
                 image_repl_ids = hf_processor._get_image_repl_features(
-                    1, num_patches, patch_newline_mask)[1]
+                    1, num_patches, patch_newline_mask.tolist())[1]
             else:
                 image_repl_ids = hf_processor._get_image_repl_features(
                     1, 0, None)[1]
@@ -650,7 +650,8 @@ class Step3VisionAttention(nn.Module):
     def __init__(self,
                  config,
                  quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
+                 prefix: str = "",
+                 use_data_parallel: bool = False):
         super().__init__()
         self.config = config
         self.embed_dim = config.hidden_size
@@ -659,20 +660,42 @@ class Step3VisionAttention(nn.Module):
 
         self.scale = self.head_dim**-0.5
 
-        tp_size = get_tensor_model_parallel_world_size()
+        tp_size = (1 if use_data_parallel else
+                   get_tensor_model_parallel_world_size())
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
-        self.qkv_proj = QKVParallelLinear(self.embed_dim,
-                                          self.head_dim,
-                                          self.total_num_heads,
-                                          bias=True,
-                                          quant_config=quant_config,
-                                          prefix=prefix)
-        self.out_proj = RowParallelLinear(self.embed_dim,
-                                          self.embed_dim,
-                                          bias=True,
-                                          quant_config=quant_config,
-                                          prefix=prefix)
+
+        self.q_size = self.num_heads * self.head_dim
+
+        if use_data_parallel:
+            self.qkv_proj = ReplicatedLinear(
+                self.embed_dim,
+                3 * self.q_size,
+                bias=True,
+                quant_config=quant_config,
+                prefix=prefix,
+            )
+            self.out_proj = ReplicatedLinear(
+                self.total_num_heads * self.head_dim,
+                self.embed_dim,
+                bias=True,
+                quant_config=quant_config,
+                prefix=prefix,
+            )
+        else:
+            self.qkv_proj = QKVParallelLinear(
+                self.embed_dim,
+                self.head_dim,
+                self.total_num_heads,
+                bias=True,
+                quant_config=quant_config,
+                prefix=prefix,
+            )
+            self.out_proj = RowParallelLinear(self.embed_dim,
+                                              self.embed_dim,
+                                              bias=True,
+                                              quant_config=quant_config,
+                                              prefix=prefix)
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads,
@@ -712,20 +735,25 @@ class Step3VisionMLP(nn.Module):
     def __init__(self,
                  config,
                  quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
+                 prefix: str = "",
+                 use_data_parallel: bool = False):
         super().__init__()
         self.config = config
         self.activation_fn = get_act_fn(config.hidden_act)
-        self.fc1 = ColumnParallelLinear(config.hidden_size,
-                                        config.intermediate_size,
-                                        bias=True,
-                                        quant_config=quant_config,
-                                        prefix=prefix)
-        self.fc2 = RowParallelLinear(config.intermediate_size,
-                                     config.hidden_size,
-                                     bias=True,
-                                     quant_config=quant_config,
-                                     prefix=prefix)
+        cls_fc1 = (ReplicatedLinear
+                   if use_data_parallel else ColumnParallelLinear)
+        self.fc1 = cls_fc1(config.hidden_size,
+                           config.intermediate_size,
+                           bias=True,
+                           quant_config=quant_config,
+                           prefix=prefix)
+        cls_fc2 = (ReplicatedLinear
+                   if use_data_parallel else RowParallelLinear)
+        self.fc2 = cls_fc2(config.intermediate_size,
+                           config.hidden_size,
+                           bias=True,
+                           quant_config=quant_config,
+                           prefix=prefix)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.fc1(hidden_states)
@@ -739,15 +767,22 @@ class Step3VisionEncoderLayer(nn.Module):
     def __init__(self,
                  config: Step3VisionEncoderConfig,
                  quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
+                 prefix: str = "",
+                 use_data_parallel: bool = False):
         super().__init__()
+        self.use_data_parallel = use_data_parallel
         self.embed_dim = config.hidden_size
-        self.self_attn = Step3VisionAttention(config,
-                                              quant_config,
-                                              prefix=f"{prefix}.self_attn")
+        self.self_attn = Step3VisionAttention(
+            config,
+            quant_config,
+            prefix=f"{prefix}.self_attn",
+            use_data_parallel=self.use_data_parallel)
         self.layer_norm1 = nn.LayerNorm(self.embed_dim,
                                         eps=config.layer_norm_eps)
-        self.mlp = Step3VisionMLP(config, quant_config, prefix=f"{prefix}.mlp")
+        self.mlp = Step3VisionMLP(config,
+                                  quant_config,
+                                  prefix=f"{prefix}.mlp",
+                                  use_data_parallel=self.use_data_parallel)
         self.layer_norm2 = nn.LayerNorm(self.embed_dim,
                                         eps=config.layer_norm_eps)
 
@@ -767,13 +802,16 @@ class Step3VisionEncoder(nn.Module):
     def __init__(self,
                  config: Step3VisionEncoderConfig,
                  quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
+                 prefix: str = "",
+                 use_data_parallel: bool = False):
         super().__init__()
         self.config = config
+        self.use_data_parallel = use_data_parallel
         self.layers = nn.ModuleList([
             Step3VisionEncoderLayer(config,
                                     quant_config,
-                                    prefix=f"{prefix}.layers.{i}")
+                                    prefix=f"{prefix}.layers.{i}",
+                                    use_data_parallel=self.use_data_parallel)
             for i in range(config.num_hidden_layers)
         ])
 
@@ -792,21 +830,29 @@ class Step3VisionTransformer(nn.Module):
     def __init__(self,
                  config: Step3VisionEncoderConfig,
                  quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
+                 prefix: str = "",
+                 use_data_parallel: bool = False):
         super().__init__()
         self.config = config
+        self.use_data_parallel = use_data_parallel
         self.image_size = config.image_size
         self.embeddings = Step3VisionEmbeddings(config)
-        self.transformer = Step3VisionEncoder(config,
-                                              quant_config,
-                                              prefix=f"{prefix}.transformer")
+        self.transformer = Step3VisionEncoder(
+            config,
+            quant_config,
+            prefix=f"{prefix}.transformer",
+            use_data_parallel=self.use_data_parallel)
 
     def forward(
         self,
         pixel_values: torch.Tensor,
     ):
         hidden_states = self.embeddings(pixel_values)
-        hidden_states = self.transformer(inputs_embeds=hidden_states)
+        if self.use_data_parallel:
+            hidden_states = run_dp_sharded_vision_model(
+                hidden_states, self.transformer)
+        else:
+            hidden_states = self.transformer(inputs_embeds=hidden_states)
         return hidden_states
 
 
@@ -820,6 +866,8 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         "model.": "language_model.model.",
         "lm_head.": "language_model.lm_head.",
     })
+
+    supports_encoder_tp_data = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
@@ -836,28 +884,37 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         self.config = config
         self.multimodal_config = multimodal_config
+        self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
-        self.vision_model = Step3VisionTransformer(config.vision_config,
-                                                   None,
-                                                   prefix=maybe_prefix(
-                                                       prefix, "vision_model"))
-        self.vit_downsampler = nn.Conv2d(
-            config.vision_config.hidden_size,
-            config.vision_config.output_hidden_size,
-            kernel_size=2,
-            stride=config.understand_projector_stride)
-        self.vit_downsampler2 = nn.Conv2d(
-            config.vision_config.output_hidden_size,
-            config.vision_config.output_hidden_size * 2,
-            kernel_size=3,
-            stride=2,
-            padding=1,
-        )
-        self.vit_large_projector = nn.Linear(
-            config.vision_config.output_hidden_size * 2,
-            config.hidden_size,
-            bias=config.projector_bias,
-        )
+        if multimodal_config.get_limit_per_prompt("image"):
+            self.vision_model = Step3VisionTransformer(
+                config.vision_config,
+                None,
+                prefix=maybe_prefix(prefix, "vision_model"),
+                use_data_parallel=self.use_data_parallel)
+            self.vit_downsampler = nn.Conv2d(
+                config.vision_config.hidden_size,
+                config.vision_config.output_hidden_size,
+                kernel_size=2,
+                stride=config.understand_projector_stride)
+            self.vit_downsampler2 = nn.Conv2d(
+                config.vision_config.output_hidden_size,
+                config.vision_config.output_hidden_size * 2,
+                kernel_size=3,
+                stride=2,
+                padding=1,
+            )
+            self.vit_large_projector = nn.Linear(
+                config.vision_config.output_hidden_size * 2,
+                config.hidden_size,
+                bias=config.projector_bias,
+            )
+        else:
+            self.vision_model = None
+            self.vit_downsampler = None
+            self.vit_downsampler2 = None
+            self.vit_large_projector = None
+
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
             hf_config=config.text_config,
@@ -1046,7 +1103,15 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        loader = AutoWeightsLoader(self)
+
+        skip_prefixes = []
+        if self.vision_model is None and self.vit_large_projector is None:
+            skip_prefixes = [
+                "vision_model.", "vit_downsampler.", "vit_downsampler2.",
+                "vit_large_projector."
+            ]
+
+        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
         loaded_weights = loader.load_weights(weights,
                                              mapper=self.hf_to_vllm_mapper)
         return loaded_weights

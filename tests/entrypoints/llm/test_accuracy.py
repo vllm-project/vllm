@@ -96,9 +96,6 @@ def test_lm_eval_accuracy_v1_engine_fp8_kv_cache(
         more_args = None
         if current_platform.is_tpu():
             # Limit compilation time for TPU V1
-
-            # xet doesn't work well for Qwen/Qwen3-1.7B
-            m.setenv("HF_HUB_DISABLE_XET", "1")
             more_args = "max_model_len=2048,max_num_seqs=128,kv_cache_dtype=fp8"
 
             # Add TP test (if provided)

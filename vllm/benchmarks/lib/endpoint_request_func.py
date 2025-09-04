@@ -9,7 +9,7 @@ import sys
 import time
 import traceback
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Union
 
 import aiohttp
 from tqdm.asyncio import tqdm
@@ -28,9 +28,10 @@ class RequestFuncInput:
     model_name: Optional[str] = None
     logprobs: Optional[int] = None
     extra_body: Optional[dict] = None
-    multi_modal_content: Optional[dict] = None
+    multi_modal_content: Optional[Union[dict, list[dict]]] = None
     ignore_eos: bool = False
     language: Optional[str] = None
+    request_id: Optional[str] = None
 
 
 @dataclass
@@ -68,8 +69,8 @@ async def async_request_openai_completions(
     ), "OpenAI Completions API URL must end with 'completions' or 'profile'."
 
     payload = {
-        "model": request_func_input.model_name \
-            if request_func_input.model_name else request_func_input.model,
+        "model": request_func_input.model_name
+        if request_func_input.model_name else request_func_input.model,
         "prompt": request_func_input.prompt,
         "temperature": 0.0,
         "repetition_penalty": 1.0,
@@ -87,6 +88,8 @@ async def async_request_openai_completions(
     headers = {
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"
     }
+    if request_func_input.request_id:
+        headers["x-request-id"] = request_func_input.request_id
 
     output = RequestFuncOutput()
     output.prompt_len = request_func_input.prompt_len
@@ -132,7 +135,7 @@ async def async_request_openai_completions(
                             # Decoding phase
                             else:
                                 output.itl.append(timestamp -
-                                                    most_recent_timestamp)
+                                                  most_recent_timestamp)
 
                             most_recent_timestamp = timestamp
                             generated_text += text or ""
@@ -172,7 +175,16 @@ async def async_request_openai_chat_completions(
 
     content = [{"type": "text", "text": request_func_input.prompt}]
     if request_func_input.multi_modal_content:
-        content.append(request_func_input.multi_modal_content)
+        mm_content = request_func_input.multi_modal_content
+        if isinstance(mm_content, list):
+            content.extend(mm_content)
+        elif isinstance(mm_content, dict):
+            content.append(mm_content)
+        else:
+            raise TypeError(
+                "multi_modal_content must be a dict or list[dict] "
+                "for openai-chat"
+            )
     payload = {
         "model":
         request_func_input.model_name
@@ -201,6 +213,8 @@ async def async_request_openai_chat_completions(
         "Content-Type": "application/json",
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
     }
+    if request_func_input.request_id:
+        headers["x-request-id"] = request_func_input.request_id
 
     output = RequestFuncOutput()
     output.prompt_len = request_func_input.prompt_len
@@ -240,7 +254,7 @@ async def async_request_openai_chat_completions(
                             # Decoding phase
                             else:
                                 output.itl.append(timestamp -
-                                                    most_recent_timestamp)
+                                                  most_recent_timestamp)
 
                             generated_text += content or ""
                         elif usage := data.get("usage"):
@@ -302,6 +316,8 @@ async def async_request_openai_audio(
     headers = {
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
     }
+    if request_func_input.request_id:
+        headers["x-request-id"] = request_func_input.request_id
 
     # Send audio file
     def to_bytes(y, sr):
@@ -310,7 +326,10 @@ async def async_request_openai_audio(
         buffer.seek(0)
         return buffer
 
-    with to_bytes(*request_func_input.multi_modal_content["audio"]) as f:
+    mm_audio = request_func_input.multi_modal_content
+    if not isinstance(mm_audio, dict) or "audio" not in mm_audio:
+        raise TypeError("multi_modal_content must be a dict containing 'audio'")
+    with to_bytes(*mm_audio["audio"]) as f:
         form = aiohttp.FormData()
         form.add_field("file", f, content_type="audio/wav")
         for key, value in payload.items():
@@ -375,12 +394,61 @@ async def async_request_openai_audio(
     return output
 
 
+async def async_request_openai_embeddings(
+    request_func_input: RequestFuncInput,
+    session: aiohttp.ClientSession,
+    pbar: Optional[tqdm] = None,
+):
+    api_url = request_func_input.api_url
+    assert api_url.endswith(
+        "embeddings"
+    ), "OpenAI Embeddings API URL must end with 'embeddings'."
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+    }
+
+    payload = {
+        "model": request_func_input.model,
+        "input": request_func_input.prompt,
+    }
+
+    output = RequestFuncOutput()
+    st = time.perf_counter()
+    try:
+        async with session.post(
+            url=api_url,
+            headers=headers,
+            json=payload
+        ) as response:
+            if response.status == 200:
+                output.latency = time.perf_counter() - st
+                data = await response.json()
+                output.success = True
+                output.generated_text = ""
+                output.prompt_len = data.get(
+                    "usage", {}).get(
+                    "prompt_tokens", 0)
+            else:
+                output.success = False
+                output.error = response.reason or ""
+    except Exception as e:
+        output.success = False
+        output.error = str(e)
+
+    if pbar:
+        pbar.update(1)
+    return output
+
+
 # TODO: Add more request functions for different API protocols.
 ASYNC_REQUEST_FUNCS = {
     "vllm": async_request_openai_completions,
     "openai": async_request_openai_completions,
     "openai-chat": async_request_openai_chat_completions,
     "openai-audio": async_request_openai_audio,
+    "openai-embeddings": async_request_openai_embeddings,
 }
 
 OPENAI_COMPATIBLE_BACKENDS = [

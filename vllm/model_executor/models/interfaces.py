@@ -52,6 +52,18 @@ class SupportsMultiModal(Protocol):
         MRO of your model class.
     """
 
+    supports_multimodal_raw_input_only: ClassVar[bool] = False
+    """
+    A flag that indicates this model supports multi-modal inputs and processes
+    them in their raw form and not embeddings.
+    """
+
+    supports_encoder_tp_data: ClassVar[bool] = False
+    """
+    A flag that indicates whether this model supports
+    `multimodal_config.mm_encoder_tp_mode="data"`.
+    """
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
         """
@@ -137,38 +149,14 @@ def supports_multimodal(
     return getattr(model, "supports_multimodal", False)
 
 
-@runtime_checkable
-class SupportsMultiModalWithRawInput(SupportsMultiModal, Protocol):
-    """The interface required for all multi-modal models."""
-
-    supports_multimodal_raw_input: ClassVar[Literal[True]] = True
-    """
-    A flag that indicates this model supports multi-modal inputs and processes
-    them in their raw form and not embeddings.
-
-    Note:
-        There is no need to redefine this flag if this class is in the
-        MRO of your model class.
-    """
+def supports_multimodal_raw_input_only(
+        model: Union[type[object], object]) -> bool:
+    return getattr(model, "supports_multimodal_raw_input_only", False)
 
 
-@overload
-def supports_multimodal_raw_input(
-        model: object) -> TypeIs[SupportsMultiModalWithRawInput]:
-    ...
-
-
-@overload
-def supports_multimodal_raw_input(
-        model: type[object]) -> TypeIs[type[SupportsMultiModalWithRawInput]]:
-    ...
-
-
-def supports_multimodal_raw_input(
-    model: Union[type[object], object]
-) -> Union[TypeIs[type[SupportsMultiModalWithRawInput]],
-           TypeIs[SupportsMultiModalWithRawInput]]:
-    return getattr(model, "supports_multimodal_raw_input", False)
+def supports_multimodal_encoder_tp_data(
+        model: Union[type[object], object]) -> bool:
+    return getattr(model, "supports_encoder_tp_data", False)
 
 
 @runtime_checkable
@@ -712,8 +700,10 @@ class SupportsTranscription(Protocol):
     def get_generation_prompt(cls, audio: np.ndarray,
                               stt_config: SpeechToTextConfig,
                               model_config: ModelConfig,
-                              language: Optional[str], task_type: str,
-                              request_prompt: str) -> PromptType:
+                              language: Optional[str],
+                              task_type: Literal["transcribe", "translate"],
+                              request_prompt: str,
+                              to_language: Optional[str]) -> PromptType:
         """Get the prompt for the ASR model.
         The model has control over the construction, as long as it
         returns a valid PromptType."""
@@ -809,3 +799,56 @@ def supports_v0_only(
     model: Union[type[object], object],
 ) -> Union[TypeIs[type[SupportsV0Only]], TypeIs[SupportsV0Only]]:
     return getattr(model, "supports_v0_only", False)
+
+
+@runtime_checkable
+class SupportsEagle3(Protocol):
+    """The interface required for models that support 
+    EAGLE3 speculative decoding."""
+
+    supports_eagle3: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model supports EAGLE3 
+    speculative decoding.
+
+    Note:
+        There is no need to redefine this flag if this class is in the
+        MRO of your model class.
+    """
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        """
+        Set which layers should output auxiliary
+        hidden states for EAGLE3.
+        
+        Args:
+            layers: Tuple of layer indices that should output auxiliary
+              hidden states.
+        """
+        ...
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        """
+        Get the layer indices that should output auxiliary hidden states
+        for EAGLE3.
+        
+        Returns:
+            Tuple of layer indices for auxiliary hidden state outputs.
+        """
+        ...
+
+
+@overload
+def supports_eagle3(model: type[object]) -> TypeIs[type[SupportsEagle3]]:
+    ...
+
+
+@overload
+def supports_eagle3(model: object) -> TypeIs[SupportsEagle3]:
+    ...
+
+
+def supports_eagle3(
+    model: Union[type[object], object],
+) -> Union[TypeIs[type[SupportsEagle3]], TypeIs[SupportsEagle3]]:
+    return isinstance(model, SupportsEagle3)
