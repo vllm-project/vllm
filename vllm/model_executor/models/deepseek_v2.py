@@ -518,7 +518,6 @@ class DeepseekV2MLAAttention(nn.Module):
         )
 
         self.prefix = prefix
-        self.debug_layer_idx = int(self.prefix.split(".")[-2])
 
     def forward(
         self,

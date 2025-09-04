@@ -1391,7 +1391,8 @@ class ModelConfig:
         if not hasattr(self.hf_text_config, "model_type"):
             return False
         elif self.hf_text_config.model_type in \
-            ('deepseek_v2', 'deepseek_v3', 'deepseek_mtp', 'kimi_k2'):
+            ('deepseek_v2', 'deepseek_v3', 'deepseek_mtp',
+              'kimi_k2', 'longcat_flash'):
             return self.hf_text_config.kv_lora_rank is not None
         elif self.hf_text_config.model_type == 'eagle':
             # if the model is an EAGLE module, check for the
@@ -1512,6 +1513,9 @@ class ModelConfig:
                 or self.hf_config.model_type == "ernie_mtp"):
             total_num_hidden_layers = getattr(self.hf_text_config,
                                               "num_nextn_predict_layers", 0)
+        elif (self.hf_config.model_type == "longcat_flash_mtp"):
+            total_num_hidden_layers = getattr(self.hf_text_config,
+                                              "num_nextn_predict_layers", 1)
         else:
             total_num_hidden_layers = getattr(self.hf_text_config,
                                               "num_hidden_layers", 0)
@@ -1933,7 +1937,7 @@ class DeviceConfig:
 
 SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "medusa",
                             "mlp_speculator", "draft_model", "deepseek_mtp",
-                            "ernie_mtp"]
+                            "ernie_mtp", "longcat_flash_mtp"]
 
 
 @config
@@ -2046,6 +2050,13 @@ class SpeculativeConfig:
             hf_config.update({
                 "n_predict": n_predict,
                 "architectures": ["DeepSeekMTPModel"]
+            })
+        if hf_config.model_type == "longcat_flash":
+            hf_config.model_type = "longcat_flash_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
+            hf_config.update({
+                "n_predict": n_predict,
+                "architectures": ["LongCatFlashMTPModel"]
             })
 
         if hf_config.architectures[0] == "MiMoForCausalLM":
@@ -2199,6 +2210,15 @@ class SpeculativeConfig:
                     if self.num_speculative_tokens > 1:
                         logger.warning(
                                 "All Ernie MTP models only have " \
+                                "one layer. Might need some code changes " \
+                                "to support multiple layers."
+                            )
+                elif (self.draft_model_config.hf_config.model_type
+                      in ("longcat_flash_mtp")):
+                    self.method = "longcat_flash_mtp"
+                    if self.num_speculative_tokens > 1:
+                        logger.warning(
+                                "LongCat MTP models only have " \
                                 "one layer. Might need some code changes " \
                                 "to support multiple layers."
                             )
@@ -2417,7 +2437,8 @@ class SpeculativeConfig:
         return self.num_speculative_tokens
 
     def use_eagle(self) -> bool:
-        return self.method in ("eagle", "eagle3", "deepseek_mtp", "ernie_mtp")
+        return self.method in ("eagle", "eagle3", "deepseek_mtp", "ernie_mtp",
+                               "longcat_flash_mtp")
 
     def __repr__(self) -> str:
         method = self.method

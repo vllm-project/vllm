@@ -358,6 +358,8 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
+        zero_expert_num: Optional[int] = 0,
+        zero_expert_type: Optional[str] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         assert self.fused_experts is None
 
@@ -819,6 +821,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
+        zero_expert_num: Optional[int] = 0,
+        zero_expert_type: Optional[str] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         if enable_eplb:
             raise NotImplementedError(
@@ -1069,6 +1073,8 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
+        zero_expert_num: Optional[int] = 0,
+        zero_expert_type: Optional[str] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         assert self.fused_experts is None
 
@@ -1375,6 +1381,8 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
+        zero_expert_num: Optional[int] = 0,
+        zero_expert_type: Optional[str] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         assert self.fused_experts is None
 
@@ -1608,6 +1616,8 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
+        zero_expert_num: Optional[int] = 0,
+        zero_expert_type: Optional[str] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         assert self.fused_experts is None
 

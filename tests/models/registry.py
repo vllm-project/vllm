@@ -341,6 +341,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MiMoForCausalLM": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL",
                                         trust_remote_code=True),
     "Dots1ForCausalLM": _HfExamplesInfo("rednote-hilab/dots.llm1.inst"),
+    "LongcatFlashForCausalLM": _HfExamplesInfo
+                ("meituan-longcat/LongCat-Flash-Chat", trust_remote_code=True),
     # [Encoder-decoder]
     "BartModel": _HfExamplesInfo("facebook/bart-base"),
     "BartForConditionalGeneration": _HfExamplesInfo("facebook/bart-large-cnn"),
