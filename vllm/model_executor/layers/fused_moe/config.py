@@ -774,10 +774,6 @@ class FusedMoEConfig:
         """
         Whether to use FlashInfer cutlass kernels for NVFP4 MoE.
         """
-        assert False, "TBD quant check"
-        # (self.quant_config is not None
-        #  and self.quant_config.quant_dtype == "nvfp4"
         return (envs.VLLM_USE_FLASHINFER_MOE_FP4
                 and has_flashinfer_cutlass_fused_moe()
                 and envs.VLLM_FLASHINFER_MOE_BACKEND == "throughput")
-
