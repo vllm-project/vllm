@@ -282,3 +282,29 @@ python quantize_quark.py --model_dir Qwen/Qwen1.5-MoE-A2.7B-Chat \
 ```
 
 The current integration supports [all combination of FP4, FP6_E3M2, FP6_E2M3](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/utils/ocp_mx_utils.py) used for either weights or activations. Eventually, some target hardware support mixed precision GEMM, as AMD Instinct MI350/MI355, for example using FP6 for activations and FP4 for weights.
+
+## Using Quark Quantized Auto Mixed Precision (AMP) Models
+Extended from single quantization scheme (e.g. MXFP4, FP8) models, aka PTQ models, vLLM also supports loading layerwise mixed precision model quantized by AMD Quark. Currently, mixed scheme of {MXFP4, FP8} is supported, where FP8 here denotes for FP8 per-tensor scheme. More mixed precision schemes are planned to be supported in a near future, including
+- Unquantized Linear and/or MoE layer(s) as an option for each layer, i.e., mixed of {MXFP4, FP8, BF16/FP16}
+- MXFP6 quantization extension, i.e., {MXFP4, MXFP6, FP8, BF16/FP16}
+- etc.
+
+With the mixed-precision quantized model, one could expect an optimal balance between accuracy and hardware metrics.
+
+Simply speaking, there are two steps to use the mixed precision feature mention above.
+### 1. generate a mixed precision quantized model in AMD Quark.
+Firstly, the layerwise mixed-precision configuration for a given LLM model is searched and then quantized by amd-quark. We will provide a detailed tutorial with Quark APIs later.
+
+As examples, we provide some ready-to-use quantized mixed precision model to show the usage in vLLM and the accuracy benifits. They are:
+- amd/Llama-2-70b-chat-hf-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8
+- amd/Mixtral-8x7B-Instruct-v0.1-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8
+
+### 2. inference the quantized mixed precision model in vLLM.
+There can be virutally free to load the mixed precision model and then inference in vllm, compared with common PTQ models. For example, one can evaluate a mixed-precision model using lm_eval CLI as same as evaluating a PTQ model, such as:
+
+```bash
+lm_eval --model vllm \
+    --model_args pretrained=amd/Llama-2-70b-chat-hf-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8,tensor_parallel_size=4,dtype=auto,gpu_memory_utilization=0.8,trust_remote_code=False \
+    --tasks mmlu \
+    --batch_size auto
+```
