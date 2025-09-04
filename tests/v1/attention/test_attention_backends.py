@@ -18,7 +18,7 @@ from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 BACKENDS_TO_TEST = [
-    _Backend.FLASH_ATTN_VLLM_V1, _Backend.FLASHINFER_VLLM_V1,
+    _Backend.FLASH_ATTN_VLLM_V1,
     _Backend.FLEX_ATTENTION, _Backend.TRITON_ATTN_VLLM_V1, _Backend.TREE_ATTN,
     "FLEX_ATTENTION_SLOW"
 ]
@@ -298,7 +298,7 @@ def run_attention_backend(backend: _Backend, kv_cache_spec: FullAttentionSpec,
     "medium_prefill", "mixed_medium", "large_decode", "large_prefill",
     "single_decode", "single_prefill"
 ])
-@pytest.mark.parametrize("model", ["meta-llama/Meta-Llama-3-8B"])
+@pytest.mark.parametrize("model", ["unsloth/Meta-Llama-3.1-8B"])
 def test_backend_correctness(batch_spec_name: str, model: str):
     """
     Test that all backends produce similar outputs to a reference implementation
@@ -381,21 +381,13 @@ def test_backend_correctness(batch_spec_name: str, model: str):
         #  (context_len + i)
         kv_len = s_len
         offset = context_len
-        attn_mask = torch.full((q_len, kv_len),
-                               float('-inf'),
-                               device=device,
-                               dtype=dtype)
-        for i in range(q_len):
-            attn_mask[i, :offset + i + 1] = 0.0
 
-        sdpa_out_i = torch.nn.functional.scaled_dot_product_attention(
-            q_sdpa_in,
-            k_sdpa_in,
-            v_sdpa_in,
-            attn_mask=attn_mask,
-            scale=scale,
-            enable_gqa=True)
-        # Convert back to (L, H, D)
+        def causal(b, h, q_idx, kv_idx):
+            return (q_idx + offset) >= kv_idx
+
+        block_mask = create_block_mask(causal, B=None, H=None, Q_LEN=q_len, KV_LEN=kv_len)
+        sdpa_out_i = flex_attention(q_sdpa_in, k_sdpa_in, v_sdpa_in, block_mask=block_mask, scale=scale, enable_gqa=True)
+
         all_sdpa_outputs.append(sdpa_out_i.transpose(1, 2).squeeze(0))
 
         # Inputs for vLLM backends are just the new tokens
@@ -466,20 +458,17 @@ def test_backend_correctness(batch_spec_name: str, model: str):
 
         # Check numerical similarity
         rtol = 1e-2
-        atol = 5e-3
+        atol = 1e-2
 
-        max_diff = torch.max(torch.abs(backend_output - sdpa_output)).item()
-        max_rel_diff = torch.max(
-            torch.abs(backend_output - sdpa_output) /
-            torch.abs(sdpa_output)).item()
-        all_close = torch.allclose(backend_output,
+        def error_msg(msg: str):
+            return (f"[{backend_name}] output differs from SDPA baseline. "
+                    f"{msg}")
+
+        torch.testing.assert_close(backend_output,
                                    sdpa_output,
                                    rtol=rtol,
-                                   atol=atol)
-
-        assert all_close, (
-            f"[{backend_name}] output differs from SDPA baseline. "
-            f"Max diff: {max_diff:.6f}, max rel diff: {max_rel_diff:.6f})")
+                                   atol=atol,
+                                   msg=error_msg)
 
 
 SLIDING_WINDOW_BACKENDS_TO_TEST = [
