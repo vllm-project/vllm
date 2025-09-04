@@ -54,14 +54,15 @@ steps:
   - tests/worker
   - tests/standalone_tests/lazy_imports.py
   commands:
+  - set -e
   - python3 standalone_tests/lazy_imports.py
-  - pytest -v -s mq_llm_engine # MQLLMEngine
-  - pytest -v -s async_engine # AsyncLLMEngine
-  - pytest -v -s test_inputs.py
-  - pytest -v -s test_outputs.py
-  - pytest -v -s multimodal
-  - pytest -v -s utils_ # Utils
-  - pytest -v -s worker # Worker
+  - pytest -x -v -s mq_llm_engine # MQLLMEngine
+  - pytest -x -v -s async_engine # AsyncLLMEngine
+  - pytest -x -v -s test_inputs.py
+  - pytest -x -v -s test_outputs.py
+  - pytest -x -v -s multimodal
+  - pytest -x -v -s utils_ # Utils
+  - pytest -x -v -s worker # Worker
 
 - label: Python-only Installation Test
   mirror_hardwares: [amdexperimental]
@@ -82,11 +83,12 @@ steps:
   - tests/basic_correctness/test_preemption
   - tests/basic_correctness/test_cumem.py
   commands:
+  - set -e
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s basic_correctness/test_cumem.py
-  - pytest -v -s basic_correctness/test_basic_correctness.py
-  - pytest -v -s basic_correctness/test_cpu_offload.py
-  - VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py
+  - pytest -x -v -s basic_correctness/test_cumem.py
+  - pytest -x -v -s basic_correctness/test_basic_correctness.py
+  - pytest -x -v -s basic_correctness/test_cpu_offload.py
+  - VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -x -v -s basic_correctness/test_preemption.py
 
 - label: Core Test # 10min
   mirror_hardwares: [amdexperimental]
@@ -96,7 +98,8 @@ steps:
   - vllm/distributed
   - tests/core
   commands:
-  - pytest -v -s core
+  - set -e
+  - pytest -x -v -s core
 
 - label: Entrypoints Test (LLM) # 40min
   mirror_hardwares: [amdexperimental]
@@ -108,11 +111,12 @@ steps:
   - tests/entrypoints/llm
   - tests/entrypoints/offline_mode
   commands:
+  - set -e
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
-  - pytest -v -s entrypoints/llm/test_lazy_outlines.py # it needs a clean process
-  - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
-  - VLLM_USE_V1=0 pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
+  - pytest -x -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
+  - pytest -x -v -s entrypoints/llm/test_lazy_outlines.py # it needs a clean process
+  - pytest -x -v -s entrypoints/llm/test_generate.py # it needs a clean process
+  - VLLM_USE_V1=0 pytest -x -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
 
 - label: Entrypoints Test (API Server) # 40min
   mirror_hardwares: [amdexperimental]
@@ -124,10 +128,11 @@ steps:
   - tests/entrypoints/openai
   - tests/entrypoints/test_chat_utils
   commands:
+  - set -e
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/openai/test_collective_rpc.py # PYTHONPATH is needed to import custom Worker extension
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/test_oot_registration.py --ignore=entrypoints/openai/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/test_collective_rpc.py
-  - pytest -v -s entrypoints/test_chat_utils.py
+  - PYTHONPATH=/vllm-workspace pytest -x -v -s entrypoints/openai/test_collective_rpc.py # PYTHONPATH is needed to import custom Worker extension
+  - pytest -x -v -s entrypoints/openai --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/test_oot_registration.py --ignore=entrypoints/openai/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/test_collective_rpc.py
+  - pytest -x -v -s entrypoints/test_chat_utils.py
 
 - label: Distributed Tests (4 GPUs) # 10min
   mirror_hardwares: [amdexperimental]
@@ -149,6 +154,7 @@ steps:
   - tests/v1/test_hybrid_lb_dp.py
   - tests/v1/engine/test_engine_core_client.py
   commands:
+  - set -e
   # test with tp=2 and external_dp=2
   - VLLM_USE_V1=0 torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
   - torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
@@ -156,15 +162,15 @@ steps:
   - PP_SIZE=2 torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
   # test with internal dp
   - python3 ../examples/offline_inference/data_parallel.py --enforce-eager
-  - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/test_async_llm_dp.py
-  - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/test_external_lb_dp.py
-  - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/test_internal_lb_dp.py
-  - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/test_hybrid_lb_dp.py
-  - pytest -v -s v1/engine/test_engine_core_client.py::test_kv_cache_events_dp
-  - pytest -v -s distributed/test_utils.py
-  - pytest -v -s compile/test_basic_correctness.py
-  - pytest -v -s distributed/test_pynccl.py
-  - pytest -v -s distributed/test_events.py
+  - TP_SIZE=2 DP_SIZE=2 pytest -x -v -s v1/test_async_llm_dp.py
+  - TP_SIZE=2 DP_SIZE=2 pytest -x -v -s v1/test_external_lb_dp.py
+  - TP_SIZE=1 DP_SIZE=4 pytest -x -v -s v1/test_internal_lb_dp.py
+  - TP_SIZE=1 DP_SIZE=4 pytest -x -v -s v1/test_hybrid_lb_dp.py
+  - pytest -x -v -s v1/engine/test_engine_core_client.py::test_kv_cache_events_dp
+  - pytest -x -v -s distributed/test_utils.py
+  - pytest -x -v -s compile/test_basic_correctness.py
+  - pytest -x -v -s distributed/test_pynccl.py
+  - pytest -x -v -s distributed/test_events.py
   # TODO: create a dedicated test section for multi-GPU example tests
   # when we have multiple distributed example tests
   - pushd ../examples/offline_inference
@@ -178,7 +184,8 @@ steps:
   - vllm/distributed/eplb
   - tests/distributed/test_eplb_algo.py
   commands:
-  - pytest -v -s distributed/test_eplb_algo.py
+  - set -e
+  - pytest -x -v -s distributed/test_eplb_algo.py
 
 - label: EPLB Execution Test # 5min
   working_dir: "/vllm-workspace/tests"
@@ -187,7 +194,8 @@ steps:
   - vllm/distributed/eplb
   - tests/distributed/test_eplb_execute.py
   commands:
-  - pytest -v -s distributed/test_eplb_execute.py
+  - set -e
+  - pytest -x -v -s distributed/test_eplb_execute.py
 
 - label: Metrics, Tracing Test # 10min
   mirror_hardwares: [amdexperimental]
@@ -197,13 +205,14 @@ steps:
   - tests/metrics
   - tests/tracing
   commands:
-  - pytest -v -s metrics
+  - set -e
+  - pytest -x -v -s metrics
   - "pip install \
       'opentelemetry-sdk>=1.26.0' \
       'opentelemetry-api>=1.26.0' \
       'opentelemetry-exporter-otlp>=1.26.0' \
       'opentelemetry-semantic-conventions-ai>=0.4.1'"
-  - pytest -v -s tracing
+  - pytest -x -v -s tracing
 
 ##### fast check tests  #####
 #####  1 GPU test  #####
@@ -214,8 +223,9 @@ steps:
   - vllm/
   - tests/test_regression
   commands:
+  - set -e
   - pip install modelscope
-  - pytest -v -s test_regression.py
+  - pytest -x -v -s test_regression.py
   working_dir: "/vllm-workspace/tests" # optional
 
 - label: Engine Test # 10min
@@ -229,9 +239,10 @@ steps:
   - tests/test_logger
   - tests/test_vllm_port
   commands:
-  - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py
+  - set -e
+  - pytest -x -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py
   # OOM in the CI unless we run this separately
-  - pytest -v -s tokenization
+  - pytest -x -v -s tokenization
 
 - label: V1 Test e2e + engine
   mirror_hardwares: [amdexperimental]
@@ -239,10 +250,11 @@ steps:
     - vllm/
     - tests/v1
   commands:
+    - set -e
     # TODO: accuracy does not match, whether setting
     # VLLM_USE_FLASHINFER_SAMPLER or not on H100.
-    - pytest -v -s v1/e2e
-    - pytest -v -s v1/engine
+    - pytest -x -v -s v1/e2e
+    - pytest -x -v -s v1/engine
 
 - label: V1 Test entrypoints
   mirror_hardwares: [amdexperimental]
@@ -250,7 +262,8 @@ steps:
     - vllm/
     - tests/v1
   commands:
-    - pytest -v -s v1/entrypoints
+    - set -e
+    - pytest -x -v -s v1/entrypoints
 
 - label: V1 Test others
   mirror_hardwares: [amdexperimental]
@@ -258,23 +271,24 @@ steps:
     - vllm/
     - tests/v1
   commands:
+    - set -e
     # split the test to avoid interference
-    - pytest -v -s v1/core
-    - pytest -v -s v1/executor
-    - pytest -v -s v1/sample
-    - pytest -v -s v1/logits_processors
-    - pytest -v -s v1/worker
-    - pytest -v -s v1/structured_output
-    - pytest -v -s v1/spec_decode
-    - pytest -v -s v1/kv_connector/unit
-    - pytest -v -s v1/metrics
-    - pytest -v -s v1/test_serial_utils.py
-    - pytest -v -s v1/test_utils.py
-    - pytest -v -s v1/test_oracle.py
-    - pytest -v -s v1/test_metrics_reader.py
+    - pytest -x -v -s v1/core
+    - pytest -x -v -s v1/executor
+    - pytest -x -v -s v1/sample
+    - pytest -x -v -s v1/logits_processors
+    - pytest -x -v -s v1/worker
+    - pytest -x -v -s v1/structured_output
+    - pytest -x -v -s v1/spec_decode
+    - pytest -x -v -s v1/kv_connector/unit
+    - pytest -x -v -s v1/metrics
+    - pytest -x -v -s v1/test_serial_utils.py
+    - pytest -x -v -s v1/test_utils.py
+    - pytest -x -v -s v1/test_oracle.py
+    - pytest -x -v -s v1/test_metrics_reader.py
     # Integration test for streaming correctness (requires special branch).
     - pip install -U git+https://github.com/robertgshaw2-redhat/lm-evaluation-harness.git@streaming-api
-    - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
+    - pytest -x -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
 
 - label: Examples Test # 25min
   mirror_hardwares: [amdexperimental]
@@ -283,6 +297,7 @@ steps:
   - vllm/entrypoints
   - examples/
   commands:
+    - set -e
     - pip install tensorizer # for tensorizer test
     - python3 offline_inference/basic/generate.py --model facebook/opt-125m
     - python3 offline_inference/basic/generate.py --model meta-llama/Llama-2-13b-chat-hf --cpu-offload-gb 10
@@ -307,7 +322,8 @@ steps:
   - vllm/
   - tests/cuda
   commands:
-    - pytest -v -s cuda/test_cuda_context.py
+    - set -e
+    - pytest -x -v -s cuda/test_cuda_context.py
 
 - label: Samplers Test # 36min
   mirror_hardwares: [amdexperimental]
@@ -317,15 +333,16 @@ steps:
   - tests/samplers
   - tests/conftest.py
   commands:
-    - pytest -v -s samplers
-    - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers
+    - set -e
+    - pytest -x -v -s samplers
+    - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -x -v -s samplers
 
 - label: LoRA Test %N # 15min each
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - vllm/lora
   - tests/lora
-  command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_llm_with_multi_loras.py
+  command: pytest -x -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_llm_with_multi_loras.py
   parallelism: 4
 
 - label: PyTorch Compilation Unit Tests
@@ -335,14 +352,15 @@ steps:
     - vllm/
     - tests/compile
   commands:
-    - pytest -v -s compile/test_pass_manager.py
-    - pytest -v -s compile/test_fusion.py
-    - pytest -v -s compile/test_fusion_attn.py
-    - pytest -v -s compile/test_silu_mul_quant_fusion.py
-    - pytest -v -s compile/test_sequence_parallelism.py
-    - pytest -v -s compile/test_async_tp.py
-    - pytest -v -s compile/test_fusion_all_reduce.py
-    - pytest -v -s compile/test_decorator.py
+    - set -e
+    - pytest -x -v -s compile/test_pass_manager.py
+    - pytest -x -v -s compile/test_fusion.py
+    - pytest -x -v -s compile/test_fusion_attn.py
+    - pytest -x -v -s compile/test_silu_mul_quant_fusion.py
+    - pytest -x -v -s compile/test_sequence_parallelism.py
+    - pytest -x -v -s compile/test_async_tp.py
+    - pytest -x -v -s compile/test_fusion_all_reduce.py
+    - pytest -x -v -s compile/test_decorator.py
 
 - label: PyTorch Fullgraph Smoke Test # 9min
   mirror_hardwares: [amdexperimental]
@@ -351,12 +369,13 @@ steps:
   - vllm/
   - tests/compile
   commands:
-  - pytest -v -s compile/test_basic_correctness.py
+  - set -e
+  - pytest -x -v -s compile/test_basic_correctness.py
   # these tests need to be separated, cannot combine
-  - pytest -v -s compile/piecewise/test_simple.py
-  - pytest -v -s compile/piecewise/test_toy_llama.py
-  - pytest -v -s compile/piecewise/test_full_cudagraph.py
-  - pytest -v -s compile/piecewise/test_multiple_graphs.py
+  - pytest -x -v -s compile/piecewise/test_simple.py
+  - pytest -x -v -s compile/piecewise/test_toy_llama.py
+  - pytest -x -v -s compile/piecewise/test_full_cudagraph.py
+  - pytest -x -v -s compile/piecewise/test_multiple_graphs.py
 
 - label: PyTorch Fullgraph Test # 18min
   mirror_hardwares: [amdexperimental]
@@ -365,7 +384,8 @@ steps:
   - vllm/
   - tests/compile
   commands:
-  - pytest -v -s compile/test_full_graph.py
+  - set -e
+  - pytest -x -v -s compile/test_full_graph.py
 
 - label: Kernels Core Operation Test
   mirror_hardwares: [amdexperimental]
@@ -373,7 +393,8 @@ steps:
   - csrc/
   - tests/kernels/core
   commands:
-    - pytest -v -s kernels/core
+    - set -e
+    - pytest -x -v -s kernels/core
 
 - label: Kernels Attention Test %N
   mirror_hardwares: [amdexperimental]
@@ -383,7 +404,8 @@ steps:
   - vllm/v1/attention
   - tests/kernels/attention
   commands:
-    - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+    - set -e
+    - pytest -x -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 2
 
 - label: Kernels Quantization Test %N
@@ -393,7 +415,8 @@ steps:
   - vllm/model_executor/layers/quantization
   - tests/kernels/quantization
   commands:
-    - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+    - set -e
+    - pytest -x -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 2
 
 - label: Kernels MoE Test %N
@@ -405,7 +428,8 @@ steps:
   - vllm/model_executor/layers/fused_moe/
   - vllm/distributed/device_communicators/
   commands:
-    - pytest -v -s kernels/moe --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+    - set -e
+    - pytest -x -v -s kernels/moe --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 2
 
 - label: Kernels Mamba Test
@@ -414,7 +438,8 @@ steps:
   - csrc/mamba/
   - tests/kernels/mamba
   commands:
-    - pytest -v -s kernels/mamba
+    - set -e
+    - pytest -x -v -s kernels/mamba
 
 - label: Tensorizer Test # 11min
   mirror_hardwares: [amdexperimental]
@@ -423,10 +448,11 @@ steps:
   - tests/tensorizer_loader
   - tests/entrypoints/openai/test_tensorizer_entrypoint.py
   commands:
+    - set -e
     - apt-get update && apt-get install -y curl libsodium23
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-    - pytest -v -s tensorizer_loader
-    - pytest -v -s entrypoints/openai/test_tensorizer_entrypoint.py
+    - pytest -x -v -s tensorizer_loader
+    - pytest -x -v -s entrypoints/openai/test_tensorizer_entrypoint.py
 
 - label: Model Executor Test
   mirror_hardwares: [amdexperimental]
@@ -434,9 +460,10 @@ steps:
   - vllm/model_executor
   - tests/model_executor
   commands:
+    - set -e
     - apt-get update && apt-get install -y curl libsodium23
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-    - pytest -v -s model_executor
+    - pytest -x -v -s model_executor
 
 - label: Benchmarks # 9min
   mirror_hardwares: [amdexperimental]
@@ -444,6 +471,7 @@ steps:
   source_file_dependencies:
   - benchmarks/
   commands:
+  - set -e
   - bash scripts/run-benchmarks.sh
 
 - label: Benchmarks CLI Test # 10min
@@ -452,7 +480,8 @@ steps:
   - vllm/
   - tests/benchmarks/
   commands:
-  - pytest -v -s benchmarks/
+  - set -e
+  - pytest -x -v -s benchmarks/
 
 - label: Quantization Test
   mirror_hardwares: [amdexperimental]
@@ -461,10 +490,11 @@ steps:
   - vllm/model_executor/layers/quantization
   - tests/quantization
   commands:
+  - set -e
   # temporary install here since we need nightly, will move to requirements/test.in
   # after torchao 0.12 release, and pin a working version of torchao nightly here
   - pip install --pre torchao==0.13.0.dev20250814 --index-url https://download.pytorch.org/whl/nightly/cu128
-  - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization
+  - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -x -v -s quantization
 
 - label: LM Eval Small Models # 53min
   mirror_hardwares: [amdexperimental]
@@ -472,7 +502,8 @@ steps:
   - csrc/
   - vllm/model_executor/layers/quantization
   commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt --tp-size=1
+  - set -e
+  - pytest -x -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt --tp-size=1
 
 - label: OpenAI API correctness
   mirror_hardwares: [amdexperimental]
@@ -481,7 +512,8 @@ steps:
   - vllm/entrypoints/openai/
   - vllm/model_executor/models/whisper.py
   commands: # LMEval+Transcription WER check
-  - pytest -s entrypoints/openai/correctness/
+  - set -e
+  - pytest -x -s entrypoints/openai/correctness/
 
 - label: Encoder Decoder tests # 5min
   mirror_hardwares: [amdexperimental]
@@ -489,7 +521,8 @@ steps:
   - vllm/
   - tests/encoder_decoder
   commands:
-    - pytest -v -s encoder_decoder
+    - set -e
+    - pytest -x -v -s encoder_decoder
 
 - label: OpenAI-Compatible Tool Use # 20 min
   mirror_hardwares: [amdexperimental]
@@ -499,8 +532,9 @@ steps:
     - tests/tool_use
     - tests/mistral_tool_use
   commands:
-    - pytest -v -s tool_use
-    - pytest -v -s mistral_tool_use
+    - set -e
+    - pytest -x -v -s tool_use
+    - pytest -x -v -s mistral_tool_use
 
 #####  models test  #####
 
@@ -511,11 +545,12 @@ steps:
   - vllm/
   - tests/models
   commands:
-    - pytest -v -s models/test_transformers.py
-    - pytest -v -s models/test_registry.py
-    - pytest -v -s models/test_utils.py
-    - pytest -v -s models/test_vision.py
-    - pytest -v -s models/test_initialization.py
+    - set -e
+    - pytest -x -v -s models/test_transformers.py
+    - pytest -x -v -s models/test_registry.py
+    - pytest -x -v -s models/test_utils.py
+    - pytest -x -v -s models/test_vision.py
+    - pytest -x -v -s models/test_initialization.py
 
 - label: Language Models Test (Standard)
   mirror_hardwares: [amdexperimental]
@@ -524,8 +559,9 @@ steps:
   - vllm/
   - tests/models/language
   commands:
+    - set -e
     - pip freeze | grep -E 'torch'
-    - pytest -v -s models/language -m core_model
+    - pytest -x -v -s models/language -m core_model
 
 - label: Language Models Test (Hybrid) # 35 min
   mirror_hardwares: [amdexperimental]
@@ -534,11 +570,12 @@ steps:
   - vllm/
   - tests/models/language/generation
   commands:
+    - set -e
     # Install fast path packages for testing against transformers
     # Note: also needed to run plamo2 model in vLLM
     - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.2.5'
     - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
-    - pytest -v -s models/language/generation -m hybrid_model
+    - pytest -x -v -s models/language/generation -m hybrid_model
 
 - label: Language Models Test (Extended Generation) # 1hr20min
   mirror_hardwares: [amdexperimental]
@@ -547,9 +584,10 @@ steps:
   - vllm/
   - tests/models/language/generation
   commands:
+    - set -e
     # Install causal-conv1d for plamo2 models here, as it is not compatible with pip-compile.
     - pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8'
-    - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
+    - pytest -x -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
 - label: Language Models Test (Extended Pooling)  # 36min
   mirror_hardwares: [amdexperimental]
@@ -558,15 +596,17 @@ steps:
   - vllm/
   - tests/models/language/pooling
   commands:
-    - pytest -v -s models/language/pooling -m 'not core_model'
+    - set -e
+    - pytest -x -v -s models/language/pooling -m 'not core_model'
 
 - label: Multi-Modal Processor Test
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
   commands:
+    - set -e
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-    - pytest -v -s models/multimodal/processing
+    - pytest -x -v -s models/multimodal/processing
 
 - label: Multi-Modal Models Test (Standard)
   mirror_hardwares: [amdexperimental]
@@ -575,10 +615,11 @@ steps:
   - vllm/
   - tests/models/multimodal
   commands:
+    - set -e
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pip freeze | grep -E 'torch'
-    - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/processing
-    - cd .. && pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model  # Otherwise, mp_method="spawn" doesn't work
+    - pytest -x -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/processing
+    - cd .. && pytest -x -v -s tests/models/multimodal/generation/test_whisper.py -m core_model  # Otherwise, mp_method="spawn" doesn't work
 
 - label: Multi-Modal Models Test (Extended) 1
   mirror_hardwares: [amdexperimental]
@@ -587,8 +628,9 @@ steps:
   - vllm/
   - tests/models/multimodal
   commands:
+    - set -e
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-    - pytest -v -s models/multimodal -m 'not core_model' --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/processing
+    - pytest -x -v -s models/multimodal -m 'not core_model' --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/processing
 
 - label: Multi-Modal Models Test (Extended) 2
   mirror_hardwares: [amdexperimental]
@@ -597,8 +639,9 @@ steps:
   - vllm/
   - tests/models/multimodal
   commands:
+    - set -e
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-    - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
+    - pytest -x -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
 
 - label: Multi-Modal Models Test (Extended) 3
   mirror_hardwares: [amdexperimental]
@@ -607,8 +650,9 @@ steps:
   - vllm/
   - tests/models/multimodal
   commands:
+    - set -e
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-    - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
+    - pytest -x -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
 
 - label: Quantized Models Test
   mirror_hardwares: [amdexperimental]
@@ -616,13 +660,15 @@ steps:
   - vllm/model_executor/layers/quantization
   - tests/models/quantization
   commands:
-    - pytest -v -s models/quantization
+    - set -e
+    - pytest -x -v -s models/quantization
 
 # This test is used only in PR development phase to test individual models and should never run on main
 - label: Custom Models Test
   mirror_hardwares: [amdexperimental]
   optional: true
   commands:
+    - set -e
     - echo 'Testing custom models...'
     # PR authors can temporarily add commands below to test individual models
     # e.g. pytest -v -s models/encoder_decoder/vision_language/test_mllama.py
@@ -632,10 +678,11 @@ steps:
   working_dir: "/vllm-workspace/"
   optional: true
   commands:
+    - set -e
     - pip install --upgrade git+https://github.com/huggingface/transformers
-    - pytest -v -s tests/models/test_initialization.py
-    - pytest -v -s tests/models/multimodal/processing/
-    - pytest -v -s tests/models/multimodal/test_mapping.py
+    - pytest -x -v -s tests/models/test_initialization.py
+    - pytest -x -v -s tests/models/multimodal/processing/
+    - pytest -x -v -s tests/models/multimodal/test_mapping.py
     - python3 examples/offline_inference/basic/chat.py
     - python3 examples/offline_inference/audio_language.py --model-type whisper
     - python3 examples/offline_inference/vision_language.py --model-type qwen2_5_vl
@@ -656,26 +703,27 @@ steps:
   - vllm/compilation/fusion.py
   - vllm/compilation/fusion_attn.py
   commands:
+    - set -e
     - nvidia-smi
     - python3 examples/offline_inference/basic/chat.py
     # Attention
     # num_heads2 broken by https://github.com/flashinfer-ai/flashinfer/issues/1353
-    - pytest -v -s tests/kernels/attention/test_flashinfer.py -k 'not num_heads2'
-    - pytest -v -s tests/kernels/attention/test_flashinfer_trtllm_attention.py
-    - pytest -v -s tests/kernels/test_cutlass_mla_decode.py
+    - pytest -x -v -s tests/kernels/attention/test_flashinfer.py -k 'not num_heads2'
+    - pytest -x -v -s tests/kernels/attention/test_flashinfer_trtllm_attention.py
+    - pytest -x -v -s tests/kernels/test_cutlass_mla_decode.py
     # Quantization
-    - pytest -v -s tests/kernels/quantization/test_cutlass_scaled_mm.py -k 'fp8'
-    - pytest -v -s tests/kernels/quantization/test_nvfp4_quant.py
+    - pytest -x -v -s tests/kernels/quantization/test_cutlass_scaled_mm.py -k 'fp8'
+    - pytest -x -v -s tests/kernels/quantization/test_nvfp4_quant.py
     # - pytest -v -s tests/kernels/quantization/test_silu_nvfp4_quant_fusion.py
-    - pytest -v -s tests/kernels/quantization/test_nvfp4_scaled_mm.py
-    - pytest -v -s tests/kernels/quantization/test_flashinfer_scaled_mm.py
-    - pytest -v -s tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
-    - pytest -v -s tests/kernels/moe/test_nvfp4_moe.py
-    - pytest -v -s tests/kernels/moe/test_mxfp4_moe.py
+    - pytest -x -v -s tests/kernels/quantization/test_nvfp4_scaled_mm.py
+    - pytest -x -v -s tests/kernels/quantization/test_flashinfer_scaled_mm.py
+    - pytest -x -v -s tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
+    - pytest -x -v -s tests/kernels/moe/test_nvfp4_moe.py
+    - pytest -x -v -s tests/kernels/moe/test_mxfp4_moe.py
     # Fusion
-    - pytest -v -s tests/compile/test_fusion_all_reduce.py
-    - pytest -v -s tests/compile/test_fusion_attn.py::test_attention_quant_pattern
-    - pytest -v -s tests/kernels/moe/test_flashinfer.py
+    - pytest -x -v -s tests/compile/test_fusion_all_reduce.py
+    - pytest -x -v -s tests/compile/test_fusion_attn.py::test_attention_quant_pattern
+    - pytest -x -v -s tests/kernels/moe/test_flashinfer.py
     # - pytest -v -s tests/compile/test_silu_mul_quant_fusion.py
 
 #####  1 GPU test  #####
@@ -689,8 +737,9 @@ steps:
   - vllm/distributed
   - tests/distributed
   commands:
-  - pytest -v -s distributed/test_comm_ops.py
-  - pytest -v -s distributed/test_shm_broadcast.py
+  - set -e
+  - pytest -x -v -s distributed/test_comm_ops.py
+  - pytest -x -v -s distributed/test_shm_broadcast.py
 
 - label: 2 Node Tests (4 GPUs in total) # 16min
   mirror_hardwares: [amdexperimental]
@@ -706,11 +755,12 @@ steps:
   - tests/examples/offline_inference/data_parallel.py
   commands:
   - # the following commands are for the first node, with ip 192.168.10.10 (ray environment already set up)
+    - set -e
     - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed'
     - NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed'
     - python3 ../examples/offline_inference/data_parallel.py --dp-size=2 --tp-size=1 --node-size=2 --node-rank=0 --master-addr=192.168.10.10 --master-port=12345 --enforce-eager --trust-remote-code
-    - VLLM_MULTI_NODE=1 pytest -v -s distributed/test_multi_node_assignment.py
-    - VLLM_MULTI_NODE=1 pytest -v -s distributed/test_pipeline_parallel.py
+    - VLLM_MULTI_NODE=1 pytest -x -v -s distributed/test_multi_node_assignment.py
+    - VLLM_MULTI_NODE=1 pytest -x -v -s distributed/test_pipeline_parallel.py
   - # the following commands are for the second node, with ip 192.168.10.11 (ray environment already set up)
     - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed'
     - NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed'
@@ -736,25 +786,26 @@ steps:
   - tests/v1/entrypoints/openai/test_multi_api_servers.py
   - vllm/v1/engine/
   commands:
-  - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/test_async_llm_dp.py
-  - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/test_external_lb_dp.py
-  - DP_SIZE=2 pytest -v -s v1/entrypoints/openai/test_multi_api_servers.py
-  - pytest -v -s entrypoints/llm/test_collective_rpc.py
-  - pytest -v -s ./compile/test_basic_correctness.py
-  - pytest -v -s ./compile/test_wrapper.py
+  - set -e
+  - TP_SIZE=1 DP_SIZE=2 pytest -x -v -s v1/test_async_llm_dp.py
+  - TP_SIZE=1 DP_SIZE=2 pytest -x -v -s v1/test_external_lb_dp.py
+  - DP_SIZE=2 pytest -x -v -s v1/entrypoints/openai/test_multi_api_servers.py
+  - pytest -x -v -s entrypoints/llm/test_collective_rpc.py
+  - pytest -x -v -s ./compile/test_basic_correctness.py
+  - pytest -x -v -s ./compile/test_wrapper.py
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
-  - TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
+  - TARGET_TEST_SUITE=L4 pytest -x basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   # Avoid importing model tests that cause CUDA reinitialization error
-  - pytest models/test_transformers.py -v -s -m 'distributed(num_gpus=2)'
-  - pytest models/language -v -s -m 'distributed(num_gpus=2)'
-  - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)'
+  - pytest -x models/test_transformers.py -v -s -m 'distributed(num_gpus=2)'
+  - pytest -x models/language -v -s -m 'distributed(num_gpus=2)'
+  - pytest -x models/multimodal -v -s -m 'distributed(num_gpus=2)'
   # test sequence parallel
-  - pytest -v -s distributed/test_sequence_parallel.py
+  - pytest -x -v -s distributed/test_sequence_parallel.py
   # this test fails consistently.
   # TODO: investigate and fix
-  - VLLM_USE_V1=0 CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py
-  - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
-  - pytest -v -s models/multimodal/generation/test_maverick.py
+  - VLLM_USE_V1=0 CUDA_VISIBLE_DEVICES=0,1 pytest -x -v -s test_sharded_state_loader.py
+  - CUDA_VISIBLE_DEVICES=0,1 pytest -x -v -s v1/shutdown
+  - pytest -x -v -s models/multimodal/generation/test_maverick.py
 
 - label: Plugin Tests (2 GPUs) # 40min
   mirror_hardwares: [amdexperimental]
@@ -764,23 +815,24 @@ steps:
   - vllm/plugins/
   - tests/plugins/
   commands:
+  - set -e
   # begin platform plugin and general plugin tests, all the code in-between runs on dummy platform
   - pip install -e ./plugins/vllm_add_dummy_platform
-  - pytest -v -s plugins_tests/test_platform_plugins.py
+  - pytest -x -v -s plugins_tests/test_platform_plugins.py
   - pip uninstall vllm_add_dummy_platform -y
   # end platform plugin tests
   # begin io_processor plugins test, all the code in between uses the prithvi_io_processor plugin
   - pip install -e ./plugins/prithvi_io_processor_plugin
-  - pytest -v -s plugins_tests/test_io_processor_plugins.py
+  - pytest -x -v -s plugins_tests/test_io_processor_plugins.py
   - pip uninstall prithvi_io_processor_plugin -y 
   # end io_processor plugins test
   # other tests continue here:
-  - pytest -v -s plugins_tests/test_scheduler_plugins.py
+  - pytest -x -v -s plugins_tests/test_scheduler_plugins.py
   - pip install -e ./plugins/vllm_add_dummy_model
-  - pytest -v -s distributed/test_distributed_oot.py
-  - pytest -v -s entrypoints/openai/test_oot_registration.py # it needs a clean process
-  - pytest -v -s models/test_oot_registration.py # it needs a clean process
-  - pytest -v -s plugins/lora_resolvers # unit tests for in-tree lora resolver plugins
+  - pytest -x -v -s distributed/test_distributed_oot.py
+  - pytest -x -v -s entrypoints/openai/test_oot_registration.py # it needs a clean process
+  - pytest -x -v -s models/test_oot_registration.py # it needs a clean process
+  - pytest -x -v -s plugins/lora_resolvers # unit tests for in-tree lora resolver plugins
 
 - label: Pipeline Parallelism Test # 45min
   mirror_hardwares: [amdexperimental]
@@ -793,8 +845,9 @@ steps:
   - vllm/model_executor/models/
   - tests/distributed/
   commands:
-  - pytest -v -s distributed/test_pp_cudagraph.py
-  - pytest -v -s distributed/test_pipeline_parallel.py
+  - set -e
+  - pytest -x -v -s distributed/test_pp_cudagraph.py
+  - pytest -x -v -s distributed/test_pipeline_parallel.py
 
 - label: LoRA TP Test (Distributed)
   mirror_hardwares: [amdexperimental]
@@ -803,14 +856,15 @@ steps:
   - vllm/lora
   - tests/lora
   commands:
+    - set -e
     # FIXIT: find out which code initialize cuda before running the test
     # before the fix, we need to use spawn to test it
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     # There is some Tensor Parallelism related processing logic in LoRA that
     # requires multi-GPU testing for validation.
-    - pytest -v -s -x lora/test_chatglm3_tp.py
-    - pytest -v -s -x lora/test_llama_tp.py
-    - pytest -v -s -x lora/test_llm_with_multi_loras.py
+    - pytest -x -v -s lora/test_chatglm3_tp.py
+    - pytest -x -v -s lora/test_llama_tp.py
+    - pytest -x -v -s lora/test_llm_with_multi_loras.py
 
 
 - label: Weight Loading Multiple GPU Test  # 33min
@@ -822,6 +876,7 @@ steps:
   - vllm/
   - tests/weight_loading
   commands:
+    - set -e
     - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models.txt
 
 - label: Weight Loading Multiple GPU Test - Large Models # optional
@@ -834,6 +889,7 @@ steps:
   - vllm/
   - tests/weight_loading
   commands:
+    - set -e
     - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-large.txt
 
 
@@ -847,12 +903,13 @@ steps:
   source_file_dependencies:
   - vllm/
   commands:
+  - set -e
   # NOTE: don't test llama model here, it seems hf implementation is buggy
   # see https://github.com/vllm-project/vllm/pull/5689 for details
-  - pytest -v -s distributed/test_custom_all_reduce.py
+  - pytest -x -v -s distributed/test_custom_all_reduce.py
   - torchrun --nproc_per_node=2 distributed/test_ca_buffer_sharing.py
-  - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
-  - pytest -v -s -x lora/test_mixtral.py
+  - TARGET_TEST_SUITE=A100 pytest -x basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
+  - pytest -x -v -s lora/test_mixtral.py
 
 - label: LM Eval Large Models # optional
   gpu: a100
@@ -863,12 +920,14 @@ steps:
   - csrc/
   - vllm/model_executor/layers/quantization
   commands:
+  - set -e
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
+  - pytest -x -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
 
 - label: Qwen MoE EP Test # optional
   gpu: h200
   optional: true
   num_gpus: 2
   commands:
+    - set -e
     - CUDA_VISIBLE_DEVICES=1,2 VLLM_ALL2ALL_BACKEND=deepep_high_throughput VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 /vllm-workspace/examples/offline_inference/data_parallel.py --model Qwen/Qwen1.5-MoE-A2.7B --tp-size=1  --dp-size=2 --max-model-len 2048
