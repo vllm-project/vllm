@@ -903,7 +903,7 @@ class OpenAIServingResponses(OpenAIServing):
             response.status = "cancelled"
 
         # Abort the request.
-        if task := self.background_tasks.get(response_id):
+        if (task := self.background_tasks.get(response_id)):
             task.cancel()
             try:
                 await task
