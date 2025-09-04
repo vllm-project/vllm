@@ -11,7 +11,7 @@ import torch
 
 from ...utils import RemoteOpenAIServer
 
-MODEL_NAME = "christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM"
+MODEL_NAME = "mgazz/Prithvi-EO-2.0-300M-TL-Sen1Floods11"
 DTYPE = "float16"
 
 
@@ -35,7 +35,9 @@ def server():
         "--trust-remote-code",
         "--skip-tokenizer-init",
         "--max-num-seqs",
-        "32"
+        "32",
+        "--model-impl",
+        "terratorch"
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
