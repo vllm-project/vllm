@@ -270,7 +270,7 @@ class MQLLMEngineClient(EngineClient):
             queue.put_nowait(request_output)
 
     async def setup(self):
-        """Setup the client before it starts sending server requests."""
+        """Set up the client before it starts sending server requests."""
 
         # Start output_loop
         if self.output_loop is None:
