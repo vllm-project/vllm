@@ -10,6 +10,7 @@ ST_PROJECTOR_MODELS = [
     CLSPoolingEmbedModelInfo(
         "TencentBAC/Conan-embedding-v1",
         architecture="BertModel",
+        mteb_score=0.688611955,
         enable_test=True,
     ),
 ]
