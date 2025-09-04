@@ -251,10 +251,14 @@ class LinearBase(CustomOp):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
         *,
+        tp_size: Optional[int] = None,
+        tp_rank: Optional[int] = None,
         return_bias: bool = True,
     ):
         super().__init__()
 
+        self.tp_size = tp_size or get_tensor_model_parallel_world_size()
+        self.tp_rank = tp_rank or get_tensor_model_parallel_rank()
         # Keep input parameters
         self.input_size = input_size
         self.output_size = output_size
@@ -270,6 +274,7 @@ class LinearBase(CustomOp):
         else:
             self.quant_method = quant_config.get_quant_method(self,
                                                               prefix=prefix)
+
         self.return_bias = return_bias
 
 
@@ -299,6 +304,8 @@ class ReplicatedLinear(LinearBase):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
         *,
+        tp_size: Optional[int] = None,
+        tp_rank: Optional[int] = None,
         return_bias: bool = True,
     ):
         # If MergedReplicatedLinear, use output size of each partition.
@@ -313,6 +320,8 @@ class ReplicatedLinear(LinearBase):
                          params_dtype,
                          quant_config,
                          prefix=prefix,
+                         tp_size=tp_size,
+                         tp_rank=tp_rank,
                          return_bias=return_bias)
 
         # All the linear layer supports quant method.
@@ -400,6 +409,8 @@ class MergedReplicatedLinear(ReplicatedLinear):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
         *,
+        tp_size: Optional[int] = None,
+        tp_rank: Optional[int] = None,
         return_bias: bool = True,
     ):
         self.output_sizes = output_sizes
@@ -410,6 +421,8 @@ class MergedReplicatedLinear(ReplicatedLinear):
                          params_dtype,
                          quant_config,
                          prefix=prefix,
+                         tp_size=tp_size,
+                         tp_rank=tp_rank,
                          return_bias=return_bias)
 
     def weight_loader(self,
@@ -480,10 +493,21 @@ class ColumnParallelLinear(LinearBase):
         output_sizes: Optional[list[int]] = None,
         prefix: str = "",
         *,
+        tp_size: Optional[int] = None,
+        tp_rank: Optional[int] = None,
         return_bias: bool = True,
     ):
+
+        super().__init__(input_size,
+                         output_size,
+                         skip_bias_add,
+                         params_dtype,
+                         quant_config,
+                         prefix,
+                         tp_size=tp_size,
+                         tp_rank=tp_rank,
+                         return_bias=return_bias)
         # Divide the weight matrix along the last dimension.
-        self.tp_size = get_tensor_model_parallel_world_size()
         self.input_size_per_partition = input_size
         self.output_size_per_partition = divide(output_size, self.tp_size)
         self.output_partition_sizes = [self.output_size_per_partition]
@@ -493,14 +517,6 @@ class ColumnParallelLinear(LinearBase):
                 divide(output_size, self.tp_size)
                 for output_size in self.output_sizes
             ]
-
-        super().__init__(input_size,
-                         output_size,
-                         skip_bias_add,
-                         params_dtype,
-                         quant_config,
-                         prefix,
-                         return_bias=return_bias)
 
         self.gather_output = gather_output
 
@@ -528,8 +544,6 @@ class ColumnParallelLinear(LinearBase):
             })
         else:
             self.register_parameter("bias", None)
-
-        self.tp_rank = get_tensor_model_parallel_rank()
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
 
@@ -601,7 +615,7 @@ class ColumnParallelLinear(LinearBase):
         s = f"in_features={self.input_size}"
         s += f", output_features={self.output_size_per_partition}"
         s += f", bias={self.bias is not None}"
-        s += f", tp_size={get_tensor_model_parallel_world_size()}"
+        s += f", tp_size={self.tp_size}"
         s += f", gather_output={self.gather_output}"
         return s
 
@@ -641,14 +655,10 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
         *,
+        tp_size: Optional[int] = None,
+        tp_rank: Optional[int] = None,
         return_bias: bool = True,
     ):
-        self.output_sizes = output_sizes
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.tp_rank = get_tensor_model_parallel_rank()
-
-        assert all(output_size % self.tp_size == 0
-                   for output_size in output_sizes)
         super().__init__(input_size=input_size,
                          output_size=sum(output_sizes),
                          bias=bias,
@@ -657,7 +667,13 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                          params_dtype=params_dtype,
                          quant_config=quant_config,
                          prefix=prefix,
+                         tp_size=tp_size,
+                         tp_rank=tp_rank,
                          return_bias=return_bias)
+        self.output_sizes = output_sizes
+
+        assert all(output_size % self.tp_size == 0
+                   for output_size in output_sizes)
 
     def weight_loader(self,
                       param: Parameter,
@@ -849,8 +865,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
         assert loaded_shard_id < len(self.output_sizes)
 
-        tp_size = get_tensor_model_parallel_world_size()
-
         if isinstance(param, BlockQuantScaleParameter):
             from vllm.model_executor.layers.quantization.fp8 import (
                 Fp8LinearMethod, Fp8MoEMethod)
@@ -862,12 +876,13 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             block_n, _ = weight_block_size[0], weight_block_size[1]
             shard_offset = (
                 (sum(self.output_sizes[:loaded_shard_id]) + block_n - 1) //
-                block_n) // tp_size
+                block_n) // self.tp_size
             shard_size = ((self.output_sizes[loaded_shard_id] + block_n - 1) //
-                          block_n // tp_size)
+                          block_n // self.tp_size)
         else:
-            shard_offset = sum(self.output_sizes[:loaded_shard_id]) // tp_size
-            shard_size = self.output_sizes[loaded_shard_id] // tp_size
+            shard_offset = sum(
+                self.output_sizes[:loaded_shard_id]) // self.tp_size
+            shard_size = self.output_sizes[loaded_shard_id] // self.tp_size
 
         param.load_merged_column_weight(loaded_weight=loaded_weight,
                                         shard_id=loaded_shard_id,
@@ -914,8 +929,15 @@ class QKVParallelLinear(ColumnParallelLinear):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
         *,
+        tp_size: Optional[int] = None,
+        tp_rank: Optional[int] = None,
         return_bias: bool = True,
     ):
+        # Since output_sizes needs to be calculated in advance,
+        # we need to obtain self.tp_size here.
+        self.tp_size = tp_size or get_tensor_model_parallel_world_size()
+        self.tp_rank = tp_rank or get_tensor_model_parallel_rank()
+
         self.hidden_size = hidden_size
         self.head_size = head_size
         self.total_num_heads = total_num_heads
@@ -923,22 +945,21 @@ class QKVParallelLinear(ColumnParallelLinear):
             total_num_kv_heads = total_num_heads
         self.total_num_kv_heads = total_num_kv_heads
         # Divide the weight matrix along the last dimension.
-        tp_size = get_tensor_model_parallel_world_size()
-        self.num_heads = divide(self.total_num_heads, tp_size)
-        if tp_size >= self.total_num_kv_heads:
+        self.num_heads = divide(self.total_num_heads, self.tp_size)
+        if self.tp_size >= self.total_num_kv_heads:
             self.num_kv_heads = 1
-            self.num_kv_head_replicas = divide(tp_size,
+            self.num_kv_head_replicas = divide(self.tp_size,
                                                self.total_num_kv_heads)
         else:
-            self.num_kv_heads = divide(self.total_num_kv_heads, tp_size)
+            self.num_kv_heads = divide(self.total_num_kv_heads, self.tp_size)
             self.num_kv_head_replicas = 1
         input_size = self.hidden_size
         output_size = (self.num_heads +
-                       2 * self.num_kv_heads) * tp_size * self.head_size
+                       2 * self.num_kv_heads) * self.tp_size * self.head_size
         self.output_sizes = [
-            self.num_heads * self.head_size * tp_size,  # q_proj
-            self.num_kv_heads * self.head_size * tp_size,  # k_proj
-            self.num_kv_heads * self.head_size * tp_size,  # v_proj 
+            self.num_heads * self.head_size * self.tp_size,  # q_proj
+            self.num_kv_heads * self.head_size * self.tp_size,  # k_proj
+            self.num_kv_heads * self.head_size * self.tp_size,  # v_proj 
         ]
 
         super().__init__(input_size=input_size,
@@ -949,6 +970,8 @@ class QKVParallelLinear(ColumnParallelLinear):
                          params_dtype=params_dtype,
                          quant_config=quant_config,
                          prefix=prefix,
+                         tp_size=self.tp_size,
+                         tp_rank=self.tp_rank,
                          return_bias=return_bias)
 
     def _get_shard_offset_mapping(self, loaded_shard_id: str):
@@ -1257,23 +1280,23 @@ class RowParallelLinear(LinearBase):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
         *,
+        tp_size: Optional[int] = None,
+        tp_rank: Optional[int] = None,
         return_bias: bool = True,
     ):
-        # Divide the weight matrix along the first dimension.
-        self.tp_rank = get_tensor_model_parallel_rank()
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.input_size_per_partition = divide(input_size, self.tp_size)
-        self.output_size_per_partition = output_size
-        self.output_partition_sizes = [output_size]
-
         super().__init__(input_size,
                          output_size,
                          skip_bias_add,
                          params_dtype,
                          quant_config,
                          prefix,
+                         tp_size=tp_size,
+                         tp_rank=tp_rank,
                          return_bias=return_bias)
-
+        # Divide the weight matrix along the first dimension.
+        self.input_size_per_partition = divide(input_size, self.tp_size)
+        self.output_size_per_partition = output_size
+        self.output_partition_sizes = [output_size]
         self.input_is_parallel = input_is_parallel
         self.reduce_results = reduce_results
 
@@ -1356,10 +1379,9 @@ class RowParallelLinear(LinearBase):
         if self.input_is_parallel:
             input_parallel = input_
         else:
-            tp_rank = get_tensor_model_parallel_rank()
             splitted_input = split_tensor_along_last_dim(
                 input_, num_partitions=self.tp_size)
-            input_parallel = splitted_input[tp_rank].contiguous()
+            input_parallel = splitted_input[self.tp_rank].contiguous()
 
         # Matrix multiply.
         assert self.quant_method is not None
@@ -1418,6 +1440,8 @@ class QKVCrossParallelLinear(LinearBase):
                  skip_bias_add: bool = False,
                  params_dtype: Optional[torch.dtype] = None,
                  quant_config: Optional[QuantizationConfig] = None,
+                 tp_size: Optional[int] = None,
+                 tp_rank: Optional[int] = None,
                  prefix: str = ""):
         # input_size and output_size are not used, just for alignment
         input_size = hidden_size
@@ -1427,6 +1451,8 @@ class QKVCrossParallelLinear(LinearBase):
                          skip_bias_add=skip_bias_add,
                          params_dtype=params_dtype,
                          quant_config=quant_config,
+                         tp_size=tp_size,
+                         tp_rank=tp_rank,
                          prefix=prefix)
 
         self.quant_config = quant_config
@@ -1612,6 +1638,6 @@ class QKVCrossParallelLinear(LinearBase):
         s += f", q_size={self.q_size}"
         s += f", kv_size={self.kv_size}"
         s += f", bias={self.bias is not None}"
-        s += f", tp_size={get_tensor_model_parallel_world_size()}"
+        s += f", tp_size={self.tp_size}"
         s += ", gather_output=False"
         return s
