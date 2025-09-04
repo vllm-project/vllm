@@ -204,7 +204,8 @@ def _mxfp6_quantize(
 
     # TODO: native mxfp6 is currently not integrated in vllm,
     # so simulating even on devices supporting this data type natively.
-    # Eventually, there should be a check based on `current_platform.supports_mx()` here.
+    # Eventually, there should be a check based on
+    # `current_platform.supports_mx()` here.
     A = quant_dequant_mxfp6(A, quant_dtype=quant_dtype)
 
     return A, None
