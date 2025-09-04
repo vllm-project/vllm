@@ -5,7 +5,7 @@ import copy
 import gc
 import os
 from contextlib import AbstractContextManager, nullcontext
-from typing import TYPE_CHECKING, Any, Optional, Callable
+from typing import TYPE_CHECKING, Any, Optional, Callable, TypedDict
 
 import torch
 import torch.distributed
@@ -55,6 +55,21 @@ def rebuild_ipc(handle: tuple[Callable, tuple],
     return buffer
 
 
+class UpdateWeightsFromIPCRequest(TypedDict):
+    # a list of tuple to specify tensor metadata
+    # the info in tuple is [name, dtype, shape]
+    named_tensors: list[tuple[str, torch.dtype, torch.Size]]
+    # dict key is device_uuid, could get my own from `current_platform.get_device_uuid(self.device.index)` in vLLM
+    # dict value is a serialized ipc `handle`, vLLM can use `func, args = handle` and `func(*args)` to rebuild GPU tensor
+    # if `handles` is not None, means this is the first request in current update flow
+    # vLLM should rebuild and save this GPU tensor as a shared buffer
+    ipc_handle: tuple[Callable, tuple] | None
+    # specify the start offset of named_tensors in ipc_buffer tensor
+    offset: int
+    # specify whether this request is the last request in current update flow
+    end: bool
+
+
 class Worker(WorkerBase):
 
     def __init__(
@@ -77,7 +92,7 @@ class Worker(WorkerBase):
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
 
-        self._ctx = zmq.Context()
+        self._zmq_ctx = zmq.Context()
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
 
@@ -235,66 +250,42 @@ class Worker(WorkerBase):
     def reload_weights(self) -> None:
         self.model_runner.reload_weights()
 
-    def update_weights_from_ipc(self, zmq_handles: dict[str, str] | None, end: bool):
-        update_weights_socket_attr = "_update_weights_socket"
-        if zmq_handles is not None:
-            socket = self._ctx.socket(zmq.PULL)
-            socket.connect(zmq_handles[self.device_uuid])
-            setattr(self, update_weights_socket_attr, socket)
-            return
-        assert hasattr(self, update_weights_socket_attr)
-        socket = getattr(self, update_weights_socket_attr)
-        kwargs = socket.recv_pyobj()
-        if end:
-            socket.close()
-            delattr(self, update_weights_socket_attr)
-        self._update_weights_from_ipc(**kwargs, end=end)
-
-    def _update_weights_from_ipc(
-        self,
-        named_tensors: list[tuple[str, torch.dtype, torch.Size]],
-        ipc_handle: tuple[Callable, tuple] | None,
-        offset: int,
-        end: bool,
-    ):
-        """
-        Args:
-            named_tensors: a list of tuple to specify tensor metadata the info in tuple is [name, dtype, shape]
-            ipc_handle: a serialized `ipc_handle`, vLLM can use `func, args = handle` and `func(*args)` to rebuild GPU tensor
-                if `ipc_handles` is not None, means this is the first request in current update flow
-                vLLM should rebuild and save this GPU tensor as a shared buffer
-            offset: specify the start offset of named_tensors in ipc_buffer tensor
-            end: specify whether this request is the last request in current update flow
-        """
-        device_id = self.device.index
-        BUF_ATTR_NAME = '_shared_ipc_buffer'
-        buffer: torch.Tensor
-        if ipc_handle is not None:
-            buffer = rebuild_ipc(ipc_handle, device_id)
-            assert buffer.dtype == torch.uint8
-            setattr(self, BUF_ATTR_NAME, buffer)
-        else:
-            assert hasattr(self, BUF_ATTR_NAME)
-            buffer = getattr(self, BUF_ATTR_NAME)
+    def update_weights_from_ipc(self, zmq_handles: dict[str, str]):
+        socket = self._zmq_ctx.socket(zmq.REP)
+        socket.connect(zmq_handles[self.device_uuid])
+        buffer: torch.Tensor | None = None
+        while True:
+            kwargs: UpdateWeightsFromIPCRequest = socket.recv_pyobj()
+            if kwargs["ipc_handle"] is not None:
+                assert buffer is None
+                buffer = rebuild_ipc(kwargs["ipc_handle"], self.device.index)
+                assert buffer.dtype == torch.uint8
             assert buffer is not None
-        weights = []
-        for name, dtype, shape in named_tensors:
-            if isinstance(shape, (list, tuple)):
-                shape = torch.Size(shape)
-            assert isinstance(shape, torch.Size)
-            size = dtype.itemsize * shape.numel()
-            tensor = buffer[offset:offset +
-                            size].view(dtype=dtype).view(shape)
-            weights.append((name, tensor))
-            offset += size
-        self.model_runner.model.load_weights(weights=weights)
-        del weights
-        if end:
-            process_weights_after_loading(self.model_runner.model,
-                                          self.model_config, self.device)
-            if hasattr(self, BUF_ATTR_NAME):
-                delattr(self, BUF_ATTR_NAME)
+            weights = []
+            offset = kwargs["offset"]
+            for name, dtype, shape in kwargs["named_tensors"]:
+                if isinstance(shape, (list, tuple)):
+                    shape = torch.Size(shape)
+                assert isinstance(shape, torch.Size)
+                size = dtype.itemsize * shape.numel()
+                tensor = buffer[offset:offset +
+                                size].view(dtype=dtype).view(shape)
+                weights.append((name, tensor))
+                offset += size
+            self.model_runner.model.load_weights(weights=weights)
+            del weights
+            if kwargs["end"]:
+                process_weights_after_loading(self.model_runner.model,
+                                              self.model_config, self.device)
+                break
+            torch.cuda.synchronize()
+            socket.send(b"")
         torch.cuda.synchronize()
+        socket.send(b"")
+
+        socket.close()
+        del buffer
+        gc.collect()
         torch.cuda.empty_cache()
 
     @torch.inference_mode()
