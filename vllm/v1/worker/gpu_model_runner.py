@@ -712,7 +712,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         from the previous engine iteration, in which case those tokens on the
         GPU need to be copied into the corresponding slots into input_ids."""
 
-        if self.input_batch.prev_sampled_token_ids is not None:
+        if self.input_batch.prev_sampled_token_ids is None:
+            # Normal scheduling case
+            self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
+            return
+        else:
             # Async scheduling case, we need to copy the sampled token ids
             # from the previous iteration.
             prev_req_id_to_index = self.input_batch.prev_req_id_to_index
@@ -739,11 +743,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     # We need to copy the input_ids_cpu to the GPU first.
                     self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
                 if flattened_indices == prev_common_req_indices and \
-                    set(flattened_indices) == \
-                        set(range(len(flattened_indices))):
+                    max(flattened_indices) == (len(flattened_indices) - 1):
                     # Common-case optimization: the batch is unchanged
                     # and no reordering happened.
-                    # The indices are both the same permutation of 0..N-1
+                    # The indices are both the same permutation of 0..N-1 so
+                    # we can copy directly using a single slice.
                     self.input_ids.gpu[:len(flattened_indices)].copy_(
                         self.input_batch.prev_sampled_token_ids[:len(
                             flattened_indices)].squeeze(1),
@@ -766,8 +770,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         index=input_ids_index_tensor,
                         src=self.input_batch.prev_sampled_token_ids[
                             prev_common_req_indices_tensor].squeeze(1))
-                return
-        self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
+            else:
+                # No requests in common with the previous iteration
+                # So input_ids_cpu will have all the input ids
+                self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
 
     def _prepare_inputs(
         self,
@@ -1851,7 +1857,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         req_ids = self.input_batch.req_ids
         for req_idx in range(num_sampled_tokens):
             if self.use_async_scheduling:
-                sampled_ids = [-1] * 1 if \
+                sampled_ids = [-1] if \
                     req_idx not in invalid_req_indices_set else None
             else:
                 sampled_ids = valid_sampled_token_ids[req_idx]
