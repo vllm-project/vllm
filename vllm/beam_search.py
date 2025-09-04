@@ -4,8 +4,8 @@
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Union
 
+from vllm.logprobs import Logprob
 from vllm.lora.request import LoRARequest
-from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 if TYPE_CHECKING:
