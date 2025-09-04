@@ -30,6 +30,7 @@ from typing import Any, Callable, Optional, TypedDict, Union, cast
 import numpy as np
 import torch
 import torch.nn as nn
+import torchaudio.transforms as audio_transforms
 from transformers import BatchFeature
 
 from vllm.attention.layer import MultiHeadAttention
@@ -324,7 +325,6 @@ class DashengAudioTransformer(nn.Module):
         self.norm = nn.LayerNorm(config.embed_dim, eps=1e-6)
 
     def _init_front_end(self, config):
-        import torchaudio.transforms as audio_transforms
         with set_default_torch_dtype(torch.float32):
             self.front_end = nn.Sequential(
                 audio_transforms.MelSpectrogram(
