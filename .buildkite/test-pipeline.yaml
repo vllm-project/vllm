@@ -474,6 +474,15 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt --tp-size=1
 
+- label: GSM8K V2Lite (manual)
+  mirror_hardwares: [amdexperimental]
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - tests/evals/gsm8k
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt --tp-size=1 -k DeepSeek-V2-Lite-Chat
+
 - label: OpenAI API correctness
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
