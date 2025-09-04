@@ -332,21 +332,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     @overload
     def _make_buffer(self,
-                     *args: int | torch.SymInt,
+                     *args: Union[int, torch.SymInt],
                      dtype: torch.dtype,
                      numpy: Literal[True] = ...) -> CpuGpuBufferWithNumpy:
         ...
 
     @overload
-    def _make_buffer(self, *args: int | torch.SymInt, dtype: torch.dtype,
+    def _make_buffer(self, *args: Union[int, torch.SymInt], dtype: torch.dtype,
                      numpy: Literal[False]) -> CpuGpuBuffer:
         ...
 
     def _make_buffer(
             self,
-            *args: int | torch.SymInt,
+            *args: Union[int, torch.SymInt],
             dtype: torch.dtype,
-            numpy: bool = True) -> CpuGpuBuffer | CpuGpuBufferWithNumpy:
+            numpy: bool = True) -> Union[CpuGpuBuffer, CpuGpuBufferWithNumpy]:
         # Bfloat16 torch tensors cannot be directly cast to a numpy array, so
         # if a bfloat16 buffer is needed without a corresponding numpy array,
         # don't bother instantiating the numpy array.
