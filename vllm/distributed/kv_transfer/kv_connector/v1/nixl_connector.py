@@ -1044,12 +1044,14 @@ class NixlConnectorWorker:
             if now < expires:
                 break
             count = self.consumer_notification_counts_by_req.pop(req_id, 0)
-            logger.warning(
-                "Releasing expired KV blocks for request %s which were "
-                "retrieved by %d decode worker(s) within %d seconds.", req_id,
-                count, envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT)
-            del self._reqs_to_send[req_id]
-            done_sending.add(req_id)
+            # pop because it's possible for request to complete at the
+            # same time as timeout, creating a race condition
+            if self._reqs_to_send.pop(req_id, None) is not None:
+                logger.warning(
+                    "Releasing expired KV blocks for request %s which were "
+                    "retrieved by %d decode worker(s) within %d seconds.",
+                    req_id, count, envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT)
+                done_sending.add(req_id)
 
         return done_sending, done_recving
 
