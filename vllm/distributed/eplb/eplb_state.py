@@ -183,7 +183,7 @@ class EplbState:
     """
     The flag indicates whether the expert buffer is ready for transfer.
     """
-    buffer_lock: threading.Lock = field(default_factory=threading.Lock())
+    buffer_lock: threading.Lock = field(default_factory=threading.Lock)
     """
     The lock to protect the expert buffer.
     """
@@ -311,6 +311,9 @@ class EplbState:
             dtype=torch.int32,
             device=device,
         )
+        self.expert_buffer = [
+                        torch.empty_like(w) for w in model.expert_weights[0]
+                        ]
 
         # Set the initial progress of rearrangement to 3/4
         eplb_step_interval = parallel_config.eplb_config.step_interval
@@ -378,6 +381,7 @@ class EplbState:
             new_physical_to_logical_map,
             new_logical_to_physical_map,
             new_logical_replica_count,
+            expert_buffer=expert_buffer,
             is_async=is_async,
             expert_load_window_size=expert_load_window_size,
             expert_rearrangement_step=expert_rearrangement_step,
@@ -660,11 +664,11 @@ class EplbState:
         while self.layer_to_transfer < model.num_moe_layers:
             if not self.ep_buffer_ready and self.rebalanced:
                 # get lock
+                assert self.new_physical_to_logical_map is not None
                 await asyncio.to_thread(self.buffer_lock.acquire)
                 try:
-                    self.expert_buffer = [
-                        torch.empty_like(w) for w in model.expert_weights[0]
-                        ]                   
+                    for i, w in enumerate(model.expert_weights[0]):
+                        self.expert_buffer[i] = torch.empty_like(w)                   
                     (
                     self.is_unchanged,
                     self.is_received_locally, 
@@ -717,6 +721,9 @@ class EplbState:
     def post_eplb(self,
                   model: MixtureOfExperts,
                   is_profile: bool = False) -> None:
+        assert self.new_physical_to_logical_map is not None
+        assert self.new_logical_to_physical_map is not None
+        assert self.new_logical_replica_count is not None
         if not is_profile:
             if self.physical_to_logical_map.shape[
                     1] != self.new_physical_to_logical_map.shape[1]:

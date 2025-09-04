@@ -221,16 +221,15 @@ def move_to_buffer(
             P2POp(
                 torch.distributed.irecv,
                 weight[dst],
-                src_global,
-                stream=cuda_stream if cuda_stream is not None else torch.cuda.default_stream()
+                src_global
             ) for weight in expert_weights_buffer
         ]
 
     # 4. Execute the P2P operations. The real communication happens here.
     if p2p_ops and cuda_stream is not None:
-        reqs = batch_isend_irecv(p2p_ops)
-        for req in reqs:
-            with torch.cuda.stream(cuda_stream):
+        with torch.cuda.stream(cuda_stream): 
+            reqs = batch_isend_irecv(p2p_ops)
+            for req in reqs:
                 req.wait()  
     elif p2p_ops:
         reqs = batch_isend_irecv(p2p_ops)
@@ -345,7 +344,7 @@ async def transfer_layer(old_global_expert_indices: torch.Tensor,
 def rearrange_expert_weights_inplace(
     old_global_expert_indices: torch.Tensor,
     new_global_expert_indices: torch.Tensor,
-    expert_weights: list[torch.Tensor],
+    expert_weights: Sequence[Iterable[torch.Tensor]],
     ep_group: ProcessGroup,
     is_profile: bool = False,
     rank_mapping: Optional[dict[int, int]] = None,
