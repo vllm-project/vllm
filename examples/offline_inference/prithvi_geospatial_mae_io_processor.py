@@ -37,6 +37,7 @@ def main():
         # The maximum number depends on the available GPU memory
         max_num_seqs=32,
         io_processor_plugin="prithvi_to_tiff_india",
+        model_impl="terratorch",
     )
 
     pooling_params = PoolingParams(task="encode", softmax=False)
