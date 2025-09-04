@@ -240,7 +240,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> Callable:
-        return self._finalize(
+        receiver = self._finalize(
             output,
             fused_expert_output,
             topk_weights,
@@ -249,6 +249,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             weight_and_reduce_impl,
             True,
         )
+        assert receiver is not None
+        return receiver
 
     def finalize(
         self,
