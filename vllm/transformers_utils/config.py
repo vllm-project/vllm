@@ -208,6 +208,13 @@ _CONFIG_FORMAT_TO_CONFIG_PARSER: dict[str, type[ConfigParserBase]] = {
 }
 
 
+def get_config_parser(config_format: str) -> ConfigParserBase:
+    """Get the config parser for a given config format."""
+    if config_format not in _CONFIG_FORMAT_TO_CONFIG_PARSER:
+        raise ValueError(f"Unknown load format `{config_format}`.")
+    return _CONFIG_FORMAT_TO_CONFIG_PARSER[config_format]()
+
+
 def register_config_parser(config_format: str):
     """Register a customized vllm model loader.
     When a load format is not supported by vllm, you can register a customized
@@ -542,7 +549,7 @@ def get_config(
         config_format_str = config_format.value if isinstance(
             config_format, ConfigFormat) else config_format
 
-    config_parser = _CONFIG_FORMAT_TO_CONFIG_PARSER[config_format_str]()
+    config_parser = get_config_parser(config_format_str)
     config_dict, config = config_parser.parse(
         model,
         trust_remote_code=trust_remote_code,

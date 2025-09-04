@@ -627,9 +627,6 @@ class ModelConfig:
             raise ValueError(
                 "Sleep mode is not supported on current platform.")
 
-        if isinstance(self.config_format, str):
-            self.config_format = ConfigFormat(self.config_format)
-
         hf_config = get_config(self.hf_config_path or self.model,
                                self.trust_remote_code,
                                self.revision,
