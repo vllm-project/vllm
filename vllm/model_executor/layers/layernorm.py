@@ -20,7 +20,9 @@ def is_rocm_aiter_rmsnorm_enabled() -> bool:
 def rms_norm(x: torch.Tensor, weight: torch.Tensor,
              variance_epsilon: float) -> torch.Tensor:
     from vllm import _custom_ops as ops
-    out = torch.empty_like(x)
+
+    # x may not be contiguous but out must be contiguous
+    out = torch.empty_like(x).contiguous()
     ops.rms_norm(
         out,
         x,
@@ -46,7 +48,9 @@ def fused_add_rms_norm(
 def poly_norm(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor,
               variance_epsilon: float) -> torch.Tensor:
     from vllm import _custom_ops as ops
-    out = torch.empty_like(x)
+
+    # x may not be contiguous but out must be contiguous
+    out = torch.empty_like(x).contiguous()
     ops.poly_norm(
         out,
         x,

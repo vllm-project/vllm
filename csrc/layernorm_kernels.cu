@@ -1,6 +1,7 @@
 #include "type_convert.cuh"
 #include "dispatch_utils.h"
 #include "cub_helpers.h"
+#include "utils.h"
 
 #include <torch/cuda.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -348,6 +349,7 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
               double epsilon) {
   TORCH_CHECK(out.is_contiguous());
   TORCH_CHECK(input.stride(-1) == 1);
+  TORCH_CHECK(is_contiguous_except_last_dim(input));
   TORCH_CHECK(weight.is_contiguous());
 
   int hidden_size = input.size(-1);
@@ -380,6 +382,8 @@ void fused_add_rms_norm(torch::Tensor& input,     // [..., hidden_size]
                         torch::Tensor& weight,    // [hidden_size]
                         double epsilon) {
   TORCH_CHECK(residual.is_contiguous());
+  TORCH_CHECK(input.stride(-1) == 1);
+  TORCH_CHECK(is_contiguous_except_last_dim(input));
   TORCH_CHECK(weight.is_contiguous());
   int hidden_size = input.size(-1);
   int64_t input_stride = input.stride(-2);
