@@ -31,6 +31,12 @@ cd vllm
 
 You must set the following variables at the top of the script before execution.
 
+   Note: You can also override the default values below via environment variables when running the script.
+
+```bash
+MODEL=meta-llama/Llama-3.3-70B-Instruct SYSTEM=TPU TP=8 DOWNLOAD_DIR='' INPUT_LEN=128 OUTPUT_LEN=2048 MAX_MODEL_LEN=2300 MIN_CACHE_HIT_PCT=0 MAX_LATENCY_ALLOWED_MS=100000000000 NUM_SEQS_LIST="128 256" NUM_BATCHED_TOKENS_LIST="1024 2048 4096" VLLM_LOGGING_LEVEL=DEBUG bash auto_tune.sh
+```
+
 | Variable | Description | Example Value |
 | --- | --- | --- |
 | `BASE` | **Required.** The absolute path to the parent directory of your vLLM repository directory. | `"$HOME"` |
