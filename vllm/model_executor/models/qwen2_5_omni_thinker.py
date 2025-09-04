@@ -716,14 +716,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
-        # IMPORTANT: Multimodal modules excluded from LoRA adaptation
-        # These modules are mapped to empty lists to prevent the LoRA framework
-        # from attempting to adapt them. This is necessary because these modules
-        # contain layers that cannot be replaced with LoRA layers.
-        # This approach keeps all LoRA configuration within the model-specific file
-        # without requiring changes to the core LoRA framework.
-        "audio_tower": [],  # Audio encoder - excluded from LoRA
-        "visual": [],       # Vision transformer - excluded from LoRA
     }
     
     # For multimodal models, vLLM currently only supports adding LoRA to language model
