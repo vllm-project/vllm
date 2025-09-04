@@ -12,42 +12,8 @@ logger = init_logger(__name__)
 
 
 class BaseUpdator(ABC):
-    """
-    Abstract Base Class (ABC) for updator mechanisms in a distributed system.
-    This class defines the interface that any concrete updator must implement,
-    providing hooks for various stages of a distributed operation cycle,
-    such as initialization, profiling, warm-up, step execution, and rearrangement.
-    """
     @abstractmethod
-    def init(self):
-        pass
-
-    @abstractmethod
-    def profile(self):
-        """
-        Performs profiling operations. This could involve measuring performance
-        or collecting statistics.
-        """
-        pass
-
-    @abstractmethod
-    def warm_up(self):
-        """
-        Executes warm-up steps. This is typically used to pre-allocate resources
-        or stabilize performance before actual operations begin.
-        """
-        pass
-
-    @abstractmethod
-    def dummy(self):
-        """
-        Executes a dummy operation. This might be used for testing or
-        to simulate a workload without actual data processing.
-        """
-        pass
-
-    @abstractmethod
-    def step(self):
+    def step(self, model, is_dummy, is_profile, log_stats):
         """
         Performs a single synchronous step of the updator's main operation.
         """
@@ -77,22 +43,6 @@ class BaseUpdator(ABC):
         of a model.
         """
 
-        pass
-
-    @abstractmethod
-    def rearrange(self):
-        """
-        Handles the rearrangement of data or states, often in response to
-        load balancing or topology changes.
-        """
-        pass
-
-    @abstractmethod
-    def recv_state(self):
-        """
-        Receives state information from other components or ranks in the
-        distributed system.
-        """
         pass
 
     @staticmethod

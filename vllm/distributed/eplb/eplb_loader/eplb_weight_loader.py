@@ -29,6 +29,7 @@ class EplbWeightLoader(BaseLoader):
             eplb_adaptor: An adaptor to interact with the vLLM model's expert
                           parameters and buffer management.
         """
+        self.reqs = list()
         self.eplb_adaptor = eplb_adaptor
         self.layer_id = -1
         self.recv_expert_list = list()
@@ -95,12 +96,12 @@ class EplbWeightLoader(BaseLoader):
         p2p_ops: list[P2POp] = []
 
         # 2. Initiate sending of weights.
-        p2p_ops = self.prepare_send(ep_group, ep_rank, expert_weights, local2global, new_indices, num_local_experts,
+        p2p_ops = self.prepare_send_p2p_ops(ep_group, ep_rank, expert_weights, local2global, new_indices, num_local_experts,
                                     old_indices,
                                     p2p_ops)
 
         # 3. Initiate receiving of weights.
-        experts_recv_loc, p2p_ops = self.prepare_recv(ep_group, ep_rank, expert_weights_buffer, is_received_locally,
+        experts_recv_loc, p2p_ops = self.prepare_recv_p2p_ops(ep_group, ep_rank, expert_weights_buffer, is_received_locally,
                                                       local2global, new_indices, num_local_experts, old_indices,
                                                       p2p_ops)
 
@@ -111,7 +112,6 @@ class EplbWeightLoader(BaseLoader):
         self.update_weight(expert_weights, expert_weights_buffer, experts_recv_loc, is_received_locally, is_unchanged,
                            local2global, new_indices, num_local_experts)
 
-    @override
     def update_weight(self, expert_weights, expert_weights_buffer, experts_recv_loc, is_received_locally, is_unchanged,
                       local2global, new_indices, num_local_experts):
         """
@@ -156,8 +156,7 @@ class EplbWeightLoader(BaseLoader):
             for req in reqs:
                 req.wait()
 
-    @override
-    def prepare_recv(self, ep_group, ep_rank, expert_weights_buffer, is_received_locally, local2global, new_indices,
+    def prepare_recv_p2p_ops(self, ep_group, ep_rank, expert_weights_buffer, is_received_locally, local2global, new_indices,
                      num_local_experts, old_indices, p2p_ops):
         """
         Prepares irecv operations for experts that need to be received from other ranks
@@ -218,8 +217,7 @@ class EplbWeightLoader(BaseLoader):
             ]
         return experts_recv_loc, p2p_ops
 
-    @override
-    def prepare_send(self, ep_group, ep_rank, expert_weights, local2global, new_indices, num_local_experts, old_indices,
+    def prepare_send_p2p_ops(self, ep_group, ep_rank, expert_weights, local2global, new_indices, num_local_experts, old_indices,
                      p2p_ops):
         """
         Prepares isend operations for experts that need to be sent to other ranks
@@ -343,7 +341,7 @@ class EplbWeightLoader(BaseLoader):
 
 
 
-    def async_expert_weight_transfer(self, reqs):
+    def async_expert_weight_transfer(self):
         """
         Initiates the asynchronous expert weight transfer by executing the
         prepared P2P communication operations.
@@ -355,9 +353,10 @@ class EplbWeightLoader(BaseLoader):
         # set asynchronous stream for d2d expert weight transfer
         if self.comm_op_list:
             ret_list = dist.batch_isend_irecv(self.comm_op_list)
-            reqs.extend(ret_list)
+            self.reqs.extend(ret_list)
 
-    def update_expert_map_and_weight(self, reqs):
+    @override
+    def update_expert_map_and_weight(self):
         """
         Waits for all pending communication requests to complete, then updates
         the expert map, logical-to-physical map, and the expert weights based
@@ -367,7 +366,7 @@ class EplbWeightLoader(BaseLoader):
             reqs: A list of communication requests to wait for.
         """
         # Waiting for send/recv tasks finish
-        for req in reqs:
+        for req in self.reqs:
             req.wait()
 
 
@@ -398,6 +397,7 @@ class EplbWeightLoader(BaseLoader):
         if self.comm_op_list is not None:
             self.comm_op_list.clear()
         self.recv_expert_list.clear()
+        self.reqs.clear()
         self.updated_expert_map = None
         self.layer_id = -1
 

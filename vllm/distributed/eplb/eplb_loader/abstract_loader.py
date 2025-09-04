@@ -15,7 +15,7 @@ class BaseLoader(ABC):
     """
 
     @abstractmethod
-    def prepare_send(self):
+    def prepare_send(self, expert_send_info, layer_id):
         """
         Abstract method: Prepares the necessary data structures or buffers
         for sending expert weights or related information to other ranks.
@@ -26,7 +26,7 @@ class BaseLoader(ABC):
         pass
 
     @abstractmethod
-    def prepare_recv(self):
+    def prepare_recv(self, expert_recv_info, updated_expert_map):
         """
         Abstract method: Prepares the necessary data structures or buffers
         for receiving expert weights or related information from other ranks.
@@ -37,18 +37,7 @@ class BaseLoader(ABC):
         pass
 
     @abstractmethod
-    def send_recv(self):
-        """
-        Abstract method: Executes the actual send and receive operations
-        for expert weights or related data between ranks.
-
-        This typically involves collective communication operations or
-        point-to-point transfers.
-        """
-        pass
-
-    @abstractmethod
-    def update_weight(self):
+    def update_expert_map_and_weight(self):
         """
         Abstract method: Applies the received expert weights or updates
         the local expert weights based on some logic (e.g., after a transfer).

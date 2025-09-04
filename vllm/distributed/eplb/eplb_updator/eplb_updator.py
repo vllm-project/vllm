@@ -61,7 +61,6 @@ class EplbUpdator(BaseUpdator):
         })
 
 
-    @override
     def profile(self, model: MixtureOfExperts, is_profile):
         """
         Profiles the expert rearrangement process.
@@ -74,7 +73,6 @@ class EplbUpdator(BaseUpdator):
         self.rearrange(model, is_profile)
         return
 
-    @override
     def dummy(self, model: MixtureOfExperts):
         """
         Performs a dummy step for expert load balancing.
@@ -178,8 +176,7 @@ class EplbUpdator(BaseUpdator):
             # adaptor与updator解耦，数据相关的类型放到数据侧
             for layer_id in range(self.eplb_adaptor.num_moe_layers):
                 self.shuffer_layer_async(layer_id)
-                
-    @override           
+
     def shuffer_layer_async(self,layer):
         """
         Initiates asynchronous shuffling of experts for a specific MoE layer.
@@ -204,7 +201,7 @@ class EplbUpdator(BaseUpdator):
                     updated_expert_map_this_rank, 
                     layer_id + self.eplb_adaptor.num_dense_layers)
             self.reqs = []
-            self.eplb_loader.async_expert_weight_transfer(self.reqs)
+            self.eplb_loader.async_expert_weight_transfer()
             
     @override
     def step_after_forward(self):
@@ -217,11 +214,10 @@ class EplbUpdator(BaseUpdator):
             self.compute_and_set_moe_load(is_clear=True)
  
         if self.update_expert_weight_flag():
-            self.eplb_loader.update_expert_map_and_weight(self.reqs) 
+            self.eplb_loader.update_expert_map_and_weight()
  
         self.update_iteration()
 
-    @override
     def update_expert_weight_flag(self):
         """
         Determines if expert weights should be updated in the current iteration.
@@ -234,7 +230,6 @@ class EplbUpdator(BaseUpdator):
             self.eplb_data.num_iterations_eplb_update + self.eplb_data.num_wait_worker_iterations)
         return 0 <= weight_update_counter < self.eplb_data.num_moe_layers
 
-    @override
     def wakeup_eplb_worker_flag(self):
         """
         Determines if the EPLB worker process should be woken up in the current iteration.
@@ -245,7 +240,6 @@ class EplbUpdator(BaseUpdator):
         """
         return self.cur_iterations == (self.eplb_data.num_iterations_eplb_update - 1)
 
-    @override 
     def compute_and_set_moe_load(self, is_clear=False):
         """
         Computes the MoE load across all ranks and sets it in the shared dictionary.
@@ -283,7 +277,6 @@ class EplbUpdator(BaseUpdator):
             )
         return moe_load
 
-    @override
     def rearrange(self,
                   model: MixtureOfExperts,
                   is_profile: bool = False,
@@ -433,7 +426,6 @@ class EplbUpdator(BaseUpdator):
                 time_end - time_start,
             )
 
-    @override
     def recv_state(self) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Receives the global expert load and old expert placement information
