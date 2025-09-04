@@ -232,7 +232,8 @@ class Glm4vVisionAttention(nn.Module):
         # Per attention head and per partition values.
         self.tp_size = (1 if use_data_parallel else
                         get_tensor_model_parallel_world_size())
-        self.tp_rank = parallel_state.get_tensor_model_parallel_rank()
+        self.tp_rank = (0 if use_data_parallel else
+                        parallel_state.get_tensor_model_parallel_rank())
         self.hidden_size_per_attention_head = dist_utils.divide(
             projection_size, num_heads)
         self.num_attention_heads_per_partition = dist_utils.divide(
