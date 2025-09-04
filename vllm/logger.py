@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Logging configuration for vLLM."""
+import copy
 import datetime
 import json
 import logging
@@ -166,10 +167,14 @@ def _configure_vllm_root_logger() -> None:
 def setup_per_rank_logger(rank) -> None:
     if not envs.VLLM_PER_RANK_LOGS:
         return
+    if LOG_FILE_NAME is None:
+        raise ValueError(
+            "LOG_FILE_NAME is None. "
+            "Please configure logging before setting up per-rank logger.")
     base_str = os.path.splitext(LOG_FILE_NAME)[0]
     log_file = f"{base_str}_rank_{rank}.log"
 
-    log_config = DEFAULT_LOGGING_CONFIG.copy()
+    log_config = copy.deepcopy(DEFAULT_LOGGING_CONFIG)
     log_config["handlers"]["vllm_log_file"]["filename"] = log_file
     dictConfig(log_config)
 
