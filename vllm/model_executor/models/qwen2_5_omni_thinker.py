@@ -716,18 +716,12 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             "thinker.": "",
         })
 
-    # LoRA specific attributes
+    # Packed projection mappings
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
-    # For multimodal models, vLLM currently only supports adding LoRA to
-    # language model. Map the embedding module to language model's embed_tokens
-    embedding_modules = {
-        "embed_tokens": "language_model.model.embed_tokens",
-    }
-    embedding_padding_modules = ["language_model.model.embed_tokens"]
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
