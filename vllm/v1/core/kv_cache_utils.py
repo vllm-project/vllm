@@ -370,7 +370,6 @@ class FreeKVCacheBlockQueue:
         """
         if len(blocks) == 0:
             return
-        self.num_free_blocks += len(blocks)
 
         last_block = self.fake_free_list_tail.prev_free_block
         assert last_block is not None, (
@@ -384,6 +383,8 @@ class FreeKVCacheBlockQueue:
         # Connect the last block of <blocks> to the fake tail
         last_block.next_free_block = self.fake_free_list_tail
         self.fake_free_list_tail.prev_free_block = last_block
+
+        self.num_free_blocks += len(blocks)
 
     def get_all_free_blocks(self) -> list[KVCacheBlock]:
         """Get all free blocks in the free list. Mainly used for testing.
