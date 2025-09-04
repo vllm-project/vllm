@@ -166,6 +166,7 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
     VLLM_TUNED_CONFIG_FOLDER: Optional[str] = None
+    VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE: bool = False
 
 
 def get_default_cache_root():
@@ -1175,6 +1176,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Allows vllm to find tuned config under customized folder
     "VLLM_TUNED_CONFIG_FOLDER":
     lambda: os.getenv("VLLM_TUNED_CONFIG_FOLDER", None),
+
+    # Use AITER Triton fused rope + zeros + reshape_and_cache
+    "VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE":
+    lambda: bool(int(os.getenv("VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE", "0"))),
 
 }
 

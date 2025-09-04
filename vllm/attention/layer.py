@@ -28,6 +28,8 @@ from vllm.utils import direct_register_custom_op
 logger = init_logger(__name__)
 USE_XFORMERS_OPS = None
 
+if current_platform.is_rocm():
+    VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE = envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE
 
 def check_xformers_availability():
     global USE_XFORMERS_OPS
@@ -228,6 +230,9 @@ class Attention(nn.Module):
         # shape does not match the query shape, so we optionally let the model
         # definition specify the output tensor shape.
         output_shape: Optional[torch.Size] = None,
+        positions: torch.Tensor = None,
+        cos_sin_cache: torch.Tensor = None,
+        is_neox: bool = False,
     ) -> torch.Tensor:
         """
         The KV cache is stored inside this class and is accessed via
@@ -245,9 +250,15 @@ class Attention(nn.Module):
         if self.use_output:
             output_shape = (output_shape
                             if output_shape is not None else query.shape)
-            output = torch.zeros(output_shape,
-                                 dtype=query.dtype,
-                                 device=query.device)
+            if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE:
+                output = torch.empty(output_shape,
+                                    dtype=query.dtype,
+                                    device=query.device)
+            else:
+                output = torch.zeros(output_shape,
+                                    dtype=query.dtype,
+                                    device=query.device)
+
             hidden_size = output_shape[-1]
             # We skip reshaping query, key and value tensors for the MLA
             # backend since these tensors have different semantics and are
@@ -269,15 +280,19 @@ class Attention(nn.Module):
                     attn_metadata = attn_metadata[self.layer_name]
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
                 self.impl.forward(self,
-                                  query,
-                                  key,
-                                  value,
-                                  self_kv_cache,
-                                  attn_metadata,
-                                  output=output)
+                                query,
+                                key,
+                                value,
+                                self_kv_cache,
+                                attn_metadata,
+                                output=output)
             else:
-                torch.ops.vllm.unified_attention_with_output(
-                    query, key, value, output, self.layer_name)
+                if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE:
+                    torch.ops.vllm.unified_attention_with_output(
+                        query, key, value, output, self.layer_name, None, positions, cos_sin_cache, True)
+                else:
+                    torch.ops.vllm.unified_attention_with_output(
+                        query, key, value, output, self.layer_name)
             return output.view(-1, hidden_size)
         else:
             if self.use_direct_call:
@@ -485,6 +500,9 @@ def unified_attention_with_output(
     output: torch.Tensor,
     layer_name: str,
     output_scale: Optional[torch.Tensor] = None,
+    positions:  Optional[torch.Tensor] = None,
+    cos_sin_cache: Optional[torch.Tensor] = None,
+    is_neox: bool = False,
 ) -> None:
     wait_for_kv_layer_from_connector(layer_name)
     forward_context: ForwardContext = get_forward_context()
@@ -493,14 +511,29 @@ def unified_attention_with_output(
         attn_metadata = attn_metadata[layer_name]
     self = forward_context.no_compile_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
-    self.impl.forward(self,
-                      query,
-                      key,
-                      value,
-                      kv_cache,
-                      attn_metadata,
-                      output=output,
-                      output_scale=output_scale)
+
+    if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE:
+        from vllm.v1.attention.backends.triton_attn import TritonAttentionImpl
+        assert isinstance(self.impl, TritonAttentionImpl), f"Expect attention implementation = TritonAttentionImpl for VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE=1 but got {self.impl=}"
+        assert self.impl.kv_sharing_target_layer_name is None, "kv_sharing_target_layer_name error"
+        self.impl.forward(self,
+                        query,
+                        key,
+                        value,
+                        kv_cache,
+                        attn_metadata,
+                        output=output,
+                        output_scale=output_scale,
+                        positions=positions, cos_sin_cache=cos_sin_cache, is_neox=is_neox)
+    else:
+        self.impl.forward(self,
+                        query,
+                        key,
+                        value,
+                        kv_cache,
+                        attn_metadata,
+                        output=output,
+                        output_scale=output_scale)
 
     maybe_save_kv_layer_to_connector(layer_name, kv_cache)
 
@@ -512,6 +545,9 @@ def unified_attention_with_output_fake(
     output: torch.Tensor,
     layer_name: str,
     output_scale: Optional[torch.Tensor] = None,
+    positions:  Optional[torch.Tensor] = None,
+    cos_sin_cache: Optional[torch.Tensor] = None,
+    is_neox: bool = False,
 ) -> None:
     return
 
