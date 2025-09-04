@@ -649,7 +649,8 @@ class ModelConfig:
         if (self.runner == "draft" and hasattr(self.hf_config, 'architectures')
                 and self.hf_config.architectures):
 
-            from vllm.model_executor.models.utils import normalize_eagle_architecture
+            from vllm.model_executor.models.utils import (
+                normalize_eagle_architecture)
 
             # Apply normalization to all architectures
             original_archs = self.hf_config.architectures.copy()
