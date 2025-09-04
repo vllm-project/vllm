@@ -393,7 +393,7 @@ class LLMEngine:
                     self.scheduler_config.max_model_len,
                     get_tokenizer_for_seq,
                     self.reasoner if self.decoding_config.reasoning_backend
-                    is not None else None,
+                    and self.tokenizer else None,
                 ),
             ))
 
