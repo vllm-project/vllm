@@ -1176,6 +1176,10 @@ class FusedMoE(CustomOp):
         return None
 
     @property
+    def shared_fused_combine(self) -> Optional[Callable]:
+        return None
+
+    @property
     def tp_size(self):
         return self.moe_parallel_config.tp_size
 
@@ -1630,8 +1634,9 @@ class FusedMoE(CustomOp):
 
         return [
             weight.view(self.local_num_experts, -1) for name, weight in weights
-            if name not in NON_EXPERT_WEIGHTS and weight.shape != torch.Size(
-                []) and not name.startswith("_shared_experts.")
+            if name not in NON_EXPERT_WEIGHTS and weight.shape != torch.Size([])
+            and not name.startswith("_shared_experts.")
+            and not name.startswith("_shared_fused_combine.")
         ]
 
     def set_eplb_state(
@@ -1809,7 +1814,7 @@ class FusedMoE(CustomOp):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+    ) -> torch.Tensor:
         og_hidden_states = hidden_states.shape[-1]
         if self.hidden_size != og_hidden_states:
             hidden_states = F.pad(hidden_states,
@@ -1817,27 +1822,14 @@ class FusedMoE(CustomOp):
                                   mode='constant',
                                   value=0.0)
 
-        if self.shared_experts is None:
-            if current_platform.is_tpu():
-                # TODO: Once the OOM issue for the TPU backend is resolved, we
-                # will switch to using the moe_forward custom op.
-                fused_output = self.forward_impl(hidden_states, router_logits)
-                assert not isinstance(fused_output, tuple)
-            else:
-                fused_output = torch.ops.vllm.moe_forward(
-                    hidden_states, router_logits, self.layer_name)
-            return fused_output[..., :og_hidden_states]
+        if current_platform.is_tpu():
+            # TODO: Once the OOM issue for the TPU backend is resolved, we
+            # will switch to using the moe_forward custom op.
+            fused_output = self.forward_impl(hidden_states, router_logits)
         else:
-            if current_platform.is_tpu():
-                # TODO: Once the OOM issue for the TPU backend is resolved, we
-                # will switch to using the moe_forward custom op.
-                shared_output, fused_output = self.forward_impl(
-                    hidden_states, router_logits)
-            else:
-                shared_output, fused_output = torch.ops.vllm.moe_forward_shared(
-                    hidden_states, router_logits, self.layer_name)
-            return (shared_output[..., :og_hidden_states],
-                    fused_output[..., :og_hidden_states])
+            fused_output = torch.ops.vllm.moe_forward(
+                hidden_states, router_logits, self.layer_name)
+        return fused_output[..., :og_hidden_states]
 
     def forward_cuda(
         self,
@@ -1850,7 +1842,7 @@ class FusedMoE(CustomOp):
         self,
         full_hidden_states: torch.Tensor,
         full_router_logits: torch.Tensor,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+    ) -> torch.Tensor:
         assert self.batched_hidden_states is not None
         assert self.batched_router_logits is not None
         assert self.batched_hidden_states.dtype == full_hidden_states.dtype
@@ -1867,6 +1859,8 @@ class FusedMoE(CustomOp):
         if self.shared_experts is not None:
             full_shared_final_hidden_states = torch.empty_like(
                 full_hidden_states)
+        else:
+            full_shared_final_hidden_states = None
 
         def process_chunk(chunk_start, chunk_end, skip_result_store=False):
             chunk_size = chunk_end - chunk_start
@@ -1898,6 +1892,15 @@ class FusedMoE(CustomOp):
                                                          chunk_size, :]  # type: ignore
             staged_hidden_states.copy_(hidden_states, non_blocking=True)
             staged_router_logits.copy_(router_logits, non_blocking=True)
+
+            # If there are shared experts but we are not using a modular kernel, the
+            # shared experts must be called here
+            if (not isinstance(self.quant_method.fused_experts,
+                               FusedMoEModularKernel)
+                and self.shared_experts is not None):
+                shared_output = self.shared_experts(hidden_states)
+            else:
+                shared_output = None
 
             # Matrix multiply.
             final_hidden_states = self.quant_method.apply(
@@ -1972,17 +1975,21 @@ class FusedMoE(CustomOp):
                               chunk_end,
                               skip_result_store=chunk_start_ >= num_tokens)
 
-        if self.shared_experts is None:
-            return full_fused_final_hidden_states
-        else:
-            return (full_shared_final_hidden_states,
-                    full_fused_final_hidden_states)
+        if self.shared_experts is not None:
+            assert self.shared_fused_combine is not None
+            full_fused_final_hidden_states = self.shared_fused_combine(
+                full_shared_final_hidden_states,
+                full_fused_final_hidden_states)
+
+        # XXXXXXXXX reduce
+
+        return full_fused_final_hidden_states
 
     def forward_impl(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+    ) -> torch.Tensor:
         assert self.quant_method is not None
 
         self.ensure_moe_quant_config()
@@ -2039,9 +2046,12 @@ class FusedMoE(CustomOp):
         )
 
         if shared_output is not None:
-            assert not isinstance(final_hidden_states, tuple)
             assert self.shared_experts is not None
-            final_hidden_states = (
+            assert self.shared_fused_combine is not None
+
+            # shared_output reduce needed?
+
+            final_hidden_states = self.shared_fused_combine(
                 shared_output,
                 final_hidden_states,
             )
@@ -2053,6 +2063,7 @@ class FusedMoE(CustomOp):
             if do_naive_dispatch_combine:
                 states = get_ep_group().combine(states)
 
+            # update augment condition?
             if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
                 states = self.maybe_all_reduce_tensor_model_parallel(states)
 
@@ -2149,35 +2160,6 @@ direct_register_custom_op(
     tags=(torch.Tag.needs_fixed_stride_order, ),
 )
 
-
-def moe_forward_shared(
-    hidden_states: torch.Tensor,
-    router_logits: torch.Tensor,
-    layer_name: str,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    forward_context: ForwardContext = get_forward_context()
-    self = forward_context.no_compile_layers[layer_name]
-    assert self.shared_experts is not None
-    return self.forward_impl(hidden_states, router_logits)
-
-
-def moe_forward_shared_fake(
-    hidden_states: torch.Tensor,
-    router_logits: torch.Tensor,
-    layer_name: str,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    shared_out = torch.empty_like(hidden_states)
-    fused_out = torch.empty_like(hidden_states)
-    return shared_out, fused_out
-
-
-direct_register_custom_op(
-    op_name="moe_forward_shared",
-    op_func=moe_forward_shared,
-    mutates_args=["hidden_states"],
-    fake_impl=moe_forward_shared_fake,
-    tags=(torch.Tag.needs_fixed_stride_order, ),
-)
 
 # Mark the FusedMoE weight_loader as supporting MoE-specific parameters
 # to avoid expensive runtime reflection in model loading code

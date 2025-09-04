@@ -248,7 +248,9 @@ class DeepseekV2MoE(nn.Module):
             )
 
             self.experts = SharedFusedMoE(
+                use_overlapped=False,  # For test
                 shared_experts=self.shared_experts,
+                shared_fused_combine=lambda shared, fused: self.sum_shared_fused(shared, fused),
                 num_experts=config.n_routed_experts,
                 top_k=config.num_experts_per_tok,
                 hidden_size=config.hidden_size,
@@ -295,15 +297,26 @@ class DeepseekV2MoE(nn.Module):
 
         # Fix FP16 overflow
         # See DeepseekV2DecoderLayer for more details.
-        if hidden_states.dtype != torch.float16:
-            final_hidden_states *= self.routed_scaling_factor
+        if fused_output.dtype != torch.float16:
+            fused_output *= self.routed_scaling_factor
         elif self.shared_experts is not None:
             assert shared_output is not None
             shared_output *= (1. / self.routed_scaling_factor)
 
         if self.shared_experts is not None:
             assert shared_output is not None
-            final_hidden_states += shared_output
+            fused_output += shared_output
+
+        return fused_output
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        num_tokens, hidden_dim = hidden_states.shape
+        hidden_states = hidden_states.view(-1, hidden_dim)
+        # router_logits: (num_tokens, n_experts)
+        router_logits, _ = self.gate(hidden_states)
+
+        final_hidden_states = self.experts(hidden_states=hidden_states,
+                                           router_logits=router_logits)
 
         if self.is_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(
