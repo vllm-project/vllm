@@ -100,6 +100,15 @@ class Scheduler(SchedulerInterface):
 
         self.block_size = self.cache_config.block_size
 
+        self.dcp_world_size = \
+            vllm_config.parallel_config.decode_context_parallel_size
+        # Note(hc): The scheduler’s block_size must be multiplied
+        # by dcp_world_size, since block hashes are computed on the
+        # original full token sequence at a granularity of
+        # original_block_size × dcp_world_size.
+        if self.dcp_world_size > 1:
+            self.block_size *= self.dcp_world_size
+
         # req_id -> Request
         self.requests: dict[str, Request] = {}
         # Scheduling policy
@@ -161,6 +170,7 @@ class Scheduler(SchedulerInterface):
             use_eagle=self.use_eagle,
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
+            dcp_world_size=self.dcp_world_size,
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
 
@@ -815,7 +825,7 @@ class Scheduler(SchedulerInterface):
         # NOTE: structured_output_request_ids maps
         # a request's (request that uses structured output)
         # request_id to its index in the batch.
-        # This will helps us determine to slice the grammar bitmask
+        # This will help us determine to slice the grammar bitmask
         # and only applies valid mask for requests that
         # uses structured decoding.
         structured_output_request_ids: dict[str, int] = {}
@@ -923,7 +933,7 @@ class Scheduler(SchedulerInterface):
                     request):
                 # NOTE: structured_output_request
                 # should not be None if use_structured_output, we have
-                # check above, so safe to ignore type warning
+                # checked above, so safe to ignore type warning
                 request.structured_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
                     req_id, new_token_ids)
 
@@ -1178,6 +1188,8 @@ class Scheduler(SchedulerInterface):
     def shutdown(self) -> None:
         if self.kv_event_publisher:
             self.kv_event_publisher.shutdown()
+        if self.connector is not None:
+            self.connector.shutdown()
 
     ########################################################################
     # KV Connector Related Methods
@@ -1242,7 +1254,7 @@ class Scheduler(SchedulerInterface):
         finished_sending reqs to the output.
         * if finished_sending: free the blocks
         # if finished_recving: add to state so we can
-            scheduler the request during the next step.
+            schedule the request during the next step.
         """
 
         if self.connector is not None:
