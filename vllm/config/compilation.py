@@ -560,7 +560,7 @@ class CompilationConfig:
                     "using attention backends that support cudagraph or set "
                     "cudagraph_mode to NONE explicitly if encountering "
                     "any problems.")
-                self.cudagraph_mode = CUDAGraphMode.FULL
+                # self.cudagraph_mode = CUDAGraphMode.FULL
             self.splitting_ops = []
 
         if envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput":
