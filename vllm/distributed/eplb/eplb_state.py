@@ -427,12 +427,15 @@ class EplbState:
             self.expert_rearrangement_step = 0
             self.rearrange(model)
 
+        # logger.error("EPLBState step0") #TODO del
         if self._async_processor and self._async_processor.has_pending_task:
             logger.error("EPLBState step1")
             try:
                 if self._async_processor.step():
+                    logger.error("EPLBState step2") #TODO del
                     # Process results
                     self._process_async_result()
+                    logger.error("EPLBState step3") #TODO del
             except Exception as e:
                 logger.error("Error processing async rebalance results: {}",
                              str(e))
@@ -569,12 +572,14 @@ class EplbState:
             logger.error("Failed to submit rebalance task to async process")
 
     def _process_async_result(self):
+        logger.error("_process_async_result step0") #TODO del
         """Process asynchronously returned results"""
         if not self._async_processor:
             return
 
         result = self._async_processor.result
         post_args = self._async_processor.post_process_args
+        logger.error("_process_async_result step1") #TODO del
         if not result or not post_args:
             logger.error("Async process did not return valid results, "
                          "skipping post-processing")
@@ -589,10 +594,15 @@ class EplbState:
 
         (new_physical_to_logical_map, new_logical_to_physical_map,
          new_logical_replica_count) = result
+        logger.error("_process_async_result step2") #TODO del
         # Restore tensors to original device
         new_physical_to_logical_map = new_physical_to_logical_map.to(device)
         new_logical_to_physical_map = new_logical_to_physical_map.to(device)
         new_logical_replica_count = new_logical_replica_count.to(device)
+        logger.error("_process_async_result step3") #TODO del
+        logger.error(str(new_physical_to_logical_map)) #TODO del
+        logger.error(str(new_logical_to_physical_map)) #TODO del
+        logger.error(str(new_logical_replica_count)) #TODO del
 
         # Update expert weights
         rearrange_expert_weights_inplace(
@@ -603,7 +613,7 @@ class EplbState:
             is_profile,
             rank_mapping,
         )
-
+        logger.error("_process_async_result step4") #TODO del
         if not is_profile:
             # Update state mappings
             if self.physical_to_logical_map.shape[

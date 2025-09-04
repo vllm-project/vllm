@@ -13,6 +13,7 @@ class EPLBProcess:
     """
 
     def __init__(self, target_func: Callable, num_wait_worker_iterations: int):
+        logger.error("EPLBProcess __init__") #TODO del
         """
         Initialize asynchronous process manager
 
@@ -45,6 +46,7 @@ class EPLBProcess:
 
     def _initialize_process(self) -> None:
         """Initialize the background process and queues"""
+        logger.error("EPLBProcess _initialize_process") #TODO del
         try:
             # Initialize queues
             self._input_queue = Queue()
@@ -68,6 +70,7 @@ class EPLBProcess:
 
     def _worker_loop(self, input_queue: Queue, output_queue: Queue,
                      exception_queue: Queue) -> None:
+        logger.error("EPLBProcess _worker_loop") #TODO del
         """Subprocess worker loop that processes tasks continuously"""
         try:
             while True:
@@ -99,6 +102,7 @@ class EPLBProcess:
 
     def submit_task(self, args: tuple,
                     post_process_args: dict[str, Any]) -> bool:
+        logger.error("EPLBProcess submit_task") #TODO del
         """
         Submit a task to the asynchronous process
 
@@ -134,6 +138,7 @@ class EPLBProcess:
             return False
 
     def step(self) -> bool:
+        logger.error("EPLBProcess step") #TODO del
         """
         Increment step counter and check if results need processing
 
@@ -160,6 +165,7 @@ class EPLBProcess:
         return False
 
     def _should_process(self) -> bool:
+        logger.error("EPLBProcess _should_process") #TODO del
         """Determine if results need processing"""
         if not self._process or not self._result_queue:
             return True
@@ -169,6 +175,7 @@ class EPLBProcess:
                 or not self._result_queue.empty())
 
     def _fetch_result(self) -> None:
+        logger.error("EPLBProcess _fetch_result") #TODO del
         """Retrieve subprocess results"""
         if self._result_queue and not self._result_queue.empty():
             self._result = self._result_queue.get()
@@ -178,6 +185,7 @@ class EPLBProcess:
                 "Asynchronous process completed but no result was returned")
 
     def cleanup(self) -> None:
+        logger.error("EPLBProcess cleanup") #TODO del
         """Clean up process resources"""
         # Send sentinel value to stop the process
         if self._input_queue:
@@ -211,11 +219,13 @@ class EPLBProcess:
 
     @property
     def is_running(self) -> bool:
+        # logger.error("EPLBProcess is_running") #TODO del
         """Return whether the process is running"""
         return self._is_running
 
     @property
     def has_pending_task(self) -> bool:
+        # logger.error("EPLBProcess has_pending_task") #TODO del
         """Return whether there is a pending task"""
         return self._has_pending_task
 
@@ -229,14 +239,17 @@ class EPLBProcess:
 
     @property
     def result(self) -> Optional[tuple]:
+        logger.error("EPLBProcess result") #TODO del
         """Return processing results"""
         return self._result
 
     @property
     def post_process_args(self) -> Optional[dict[str, Any]]:
+        logger.error("EPLBProcess post_process_args") #TODO del
         """Return post-processing arguments"""
         return self._post_process_args
 
     def __del__(self):
+        logger.error("EPLBProcess __del__") #TODO del
         """Ensure resource cleanup when object is destroyed"""
         self.cleanup()
