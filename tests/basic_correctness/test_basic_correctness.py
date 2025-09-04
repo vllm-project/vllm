@@ -218,6 +218,16 @@ def test_models_distributed(
     )
 
 
+def test_dummy_failing_test():
+    """
+    This is a dummy test that always fails for testing the -x flag.
+    It will fail on purpose to verify that pytest stops on first failure.
+    """
+    # assert False, "This test is designed to fail for testing the -x flag"
+    raise AssertionError(
+        "This test is designed to fail for testing the -x flag")
+
+
 def test_failed_model_execution(vllm_runner, monkeypatch) -> None:
 
     from vllm.envs import VLLM_USE_V1
@@ -239,7 +249,7 @@ def v1_test_failed_model_execution(vllm_model):
     mocked_execute_model = Mock(
         side_effect=RuntimeError("Mocked Critical Error"))
     engine.engine_core.engine_core.model_executor.execute_model =\
-                mocked_execute_model
+        mocked_execute_model
 
     with pytest.raises(RuntimeError) as exc_info:
         prompts = [
