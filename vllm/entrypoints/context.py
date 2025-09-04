@@ -49,9 +49,19 @@ class SimpleContext(ConversationContext):
 
     def __init__(self):
         self.last_output = None
+        self.num_prompt_tokens = 0
+        self.num_output_tokens = 0
+        self.num_cached_tokens = 0
+        # todo num_reasoning_tokens is not implemented yet.
+        self.num_reasoning_tokens = 0
 
     def append_output(self, output) -> None:
         self.last_output = output
+        if not isinstance(output, RequestOutput):
+            raise ValueError("SimpleContext only supports RequestOutput.")
+        self.num_prompt_tokens = len(output.prompt_token_ids or [])
+        self.num_cached_tokens = output.num_cached_tokens or 0
+        self.num_output_tokens += len(output.outputs[0].token_ids or [])
 
     def need_builtin_tool_call(self) -> bool:
         return False
