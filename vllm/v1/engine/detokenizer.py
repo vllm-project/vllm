@@ -272,7 +272,6 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
                 ))
         else:
             # Prompt embedding requests cannot be detokenized, in general.
-            # TODO: Validate this is correct
             self.tokens = [""] * self.prompt_len
             self.prefix_offset = 0
             self.read_offest = 0
