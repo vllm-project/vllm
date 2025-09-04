@@ -3247,7 +3247,7 @@ class KVTransferConfig:
 
     kv_parallel_size: int = 1
     """The number of parallel instances for KV cache transfer. For
-    PyNcclConnector, this should be 2."""
+    P2pNcclConnector, this should be 2."""
 
     kv_ip: str = "127.0.0.1"
     """The KV connector ip, used to build distributed connection."""
