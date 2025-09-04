@@ -25,7 +25,7 @@
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, ClassVar, Literal
 
 import torch
 from torch import nn
@@ -57,7 +57,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
+from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP, SupportsTokenformer
 from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
@@ -577,7 +577,7 @@ class Qwen3MoeModel(nn.Module):
 
 
 class Qwen3MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA,
-                          MixtureOfExperts):
+                          MixtureOfExperts, SupportsTokenformer):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",

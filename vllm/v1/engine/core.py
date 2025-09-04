@@ -219,12 +219,66 @@ class EngineCore:
                      "warmup model) took %.2f seconds"), elapsed)
         return num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config
 
+    def get_free_kv_cache_tokens(self) -> int:
+        """Get the number of free KV cache tokens available.
+
+        This method queries the scheduler's KV cache manager to determine
+        how many tokens worth of KV cache memory is currently available.
+
+        Returns:
+            int: Number of free tokens available in KV cache
+        """
+        if not hasattr(self.scheduler, 'kv_cache_manager'):
+            logger.warning("get_free_kv_cache_tokens() no kv_cache_manager on scheduler.")
+            return 0
+
+        kv_manager = self.scheduler.kv_cache_manager
+        if not hasattr(kv_manager, 'block_pool') or not hasattr(kv_manager, 'block_size'):
+            logger.warning("get_free_kv_cache_tokens() no block_pool on kv_manager.")
+            return 0
+
+        # Get free blocks and convert to tokens
+        free_blocks = kv_manager.block_pool.get_num_free_blocks()
+        block_size = kv_manager.block_size
+
+        if block_size is None:
+            return 0
+
+        return free_blocks * block_size
+
+    def get_total_kv_cache_tokens(self) -> int:
+        """Get the total number of KV cache tokens available.
+
+        This method queries the scheduler's KV cache manager to determine
+        how many tokens worth of KV cache memory is currently configured.
+
+        Returns:
+            int: Total number of tokens available in KV cache
+        """
+        if not hasattr(self.scheduler, 'kv_cache_manager'):
+            logger.warning("get_total_kv_cache_tokens() no kv_cache_manager on scheduler.")
+            return 0
+
+        kv_manager = self.scheduler.kv_cache_manager
+        if not hasattr(kv_manager, 'block_pool') or not hasattr(kv_manager, 'block_size'):
+            logger.warning("get_total_kv_cache_tokens() no block_pool on kv_manager.")
+            return 0
+
+        # Get total blocks and convert to tokens
+        total_blocks = kv_manager.block_pool.num_gpu_blocks
+        block_size = kv_manager.block_size
+
+        if block_size is None:
+            return 0
+
+        return total_blocks * block_size
+
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_executor.supported_tasks
 
     def add_request(self, request: Request, request_wave: int = 0):
         """Add request to the scheduler.
-        
+
         `request_wave`: indicate which wave of requests this is expected to
         belong to in DP case
         """
@@ -433,7 +487,7 @@ class EngineCore:
     def preprocess_add_request(
             self, request: EngineCoreRequest) -> tuple[Request, int]:
         """Preprocess the request.
-        
+
         This function could be directly used in input processing thread to allow
         request initialization running in parallel with Model forward
         """

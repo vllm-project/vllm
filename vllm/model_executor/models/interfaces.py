@@ -837,11 +837,9 @@ class SupportsEagle3(Protocol):
         """
         ...
 
-
 @overload
 def supports_eagle3(model: type[object]) -> TypeIs[type[SupportsEagle3]]:
     ...
-
 
 @overload
 def supports_eagle3(model: object) -> TypeIs[SupportsEagle3]:
@@ -852,3 +850,33 @@ def supports_eagle3(
     model: Union[type[object], object],
 ) -> Union[TypeIs[type[SupportsEagle3]], TypeIs[SupportsEagle3]]:
     return isinstance(model, SupportsEagle3)
+
+
+@runtime_checkable
+class SupportsTokenformer(Protocol):
+    """The interface required for all models that support Tokenformer."""
+
+    supports_tokenformer: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model supports Tokenformer.
+
+    Note:
+        There is no need to redefine this flag if this class is in the
+        MRO of your model class.
+    """
+
+
+@overload
+def supports_tokenformer(model: type[object]) -> TypeIs[type[SupportsTokenformer]]:
+    ...
+
+
+@overload
+def supports_tokenformer(model: object) -> TypeIs[SupportsTokenformer]:
+    ...
+
+
+def supports_tokenformer(
+    model: Union[type[object], object],
+) -> Union[TypeIs[type[SupportsTokenformer]], TypeIs[SupportsTokenformer]]:
+    return isinstance(model, SupportsTokenformer)
