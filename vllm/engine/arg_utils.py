@@ -687,8 +687,6 @@ class EngineArgs:
             "--microbatch-schedule",
             dest="microbatch_schedule",
             **parallel_kwargs["microbatch_schedule"])
-        parallel_group.add_argument("--enable-async-comms",
-                                    **parallel_kwargs["enable_async_comms"])
         parallel_group.add_argument("--enable-eplb",
                                     **parallel_kwargs["enable_eplb"])
         parallel_group.add_argument("--eplb-config",

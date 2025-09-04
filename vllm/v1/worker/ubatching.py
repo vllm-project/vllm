@@ -153,7 +153,6 @@ class UBatchContext:
         # It is critical for correctness that only one thread is running
         # at a time. These asserts just make sure that this is the only
         # thread running before waking the other one up and going to sleep
-        print(f"CPU yield {self.id} {type(forward_context._forward_context)} {type(self.forward_context)}")
         assert (
             not check_context or
             forward_context._forward_context is self.forward_context)
@@ -171,11 +170,6 @@ class UBatchContext:
         self._signal_compute_done()
         self.update_stream(self.comm_stream)
         self._wait_comm_done()
-
-    def switch_to_compute_sync(self):
-        self._signal_comm_done()
-        self.update_stream(self.compute_stream)
-        self._wait_compute_done()
 
     def maybe_run_recv_hook(self):
         if self.recv_hook is not None:
@@ -291,7 +285,6 @@ def make_ubatch_contexts(
     comm_stream: torch.cuda.Stream,
     forward_contexts: list[ForwardContext],
     ready_barrier: threading.Barrier,
-    device: Optional[torch.device] = None,
     schedule: Schedule = Schedule.MLP_OVERLAP,
     delayed_start: bool = False,
 ) -> list[UBatchContext]:
