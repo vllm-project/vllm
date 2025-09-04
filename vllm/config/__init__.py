@@ -2897,11 +2897,8 @@ def _get_and_verify_dtype(
     return torch_dtype
 
 
-def _get_head_dtype(
-        config: PretrainedConfig,
-        dtype: torch.dtype,
-    runner_type: str
-) -> torch.dtype:
+def _get_head_dtype(config: PretrainedConfig, dtype: torch.dtype,
+                    runner_type: str) -> torch.dtype:
     if torch.float32 not in current_platform.supported_dtypes:
         return dtype
 
