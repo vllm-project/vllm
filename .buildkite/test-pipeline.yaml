@@ -133,8 +133,16 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/openai/test_collective_rpc.py # PYTHONPATH is needed to import custom Worker extension
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/test_oot_registration.py --ignore=entrypoints/openai/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/test_collective_rpc.py
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_chat_template.py --ignore=entrypoints/openai/test_cli_args.py --ignore=entrypoints/openai/test_lora_resolvers.py --ignore=entrypoints/openai/test_oot_registration.py --ignore=entrypoints/openai/test_serving_chat.py --ignore=entrypoints/openai/test_serving_models.py --ignore=entrypoints/openai/tool_parsers/test_pythonic_tool_parser.py --ignore=entrypoints/openai/tool_parsers/utils.py --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/test_collective_rpc.py
   - pytest -v -s entrypoints/test_chat_utils.py
+
+- label: Entrypoints Test (API Server CPU)
+  source_file_dependencies:
+  - vllm/
+  - tests/entrypoints/openai
+  no_gpu: true
+  commands:
+  - pytest -v -s entrypoints/openai/test_chat_template.py entrypoints/openai/test_cli_args.py entrypoints/openai/test_lora_resolvers.py entrypoints/openai/test_oot_registration.py entrypoints/openai/test_serving_chat.py entrypoints/openai/test_serving_models.py entrypoints/openai/tool_parsers/test_pythonic_tool_parser.py entrypoints/openai/tool_parsers/utils.py entrypoints/test_api_server_process_manager.py entrypoints/test_ssl_cert_refresher.py
 
 - label: Distributed Tests (4 GPUs) # 10min
   mirror_hardwares: [amdexperimental]
