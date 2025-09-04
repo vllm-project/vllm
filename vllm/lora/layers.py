@@ -1151,7 +1151,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         lora_logits = lora_logits.mT
         indices_padded = self.punica_wrapper.sampler_indices_padded
 
-        if current_platform.is_tpu():
+        if current_platform.is_tpu() or current_platform.is_xpu():
             indices_padded = indices_padded[:logits.size(0)]
 
         lora_logits = (lora_logits.reshape(
