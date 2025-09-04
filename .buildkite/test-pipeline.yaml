@@ -41,7 +41,7 @@ steps:
   commands:
   - bash standalone_tests/pytorch_nightly_dependency.sh
 
-- label: Async Engine, Inputs, Utils, Worker Test # 24min
+- label: Async Engine, Inputs, Utils, Worker Test # 36min
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - vllm/
@@ -54,6 +54,7 @@ steps:
   - tests/worker
   - tests/standalone_tests/lazy_imports.py
   commands:
+  - export PYTEST_ADDOPTS="--timeout=2700" # 45min timeout
   - python3 standalone_tests/lazy_imports.py
   - pytest -v -s mq_llm_engine # MQLLMEngine
   - pytest -v -s async_engine # AsyncLLMEngine
@@ -63,15 +64,16 @@ steps:
   - pytest -v -s utils_ # Utils
   - pytest -v -s worker # Worker
 
-- label: Python-only Installation Test
+- label: Python-only Installation Test # 10min
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - tests/standalone_tests/python_only_compile.sh
   - setup.py
   commands:
+  - export PYTEST_ADDOPTS="--timeout=720" # 12min timeout
   - bash standalone_tests/python_only_compile.sh
 
-- label: Basic Correctness Test # 30min
+- label: Basic Correctness Test # 20min
   mirror_hardwares: [amdexperimental]
   fast_check: true
   torch_nightly: true
@@ -82,13 +84,14 @@ steps:
   - tests/basic_correctness/test_preemption
   - tests/basic_correctness/test_cumem.py
   commands:
+  - export PYTEST_ADDOPTS="--timeout=1800" # 30min timeout
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s basic_correctness/test_cumem.py
   - pytest -v -s basic_correctness/test_basic_correctness.py
   - pytest -v -s basic_correctness/test_cpu_offload.py
   - VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py
 
-- label: Core Test # 10min
+- label: Core Test # 22min
   mirror_hardwares: [amdexperimental]
   fast_check: true
   source_file_dependencies:
@@ -96,9 +99,10 @@ steps:
   - vllm/distributed
   - tests/core
   commands:
+  - export PYTEST_ADDOPTS="--timeout=1800" # 30min timeout
   - pytest -v -s core
 
-- label: Entrypoints Test (LLM) # 40min
+- label: Entrypoints Test (LLM) # 30min
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
   fast_check: true
@@ -108,13 +112,14 @@ steps:
   - tests/entrypoints/llm
   - tests/entrypoints/offline_mode
   commands:
+  - export PYTEST_ADDOPTS="--timeout=2400" # 40min timeout
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
   - pytest -v -s entrypoints/llm/test_lazy_outlines.py # it needs a clean process
   - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
   - VLLM_USE_V1=0 pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
 
-- label: Entrypoints Test (API Server) # 40min
+- label: Entrypoints Test (API Server) # 100min
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
   fast_check: true
@@ -124,12 +129,13 @@ steps:
   - tests/entrypoints/openai
   - tests/entrypoints/test_chat_utils
   commands:
+  - export PYTEST_ADDOPTS="--timeout=7200" # 120min timeout
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/openai/test_collective_rpc.py # PYTHONPATH is needed to import custom Worker extension
   - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/test_oot_registration.py --ignore=entrypoints/openai/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/test_collective_rpc.py
   - pytest -v -s entrypoints/test_chat_utils.py
 
-- label: Distributed Tests (4 GPUs) # 10min
+- label: Distributed Tests (4 GPUs) # 35min
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
@@ -149,6 +155,7 @@ steps:
   - tests/v1/test_hybrid_lb_dp.py
   - tests/v1/engine/test_engine_core_client.py
   commands:
+  - export PYTEST_ADDOPTS="--timeout=2700" # 45min timeout
   # test with tp=2 and external_dp=2
   - VLLM_USE_V1=0 torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
   - torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
@@ -172,12 +179,13 @@ steps:
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 RAY_DEDUP_LOGS=0 python3 rlhf_colocate.py
   - popd
 
-- label: EPLB Algorithm Test
+- label: EPLB Algorithm Test # 5min
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/distributed/eplb
   - tests/distributed/test_eplb_algo.py
   commands:
+  - export PYTEST_ADDOPTS="--timeout=360" # 6min timeout
   - pytest -v -s distributed/test_eplb_algo.py
 
 - label: EPLB Execution Test # 5min
@@ -187,9 +195,10 @@ steps:
   - vllm/distributed/eplb
   - tests/distributed/test_eplb_execute.py
   commands:
+  - export PYTEST_ADDOPTS="--timeout=360" # 6min timeout
   - pytest -v -s distributed/test_eplb_execute.py
 
-- label: Metrics, Tracing Test # 10min
+- label: Metrics, Tracing Test # 12min
   mirror_hardwares: [amdexperimental]
   num_gpus: 2
   source_file_dependencies:
@@ -197,6 +206,7 @@ steps:
   - tests/metrics
   - tests/tracing
   commands:
+  - export PYTEST_ADDOPTS="--timeout=900" # 15min timeout
   - pytest -v -s metrics
   - "pip install \
       'opentelemetry-sdk>=1.26.0' \
@@ -208,17 +218,18 @@ steps:
 ##### fast check tests  #####
 #####  1 GPU test  #####
 
-- label: Regression Test # 5min
+- label: Regression Test # 7min
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - vllm/
   - tests/test_regression
   commands:
+  - export PYTEST_ADDOPTS="--timeout=600" # 10min timeout
   - pip install modelscope
   - pytest -v -s test_regression.py
   working_dir: "/vllm-workspace/tests" # optional
 
-- label: Engine Test # 10min
+- label: Engine Test # 25min
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - vllm/
@@ -229,11 +240,12 @@ steps:
   - tests/test_logger
   - tests/test_vllm_port
   commands:
+  - export PYTEST_ADDOPTS="--timeout=1800" # 30min timeout
   - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py
   # OOM in the CI unless we run this separately
   - pytest -v -s tokenization
 
-- label: V1 Test e2e + engine
+- label: V1 Test e2e + engine # 30min
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
     - vllm/
@@ -241,24 +253,27 @@ steps:
   commands:
     # TODO: accuracy does not match, whether setting
     # VLLM_USE_FLASHINFER_SAMPLER or not on H100.
+    - export PYTEST_ADDOPTS="--timeout=2100" # 35min timeout
     - pytest -v -s v1/e2e
     - pytest -v -s v1/engine
 
-- label: V1 Test entrypoints
+- label: V1 Test entrypoints # 35min
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
     - vllm/
     - tests/v1
   commands:
+    - export PYTEST_ADDOPTS="--timeout=2400" # 40min timeout
     - pytest -v -s v1/entrypoints
 
-- label: V1 Test others
+- label: V1 Test others # 42min
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
     - vllm/
     - tests/v1
   commands:
     # split the test to avoid interference
+    - export PYTEST_ADDOPTS="--timeout=3000" # 50min timeout
     - pytest -v -s v1/core
     - pytest -v -s v1/executor
     - pytest -v -s v1/sample
@@ -276,13 +291,14 @@ steps:
     - pip install -U git+https://github.com/robertgshaw2-redhat/lm-evaluation-harness.git@streaming-api
     - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
 
-- label: Examples Test # 25min
+- label: Examples Test # 30min
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/examples"
   source_file_dependencies:
   - vllm/entrypoints
   - examples/
   commands:
+    - export PYTEST_ADDOPTS="--timeout=2400" # 40min timeout
     - pip install tensorizer # for tensorizer test
     - python3 offline_inference/basic/generate.py --model facebook/opt-125m
     - python3 offline_inference/basic/generate.py --model meta-llama/Llama-2-13b-chat-hf --cpu-offload-gb 10
@@ -301,15 +317,16 @@ steps:
     - python3 offline_inference/basic/score.py
     - VLLM_USE_V1=0 python3 offline_inference/profiling.py --model facebook/opt-125m run_num_steps --num-steps 2
 
-- label: Platform Tests (CUDA)
+- label: Platform Tests (CUDA) # 4min
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - vllm/
   - tests/cuda
   commands:
+    - export PYTEST_ADDOPTS="--timeout=300" # 5min timeout
     - pytest -v -s cuda/test_cuda_context.py
 
-- label: Samplers Test # 36min
+- label: Samplers Test # 56min
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - vllm/model_executor/layers
@@ -317,24 +334,33 @@ steps:
   - tests/samplers
   - tests/conftest.py
   commands:
+    - export PYTEST_ADDOPTS="--timeout=3900" # 65min timeout
     - pytest -v -s samplers
     - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers
 
-- label: LoRA Test %N # 15min each
+- label: LoRA Test %N # 20min each
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - vllm/lora
   - tests/lora
-  command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_llm_with_multi_loras.py
+  command:
+    - export PYTEST_ADDOPTS="--timeout=1800" # 30min timeout
+    - pytest -v -s lora \
+      --shard-id=$$BUILDKITE_PARALLEL_JOB \
+      --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT \
+      --ignore=lora/test_chatglm3_tp.py \
+      --ignore=lora/test_llama_tp.py \
+      --ignore=lora/test_llm_with_multi_loras.py
   parallelism: 4
 
-- label: PyTorch Compilation Unit Tests
+- label: PyTorch Compilation Unit Tests # 15min
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
     - vllm/
     - tests/compile
   commands:
+    - export PYTEST_ADDOPTS="--timeout=1200" # 20min timeout
     - pytest -v -s compile/test_pass_manager.py
     - pytest -v -s compile/test_fusion.py
     - pytest -v -s compile/test_fusion_attn.py
@@ -344,13 +370,14 @@ steps:
     - pytest -v -s compile/test_fusion_all_reduce.py
     - pytest -v -s compile/test_decorator.py
 
-- label: PyTorch Fullgraph Smoke Test # 9min
+- label: PyTorch Fullgraph Smoke Test # 15min
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/compile
   commands:
+  - export PYTEST_ADDOPTS="--timeout=1200" # 20min timeout
   - pytest -v -s compile/test_basic_correctness.py
   # these tests need to be separated, cannot combine
   - pytest -v -s compile/piecewise/test_simple.py
@@ -358,24 +385,26 @@ steps:
   - pytest -v -s compile/piecewise/test_full_cudagraph.py
   - pytest -v -s compile/piecewise/test_multiple_graphs.py
 
-- label: PyTorch Fullgraph Test # 18min
+- label: PyTorch Fullgraph Test # 20min
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/compile
   commands:
+  - export PYTEST_ADDOPTS="--timeout=1500" # 25min timeout
   - pytest -v -s compile/test_full_graph.py
 
-- label: Kernels Core Operation Test
+- label: Kernels Core Operation Test # 48min
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - csrc/
   - tests/kernels/core
   commands:
+    - export PYTEST_ADDOPTS="--timeout=3600" # 60min timeout
     - pytest -v -s kernels/core
 
-- label: Kernels Attention Test %N
+- label: Kernels Attention Test %N # 23min
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - csrc/attention/
@@ -383,20 +412,22 @@ steps:
   - vllm/v1/attention
   - tests/kernels/attention
   commands:
+    - export PYTEST_ADDOPTS="--timeout=1680" # 28min timeout
     - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 2
 
-- label: Kernels Quantization Test %N
+- label: Kernels Quantization Test %N # 64min
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - csrc/quantization/
   - vllm/model_executor/layers/quantization
   - tests/kernels/quantization
   commands:
+    - export PYTEST_ADDOPTS="--timeout=4500" # 75min timeout
     - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 2
 
-- label: Kernels MoE Test %N
+- label: Kernels MoE Test %N # 40min
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - csrc/quantization/cutlass_w8a8/moe/
@@ -405,40 +436,44 @@ steps:
   - vllm/model_executor/layers/fused_moe/
   - vllm/distributed/device_communicators/
   commands:
+    - export PYTEST_ADDOPTS="--timeout=2880" # 48min timeout
     - pytest -v -s kernels/moe --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 2
 
-- label: Kernels Mamba Test
+- label: Kernels Mamba Test # 31min
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - csrc/mamba/
   - tests/kernels/mamba
   commands:
+    - export PYTEST_ADDOPTS="--timeout=2100" # 35min timeout
     - pytest -v -s kernels/mamba
 
-- label: Tensorizer Test # 11min
+- label: Tensorizer Test # 14min
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - vllm/model_executor/model_loader
   - tests/tensorizer_loader
   - tests/entrypoints/openai/test_tensorizer_entrypoint.py
   commands:
+    - export PYTEST_ADDOPTS="--timeout=960" # 16min timeout
     - apt-get update && apt-get install -y curl libsodium23
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s tensorizer_loader
     - pytest -v -s entrypoints/openai/test_tensorizer_entrypoint.py
 
-- label: Model Executor Test
+- label: Model Executor Test # 7min
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - vllm/model_executor
   - tests/model_executor
   commands:
+    - export PYTEST_ADDOPTS="--timeout=540" # 9min timeout
     - apt-get update && apt-get install -y curl libsodium23
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s model_executor
 
-- label: Benchmarks # 9min
+- label: Benchmarks # 11min
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/.buildkite"
   source_file_dependencies:
@@ -446,21 +481,23 @@ steps:
   commands:
   - bash scripts/run-benchmarks.sh
 
-- label: Benchmarks CLI Test # 10min
+- label: Benchmarks CLI Test # 7min
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - vllm/
   - tests/benchmarks/
   commands:
+  - export PYTEST_ADDOPTS="--timeout=540" # 9min timeout
   - pytest -v -s benchmarks/
 
-- label: Quantization Test
+- label: Quantization Test # 70min
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
   - tests/quantization
   commands:
+  - export PYTEST_ADDOPTS="--timeout=5100" # 85min timeout
   # temporary install here since we need nightly, will move to requirements/test.in
   # after torchao 0.12 release, and pin a working version of torchao nightly here
   - pip install --pre torchao==0.13.0.dev20250814 --index-url https://download.pytorch.org/whl/nightly/cu128
@@ -472,26 +509,29 @@ steps:
   - csrc/
   - vllm/model_executor/layers/quantization
   commands:
+  - export PYTEST_ADDOPTS="--timeout=3600" # 60min timeout
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt --tp-size=1
 
-- label: OpenAI API correctness
+- label: OpenAI API correctness # 22min
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - csrc/
   - vllm/entrypoints/openai/
   - vllm/model_executor/models/whisper.py
   commands: # LMEval+Transcription WER check
+  - export PYTEST_ADDOPTS="--timeout=1500" # 25min timeout
   - pytest -s entrypoints/openai/correctness/
 
-- label: Encoder Decoder tests # 5min
+- label: Encoder Decoder tests # 12min
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - vllm/
   - tests/encoder_decoder
   commands:
+    - export PYTEST_ADDOPTS="--timeout=900" # 15min timeout
     - pytest -v -s encoder_decoder
 
-- label: OpenAI-Compatible Tool Use # 20 min
+- label: OpenAI-Compatible Tool Use # 23 min
   mirror_hardwares: [amdexperimental]
   fast_check: false
   source_file_dependencies:
@@ -499,31 +539,34 @@ steps:
     - tests/tool_use
     - tests/mistral_tool_use
   commands:
+    - export PYTEST_ADDOPTS="--timeout=1500" # 25min timeout
     - pytest -v -s tool_use
     - pytest -v -s mistral_tool_use
 
 #####  models test  #####
 
-- label: Basic Models Test # 24min
+- label: Basic Models Test # 57min
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models
   commands:
+    - export PYTEST_ADDOPTS="--timeout=3900" # 65min timeout
     - pytest -v -s models/test_transformers.py
     - pytest -v -s models/test_registry.py
     - pytest -v -s models/test_utils.py
     - pytest -v -s models/test_vision.py
     - pytest -v -s models/test_initialization.py
 
-- label: Language Models Test (Standard)
+- label: Language Models Test (Standard) # 35min
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/language
   commands:
+    - export PYTEST_ADDOPTS="--timeout=2400" # 40min timeout
     - pip freeze | grep -E 'torch'
     - pytest -v -s models/language -m core_model
 
@@ -534,19 +577,21 @@ steps:
   - vllm/
   - tests/models/language/generation
   commands:
+    - export PYTEST_ADDOPTS="--timeout=2400" # 40min timeout
     # Install fast path packages for testing against transformers
     # Note: also needed to run plamo2 model in vLLM
     - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.2.5'
     - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
     - pytest -v -s models/language/generation -m hybrid_model
 
-- label: Language Models Test (Extended Generation) # 1hr20min
+- label: Language Models Test (Extended Generation) # 80min
   mirror_hardwares: [amdexperimental]
   optional: true
   source_file_dependencies:
   - vllm/
   - tests/models/language/generation
   commands:
+    - export PYTEST_ADDOPTS="--timeout=5700" # 95min timeout
     # Install causal-conv1d for plamo2 models here, as it is not compatible with pip-compile.
     - pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8'
     - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
@@ -558,23 +603,26 @@ steps:
   - vllm/
   - tests/models/language/pooling
   commands:
+    - export PYTEST_ADDOPTS="--timeout=2400" # 40min timeout
     - pytest -v -s models/language/pooling -m 'not core_model'
 
-- label: Multi-Modal Processor Test
+- label: Multi-Modal Processor Test # 44min
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
   commands:
+    - export PYTEST_ADDOPTS="--timeout=3180" # 53min timeout
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal/processing
 
-- label: Multi-Modal Models Test (Standard)
+- label: Multi-Modal Models Test (Standard) # 60min
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
   commands:
+    - export PYTEST_ADDOPTS="--timeout=4320" # 72min timeout
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pip freeze | grep -E 'torch'
     - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/processing
@@ -610,12 +658,13 @@ steps:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
 
-- label: Quantized Models Test
+- label: Quantized Models Test # 45 min
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - vllm/model_executor/layers/quantization
   - tests/models/quantization
   commands:
+    - export PYTEST_ADDOPTS="--timeout=3300" # 55min timeout
     - pytest -v -s models/quantization
 
 # This test is used only in PR development phase to test individual models and should never run on main
@@ -640,7 +689,7 @@ steps:
     - python3 examples/offline_inference/audio_language.py --model-type whisper
     - python3 examples/offline_inference/vision_language.py --model-type qwen2_5_vl
 
-- label: Blackwell Test
+- label: Blackwell Test # 38 min
   working_dir: "/vllm-workspace/"
   gpu: b200
   # optional: true
@@ -656,6 +705,7 @@ steps:
   - vllm/compilation/fusion.py
   - vllm/compilation/fusion_attn.py
   commands:
+    - export PYTEST_ADDOPTS="--timeout=2700" # 45min timeout
     - nvidia-smi
     - python3 examples/offline_inference/basic/chat.py
     # Attention
@@ -689,6 +739,7 @@ steps:
   - vllm/distributed
   - tests/distributed
   commands:
+  - export PYTEST_ADDOPTS="--timeout=600" # 10min timeout
   - pytest -v -s distributed/test_comm_ops.py
   - pytest -v -s distributed/test_shm_broadcast.py
 
@@ -705,6 +756,7 @@ steps:
   - tests/distributed/
   - tests/examples/offline_inference/data_parallel.py
   commands:
+  - export PYTEST_ADDOPTS="--timeout=1200" # 20min timeout
   - # the following commands are for the first node, with ip 192.168.10.10 (ray environment already set up)
     - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed'
     - NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed'
@@ -716,7 +768,7 @@ steps:
     - NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed'
     - python3 ../examples/offline_inference/data_parallel.py --dp-size=2 --tp-size=1 --node-size=2 --node-rank=1 --master-addr=192.168.10.10 --master-port=12345 --enforce-eager --trust-remote-code
 
-- label: Distributed Tests (2 GPUs) # 40min
+- label: Distributed Tests (2 GPUs) # 110min
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
@@ -736,6 +788,7 @@ steps:
   - tests/v1/entrypoints/openai/test_multi_api_servers.py
   - vllm/v1/engine/
   commands:
+  - export PYTEST_ADDOPTS="--timeout=7800" # 130min timeout
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/test_async_llm_dp.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/test_external_lb_dp.py
   - DP_SIZE=2 pytest -v -s v1/entrypoints/openai/test_multi_api_servers.py
@@ -764,6 +817,7 @@ steps:
   - vllm/plugins/
   - tests/plugins/
   commands:
+  - export PYTEST_ADDOPTS="--timeout=2880" # 48min timeout
   # begin platform plugin and general plugin tests, all the code in-between runs on dummy platform
   - pip install -e ./plugins/vllm_add_dummy_platform
   - pytest -v -s plugins_tests/test_platform_plugins.py
@@ -793,16 +847,18 @@ steps:
   - vllm/model_executor/models/
   - tests/distributed/
   commands:
+  - export PYTEST_ADDOPTS="--timeout=3000" # 50min timeout
   - pytest -v -s distributed/test_pp_cudagraph.py
   - pytest -v -s distributed/test_pipeline_parallel.py
 
-- label: LoRA TP Test (Distributed)
+- label: LoRA TP Test (Distributed) # 17 min
   mirror_hardwares: [amdexperimental]
   num_gpus: 4
   source_file_dependencies:
   - vllm/lora
   - tests/lora
   commands:
+    - export PYTEST_ADDOPTS="--timeout=1200" # 20min timeout
     # FIXIT: find out which code initialize cuda before running the test
     # before the fix, we need to use spawn to test it
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
