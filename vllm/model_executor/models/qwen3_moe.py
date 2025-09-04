@@ -65,6 +65,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
 
+<<<<<<< HEAD
 from .interfaces import MixtureOfExperts, SupportsEagle3, SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
@@ -75,6 +76,13 @@ from .utils import (
     make_layers,
     maybe_prefix,
 )
+=======
+from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP, SupportsTokenformer
+from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
+                    is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
+>>>>>>> c3a9c1780 (Patch apply from previous changes to different upstream)
 
 logger = init_logger(__name__)
 
@@ -672,9 +680,14 @@ class Qwen3MoeModel(nn.Module):
         return loaded_params
 
 
+<<<<<<< HEAD
 class Qwen3MoeForCausalLM(
     nn.Module, SupportsPP, SupportsLoRA, SupportsEagle3, MixtureOfExperts
 ):
+=======
+class Qwen3MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA,
+                          MixtureOfExperts, SupportsTokenformer):
+>>>>>>> c3a9c1780 (Patch apply from previous changes to different upstream)
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",

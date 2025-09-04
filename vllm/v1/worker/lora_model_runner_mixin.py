@@ -18,6 +18,7 @@ from vllm.lora.layers import LoRAMapping, LoRAMappingType
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora
+from vllm.tokenformer.tokenformer_model_manager import TokenformerModelManager
 from vllm.v1.worker.gpu_input_batch import InputBatch as GPUInputBatch
 from vllm.v1.worker.tpu_input_batch import InputBatch as TPUInputBatch
 
@@ -35,15 +36,17 @@ class LoRAModelRunnerMixin:
         device: torch.device,
     ) -> nn.Module:
         if not supports_lora(model):
-            raise ValueError(f"{model.__class__.__name__} does not support LoRA yet.")
+            raise ValueError(
+                f"{model.__class__.__name__} does not support LoRA yet.")
 
-        # Add LoRA Manager to the Model Runner
-        self.lora_manager = LRUCacheWorkerLoRAManager(
-            vllm_config,
-            device,
-            model.embedding_modules,
-        )
-        return self.lora_manager.create_lora_manager(model, vllm_config)
+        self.lora_manager = TokenformerModelManager(model=model,
+                                                    device=device)
+
+        logger.info("Created LoRA manager for model "
+                    f"{model.__class__.__name__} with device {device}.")
+
+        return self.lora_manager.model
+
 
     def _set_active_loras(
         self,
@@ -53,6 +56,8 @@ class LoRAModelRunnerMixin:
         mapping_type: LoRAMappingType = LoRAMappingType.LANGUAGE,
     ) -> None:
         self._ensure_lora_enabled()
+        if self.lora_manager is None:
+            raise RuntimeError("LoRA is not enabled.")
 
         # Set is_prefill to True, so we always use the SGMV kernels on
         # non-cuda platforms.

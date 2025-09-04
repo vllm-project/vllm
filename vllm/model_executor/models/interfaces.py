@@ -757,7 +757,7 @@ class IsHybrid(Protocol):
     is_hybrid: ClassVar[Literal[True]] = True
     """
         A flag that indicates this model has both mamba and attention blocks
-        , also indicates that the model's hf_config has 
+        , also indicates that the model's hf_config has
         'layers_block_type' """
 
     @classmethod
@@ -1161,7 +1161,7 @@ class SupportsEagle(SupportsEagleBase, Protocol):
 
     supports_eagle: ClassVar[Literal[True]] = True
     """
-    A flag that indicates this model supports EAGLE-1 and EAGLE-2 
+    A flag that indicates this model supports EAGLE-1 and EAGLE-2
     speculative decoding.
 
     Note:
@@ -1191,7 +1191,7 @@ class SupportsEagle3(SupportsEagleBase, Protocol):
 
     supports_eagle3: ClassVar[Literal[True]] = True
     """
-    A flag that indicates this model supports EAGLE-3 
+    A flag that indicates this model supports EAGLE-3
     speculative decoding.
 
     Note:
@@ -1220,10 +1220,8 @@ class SupportsEagle3(SupportsEagleBase, Protocol):
         """
         ...
 
-
 @overload
 def supports_eagle3(model: type[object]) -> TypeIs[type[SupportsEagle3]]: ...
-
 
 @overload
 def supports_eagle3(model: object) -> TypeIs[SupportsEagle3]: ...
@@ -1240,12 +1238,20 @@ class SupportsMRoPE(Protocol):
     """The interface required for all models that support M-RoPE."""
 
     supports_mrope: ClassVar[Literal[True]] = True
-    """
-    A flag that indicates this model supports M-RoPE.
 
     Note:
         There is no need to redefine this flag if this class is in the
         MRO of your model class.
+    """
+    A flag that indicates this model supports M-RoPE.
+
+class SupportsTokenformer(Protocol):
+    """The interface required for all models that support Tokenformer."""
+
+    supports_tokenformer: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model supports Tokenformer.
+
     """
 
     def get_mrope_input_positions(
@@ -1332,3 +1338,19 @@ def supports_xdrope(
     model: type[object] | object,
 ) -> TypeIs[type[SupportsXDRoPE]] | TypeIs[SupportsXDRoPE]:
     return isinstance(model, SupportsXDRoPE)
+
+@overload
+def supports_tokenformer(model: type[object]) -> TypeIs[type[SupportsTokenformer]]:
+    ...
+
+
+@overload
+def supports_tokenformer(model: object) -> TypeIs[SupportsTokenformer]:
+    ...
+
+
+def supports_tokenformer(
+    model: Union[type[object], object],
+) -> Union[TypeIs[type[SupportsTokenformer]], TypeIs[SupportsTokenformer]]:
+    return isinstance(model, SupportsTokenformer)
+>>>>>>> c3a9c1780 (Patch apply from previous changes to different upstream)
