@@ -57,7 +57,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils import cdiv, direct_register_custom_op
 
 from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
 from .utils import (PPMissingLayer, is_pp_missing_parameter,
@@ -117,6 +119,46 @@ class DeepseekV2MLP(nn.Module):
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
+
+
+# Chunk x along the num_tokens axis for sequence parallelism
+# NOTE: This is wrapped in a torch custom op to work around an issue: The
+# output tensor can have a sequence length 0 at small input sequence lengths
+# even though we explicitly pad to avoid this.
+def sequence_parallel_chunk(x: torch.Tensor) -> torch.Tensor:
+    tp_size = get_tensor_model_parallel_world_size()
+    tp_rank = get_tensor_model_parallel_rank()
+
+    # all_gather needs the sequence length to be divisible by tp_size
+    seq_len = x.size(0)
+    remainder = seq_len % tp_size
+    if remainder != 0:
+        pad_len = tp_size - remainder
+        x = nn.functional.pad(x, (0, 0, 0, pad_len))
+
+    chunk = x.shape[0] // tp_size
+    start = tp_rank * chunk
+    #TODO: is the contiguous necessary?
+    return torch.narrow(x, 0, start, chunk).contiguous
+
+
+def sequence_parallel_chunk_fake(x: torch.Tensor) -> torch.Tensor:
+    tp_size = get_tensor_model_parallel_world_size()
+    seq_len = cdiv(x.size(0), tp_size)
+    shape = list(x.shape)
+    shape[0] = seq_len
+    out = torch.empty(shape, dtype=x.dtype, device=x.device)
+    return out
+
+
+direct_register_custom_op(
+    op_name="sequence_parallel_chunk",
+    op_func=sequence_parallel_chunk,
+    mutates_args=[],
+    fake_impl=sequence_parallel_chunk_fake,
+    dispatch_key=current_platform.dispatch_key,
+    tags=(torch.Tag.needs_fixed_stride_order, ),
+)
 
 
 class DeepseekV2MoE(nn.Module):
@@ -243,24 +285,6 @@ class DeepseekV2MoE(nn.Module):
                 is_sequence_parallel=self.is_sequence_parallel,
             )
 
-    # Chunk x along the num_tokens axis for sequence parallelism
-    def sequence_parallel_chunk(self, x: torch.Tensor):
-        seq_len = x.size(0)
-
-        # all_gather needs the sequence length to be divisible by tp_size
-        remainder = seq_len % self.tp_size
-        if remainder != 0:
-            pad_len = self.tp_size - remainder
-            pad_shape = list(x.shape)
-            pad_shape[0] = pad_len
-            pad = x.new_zeros(pad_shape)
-            x = torch.cat([x, pad], dim=0)
-            seq_len = x.size(0)
-
-        chunk = seq_len // self.tp_size
-        start = self.tp_rank * chunk
-        return x.narrow(0, start, chunk).contiguous()
-
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
@@ -270,7 +294,7 @@ class DeepseekV2MoE(nn.Module):
         # TODO: We can replace the all_reduce at the end of attn with a
         # reduce_scatter instead of chunking here.
         if self.is_sequence_parallel:
-            hidden_states = self.sequence_parallel_chunk(hidden_states)
+            hidden_states = torch.ops.vllm.sequence_parallel_op(hidden_states)
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
