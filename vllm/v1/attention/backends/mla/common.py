@@ -401,7 +401,7 @@ M = TypeVar("M", bound=MLACommonMetadata)
 
 
 def use_flashinfer_prefill() -> bool:
-    # For blackwell default to flashinfer prefill if its available since
+    # For blackwell default to flashinfer prefill if it's available since
     # it is faster than FA2.
     return (flashinfer_available and not envs.VLLM_USE_CUDNN_PREFILL
             and current_platform.is_device_capability(100))
@@ -1018,7 +1018,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             return layer.weight
 
         # we currently do not have quantized bmm's which are needed for
-        # `W_UV` and `W_UK_T`, we we just store fp16/bf16 copies and perform
+        # `W_UV` and `W_UK_T`, we just store fp16/bf16 copies and perform
         # the bmm's in 16-bit, the extra memory overhead of this is fairly low
         kv_b_proj_weight = get_and_maybe_dequant_weights(self.kv_b_proj).T
         assert kv_b_proj_weight.shape == (

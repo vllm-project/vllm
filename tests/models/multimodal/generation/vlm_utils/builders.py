@@ -250,7 +250,7 @@ def build_video_inputs_from_test_info(
 
 def apply_image_size_scaling(image, size: Union[float, tuple[int, int]],
                              size_type: SizeType):
-    """Applies a size scaler to one image; this can be a an image size factor,
+    """Applies a size scaler to one image; this can be an image size factor,
     which scales the image while maintaining the aspect ratio"""
     # Special case for embeddings; if it's a tensor, it's only valid if we
     # are considering size factors at constant scale, i.e., we just clone
