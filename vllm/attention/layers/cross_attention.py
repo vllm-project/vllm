@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
-from copy import copy
 from typing import Optional
 
 import torch
@@ -16,6 +15,104 @@ from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
                                               subclass_attention_backend)
 
 
+def _get_cross_slot_mapping(req_id: str, encoder_seq_len: int, requests: dict,
+                            kv_cache_config) -> list[int]:
+    """Get cross-attention slot mapping for a request."""
+    from vllm.attention.backends.utils import PAD_SLOT_ID
+    from vllm.v1.kv_cache_interface import CrossAttentionSpec
+
+    req_state = requests.get(req_id)
+    if req_state is None:
+        # During memory profiling or if request not found
+        return [PAD_SLOT_ID] * encoder_seq_len
+
+    # Find the KV cache group that uses CrossAttentionSpec
+    cross_attn_group_idx = None
+    for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+        if isinstance(kv_cache_group.kv_cache_spec, CrossAttentionSpec):
+            cross_attn_group_idx = i
+            break
+
+    if (cross_attn_group_idx is None
+            or cross_attn_group_idx >= len(req_state.block_ids)):
+        return [PAD_SLOT_ID] * encoder_seq_len
+
+    # Get cross attention block IDs and calculate slot mapping
+    cross_block_ids = req_state.block_ids[cross_attn_group_idx]
+    block_size = kv_cache_config.kv_cache_groups[
+        cross_attn_group_idx].kv_cache_spec.block_size
+
+    slot_mapping = []
+    for i in range(encoder_seq_len):
+        block_number = cross_block_ids[i // block_size]
+        block_offset = i % block_size
+        slot = block_number * block_size + block_offset
+        slot_mapping.append(slot)
+
+    return slot_mapping
+
+
+def _make_cross_attention_metadata(
+    common_attn_metadata: CommonAttentionMetadata,
+) -> CommonAttentionMetadata:
+    """
+    Transform common attention metadata for cross-attention.
+    
+    Cross-attention has specific requirements:
+    - Non-causal (bidirectional) attention
+    - Custom sequence lengths based on encoder length
+    - Special slot mapping for encoder keys/values
+    """
+    # Create cross-attention specific slot mapping
+    cross_slot_mapping = []
+    for req_id in common_attn_metadata.scheduled_encoder_inputs:
+        cross_slot_mapping.extend(
+            _get_cross_slot_mapping(req_id,
+                                    common_attn_metadata.max_encoder_len,
+                                    common_attn_metadata.requests,
+                                    common_attn_metadata.kv_cache_config))
+
+    # Create tensors for cross-attention
+    device = common_attn_metadata.device
+    num_reqs = common_attn_metadata.num_reqs
+    max_encoder_len = common_attn_metadata.max_encoder_len
+
+    slot_mapping = torch.tensor(cross_slot_mapping,
+                                dtype=torch.int64,
+                                device=device)
+
+    # Use encoder length for sequence lengths in cross-attention
+    seq_lens_arg = torch.full(
+        (num_reqs, ),
+        max_encoder_len,
+        dtype=torch.int32,
+        device=device,
+    )
+    seq_lens_cpu_arg = torch.full(
+        (num_reqs, ),
+        max_encoder_len,
+        dtype=torch.int32,
+        device="cpu",
+    )
+
+    return CommonAttentionMetadata(
+        query_start_loc=common_attn_metadata.query_start_loc,
+        query_start_loc_cpu=common_attn_metadata.query_start_loc_cpu,
+        seq_lens=seq_lens_arg,
+        seq_lens_cpu=seq_lens_cpu_arg,
+        num_computed_tokens_cpu=common_attn_metadata.num_computed_tokens_cpu,
+        num_reqs=num_reqs,
+        num_actual_tokens=common_attn_metadata.num_actual_tokens,
+        max_query_len=common_attn_metadata.max_query_len,
+        max_seq_len=max_encoder_len,
+        block_table_tensor=common_attn_metadata.block_table_tensor,
+        slot_mapping=slot_mapping,
+        causal=False,  # Cross-attention is non-causal
+        logits_indices_padded=common_attn_metadata.logits_indices_padded,
+        num_logits_indices=common_attn_metadata.num_logits_indices,
+    )
+
+
 @functools.lru_cache
 def create_cross_attention_backend(
     underlying_attn_backend: AttentionBackend, ) -> type[AttentionBackend]:
@@ -28,11 +125,10 @@ def create_cross_attention_backend(
                   common_prefix_len: int,
                   common_attn_metadata: CommonAttentionMetadata,
                   fast_build: bool = False) -> AttentionMetadata:
-            # Cross-attention metadata is built in GPU model runner
-            # We just ensure it's non-causal and pass through
-            new_common_attn_metadata = copy(common_attn_metadata)
-            new_common_attn_metadata.causal = False
-            return super().build(common_prefix_len, new_common_attn_metadata,
+            # Transform the metadata for cross-attention
+            cross_attn_metadata = _make_cross_attention_metadata(
+                common_attn_metadata)
+            return super().build(common_prefix_len, cross_attn_metadata,
                                  fast_build)
 
     attn_backend = subclass_attention_backend(

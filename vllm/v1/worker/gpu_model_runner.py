@@ -19,7 +19,6 @@ from tqdm import tqdm
 import vllm.envs as envs
 from vllm.attention import Attention, AttentionType
 from vllm.attention.backends.abstract import AttentionBackend
-from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
@@ -838,42 +837,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     _dummy_blk_table_and_slot_mapping())
                 num_common_prefix_blocks = 0
                 causal_arg = False
-            elif isinstance(kv_cache_group_spec.kv_cache_spec,
-                            CrossAttentionSpec):
-                causal_arg = False
-                num_common_prefix_blocks = 0
-                blk_table = self.input_batch.block_table[kv_cache_group_id]
-                blk_table_tensor = blk_table.get_device_tensor()[:num_reqs]
-                # TODO - look into slot_mapping for cross-attention
-                # directly from the block table like other attention types
-                cross_slot_mapping = []
-                for req_id in scheduler_output.scheduled_encoder_inputs:
-                    cross_slot_mapping.extend(
-                        self._get_cross_slot_mapping(req_id,
-                                                     self.max_encoder_len))
-
-                # Create cross-attention metadata using decoder queries and
-                # encoder keys/values
-                slot_mapping = torch.tensor(cross_slot_mapping,
-                                            dtype=torch.int64,
-                                            device=self.device)
-
-                # NOTE - using max_encoder_len is whisper specific
-                max_seq_len_arg = self.max_encoder_len
-
-                seq_lens_arg = torch.full(
-                    (num_reqs, ),
-                    self.max_encoder_len,
-                    dtype=torch.int32,
-                    device=self.device,
-                )
-                seq_lens_cpu_arg = torch.full(
-                    (num_reqs, ),
-                    self.max_encoder_len,
-                    dtype=torch.int32,
-                    device="cpu",
-                )
             else:
+                if isinstance(kv_cache_group_spec.kv_cache_spec,
+                              CrossAttentionSpec):
+                    causal_arg = False
+                    num_common_prefix_blocks = 0
                 blk_table = self.input_batch.block_table[kv_cache_group_id]
                 blk_table_tensor = blk_table.get_device_tensor()[:num_reqs]
                 slot_mapping = blk_table.slot_mapping[:
@@ -885,6 +853,22 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_common_prefix_blocks = (
                     scheduler_output.
                     num_common_prefix_blocks[kv_cache_group_id])
+
+            # Add encoder inputs for cross-attention if applicable
+            scheduled_encoder_inputs = None
+            max_encoder_len = None
+            requests = None
+            kv_cache_config = None
+            device = None
+
+            if isinstance(kv_cache_group_spec.kv_cache_spec,
+                          CrossAttentionSpec):
+                scheduled_encoder_inputs =\
+                    scheduler_output.scheduled_encoder_inputs
+                max_encoder_len = self.max_encoder_len
+                requests = self.requests
+                kv_cache_config = self.kv_cache_config
+                device = self.device
 
             common_attn_metadata = CommonAttentionMetadata(
                 query_start_loc=query_start_loc_arg,
@@ -901,6 +885,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 logits_indices_padded=logits_indices_padded,
                 num_logits_indices=logits_indices.size(0),
                 causal=causal_arg,
+                scheduled_encoder_inputs=scheduled_encoder_inputs,
+                max_encoder_len=max_encoder_len,
+                requests=requests,
+                kv_cache_config=kv_cache_config,
+                device=device,
             )
 
             if self.speculative_config and \
@@ -934,40 +923,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return (attn_metadata, logits_indices, spec_decode_metadata,
                 num_scheduled_tokens, spec_decode_common_attn_metadata,
                 max_num_scheduled_tokens)
-
-    def _get_cross_slot_mapping(self, req_id: str,
-                                encoder_seq_len: int) -> list[int]:
-        """Get cross-attention slot mapping for a request."""
-        req_state = self.requests.get(req_id)
-        if req_state is None:
-            # During memory profiling or if request not found
-            return [PAD_SLOT_ID] * encoder_seq_len
-
-        # Find the KV cache group that uses CrossAttentionSpec
-        cross_attn_group_idx = None
-        for i, kv_cache_group in enumerate(
-                self.kv_cache_config.kv_cache_groups):
-            if isinstance(kv_cache_group.kv_cache_spec, CrossAttentionSpec):
-                cross_attn_group_idx = i
-                break
-
-        if (cross_attn_group_idx is None
-                or cross_attn_group_idx >= len(req_state.block_ids)):
-            return [PAD_SLOT_ID] * encoder_seq_len
-
-        # Get cross attention block IDs and calculate slot mapping
-        cross_block_ids = req_state.block_ids[cross_attn_group_idx]
-        block_size = self.kv_cache_config.kv_cache_groups[
-            cross_attn_group_idx].kv_cache_spec.block_size
-
-        slot_mapping = []
-        for i in range(encoder_seq_len):
-            block_number = cross_block_ids[i // block_size]
-            block_offset = i % block_size
-            slot = block_number * block_size + block_offset
-            slot_mapping.append(slot)
-
-        return slot_mapping
 
     def _compute_cascade_attn_prefix_len(
         self,
