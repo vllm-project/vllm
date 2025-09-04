@@ -282,7 +282,6 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         raise NotImplementedError
 
-    @abstractmethod
     def finalize_async(
         self,
         output: torch.Tensor,
