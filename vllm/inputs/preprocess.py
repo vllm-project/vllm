@@ -258,8 +258,7 @@ class InputPreprocessor:
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         *,
-        mm_hash_overrides: Optional[Union[dict[str, list[str]],
-                                          MultiModalUUIDDict]] = None,
+        mm_uuids: Optional[MultiModalUUIDDict] = None,
     ) -> MultiModalInputs:
         """
         Apply the model's multi-modal processor to a multi-modal prompt,
@@ -281,7 +280,7 @@ class InputPreprocessor:
             mm_data,
             hf_processor_mm_kwargs=mm_processor_kwargs,
             tokenization_kwargs=tokenization_kwargs,
-            mm_hash_overrides=mm_hash_overrides,
+            mm_uuids=mm_uuids,
         )
 
     async def _process_multimodal_async(
@@ -292,8 +291,7 @@ class InputPreprocessor:
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         *,
-        mm_hash_overrides: Optional[Union[dict[str, list[str]],
-                                          MultiModalUUIDDict]] = None,
+        mm_uuids: Optional[MultiModalUUIDDict] = None,
     ) -> MultiModalInputs:
         """
         Async version of
@@ -315,7 +313,7 @@ class InputPreprocessor:
             mm_data,
             hf_processor_mm_kwargs=mm_processor_kwargs,
             tokenization_kwargs=tokenization_kwargs,
-            mm_hash_overrides=mm_hash_overrides,
+            mm_uuids=mm_uuids,
         )
 
     def _process_embeds(
@@ -370,8 +368,7 @@ class InputPreprocessor:
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         *,
-        mm_hash_overrides: Optional[Union[dict[str, list[str]],
-                                          MultiModalUUIDDict]] = None,
+        mm_uuids: Optional[MultiModalUUIDDict] = None,
     ) -> Union[TokenInputs, MultiModalInputs]:
         prompt_token_ids = self._truncate_inputs(
             parsed_content["prompt_token_ids"], tokenization_kwargs)
@@ -384,7 +381,7 @@ class InputPreprocessor:
                 parsed_content.get("mm_processor_kwargs"),
                 tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
-                mm_hash_overrides=mm_hash_overrides,
+                mm_uuids=mm_uuids,
             )
         else:
             inputs = token_inputs(prompt_token_ids=prompt_token_ids)
@@ -400,8 +397,7 @@ class InputPreprocessor:
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         *,
-        mm_hash_overrides: Optional[Union[dict[str, list[str]],
-                                          MultiModalUUIDDict]] = None,
+        mm_uuids: Optional[MultiModalUUIDDict] = None,
     ) -> Union[TokenInputs, MultiModalInputs]:
         prompt_token_ids = self._truncate_inputs(
             parsed_content["prompt_token_ids"], tokenization_kwargs)
@@ -414,7 +410,7 @@ class InputPreprocessor:
                 parsed_content.get("mm_processor_kwargs"),
                 tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
-                mm_hash_overrides=mm_hash_overrides,
+                mm_uuids=mm_uuids,
             )
         else:
             inputs = token_inputs(prompt_token_ids=prompt_token_ids, )
@@ -430,8 +426,7 @@ class InputPreprocessor:
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         *,
-        mm_hash_overrides: Optional[Union[dict[str, list[str]],
-                                          MultiModalUUIDDict]] = None,
+        mm_uuids: Optional[MultiModalUUIDDict] = None,
     ) -> Union[TokenInputs, MultiModalInputs]:
         prompt_text = parsed_content["prompt"]
 
@@ -443,7 +438,7 @@ class InputPreprocessor:
                 parsed_content.get("mm_processor_kwargs"),
                 tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
-                mm_hash_overrides=mm_hash_overrides,
+                mm_uuids=mm_uuids,
             )
         else:
             prompt_token_ids = self._tokenize_prompt(
@@ -467,8 +462,7 @@ class InputPreprocessor:
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         *,
-        mm_hash_overrides: Optional[Union[dict[str, list[str]],
-                                          MultiModalUUIDDict]] = None,
+        mm_uuids: Optional[MultiModalUUIDDict] = None,
     ) -> Union[TokenInputs, MultiModalInputs]:
         prompt_text = parsed_content["prompt"]
 
@@ -480,7 +474,7 @@ class InputPreprocessor:
                 parsed_content.get("mm_processor_kwargs"),
                 tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
-                mm_hash_overrides=mm_hash_overrides,
+                mm_uuids=mm_uuids,
             )
         else:
             prompt_token_ids = await self._tokenize_prompt_async(
@@ -504,8 +498,7 @@ class InputPreprocessor:
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         *,
-        mm_hash_overrides: Optional[Union[dict[str, list[str]],
-                                          MultiModalUUIDDict]] = None,
+        mm_uuids: Optional[MultiModalUUIDDict] = None,
     ) -> SingletonInputs:
         """
         Extract the singleton inputs from a prompt.
@@ -527,21 +520,21 @@ class InputPreprocessor:
             return self._process_tokens(
                 parsed["content"],
                 lora_request=lora_request,
-                mm_hash_overrides=mm_hash_overrides,
+                mm_uuids=mm_uuids,
             )
         if parsed["type"] == "text":
             return self._process_text(
                 parsed["content"],
                 tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
-                mm_hash_overrides=mm_hash_overrides,
+                mm_uuids=mm_uuids,
             )
         if parsed["type"] == "str":
             return self._process_text(
                 TextPrompt(prompt=parsed["content"]),
                 tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
-                mm_hash_overrides=mm_hash_overrides,
+                mm_uuids=mm_uuids,
             )
 
         assert_never(parsed)
@@ -552,8 +545,7 @@ class InputPreprocessor:
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         *,
-        mm_hash_overrides: Optional[Union[dict[str, list[str]],
-                                          MultiModalUUIDDict]] = None,
+        mm_uuids: Optional[MultiModalUUIDDict] = None,
     ) -> SingletonInputs:
         """
         Async version of
@@ -567,21 +559,21 @@ class InputPreprocessor:
             return await self._process_tokens_async(
                 parsed["content"],
                 lora_request=lora_request,
-                mm_hash_overrides=mm_hash_overrides,
+                mm_uuids=mm_uuids,
             )
         if parsed["type"] == "text":
             return await self._process_text_async(
                 parsed["content"],
                 tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
-                mm_hash_overrides=mm_hash_overrides,
+                mm_uuids=mm_uuids,
             )
         if parsed["type"] == "str":
             return await self._process_text_async(
                 TextPrompt(prompt=parsed["content"]),
                 tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
-                mm_hash_overrides=mm_hash_overrides,
+                mm_uuids=mm_uuids,
             )
 
         assert_never(parsed)
@@ -692,8 +684,7 @@ class InputPreprocessor:
         prompt: PromptType,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         *,
-        mm_hash_overrides: Optional[Union[dict[str, list[str]],
-                                          MultiModalUUIDDict]] = None,
+        mm_uuids: Optional[MultiModalUUIDDict] = None,
     ) -> EncoderDecoderInputs:
         """
         For encoder/decoder models only:
@@ -735,7 +726,7 @@ class InputPreprocessor:
             encoder_inputs = self._prompt_to_llm_inputs(
                 prompt["encoder_prompt"],
                 tokenization_kwargs=tokenization_kwargs,
-                mm_hash_overrides=mm_hash_overrides,
+                mm_uuids=mm_uuids,
             )
             if (decoder_input := prompt["decoder_prompt"]) is None:
                 decoder_inputs = None
@@ -751,7 +742,7 @@ class InputPreprocessor:
             inputs = self._prompt_to_llm_inputs(
                 prompt,
                 tokenization_kwargs=tokenization_kwargs,
-                mm_hash_overrides=mm_hash_overrides,
+                mm_uuids=mm_uuids,
             )
             if self.model_config.is_multimodal_model:
                 # Encoder-Decoder Multimodal model
@@ -768,8 +759,7 @@ class InputPreprocessor:
         prompt: PromptType,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         *,
-        mm_hash_overrides: Optional[Union[dict[str, list[str]],
-                                          MultiModalUUIDDict]] = None,
+        mm_uuids: Optional[MultiModalUUIDDict] = None,
     ) -> EncoderDecoderInputs:
         """
         Async version of
@@ -782,7 +772,7 @@ class InputPreprocessor:
             encoder_task = self._prompt_to_llm_inputs_async(
                 prompt["encoder_prompt"],
                 tokenization_kwargs=tokenization_kwargs,
-                mm_hash_overrides=mm_hash_overrides,
+                mm_uuids=mm_uuids,
             )
 
             if (decoder_input := prompt["decoder_prompt"]) is None:
@@ -792,7 +782,7 @@ class InputPreprocessor:
                 decoder_task = self._prompt_to_llm_inputs_async(
                     decoder_input,
                     tokenization_kwargs=tokenization_kwargs,
-                    mm_hash_overrides=mm_hash_overrides,
+                    mm_uuids=mm_uuids,
                 )
 
                 encoder_inputs, decoder_inputs = await asyncio.gather(
@@ -808,7 +798,7 @@ class InputPreprocessor:
             inputs = await self._prompt_to_llm_inputs_async(
                 prompt,
                 tokenization_kwargs=tokenization_kwargs,
-                mm_hash_overrides=mm_hash_overrides,
+                mm_uuids=mm_uuids,
             )
             if self.model_config.is_multimodal_model:
                 # Encoder-Decoder Multimodal model
@@ -836,8 +826,7 @@ class InputPreprocessor:
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         *,
-        mm_hash_overrides: Optional[Union[dict[str, list[str]],
-                                          MultiModalUUIDDict]] = None,
+        mm_uuids: Optional[MultiModalUUIDDict] = None,
     ) -> DecoderOnlyInputs:
         """
         For decoder-only models:
@@ -858,7 +847,7 @@ class InputPreprocessor:
             prompt,
             tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
-            mm_hash_overrides=mm_hash_overrides,
+            mm_uuids=mm_uuids,
         )
 
         return self._build_decoder_only_llm_inputs(prompt_comps)
@@ -869,8 +858,7 @@ class InputPreprocessor:
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         *,
-        mm_hash_overrides: Optional[Union[dict[str, list[str]],
-                                          MultiModalUUIDDict]] = None,
+        mm_uuids: Optional[MultiModalUUIDDict] = None,
     ) -> DecoderOnlyInputs:
         """
         Async version of
@@ -880,7 +868,7 @@ class InputPreprocessor:
             prompt,
             tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
-            mm_hash_overrides=mm_hash_overrides,
+            mm_uuids=mm_uuids,
         )
 
         return self._build_decoder_only_llm_inputs(prompt_comps)
@@ -891,8 +879,7 @@ class InputPreprocessor:
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         *,
-        mm_hash_overrides: Optional[Union[dict[str, list[str]],
-                                          MultiModalUUIDDict]] = None,
+        mm_uuids: Optional[MultiModalUUIDDict] = None,
     ) -> ProcessorInputs:
         """Preprocess the input prompt."""
         if self.model_config.is_encoder_decoder:
@@ -901,7 +888,7 @@ class InputPreprocessor:
             return self._process_encoder_decoder_prompt(
                 prompt,
                 tokenization_kwargs,
-                mm_hash_overrides=mm_hash_overrides,
+                mm_uuids=mm_uuids,
             )
 
         if is_explicit_encoder_decoder_prompt(prompt):
@@ -913,7 +900,7 @@ class InputPreprocessor:
             prompt,
             tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
-            mm_hash_overrides=mm_hash_overrides,
+            mm_uuids=mm_uuids,
         )
 
     async def preprocess_async(
@@ -922,8 +909,7 @@ class InputPreprocessor:
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         *,
-        mm_hash_overrides: Optional[Union[dict[str, list[str]],
-                                          MultiModalUUIDDict]] = None,
+        mm_uuids: Optional[MultiModalUUIDDict] = None,
     ) -> ProcessorInputs:
         """
         Async version of
@@ -935,7 +921,7 @@ class InputPreprocessor:
             return await self._process_encoder_decoder_prompt_async(
                 prompt,
                 tokenization_kwargs,
-                mm_hash_overrides=mm_hash_overrides,
+                mm_uuids=mm_uuids,
             )
 
         if is_explicit_encoder_decoder_prompt(prompt):
@@ -947,7 +933,7 @@ class InputPreprocessor:
             prompt,
             tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
-            mm_hash_overrides=mm_hash_overrides,
+            mm_uuids=mm_uuids,
         )
 
     def clear_cache(self) -> None:
