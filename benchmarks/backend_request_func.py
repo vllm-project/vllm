@@ -176,7 +176,7 @@ async def async_request_trt_llm(
                 url=api_url, json=payload, headers=headers
             ) as response:
                 if response.status == 200:
-                    async for chunk_bytes in iter_lines(response.content):
+                    async for chunk_bytes in iter_lines(response):
                         chunk_bytes = chunk_bytes.strip()
                         if not chunk_bytes:
                             continue
@@ -436,7 +436,7 @@ async def async_request_openai_chat_completions(
                 url=api_url, json=payload, headers=headers
             ) as response:
                 if response.status == 200:
-                    async for chunk_bytes in iter_lines(response.content):
+                    async for chunk_bytes in iter_lines(response):
                         chunk_bytes = chunk_bytes.strip()
                         if not chunk_bytes:
                             continue
