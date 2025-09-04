@@ -356,7 +356,6 @@ def test_generate_block_hash_extra_keys(with_init_none_hash):
 
 
 def test_generate_block_hash_extra_keys_no_mm_inputs(with_init_none_hash):
-    init_none_hash(hash)
     request = make_request(
         request_id="0",
         prompt_token_ids=[_ for _ in range(6)],
@@ -370,7 +369,6 @@ def test_generate_block_hash_extra_keys_no_mm_inputs(with_init_none_hash):
 
 
 def test_generate_block_hash_extra_keys_cache_salt(with_init_none_hash):
-    init_none_hash(hash)
     request = make_request(
         request_id="0",
         prompt_token_ids=[_ for _ in range(6)],
