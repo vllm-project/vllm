@@ -453,16 +453,6 @@ class Scheduler(SchedulerInterface):
                 else:
                     num_encoder_tokens = 0
 
-                # new_blocks = self.kv_cache_manager.allocate_slots(
-                #     request,
-                #     num_new_tokens,
-                #     num_new_local_computed_tokens,
-                #     new_computed_blocks,
-                #     num_extra_tokens_from_connector,
-                #     num_lookahead_tokens=effective_lookahead_tokens,
-                #     delay_cache_blocks=load_kv_async,
-                #     num_encoder_tokens=num_encoder_tokens,
-                # )
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens,
@@ -473,6 +463,7 @@ class Scheduler(SchedulerInterface):
                     delay_cache_blocks=load_kv_async,
                     num_encoder_tokens=num_encoder_tokens,
                 )
+
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     break
