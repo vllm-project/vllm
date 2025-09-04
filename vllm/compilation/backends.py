@@ -327,29 +327,8 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 i for i, x in enumerate(args) if isinstance(x, torch.SymInt)
             ]
             global compilation_start_time
-            # torch._inductor.config.triton.customized_cudagraph_wrappers = [lambda f: CUDAGraphWrapper(f, VllmConfig(), CUDAGraphMode.PIECEWISE), lambda f: f]
-
-            # self.module.__dict__[target] = static_graph_wrapper_class(
-            #     runnable=piecewise_backend,
-            #     vllm_config=self.vllm_config,
-            #     runtime_mode=CUDAGraphMode.PIECEWISE,
-            #     cudagraph_options=CUDAGraphOptions(
-            #         debug_log_enable=piecewise_backend.is_first_graph,
-            #         gc_disable=not piecewise_backend.is_first_graph,
-            #         weak_ref_output=piecewise_backend.is_last_graph))
 
             from .cuda_graph import CUDAGraphOptions
-            cudagraph_options_first = CUDAGraphOptions(debug_log_enable=True,
-                                                       gc_disable=not True,
-                                                       weak_ref_output=False)
-
-            cudagraph_options_mid = CUDAGraphOptions(debug_log_enable=False,
-                                                     gc_disable=not False,
-                                                     weak_ref_output=False)
-
-            cudagraph_options_last = CUDAGraphOptions(debug_log_enable=False,
-                                                      gc_disable=not False,
-                                                      weak_ref_output=True)
 
             num_layers = len(
                 list(x for x in self.vllm_config.compilation_config.
@@ -362,10 +341,12 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 runtime_mode=CUDAGraphMode.PIECEWISE,
                 cudagraph_options=CUDAGraphOptions(True, i != 0, i ==
                                                    num_layers - 1))
-            fns = [make_fn(i) for i in range(num_layers)]
-            # self.vllm_config.compilation_config.static_forward_context.attention_layer
+
             self.compilation_config.inductor_compile_config[
-                "triton.customized_cudagraph_wrappers"] = fns
+                "customized_partition_wrappers"] = [
+                    make_fn(i) for i in range(num_layers)
+                ]
+
             compiled_graph_for_dynamic_shape = self.vllm_backend.\
                 compiler_manager.compile(
                 submod,
@@ -376,7 +357,6 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 num_graphs=len(self.compile_submod_names),
                 runtime_shape=None)
             # Lazy import here to avoid circular import
-            from .cuda_graph import CUDAGraphOptions
             from .cuda_piecewise_backend import PiecewiseBackend
 
             piecewise_backend = PiecewiseBackend(
