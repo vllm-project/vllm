@@ -5,7 +5,12 @@
 
 ## Profile with PyTorch Profiler
 
-We support tracing vLLM workers using the `torch.profiler` module. You can enable tracing by setting the `VLLM_TORCH_PROFILER_DIR` environment variable to the directory where you want to save the traces: `VLLM_TORCH_PROFILER_DIR=/mnt/traces/`
+We support tracing vLLM workers using the `torch.profiler` module. You can enable tracing by setting the `VLLM_TORCH_PROFILER_DIR` environment variable to the directory where you want to save the traces: `VLLM_TORCH_PROFILER_DIR=/mnt/traces/`. Additionally, you can control the profiling content by specifying the following environment variables:
+
+- `VLLM_TORCH_PROFILER_RECORD_SHAPES=1` to enable recording Tensor Shapes, off by default
+- `VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY=1` to record memory, off by default
+- `VLLM_TORCH_PROFILER_WITH_STACK=1` to enable recording stack information, on by default
+- `VLLM_TORCH_PROFILER_WITH_FLOPS=1` to enable recording FLOPs, off by default
 
 The OpenAI server also needs to be started with the `VLLM_TORCH_PROFILER_DIR` environment variable set.
 
@@ -68,6 +73,8 @@ apt install nsight-systems-cli
 
 ### Example commands and usage
 
+When profiling with `nsys`, it is advisable to set the environment variable `VLLM_WORKER_MULTIPROC_METHOD=spawn`. The default is to use the `fork` method instead of `spawn`. More information on the topic can be found in the [Nsight Systems release notes](https://docs.nvidia.com/nsight-systems/ReleaseNotes/index.html#general-issues).
+
 #### Offline Inference
 
 For basic usage, you can just append `nsys profile -o report.nsys-rep --trace-fork-before-exec=true --cuda-graph-trace=node` before any existing script you would run for offline inference.
@@ -112,13 +119,13 @@ vllm bench serve \
 
 In practice, you should set the `--duration` argument to a large value. Whenever you want the server to stop profiling, run:
 
-```
+```bash
 nsys sessions list
 ```
 
 to get the session id in the form of `profile-XXXXX`, then run:
 
-```
+```bash
 nsys stop --session=profile-XXXXX
 ```
 

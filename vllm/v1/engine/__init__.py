@@ -3,15 +3,13 @@
 
 import enum
 import time
-from collections.abc import Sequence
 from typing import Any, Optional, Union
 
 import msgspec
 import torch
 
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import MultiModalKwargs
-from vllm.multimodal.inputs import PlaceholderRange
+from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import SchedulerStats
@@ -49,9 +47,7 @@ class EngineCoreRequest(
 
     request_id: str
     prompt_token_ids: list[int]
-    mm_inputs: Optional[Sequence[Optional[MultiModalKwargs]]]
-    mm_hashes: Optional[list[str]]
-    mm_placeholders: Optional[list[PlaceholderRange]]
+    mm_features: Optional[list[MultiModalFeatureSpec]]
     sampling_params: Optional[SamplingParams]
     pooling_params: Optional[PoolingParams]
     eos_token_id: Optional[int]
@@ -123,6 +119,13 @@ class EngineCoreOutput(
         return self.finish_reason is not None
 
 
+class UtilityResult:
+    """Wrapper for special handling when serializing/deserializing."""
+
+    def __init__(self, r: Any = None):
+        self.result = r
+
+
 class UtilityOutput(
         msgspec.Struct,
         array_like=True,  # type: ignore[call-arg]
@@ -132,7 +135,7 @@ class UtilityOutput(
 
     # Non-None implies the call failed, result should be None.
     failure_message: Optional[str] = None
-    result: Any = None
+    result: Optional[UtilityResult] = None
 
 
 class EngineCoreOutputs(

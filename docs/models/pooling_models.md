@@ -45,14 +45,14 @@ Each pooling model in vLLM supports one or more of these tasks according to
 [Pooler.get_supported_tasks][vllm.model_executor.layers.pooler.Pooler.get_supported_tasks],
 enabling the corresponding APIs:
 
-| Task       | APIs               |
-|------------|--------------------|
-| `encode`   | `encode`           |
-| `embed`    | `embed`, `score`\* |
-| `classify` | `classify`         |
-| `score`    | `score`            |
+| Task       | APIs                                 |
+|------------|--------------------------------------|
+| `encode`   | `LLM.reward(...)`                    |
+| `embed`    | `LLM.embed(...)`, `LLM.score(...)`\* |
+| `classify` | `LLM.classify(...)`                  |
+| `score`    | `LLM.score(...)`                     |
 
-\* The `score` API falls back to `embed` task if the model does not support `score` task.
+\* The `LLM.score(...)` API falls back to `embed` task if the model does not support `score` task.
 
 ### Pooler Configuration
 
@@ -66,11 +66,11 @@ you can override some of its attributes via the `--override-pooler-config` optio
 If the model has been converted via `--convert` (see above),
 the pooler assigned to each task has the following attributes by default:
 
-| Task       | Pooling Type   | Normalization | Softmax |
-|------------|----------------|---------------|---------|
-| `encode`   | `ALL`          | ❌            | ❌      |
-| `embed`    | `LAST`         | ✅︎            | ❌      |
-| `classify` | `LAST`         | ❌            | ✅︎      |
+| Task       | Pooling Type | Normalization | Softmax |
+|------------|--------------|---------------|---------|
+| `reward`   | `ALL`        | ❌            | ❌     |
+| `embed`    | `LAST`       | ✅︎            | ❌      |
+| `classify` | `LAST`       | ❌            | ✅︎      |
 
 When loading [Sentence Transformers](https://huggingface.co/sentence-transformers) models,
 its Sentence Transformers configuration file (`modules.json`) takes priority over the model's defaults.
@@ -81,22 +81,7 @@ which takes priority over both the model's and Sentence Transformers's defaults.
 ## Offline Inference
 
 The [LLM][vllm.LLM] class provides various methods for offline inference.
-See [configuration][configuration] for a list of options when initializing the model.
-
-### `LLM.encode`
-
-The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
-It returns the extracted hidden states directly, which is useful for reward models.
-
-```python
-from vllm import LLM
-
-llm = LLM(model="Qwen/Qwen2.5-Math-RM-72B", runner="pooling")
-(output,) = llm.encode("Hello, my name is")
-
-data = output.outputs.data
-print(f"Data: {data!r}")
-```
+See [configuration](../api/README.md#configuration) for a list of options when initializing the model.
 
 ### `LLM.embed`
 
@@ -106,7 +91,7 @@ It is primarily designed for embedding models.
 ```python
 from vllm import LLM
 
-llm = LLM(model="intfloat/e5-mistral-7b-instruct", runner="pooling")
+llm = LLM(model="intfloat/e5-small", runner="pooling")
 (output,) = llm.embed("Hello, my name is")
 
 embeds = output.outputs.embedding
@@ -135,7 +120,7 @@ A code example can be found here: <gh-file:examples/offline_inference/basic/clas
 ### `LLM.score`
 
 The [score][vllm.LLM.score] method outputs similarity scores between sentence pairs.
-It is designed for embedding models and cross encoder models. Embedding models use cosine similarity, and [cross-encoder models](https://www.sbert.net/examples/applications/cross-encoder/README.html) serve as rerankers between candidate query-document pairs in RAG systems.
+It is designed for embedding models and cross-encoder models. Embedding models use cosine similarity, and [cross-encoder models](https://www.sbert.net/examples/applications/cross-encoder/README.html) serve as rerankers between candidate query-document pairs in RAG systems.
 
 !!! note
     vLLM can only perform the model inference component (e.g. embedding, reranking) of RAG.
@@ -153,6 +138,46 @@ print(f"Score: {score}")
 ```
 
 A code example can be found here: <gh-file:examples/offline_inference/basic/score.py>
+
+### `LLM.reward`
+
+The [reward][vllm.LLM.reward] method is available to all reward models in vLLM.
+It returns the extracted hidden states directly.
+
+```python
+from vllm import LLM
+
+llm = LLM(model="internlm/internlm2-1_8b-reward", runner="pooling", trust_remote_code=True)
+(output,) = llm.reward("Hello, my name is")
+
+data = output.outputs.data
+print(f"Data: {data!r}")
+```
+
+A code example can be found here: <gh-file:examples/offline_inference/basic/reward.py>
+
+### `LLM.encode`
+
+The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
+It returns the extracted hidden states directly.
+
+!!! note
+    Please use one of the more specific methods or set the task directly when using `LLM.encode`:
+
+    - For embeddings, use `LLM.embed(...)` or `pooling_task="embed"`.
+    - For classification logits, use `LLM.classify(...)` or `pooling_task="classify"`.
+    - For rewards, use `LLM.reward(...)` or `pooling_task="reward"`.
+    - For similarity scores, use `LLM.score(...)`.  
+
+```python
+from vllm import LLM
+
+llm = LLM(model="intfloat/e5-small", runner="pooling")
+(output,) = llm.encode("Hello, my name is", pooling_task="embed")
+
+data = output.outputs.data
+print(f"Data: {data!r}")
+```
 
 ## Online Serving
 
@@ -180,12 +205,12 @@ Our [OpenAI-Compatible Server](../serving/openai_compatible_server.md) provides 
 
 There is currently no official interface for specifying support for Matryoshka Embeddings. In vLLM, if `is_matryoshka` is `True` in `config.json,` it is allowed to change the output to arbitrary dimensions. Using `matryoshka_dimensions` can control the allowed output dimensions.
 
-For models that support Matryoshka Embeddings but not recognized by vLLM, please manually override the config using `hf_overrides={"is_matryoshka": True}`, `hf_overrides={"matryoshka_dimensions": [<allowed output dimensions>]}` (offline) or `--hf_overrides '{"is_matryoshka": true}'`,  `--hf_overrides '{"matryoshka_dimensions": [<allowed output dimensions>]}'`(online).
+For models that support Matryoshka Embeddings but not recognized by vLLM, please manually override the config using `hf_overrides={"is_matryoshka": True}`, `hf_overrides={"matryoshka_dimensions": [<allowed output dimensions>]}` (offline) or `--hf-overrides '{"is_matryoshka": true}'`,  `--hf-overrides '{"matryoshka_dimensions": [<allowed output dimensions>]}'`(online).
 
 Here is an example to serve a model with Matryoshka Embeddings enabled.
 
 ```text
-vllm serve Snowflake/snowflake-arctic-embed-m-v1.5 --hf_overrides '{"matryoshka_dimensions":[256]}'
+vllm serve Snowflake/snowflake-arctic-embed-m-v1.5 --hf-overrides '{"matryoshka_dimensions":[256]}'
 ```
 
 ### Offline Inference
@@ -233,4 +258,4 @@ Expected output:
 {"id":"embd-5c21fc9a5c9d4384a1b021daccaf9f64","object":"list","created":1745476417,"model":"jinaai/jina-embeddings-v3","data":[{"index":0,"object":"embedding","embedding":[-0.3828125,-0.1357421875,0.03759765625,0.125,0.21875,0.09521484375,-0.003662109375,0.1591796875,-0.130859375,-0.0869140625,-0.1982421875,0.1689453125,-0.220703125,0.1728515625,-0.2275390625,-0.0712890625,-0.162109375,-0.283203125,-0.055419921875,-0.0693359375,0.031982421875,-0.04052734375,-0.2734375,0.1826171875,-0.091796875,0.220703125,0.37890625,-0.0888671875,-0.12890625,-0.021484375,-0.0091552734375,0.23046875]}],"usage":{"prompt_tokens":8,"total_tokens":8,"completion_tokens":0,"prompt_tokens_details":null}}
 ```
 
-A openai client example can be found here: <gh-file:examples/online_serving/openai_embedding_matryoshka_fy.py>
+An OpenAI client example can be found here: <gh-file:examples/online_serving/openai_embedding_matryoshka_fy.py>

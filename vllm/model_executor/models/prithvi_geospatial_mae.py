@@ -18,29 +18,69 @@
 """Inference-only IBM/NASA Prithvi Geospatial model."""
 
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import torch
 import torch.nn as nn
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.pooler import (AllPool, PoolerHead,
-                                               PoolerIdentity, SimplePooler)
+from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import (
-    IsAttentionFree, MultiModalEmbeddings, SupportsMultiModalWithRawInput)
 from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalFieldElem, MultiModalInputs,
-                                    MultiModalKwargs, MultiModalKwargsItem,
-                                    MultiModalSharedField, PlaceholderRange)
-from vllm.multimodal.parse import MultiModalDataItems
+from vllm.multimodal.inputs import (ImageItem, ModalityData,
+                                    MultiModalDataDict, MultiModalFieldConfig,
+                                    MultiModalInputs, MultiModalKwargsItems,
+                                    PlaceholderRange)
+from vllm.multimodal.parse import (DictEmbeddingItems, ModalityDataItems,
+                                   MultiModalDataItems, MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+
+from .interfaces import (IsAttentionFree, MultiModalEmbeddings,
+                         SupportsMultiModal)
+from .interfaces_base import default_pooling_type
+
+
+def _prithvi_field_config(hf_inputs: Mapping[str, torch.Tensor]):
+    # This model receives in input a multi-dimensional tensor representing
+    # a single image patch and therefore it is not to be split
+    # into multiple elements, but rather to be considered a single one.
+    # Hence, the decision of using a MultiModalSharedField.
+    # The expected shape is (num_channels, width, height).
+
+    # This model however allows the user to also submit multiple image
+    # patches as a batch, adding a further dimension to the above shape.
+    # At this stage we only support submitting one patch per request and
+    # batching is achieved via vLLM batching.
+    # TODO (christian-pinto): enable support for multi patch requests
+    # in tandem with vLLM batching.
+    return dict(
+        pixel_values=MultiModalFieldConfig.shared(batch_size=1,
+                                                  modality="image"),
+        location_coords=MultiModalFieldConfig.shared(batch_size=1,
+                                                     modality="image"),
+    )
+
+
+class PrithviGeoSpatialMAEMultiModalDataParser(MultiModalDataParser):
+
+    def _parse_image_data(
+        self,
+        data: Union[dict[str, torch.Tensor], ModalityData[ImageItem]],
+    ) -> Optional[ModalityDataItems[Any, Any]]:
+        if isinstance(data, dict):
+            return DictEmbeddingItems(
+                data,
+                modality="image",
+                required_fields={"pixel_values", "location_coords"},
+                fields_factory=_prithvi_field_config,
+            )
+
+        return super()._parse_image_data(data)
 
 
 class PrithviGeoSpatialMAEProcessingInfo(BaseProcessingInfo):
@@ -63,32 +103,32 @@ class PrithviGeoSpatialMAEInputBuilder(
         # This model input is fixed and is in the form of a torch Tensor.
         # The size of pixel_values might change in the cases where we resize
         # the input but never exceeds the dimensions below.
-        return {
+        image_data = {
             "pixel_values": torch.full((6, 512, 512), 1.0,
                                        dtype=torch.float16),
             "location_coords": torch.full((1, 2), 1.0, dtype=torch.float16),
         }
 
+        return {"image": image_data}
+
 
 class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
+
+    def _get_data_parser(self) -> MultiModalDataParser:
+        return PrithviGeoSpatialMAEMultiModalDataParser()
 
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return dict(
-            pixel_values=MultiModalFieldConfig.shared(batch_size=1,
-                                                      modality="image"),
-            location_coords=MultiModalFieldConfig.shared(batch_size=1,
-                                                         modality="image"),
-        )
+        return _prithvi_field_config(hf_inputs)
 
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         return []
 
@@ -98,59 +138,49 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Optional[Mapping[str, object]] = None,
-        return_mm_hashes: bool = False,
+        mm_hash_overrides: Optional[dict[str, list[str]]] = None,
     ) -> MultiModalInputs:
-        mm_kwargs = {}
+        if "image" in mm_data:
+            image_data = mm_data["image"]
+        else:
+            image_data = mm_data
+            mm_data = {"image": mm_data}
 
-        for k, v in mm_data.items():
-            if isinstance(v, dict) and k == "image":
-                mm_kwargs.update(v)
-            else:
-                mm_kwargs[k] = v
+        mm_items = self._to_mm_items(mm_data)
+        tokenization_kwargs = tokenization_kwargs or {}
+        mm_hashes = (mm_hash_overrides if mm_hash_overrides is not None else
+                     self._hash_mm_items(mm_items, hf_processor_mm_kwargs,
+                                         tokenization_kwargs))
         mm_placeholders = {"image": [PlaceholderRange(offset=0, length=0)]}
 
-        # This model receives in input a multi-dimensional tensor representing
-        # a single image patch and therefore it is not to be split
-        # into multiple elements, but rather to be considered a single one.
-        # Hence, the decision of using a MultiModalSharedField.
-        # The expected shape is (num_channels, width, height).
+        mm_processed_data = BatchFeature(image_data)
 
-        # This model however allows the user to also submit multiple image
-        # patches as a batch, adding a further dimension to the above shape.
-        # At this stage we only support submitting one patch per request and
-        # batching is achieved via vLLM batching.
-        # TODO (christian-pinto): enable support for multi patch requests
-        # in tandem with vLLM batching.
-        multimodal_kwargs_items = [
-            MultiModalKwargsItem.from_elems([
-                MultiModalFieldElem(
-                    modality="image",
-                    key=key,
-                    data=data,
-                    field=MultiModalSharedField(1),
-                ) for key, data in mm_kwargs.items()
-            ])
-        ]
+        mm_kwargs = MultiModalKwargsItems.from_hf_inputs(
+            mm_processed_data,
+            self._get_mm_fields_config(mm_processed_data,
+                                       hf_processor_mm_kwargs),
+        )
 
         return MultiModalInputs(
             type="multimodal",
             prompt=prompt,
             prompt_token_ids=[1],
-            mm_kwargs=MultiModalKwargs.from_items(multimodal_kwargs_items),
-            mm_hashes=None,
+            mm_kwargs=mm_kwargs,
+            mm_hashes=mm_hashes,
             mm_placeholders=mm_placeholders,
         )
 
 
+@default_pooling_type("All")
 @MULTIMODAL_REGISTRY.register_processor(
     PrithviGeoSpatialMAEMultiModalProcessor,
     info=PrithviGeoSpatialMAEProcessingInfo,
     dummy_inputs=PrithviGeoSpatialMAEInputBuilder,
 )
-class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree,
-                           SupportsMultiModalWithRawInput):
+class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree, SupportsMultiModal):
     """Prithvi Masked Autoencoder"""
 
+    supports_multimodal_raw_input_only = True
     is_pooling_model = True
 
     @classmethod
@@ -198,7 +228,11 @@ class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree,
                 "Only SemanticSegmentationTask is supported for now "
                 "by PrithviGeospatialMAE.")
 
-        self.pooler = SimplePooler(AllPool(), PoolerHead(PoolerIdentity()))
+        pooler_config = vllm_config.model_config.pooler_config
+        assert pooler_config is not None
+
+        self.pooler = DispatchPooler(
+            {"encode": Pooler.for_encode(pooler_config)}, )
 
     def _parse_and_validate_multimodal_data(
             self, **kwargs) -> tuple[torch.Tensor, Optional[torch.Tensor]]:

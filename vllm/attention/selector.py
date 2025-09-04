@@ -142,8 +142,9 @@ def get_attn_backend(
     dtype: torch.dtype,
     kv_cache_dtype: Optional[str],
     block_size: int,
-    is_attention_free: bool,
+    is_attention_free: bool = False,
     use_mla: bool = False,
+    has_sink: bool = False,
 ) -> type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
     # Accessing envs.* behind an @lru_cache decorator can cause the wrong
@@ -158,6 +159,7 @@ def get_attn_backend(
         is_attention_free=is_attention_free,
         use_v1=envs.VLLM_USE_V1,
         use_mla=use_mla,
+        has_sink=has_sink,
     )
 
 
@@ -170,6 +172,7 @@ def _cached_get_attn_backend(
     is_attention_free: bool,
     use_v1: bool = False,
     use_mla: bool = False,
+    has_sink: bool = False,
 ) -> type[AttentionBackend]:
     # If there are no attention layers (e.g. we are running Mamba),
     # use the placeholder NO_ATTENTION
@@ -193,11 +196,15 @@ def _cached_get_attn_backend(
         backend_by_env_var: Optional[str] = envs.VLLM_ATTENTION_BACKEND
         if backend_by_env_var is not None:
             selected_backend = backend_name_to_enum(backend_by_env_var)
+            if selected_backend is None:
+                raise ValueError(
+                    f"Invalid attention backend: '{backend_by_env_var}'. "
+                    f"Valid backends are: {list(_Backend.__members__.keys())}")
 
     # get device-specific attn_backend
     attention_cls = current_platform.get_attn_backend_cls(
         selected_backend, head_size, dtype, kv_cache_dtype, block_size, use_v1,
-        use_mla)
+        use_mla, has_sink)
     if not attention_cls:
         raise ValueError(
             f"Invalid attention backend for {current_platform.device_name}")
