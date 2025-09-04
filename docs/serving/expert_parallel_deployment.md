@@ -123,12 +123,31 @@ When enabled, vLLM collects load statistics with every forward pass and periodic
 
 ### EPLB Parameters
 
+> Tips: This config type will be removed in v0.12.0, please use new `--eplb_config` config type.
+
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `--eplb-window-size` | Number of engine steps to track for rebalancing decisions | - |
 | `--eplb-step-interval` | Frequency of rebalancing (every N engine steps) | - |
 | `--eplb-log-balancedness` | Log balancedness metrics (avg tokens per expert ÷ max tokens per expert) | `false` |
 | `--num-redundant-experts` | Additional global experts per EP rank beyond equal distribution | `0` |
+
+
+The new `--eplb-config` argument should be used, which accepts a JSON string. The available keys and their descriptions are:
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `window_size`| Number of engine steps to track for rebalancing decisions | 1000 |
+| `step_interval`| Frequency of rebalancing (every N engine steps) | 3000 |
+| `log_balancedness` | Log balancedness metrics (avg tokens per expert ÷ max tokens per expert) | `false` |
+| `num_redundant_experts` | Additional global experts per EP rank beyond equal distribution | `0` |
+
+For example:
+
+```
+vllm serve meta-llama/Llama-3.2-1B \
+  --enable-eplb \
+  --eplb_config '{"window_size":1000,"step_interval":3000,"num_redundant_experts":2,"log_balancedness":true}'
+```
 
 ### Expert Distribution Formula
 
