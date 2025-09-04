@@ -757,8 +757,8 @@ class ModelConfig:
             revision=self.revision,
         )
         self._head_dtype = _get_head_dtype(config=self.hf_config,
-                                          dtype=self.dtype,
-                                          runner_type=self.runner_type)
+                                           dtype=self.dtype,
+                                           runner_type=self.runner_type)
 
         # Interleaved attention is not supported by some backends in V0
         if (not self.disable_sliding_window
@@ -1777,7 +1777,6 @@ class ModelConfig:
         #   - The generate model defaults to not using fp32 head,
         # you can use using_fp32_head=True to enable it.
         return self._head_dtype
-
 
     def get_and_verify_max_len(self, max_model_len: int):
         # Consider max_model_len in tokenizer_config only when
