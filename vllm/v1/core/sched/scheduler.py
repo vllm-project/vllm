@@ -775,15 +775,19 @@ class Scheduler(SchedulerInterface):
                 # in the decoder's KV cache.
                 continue
 
-            # The same encoder input has already been scheduled in the current
-            # step.
-            if request.mm_hashes[i] in mm_hashes_to_schedule:
-                continue
+            if not self.is_encoder_decoder:
+                # We are not using the encoder cache for encoder-decoder models,
+                # yet.
+                if request.mm_hashes[i] in mm_hashes_to_schedule:
+                    # The same encoder input has already been scheduled in the
+                    # current step.
+                    continue
 
-            if self.encoder_cache_manager.check_and_update_cache(request, i):
-                # The encoder input is already computed and cached from a
-                # previous step.
-                continue
+                if self.encoder_cache_manager.check_and_update_cache(
+                        request, i):
+                    # The encoder input is already computed and cached from a
+                    # previous step.
+                    continue
 
             # If no encoder input chunking is allowed, we do not want to
             # partially schedule a multimodal item. If the scheduled range would
