@@ -41,7 +41,8 @@ from vllm.model_executor.layers.sampler import (Sampler, SamplerOutput,
                                                 get_sampler)
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-from vllm.model_executor.models import supports_lora, supports_multimodal
+from vllm.model_executor.models import (supports_lora, supports_mrope,
+                                        supports_multimodal)
 from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalKwargs, MultiModalPlaceholderMap,
@@ -523,12 +524,20 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             if inter_data.mrope_input_positions is None:
                 inter_data.mrope_input_positions = [None] * inter_data.n_seqs
 
-            inter_data.mrope_input_positions[
-                seq_idx] = MRotaryEmbedding.get_next_input_positions(
-                    seq_data.mrope_position_delta,
-                    context_len,
-                    seq_len,
-                )
+            if supports_mrope(self.runner.model):
+                inter_data.mrope_input_positions[
+                    seq_idx] = self.runner.model.get_next_input_positions(
+                        seq_data.mrope_position_delta,
+                        context_len,
+                        seq_len,
+                    )
+            else:
+                inter_data.mrope_input_positions[
+                    seq_idx] = MRotaryEmbedding.get_next_input_positions(
+                        seq_data.mrope_position_delta,
+                        context_len,
+                        seq_len,
+                    )
 
     def _compute_for_prefix_cache_hit(
             self, inter_data: InterDataForSeqGroup, seq_idx: int,
@@ -670,18 +679,32 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                     inter_data.seq_ids[seq_idx]]
                 token_ids = seq_data.get_token_ids()
 
-                mrope_input_positions, mrope_position_delta = \
-                    MRotaryEmbedding.get_input_positions(
-                        token_ids,
-                        hf_config=hf_config,
-                        image_grid_thw=image_grid_thw,
-                        video_grid_thw=video_grid_thw,
-                        second_per_grid_ts=second_per_grid_ts,
-                        context_len=inter_data.context_lens[seq_idx],
-                        seq_len=inter_data.seq_lens[seq_idx],
-                        audio_feature_lengths=audio_feature_lengths,
-                        use_audio_in_video=use_audio_in_video,
-                    )
+                if supports_mrope(self.runner.model):
+                    mrope_input_positions, mrope_position_delta = \
+                        self.runner.model.get_input_positions(
+                            token_ids,
+                            hf_config=hf_config,
+                            image_grid_thw=image_grid_thw,
+                            video_grid_thw=video_grid_thw,
+                            second_per_grid_ts=second_per_grid_ts,
+                            context_len=inter_data.context_lens[seq_idx],
+                            seq_len=inter_data.seq_lens[seq_idx],
+                            audio_feature_lengths=audio_feature_lengths,
+                            use_audio_in_video=use_audio_in_video,
+                        )
+                else:
+                    mrope_input_positions, mrope_position_delta = \
+                        MRotaryEmbedding.get_input_positions(
+                            token_ids,
+                            hf_config=hf_config,
+                            image_grid_thw=image_grid_thw,
+                            video_grid_thw=video_grid_thw,
+                            second_per_grid_ts=second_per_grid_ts,
+                            context_len=inter_data.context_lens[seq_idx],
+                            seq_len=inter_data.seq_lens[seq_idx],
+                            audio_feature_lengths=audio_feature_lengths,
+                            use_audio_in_video=use_audio_in_video,
+                        )
 
                 seq_data.mrope_position_delta = mrope_position_delta
                 inter_data.mrope_input_positions[

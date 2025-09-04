@@ -32,7 +32,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
-from transformers import AutoConfig, BatchFeature, PretrainedConfig
+from transformers import AutoConfig, BatchFeature
 from transformers.models.qwen2_vl import (Qwen2VLImageProcessor,
                                           Qwen2VLProcessor)
 from transformers.models.qwen2_vl.configuration_qwen2_vl import (
@@ -1052,11 +1052,9 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             "model.": "language_model.model.",
         })
 
-    @classmethod
     def get_mrope_input_positions(
-        cls,
+        self,
         input_tokens: list[int],
-        hf_config: PretrainedConfig,
         image_grid_thw: Optional[Union[list[list[int]], torch.Tensor]],
         video_grid_thw: Optional[Union[list[list[int]], torch.Tensor]],
         second_per_grid_ts: Optional[list[float]] = None,
@@ -1073,6 +1071,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         if second_per_grid_ts is None:
             second_per_grid_ts = []
 
+        hf_config = self.config
         image_token_id = hf_config.image_token_id
         video_token_id = hf_config.video_token_id
         vision_start_token_id = hf_config.vision_start_token_id
