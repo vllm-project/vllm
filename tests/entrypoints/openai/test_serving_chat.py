@@ -36,9 +36,15 @@ def monkeypatch_module():
     mpatch.undo()
 
 
+@pytest.fixture(scope="module",
+                params=[True, False],
+                ids=["with_tool_parser", "without_tool_parser"])
+def with_tool_parser(request) -> bool:
+    return request.param
+
+
 @pytest.fixture(scope="module")
-@pytest.mark.parametrize("with_tool_parser", [True, False])
-def default_server_args(with_tool_parser):
+def default_server_args(with_tool_parser: bool):
     args = [
         # use half precision for speed and memory savings in CI environment
         "--enforce-eager",
@@ -75,7 +81,6 @@ async def gptoss_client(gptoss_server):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("with_tool_parser", [True, False])
 async def test_gpt_oss_chat_tool_call_streaming(gptoss_client: OpenAI,
                                                 with_tool_parser: bool):
     tools = [{
