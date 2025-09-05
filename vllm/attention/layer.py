@@ -360,12 +360,15 @@ class MultiHeadAttention(nn.Module):
             # currently, only torch_sdpa is supported on rocm
             self.attn_backend = _Backend.TORCH_SDPA
         else:
-            if backend in (_Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1,
-                           _Backend.FLEX_ATTENTION):
+            if backend == _Backend.FLEX_ATTENTION:
                 backend = _Backend.XFORMERS
 
             self.attn_backend = backend if backend in {
-                _Backend.TORCH_SDPA, _Backend.XFORMERS, _Backend.PALLAS_VLLM_V1
+                _Backend.TORCH_SDPA,
+                _Backend.XFORMERS,
+                _Backend.PALLAS_VLLM_V1,
+                _Backend.FLASH_ATTN,
+                _Backend.FLASH_ATTN_VLLM_V1,
             } else _Backend.TORCH_SDPA
 
         if (self.attn_backend == _Backend.XFORMERS
@@ -392,7 +395,37 @@ class MultiHeadAttention(nn.Module):
             key = torch.repeat_interleave(key, num_repeat, dim=2)
             value = torch.repeat_interleave(value, num_repeat, dim=2)
 
-        if self.attn_backend == _Backend.XFORMERS:
+        if self.attn_backend in {
+                _Backend.FLASH_ATTN,
+                _Backend.FLASH_ATTN_VLLM_V1,
+        }:
+            if self.head_size % 32 != 0:
+                # import from upstream flash_attn
+                from flash_attn import flash_attn_varlen_func
+            else:
+                from vllm.vllm_flash_attn import flash_attn_varlen_func
+
+            cu_seqlens_q = torch.arange(0, (bsz + 1) * q_len,
+                                        step=q_len,
+                                        dtype=torch.int32,
+                                        device=query.device)
+            cu_seqlens_k = torch.arange(0, (bsz + 1) * kv_len,
+                                        step=kv_len,
+                                        dtype=torch.int32,
+                                        device=key.device)
+
+            out = flash_attn_varlen_func(
+                query.flatten(0, 1),
+                key.flatten(0, 1),
+                value.flatten(0, 1),
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_k,
+                max_seqlen_q=q_len,
+                max_seqlen_k=kv_len,
+                softmax_scale=self.scale,
+            )
+            out = out.reshape(bsz, q_len, -1)
+        elif self.attn_backend == _Backend.XFORMERS:
             from xformers import ops as xops
 
             out = xops.memory_efficient_attention_forward(query,
