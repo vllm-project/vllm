@@ -331,8 +331,8 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
             from .cuda_graph import CUDAGraphOptions
 
             num_layers = len(
-                list(x for x in self.vllm_config.compilation_config.
-                     static_forward_context if isinstance(x, Attention))) + 1
+                list(v for (k, v) in self.vllm_config.compilation_config.
+                     static_forward_context.items() if isinstance(v, Attention))) + 1
             static_graph_wrapper_class = resolve_obj_by_qualname(
                 current_platform.get_static_graph_wrapper_cls())
             make_fn = lambda i: lambda f: static_graph_wrapper_class(
