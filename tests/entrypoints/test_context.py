@@ -282,31 +282,42 @@ async def test_single_turn_no_tool_output():
 @pytest.mark.asyncio
 async def test_negative_tool_tokens_edge_case():
     """Test edge case where calculation could result in negative tool
-    tokens."""
-    context = HarmonyContext(messages=[], available_tools=["browser"])
+    tokens. We should log an error and clamp the value to 0."""
+    # Use patch to check if logger.error was called
+    with patch("vllm.entrypoints.context.logger.error") as mock_log:
+        context = HarmonyContext(messages=[], available_tools=["browser"])
 
-    # First turn
-    mock_output1 = create_mock_request_output(
-        prompt_token_ids=list(range(10)),  # 10 tokens
-        output_token_ids=[1, 2, 3, 4, 5],  # 5 tokens
-    )
-    context.append_output(mock_output1)
+        # First turn
+        mock_output1 = create_mock_request_output(
+            prompt_token_ids=list(range(10)),  # 10 tokens
+            output_token_ids=[1, 2, 3, 4, 5],  # 5 tokens
+        )
+        context.append_output(mock_output1)
 
-    # Second turn with fewer new tokens than previous output
-    # This could happen in edge cases with aggressive caching
-    mock_output2 = create_mock_request_output(
-        prompt_token_ids=list(range(12)),  # 12 tokens (only 2 new)
-        output_token_ids=[6, 7],  # 2 tokens
-    )
-    context.append_output(mock_output2)
+        # Second turn with fewer new tokens than previous output
+        # This could happen in edge cases with aggressive caching
+        mock_output2 = create_mock_request_output(
+            prompt_token_ids=list(range(12)),  # 12 tokens (only 2 new)
+            output_token_ids=[6, 7],  # 2 tokens
+        )
+        context.append_output(mock_output2)
 
-    # Tool tokens = 12 - 10 - 5 = -3, but should be handled gracefully
-    # The implementation adds this to tool_output_tokens, so it would be
-    # negative
-    expected_tool_tokens = 12 - 10 - 5  # -3
-    assert context.num_tool_output_tokens == expected_tool_tokens
-    assert context.num_prompt_tokens == 10 + 12
-    assert context.num_output_tokens == 5 + 2
+        # Calculated negative tool tokens (12 - 10 - 5 = -3) should be clamped
+        # to 0 and an error should be logged
+        assert context.num_tool_output_tokens == 0
+        assert context.num_prompt_tokens == 10 + 12
+        assert context.num_output_tokens == 5 + 2
+
+        # Verify the error was logged properly
+        mock_log.assert_called_once()
+
+        # Extract the actual log message and arguments from the call
+        args, _ = mock_log.call_args
+        log_message = args[0]
+
+        # Check for key parts of the message
+        assert "Negative tool output tokens calculated" in log_message
+        assert "-3" in str(args)  # Check that -3 is in the arguments
 
 
 @pytest.mark.asyncio

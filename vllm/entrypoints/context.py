@@ -181,6 +181,19 @@ class HarmonyContext(ConversationContext):
             this_turn_tool_tokens = (self.current_turn.input_tokens -
                                      self.previous_turn.input_tokens -
                                      self.previous_turn.output_tokens)
+
+            # Handle negative tool token counts (shouldn't happen in normal
+            # cases)
+            if this_turn_tool_tokens < 0:
+                logger.error(
+                    "Negative tool output tokens calculated: %d "
+                    "(current_input=%d, previous_input=%d, "
+                    "previous_output=%d). Setting to 0.",
+                    this_turn_tool_tokens, self.current_turn.input_tokens,
+                    self.previous_turn.input_tokens,
+                    self.previous_turn.output_tokens)
+                this_turn_tool_tokens = 0
+
             self.num_tool_output_tokens += this_turn_tool_tokens
 
         # Update cached tokens
