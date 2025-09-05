@@ -129,6 +129,8 @@ class BlockPool:
             assert blk.block_hash is None
             block_hash = new_block_hashes[i]
 
+            blk.block_depth = num_cached_blocks + i
+
             # Update and added the full block to the cache.
             block_hash_with_group_id = BlockHashWithGroupId(
                 block_hash, kv_cache_group_id)

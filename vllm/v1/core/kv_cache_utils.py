@@ -154,6 +154,8 @@ class KVCacheBlock:
     # Whether the block is a null block that should never be cached.
     is_null: bool = False
 
+    _block_depth: int = 0
+
     @property
     def block_hash(self) -> Optional[BlockHashWithGroupId]:
         return self._block_hash
@@ -167,6 +169,14 @@ class KVCacheBlock:
     def reset_hash(self):
         """Reset the block hash when the block is evicted."""
         self._block_hash = None
+
+    @property
+    def block_depth(self) -> int:
+        return self._block_depth
+
+    @block_depth.setter
+    def block_depth(self, block_depth: int):
+        self._block_depth = block_depth
 
     def __repr__(self) -> str:
         # Use block_id instead of KVCacheBlock object to avoid calling __repr__
