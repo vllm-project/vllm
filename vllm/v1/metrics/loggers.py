@@ -651,16 +651,16 @@ class StatLoggerManager:
         vllm_config: VllmConfig,
         engine_idxs: Optional[list[int]] = None,
         custom_stat_loggers: Optional[list[StatLoggerFactory]] = None,
+        enable_default_loggers: bool = True,
     ):
         self.engine_idxs = engine_idxs if engine_idxs else [0]
 
-        factories: list[StatLoggerFactory]
+        factories: list[StatLoggerFactory] = []
         if custom_stat_loggers is not None:
-            factories = custom_stat_loggers
-        else:
-            factories = []
-            if logger.isEnabledFor(logging.INFO):
-                factories.append(LoggingStatLogger)
+            factories.extend(custom_stat_loggers)
+
+        if enable_default_loggers and logger.isEnabledFor(logging.INFO):
+            factories.append(LoggingStatLogger)
 
         # engine_idx: StatLogger
         self.per_engine_logger_dict: dict[int, list[StatLoggerBase]] = {}
