@@ -1987,10 +1987,12 @@ class SpeculativeConfig:
     will use the default version."""
 
     # Draft model vocabulary
-    vocab_freq: Optional[str] = None
-    """The path to the token frequencies over the entire draft model vocabulary."""
-    vocab_freq_cutoff: Optional[float] = None
-    """The vocabulary frequency threshold for the draft model.
+    draft_vocab_pruned: Optional[str] = None
+    """The path to the pruned draft model vocabulary."""
+    draft_vocab_freq: Optional[str] = None
+    """The path to token frequencies for the draft model vocabulary."""
+    draft_vocab_freq_threshold: Optional[float] = None
+    """The frequency threshold for the draft model vocabulary.
     If `None`, do not prune the vocabulary. If >= 1, prune to top N most
     frequent tokens. If < 1, prune tokens until cumulative relative frequency
     mass reaches threshold"""
