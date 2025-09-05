@@ -576,8 +576,10 @@ class CompilationConfig:
             # make a copy to avoid mutating the class-level list via reference.
             self.splitting_ops = list(self._attention_ops)
         elif len(self.splitting_ops) == 0:
-            logger.warning_once("Using piecewise compilation with empty "
-                                "splitting_ops.")
+            logger.warning_once(
+                "Using piecewise compilation with empty "
+                "splitting_ops and use_inductor_graph_partition"
+                f"={self.use_inductor_graph_partition}.")
             if (self.cudagraph_mode == CUDAGraphMode.PIECEWISE
                     and not self.use_inductor_graph_partition):
                 logger.warning_once(
