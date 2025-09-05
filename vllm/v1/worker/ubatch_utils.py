@@ -19,23 +19,27 @@ class UbatchSlice:
 UBatchSlices: TypeAlias = list[UbatchSlice]
 
 
-def create_slices(query_start_loc: np.ndarray, split_point: int,
-                  num_tokens: int) -> tuple[slice, slice]:
+def create_slices(num_scheduled_tokens: np.ndarray, split_point: int) -> tuple[slice, slice]:
+    # TODO(lucas): Refactor the gpu_model_runner.py so we can pass
+    # in cu_num_tokens directly (i.e. query_start_loc)
+    cu_num_tokens = np.zeros(len(num_scheduled_tokens) + 1, dtype=np.int32)
+    np.cumsum(num_scheduled_tokens, dtype=np.int32, out=cu_num_tokens[1:])
+
     first_token_slice = slice(0, split_point)
-    second_token_slice = slice(split_point, num_tokens)
+    second_token_slice = slice(split_point, cu_num_tokens[-1])
 
     # Determine request slices using exclusive stop semantics
     # First ubatch includes requests whose tokens overlap [0, split_point)
     first_ubatch_req_stop = int(
-        np.searchsorted(query_start_loc, split_point, side="left"))
+        np.searchsorted(cu_num_tokens, split_point, side="left"))
     first_ubatch_req_slice = slice(0, first_ubatch_req_stop)
 
     # Second ubatch starts at the request that contains the split_point
     # or the request starting exactly at split_point (if on boundary)
     second_ubatch_req_start = int(
-        np.searchsorted(query_start_loc, split_point, side="left") - 1)
+        np.searchsorted(cu_num_tokens, split_point, side="left") - 1)
     second_ubatch_req_slice = slice(second_ubatch_req_start,
-                                    len(query_start_loc) - 1)
+                                    len(cu_num_tokens) - 1)
 
     return [
         UbatchSlice(first_ubatch_req_slice, first_token_slice),

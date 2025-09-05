@@ -170,16 +170,19 @@ def test_split_attn_metadata_decode_batch(large_decode_metadata):
 def test_prefill_split_across_ubatches_param(seq_lens, query_lens, split_point,
                                              expected_first_reqs,
                                              expected_second_reqs):
+    import numpy as np
+    
     device = torch.device("cpu")
     batch_spec = BatchSpec(seq_lens=seq_lens, query_lens=query_lens)
     common = create_common_attn_metadata(batch_spec,
                                          block_size=16,
                                          device=device)
 
+    num_scheduled_tokens = np.array(query_lens, dtype=np.int32)
     qsl_np = common.query_start_loc_cpu.numpy()
     num_tokens = common.num_actual_tokens
 
-    ubatch_slices = create_slices(qsl_np, split_point, num_tokens)
+    ubatch_slices = create_slices(num_scheduled_tokens, split_point)
     assert len(ubatch_slices) == 2
 
     first_meta = _make_metadata_with_slice(ubatch_slices[0], common)
