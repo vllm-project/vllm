@@ -10,6 +10,7 @@ wheel
 jinja2>=3.1.6
 datasets # for benchmark scripts
 numba == 0.60.0 # v0.61 doesn't support Python 3.9. Required for N-gram speculative decoding
+nixl==0.3.0 # for PD disaggregation
 --extra-index-url=https://download.pytorch.org/whl/xpu
 torch==2.8.0+xpu
 torchaudio
