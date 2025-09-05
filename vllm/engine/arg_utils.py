@@ -43,7 +43,7 @@ from vllm.ray.lazy_utils import is_ray_initialized
 from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.config import get_model_path, is_interleaved
-from vllm.transformers_utils.utils import check_gguf_file
+from vllm.transformers_utils.utils import check_gguf_file, is_s3
 from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
                         GiB_bytes, get_ip, is_in_ray_actor)
 from vllm.v1.sample.logits_processor import LogitsProcessor
@@ -491,6 +491,14 @@ class EngineArgs:
         # Setup plugins
         from vllm.plugins import load_general_plugins
         load_general_plugins()
+        if is_s3(self.model):
+            if self.load_format == "auto":
+                self.load_format = "runai_streamer"
+            elif self.load_format != "runai_streamer":
+                raise ValueError(
+                    f"To load a model from S3, 'load_format' "
+                    f"must be 'runai_streamer', "
+                    f"but got '{self.load_format}'. Model: {self.model}")
         # when use hf offline,replace model id to local model path
         if huggingface_hub.constants.HF_HUB_OFFLINE:
             model_id = self.model
