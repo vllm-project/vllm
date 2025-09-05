@@ -12,6 +12,8 @@ from ....utils import large_gpu_mark
 from ...registry import HF_EXAMPLE_MODELS
 from ...utils import check_logprobs_close
 
+pytestmark = pytest.mark.common_model
+
 # These have unsupported head_dim for FA. We do not
 # have a clean way to fall back, so we fail with
 # a clear msg when it happens.

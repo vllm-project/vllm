@@ -9,6 +9,8 @@ from vllm.platforms import current_platform
 
 from ...utils import check_embeddings_close
 
+pytestmark = pytest.mark.embedding_model
+
 
 @pytest.mark.parametrize(
     "model",
