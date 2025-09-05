@@ -28,6 +28,7 @@ from vllm.config import (CompilationLevel, CUDAGraphMode, VllmConfig,
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
+from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.parallel_state import (
     get_pp_group, get_tp_group, graph_capture, is_global_first_rank,
     prepare_communication_buffer_for_model)
@@ -90,15 +91,11 @@ from .utils import (AttentionGroup, MultiModalBudget,
 
 if TYPE_CHECKING:
     import xgrammar as xgr
-    import xgrammar.kernels.apply_token_bitmask_inplace_torch_compile as xgr_torch_compile  # noqa: E501
 
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.core.sched.output import SchedulerOutput
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
-    xgr_torch_compile = LazyLoader(
-        "xgr_torch_compile", globals(),
-        "xgrammar.kernels.apply_token_bitmask_inplace_torch_compile")
 
 logger = init_logger(__name__)
 
@@ -1333,10 +1330,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # so we receive it in that format.
         grammar_bitmask = torch.from_numpy(grammar_bitmask).contiguous()
 
-        # Force use of the torch.compile implementation from xgrammar to work
-        # around issues with the Triton kernel in concurrent structured output
-        # scenarios. See PR #19565 and issues #19493, #18376 for details.
-        xgr_torch_compile.apply_token_bitmask_inplace_torch_compile(
+        xgr.apply_token_bitmask_inplace(
             logits,
             grammar_bitmask.to(self.device, non_blocking=True),
             indices=out_indices if not skip_out_indices else None,
@@ -2783,7 +2777,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.attn_groups.append(
                 create_attn_groups(attn_backends, kv_cache_spec))
 
-        # Calculate reorder batch threshold (if neeeded)
+        # Calculate reorder batch threshold (if needed)
         self.calculate_reorder_batch_threshold()
 
     def initialize_cudagraph_capture(self) -> None:
@@ -3146,6 +3140,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
+            if self.device.type == 'xpu':
+                get_kv_transfer_group().set_host_xfer_buffer_ops(
+                    copy_kv_blocks)
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """

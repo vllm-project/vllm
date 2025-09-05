@@ -1488,6 +1488,8 @@ class EngineArgs:
             "TRITON_MLA",
             "CUTLASS_MLA",
             "FLASHMLA",
+            "FLASHMLA_VLLM_V1",
+            "FLASH_ATTN_MLA",
             "FLASHINFER",
             "FLASHINFER_VLLM_V1",
             "ROCM_AITER_MLA",

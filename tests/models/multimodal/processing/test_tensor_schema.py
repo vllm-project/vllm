@@ -41,9 +41,6 @@ ARCH_NEEDS_EXTRAS = [
 ]
 REPO_ID_TO_SKIP = {
     "nm-testing/pixtral-12b-FP8-dynamic": "duplicated test",
-    # FIXME(Isotr0py): enable GPT-OSS based InternVL3.5 model
-    # after support PP for GPT-OSS
-    "OpenGVLab/InternVL3_5-GPT-OSS-20B-A4B-Preview": "Broken model",
 }
 
 ImageInput = list[Image.Image]
@@ -199,7 +196,9 @@ def test_model_tensor_schema(model_arch: str, model_id: str):
         revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=hf_overrides_fn,
-    )
+        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        enforce_eager=model_info.enforce_eager,
+        dtype=model_info.dtype)
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
     factories = MULTIMODAL_REGISTRY._processor_factories[model_cls]
 
