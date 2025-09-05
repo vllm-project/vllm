@@ -67,7 +67,6 @@ def get_platform_metadata_classes() -> tuple[type[AttentionMetadata], ...]:
 def prepare_mamba2_metadata(
     chunk_size: int,
     attn_metadata: AttentionMetadata,
-    mamba2_metadata=None,
 ) -> Mamba2Metadata:
 
     # compute number of prefill and decode requests
@@ -108,20 +107,6 @@ def prepare_mamba2_metadata(
                 _query_start_loc_to_chunk_indices_offsets(
                 query_start_loc_p, chunk_size, num_prefill_tokens)
 
-    if mamba2_metadata is not None:
-        mamba2_metadata.has_initial_states = has_initial_states_p
-        mamba2_metadata.prep_initial_states = prep_initial_states
-        mamba2_metadata.chunk_size = chunk_size
-        mamba2_metadata.seq_idx = seq_idx_p
-        mamba2_metadata.chunk_indices = chunk_indices_p
-        mamba2_metadata.chunk_offsets = chunk_offsets_p
-        # We use 1 reset flag:
-        #  * mamba2_metadata.cu_seqlen is None
-        #      update config specific to (each input)
-        #      (become available at first layer, e.g. conv_weights)
-        mamba2_metadata.cu_seqlen = None  # suppose to be updated at each input
-
-        return mamba2_metadata
     return Mamba2Metadata(has_initial_states_p=has_initial_states_p,
                           prep_initial_states=prep_initial_states,
                           chunk_size=chunk_size,
