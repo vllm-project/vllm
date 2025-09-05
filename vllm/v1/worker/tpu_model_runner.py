@@ -402,7 +402,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 lora_request=new_req_data.lora_request,
             )
 
-            if self.requests[req_id].sampling_params.guided_decoding:
+            if self.requests[req_id].sampling_params.guided_decoding is not None:
                 self.structured_output_manager.grammar_init(self.requests[req_id])
 
             req_ids_to_add.append(req_id)
@@ -1132,16 +1132,18 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             count = 0
             for num_new, output_token_id in enumerate(generated_token_ids, 1):
                 last_token_id = output_token_id
-                if (not self.requests[req_id].sampling_params.ignore_eos  and 
+                if (self.requests[req_id].sampling_params is not None and 
+                    not self.requests[req_id].sampling_params.ignore_eos  and 
                    last_token_id == scheduler_output.eos_token_ids[req_id]):
                    count = num_new
                    self.requests[req_id].stop = True
                    break
             if generated_token_ids and self.structured_output_manager.should_advance(self.requests[req_id]):
-                if count > 0:
-                    self.requests[req_id].structured_output_request.grammar.accept_tokens(req_id, generated_token_ids[:count])
-                else:
-                    self.requests[req_id].structured_output_request.grammar.accept_tokens(req_id, generated_token_ids)
+                if self.requests[req_id].structured_output_request is not None and self.requests[req_id].structured_output_request.grammar is not None:
+                    if count > 0:
+                        self.requests[req_id].structured_output_request.grammar.accept_tokens(req_id, generated_token_ids[:count])
+                    else:
+                        self.requests[req_id].structured_output_request.grammar.accept_tokens(req_id, generated_token_ids)
 
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids,

@@ -50,7 +50,7 @@ class CachedRequestState:
 
     structured_output_request: Optional[StructuredOutputRequest] = None
 
-    requests_stop_id: int = None
+    requests_stop_id: Optional[int] = None
 
     stop : bool = False
 

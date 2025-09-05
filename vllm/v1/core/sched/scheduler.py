@@ -557,7 +557,7 @@ class Scheduler(SchedulerInterface):
             req_to_new_blocks,
         )
 
-        eos_token_ids = {req.request_id: req.eos_token_id for req in self.running}
+        eos_token_ids = {req.request_id: req.eos_token_id for req in self.running if req.eos_token_id is not None}
         structured_output_request_ids = self.get_structured_output_request_ids(self.running,
                                      )
         scheduler_output = SchedulerOutput(
