@@ -52,9 +52,10 @@ class _Backend(enum.Enum):
     FLASHINFER_VLLM_V1 = enum.auto()
     TRITON_MLA = enum.auto()  # Supported by V1
     TRITON_MLA_VLLM_V1 = enum.auto()
-    FLASHMLA_VLLM_V1 = enum.auto()
-    FLASHMLA = enum.auto()  # Supported by V1
     CUTLASS_MLA = enum.auto()
+    FLASHMLA = enum.auto()  # Supported by V1
+    FLASHMLA_VLLM_V1 = enum.auto()
+    FLASH_ATTN_MLA = enum.auto()  # Supported by V1
     PALLAS = enum.auto()
     PALLAS_VLLM_V1 = enum.auto()
     IPEX = enum.auto()
@@ -537,7 +538,7 @@ class Platform:
 
     def get_global_graph_pool(self) -> Any:
         """
-        Return the global graph pool for the this platform.
+        Return the global graph pool for this platform.
         """
         cls = self.__class__
         if cls._global_graph_pool is None:

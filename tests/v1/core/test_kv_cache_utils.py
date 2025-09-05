@@ -247,7 +247,7 @@ def test_free_kv_cache_block_queue_append_n():
 
 def test_free_kv_cache_block_queue_popleft_n():
     blocks = [KVCacheBlock(block_id=i) for i in range(6)]
-    # Create a empty FreeKVCacheBlockQueue with these blocks
+    # Create an empty FreeKVCacheBlockQueue with these blocks
     queue = FreeKVCacheBlockQueue(
         [blocks[1], blocks[3], blocks[5], blocks[4], blocks[0], blocks[2]])
     assert queue.num_free_blocks == 6
@@ -601,8 +601,14 @@ def test_unify_kv_cache_configs():
     ]
 
     unify_kv_cache_configs(need_sort_kv_cache_config)
-    assert need_sort_kv_cache_config[0].num_blocks == 10
-    assert need_sort_kv_cache_config[1].num_blocks == 10
+    sorted_kv_cache_groups = [
+        KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
+        KVCacheGroupSpec(["layer2"], new_kv_cache_spec(num_kv_heads=4)),
+    ]
+    assert (
+        need_sort_kv_cache_config[0].kv_cache_groups == sorted_kv_cache_groups)
+    assert (
+        need_sort_kv_cache_config[1].kv_cache_groups == sorted_kv_cache_groups)
 
     diff_kv_cache_config = [
         KVCacheConfig(

@@ -25,8 +25,7 @@ SSM_MODELS = [
 
 HYBRID_MODELS = [
     "ai21labs/Jamba-tiny-dev",
-    # skipping until vLLM implementation issues are resolved
-    # "pfnet/plamo-2-1b",
+    "pfnet/plamo-2-1b",
     "Zyphra/Zamba2-1.2B-instruct",
     "hmellor/tiny-random-BambaForCausalLM",
     "ibm-granite/granite-4.0-tiny-preview",
@@ -34,20 +33,10 @@ HYBRID_MODELS = [
     "LiquidAI/LFM2-1.2B",
 ]
 
-HF_UNSUPPORTED_MODELS = [
-    # The HF transformers implementation of
-    # Mamba2 is buggy for Codestral as it doesn't handle n_groups, so the test
-    # doesn't compare vLLM output with HF output.
-    # See https://github.com/huggingface/transformers/pull/35943
-    "yujiepan/mamba2-codestral-v0.1-tiny-random",
-    # transformers 4.55 is still producing garbage for this model
-    # TODO(tdoublep): follow-up on transformers side
-    "ibm-granite/granite-4.0-tiny-preview"
-]
-
 V1_SUPPORTED_MODELS = [
     "state-spaces/mamba-130m-hf",
     "ai21labs/Jamba-tiny-dev",
+    "pfnet/plamo-2-1b",
     "yujiepan/mamba2-codestral-v0.1-tiny-random",
     "Zyphra/Zamba2-1.2B-instruct",
     "hmellor/tiny-random-BambaForCausalLM",
@@ -58,11 +47,17 @@ V1_SUPPORTED_MODELS = [
 
 FULL_CUDA_GRAPH_MODELS = [
     "ai21labs/Jamba-tiny-dev",
+    "pfnet/plamo-2-1b",
     "Zyphra/Zamba2-1.2B-instruct",
 ]
 
 V0_UNSUPPORTED_MODELS = [
     "LiquidAI/LFM2-1.2B",
+]
+
+FP32_STATE_MODELS = [
+    "state-spaces/mamba-130m-hf",
+    "Zyphra/Zamba2-1.2B-instruct",
 ]
 
 # Avoid OOM
@@ -85,20 +80,13 @@ def test_models(
     try:
         model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
         model_info.check_available_online(on_fail="skip")
-        hf_version_check = model_info.check_transformers_version(
-            on_fail="return")
+        model_info.check_transformers_version(on_fail="skip")
     except ValueError:
-        hf_version_check = None
-
-    if hf_version_check is not None:
-        print(f"Skipping transformers comparison because: {hf_version_check}")
+        pass
 
     with hf_runner(model) as hf_model:
-        if model not in HF_UNSUPPORTED_MODELS and hf_version_check is None:
-            hf_outputs = hf_model.generate_greedy_logprobs_limit(
-                example_prompts, max_tokens, num_logprobs)
-        else:
-            hf_outputs = None
+        hf_outputs = hf_model.generate_greedy_logprobs_limit(
+            example_prompts, max_tokens, num_logprobs)
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "0")
@@ -116,7 +104,7 @@ def test_models(
     else:
         vllm_v1_outputs = None
 
-    if hf_outputs is not None and vllm_v0_outputs is not None:
+    if vllm_v0_outputs is not None:
         check_logprobs_close(
             outputs_0_lst=hf_outputs,
             outputs_1_lst=vllm_v0_outputs,
@@ -125,12 +113,10 @@ def test_models(
         )
 
     if model in V1_SUPPORTED_MODELS:
-        ref_outputs = hf_outputs if hf_outputs is not None else vllm_v0_outputs
-        assert ref_outputs is not None
         check_logprobs_close(
-            outputs_0_lst=ref_outputs,
+            outputs_0_lst=hf_outputs,
             outputs_1_lst=vllm_v1_outputs,
-            name_0="hf" if hf_outputs is not None else "vllm-v0",
+            name_0="hf",
             name_1="vllm-v1",
         )
 
@@ -397,11 +383,8 @@ def test_full_cuda_graph(
         pass
 
     with hf_runner(model) as hf_model:
-        if model not in HF_UNSUPPORTED_MODELS:
-            hf_outputs = hf_model.generate_greedy_logprobs_limit(
-                example_prompts, max_tokens, num_logprobs)
-        else:
-            hf_outputs = None
+        hf_outputs = hf_model.generate_greedy_logprobs_limit(
+            example_prompts, max_tokens, num_logprobs)
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "0")
@@ -416,7 +399,7 @@ def test_full_cuda_graph(
         vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
-    if hf_outputs is not None and vllm_v0_outputs is not None:
+    if vllm_v0_outputs is not None:
         check_logprobs_close(
             outputs_0_lst=hf_outputs,
             outputs_1_lst=vllm_v0_outputs,
@@ -424,17 +407,15 @@ def test_full_cuda_graph(
             name_1="vllm-v0",
         )
 
-    ref_outputs = hf_outputs if hf_outputs is not None else vllm_v0_outputs
-    assert ref_outputs is not None
     check_logprobs_close(
-        outputs_0_lst=ref_outputs,
+        outputs_0_lst=hf_outputs,
         outputs_1_lst=vllm_v1_outputs,
-        name_0="hf" if hf_outputs is not None else "vllm-v0",
+        name_0="hf",
         name_1="vllm-v1",
     )
 
 
-@pytest.mark.parametrize("model", ["Zyphra/Zamba2-1.2B-instruct"])
+@pytest.mark.parametrize("model", FP32_STATE_MODELS)
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_fp32_state(
@@ -455,11 +436,8 @@ def test_fp32_state(
         pass
 
     with hf_runner(model) as hf_model:
-        if model not in HF_UNSUPPORTED_MODELS:
-            hf_outputs = hf_model.generate_greedy_logprobs_limit(
-                example_prompts, max_tokens, num_logprobs)
-        else:
-            hf_outputs = None
+        hf_outputs = hf_model.generate_greedy_logprobs_limit(
+            example_prompts, max_tokens, num_logprobs)
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "0")
@@ -475,18 +453,16 @@ def test_fp32_state(
         vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
-    if hf_outputs is not None:
-        check_logprobs_close(
-            outputs_0_lst=hf_outputs,
-            outputs_1_lst=vllm_v0_outputs,
-            name_0="hf",
-            name_1="vllm-v0",
-        )
-
-    ref_outputs = hf_outputs if hf_outputs is not None else vllm_v0_outputs
     check_logprobs_close(
-        outputs_0_lst=ref_outputs,
+        outputs_0_lst=hf_outputs,
+        outputs_1_lst=vllm_v0_outputs,
+        name_0="hf",
+        name_1="vllm-v0",
+    )
+
+    check_logprobs_close(
+        outputs_0_lst=hf_outputs,
         outputs_1_lst=vllm_v1_outputs,
-        name_0="hf" if hf_outputs is not None else "vllm-v0",
+        name_0="hf",
         name_1="vllm-v1",
     )
