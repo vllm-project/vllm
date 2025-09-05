@@ -102,28 +102,22 @@ def _make_metadata_with_slice(
 
     request_slice = ubatch_slice.request_slice
     token_slice = ubatch_slice.token_slice
+    
+    start_locs = attn_metadata.query_start_loc_cpu
+    first_req = request_slice.start
+    first_tok = token_slice.start
+    last_req = request_slice.stop - 1
+    last_tok = token_slice.stop - 1
 
-    assert attn_metadata.query_start_loc[
-        request_slice.
-        start] <= token_slice.start < attn_metadata.query_start_loc[
-            request_slice.start + 1], (
+    assert start_locs[first_req] <= first_tok < start_locs[first_req + 1], (
                 "Token slice start outside of first request")
-    assert attn_metadata.query_start_loc[
-        request_slice.stop -
-        1] < token_slice.stop <= attn_metadata.query_start_loc[
-            request_slice.stop], ("Token slice end outside of last request")
+    assert start_locs[last_req] <= last_tok < start_locs[last_req+1], \
+        "Token slice end outside of last request"
 
-    splits_first_request = token_slice.start > attn_metadata.query_start_loc[
-        request_slice.start]
-    splits_last_request = token_slice.stop < attn_metadata.query_start_loc[
-        request_slice.stop]
+    splits_first_request = first_tok > start_locs[first_req]
+    splits_last_request = last_tok < start_locs[last_req+1] - 1
 
-    query_start_loc = slice_query_start_locs(attn_metadata.query_start_loc,
-                                             request_slice)
-    if splits_first_request:
-        tokens_skipped = token_slice.start - attn_metadata.query_start_loc[
-            request_slice.start]
-        query_start_loc[0] += tokens_skipped
+    query_start_loc = slice_query_start_locs(start_locs, request_slice)
 
     assert len(query_start_loc) >= 2, (
         f"query_start_loc must have at least 2 elements, "
@@ -131,19 +125,23 @@ def _make_metadata_with_slice(
     query_start_loc_cpu = slice_query_start_locs(
         attn_metadata.query_start_loc_cpu, request_slice)
     if splits_first_request:
-        tokens_skipped = token_slice.start - \
-            attn_metadata.query_start_loc_cpu[request_slice.start]
+        tokens_skipped = first_tok - start_locs[first_req]
+        query_start_loc[0] += tokens_skipped
         query_start_loc_cpu[0] += tokens_skipped
-
     seq_lens = attn_metadata.seq_lens[request_slice]
     seq_lens_cpu = attn_metadata.seq_lens_cpu[request_slice]
 
     if splits_last_request:
-        tokens_skipped = query_start_loc[-1] - token_slice.stop
-        seq_lens[-1] -= tokens_skipped
-        seq_lens_cpu[-1] -= tokens_skipped
+        tokens_skipped = query_start_loc_cpu[-1] - token_slice.stop
         query_start_loc[-1] -= tokens_skipped
         query_start_loc_cpu[-1] -= tokens_skipped
+        
+        # Make sure we don't modify the seq_lens tensors
+        #  (not cudagraph compatible)
+        seq_lens = seq_lens.clone()
+        seq_lens_cpu = seq_lens_cpu.clone()        
+        seq_lens[-1] -= tokens_skipped
+        seq_lens_cpu[-1] -= tokens_skipped
 
     max_seq_len = int(seq_lens_cpu.max())
     num_computed_tokens_cpu = attn_metadata.num_computed_tokens_cpu[

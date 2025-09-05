@@ -217,9 +217,8 @@ def test_prefill_split_across_ubatches_param(seq_lens, query_lens, split_point,
 
     # First ubatch: last request's seq_len should be
     #  context + tokens_in_first_chunk
-    expected_first_last_seqlen = context_lens[
-        split_req_idx] + tokens_in_first_chunk
-    assert int(first_meta.seq_lens[-1]) == expected_first_last_seqlen
+    expected_seqlen = context_lens[split_req_idx] + tokens_in_first_chunk
+    assert int(first_meta.seq_lens[-1]) == expected_seqlen
 
     # For full preceding requests in first ubatch, seq_lens should match
     #  originals
