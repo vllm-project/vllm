@@ -44,6 +44,7 @@ def reshape_and_cache_kernel_flash(
     slot_mapping_ptr,  # [num_tokens]
     k_scale,  # float32
     v_scale,  # float32
+    # strides
     key_stride: tl.int64,
     value_stride: tl.int64,
     block_stride: tl.int64,
@@ -51,10 +52,11 @@ def reshape_and_cache_kernel_flash(
     num_heads: tl.constexpr,
     head_size: tl.constexpr,
     block_size: tl.constexpr,
+    # FP8 flags
     FP8_KV_CACHE: tl.constexpr,
-    KV_CACHE_UINT8_CAST_REQUIRED: tl.constexpr,
     KV_CACHE_FP8E4M3_DTYPE: tl.constexpr,
     KV_CACHE_FP8E5M2_DTYPE: tl.constexpr,
+    KV_CACHE_UINT8_CAST_REQUIRED: tl.constexpr,
     # tune parameters
     TILE_SIZE: tl.constexpr,
 ):
@@ -162,16 +164,6 @@ def reshape_and_cache_flash(
     head_stride = key_cache.stride()[2]
     assert head_stride == head_size, "only continous heads are supported"
 
-    TILE_SIZE = min(2048, triton.next_power_of_2(n))
-    if torch.version.hip:
-        num_stages = 4
-        num_warps = 8
-    else: # cuda
-        num_stages = 10
-        num_warps = 16
-        if torch.cuda.get_device_capability("cuda")[0] < 9:
-            TILE_SIZE = min(512, TILE_SIZE)
-    
     kv_cache_torch_dtype = key_cache.dtype if kv_cache_dtype == "auto" else STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
     FP8_KV_CACHE = kv_cache_torch_dtype in [torch.float8_e4m3fn, torch.float8_e5m2, torch.uint8]
     # if the pytorch dtype of the kv_cache is uint8, fp8e4m3 is used 
@@ -181,6 +173,17 @@ def reshape_and_cache_flash(
     KV_CACHE_UINT8_CAST_REQUIRED = kv_cache_torch_dtype == torch.uint8
     assert (not FP8_KV_CACHE) or (KV_CACHE_FP8E4M3_DTYPE or KV_CACHE_FP8E5M2_DTYPE), \
         f"unsupported kv cache dtype, got {kv_cache_torch_dtype}"
+
+    # heuristics instead of autotuning
+    TILE_SIZE = min(2048, triton.next_power_of_2(n))
+    if torch.version.hip:
+        num_stages = 4
+        num_warps = 8
+    else: # cuda
+        num_stages = 10
+        num_warps = 16
+        if torch.cuda.get_device_capability(key.device)[0] < 9:
+            TILE_SIZE = min(512, TILE_SIZE)
     
     # TODO(ngl): maybe replace with static launch grid to avoid overhead if
     #   using cudagraphs
@@ -202,10 +205,11 @@ def reshape_and_cache_flash(
         num_heads=num_heads,
         head_size=head_size,
         block_size=block_size,
+        # FP8 flags
         FP8_KV_CACHE=FP8_KV_CACHE,
-        KV_CACHE_UINT8_CAST_REQUIRED=KV_CACHE_UINT8_CAST_REQUIRED,
         KV_CACHE_FP8E4M3_DTYPE=KV_CACHE_FP8E4M3_DTYPE,
         KV_CACHE_FP8E5M2_DTYPE=KV_CACHE_FP8E5M2_DTYPE,
+        KV_CACHE_UINT8_CAST_REQUIRED=KV_CACHE_UINT8_CAST_REQUIRED,
         # autotune parameters
         TILE_SIZE=TILE_SIZE,
         num_warps=num_warps,
