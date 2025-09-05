@@ -257,12 +257,24 @@ class KVCacheManager:
 
         Abbrivations:
 
+        ```
         comp      = request.num_computed_tokens
         new_comp  = num_new_computed_tokens
                   = len(new_computed_blocks) * block_size
         connector = num_extra_tokens_from_connector
         new       = num_new_tokens
         lookahead = num_lookahead_tokens
+        ```
+
+
+        The allocation has three stages:
+        - Free unnecessary blocks in `comp` and check
+           if we have sufficient free blocks (return None if not).
+        - Handle prefix tokens (`comp + new_comp + connector`):
+            - Free unnecessary blocks (e.g. outside sliding window)
+            - Allocate new blocks for `connector` tokens inside 
+              sliding window
+        - Allocate new blocks for tokens to be computed (`new + lookahead`)
 
         Returns:
             A list of new allocated blocks.
