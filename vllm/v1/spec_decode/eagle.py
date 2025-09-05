@@ -650,10 +650,10 @@ class EagleProposer:
             logger.info("Loading EAGLE LM head weights from the target model.")
             self.model.lm_head = target_language_model.lm_head
 
-        # optionally prune the language model vocabulary
+        # optionally prune the draft model vocabulary
+        self.hot_token_ids = None
         if self.vllm_config.speculative_config.draft_vocab_pruned:
-            # todo: prune draft model vocabulary here
-            # self.model.model.embed_tokens.weight = None
+            self.hot_token_ids = load_draft_pruned_vocab(self.vllm_config.speculative_config.draft_vocab_pruned).to(self.model.device)
 
     @torch.inference_mode()
     def dummy_run(
@@ -695,6 +695,18 @@ class EagleProposer:
             ])
         ) == 1, "All eagle layers should belong to the same kv cache group"
 
+
+def load_draft_vocab_pruned(token_map_path: str) -> list[int]:
+    # todo: use vllm method to download a model
+    from huggingface_hub import snapshot_download
+    if not os.path.exists(token_map_path):
+        cache_dir = snapshot_download(
+            os.path.dirname(token_map_path),
+            ignore_patterns=["*.bin", "*.safetensors"],
+        )
+        token_map_path = os.path.join(cache_dir, os.path.basename(token_map_path))
+    hot_token_ids = torch.load(token_map_path, weights_only=True)
+    return torch.tensor(hot_token_ids, dtype=torch.int64)
 
 # NOTE(woosuk): Currently, the below code is not used and we always use argmax
 # to sample the draft tokens. We will use this after we find a way to manage
