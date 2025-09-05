@@ -54,14 +54,15 @@ class KVCacheBlocks:
     def get_block_ids(
         self,
         allow_none: bool = False,
-    ):
+    ) -> Optional[tuple[list[int], ...]]:
         """
         Converts the KVCacheBlocks instance to block_ids.
-        
+
         Returns:
-            tuple[list[int], ...]: A tuple of lists where
-            * the outer tuple corresponds to KV cache groups
-            * each inner list contains the block_ids of the blocks in that group
+            tuple[list[int], ...]: A tuple of lists where:
+                - the outer tuple corresponds to KV cache groups
+                - each inner list contains the block_ids of the blocks in that
+                  group
         """
         if allow_none and all(len(group) == 0 for group in self.blocks):
             return None
