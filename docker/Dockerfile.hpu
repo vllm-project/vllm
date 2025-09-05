@@ -3,7 +3,7 @@
 # --- Config ---
 # Use a Gaudi 1.21.x PyTorch base (Ubuntu 24.04 + PyTorch 2.6 installer).
 # Adjust if your environment pins a different 1.21 minor.
-ARG BASE_IMAGE=vault.habana.ai/gaudi-docker/1.21.3/ubuntu24.04/habanalabs/pytorch-installer-2.6.0:latest
+ARG BASE_IMAGE=vault.habana.ai/gaudi-docker/1.22.0/ubuntu24.04/habanalabs/pytorch-installer-2.7.1:latest
 
 FROM ${BASE_IMAGE}
 
@@ -17,9 +17,6 @@ RUN apt-get update && \
       git build-essential ca-certificates bash && \
     rm -rf /var/lib/apt/lists/*
 
-# copy needed patches
-COPY patches/*.patch /tmp/
-
 # --- Workspace root ---
 WORKDIR /workspace
 
@@ -29,8 +26,6 @@ WORKDIR /workspace
 RUN git clone --depth=1 https://github.com/vllm-project/vllm /workspace/vllm
 WORKDIR /workspace/vllm
 
-# Patch needed patches
-RUN git apply /tmp/*.patch
 # Install build reqs but strip any torch* so we don't overwrite Habana torch
 RUN sed '/^[[:space:]]*torch/Id' requirements/build.txt > /tmp/vllm-build-no-torch.txt && \
     python -m pip install --upgrade pip && \
