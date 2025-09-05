@@ -238,11 +238,11 @@ class StreamingHarmonyContext(HarmonyContext):
             # (finished=True), then the next token processed will mark the
             # beginning of a new message
             self.first_tok_of_message = output.finished
-            tok = output.outputs[0].token_ids[0]
-            self.parser.process(tok)
+            for tok in output.outputs[0].token_ids:
+                self.parser.process(tok)
             self._update_num_output_tokens(output.outputs[0].token_ids)
             # Check if the current token is part of reasoning content
-            self._update_num_reasoning_tokens([tok])
+            self._update_num_reasoning_tokens(output.outputs[0].token_ids)
             self.last_tok = tok
         else:
             # Handle the case of tool output in direct message format
