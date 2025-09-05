@@ -574,8 +574,10 @@ class CompilationConfig:
             # see https://github.com/vllm-project/vllm/pull/20059 for details.
             self.splitting_ops = self._attention_ops
         elif len(self.splitting_ops) == 0:
-            logger.warning_once("Using piecewise compilation with empty "
-                                "splitting_ops.")
+            logger.warning_once(
+                "Using piecewise compilation with empty "
+                "splitting_ops and use_inductor_graph_partition"
+                f"={self.use_inductor_graph_partition}.")
             if (self.cudagraph_mode == CUDAGraphMode.PIECEWISE
                     and not self.use_inductor_graph_partition):
                 logger.warning_once(

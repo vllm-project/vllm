@@ -39,15 +39,16 @@ class CudagraphDispatcher:
             CUDAGraphMode.FULL: set(),
         }
 
-        if not vllm_config.compilation_config.use_inductor_graph_partition:
-            assert not self.cudagraph_mode.requires_piecewise_compilation() or \
-                (self.compilation_config.level == CompilationLevel.PIECEWISE and
-                self.compilation_config.splitting_ops_contain_attention()), \
-                "Compilation level should be CompilationLevel.PIECEWISE when "\
-                "cudagraph_mode piecewise cudagraphs is used, "\
-                f"cudagraph_mode={self.cudagraph_mode}, "\
-                f"compilation_level={self.compilation_config.level}, "\
-                f"splitting_ops={self.compilation_config.splitting_ops}"
+        assert not self.cudagraph_mode.requires_piecewise_compilation() or \
+            (self.compilation_config.level == CompilationLevel.PIECEWISE and
+            self.compilation_config.splitting_ops_contain_attention()) or\
+            (self.compilation_config.use_inductor_graph_partition and \
+            not self.compilation_config.splitting_ops_contain_attention()), \
+            "Compilation level should be CompilationLevel.PIECEWISE when "\
+            "cudagraph_mode piecewise cudagraphs is used, "\
+            f"cudagraph_mode={self.cudagraph_mode}, "\
+            f"compilation_level={self.compilation_config.level}, "\
+            f"splitting_ops={self.compilation_config.splitting_ops}"
 
         self.keys_initialized = False
 
