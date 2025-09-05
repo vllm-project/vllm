@@ -286,7 +286,8 @@ class SamplingParams(
             detokenize=True if detokenize is None else detokenize,
             skip_special_tokens=True
             if skip_special_tokens is None else skip_special_tokens,
-            spaces_between_special_tokens=spaces_between_special_tokens,
+            spaces_between_special_tokens=True if spaces_between_special_tokens
+            is None else spaces_between_special_tokens,
             logits_processors=logits_processors,
             truncate_prompt_tokens=truncate_prompt_tokens,
             output_kind=RequestOutputKind.CUMULATIVE
