@@ -188,7 +188,6 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   static constexpr auto THREAD_COUNT = NUM_WARPS * WARP_SIZE;
   static constexpr int HALF_THREAD_COUNT = THREAD_COUNT / 2;
   static constexpr uint32_t S_NUM_64 = S_NUM_128 * 2;
-  static constexpr uint32_t S_NUM_32 = S_NUM_64 * 2;
   __shared__ __int128_t __align__(16) s_buff_128[S_NUM_128];
 
   const Idx_t tid = threadIdx.x;

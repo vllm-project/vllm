@@ -28,8 +28,9 @@ def silu_mul_fp8_quant_deep_gemm_cuda(
     E, T, H2 = y.shape
     assert H2 % 2 == 0, "last dim of y must be even (2*H)"
     H = H2 // 2
-    G = H // group_size
-    assert H % group_size == 0, "H must be divisible by group_size"
+    G = (H + group_size - 1) // group_size
+    assert H % 8 == 0, "H must be divisible by 8"
+    assert group_size == 128, "H must be divisible by 8"
     assert tokens_per_expert.ndim == 1 and tokens_per_expert.shape[0] == E
 
     tokens_per_expert = tokens_per_expert.to(device=y.device,

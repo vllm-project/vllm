@@ -73,9 +73,7 @@ def _silu_mul_fp8_quant_deep_gemm(
         gate = tl.load(
             input_ptr + base_gate_offset + t * stride_i_t, mask=mask, other=0.0
         ).to(tl.float32)
-        up = tl.load(
-            input_ptr + base_up_offset + t * stride_i_t, mask=mask, other=0.0
-        ).to(tl.float32)
+        up = tl.load(input_ptr + base_up_offset + t * stride_i_t, mask=mask, other=0.0)
 
         gate = gate * (1.0 / (1.0 + tl.exp(-gate)))
         y = gate * up
@@ -110,7 +108,7 @@ def silu_mul_fp8_quant_deep_gemm_triton(
     E, T, H2 = y.shape
     assert H2 % 2 == 0, "last dim of y must be even (2*H)"
     H = H2 // 2
-    G = H // group_size
+    G = (H + group_size - 1) // group_size
     assert H % group_size == 0, "H must be divisible by group_size"
     assert tokens_per_expert.ndim == 1 and tokens_per_expert.shape[0] == E, (
         "tokens_per_expert must be shape (E,)"
@@ -176,7 +174,7 @@ def silu_mul_fp8_quant_deep_gemm_triton(
 
 
 # Parse generation strategies
-strategies = ["uniform", "max_t", "first_t"]
+strategies = ["max_t", "uniform", "first_t"]
 
 
 def benchmark(
@@ -184,7 +182,7 @@ def benchmark(
     E,
     T,
     H,
-    num_parallel_tokens=16,
+    num_parallel_tokens=64,
     G=128,
     runs=100,
     num_warmups=20,
@@ -196,7 +194,7 @@ def benchmark(
     # Different random generation strategies
     if gen_strategy == "uniform":
         tokens_per_expert = torch.randint(
-            0, T, size=(E,), dtype=torch.int32, device="cuda"
+            int(T * 0.7), T, size=(E,), dtype=torch.int32, device="cuda"
         )
     elif gen_strategy == "max_t":
         tokens_per_expert = (
@@ -245,20 +243,35 @@ def benchmark(
     total_bytes = input_bytes + output_bytes + scale_bytes
     memory_bw = total_bytes / (avg_time / 1000) / 1e9
 
-    return avg_time, gflops, memory_bw
+    return avg_time, gflops, memory_bw, (memory_bw / (3.35 * 1024)) * 100
 
 
 def create_comparison_plot(
-    cuda_times, baseline_times, config_labels, strategy_name, id
+    ratio, cuda_times, baseline_times, config_labels, strategy_name, id
 ):
     """Create a comparison plot for a specific generation strategy"""
     fig, ax = plt.subplots(1, 1, figsize=(12, 6))
 
     # Configure x-axis positions
     x = np.arange(len(config_labels))
+    width = 0.35
+
+    # Execution Time plot (lower is better)
+    ax.bar(
+        x - width / 2, cuda_times, width, label="CUDA Kernel", alpha=0.8, color="blue"
+    )
+    ax.bar(
+        x + width / 2,
+        baseline_times,
+        width,
+        label="Baseline",
+        alpha=0.8,
+        color="orange",
+    )
+
     # Add speedup labels over each bar pair
     for i in range(len(x)):
-        speedup = baseline_times[i] / cuda_times[i]
+        speedup = ratio[i]
         max_height = max(cuda_times[i], baseline_times[i])
         ax.text(
             x[i],
@@ -271,15 +284,17 @@ def create_comparison_plot(
         )
 
     ax.set_xlabel("Configuration")
-    ax.set_ylabel("Time (ms)")
-    ax.set_title(f"Execution Time Comparison - {strategy_name}\n(Lower is Better)")
+    ax.set_ylabel("% Utilization")
+    ax.set_title(
+        f"Memory Bandwidth Utilization (%) - {strategy_name}\n(Higher is Better)"
+    )
     ax.set_xticks(x)
     ax.set_xticklabels(config_labels, rotation=45, ha="right")
     ax.legend()
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    filename = f"../../silu_bench/silu_benchmark_{id}.png"
+    filename = f"../silu_bench/silu_benchmark_{id}.png"
     plt.savefig(filename, dpi=300, bbox_inches="tight")
     plt.show()
 
@@ -289,14 +304,14 @@ def create_comparison_plot(
 outer_dim = 7168
 configs = [
     # DeepSeekV3 Configs
-    (8, 8, 7168),
-    (8, 16, 7168),
-    (8, 32, 7168),
-    (8, 64, 7168),
-    (8, 128, 7168),
-    (8, 256, 7168),
-    (8, 512, 7168),
-    (8, 1024, 7168),
+    (9, 8, 7168),
+    (9, 16, 7168),
+    (9, 32, 7168),
+    (9, 64, 7168),
+    (9, 128, 7168),
+    (9, 256, 7168),
+    (9, 512, 7168),
+    (9, 1024, 7168),
     # DeepSeekV3 Configs
     (32, 8, 7168),
     (32, 16, 7168),
@@ -321,7 +336,7 @@ runs = 100
 num_warmups = 20
 
 strategy_descriptions = {
-    "uniform": "experts = torch.randint(0, T, size=(E,))",
+    "uniform": "experts = torch.randint(int(T * 0.7), T, size=(E,))",
     "max_t": "experts[:] = T",
     "first_t": "experts[0] = T, experts[1:] = 0",
 }
@@ -348,7 +363,7 @@ for id, strategy in enumerate(strategies):
         config_labels.append(config_label)
 
         # CUDA kernel results
-        time_ms, gflops, gbps = benchmark(
+        time_ms, gflops, gbps, perc = benchmark(
             silu_mul_fp8_quant_deep_gemm_cuda,
             E,
             T,
@@ -357,10 +372,10 @@ for id, strategy in enumerate(strategies):
             num_warmups=num_warmups,
             gen_strategy=strategy,
         )
-        cuda_results.append((time_ms, gflops, gbps))
+        cuda_results.append((time_ms, gflops, gbps, perc))
 
         # Baseline results
-        time_ms, gflops, gbps = benchmark(
+        time_ms, gflops, gbps, perc = benchmark(
             silu_mul_fp8_quant_deep_gemm_triton,
             E,
             T,
@@ -369,17 +384,25 @@ for id, strategy in enumerate(strategies):
             num_warmups=num_warmups,
             gen_strategy=strategy,
         )
-        baseline_results.append((time_ms, gflops, gbps))
+        baseline_results.append((time_ms, gflops, gbps, perc))
 
         print(f"Completed: {config_label}")
 
     # Extract data for plotting
-    cuda_times = [r[0] for r in cuda_results]
-    baseline_times = [r[0] for r in baseline_results]
+    cuda_times = [r[3] for r in cuda_results]
+    baseline_times = [r[3] for r in baseline_results]
 
+    ratio = [
+        baseline_results[i][0] / cuda_results[i][0] for i in range(len(config_labels))
+    ]
     # Create comparison plot for this strategy
     plot_filename = create_comparison_plot(
-        cuda_times, baseline_times, config_labels, strategy_descriptions[strategy], id
+        ratio,
+        cuda_times,
+        baseline_times,
+        config_labels,
+        strategy_descriptions[strategy],
+        id,
     )
     generated_plots.append(plot_filename)
 
@@ -389,12 +412,11 @@ for id, strategy in enumerate(strategies):
     print("-" * 60)
 
     for i, (E, T, H) in enumerate(configs):
-        speedup = baseline_times[i] / cuda_times[i]
+        speedup = baseline_results[i][0] / cuda_results[i][0]
         config_label = f"E={E:3d},T={T:4d},H={H:4d}"
         print(
-            f"{config_label:<20} {cuda_times[i]:8.3f}     "
-            f"{baseline_times[i]:8.3f}     "
-            f"{speedup:6.2f}x"
+            f"{config_label:<20} {cuda_times[i]:8.3f} "
+            f"{baseline_times[i]:8.3f} {speedup:6.2f}x"
         )
 
 print(f"\n{'=' * 60}")
