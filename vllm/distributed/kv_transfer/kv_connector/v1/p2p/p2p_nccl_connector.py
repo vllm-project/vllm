@@ -16,6 +16,7 @@ from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import MLACommonMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -74,8 +75,11 @@ class P2pNcclConnectorMetadata(KVConnectorMetadata):
 
 class P2pNcclConnector(KVConnectorBase_V1):
 
-    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
-        super().__init__(vllm_config=vllm_config, role=role)
+    def __init__(self, vllm_config: "VllmConfig",
+                 kv_cache_config: KVCacheConfig, role: KVConnectorRole):
+        super().__init__(vllm_config=vllm_config,
+                         kv_cache_config=kv_cache_config,
+                         role=role)
         self._block_size = vllm_config.cache_config.block_size
         self._requests_need_load: dict[str, Any] = {}
         self.config = vllm_config.kv_transfer_config

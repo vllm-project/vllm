@@ -82,7 +82,9 @@ class SharedStorageConnector(KVConnectorBase_V1):
 
     def __init__(self, vllm_config: "VllmConfig",
                  kv_cache_config: KVCacheConfig, role: KVConnectorRole):
-        super().__init__(vllm_config=vllm_config, role=role)
+        super().__init__(vllm_config=vllm_config,
+                         kv_cache_config=kv_cache_config,
+                         role=role)
         self._block_size = vllm_config.cache_config.block_size
         self._requests_need_load: dict[str, Request] = {}
         transfer_config = vllm_config.kv_transfer_config
