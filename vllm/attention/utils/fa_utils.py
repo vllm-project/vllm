@@ -3,6 +3,7 @@
 from typing import Optional
 
 from vllm import envs
+from vllm._custom_ops import _get_import_fix
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -59,7 +60,10 @@ def get_flash_attn_version(requires_alibi: bool = False) -> Optional[int]:
 
         assert is_fa_version_supported(fa_version)
         return fa_version
-    except (ImportError, AssertionError):
+    except ImportError as e:
+        logger.error(_get_import_fix("flash_attn", e))
+        return None
+    except AssertionError:
         return None
 
 
