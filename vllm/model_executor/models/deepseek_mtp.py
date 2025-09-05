@@ -91,7 +91,7 @@ class DeepSeekMultiTokenPredictor(nn.Module):
         # to map the exact layer index from weights
         self.layers = torch.nn.ModuleDict({
             str(idx):
-            DeepSeekMultiTokenPredictorLayer(config, vllm_config,
+            DeepSeekMultiTokenPredictorLayer(vllm_config,
                                              f"{prefix}.layers.{idx}")
             for idx in range(self.mtp_start_layer_idx,
                              self.mtp_start_layer_idx + self.num_mtp_layers)
