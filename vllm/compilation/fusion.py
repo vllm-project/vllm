@@ -16,7 +16,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym, kNvfp4Quant, kStaticTensorScale)
 from vllm.platforms import current_platform
 
-from .fx_utils import find_getitem_maybe
 from .inductor_pass import enable_fake_mode
 from .multi_output_match import MultiOutputMatch
 from .vllm_inductor_pass import VllmInductorPass
@@ -78,68 +77,6 @@ FUSED_OPS: dict[FusedRMSQuantKey, OpOverload] = {
     FusedRMSQuantKey(kFp8DynamicTokenSym, True):
     torch.ops._C.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
 }
-
-
-class QuantMultiOutputMatch(MultiOutputMatch):
-
-    def __init__(self, match: pm.Match, quant_op, fused_op):
-        super().__init__(match)
-        assert isinstance(quant_op, OpOverload)
-        assert isinstance(fused_op, OpOverload)
-        self.QUANT_OP = quant_op  # in-place quant op
-        self.FUSED_OP = fused_op  # in-place fused quant op
-
-    def insert_fused_node(self, fused_return_mapping: dict[int, tuple[fx.Node,
-                                                                      int]],
-                          **kwargs):
-        """
-        This utility function inserts an auto-functionalized node for FUSED_OP.
-        It also correctly sets its meta value and rebinds the users of the
-        unfused nodes to use the fused node instead.
-
-        :param fused_return_mapping: A dictionary, mapping from getitem indices
-        of the fused node result to a tuple of the old node and a getitem index.
-        :param kwargs: kwargs that get directly forwarded to the auto_fn node
-
-        Example:
-        If we want to replace this graph:
-        _, x1, x2 = auto_fn(op1)
-        _, y1, y2 = auto_fn(op2)
-
-        with
-        _, x1, y2, x2 = auto_fn(FUSED_OP)
-
-        we would call:
-        insert_fused_node({1: (op1_node, 1), 2: (op2_node, 2), 3: (op1_node, 2)}
-
-        Note that the 0th element is None for auto-functionalized in-place ops.
-        Hence, others appear 1-indexed.
-        """
-        fused_node = self.insert_auto_fn(self.FUSED_OP, kwargs)
-        indices = fused_return_mapping.keys()
-        getitem_nodes = self.insert_getitems(fused_node, indices)
-
-        # Prepare the meta value, use a list so it's mutable
-        meta_val = [None] * (max(indices) + 1)
-
-        # Iterate through elements of the tuple produced by fused_node
-        for idx, getitem_node in zip(indices, getitem_nodes):
-            old_node, old_idx = fused_return_mapping[idx]
-
-            # If the old value was never used, the old_getitem might not exist
-            old_getitem = find_getitem_maybe(old_node, old_idx)
-            if old_getitem is not None:
-                # Rebind the users of match getitem nodes to use the new nodes.
-                # The old nodes will be removed by DCE at the end of the pass.
-                old_getitem.replace_all_uses_with(getitem_node)
-                getitem_node.meta["val"] = old_getitem.meta["val"]
-
-            # Extract the appropriate meta value
-            # It is present even if the getitem node does not exist
-            meta_val[idx] = old_node.meta["val"][old_idx]
-
-        # Fix the meta value on the new fused node
-        fused_node.meta["val"] = tuple(meta_val)
 
 
 class RMSNormQuantPattern:
