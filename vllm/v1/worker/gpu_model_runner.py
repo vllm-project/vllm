@@ -85,7 +85,7 @@ from vllm.v1.worker.kv_connector_model_runner_mixin import (
     KVConnectorModelRunnerMixin, KVConnectorOutput)
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.ubatch_utils import (UbatchSlice, UBatchSlices,
-                                         create_slices)
+                                         create_ubatch_slices)
 
 from .utils import (AttentionGroup, MultiModalBudget,
                     add_kv_sharing_layers_to_kv_cache_groups, bind_kv_cache,
@@ -329,6 +329,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             dtype=torch.int64,
             device="cpu",
             pin_memory=self.pin_memory)
+        
+        # Microbatching
+        self.ubatching_decode_token_threshold = \
+            self.parallel_config.microbatching_decode_token_threshold
+        self.ubatching_prefill_token_threshold = \
+            self.parallel_config.microbatching_prefill_token_threshold
+        self.enable_ubatching = self.parallel_config.enable_microbatching
 
     def _make_buffer(self, *args, dtype: torch.dtype) -> CpuGpuBuffer:
         return CpuGpuBuffer(*args,
@@ -588,15 +595,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     ) -> tuple[Optional[UBatchSlices], int, Optional[torch.Tensor]]:
         # Don't bother with the should_ubatch handshaking unless microbatching
         # is enabled
-        if not self.parallel_config.enable_microbatching:
+        if not self.enable_ubatching:
             return (None, 0, None)
 
         # Check preconditions for microbatching
         total_num_scheduled_tokens = max_num_scheduled_tokens
-        should_attempt_ubatching = \
-            self.parallel_config.enable_microbatching and \
-            total_num_scheduled_tokens >= \
-            self.parallel_config.microbatching_token_threshold
+        uniform_decode = (max_num_scheduled_tokens == self.uniform_decode_query_len) and (
+            num_scheduled_tokens == self.input_batch.num_reqs * max_num_scheduled_tokens)
+        should_attempt_ubatching = self._should_ubatch(total_num_scheduled_tokens, uniform_decode=uniform_decode)
 
         # Don't microbatch unless every other DP worker is also microbatching
         num_pad_tokens = 0
@@ -616,7 +622,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             f"original_num_tokens {total_num_scheduled_tokens}"
         num_tokens_per_ubatch = (total_num_scheduled_tokens +
                                        num_pad_tokens) // 2
-        ubatch_slices = create_slices(
+        ubatch_slices = create_ubatch_slices(
             num_scheduled_tokens, num_tokens_per_ubatch)
 
         return (ubatch_slices, num_pad_tokens, num_tokens_after_padding)
@@ -781,8 +787,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         query_start_loc = self.query_start_loc.gpu[:num_reqs + 1]
 
         ubatch_slices, num_pad_tokens, num_tokens_after_padding = \
-            self._ubatch_split(num_scheduled_tokens,
-                               max_num_scheduled_tokens)
+            self._ubatch_split(num_scheduled_tokens, max_num_scheduled_tokens)
 
         self.seq_lens.np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
@@ -2182,11 +2187,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # wrap the model with full cudagraph wrapper if needed.
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs() \
-            and not self.parallel_config.enable_microbatching:
+            and not self.enable_ubatching:
             self.model = CUDAGraphWrapper(self.model,
                                           self.vllm_config,
                                           runtime_mode=CUDAGraphMode.FULL)
-        elif self.parallel_config.enable_microbatching:
+        elif self.enable_ubatching:
             if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
                 self.model = UBatchWrapper(self.model, self.vllm_config,
                                            CUDAGraphMode.FULL, self.device)
@@ -2326,6 +2331,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             return num_nans_in_logits
         except IndexError:
             return {}
+        
+    def _should_ubatch(self, num_tokens: int, uniform_decode: bool) -> bool:
+        if not self.enable_ubatching:
+            return False
+        if uniform_decode:
+            return num_tokens >= self.ubatching_decode_token_threshold
+        else:
+            return num_tokens >= self.ubatching_prefill_token_threshold
 
     @contextmanager
     def maybe_randomize_inputs(self, input_ids: torch.Tensor):
@@ -2413,15 +2426,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             is_profile: If True, this is a profile run.
             remove_lora: If False, dummy LoRAs are not destroyed after the run
         """
-        ubatch_enabled = self.parallel_config.enable_microbatching
         num_tokens_across_dp = None
         num_pad = 0
         should_ubatch = False
-        if ubatch_enabled:
-            should_ubatch = num_tokens >= \
-                self.parallel_config.microbatching_token_threshold and \
-                allow_microbatching
-
+        if self.enable_ubatching:
+            should_ubatch = self._should_ubatch(num_tokens, uniform_decode)
             (should_ubatch, num_pad,
              num_tokens_across_dp) = self.get_dp_padding_ubatch(
                  num_tokens, should_ubatch)
@@ -2486,11 +2495,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # over a certain threshold.
         if should_ubatch:
             # We only support decode-only cudagraphs
-            assert num_reqs == num_tokens
             assert num_tokens % 2 == 0
 
             num_tokens_per_ubatch = num_tokens // 2
-            ubatch_slices = create_slices(
+            ubatch_slices = create_ubatch_slices(
                 num_scheduled_tokens, num_tokens_per_ubatch)
 
         attn_metadata: Optional[PerLayerAttnMetadata] = None
@@ -2506,6 +2514,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.seq_lens.np[:num_reqs] = self.max_model_len
             self.seq_lens.np[num_reqs:] = 0
             self.seq_lens.copy_to_gpu()
+            
+            cum_num_tokens, _  = self._get_cumsum_and_arange(num_scheduled_tokens)
+            self.query_start_loc.np[1:num_reqs + 1] = cum_num_tokens
+            self.query_start_loc.copy_to_gpu()
 
             for kv_cache_group_id, kv_cache_group_spec in enumerate(
                     self.kv_cache_config.kv_cache_groups):
@@ -2929,15 +2941,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 desc="Capturing CUDA graphs ({}, {})".format(
                     "decode" if uniform_decode else "mixed prefill-decode",
                     cudagraph_runtime_mode.name))
-        enable_microbatching = self.parallel_config.enable_microbatching
         # DBO Only supports running Full cudagraphs with uniform
         # decode lengths
-        if enable_microbatching and uniform_decode:
+        if self.enable_ubatching and uniform_decode:
             for num_tokens in compilation_cases:
                 # If the number of tokens is greater than the microbatching
                 # threshold, don't generate a microbatched cudagraph
-                if (num_tokens
-                        < self.parallel_config.microbatching_token_threshold):
+                if (num_tokens < self.ubatching_decode_token_threshold):
                     continue
 
                 # Warmup
@@ -3031,7 +3041,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     self.vllm_config,
                     self.device,
                 ))
-                if self.parallel_config.enable_microbatching:
+                if self.enable_ubatching:
                     attn_metadata_builders.append(
                         attn_backend.get_builder_cls()(
                             kv_cache_spec,

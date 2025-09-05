@@ -10,7 +10,7 @@ from vllm.v1.attention.backends.utils import (UbatchSlice,
                                               _make_metadata_with_slice,
                                               slice_query_start_locs,
                                               split_attn_metadata)
-from vllm.v1.worker.ubatch_utils import create_slices
+from vllm.v1.worker.ubatch_utils import create_ubatch_slices
 
 
 @pytest.fixture
@@ -182,7 +182,7 @@ def test_prefill_split_across_ubatches_param(seq_lens, query_lens, split_point,
     qsl_np = common.query_start_loc_cpu.numpy()
     num_tokens = common.num_actual_tokens
 
-    ubatch_slices = create_slices(num_scheduled_tokens, split_point)
+    ubatch_slices = create_ubatch_slices(num_scheduled_tokens, split_point)
     assert len(ubatch_slices) == 2
 
     first_meta = _make_metadata_with_slice(ubatch_slices[0], common)

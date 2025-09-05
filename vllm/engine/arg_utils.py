@@ -683,6 +683,8 @@ class EngineArgs:
                                     **parallel_kwargs["enable_microbatching"])
         parallel_group.add_argument("--microbatching-decode-token-threshold",
                                     **parallel_kwargs["microbatching_decode_token_threshold"])
+        parallel_group.add_argument("--microbatching-prefill-token-threshold",
+                                    **parallel_kwargs["microbatching_prefill_token_threshold"])
         parallel_group.add_argument("--enable-eplb",
                                     **parallel_kwargs["enable_eplb"])
         parallel_group.add_argument("--eplb-config",
