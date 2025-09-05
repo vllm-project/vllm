@@ -52,13 +52,18 @@ class RequestFuncOutput:
 
 async def async_request_tgi(
     request_func_input: RequestFuncInput,
+    context_len: Optional[int] = None,
     pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith("generate_stream")
 
+    cur_context_len = request_func_input.prompt_len + request_func_input.output_len if context_len is None else context_len
+    # NOTE: we estimate bufsize increasement by taking one token as approximately 4 bytes.
+    # 2**16 : the default read_bufsize of aiohttp.ClientSession
+    read_bufsize = cur_context_len * 4 + 2**16
     async with aiohttp.ClientSession(
-        trust_env=True, timeout=AIOHTTP_TIMEOUT
+        trust_env=True, timeout=AIOHTTP_TIMEOUT, read_bufsize=read_bufsize
     ) as session:
         params = {
             "max_new_tokens": request_func_input.output_len,
@@ -133,13 +138,18 @@ async def async_request_tgi(
 
 async def async_request_trt_llm(
     request_func_input: RequestFuncInput,
+    context_len: Optional[int] = None,
     pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith("generate_stream")
 
+    cur_context_len = request_func_input.prompt_len + request_func_input.output_len if context_len is None else context_len
+    # NOTE: we estimate bufsize increasement by taking one token as approximately 4 bytes.
+    # 2**16 : the default read_bufsize of aiohttp.ClientSession
+    read_bufsize = cur_context_len * 4 + 2**16
     async with aiohttp.ClientSession(
-        trust_env=True, timeout=AIOHTTP_TIMEOUT
+        trust_env=True, timeout=AIOHTTP_TIMEOUT, read_bufsize=read_bufsize
     ) as session:
         payload = {
             "accumulate_tokens": True,
@@ -204,6 +214,7 @@ async def async_request_trt_llm(
 
 async def async_request_deepspeed_mii(
     request_func_input: RequestFuncInput,
+    context_len: Optional[int] = None,
     pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
@@ -211,8 +222,12 @@ async def async_request_deepspeed_mii(
         "OpenAI Completions API URL must end with 'completions' or 'profile'."
     )
 
+    cur_context_len = request_func_input.prompt_len + request_func_input.output_len if context_len is None else context_len
+    # NOTE: we estimate bufsize increasement by taking one token as approximately 4 bytes.
+    # 2**16 : the default read_bufsize of aiohttp.ClientSession
+    read_bufsize = cur_context_len * 4 + 2**16
     async with aiohttp.ClientSession(
-        trust_env=True, timeout=AIOHTTP_TIMEOUT
+        trust_env=True, timeout=AIOHTTP_TIMEOUT, read_bufsize=read_bufsize
     ) as session:
         payload = {
             "model": request_func_input.model,
@@ -267,6 +282,7 @@ async def async_request_deepspeed_mii(
 
 async def async_request_openai_completions(
     request_func_input: RequestFuncInput,
+    context_len: Optional[int] = None,
     pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
@@ -274,8 +290,12 @@ async def async_request_openai_completions(
         "OpenAI Completions API URL must end with 'completions' or 'profile'."
     )
 
+    cur_context_len = request_func_input.prompt_len + request_func_input.output_len if context_len is None else context_len
+    # NOTE: we estimate bufsize increasement by taking one token as approximately 4 bytes.
+    # 2**16 : the default read_bufsize of aiohttp.ClientSession
+    read_bufsize = cur_context_len * 4 + 2**16
     async with aiohttp.ClientSession(
-        trust_env=True, timeout=AIOHTTP_TIMEOUT
+        trust_env=True, timeout=AIOHTTP_TIMEOUT, read_bufsize=read_bufsize
     ) as session:
         payload = {
             "model": request_func_input.model_name
@@ -367,6 +387,7 @@ async def async_request_openai_completions(
 
 async def async_request_openai_chat_completions(
     request_func_input: RequestFuncInput,
+    context_len: Optional[int] = None,
     pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
@@ -374,8 +395,12 @@ async def async_request_openai_chat_completions(
         "OpenAI Chat Completions API URL must end with 'chat/completions'."
     )
 
+    cur_context_len = request_func_input.prompt_len + request_func_input.output_len if context_len is None else context_len
+    # NOTE: we estimate bufsize increasement by taking one token as approximately 4 bytes.
+    # 2**16 : the default read_bufsize of aiohttp.ClientSession
+    read_bufsize = cur_context_len * 4 + 2**16
     async with aiohttp.ClientSession(
-        trust_env=True, timeout=AIOHTTP_TIMEOUT
+        trust_env=True, timeout=AIOHTTP_TIMEOUT, read_bufsize=read_bufsize
     ) as session:
         content = [{"type": "text", "text": request_func_input.prompt}]
         if request_func_input.multi_modal_content:
@@ -476,6 +501,7 @@ async def async_request_openai_chat_completions(
 
 async def async_request_openai_audio(
     request_func_input: RequestFuncInput,
+    context_len: Optional[int] = None,
     pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     # Lazy import without PlaceholderModule to avoid vllm dep.
@@ -487,8 +513,12 @@ async def async_request_openai_audio(
     )
     "or `translations`."
 
+    cur_context_len = request_func_input.prompt_len + request_func_input.output_len if context_len is None else context_len
+    # NOTE: we estimate bufsize increasement by taking one token as approximately 4 bytes.
+    # 2**16 : the default read_bufsize of aiohttp.ClientSession
+    read_bufsize = cur_context_len * 4 + 2**16
     async with aiohttp.ClientSession(
-        trust_env=True, timeout=AIOHTTP_TIMEOUT
+        trust_env=True, timeout=AIOHTTP_TIMEOUT, read_bufsize=read_bufsize
     ) as session:
         content = [{"type": "text", "text": request_func_input.prompt}]
         payload = {

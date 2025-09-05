@@ -249,6 +249,7 @@ async def benchmark(
     ramp_up_strategy: Optional[Literal["linear", "exponential"]] = None,
     ramp_up_start_rps: Optional[int] = None,
     ramp_up_end_rps: Optional[int] = None,
+    context_len: Optional[int] = None,
 ):
     if backend in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[backend]
@@ -284,7 +285,7 @@ async def benchmark(
         extra_body=extra_body,
     )
 
-    test_output = await request_func(request_func_input=test_input)
+    test_output = await request_func(request_func_input=test_input, context_len=context_len)
     if not test_output.success:
         raise ValueError(
             "Initial test run failed - Please make sure benchmark arguments "
@@ -313,7 +314,7 @@ async def benchmark(
             ignore_eos=ignore_eos,
             extra_body=extra_body,
         )
-        profile_output = await request_func(request_func_input=profile_input)
+        profile_output = await request_func(request_func_input=profile_input, context_len=context_len)
         if profile_output.success:
             print("Profiler started")
 
@@ -339,11 +340,11 @@ async def benchmark(
     #                 if max_concurrency else contextlib.nullcontext())
     semaphore = asyncio.Semaphore(max_concurrency) if max_concurrency else None
 
-    async def limited_request_func(request_func_input, pbar):
+    async def limited_request_func(request_func_input, pbar, context_len):
         if semaphore is None:
-            return await request_func(request_func_input=request_func_input, pbar=pbar)
+            return await request_func(request_func_input=request_func_input, pbar=pbar, context_len=context_len)
         async with semaphore:
-            return await request_func(request_func_input=request_func_input, pbar=pbar)
+            return await request_func(request_func_input=request_func_input, pbar=pbar, context_len=context_len)
 
     benchmark_start_time = time.perf_counter()
     tasks: list[asyncio.Task] = []
@@ -400,7 +401,7 @@ async def benchmark(
             extra_body=extra_body,
             request_id=request_id,
         )
-        task = limited_request_func(request_func_input=request_func_input, pbar=pbar)
+        task = limited_request_func(request_func_input=request_func_input, pbar=pbar, context_len=context_len)
         tasks.append(asyncio.create_task(task))
     outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
 
@@ -526,7 +527,7 @@ async def benchmark(
             output_len=test_output_len,
             logprobs=logprobs,
         )
-        profile_output = await request_func(request_func_input=profile_input)
+        profile_output = await request_func(request_func_input=profile_input, context_len=context_len)
         if profile_output.success:
             print("Profiler stopped")
 
@@ -847,6 +848,7 @@ def main(args: argparse.Namespace):
             ramp_up_strategy=args.ramp_up_strategy,
             ramp_up_start_rps=args.ramp_up_start_rps,
             ramp_up_end_rps=args.ramp_up_end_rps,
+            context_len=args.context_len,
         )
     )
 
@@ -1313,6 +1315,12 @@ def create_argument_parser():
         default=None,
         help="The ending request rate for ramp-up (RPS). "
         "Needs to be specified when --ramp-up-strategy is used.",
+    )
+    parser.add_argument(
+        "--context-len",
+        type=int,
+        default=None,
+        help="Total length of prompts and outputs",
     )
 
     return parser
