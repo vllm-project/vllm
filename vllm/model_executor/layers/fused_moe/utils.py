@@ -19,6 +19,9 @@ from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv
 from vllm.utils.flashinfer import fp4_quantize
 
+if current_platform.supports_mx():
+    from aiter.ops.triton.quant import dynamic_mxfp4_quant
+
 
 @triton.jit
 def _count_expert_num_tokens(topk_ids_ptr, expert_num_tokens_ptr, num_experts,
@@ -169,14 +172,14 @@ def _mxfp4_quantize(
     A_scale: Optional[torch.Tensor],
     per_act_token_quant: bool,
     block_shape: Optional[list[int]] = None,
-) -> tuple[torch.Tensor, None]:
+) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
     assert block_shape is None
     if not current_platform.supports_mx():
         A = quant_dequant_mxfp4(A)
-    else:
-        raise NotImplementedError()
-
-    return A, None
+        return A, A_scale
+    if A_scale is not None:
+        return A, A_scale
+    return dynamic_mxfp4_quant(A)
 
 
 def _mxfp8_quantize(

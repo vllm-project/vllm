@@ -144,13 +144,10 @@ class QuarkW4A4MXFP4(QuarkScheme):
             )
             weight_quantizer.scale.data = layer.weight_scale.data
 
-            if not envs.VLLM_QUARK_EMU_MEM_OPT:
-                layer.weight = torch.nn.Parameter(
-                    weight_quantizer(layer.weight.data).to(self.out_dtype),
-                    requires_grad=False,
-                )
-            else:
-                self.weight_quantizer = weight_quantizer
+            layer.weight = torch.nn.Parameter(
+                weight_quantizer(layer.weight.data).to(self.out_dtype),
+                requires_grad=False,
+            )
             layer.weight_scale = None
 
             # This call is necessary to release the scales memory.

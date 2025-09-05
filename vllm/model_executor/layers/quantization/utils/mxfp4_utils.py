@@ -34,8 +34,8 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps):
     elif current_platform.is_rocm():
         from triton_kernels.target_info import is_hip
         from triton_kernels.tensor_details.layout import (
-            BlackwellMXScaleLayout, HopperMXScaleLayout, HopperMXValueLayout,
-            GFX950MXScaleLayout)
+            BlackwellMXScaleLayout, GFX950MXScaleLayout, HopperMXScaleLayout,
+            HopperMXValueLayout)
         value_layout = StridedLayout
         scale_layout = StridedLayout
         if not is_hip():
@@ -53,7 +53,8 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps):
     else:
         """ weight swizzle for mxfp4 moe, used for OAI mxfp4 kernel
         """
-        value_layout, value_layout_opts = layout.make_default_matmul_mxfp4_w_layout(
+        value_layout, value_layout_opts = \
+            layout.make_default_matmul_mxfp4_w_layout(
             mx_axis=1)
         scale_layout, scale_layout_opts = (
             layout.make_default_matmul_mxfp4_w_scale_layout(
