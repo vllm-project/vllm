@@ -4,7 +4,7 @@
 import numpy as np
 import torch
 
-from vllm.distributed import get_cp_group
+from vllm.distributed import get_dcp_group
 from vllm.logger import init_logger
 from vllm.utils import cdiv
 
@@ -51,8 +51,8 @@ class BlockTable:
         self.slot_mapping = torch.zeros(self.max_num_batched_tokens,
                                         dtype=torch.int64,
                                         device=self.device)
-        self.cp_world_size = get_cp_group().world_size
-        self.cp_rank = get_cp_group().rank_in_group
+        self.dcp_world_size = get_dcp_group().world_size
+        self.dcp_rank = get_dcp_group().rank_in_group
 
     def append_row(
         self,
@@ -92,19 +92,23 @@ class BlockTable:
         # NOTE(woosuk): We can't simply use `token_indices // block_size`
         # here because M (max_model_len) is not necessarily divisible by
         # block_size.
-        if self.cp_world_size > 1:
+        if self.dcp_world_size > 1:
+            # Note(hc): The DCP implement store kvcache with a interleave
+            # style, the kvcache for the token whose token_idx is i is
+            # always stored on the GPU whose dcp_rank equals i % cp_world_size:
+
             # Use a "virtual block" which equals to world_size * block_size
             # for block_table_indices calculation.
-            virtual_block_size = self.block_size * self.cp_world_size
+            virtual_block_size = self.block_size * self.dcp_world_size
             block_table_indices = (req_indices * self.max_num_blocks_per_req +
                                    positions // virtual_block_size)
             block_numbers = self.block_table_np.ravel()[block_table_indices]
             # Use virtual_block_size for mask calculation, which marks local
             # tokens.
             virtual_block_offsets = positions % virtual_block_size
-            mask = virtual_block_offsets % self.cp_world_size == self.cp_rank
+            mask = virtual_block_offsets % self.dcp_world_size == self.dcp_rank
             # Calcuate local block_offsets
-            block_offsets = virtual_block_offsets // self.cp_world_size
+            block_offsets = virtual_block_offsets // self.dcp_world_size
             # Calcuate slot_mapping
             slot_mapping = block_numbers * self.block_size + block_offsets
             # Write final slots, use -1 for not-local
@@ -150,14 +154,14 @@ class MultiGroupBlockTable:
     def __init__(self, max_num_reqs: int, max_model_len: int,
                  max_num_batched_tokens: int, pin_memory: bool,
                  device: torch.device, block_sizes: list[int]) -> None:
-        # Note(hc): each cp rank only store
-        # (max_model_len//cp_world_size) tokens in kvcache,
+        # Note(hc): each dcp rank only store
+        # (max_model_len//dcp_world_size) tokens in kvcache,
         # so the block_size which used for calc max_num_blocks_per_req
-        # must be multiplied by cp_world_size.
-        cp_world_size = get_cp_group().world_size
+        # must be multiplied by dcp_world_size.
+        dcp_world_size = get_dcp_group().world_size
         self.block_tables = [
             BlockTable(block_size, max_num_reqs,
-                       cdiv(max_model_len, block_size * cp_world_size),
+                       cdiv(max_model_len, block_size * dcp_world_size),
                        max_num_batched_tokens, pin_memory, device)
             for block_size in block_sizes
         ]

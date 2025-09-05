@@ -86,11 +86,12 @@ class FullAttentionSpec(AttentionSpec):
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_model_len = vllm_config.model_config.max_model_len
-        cp_world_size = vllm_config.parallel_config.context_parallel_size
-        # Note(hc): each cp rank only need save
-        # (max_model_len//cp_world_size) tokens.
-        if cp_world_size > 1:
-            max_model_len = cdiv(max_model_len, cp_world_size)
+        dcp_world_size = \
+            vllm_config.parallel_config.decode_context_parallel_size
+        # Note(hc): each dcp rank only need save
+        # (max_model_len//dcp_world_size) tokens locally.
+        if dcp_world_size > 1:
+            max_model_len = cdiv(max_model_len, dcp_world_size)
         return cdiv(max_model_len, self.block_size) * self.page_size_bytes
 
     @classmethod
@@ -167,8 +168,8 @@ class SlidingWindowSpec(AttentionSpec):
         assert not self.use_mla, "MLA is not supported for sliding window"
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        assert vllm_config.parallel_config.context_parallel_size == 1, \
-            "CP not support sliding window."
+        assert vllm_config.parallel_config.decode_context_parallel_size == 1, \
+            "DCP not support sliding window."
         max_model_len = vllm_config.model_config.max_model_len
         max_num_batched_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens)

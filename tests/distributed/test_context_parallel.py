@@ -28,7 +28,7 @@ VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
 class ParallelSetup(NamedTuple):
     tp_size: int
     pp_size: int
-    cp_size: int
+    dcp_size: int
     eager_mode: bool
     chunked_prefill: bool
 
@@ -63,7 +63,7 @@ class CPTestSettings:
         *,
         tp_base: int = 4,
         pp_base: int = 1,
-        cp_base: int = 1,
+        dcp_base: int = 1,
         multi_node_only: bool = False,
         runner: RunnerOption = "auto",
         load_format: Optional[str] = None,
@@ -71,12 +71,12 @@ class CPTestSettings:
         parallel_setups = []
         for eager_mode_val in [False, True]:
             for pp_multiplier in [1, 2]:
-                for cp_multiplier in [2, 4]:
+                for dcp_multiplier in [2, 4]:
                     for chunked_prefill_val in [False, True]:
                         parallel_setups.append(
                             ParallelSetup(tp_size=tp_base,
                                           pp_size=pp_multiplier * pp_base,
-                                          cp_size=cp_multiplier * cp_base,
+                                          dcp_size=dcp_multiplier * dcp_base,
                                           eager_mode=eager_mode_val,
                                           chunked_prefill=chunked_prefill_val))
         return CPTestSettings(
@@ -113,7 +113,7 @@ def _compare_cp_with_tp(
     (
         tp_size,
         pp_size,
-        cp_size,
+        dcp_size,
         eager_mode,
         chunked_prefill,
     ) = parallel_setup
@@ -178,7 +178,7 @@ def _compare_cp_with_tp(
 
     cp_env = tp_env = {
         "VLLM_USE_V1":
-        vllm_major_version,  # Note(hc): CP only support V1 engine only
+        vllm_major_version,  # Note(hc): DCP only support V1 engine only
     }
 
     cp_args = [
@@ -187,8 +187,8 @@ def _compare_cp_with_tp(
         str(tp_size),
         "--pipeline-parallel-size",
         str(pp_size),
-        "--context-parallel-size",
-        str(cp_size),
+        "--decode-context-parallel-size",
+        str(dcp_size),
         "--distributed-executor-backend",
         distributed_backend,
     ]

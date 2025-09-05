@@ -106,7 +106,7 @@ def flash_mla_with_kvcache(
         descale_k,
     )
 
-    # Note(hc): need revisit when we support CP with decode query_len > 1.
+    # Note(hc): need revisit when we support DCP with decode query_len > 1.
     return out.squeeze(1), softmax_lse.squeeze(-1)
 
 

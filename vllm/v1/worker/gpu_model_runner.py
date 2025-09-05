@@ -140,7 +140,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             model_config.is_multimodal_raw_input_only_model)
 
         self.max_model_len = model_config.max_model_len
-        self.cp_world_size = self.parallel_config.context_parallel_size
+        self.dcp_world_size = self.parallel_config.decode_context_parallel_size
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
 
@@ -378,9 +378,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             return
 
         if self.reorder_batch_threshold is not None:
-            if self.cp_world_size > 1:
+            if self.dcp_world_size > 1:
                 assert self.reorder_batch_threshold == 1, \
-                    "CP not support reorder_batch_threshold > 1 now."
+                    "DCP not support reorder_batch_threshold > 1 now."
             reorder_batch_to_split_decodes_and_prefills(
                 self.input_batch,
                 scheduler_output,
@@ -3145,9 +3145,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
 
-        if self.cp_world_size > 1:
+        if self.dcp_world_size > 1:
             assert self.attn_groups[0][
-                0].backend is FlashMLABackend, "CP only support flashmla now."
+                0].backend is FlashMLABackend, "DCP only support flashmla now."
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """
