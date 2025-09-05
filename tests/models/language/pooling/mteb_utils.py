@@ -164,7 +164,7 @@ def mteb_test_embed_models(hf_runner,
                            model_info: EmbedModelInfo,
                            vllm_extra_kwargs=None,
                            hf_model_callback=None,
-                           atol=MTEB_RERANK_TOL):
+                           atol=MTEB_EMBED_TOL):
     if not model_info.enable_test:
         # A model family has many models with the same architecture,
         # and we don't need to test each one.
