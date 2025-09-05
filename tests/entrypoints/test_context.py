@@ -84,17 +84,6 @@ def mock_parser():
         yield parser
 
 
-@pytest.fixture
-def mock_encoding():
-    """Set up mock encoding for streaming tests."""
-    with patch("vllm.entrypoints.context.get_encoding") as mock:
-        encoding = MagicMock()
-        encoding.render.return_value = [101, 102, 103]
-        encoding.stop_tokens_for_assistant_actions.return_value = [103]
-        mock.return_value = encoding
-        yield encoding
-
-
 def test_single_turn_token_counting():
     """Test token counting behavior for a single turn."""
     # Create a context
