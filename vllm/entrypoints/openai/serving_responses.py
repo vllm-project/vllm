@@ -19,6 +19,7 @@ from openai.types.responses import (
     ResponseCodeInterpreterCallCodeDoneEvent,
     ResponseCodeInterpreterCallCompletedEvent,
     ResponseCodeInterpreterCallInProgressEvent,
+    ResponseFunctionCallArgumentsDoneEvent,
     ResponseCodeInterpreterCallInterpretingEvent,
     ResponseCodeInterpreterToolCallParam,
     ResponseContentPartAddedEvent,
@@ -47,6 +48,7 @@ from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
 from openai_harmony import Message as OpenAIHarmonyMessage
+from openai_harmony import Role
 
 from vllm import envs
 from vllm.engine.protocol import EngineClient
@@ -1409,19 +1411,48 @@ class OpenAIServingResponses(OpenAIServing):
         current_output_index = 0
         current_item_id: str = ""
         sent_output_item_added = False
-
+        sent_function_call_item_added = False
         async for ctx in result_generator:
             assert isinstance(ctx, StreamingHarmonyContext)
 
             if ctx.is_expecting_start():
                 current_output_index += 1
                 sent_output_item_added = False
-
+                sent_function_call_item_added = False
                 if len(ctx.parser.messages) > 0:
                     previous_item = ctx.parser.messages[-1]
                     if previous_item.recipient is not None:
-                        # Deal with tool call here
-                        pass
+                        # Deal with tool call
+                        if previous_item.recipient.startswith("functions."):
+                            function_name = \
+                                previous_item.recipient[len("functions."): ]
+                            yield _send_event(
+                                ResponseFunctionCallArgumentsDoneEvent(
+                                    type=
+                                    "response.function_call_arguments.done",
+                                    arguments=previous_item.content[0].text,
+                                    name=function_name,
+                                    item_id=current_item_id,
+                                    output_index=current_output_index,
+                                    sequence_number=-1,
+                                ))
+                            function_call_item = ResponseFunctionToolCall(
+                                type="function_call",
+                                arguments=previous_item.content[0].text,
+                                name=function_name,
+                                item_id=current_item_id,
+                                output_index=current_output_index,
+                                sequence_number=-1,
+                                call_id=f"fc_{random_uuid()}",
+                                status="completed",
+                            )
+                            yield _send_event(
+                                ResponseOutputItemDoneEvent(
+                                    type="response.output_item.done",
+                                    sequence_number=-1,
+                                    output_index=current_output_index,
+                                    item=function_call_item,
+                                ))
                     elif previous_item.channel == "analysis":
                         content = ResponseReasoningTextContent(
                             text=previous_item.content[0].text,
@@ -1775,8 +1806,39 @@ class OpenAIServingResponses(OpenAIServing):
                                 outputs=[],
                                 status="completed",
                             ),
-                        )
+                        ))
+            if ctx.parser.current_channel == "commentary":
+                if ctx.parser.current_recipient and \
+                    ctx.parser.current_recipient.startswith("functions."):
+                    function_name = ctx.parser.current_recipient[
+                        len("functions."):]
+                    tool_call_item = ResponseFunctionToolCall(
+                        name=function_name,
+                        type="function_call",
+                        id=current_item_id,
+                        call_id=f"fc_{random_uuid()}",
+                        arguments='',
+                        status="in_progress",
                     )
+                    if sent_function_call_item_added is False:
+                        sent_function_call_item_added = True
+                        yield _send_event(
+                            openai_responses_types.
+                            ResponseOutputItemAddedEvent(
+                                type="response.output_item.added",
+                                sequence_number=-1,
+                                output_index=current_output_index,
+                                item=tool_call_item,
+                            ))
+                    else:
+                        yield _send_event(
+                            openai_responses_types.
+                            ResponseFunctionCallArgumentsDeltaEvent(
+                                item_id=current_item_id,
+                                delta=ctx.parser.last_content_delta,
+                                output_index=current_output_index,
+                                sequence_number=-1,
+                                type="response.function_call_arguments.delta"))
 
     async def responses_stream_generator(
         self,
