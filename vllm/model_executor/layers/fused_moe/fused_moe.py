@@ -1026,6 +1026,8 @@ def eplb_map_to_physical_and_record(
     '''
     Map the logical expert ids to physical expert ids and record the expert load metrics.
 
+    This will select a pseudo-random replica for each logical expert. Only used for EPLB.
+
     Args:
         topk_ids: The logical expert ids.
         expert_load_view: The expert load view.
@@ -1040,15 +1042,16 @@ def eplb_map_to_physical_and_record(
     # 1. Convert the logical expert ids to physical expert ids
     # Directly select a random replica for each logical expert
 
-    # TODO: maybe optimize this by using specified kernels,
-    # or compute pseudo-random indices by modulo
-
     # In case `indices_type` is not `torch.long` or `torch.int`,
     # e.g. `torch.uint32` as required by dispatch/combine kernels
     topk_ids_long = topk_ids.long()
-    replica_indices = (torch.rand_like(topk_ids, dtype=torch.float)
-                       * logical_replica_count[topk_ids_long]).long(
-                       ).unsqueeze(-1)
+    # Use token position modulo replica count to deterministically choose a replica
+    replica_count = logical_replica_count[topk_ids_long]
+    # Flatten-position based index, reshaped back to `topk_ids` shape
+    pos_indices = torch.arange(topk_ids.numel(), device=topk_ids.device,
+                               dtype=torch.long).reshape_as(topk_ids)
+    # Compute pseudo-random indices by modulo
+    replica_indices = (pos_indices % replica_count).unsqueeze(-1)
     physical_ids = logical_to_physical_map[topk_ids_long].gather(
         -1, replica_indices).squeeze(-1)
 
@@ -1069,20 +1072,12 @@ def eplb_map_to_physical_and_record(
     # to achieve better efficiency.
 
     # `expert_load_view`: (num_physical_experts,)
+
+    # `torch.bincount` is not compilable, so use `scatter_add_` instead.
     topk_ids_flatten = topk_ids.flatten()
-
-    # Performance optimization:
-    # `masked_fill` is significantly faster than `masked_select`
-    invalid_mask = topk_ids_flatten < 0
-    # Replace invalid expert ids with 0 (just a dummy position)
-    # to avoid out-of-bounds errors in scatter_add_
-    index = topk_ids_flatten.masked_fill_(invalid_mask, 0)
-    # `src` is the valid mask, which is 1 for valid and 0 for invalid
-    src = ~invalid_mask
-
     expert_load_view.scatter_add_(dim=0,
-                                  index=index.long(),
-                                  src=src.to(expert_load_view))
+                                  index=topk_ids_flatten.long(),
+                                  src=torch.ones_like(topk_ids_flatten).to(expert_load_view))
 
     topk_ids = topk_ids.to(dtype=indices_type)
     return topk_ids
