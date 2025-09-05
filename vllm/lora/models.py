@@ -395,7 +395,6 @@ class LoRAModelManager(AdapterModelManager):
             self.lora_index_to_id,
             self.lora_slots + 1,
             self.vocab_size,
-            0,  # No extra vocab size
         )
 
     def remove_all_adapters(self):
