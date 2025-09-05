@@ -477,6 +477,7 @@ class OutputProcessor:
         iteration_stats.update_from_finished_request(
             finish_reason=finish_reason,
             num_prompt_tokens=len(req_state.prompt_token_ids),
+            num_cached_tokens=req_state.num_cached_tokens,
             max_tokens_param=req_state.max_tokens_param,
             req_stats=req_state.stats)
         self.lora_states.finish_request(req_state)
