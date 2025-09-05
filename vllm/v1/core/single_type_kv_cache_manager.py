@@ -235,6 +235,15 @@ class SingleTypeKVCacheManager(ABC):
 
         raise NotImplementedError
 
+    def remove_skipped_blocks(
+        self,
+        request_id: str,
+        num_computed_tokens: int,
+    ) -> None:
+
+        self.remove_skipped_and_allocate_necessary(request_id,
+                                                   num_computed_tokens, 0)
+
     def remove_skipped_and_allocate_necessary(
         self,
         request_id: str,
@@ -251,15 +260,6 @@ class SingleTypeKVCacheManager(ABC):
             num_computed_tokens: The number of tokens that have been computed.
         """
         raise NotImplementedError
-
-    def remove_skipped_blocks(
-        self,
-        request_id: str,
-        num_computed_tokens: int,
-    ) -> None:
-
-        self.remove_skipped_and_allocate_necessary(request_id,
-                                                   num_computed_tokens, 0)
 
 
 class FullAttentionManager(SingleTypeKVCacheManager):
