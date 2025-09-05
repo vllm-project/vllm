@@ -429,8 +429,10 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                     # Map vllm's names to transformers's names.
                     rep_name, sub_modules = modules_info
                     for sub_name in sub_modules:
-                        self.target_modules.append(
-                            name.replace(rep_name, sub_name))
+                        new_name = name.replace(rep_name, sub_name)
+                        self.target_modules.append(new_name)
+                        if module.disable_tp:
+                            self.tp_disabled_modules.append(new_name)
                 # Add original module name even if the module has stacked map,
                 # in case model has a mixture of disk-merged and disk-split
                 # weights with same last name.
