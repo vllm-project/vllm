@@ -106,3 +106,8 @@ KVConnectorFactory.register_connector(
     "MultiConnector",
     "vllm.distributed.kv_transfer.kv_connector.v1.multi_connector",
     "MultiConnector")
+
+KVConnectorFactory.register_connector(
+    "MooncakeConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_connector",
+    "MooncakeConnector")

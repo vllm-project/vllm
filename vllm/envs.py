@@ -144,6 +144,7 @@ if TYPE_CHECKING:
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5557
+    VLLM_MOONCAKE_SIDE_CHANNEL_PORT: int = 6557
     VLLM_ALL2ALL_BACKEND: str = "naive"
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
@@ -1049,6 +1050,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Port used for NIXL handshake between remote agents.
     "VLLM_NIXL_SIDE_CHANNEL_PORT":
     lambda: int(os.getenv("VLLM_NIXL_SIDE_CHANNEL_PORT", "5557")),
+
+    # Port used for Mooncake handshake between remote agents.
+    "VLLM_MOONCAKE_SIDE_CHANNEL_PORT":
+    lambda: int(os.getenv("VLLM_MOONCAKE_SIDE_CHANNEL_PORT", "6557")),
 
     # all2all backend for vllm's expert parallel communication
     # Available options:
