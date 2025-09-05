@@ -410,6 +410,7 @@ class RandomDataset(BenchmarkDataset):
         input_len: int = DEFAULT_INPUT_LEN,
         output_len: int = DEFAULT_OUTPUT_LEN,
         batchsize: int = 1,
+        fast_gen_seqs: bool = False,
         **kwargs,
     ) -> list[SampleRequest]:
 
@@ -429,6 +430,7 @@ class RandomDataset(BenchmarkDataset):
             vocab_size=vocab_size,
             input_lens=input_lens,
             offsets=offsets,
+            fast_gen_seqs=fast_gen_seqs,
         )
         for i in range(num_requests):
             requests.append(
@@ -569,6 +571,7 @@ class RandomDataset(BenchmarkDataset):
         vocab_size: int,
         input_lens: np.ndarray,
         offsets: np.ndarray,
+        fast_gen_seqs: bool,
     ) -> tuple[list[str], list[int]]:
         """
         Returns (prompts, total_input_lens).
@@ -594,15 +597,22 @@ class RandomDataset(BenchmarkDataset):
         prompts = tokenizer.backend_tokenizer.decode_batch(token_sequences)
         total_input_lens = prefix_len + input_lens
 
-        re_encoded_sequences = tokenizer.backend_tokenizer.encode_batch_fast(
-            prompts, add_special_tokens=False
-        )
-        re_encoded_sequences = [
-            seq.ids[:total_len]
-            for seq, total_len in zip(re_encoded_sequences, total_input_lens)
-        ]
+        if not fast_gen_seqs:
+            re_encoded_sequences = (
+                tokenizer.backend_tokenizer.encode_batch_fast(
+                    prompts, add_special_tokens=False
+                )
+            )
+            re_encoded_sequences = [
+                seq.ids[:total_len]
+                for seq, total_len in zip(
+                    re_encoded_sequences, total_input_lens
+                )
+            ]
+            prompts = tokenizer.backend_tokenizer.decode_batch(
+                re_encoded_sequences
+            )
 
-        prompts = tokenizer.backend_tokenizer.decode_batch(re_encoded_sequences)
         return prompts, total_input_lens
 
 
@@ -1171,6 +1181,19 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         help=("Batch size for random sampling. "
               "Only used for embeddings benchmark."),
     )
+    random_group.add_argument(
+        "--random-fast-gen-seqs",
+        action="store_true",
+        help=(
+            "Enable fast generation of token sequences for improved speed, "
+            "using a more efficient sampling strategy that decodes only once. "
+            "Recommended for benchmarking when exact input token counts are "
+            "not critical. Note: This may result in input prompts whose token "
+            "counts differ slightly from the user-specified values due to "
+            "tokenizer encoding effects. Enable this flag if you prioritize "
+            "speed over strict input length accuracy."
+        ),
+    )
 
     # random multimodal dataset options
     random_mm_group = parser.add_argument_group(
@@ -1474,6 +1497,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 range_ratio=args.random_range_ratio,
                 request_id_prefix=args.request_id_prefix,
                 batchsize=args.random_batch_size,
+                fast_gen_seqs=args.random_fast_gen_seqs,
             ),
             "random-mm":
             lambda: RandomMultiModalDataset(
