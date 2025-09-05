@@ -395,6 +395,8 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
     at::Tensor& y_s,           // (E, T, H//group_size) [OUT]
     int64_t group_size, double eps, double fp8_min, double fp8_max,
     bool use_ue8m0, int64_t num_parallel_tokens) {
+  // This kernel currently only supports H % 128 == 0 and assumes a
+  // fixed GROUP_SIZE of 128.
   TORCH_CHECK(input.size(-1) % 256 == 0);
 
   using Idx_t = uint32_t;

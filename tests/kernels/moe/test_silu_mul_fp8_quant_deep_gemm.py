@@ -10,6 +10,11 @@ from vllm.platforms import current_platform
 
 # (E, T, H)
 CASES = [
+    (1, 1, 128),
+    (1, 4, 128),
+    (2, 4, 256),
+    (32, 64, 256),
+    (17, 31, 768),
     (1, 1, 128 * 1),
     (1, 1, 128 * 2),
     (1, 1, 128 * 3),
@@ -50,7 +55,7 @@ def test_silu_mul_fp8_quant_deep_gemm(E, T, H, group_size=128, seed=0):
         size=(E, ),
         dtype=torch.int32,
         device="cuda",
-    ) * 0 + T
+    )
 
     # Run the Triton kernel
     y_q, y_s = silu_mul_fp8_quant_deep_gemm_cuda(y,
