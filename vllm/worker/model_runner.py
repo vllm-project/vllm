@@ -692,6 +692,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                             audio_feature_lengths=audio_feature_lengths,
                             use_audio_in_video=use_audio_in_video,
                         )
+                    mrope_input_positions = mrope_input_positions.tolist()
                 else:
                     mrope_input_positions, mrope_position_delta = \
                         MRotaryEmbedding.get_input_positions(
