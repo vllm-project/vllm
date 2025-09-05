@@ -64,8 +64,8 @@ __global__ void rms_norm_static_fp8_quant_kernel(
 template <typename scalar_t, int width, typename fp8_type>
 __global__ std::enable_if_t<(width > 0) && _typeConvert<scalar_t>::exists>
 fused_add_rms_norm_static_fp8_quant_kernel(
-    fp8_type* __restrict__ out,           // [..., hidden_size]
-    scalar_t* __restrict__ input,         // [..., hidden_size]
+    fp8_type* __restrict__ out,    // [..., hidden_size]
+    scalar_t* __restrict__ input,  // [..., hidden_size]
     const int input_stride,
     scalar_t* __restrict__ residual_out,  // [..., hidden_size]
     scalar_t* __restrict__ residual,      // [..., hidden_size]
@@ -132,8 +132,8 @@ fused_add_rms_norm_static_fp8_quant_kernel(
 template <typename scalar_t, int width, typename fp8_type>
 __global__ std::enable_if_t<(width == 0) || !_typeConvert<scalar_t>::exists>
 fused_add_rms_norm_static_fp8_quant_kernel(
-    fp8_type* __restrict__ out,           // [..., hidden_size]
-    scalar_t* __restrict__ input,         // [..., hidden_size]
+    fp8_type* __restrict__ out,    // [..., hidden_size]
+    scalar_t* __restrict__ input,  // [..., hidden_size]
     const int input_stride,
     scalar_t* __restrict__ residual_out,  // [..., hidden_size]
     scalar_t* __restrict__ residual,      // [..., hidden_size]
@@ -210,8 +210,8 @@ void rms_norm_static_fp8_quant(torch::Tensor& out,     // [..., hidden_size]
                                                                width, fp8_t> \
                   <<<grid, block, 0, stream>>>(                              \
                       out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),     \
-                      input_stride, residual_out.data_ptr<scalar_t>(),                     \
-                      residual.data_ptr<scalar_t>(),           \
+                      input_stride, residual_out.data_ptr<scalar_t>(),       \
+                      residual.data_ptr<scalar_t>(),                         \
                       weight.data_ptr<scalar_t>(), scale.data_ptr<float>(),  \
                       epsilon, num_tokens, hidden_size);                     \
             });                                                              \

@@ -204,6 +204,10 @@ class Fp8LinearMethod(LinearMethodBase):
         self.use_aiter_and_is_supported = (current_platform.is_rocm()
                                            and envs.VLLM_ROCM_USE_AITER
                                            and envs.VLLM_ROCM_USE_AITER_LINEAR)
+        self.use_ck_tile_and_is_supported = (
+            current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER
+            and envs.VLLM_ROCM_USE_AITER_CK_TILE_LINEAR
+            and current_platform.is_fp8_fnuz())
 
         self.block_quant = self.quant_config.weight_block_size is not None
         self.act_q_static = self.quant_config.activation_scheme == "static"
@@ -359,7 +363,10 @@ class Fp8LinearMethod(LinearMethodBase):
             layer.weight = Parameter(weight, requires_grad=False)
             layer.weight_scale_inv = Parameter(weight_scale_inv,
                                                requires_grad=False)
-
+            if self.use_ck_tile_and_is_supported:
+                weight_tmp = layer.weight.clone()
+                del layer.weight
+                layer.weight = weight_tmp
         # If checkpoint not serialized fp8, quantize the weights.
         elif not self.quant_config.is_checkpoint_fp8_serialized:
             qweight, weight_scale = ops.scaled_fp8_quant(layer.weight,
@@ -459,6 +466,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 bias=bias,
                 cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
                 use_aiter_and_is_supported=self.use_aiter_and_is_supported,
+                use_ck_tile_and_is_supported=self.use_ck_tile_and_is_supported,
             )
 
         return self.fp8_linear.apply(input=x,
