@@ -202,13 +202,13 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   Idx_t e = pid / G;
   Idx_t g = pid % G;
 
-  const Idx_t stride_i_t_128 = stride_i_t / 8u;
-
   const Idx_t n_tokens = counts[e * stride_counts_e];
 
   if (!n_tokens) {
     return;  // Exit ASAP.
   }
+
+  const Idx_t stride_i_t_128 = stride_i_t / 8u;
 
   Idx_t n_tokens_lower, n_tokens_upper;
 
@@ -258,6 +258,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   Idx_t t_load = n_tokens_lower, load_stage_id = 0;
   auto s_buff_gate_load_128 = s_buff_128 + (tid % HALF_THREAD_COUNT);
   auto s_buff_up_load_128 = s_buff_gate_load_128 + S_NUM_128 / 2u;
+
   auto load_and_advance_y_pred = [&] {
     if (t_load < n_tokens_upper) {
       auto stage_offset =
@@ -304,21 +305,21 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     auto s_gate_compute_64 = s_gate_ptr + compute_pipeline_offset_64;
     auto s_up_compute_64 = s_up_ptr + compute_pipeline_offset_64;
     __int64_t gate64 = *s_gate_compute_64;
-    __int64_t up64 = *s_up_compute_64;
     __nv_bfloat162* s_gate_compute_32 =
         reinterpret_cast<__nv_bfloat162*>(&gate64);
+
+    __int64_t up64 = *s_up_compute_64;
     __nv_bfloat162* s_up_compute_32 = reinterpret_cast<__nv_bfloat162*>(&up64);
 
 #pragma unroll
     for (int i = 0; i < 2; i++) {
-      float2 gate = silu2(__bfloat1622float2(*s_gate_compute_32));
-      __nv_bfloat162 gate_bf162 = __float22bfloat162_rn(gate);
-      __nv_bfloat162 upv = *s_up_compute_32;
+      float2 gate = silu2(__bfloat1622float2(s_gate_compute_32[i]));
+      results_bf162[i] = __float22bfloat162_rn(gate);
+    }
 
-      results_bf162[i] = __hmul2(gate_bf162, upv);
-
-      ++s_gate_compute_32;
-      ++s_up_compute_32;
+#pragma unroll
+    for (int i = 0; i < 2; i++) {
+      results_bf162[i] = __hmul2(results_bf162[i], s_up_compute_32[i]);
     }
 
     auto _y_max2 =
