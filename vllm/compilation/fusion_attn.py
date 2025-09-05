@@ -53,6 +53,10 @@ class AttentionQuantPattern(ABC):
             f"unsupported quantization scheme {self.quant_key}"
         self.QUANT_OP = QUANT_OPS[self.quant_key]
 
+    def empty(self, *args, **kwargs):
+        kwargs = {'dtype': self.dtype, 'device': "cuda", **kwargs}
+        return torch.empty(*args, **kwargs)
+
     def empty_quant(self, *args, **kwargs):
         kwargs = {'dtype': self.quant_dtype, 'device': "cuda", **kwargs}
         return torch.empty(*args, **kwargs)
@@ -142,26 +146,14 @@ class AttentionFp8StaticQuantPattern(AttentionQuantPattern):
             return RESHAPE_OP(at1[1], [-1, self.num_heads * self.head_size])
 
         inputs = [
-            torch.empty(5,
-                        self.num_heads,
-                        self.head_size,
-                        device="cuda",
-                        dtype=self.dtype),  # q
-            torch.empty(5,
-                        self.num_heads,
-                        self.head_size,
-                        device="cuda",
-                        dtype=self.dtype),  # k
-            torch.empty(5,
-                        self.num_heads,
-                        self.head_size,
-                        device="cuda",
-                        dtype=self.dtype),  # v
-            torch.empty(5,
-                        self.num_heads,
-                        self.head_size,
-                        dtype=self.dtype,
-                        device="cuda"),  # attn_output
+            self.empty(5, self.num_heads, self.head_size,
+                       dtype=self.dtype),  # q
+            self.empty(5, self.num_heads, self.head_size,
+                       dtype=self.dtype),  # k
+            self.empty(5, self.num_heads, self.head_size,
+                       dtype=self.dtype),  # v
+            self.empty(5, self.num_heads, self.head_size,
+                       dtype=self.dtype),  # attn_output
             self.empty_quant(5,
                              self.num_heads * self.head_size),  # quant_output
             empty_fp32(1, 1)  # scale

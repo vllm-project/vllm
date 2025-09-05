@@ -331,7 +331,7 @@ ROCM_HEADS = [(32, 8), (40, 8)]
 @pytest.mark.parametrize("head_size", [128])
 @pytest.mark.parametrize("batch_size",
                          [7, 256, 533] if current_platform.is_cuda() else [8])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize(
     "model_name, model_class",
     CUDA_MODELS if current_platform.is_cuda() else ROCM_MODELS)
@@ -346,6 +346,8 @@ ROCM_HEADS = [(32, 8), (40, 8)]
 @pytest.mark.skipif(current_platform.is_cuda()
                     and not current_platform.is_device_capability((10, 0)),
                     reason="On CUDA only test on SM100(Blackwell)")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(),
+                    reason="Only test ROCm or CUDA")
 def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
                                  head_size: int, batch_size: int,
                                  dtype: torch.dtype, model_name: str,
@@ -445,14 +447,19 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
         assert model_compiled.attn._o_scale_float is None
         result_fused_1 = model_compiled(q, k, v)
 
-        # After the 1st round of the forward pass, output quant scale should be
-        # loaded into the attn layer's _o_scale_float, the 2nd round should
-        # reuse the loaded _o_scale_float
-        assert current_platform.is_rocm(
-        ) or model_compiled.attn._o_scale_float is not None
-        result_fused_2 = model_compiled(q, k, v)
-        assert current_platform.is_rocm(
-        ) or model_compiled.attn._o_scale_float is not None
+        if backend == _Backend.FLASHINFER:
+            # With the Flashinfer backend after the 1st round of the forward
+            # pass, output quant scale should be loaded into the attn layer's
+            # _o_scale_float, the 2nd round should reuse the loaded
+            # _o_scale_float
+            assert model_compiled.attn._o_scale_float is not None
+            result_fused_2 = model_compiled(q, k, v)
+            assert model_compiled.attn._o_scale_float is not None
+
+            torch.testing.assert_close(result_unfused,
+                                       result_fused_2,
+                                       atol=1e-2,
+                                       rtol=1e-2)
 
     # Check attn fusion support
     quant_key = model_class.quant_key
@@ -490,9 +497,5 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
     # Check that results are close
     torch.testing.assert_close(result_unfused,
                                result_fused_1,
-                               atol=1e-2,
-                               rtol=1e-2)
-    torch.testing.assert_close(result_unfused,
-                               result_fused_2,
                                atol=1e-2,
                                rtol=1e-2)
