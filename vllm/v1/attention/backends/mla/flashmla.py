@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import ClassVar, Optional
+from typing import ClassVar, Optional, Union
 
 import torch
 
@@ -169,7 +169,7 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
 
     def _forward_decode(
         self,
-        q: torch.Tensor,
+        q: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: FlashMLAMetadata,
         layer: AttentionLayer,
@@ -177,6 +177,10 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
 
+        if type(q) is tuple:
+            q = torch.cat(q, dim=-1)
+
+        assert isinstance(q, torch.Tensor)
         o, lse = flash_mla_with_kvcache(
             q=q.unsqueeze(1),  # Add seqlen dim of 1 (decode)
             k_cache=kv_c_and_k_pe_cache.unsqueeze(-2),  # Add head dim of 1

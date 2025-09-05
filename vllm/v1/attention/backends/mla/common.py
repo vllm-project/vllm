@@ -1455,7 +1455,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
     @abstractmethod
     def _forward_decode(
         self,
-        q: torch.Tensor,
+        q: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: M,
         layer: AttentionLayer,
@@ -1565,12 +1565,12 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                     layer._q_scale)
                 decode_q_pe = decode_q_pe.reshape(q_pe_shape)
 
-            # concatenate decode_ql_nope and decode_q_pe -> (B, N, L + P)
-            decode_q = torch.cat([decode_ql_nope, decode_q_pe], dim=-1)
-
-            # Note(hc): decode_q do allgather in head dim.
+            decode_q = (decode_ql_nope, decode_q_pe)
             if get_cp_group().world_size > 1:
                 assert not fp8_attention, "CP not support fp8 kvcache now."
+                # concatenate decode_ql_nope and decode_q_pe -> (B, N, L + P)
+                decode_q = torch.cat(decode_q, dim=-1)
+                # Note(hc): decode_q do allgather in head dim.
                 decode_q = get_cp_group().all_gather(decode_q, dim=1)
 
             # call decode attn
