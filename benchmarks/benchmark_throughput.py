@@ -96,7 +96,6 @@ def run_vllm(
         end = time.perf_counter()
     else:
         assert lora_requests is None, "BeamSearch API does not support LoRA"
-        prompts = [request.prompt for request in requests]
         # output_len should be the same for all requests.
         output_len = requests[0].expected_output_len
         for request in requests:
@@ -720,7 +719,7 @@ def create_argument_parser():
         "[length * (1 - range_ratio), length * (1 + range_ratio)].",
     )
 
-    # hf dtaset
+    # hf dataset
     parser.add_argument(
         "--hf-subset", type=str, default=None, help="Subset of the HF dataset."
     )

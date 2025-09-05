@@ -9,7 +9,6 @@ import torch
 import torch.nn as nn
 from torch.nn.parameter import Parameter, UninitializedParameter
 
-from vllm import envs
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               split_tensor_along_last_dim,
@@ -35,6 +34,7 @@ logger = init_logger(__name__)
 
 WEIGHT_LOADER_V2_SUPPORTED = [
     "CompressedTensorsLinearMethod",
+    "CompressedTensorsLinearTransformMethod",
     "BitBLASLinearMethod",
     "GPTQBitBLASLinearMethod",
     "AWQMarlinLinearMethod",
@@ -199,25 +199,10 @@ class UnquantizedLinearMethod(LinearMethodBase):
         set_weight_attrs(weight, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        if current_platform.is_cpu() and envs.VLLM_CPU_SGL_KERNEL:
-            from vllm.model_executor.layers.utils import check_cpu_sgl_kernel
-            N, K = layer.weight.size()
-            dtype = layer.weight.dtype
-            if check_cpu_sgl_kernel(N, K, dtype):
-                packed_weight = torch.ops._C.convert_weight_packed(
-                    layer.weight)
-                assert packed_weight.size() == layer.weight.size()
-                layer.weight.copy_(packed_weight)
-                if layer.bias is not None:
-                    layer.bias = Parameter(layer.bias.to(torch.float32),
-                                           requires_grad=False)
-                layer.use_cpu_sgl = True
-            else:
-                logger.warning(
-                    "CPU SGL kernels require Intel AMX support,"
-                    " bf16/fp16/int8 weight, IC and OC are divisible by "
-                    "32 and 16.")
-                layer.use_cpu_sgl = False
+        if current_platform.is_cpu():
+            from vllm.model_executor.layers.utils import (
+                dispatch_cpu_unquantized_gemm)
+            dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
 
     def apply(self,
               layer: torch.nn.Module,
@@ -720,8 +705,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 # If quantized, we need to adjust the offset and size to account
                 # for the packing.
                 if packed_dim == output_dim:
-                    shard_size = shard_size // param.pack_factor
-                    shard_offset = shard_offset // param.pack_factor
+                    shard_size = shard_size // param.packed_factor
+                    shard_offset = shard_offset // param.packed_factor
                     # Special case for Marlin.
                     shard_size, shard_offset = adjust_marlin_shard(
                         param, shard_size, shard_offset)
@@ -754,8 +739,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             # for the packing.
             packed_dim = getattr(param, "packed_dim", None)
             if packed_dim == output_dim:
-                shard_size = shard_size // param.pack_factor
-                shard_offset = shard_offset // param.pack_factor
+                shard_size = shard_size // param.packed_factor
+                shard_offset = shard_offset // param.packed_factor
                 # Special case for Marlin.
                 shard_size, shard_offset = adjust_marlin_shard(
                     param, shard_size, shard_offset)
@@ -1105,8 +1090,8 @@ class QKVParallelLinear(ColumnParallelLinear):
                 # If quantized, we need to adjust the offset and size to account
                 # for the packing.
                 if packed_dim == output_dim:
-                    shard_size = shard_size // param.pack_factor
-                    shard_offset = shard_offset // param.pack_factor
+                    shard_size = shard_size // param.packed_factor
+                    shard_offset = shard_offset // param.packed_factor
 
                     # Special case for Marlin.
                     shard_size, shard_offset = adjust_marlin_shard(
@@ -1153,8 +1138,8 @@ class QKVParallelLinear(ColumnParallelLinear):
             # for the packing.
             packed_dim = getattr(param, "packed_dim", None)
             if packed_dim == output_dim:
-                shard_size = shard_size // param.pack_factor
-                shard_offset = shard_offset // param.pack_factor
+                shard_size = shard_size // param.packed_factor
+                shard_offset = shard_offset // param.packed_factor
 
                 # Special case for Marlin.
                 shard_size, shard_offset = adjust_marlin_shard(
@@ -1470,7 +1455,7 @@ class QKVCrossParallelLinear(LinearBase):
             self.bias = torch.nn.Parameter()
             set_weight_attrs(self.bias, {
                 "output_dim": 0,
-                "weight_loader": self.weight_loader,
+                "weight_loader": self.weight_loader_v1,
             })
         else:
             self.bias = None
@@ -1579,6 +1564,18 @@ class QKVCrossParallelLinear(LinearBase):
             # Split kv in half
             k, v = kv_enc.split(self.kv_size, dim=-1)
         return q, k, v
+
+    def weight_loader_v1(self,
+                         param: torch.nn.Parameter,
+                         loaded_weight: torch.Tensor,
+                         loaded_shard_id: Optional[str] = None):
+        # just like all other parameters, does not yet
+        # support loading bias with weight_loader_v2
+        layer = (self.q_proj_decoder
+                 if loaded_shard_id == "q" else self.kv_proj_encoder)
+        target_param = self.select_proj_params(layer, param)
+        shard_id_args = (loaded_shard_id, ) if loaded_shard_id != "q" else ()
+        layer.weight_loader(target_param, loaded_weight, *shard_id_args)
 
     def weight_loader(self,
                       param: torch.nn.Parameter,

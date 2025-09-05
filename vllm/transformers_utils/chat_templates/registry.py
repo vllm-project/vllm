@@ -20,6 +20,16 @@ def _get_qwen_chat_template_fallback(
     return CHAT_TEMPLATES_DIR / "template_basic.jinja"
 
 
+def _get_minicpmv_chat_template_fallback(
+        tokenizer_name_or_path: str) -> Optional[Path]:
+    # MiniCPM-V-4.5 version uses a dedicated template
+    if "4.5" in tokenizer_name_or_path or "4_5" in tokenizer_name_or_path:
+        return CHAT_TEMPLATES_DIR / "template_minicpmv45.jinja"
+
+    # Other versions use chatml template
+    return CHAT_TEMPLATES_DIR / "template_chatml.jinja"
+
+
 # yapf: disable
 _MODEL_TYPE_TO_CHAT_TEMPLATE_FALLBACK: dict[str, ChatTemplatePath] = {
     "blip-2": CHAT_TEMPLATES_DIR / "template_blip2.jinja",
@@ -27,6 +37,7 @@ _MODEL_TYPE_TO_CHAT_TEMPLATE_FALLBACK: dict[str, ChatTemplatePath] = {
     "deepseek_vl_v2": CHAT_TEMPLATES_DIR / "template_deepseek_vl2.jinja",
     "florence2": CHAT_TEMPLATES_DIR / "template_basic.jinja",
     "fuyu": CHAT_TEMPLATES_DIR / "template_fuyu.jinja",
+    "minicpmv": _get_minicpmv_chat_template_fallback,
     "paligemma": CHAT_TEMPLATES_DIR / "template_basic.jinja",
     "qwen": _get_qwen_chat_template_fallback,
 }

@@ -25,17 +25,21 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.dynamic_module import (
     try_get_class_from_dynamic_module)
 
-from .interfaces import (get_default_pooling_type, has_inner_state, has_noops,
-                         is_attention_free, is_hybrid, supports_cross_encoding,
-                         supports_multimodal, supports_multimodal_raw_input,
-                         supports_pp, supports_transcription, supports_v0_only)
-from .interfaces_base import is_pooling_model, is_text_generation_model
+from .interfaces import (has_inner_state, has_noops, is_attention_free,
+                         is_hybrid, supports_cross_encoding,
+                         supports_multimodal,
+                         supports_multimodal_encoder_tp_data,
+                         supports_multimodal_raw_input_only, supports_pp,
+                         supports_transcription, supports_v0_only)
+from .interfaces_base import (get_default_pooling_type, is_pooling_model,
+                              is_text_generation_model)
 
 logger = init_logger(__name__)
 
 # yapf: disable
 _TEXT_GENERATION_MODELS = {
     # [Decoder-only]
+    "ApertusForCausalLM": ("apertus", "ApertusForCausalLM"),
     "AquilaModel": ("llama", "LlamaForCausalLM"),
     "AquilaForCausalLM": ("llama", "LlamaForCausalLM"),  # AquilaChat2
     "ArceeForCausalLM": ("arcee", "ArceeForCausalLM"),
@@ -180,20 +184,23 @@ _EMBEDDING_MODELS = {
     "LlavaNextForConditionalGeneration": ("llava_next", "LlavaNextForConditionalGeneration"),  # noqa: E501
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),  # noqa: E501
-    # Technically PrithviGeoSpatialMAE is a model that works on images, both in
+    # Technically Terratorch models work on images, both in
     # input and output. I am adding it here because it piggy-backs on embedding
     # models for the time being.
-    "PrithviGeoSpatialMAE": ("prithvi_geospatial_mae", "PrithviGeoSpatialMAE"),
+    "PrithviGeoSpatialMAE": ("terratorch", "Terratorch"),
+    "Terratorch": ("terratorch", "Terratorch"),
 }
 
 _CROSS_ENCODER_MODELS = {
     "BertForSequenceClassification": ("bert", "BertForSequenceClassification"),
+    "GteNewForSequenceClassification": ("bert_with_rope",
+                                        "GteNewForSequenceClassification"),
+    "ModernBertForSequenceClassification": ("modernbert",
+                                            "ModernBertForSequenceClassification"),
     "RobertaForSequenceClassification": ("roberta",
                                          "RobertaForSequenceClassification"),
     "XLMRobertaForSequenceClassification": ("roberta",
                                             "RobertaForSequenceClassification"),
-    "ModernBertForSequenceClassification": ("modernbert",
-                                            "ModernBertForSequenceClassification"),
     # [Auto-converted (see adapters.py)]
     "JinaVLForRanking": ("jina_vl", "JinaVLForSequenceClassification"), # noqa: E501,
 }
@@ -206,6 +213,7 @@ _MULTIMODAL_MODELS = {
     "ChameleonForConditionalGeneration": ("chameleon", "ChameleonForConditionalGeneration"),  # noqa: E501
     "Cohere2VisionForConditionalGeneration": ("cohere2_vision", "Cohere2VisionForConditionalGeneration"),  # noqa: E501
     "DeepseekVLV2ForCausalLM": ("deepseek_vl2", "DeepseekVLV2ForCausalLM"),
+    "Ernie4_5_VLMoeForConditionalGeneration": ("ernie45_vl", "Ernie4_5_VLMoeForConditionalGeneration"),  # noqa: E501
     "FuyuForCausalLM": ("fuyu", "FuyuForCausalLM"),
     "Gemma3ForConditionalGeneration": ("gemma3_mm", "Gemma3ForConditionalGeneration"),  # noqa: E501
     "Gemma3nForConditionalGeneration": ("gemma3n_mm", "Gemma3nForConditionalGeneration"),    # noqa: E501
@@ -216,9 +224,11 @@ _MULTIMODAL_MODELS = {
     "H2OVLChatModel": ("h2ovl", "H2OVLChatModel"),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
     "InternS1ForConditionalGeneration": ("interns1", "InternS1ForConditionalGeneration"),  # noqa: E501
+    "InternVLForConditionalGeneration": ("interns1", "InternS1ForConditionalGeneration"),  # noqa: E501
     "Idefics3ForConditionalGeneration":("idefics3","Idefics3ForConditionalGeneration"),
     "SmolVLMForConditionalGeneration": ("smolvlm","SmolVLMForConditionalGeneration"),  # noqa: E501
     "KeyeForConditionalGeneration": ("keye", "KeyeForConditionalGeneration"),
+    "KeyeVL1_5ForConditionalGeneration": ("keye_vl1_5", "KeyeVL1_5ForConditionalGeneration"), # noqa: E501
     "RForConditionalGeneration": ("rvl", "RForConditionalGeneration"),
     "KimiVLForConditionalGeneration": ("kimi_vl", "KimiVLForConditionalGeneration"),  # noqa: E501
     "Llama_Nemotron_Nano_VL": ("nemotron_vl", "LlamaNemotronVLChatModel"),
@@ -227,6 +237,7 @@ _MULTIMODAL_MODELS = {
     "LlavaNextVideoForConditionalGeneration": ("llava_next_video", "LlavaNextVideoForConditionalGeneration"),  # noqa: E501
     "LlavaOnevisionForConditionalGeneration": ("llava_onevision", "LlavaOnevisionForConditionalGeneration"),  # noqa: E501
     "MantisForConditionalGeneration": ("llava", "MantisForConditionalGeneration"),  # noqa: E501
+    "MiDashengLMModel": ("midashenglm", "MiDashengLMModel"),
     "MiniMaxVL01ForConditionalGeneration": ("minimax_vl_01", "MiniMaxVL01ForConditionalGeneration"),  # noqa: E501
     "MiniCPMO": ("minicpmo", "MiniCPMO"),
     "MiniCPMV": ("minicpmv", "MiniCPMV"),
@@ -321,7 +332,8 @@ class _ModelInfo:
     default_pooling_type: str
     supports_cross_encoding: bool
     supports_multimodal: bool
-    supports_multimodal_raw_input: bool
+    supports_multimodal_raw_input_only: bool
+    supports_multimodal_encoder_tp_data: bool
     supports_pp: bool
     has_inner_state: bool
     is_attention_free: bool
@@ -340,7 +352,10 @@ class _ModelInfo:
             default_pooling_type=get_default_pooling_type(model),
             supports_cross_encoding=supports_cross_encoding(model),
             supports_multimodal=supports_multimodal(model),
-            supports_multimodal_raw_input=supports_multimodal_raw_input(model),
+            supports_multimodal_raw_input_only=
+            supports_multimodal_raw_input_only(model),
+            supports_multimodal_encoder_tp_data=
+            supports_multimodal_encoder_tp_data(model),
             supports_pp=supports_pp(model),
             has_inner_state=has_inner_state(model),
             is_attention_free=is_attention_free(model),
@@ -625,6 +640,9 @@ class _ModelRegistry:
                 model_info = self._try_inspect_model_cls(arch)
                 if model_info is not None:
                     return (model_info, arch)
+        elif model_config.model_impl == ModelImpl.TERRATORCH:
+            model_info = self._try_inspect_model_cls("Terratorch")
+            return (model_info, "Terratorch")
 
         # Fallback to transformers impl (after resolving convert_type)
         if (all(arch not in self.models for arch in architectures)
@@ -673,6 +691,11 @@ class _ModelRegistry:
                 model_cls = self._try_load_model_cls(arch)
                 if model_cls is not None:
                     return (model_cls, arch)
+        elif model_config.model_impl == ModelImpl.TERRATORCH:
+            arch = "Terratorch"
+            model_cls = self._try_load_model_cls(arch)
+            if model_cls is not None:
+                return (model_cls, arch)
 
         # Fallback to transformers impl (after resolving convert_type)
         if (all(arch not in self.models for arch in architectures)
@@ -735,13 +758,13 @@ class _ModelRegistry:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
         return model_cls.supports_multimodal
 
-    def supports_multimodal_raw_input(
+    def is_multimodal_raw_input_only_model(
         self,
         architectures: Union[str, list[str]],
         model_config: ModelConfig,
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
-        return model_cls.supports_multimodal_raw_input
+        return model_cls.supports_multimodal_raw_input_only
 
     def is_pp_supported_model(
         self,

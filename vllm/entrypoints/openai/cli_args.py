@@ -180,6 +180,8 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
     h11_max_header_count: int = H11_MAX_HEADER_COUNT_DEFAULT
     """Maximum number of HTTP headers allowed in a request for h11 parser.
     Helps mitigate header abuse. Default: 256."""
+    log_error_stack: bool = envs.VLLM_SERVER_DEV_MODE
+    """If set to True, log the stack trace of error responses"""
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:

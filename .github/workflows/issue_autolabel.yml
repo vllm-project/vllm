@@ -50,6 +50,10 @@ jobs:
                     searchIn: "both"
                   },
                   {
+                    term: "aiter",
+                    searchIn: "title"
+                  },
+                  {
                     term: "rocm",
                     searchIn: "title"
                   },
