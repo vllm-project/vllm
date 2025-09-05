@@ -143,7 +143,10 @@ async def test_gpt_oss_chat_tool_call_streaming(gptoss_client: OpenAI,
 
 
 @pytest.mark.asyncio
-async def test_gpt_oss_multi_turn_chat(gptoss_client: OpenAI):
+async def test_gpt_oss_multi_turn_chat(gptoss_client: OpenAI,
+                                       with_tool_parser: bool):
+    if not with_tool_parser:
+        pytest.skip("skip non-tool for multi-turn tests")
     tools = [{
         "type": "function",
         "function": {
