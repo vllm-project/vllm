@@ -82,20 +82,19 @@ def get_mxfp4_backend():
                or current_platform.is_device_capability(90))
               and not has_flashinfer()):
             logger.warning_once(
-                "MXFP4 MoE is enabled on Blackwell and Hopper but FlashInfer "
+                "MXFP4 MoE is enabled on Blackwell but FlashInfer "
                 "is not available. This may result in degraded performance. "
                 "Please `pip install vllm[flashinfer]` for best results.")
 
         # If FlashInfer is not available, try either Marlin or Triton
-        if current_platform.get_device_capability()[0] < 9:
+        if current_platform.get_device_capability(
+        )[0] < 9 or not has_triton_kernels() or not is_torch_equal_or_newer(
+                "2.8.0"):
             logger.info_once("Using Marlin backend")
             return Mxfp4Backend.MARLIN
-        elif has_triton_kernels():
+        else:
             logger.info_once("Using Triton backend")
             return Mxfp4Backend.TRITON
-        elif not is_torch_equal_or_newer("2.8.0"):
-            logger.info_once("Using Marlin backend")
-            return Mxfp4Backend.MARLIN
     elif current_platform.is_rocm() and has_triton_kernels():
         logger.info_once("Using Triton backend")
         return Mxfp4Backend.TRITON
