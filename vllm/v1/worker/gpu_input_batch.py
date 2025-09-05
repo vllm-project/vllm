@@ -118,7 +118,10 @@ class InputBatch:
             pin_memory=False,
         )
         self.token_ids_cpu = self.token_ids_cpu_tensor.numpy()
-        self.prompt_embeds_cpu_tensor = torch.zeros(
+        # Since this is a buffer, its initial values do not matter. Initializing
+        # with zeros is sufficiently slow that it can cause NCCL failures when
+        # starting up tensor parallel.
+        self.prompt_embeds_cpu_tensor = torch.empty(
             (max_num_reqs, max_model_len, hidden_size),
             device="cpu",
             dtype=dtype,
