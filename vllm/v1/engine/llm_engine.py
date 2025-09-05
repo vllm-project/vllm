@@ -3,7 +3,7 @@
 
 from collections.abc import Mapping
 from copy import copy
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Optional, Union, Deque
 
 from typing_extensions import TypeVar
 
