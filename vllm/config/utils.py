@@ -54,27 +54,23 @@ def normalize_value(x):
         return normalize_value(x.value)
 
     # Callables: classes, functions (incl. lambdas/nested), callable instances
-    try:
-        if callable(x):
-            fn = getattr(x, "__func__", x)  # bound methods -> function
-            code = getattr(fn, "__code__", None)
-            base = ".".join(
-                filter(None, [
-                    getattr(fn, "__module__", ""),
-                    getattr(fn, "__qualname__", getattr(fn, "__name__", "")),
-                ])) or repr(fn)
-            if code:
-                fname = pathlib.Path(code.co_filename).name
-                return f"{base}@{fname}:{code.co_firstlineno}"
-            # classes or callable instances (no __code__)
-            t = x if isinstance(x, type) else type(x)
-            return ".".join(
-                filter(None, [
-                    getattr(t, "__module__", ""),
-                    getattr(t, "__qualname__", getattr(t, "__name__", "")),
-                ])) or repr(t)
-    except Exception:
-        pass
+    if callable(x):
+        fn = getattr(x, "__func__", x)  # bound methods -> function
+        code = getattr(fn, "__code__", None)
+        module = getattr(fn, "__module__", "")
+        qual = getattr(fn, "__qualname__", getattr(fn, "__name__", ""))
+        base = ".".join([p for p in (module, qual) if p]) or repr(fn)
+        if code is not None:
+            fname = pathlib.Path(getattr(code, "co_filename", "")).name
+            lineno = getattr(code, "co_firstlineno", None)
+            if fname and isinstance(lineno, int):
+                return f"{base}@{fname}:{lineno}"
+        # classes or callable instances (no __code__)
+        t = x if isinstance(x, type) else type(x)
+        t_module = getattr(t, "__module__", "")
+        t_qual = getattr(t, "__qualname__", getattr(t, "__name__", ""))
+        ident = ".".join([p for p in (t_module, t_qual) if p])
+        return ident or repr(t)
 
     # Torch dtype without import (identify by type module/name)
     t = type(x)
