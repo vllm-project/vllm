@@ -87,13 +87,13 @@ class FinishedRequestStats:
 class IterationStats:
     """Stats associated with a single set of EngineCoreOutputs."""
 
-    """Minimum number of historical records for being valid."""
+    # Minimum number of historical records for being valid
     MIN_HISTORY_LEN: int = 10
 
-    """Maximum number of historical records to be considered."""
+    # Maximum number of historical records to be considered
     MAX_HISTORY_LEN: int = 100
 
-    """Minimum number of computed_prefill_tokens for being valid."""
+    # Minimum number of computed_prefill_tokens for being valid
     DEFAULT_MIN_COMP_PREFILL_TOKENS: int = 10
 
     def __init__(self,
