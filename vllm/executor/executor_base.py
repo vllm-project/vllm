@@ -263,9 +263,6 @@ class ExecutorBase(ABC):
             self.kv_output_aggregator = KVOutputAggregator(
                 kv_connector.get_finished_count()
                 or self.parallel_config.world_size)
-        else:
-            self.kv_output_aggregator = KVOutputAggregator(
-                self.parallel_config.world_size)
 
 
 class DistributedExecutorBase(ExecutorBase):
