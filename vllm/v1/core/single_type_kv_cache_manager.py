@@ -25,7 +25,7 @@ class SingleTypeKVCacheManager(ABC):
         kv_cache_spec: KVCacheSpec,
         block_pool: BlockPool,
         kv_cache_group_id: int,
-        dcp_world_size: int,
+        dcp_world_size: int = 1,
     ) -> None:
         """
         Initializes the SingleTypeKVCacheManager.
