@@ -1,8 +1,7 @@
 [build-system]
 # Should be mirrored in requirements/build.txt
+# Please do not add cmake or ninja here, they are handled in setup.py
 requires = [
-    "cmake>=3.26.1",
-    "ninja",
     "packaging>=24.2",
     "setuptools>=77.0.3,<80.0.0",
     "setuptools-scm>=8.0",
