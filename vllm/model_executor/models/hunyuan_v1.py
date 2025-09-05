@@ -57,7 +57,8 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import MixtureOfExperts, SupportsLoRA
+
+from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
                     make_layers)
 
@@ -890,7 +891,7 @@ class HunYuanModel(nn.Module):
         return loaded_params
 
 
-class HunYuanV1Base(nn.Module, SupportsLoRA, MixtureOfExperts):
+class HunYuanV1Base(nn.Module, SupportsLoRA, SupportsPP,  MixtureOfExperts):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
