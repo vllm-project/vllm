@@ -101,12 +101,12 @@ class CpuGpuBuffer:
 
     def __init__(
         self,
-        *args: Union[int, torch.SymInt],
+        *size: Union[int, torch.SymInt],
         dtype: torch.dtype,
         device: torch.device,
         pin_memory: bool,
     ) -> None:
-        self.cpu = torch.zeros(*args,
+        self.cpu = torch.zeros(*size,
                                dtype=dtype,
                                device="cpu",
                                pin_memory=pin_memory)
@@ -135,12 +135,12 @@ class CpuGpuBufferWithNumpy(CpuGpuBuffer):
 
     def __init__(
         self,
-        *args: Union[int, torch.SymInt],
+        *size: Union[int, torch.SymInt],
         dtype: torch.dtype,
         device: torch.device,
         pin_memory: bool,
     ) -> None:
-        super().__init__(*args,
+        super().__init__(*size,
                          dtype=dtype,
                          device=device,
                          pin_memory=pin_memory)
