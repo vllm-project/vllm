@@ -168,6 +168,7 @@ There are scenarios where the PyTorch dependency cannot be easily installed with
 To build vLLM using an existing PyTorch installation, it is recommended to use `uv`, because it has [a unique mechanism](https://docs.astral.sh/uv/concepts/projects/config/#disabling-build-isolation) for disabling build isolation for specific packages and vLLM leverages this mechanism to specify `torch` as the package to disable build isolation.
 
 ```bash
+# install PyTorch first, either from PyPI or from source
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
 # pip install -e . does not work directly, only uv can do this
