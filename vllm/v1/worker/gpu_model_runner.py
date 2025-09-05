@@ -8,7 +8,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any, Literal, Optional, Union, cast, overload
+from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
 import numpy as np
 import torch
@@ -79,7 +79,7 @@ from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
-from vllm.v1.utils import CpuGpuBuffer, CpuGpuBufferWithNumpy
+from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.kv_connector_model_runner_mixin import (
     KVConnectorModelRunnerMixin, KVConnectorOutput)
@@ -331,35 +331,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             device="cpu",
             pin_memory=self.pin_memory)
 
-    @overload
     def _make_buffer(self,
-                     *args: Union[int, torch.SymInt],
+                     *size: Union[int, torch.SymInt],
                      dtype: torch.dtype,
-                     numpy: Literal[True] = ...) -> CpuGpuBufferWithNumpy:
-        ...
-
-    @overload
-    def _make_buffer(self, *args: Union[int, torch.SymInt], dtype: torch.dtype,
-                     numpy: Literal[False]) -> CpuGpuBuffer:
-        ...
-
-    def _make_buffer(
-            self,
-            *args: Union[int, torch.SymInt],
-            dtype: torch.dtype,
-            numpy: bool = True) -> Union[CpuGpuBuffer, CpuGpuBufferWithNumpy]:
+                     numpy: bool = True) -> CpuGpuBuffer:
         # Bfloat16 torch tensors cannot be directly cast to a numpy array, so
         # if a bfloat16 buffer is needed without a corresponding numpy array,
         # don't bother instantiating the numpy array.
-        if numpy:
-            return CpuGpuBufferWithNumpy(*args,
-                                         dtype=dtype,
-                                         device=self.device,
-                                         pin_memory=self.pin_memory)
-        return CpuGpuBuffer(*args,
+        return CpuGpuBuffer(*size,
                             dtype=dtype,
                             device=self.device,
-                            pin_memory=self.pin_memory)
+                            pin_memory=self.pin_memory,
+                            with_numpy=numpy)
 
     def _init_model_kwargs(self, num_tokens: int):
         model_kwargs = dict[str, Any]()
