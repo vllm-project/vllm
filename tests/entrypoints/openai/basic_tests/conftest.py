@@ -8,7 +8,6 @@ from ....utils import RemoteOpenAIServer
 BASIC_SERVER_ARGS = [
     "--dtype", "bfloat16", "--max-model-len", "1024", "--enforce-eager",
     "--max-num-seqs", "32", "--gpu-memory-utilization", "0.7",
-    "--disable-log-stats", "--disable-log-requests",
     "--enable-server-load-tracking", "--chat-template",
     "{% for message in messages %}{{message['role'] + ': ' \
     + message['content'] + '\\n'}}{% endfor %}", "--enable-auto-tool-choice",
