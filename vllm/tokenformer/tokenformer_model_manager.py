@@ -1,4 +1,5 @@
 import torch
+from contextlib import contextmanager
 from torch import nn
 from safetensors.torch import safe_open
 from pathlib import Path
@@ -256,4 +257,21 @@ class TokenformerModelManager(AdapterModelManager):
 
     @property
     def adapter_slots(self) -> int:
+        pass
+    
+    @contextmanager
+    def dummy_lora_cache(self):
+        """Context manager for dummy LoRA cache during warmup."""
+        # Simple pass-through context manager since tokenformer doesn't need special cache handling
+        yield
+    
+    def add_dummy_lora(self, lora_request, rank: int = 8):
+        """Add a dummy LoRA for warmup purposes.
+        
+        Args:
+            lora_request: The LoRA request object
+            rank: The rank for the dummy LoRA (default 8)
+        """
+        # Tokenformer doesn't need to actually add dummy LoRAs, just accept the call
+        logger.debug(f"Adding dummy LoRA {lora_request.lora_name} with rank {rank} (no-op for tokenformer)")
         pass
