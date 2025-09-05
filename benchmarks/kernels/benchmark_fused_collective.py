@@ -187,7 +187,7 @@ def flashinfer_fused_allreduce_rmsnorm(
         allreduce_out=None,
         quant_out=None,
         scale_out=None,
-        layout_code=flashinfer_comm.QuantizationSFLayout.SWIZZLED_128x4_,
+        layout_code=flashinfer_comm.QuantizationSFLayout.SWIZZLED_128x4,
         scale_factor=None,
         use_oneshot=use_oneshot,
         **allreduce_params.get_trtllm_fused_allreduce_kwargs(),
@@ -962,10 +962,15 @@ def prepare_results_with_speedups(results_dict):
     return prepared_results
 
 
-def print_results(results_dict, seq_len, hidden_dim, dtype, use_residual, quant_mode):
+def print_results(
+    results_dict, seq_len, hidden_dim, dtype, use_residual, quant_mode, input_size_mb
+):
     """Print benchmark results in a formatted table."""
     print(f"\n{'=' * 80}")
-    print(f"Results: seq_len={seq_len}, hidden_dim={hidden_dim}")
+    print(
+        f"Results: seq_len={seq_len}, hidden_dim={hidden_dim} "
+        f"(input size: {input_size_mb:.2f} MB)"
+    )
     print(
         f"dtype={dtype}, residual={'yes' if use_residual else 'no'}, "
         f"quant_mode={quant_mode}"
@@ -1009,11 +1014,12 @@ def format_results_markdown(
         dtype = result["dtype"]
         use_residual = result["use_residual"]
         results_dict = result["results"]
-
+        input_size_mb = result["input_size_mb"]
         residual_str = "with residual" if use_residual else "no residual"
 
         markdown += f"""
 ## Configuration: seq_len={seq_len}, dtype={dtype}, {residual_str}
+**Input Size:** {input_size_mb:.2f} MB
 
 | Operation | Time (ms) | Speedup |
 |-----------|-----------|---------|
@@ -1234,6 +1240,10 @@ def main():
 
             # Store results for markdown export
             if rank == 0:
+                # Calculate input size in MB
+                input_size_mb = (
+                    seq_len * args.hidden_dim * torch.finfo(dtype).bits
+                ) / (8 * 1024 * 1024)
                 all_results.append(
                     {
                         "seq_len": seq_len,
@@ -1241,6 +1251,7 @@ def main():
                         "dtype": str(dtype).replace("torch.", ""),
                         "use_residual": use_residual,
                         "quant_mode": quant_mode,
+                        "input_size_mb": input_size_mb,
                         "results": results,
                     }
                 )
@@ -1252,6 +1263,7 @@ def main():
                     dtype,
                     use_residual,
                     quant_mode,
+                    input_size_mb,
                 )
 
         # Save results to markdown file
