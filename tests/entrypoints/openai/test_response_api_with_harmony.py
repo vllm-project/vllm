@@ -6,6 +6,7 @@ import time
 
 import pytest
 import pytest_asyncio
+import regex as re
 import requests
 from openai import BadRequestError, NotFoundError, OpenAI
 
@@ -15,21 +16,16 @@ MODEL_NAME = "openai/gpt-oss-20b"
 
 
 @pytest.fixture(scope="module")
-def monkeypatch_module():
-    from _pytest.monkeypatch import MonkeyPatch
-    mpatch = MonkeyPatch()
-    yield mpatch
-    mpatch.undo()
-
-
-@pytest.fixture(scope="module")
-def server(monkeypatch_module: pytest.MonkeyPatch):
+def server():
     args = ["--enforce-eager", "--tool-server", "demo"]
+    env_dict = dict(
+        VLLM_ENABLE_RESPONSES_API_STORE="1",
+        PYTHON_EXECUTION_BACKEND="dangerously_use_uv",
+    )
 
-    with monkeypatch_module.context() as m:
-        m.setenv("VLLM_ENABLE_RESPONSES_API_STORE", "1")
-        with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
-            yield remote_server
+    with RemoteOpenAIServer(MODEL_NAME, args,
+                            env_dict=env_dict) as remote_server:
+        yield remote_server
 
 
 @pytest_asyncio.fixture
@@ -280,7 +276,7 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
     # TODO: Add back when web search and code interpreter are available in CI
     prompts = [
         "tell me a story about a cat in 20 words",
-        # "What is 13 * 24? Use python to calculate the result.",
+        "What is 13 * 24? Use python to calculate the result.",
         # "When did Jensen found NVIDIA? Search it and answer the year only.",
     ]
 
@@ -293,12 +289,12 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
                 # {
                 #     "type": "web_search_preview"
                 # },
-                # {
-                #     "type": "code_interpreter",
-                #     "container": {
-                #         "type": "auto"
-                #     }
-                # },
+                {
+                    "type": "code_interpreter",
+                    "container": {
+                        "type": "auto"
+                    }
+                },
             ],
             stream=True,
             background=background,
@@ -338,6 +334,7 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
                 async for event in stream:
                     counter += 1
                     assert event == events[counter]
+            assert counter == len(events) - 1
 
 
 @pytest.mark.asyncio
@@ -357,7 +354,6 @@ async def test_web_search(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.skip(reason="Code interpreter tool is not available in CI yet.")
 async def test_code_interpreter(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
@@ -371,6 +367,12 @@ async def test_code_interpreter(client: OpenAI, model_name: str):
     )
     assert response is not None
     assert response.status == "completed"
+    for item in response.output:
+        if item.type == "message":
+            output_string = item.content[0].text
+            index = output_string.find('9')
+            assert parse_integer_from_string(
+                output_string[index:]) == 977966748
 
 
 def get_weather(latitude, longitude):
@@ -650,3 +652,76 @@ async def test_function_calling_full_history(client: OpenAI, model_name: str):
     assert response_2 is not None
     assert response_2.status == "completed"
     assert response_2.output_text is not None
+
+
+def parse_integer_from_string(value):
+    """
+    Enhanced integer parser that handles markdown, scientific notation, 
+    commas, and formatting artifacts like brackets and escaped characters.
+    """
+    if not isinstance(value, str):
+        return int(value)
+
+    # Initial cleanup
+    value = value.strip()
+
+    # Remove markdown code block formatting
+    value = re.sub(r'^```\s*(.+?)\s*```$', r'\1', value, flags=re.DOTALL)
+    value = re.sub(r'^`\s*(.+?)\s*`$', r'\1', value)
+    value = value.strip()
+
+    # Remove brackets, parentheses, and formatting artifacts
+    value = re.sub(r'[\[\](){}]', '', value)
+
+    # Remove newlines and extra whitespace
+    value = re.sub(r'\s+', ' ', value).strip()
+
+    # Handle escaped characters (like \,)
+    value = value.replace('\\,', ',')
+    value = value.replace('\\.', '.')
+
+    # Extract the main number pattern
+    # Look for patterns like: digits, commas, dots, scientific notation
+    number_pattern = (r'[+-]?(?:\d{1,3}(?:,\d{3})*|\d+)'
+                      r'(?:\.\d+)?(?:[eE][+-]?\d+)?')
+    match = re.search(number_pattern, value)
+
+    if not match:
+        raise ValueError(f"Cannot parse '{value}' as integer")
+
+    cleaned_number = match.group()
+
+    # Handle scientific notation
+    scientific_match = re.fullmatch(r'([+-]?\d+(?:\.\d+)?)[eE]([+-]?\d+)',
+                                    cleaned_number)
+    if scientific_match:
+        base, exponent = scientific_match.groups()
+        return int(float(base) * (10**int(exponent)))
+
+    # Handle comma-separated numbers
+    if ',' in cleaned_number:
+        cleaned_number = cleaned_number.replace(',', '')
+
+    # Handle human-readable format (1k, 2M, etc.)
+    readable_match = re.fullmatch(r'([+-]?\d+(?:\.\d+)?)([kKmMgGtT])',
+                                  cleaned_number)
+    if readable_match:
+        number, suffix = readable_match.groups()
+        multipliers = {
+            'k': 10**3,
+            'm': 10**6,
+            'g': 10**9,
+            't': 10**12,
+            'K': 2**10,
+            'M': 2**20,
+            'G': 2**30,
+            'T': 2**40
+        }
+        if suffix in multipliers:
+            return int(float(number) * multipliers[suffix])
+
+    try:
+        return int(float(cleaned_number))
+    except ValueError:
+        raise ValueError(
+            f"Cannot parse '{cleaned_number}' as integer") from None
