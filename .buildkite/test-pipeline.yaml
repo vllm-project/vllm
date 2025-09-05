@@ -504,14 +504,23 @@ steps:
 
 #####  models test  #####
 
-- label: Basic Models Test - Initialization
+- label: Basic Models Test - Initialization Shard 0
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/test_initialization.py
   commands:
-    - pytest -v -s models/test_initialization.py
+    - pytest -v -s --shard-count=2 --shard-index=0 models/test_initialization.py
+
+- label: Basic Models Test - Initialization Shard 1
+  mirror_hardwares: [amdexperimental]
+  torch_nightly: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/test_initialization.py
+  commands:
+    - pytest -v -s --shard-count=2 --shard-index=1 models/test_initialization.py
 
 - label: Basic Models Test - Transformers
   mirror_hardwares: [amdexperimental]
