@@ -27,13 +27,16 @@ with vLLM memory profiling and causes unexpected behavior.
 Learn more about Ray placement groups:
 https://docs.ray.io/en/latest/placement-groups.html
 """
-
+import gc
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 import ray
 import torch
+import zmq
 from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+from torch.multiprocessing.reductions import reduce_tensor
 
 from vllm import LLM
 
@@ -86,20 +89,34 @@ class RayTrainingActor:
         from vllm.platforms import current_platform
 
         self.device_uuid = current_platform.get_device_uuid(0)
+        self.zmq_context = zmq.Context()
+        self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-{self.device_uuid}.sock"
 
     def report_device_id(self) -> str:
         return self.device_uuid
 
-    def get_weight_ipc_handles(self):
-        from torch.multiprocessing.reductions import reduce_tensor
+    def get_zmq_handles(self):
+        return {self.device_uuid: self.zmq_handle}
 
-        data = {}
-        for name, p in self.model.named_parameters():
-            # A training actor might hold only a subset of the weights and may
-            # need to gather weights from other actors. For demonstration
-            # purposes, each training actor owns the full weight set.
-            data[name] = reduce_tensor(p.detach())
-        return {self.device_uuid: data}
+    def update_weights(self):
+        s = self.zmq_context.socket(zmq.REQ)
+        s.bind(self.zmq_handle)
+        buffer = torch.empty(1<<30, dtype=torch.uint8, device="cuda:0")
+        handle = reduce_tensor(buffer)
+        named_parameters: dict[str, torch.nn.Parameter] = dict(self.model.named_parameters())
+        for i, (name, p) in enumerate(named_parameters.items()):
+            buffer[:p.nbytes].data.copy_(p.data.view(-1).view(dtype=torch.uint8))
+            s.send_pyobj({
+                "named_tensors": [(name, p.dtype, p.shape)],
+                "ipc_handle": handle if i == 0 else None,
+                "offset": 0,
+                "end": i == len(named_parameters) - 1,
+            })
+            s.recv()
+        torch.cuda.synchronize()
+        del buffer
+        gc.collect()
+        torch.cuda.empty_cache()
 
 
 # Ray manages four GPUs.
@@ -176,17 +193,25 @@ assert training_actor_device_ids[:2] == inference_engine_device_ids[0]
 assert training_actor_device_ids[2:] == inference_engine_device_ids[1]
 
 print("Gather all the IPC handles from the training actors.")
-ipc_handles = {}
+zmq_handles = {}
 for actor in training_actors:
-    ipc_handles.update(ray.get(actor.get_weight_ipc_handles.remote()))
+    zmq_handles.update(ray.get(actor.get_zmq_handles.remote()))
 
-print("Update the weights of the inference engines.")
-for llm in inference_engines:
+def collective_rpc(llm):
     ray.get(
         llm.collective_rpc.remote(
-            "update_weights_from_ipc_handles", args=(ipc_handles,)
+            "update_weights_from_ipc", args=(zmq_handles,)
         )
     )
+
+print("Update the weights of the inference engines (threaded).")
+with ThreadPoolExecutor(max_workers=len(inference_engines)) as executor:
+    futures = [executor.submit(collective_rpc, llm) for llm in inference_engines]
+    for actor in training_actors:
+        ray.get(actor.update_weights.remote())
+    for future in futures:
+        future.result()
+
 print("Check if the weights are updated.")
 for llm in inference_engines:
     assert ray.get(llm.collective_rpc.remote("check_weights_changed", args=tuple()))
