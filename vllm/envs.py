@@ -1199,6 +1199,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TUNED_CONFIG_FOLDER":
     lambda: os.getenv("VLLM_TUNED_CONFIG_FOLDER", None),
 
+    # Whether to enable outputting Harmony messages on the
+    # Responses API response object
+    "VLLM_RESPONSES_API_ENABLE_HARMONY_MESSAGES_OUTPUT":
+    lambda: bool(int(
+        os.getenv("VLLM_RESPONSES_API_ENABLE_HARMONY_MESSAGES_OUTPUT",
+        "0"))),
 }
 
 # --8<-- [end:env-vars-definition]
