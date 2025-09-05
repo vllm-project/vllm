@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Optional, TypedDict, Union, cast
+from typing import Any, Literal, Optional, TypedDict, Union, cast
 
+import numpy as np
 import torch
+# yapf: disable
 from torch import nn
 from transformers import AutoModel, BatchFeature
 from transformers.models.gemma3n import (Gemma3nAudioConfig,
@@ -13,7 +15,8 @@ from transformers.models.gemma3n import (Gemma3nAudioConfig,
                                          Gemma3nVisionConfig)
 from transformers.models.siglip import SiglipImageProcessorFast
 
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import RowParallelLinear
@@ -21,13 +24,13 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.models.gemma3n import Gemma3nForCausalLM
 from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.whisper import ISO639_1_SUPPORTED_LANGS
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargsItems)
 from vllm.multimodal.parse import (ImageProcessorItems, MultiModalDataItems,
                                    MultiModalDataParser)
-# yapf: disable
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo,
                                         MultiModalPromptUpdates,
@@ -40,7 +43,8 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal
+from .interfaces import (MultiModalEmbeddings, SupportsMultiModal,
+                         SupportsTranscription)
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
@@ -58,7 +62,8 @@ class Gemma3nImagePixelInputs(TypedDict):
 
 
 class Gemma3nAudioInputs(TypedDict):
-    input_features: torch.Tensor
+    input_features: Union[torch.Tensor, list[torch.Tensor]]
+    input_features_padded: torch.Tensor
     """Shape: `(batch_size * num_audio, seq_length, num_features)`"""
     input_features_mask: torch.Tensor
     """Shape: `(batch_size * num_audio, seq_length)`"""
@@ -174,7 +179,7 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo]
     ) -> BatchFeature:
 
         # HF Transformers audio processor no longer accepts `audios` key.
-        # We pop `audios` and replace it with `audio` key to surpress
+        # We pop `audios` and replace it with `audio` key to suppress
         # the warning.
         if 'audios' in mm_data:
             mm_data['audio'] = mm_data.pop('audios')
@@ -184,8 +189,13 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo]
             mm_kwargs,
             tok_kwargs,
         )
+
         if 'input_features' in processed_outputs:
-            # Avoid padding since we need the output of each item to be
+            # Padding enables audio_tower to run in batched mode
+            processed_outputs["input_features_padded"] = \
+                processed_outputs["input_features"]
+
+            # Unpad features here since we need the output of each item to be
             # independent of other items for the cache to work correctly
             unpadded_features = [
                 f[mask] for f, mask in zip(
@@ -202,9 +212,11 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo]
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
 
-        return dict(pixel_values=MultiModalFieldConfig.batched("image"),
-                    input_features=MultiModalFieldConfig.batched("audio"),
-                    input_features_mask=MultiModalFieldConfig.batched("audio"))
+        return dict(
+            pixel_values=MultiModalFieldConfig.batched("image"),
+            input_features=MultiModalFieldConfig.batched("audio"),
+            input_features_padded=MultiModalFieldConfig.batched("audio"),
+            input_features_mask=MultiModalFieldConfig.batched("audio"))
 
     def _get_prompt_updates(
         self,
@@ -410,7 +422,10 @@ class Gemma3nMultimodalEmbedder(nn.Module):
 @MULTIMODAL_REGISTRY.register_processor(Gemma3nMultiModalProcessor,
                                         info=Gemma3nProcessingInfo,
                                         dummy_inputs=Gemma3nDummyInputsBuilder)
-class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
+class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal,
+                                      SupportsTranscription):
+    supported_languages = ISO639_1_SUPPORTED_LANGS
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -509,9 +524,14 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
         if input_features_mask is None:
             return None
 
+        input_features_padded = kwargs.pop("input_features_padded", None)
+        if input_features_padded is None:
+            return None
+
         return Gemma3nAudioInputs(
             input_features=input_features,
             input_features_mask=input_features_mask,
+            input_features_padded=input_features_padded,
         )
 
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
@@ -557,7 +577,8 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
         audio_input: Gemma3nAudioInputs,
     ) -> list[torch.Tensor]:
         assert self.audio_tower is not None
-        input_features = audio_input["input_features"].squeeze(1)
+        # Run on padded features to enable batching
+        input_features = audio_input["input_features_padded"].squeeze(1)
         input_features_mask = audio_input["input_features_mask"].squeeze(1)
         audio_outputs, audio_mask = self.audio_tower(input_features,
                                                      ~input_features_mask)
@@ -694,3 +715,53 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
             return "<audio_soft_token>"
         else:
             raise ValueError(f"Unsupported modality: {modality}")
+
+    @classmethod
+    def get_generation_prompt(cls, audio: np.ndarray,
+                              stt_config: SpeechToTextConfig,
+                              model_config: ModelConfig,
+                              language: Optional[str],
+                              task_type: Literal["transcribe", "translate"],
+                              request_prompt: str,
+                              to_language: Optional[str]) -> PromptType:
+        """
+        Gemma3n supports "free-form" transcription.
+        We fix its prompt here to standardize transcriptions/translations 
+        requests.
+        """
+        # Transcribe this audio [into <>] | for transcription
+        # Translate this audio [from <> into <>] | for translation
+        prompt = "<start_of_turn>user\n"
+        prompt += "Transcribe" if task_type == "transcribe" else "Translate"
+        prompt += " this audio"
+
+        # We assume the language is a valid ISO 639-1 code.
+        full_lang_name = cls.supported_languages.get(language, "")
+        # Translation only for now
+        full_lang_name_to = cls.supported_languages.get(to_language, "")
+
+        if task_type == "transcribe" and full_lang_name:
+            prompt += f" into {full_lang_name}"
+        elif task_type == "translate":
+            if full_lang_name:
+                prompt += f" from {full_lang_name}"
+            if full_lang_name_to:
+                prompt += f" into {full_lang_name_to}"
+
+        prompt += ": <audio_soft_token><end_of_turn>\n<start_of_turn>model\n"
+
+        audio = (audio, stt_config.sample_rate)
+        prompts_dict = {"multi_modal_data": {"audio": audio}, "prompt": prompt}
+        return cast(PromptType, prompts_dict)
+
+    @classmethod
+    def get_speech_to_text_config(cls, model_config: ModelConfig,
+                                  task_type: str) -> SpeechToTextConfig:
+        return SpeechToTextConfig(
+            # Let's set this to 30 as suggested in the docs for now, although
+            # the model is only limited by its context length.
+            max_audio_clip_s=30,
+            sample_rate=16000,
+            # TODO enable chunking after more thorough testing.
+            min_energy_split_window_size=None,
+        )

@@ -224,7 +224,7 @@ class Worker(WorkerBase):
         memory can be used for KV cache without OOMs.
 
         The engine will first conduct a profiling of the existing memory usage.
-        Then, it calculate the free memory that can be used for KV cache in
+        Then, it calculates the free memory that can be used for KV cache in
         bytes.
 
         Tip:
@@ -308,7 +308,10 @@ class Worker(WorkerBase):
         # We skip EPLB here since we don't want to record dummy metrics
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
-            self.model_runner._dummy_run(size, skip_eplb=True)
+            self.model_runner._dummy_run(size,
+                                         skip_eplb=True,
+                                         remove_lora=False)
+        self.model_runner.maybe_remove_all_loras(self.model_runner.lora_config)
 
         # Warmup and tune the kernels used during model execution before
         # cuda graph capture.
@@ -354,36 +357,37 @@ class Worker(WorkerBase):
         scheduler_output: "SchedulerOutput",
     ) -> Optional[ModelRunnerOutput]:
         intermediate_tensors = None
-        if not get_pp_group().is_first_rank:
+        forward_pass = scheduler_output.total_num_scheduled_tokens > 0
+        if forward_pass and not get_pp_group().is_first_rank:
             intermediate_tensors = IntermediateTensors(
                 get_pp_group().recv_tensor_dict(
                     all_gather_group=get_tp_group()))
 
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
-
-        parallel_config = self.vllm_config.parallel_config
-        if parallel_config.distributed_executor_backend != "external_launcher" \
-            and not get_pp_group().is_last_rank:
-            assert isinstance(output, IntermediateTensors)
-            get_pp_group().send_tensor_dict(output.tensors,
-                                            all_gather_group=get_tp_group())
-
-            kv_connector_output = output.kv_connector_output
-            if not kv_connector_output:
-                return None
-
-            # In case of PP with kv transfer, we need to pass through the
-            # kv_connector_output
-            if (not kv_connector_output.finished_sending
-                    and not kv_connector_output.finished_recving):
-                return EMPTY_MODEL_RUNNER_OUTPUT
-
-            output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
-            output.kv_connector_output = kv_connector_output
+        if isinstance(output, ModelRunnerOutput):
             return output
 
-        assert isinstance(output, ModelRunnerOutput)
+        assert isinstance(output, IntermediateTensors)
+        parallel_config = self.vllm_config.parallel_config
+        assert parallel_config.distributed_executor_backend != (
+            "external_launcher") and not get_pp_group().is_last_rank
+
+        get_pp_group().send_tensor_dict(output.tensors,
+                                        all_gather_group=get_tp_group())
+
+        kv_connector_output = output.kv_connector_output
+        if not kv_connector_output:
+            return None
+
+        # In case of PP with kv transfer, we need to pass through the
+        # kv_connector_output
+        if (not kv_connector_output.finished_sending
+                and not kv_connector_output.finished_recving):
+            return EMPTY_MODEL_RUNNER_OUTPUT
+
+        output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
+        output.kv_connector_output = kv_connector_output
         return output
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
@@ -396,8 +400,10 @@ class Worker(WorkerBase):
             self.profiler.start()
         else:
             self.profiler.stop()
-            print(self.profiler.key_averages().table(
-                sort_by="self_cuda_time_total"))
+            # only print profiler results on rank 0
+            if self.local_rank == 0:
+                print(self.profiler.key_averages().table(
+                    sort_by="self_cuda_time_total"))
 
     def execute_dummy_batch(self) -> None:
         self.model_runner._dummy_run(1)
@@ -494,7 +500,8 @@ class Worker(WorkerBase):
         parallel_config = self.vllm_config.parallel_config
         moe_modules = [
             module for module in self.model_runner.model.modules()
-            if module.__class__.__name__ == "FusedMoE"
+            if (module.__class__.__name__ == "FusedMoE"
+                or module.__class__.__name__ == "SharedFusedMoE")
         ]
         num_local_experts = moe_modules[0].moe_config.num_local_experts
         assert all(module.moe_config.num_local_experts == num_local_experts

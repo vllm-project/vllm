@@ -25,6 +25,7 @@
 """Inference-only DeepseekV2/DeepseekV3 model."""
 import typing
 from collections.abc import Callable, Iterable
+from itertools import islice
 from typing import Any, Optional, Union
 
 import torch
@@ -46,8 +47,10 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.shared_fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -55,7 +58,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import MixtureOfExperts, SupportsPP
+from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
 from .utils import (PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -126,7 +129,7 @@ class DeepseekV2MoE(nn.Module):
                                      prefix=f"{prefix}.gate")
         if config.topk_method == "noaux_tc":
             self.gate.e_score_correction_bias = nn.Parameter(
-                torch.empty(config.n_routed_experts))
+                torch.empty(config.n_routed_experts, dtype=torch.float32))
         else:
             self.gate.e_score_correction_bias = None
 
@@ -146,61 +149,85 @@ class DeepseekV2MoE(nn.Module):
         self.physical_expert_end = (self.physical_expert_start +
                                     self.n_local_physical_experts)
 
-        self.experts = FusedMoE(
-            num_experts=config.n_routed_experts,
-            top_k=config.num_experts_per_tok,
-            hidden_size=config.hidden_size,
-            intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
-            renormalize=config.norm_topk_prob,
-            quant_config=quant_config,
-            use_grouped_topk=True,
-            num_expert_group=config.n_group,
-            topk_group=config.topk_group,
-            prefix=f"{prefix}.experts",
-            scoring_func=config.scoring_func,
-            e_score_correction_bias=self.gate.e_score_correction_bias,
-            enable_eplb=self.enable_eplb,
-            num_redundant_experts=self.n_redundant_experts)
-
-        if config.n_shared_experts is not None:
+        if config.n_shared_experts is None:
+            self.experts = FusedMoE(
+                num_experts=config.n_routed_experts,
+                top_k=config.num_experts_per_tok,
+                hidden_size=config.hidden_size,
+                intermediate_size=config.moe_intermediate_size,
+                reduce_results=False,
+                renormalize=config.norm_topk_prob,
+                quant_config=quant_config,
+                use_grouped_topk=True,
+                num_expert_group=config.n_group,
+                topk_group=config.topk_group,
+                prefix=f"{prefix}.experts",
+                scoring_func=config.scoring_func,
+                # we do scaling outside, set factor to 1.0 to avoid double mul
+                routed_scaling_factor=1.0,
+                e_score_correction_bias=self.gate.e_score_correction_bias,
+                enable_eplb=self.enable_eplb,
+                num_redundant_experts=self.n_redundant_experts)
+            self.shared_experts = None
+        else:
             intermediate_size = (config.moe_intermediate_size *
                                  config.n_shared_experts)
+
             self.shared_experts = DeepseekV2MLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                reduce_results=self.experts.must_reduce_shared_expert_outputs(
-                ),
+                reduce_results=False,
                 prefix=f"{prefix}.shared_experts",
             )
+
+            self.experts = SharedFusedMoE(
+                shared_experts=self.shared_experts,
+                num_experts=config.n_routed_experts,
+                top_k=config.num_experts_per_tok,
+                hidden_size=config.hidden_size,
+                intermediate_size=config.moe_intermediate_size,
+                reduce_results=False,
+                renormalize=config.norm_topk_prob,
+                quant_config=quant_config,
+                use_grouped_topk=True,
+                num_expert_group=config.n_group,
+                topk_group=config.topk_group,
+                prefix=f"{prefix}.experts",
+                scoring_func=config.scoring_func,
+                # we do scaling outside, set factor to 1.0 to avoid double mul
+                routed_scaling_factor=1.0,
+                e_score_correction_bias=self.gate.e_score_correction_bias,
+                enable_eplb=self.enable_eplb,
+                num_redundant_experts=self.n_redundant_experts)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
-        if self.n_shared_experts is not None:
-            shared_output = self.shared_experts(hidden_states)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
-        if hidden_states.dtype != torch.float16:
-            final_hidden_states = self.experts(
-                hidden_states=hidden_states,
-                router_logits=router_logits) * self.routed_scaling_factor
+        fused_moe_out = self.experts(hidden_states=hidden_states,
+                                     router_logits=router_logits)
+
+        if self.shared_experts is not None:
+            shared_output, final_hidden_states = fused_moe_out
         else:
-            # Fix FP16 overflow
-            # See DeepseekV2DecoderLayer for more details.
-            final_hidden_states = self.experts(hidden_states=hidden_states,
-                                               router_logits=router_logits)
-        if shared_output is not None:
-            if hidden_states.dtype != torch.float16:
-                final_hidden_states = final_hidden_states + shared_output
-            else:
-                # Fix FP16 overflow
-                # See DeepseekV2DecoderLayer for more details.
-                final_hidden_states = final_hidden_states + shared_output \
-                    * (1. / self.routed_scaling_factor)
+            shared_output = None
+            final_hidden_states = fused_moe_out
+
+        # Fix FP16 overflow
+        # See DeepseekV2DecoderLayer for more details.
+        if hidden_states.dtype != torch.float16:
+            final_hidden_states *= self.routed_scaling_factor
+        elif self.shared_experts is not None:
+            assert shared_output is not None
+            shared_output *= (1. / self.routed_scaling_factor)
+
+        if self.shared_experts is not None:
+            assert shared_output is not None
+            final_hidden_states += shared_output
 
         if self.tp_size > 1:
             final_hidden_states = (
@@ -466,72 +493,41 @@ class DeepseekV2MLAAttention(nn.Module):
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
             self.scaling = self.scaling * mscale * mscale
 
-        # In the MLA backend, kv_cache includes both k_c and
-        # pe (i.e. decoupled position embeddings). In particular,
-        # the concat_and_cache_mla op requires
-        #     k_c.size(1) + k_pe.size(1) == kv_cache.size(2)
-        # i.e.
-        #     kv_lora_rank + qk_rope_head_dim == head_size
-        self.mla_attn = Attention(
-            num_heads=self.num_local_heads,
-            head_size=self.kv_lora_rank + self.qk_rope_head_dim,
-            scale=self.scaling,
-            num_kv_heads=1,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.attn",
-            use_mla=True,
-            # MLA Args
-            q_lora_rank=self.q_lora_rank,
-            kv_lora_rank=self.kv_lora_rank,
-            qk_nope_head_dim=self.qk_nope_head_dim,
-            qk_rope_head_dim=self.qk_rope_head_dim,
-            qk_head_dim=self.qk_head_dim,
-            v_head_dim=self.v_head_dim,
+        mla_modules = MLAModules(
+            kv_a_layernorm=self.kv_a_layernorm,
             kv_b_proj=self.kv_b_proj,
+            rotary_emb=self.rotary_emb,
+            o_proj=self.o_proj,
+            fused_qkv_a_proj=self.fused_qkv_a_proj
+            if self.q_lora_rank is not None else None,
+            kv_a_proj_with_mqa=self.kv_a_proj_with_mqa
+            if self.q_lora_rank is None else None,
+            q_a_layernorm=self.q_a_layernorm
+            if self.q_lora_rank is not None else None,
+            q_b_proj=self.q_b_proj if self.q_lora_rank is not None else None,
+            q_proj=self.q_proj if self.q_lora_rank is None else None,
         )
-
-        self.prefix = prefix
-        self.debug_layer_idx = int(self.prefix.split(".")[-2])
+        self.mla_attn = MultiHeadLatentAttention(
+            self.hidden_size,
+            self.num_local_heads,
+            self.scaling,
+            self.qk_nope_head_dim,
+            self.qk_rope_head_dim,
+            self.v_head_dim,
+            self.q_lora_rank,
+            self.kv_lora_rank,
+            mla_modules,
+            cache_config,
+            quant_config,
+            prefix,
+        )
 
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        q_c = None
-        kv_lora = None
-
-        if self.q_lora_rank is not None:
-            qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
-            q_c, kv_lora = qkv_lora.split(
-                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
-                dim=-1,
-            )
-            q_c = self.q_a_layernorm(q_c)
-            q = self.q_b_proj(q_c)[0]
-        else:
-            kv_lora = self.kv_a_proj_with_mqa(hidden_states)[0]
-            q = self.q_proj(hidden_states)[0]
-
-        kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim],
-                                   dim=-1)
-        kv_c_normed = self.kv_a_layernorm(kv_c)
-
-        q = q.view(-1, self.num_local_heads, self.qk_head_dim)
-        # Add head dim of 1 to k_pe
-        k_pe = k_pe.unsqueeze(1)
-
-        q[..., self.qk_nope_head_dim:], k_pe = self.rotary_emb(
-            positions, q[..., self.qk_nope_head_dim:], k_pe)
-
-        attn_out = self.mla_attn(
-            q,
-            kv_c_normed,
-            k_pe,
-            output_shape=(hidden_states.shape[0],
-                          self.num_local_heads * self.v_head_dim))
-        return self.o_proj(attn_out)[0]
+        return self.mla_attn(positions, hidden_states)
 
 
 class DeepseekV2DecoderLayer(nn.Module):
@@ -712,7 +708,7 @@ class DeepseekV2Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in self.layers[self.start_layer:self.end_layer]:
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
@@ -725,7 +721,8 @@ class DeepseekV2Model(nn.Module):
         return hidden_states
 
 
-class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
+class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts,
+                            SupportsLoRA):
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
     }

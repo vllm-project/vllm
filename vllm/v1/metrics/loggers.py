@@ -377,9 +377,13 @@ class PrometheusStatLogger(StatLoggerBase):
         self.histogram_time_to_first_token = make_per_engine(
             histogram_time_to_first_token, engine_indexes, model_name)
 
+        # Deprecated in 0.11 - Renamed as vllm:inter_token_latency_seconds
+        # TODO: in 0.12, only enable if show_hidden_metrics=True
         histogram_time_per_output_token = self._histogram_cls(
             name="vllm:time_per_output_token_seconds",
-            documentation="Histogram of time per output token in seconds.",
+            documentation=(
+                "Histogram of time per output token in seconds."
+                "DEPRECATED: Use vllm:inter_token_latency_seconds instead."),
             buckets=[
                 0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75,
                 1.0, 2.5, 5.0, 7.5, 10.0, 20.0, 40.0, 80.0
@@ -387,6 +391,17 @@ class PrometheusStatLogger(StatLoggerBase):
             labelnames=labelnames)
         self.histogram_time_per_output_token = make_per_engine(
             histogram_time_per_output_token, engine_indexes, model_name)
+
+        histogram_inter_token_latency = self._histogram_cls(
+            name="vllm:inter_token_latency_seconds",
+            documentation="Histogram of inter-token latency in seconds.",
+            buckets=[
+                0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75,
+                1.0, 2.5, 5.0, 7.5, 10.0, 20.0, 40.0, 80.0
+            ],
+            labelnames=labelnames)
+        self.histogram_inter_token_latency = make_per_engine(
+            histogram_inter_token_latency, engine_indexes, model_name)
 
         request_latency_buckets = [
             0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0,
@@ -537,8 +552,9 @@ class PrometheusStatLogger(StatLoggerBase):
             self.histogram_n_request[engine_idx].observe(n_param)
         for ttft in iteration_stats.time_to_first_tokens_iter:
             self.histogram_time_to_first_token[engine_idx].observe(ttft)
-        for tpot in iteration_stats.time_per_output_tokens_iter:
-            self.histogram_time_per_output_token[engine_idx].observe(tpot)
+        for itl in iteration_stats.inter_token_latencies_iter:
+            self.histogram_inter_token_latency[engine_idx].observe(itl)
+            self.histogram_time_per_output_token[engine_idx].observe(itl)
 
         for finished_request in iteration_stats.finished_requests:
             self.counter_request_success[
@@ -635,16 +651,16 @@ class StatLoggerManager:
         vllm_config: VllmConfig,
         engine_idxs: Optional[list[int]] = None,
         custom_stat_loggers: Optional[list[StatLoggerFactory]] = None,
+        enable_default_loggers: bool = True,
     ):
         self.engine_idxs = engine_idxs if engine_idxs else [0]
 
-        factories: list[StatLoggerFactory]
+        factories: list[StatLoggerFactory] = []
         if custom_stat_loggers is not None:
-            factories = custom_stat_loggers
-        else:
-            factories = []
-            if logger.isEnabledFor(logging.INFO):
-                factories.append(LoggingStatLogger)
+            factories.extend(custom_stat_loggers)
+
+        if enable_default_loggers and logger.isEnabledFor(logging.INFO):
+            factories.append(LoggingStatLogger)
 
         # engine_idx: StatLogger
         self.per_engine_logger_dict: dict[int, list[StatLoggerBase]] = {}

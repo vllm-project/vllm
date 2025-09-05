@@ -22,9 +22,9 @@ sentence-transformers # required for embedding tests
 soundfile # required for audio tests
 jiwer # required for audio tests
 timm >=1.0.17 # required for internvl and gemma3n-mm test
-torch==2.7.1
-torchaudio==2.7.1
-torchvision==0.22.1
+torch==2.8.0
+torchaudio==2.8.0
+torchvision==0.23.0
 transformers_stream_generator # required for qwen-vl test
 matplotlib # required for qwen-vl test
 mistral_common[image,audio] >= 1.8.2 # required for voxtral test
@@ -53,4 +53,5 @@ runai-model-streamer==0.11.0
 runai-model-streamer-s3==0.11.0
 fastsafetensors>=0.1.10
 pydantic>=2.10 # 2.9 leads to error on python 3.10
-terratorch==1.1rc2 # required for PrithviMAE test
+decord==0.6.0
+terratorch==1.1rc3 # required for PrithviMAE test

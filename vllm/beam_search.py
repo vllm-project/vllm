@@ -4,8 +4,8 @@
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Union
 
+from vllm.logprobs import Logprob
 from vllm.lora.request import LoRARequest
-from vllm.sequence import Logprob
 
 if TYPE_CHECKING:
     from vllm.multimodal import MultiModalDataDict

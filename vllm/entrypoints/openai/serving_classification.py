@@ -61,7 +61,6 @@ class ClassificationMixin(OpenAIServing):
                 ctx.request,
                 ctx.tokenizer,
                 ctx.request.input,
-                truncate_prompt_tokens=ctx.request.truncate_prompt_tokens,
             )
 
             return None
@@ -129,12 +128,14 @@ class ServingClassification(ClassificationMixin):
         models: OpenAIServingModels,
         *,
         request_logger: Optional[RequestLogger],
+        log_error_stack: bool = False,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
             model_config=model_config,
             models=models,
             request_logger=request_logger,
+            log_error_stack=log_error_stack,
         )
 
     async def create_classify(
@@ -154,18 +155,6 @@ class ServingClassification(ClassificationMixin):
         )
 
         return await super().handle(ctx)  # type: ignore
-
-    @override
-    def _validate_request(
-        self,
-        ctx: ClassificationServeContext,
-    ) -> Optional[ErrorResponse]:
-        if error := super()._validate_request(ctx):
-            return error
-
-        ctx.truncate_prompt_tokens = ctx.request.truncate_prompt_tokens
-
-        return None
 
     @override
     def _create_pooling_params(

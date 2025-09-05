@@ -37,13 +37,37 @@ class XPUPlatform(Platform):
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool, use_mla: bool,
                              has_sink: bool) -> str:
-        if selected_backend is not None and selected_backend != _Backend.IPEX:
-            logger.info("Cannot use %s backend on XPU.", selected_backend)
         use_v1 = envs.VLLM_USE_V1
         if not use_v1:
             raise ValueError("XPU backend only supports V1.")
+        TRITON_ATTN_VLLM_V1 = "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"  # noqa: E501
+        FLASH_ATTN_V1 = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"  # noqa: E501
+        if selected_backend == _Backend.TRITON_ATTN_VLLM_V1:
+            logger.info_once("Using Triton backend on V1 engine.")
+            return TRITON_ATTN_VLLM_V1
+        elif selected_backend == _Backend.FLASH_ATTN:
+            logger.info_once("Using Flash Attention backend on V1 engine.")
+            return FLASH_ATTN_V1
+        elif selected_backend:
+            raise ValueError(
+                f"Invalid attention backend for {cls.device_name}, "
+                f"with use_v1: {use_v1} use_mla: {use_mla}")
+
         logger.info("Using Flash Attention backend on V1 engine.")
         return "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
+
+    @classmethod
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
+                                    model_config: "ModelConfig") -> bool:
+        """
+        Check if the kv_cache_dtype is supported.
+        XPU only support fp8 kv cache with triton backend.
+        """
+        if envs.is_set("VLLM_ATTENTION_BACKEND") and \
+            envs.VLLM_ATTENTION_BACKEND == "TRITON_ATTN_VLLM_V1":
+            return kv_cache_dtype in ["fp8_e4m3", "fp8_e5m2", "fp8"]
+
+        return False
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
@@ -90,22 +114,18 @@ class XPUPlatform(Platform):
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 64
 
-        # FIXME: Temporarily forcing eager mode
-        # remove after t.compile support stabilizes.
-        if (envs.VLLM_USE_V1 and model_config is not None
-                and not vllm_config.model_config.enforce_eager):
-            from vllm.config import CompilationLevel
-            vllm_config.compilation_config.level = CompilationLevel.NO_COMPILATION  # noqa: E501
-
         # lazy import to avoid circular import
-        from vllm.config import CUDAGraphMode
+        from vllm.config import CompilationLevel, CUDAGraphMode
         compilation_config = vllm_config.compilation_config
         if compilation_config.cudagraph_mode is None or \
                 compilation_config.cudagraph_mode.max_cudagraph_mode() \
                     != CUDAGraphMode.NONE:
-            logger.info("[XPU] CUDA graph is not supported on XPU, "
-                        "disabling cudagraphs.")
+            logger.info("[XPU] CUDA graph is not supported on XPU, disabling "
+                        "cudagraphs. Fallback to cudagraph_mode=NONE")
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
+        if vllm_config.lora_config is not None:
+            compilation_config.level = CompilationLevel.NO_COMPILATION
 
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
@@ -144,6 +164,13 @@ class XPUPlatform(Platform):
                 vllm_config.scheduler_config.max_model_len,
                 DEFAULT_MAX_NUM_BATCHED_TOKENS)
 
+        if (envs.VLLM_KV_CACHE_LAYOUT is None
+                or envs.VLLM_KV_CACHE_LAYOUT != "NHD"):
+            os.environ["VLLM_KV_CACHE_LAYOUT"] = "NHD"
+            logger.info(
+                "Setting VLLM_KV_CACHE_LAYOUT to 'NHD' for XPU; "
+                "only NHD layout is supported by XPU attention kernels.")
+
     @classmethod
     def is_pin_memory_available(cls):
         return True
@@ -154,6 +181,10 @@ class XPUPlatform(Platform):
                                  ) -> float:
         torch.xpu.reset_peak_memory_stats(device)
         return torch.xpu.max_memory_allocated(device)
+
+    @classmethod
+    def fp8_dtype(cls) -> torch.dtype:
+        return torch.float8_e5m2
 
     @classmethod
     def is_data_center_gpu(cls) -> bool:
@@ -182,3 +213,31 @@ class XPUPlatform(Platform):
                     "Intel Arc A770 have bfloat16 accuracy known issue. "
                     "You can use float16 instead by explicitly setting the "
                     "`dtype` flag in CLI, for example: --dtype=half.")
+
+    @classmethod
+    def opaque_attention_op(cls) -> bool:
+        return True
+
+    @classmethod
+    def insert_blocks_to_device(
+        cls,
+        src_cache: torch.Tensor,
+        dst_cache: torch.Tensor,
+        src_block_indices: torch.Tensor,
+        dst_block_indices: torch.Tensor,
+    ) -> None:
+        """Copy blocks from src_cache to dst_cache on XPU."""
+        _src_cache = src_cache[:, src_block_indices]
+        dst_cache[:, dst_block_indices] = _src_cache.to(dst_cache.device)
+
+    @classmethod
+    def swap_out_blocks_to_host(
+        cls,
+        src_cache: torch.Tensor,
+        dst_cache: torch.Tensor,
+        src_block_indices: torch.Tensor,
+        dst_block_indices: torch.Tensor,
+    ) -> None:
+        """Copy blocks from XPU to host (CPU)."""
+        _src_cache = src_cache[:, src_block_indices]
+        dst_cache[:, dst_block_indices] = _src_cache.cpu()

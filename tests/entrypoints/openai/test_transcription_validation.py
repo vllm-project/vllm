@@ -12,8 +12,6 @@ import pytest
 import pytest_asyncio
 import soundfile as sf
 
-from vllm.assets.audio import AudioAsset
-
 from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "openai/whisper-large-v3-turbo"
@@ -22,20 +20,6 @@ MISTRAL_FORMAT_ARGS = [
     "--tokenizer_mode", "mistral", "--config_format", "mistral",
     "--load_format", "mistral"
 ]
-
-
-@pytest.fixture
-def mary_had_lamb():
-    path = AudioAsset('mary_had_lamb').get_local_path()
-    with open(str(path), "rb") as f:
-        yield f
-
-
-@pytest.fixture
-def winning_call():
-    path = AudioAsset('winning_call').get_local_path()
-    with open(str(path), "rb") as f:
-        yield f
 
 
 @pytest.fixture(scope="module")
@@ -69,8 +53,30 @@ async def test_basic_audio(mary_had_lamb, model_name):
             language="en",
             response_format="text",
             temperature=0.0)
+        out = json.loads(transcription)
+        out_text = out['text']
+        out_usage = out['usage']
+        assert "Mary had a little lamb," in out_text
+        assert out_usage["seconds"] == 16, out_usage["seconds"]
+
+
+@pytest.mark.asyncio
+async def test_basic_audio_gemma(foscolo):
+    # Gemma accuracy on some of the audio samples we use is particularly bad,
+    # hence we use a different one here. WER is evaluated separately.
+    model_name = "google/gemma-3n-E2B-it"
+    server_args = ["--enforce-eager"]
+
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+        client = remote_server.get_async_client()
+        transcription = await client.audio.transcriptions.create(
+            model=model_name,
+            file=foscolo,
+            language="it",
+            response_format="text",
+            temperature=0.0)
         out = json.loads(transcription)['text']
-        assert "Mary had a little lamb," in out
+        assert "da cui vergine nacque Venere" in out
 
 
 @pytest.mark.asyncio
@@ -116,9 +122,12 @@ async def test_long_audio_request(mary_had_lamb, client):
         language="en",
         response_format="text",
         temperature=0.0)
-    out = json.loads(transcription)['text']
-    counts = out.count("Mary had a little lamb")
+    out = json.loads(transcription)
+    out_text = out['text']
+    out_usage = out['usage']
+    counts = out_text.count("Mary had a little lamb")
     assert counts == 10, counts
+    assert out_usage["seconds"] == 161, out_usage["seconds"]
 
 
 @pytest.mark.asyncio

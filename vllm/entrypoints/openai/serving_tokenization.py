@@ -39,11 +39,13 @@ class OpenAIServingTokenization(OpenAIServing):
         request_logger: Optional[RequestLogger],
         chat_template: Optional[str],
         chat_template_content_format: ChatTemplateContentFormatOption,
+        log_error_stack: bool = False,
     ) -> None:
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
                          models=models,
-                         request_logger=request_logger)
+                         request_logger=request_logger,
+                         log_error_stack=log_error_stack)
 
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
@@ -63,6 +65,7 @@ class OpenAIServingTokenization(OpenAIServing):
             lora_request = self._maybe_get_adapters(request)
 
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
+            renderer = self._get_renderer(tokenizer)
 
             if isinstance(request, TokenizeChatRequest):
                 tool_dicts = (None if request.tools is None else
@@ -85,13 +88,11 @@ class OpenAIServingTokenization(OpenAIServing):
                     add_special_tokens=request.add_special_tokens,
                 )
             else:
-                (request_prompts,
-                 engine_prompts) = await self._preprocess_completion(
-                     request,
-                     tokenizer,
-                     request.prompt,
-                     add_special_tokens=request.add_special_tokens,
-                 )
+                engine_prompts = await renderer.render_prompt(
+                    prompt_or_prompts=request.prompt,
+                    add_special_tokens=request.add_special_tokens,
+                    cache_salt=getattr(request, 'cache_salt', None),
+                )
         except (ValueError, TypeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(f"{e} {e.__cause__}")
@@ -99,7 +100,7 @@ class OpenAIServingTokenization(OpenAIServing):
         input_ids: list[int] = []
         for i, engine_prompt in enumerate(engine_prompts):
             self._log_inputs(request_id,
-                             request_prompts[i],
+                             engine_prompt,
                              params=None,
                              lora_request=lora_request)
 

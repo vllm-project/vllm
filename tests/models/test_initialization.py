@@ -38,11 +38,6 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
                               model_arch=model_arch,
                               exist_overrides=model_info.hf_overrides)
 
-    if model_arch in ("Llama4ForCausalLM", "EagleLlama4ForCausalLM"):
-        from vllm.model_executor.models.llama4 import Llama4ForCausalLM
-        from vllm.model_executor.models.registry import ModelRegistry
-        ModelRegistry.register_model("Llama4ForCausalLM", Llama4ForCausalLM)
-
     # Avoid calling model.forward()
     def _initialize_kv_caches_v0(self) -> None:
         self.cache_config.num_gpu_blocks = 0
@@ -78,6 +73,9 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
             tokenizer=model_info.tokenizer,
             tokenizer_mode=model_info.tokenizer_mode,
             revision=model_info.revision,
+            enforce_eager=model_info.enforce_eager,
+            skip_tokenizer_init=model_info.skip_tokenizer_init,
+            dtype=model_info.dtype,
             speculative_config={
                 "model": model_info.speculative_model,
                 "num_speculative_tokens": 1,
@@ -90,7 +88,7 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
             model_impl=ModelImpl.TRANSFORMERS
             if model_arch in _TRANSFORMERS_BACKEND_MODELS else ModelImpl.VLLM,
             hf_overrides=hf_overrides_fn,
-        )
+            max_num_seqs=model_info.max_num_seqs)
 
 
 @pytest.mark.parametrize("model_arch", HF_EXAMPLE_MODELS.get_supported_archs())

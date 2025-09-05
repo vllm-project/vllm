@@ -7,7 +7,7 @@ import pytest
 from vllm import LLM
 from vllm.distributed import cleanup_dist_env_and_memory
 
-from ..openai.test_vision import TEST_IMAGE_URLS
+from ..openai.test_vision import TEST_IMAGE_ASSETS
 
 
 @pytest.fixture(scope="function")
@@ -95,7 +95,8 @@ def vision_llm():
 
 
 @pytest.mark.parametrize("image_urls",
-                         [[TEST_IMAGE_URLS[0], TEST_IMAGE_URLS[1]]])
+                         [[TEST_IMAGE_ASSETS[0], TEST_IMAGE_ASSETS[1]]],
+                         indirect=True)
 def test_chat_multi_image(vision_llm, image_urls: list[str]):
     messages = [{
         "role":

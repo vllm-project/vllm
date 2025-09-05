@@ -11,11 +11,12 @@ import torch
 from typing_extensions import TypeVar
 
 from vllm.logger import init_logger
+from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalPlaceholderDict
 from vllm.sampling_params import RequestOutputKind
-from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
-                           SequenceGroup, SequenceGroupBase, SequenceStatus)
+from vllm.sequence import (RequestMetrics, SequenceGroup, SequenceGroupBase,
+                           SequenceStatus)
 
 logger = init_logger(__name__)
 
@@ -409,7 +410,7 @@ class EmbeddingOutput:
 
     Args:
         embedding: The embedding vector, which is a list of floats.
-        Its length depends on the hidden dimension of the model.
+            Its length depends on the hidden dimension of the model.
     """
     embedding: list[float]
 
@@ -447,7 +448,7 @@ class ClassificationOutput:
 
     Args:
         probs: The probability vector, which is a list of floats.
-        Its length depends on the number of classes.
+            Its length depends on the number of classes.
     """
     probs: list[float]
 

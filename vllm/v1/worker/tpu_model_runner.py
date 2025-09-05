@@ -3,7 +3,7 @@
 import bisect
 import gc
 import time
-from typing import TYPE_CHECKING, Any, Literal, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Optional, cast
 from unittest.mock import patch
 
 import numpy as np
@@ -23,6 +23,7 @@ from vllm.config import (ParallelConfig, VllmConfig,
                          get_layers_from_vllm_config, update_config)
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
+from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.lora.layers import BaseLayerWithLoRA
@@ -55,9 +56,8 @@ from vllm.v1.worker.kv_connector_model_runner_mixin import (
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.tpu_input_batch import CachedRequestState, InputBatch
 
-from .utils import (MultiModalBudget, bind_kv_cache,
-                    initialize_kv_cache_for_kv_sharing,
-                    sanity_check_mm_encoder_outputs)
+from .utils import (MultiModalBudget, add_kv_sharing_layers_to_kv_cache_groups,
+                    bind_kv_cache, sanity_check_mm_encoder_outputs)
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -552,7 +552,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return kv_cache_spec
 
     def _get_slot_mapping_metadata(self, num_reqs,
-                                   num_scheduled_tokens_per_req):
+                                   num_scheduled_tokens_per_req) -> np.ndarray:
         """
         Computes metadata for mapping slots to blocks in the key-value (KV)
         cache for a batch of requests.
@@ -565,15 +565,15 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         Args:
             num_reqs (int): Number of requests in the current batch.
             num_scheduled_tokens_per_req (int or np.ndarray): Number of tokens
-            to be scheduled for each request.
+                to be scheduled for each request.
 
         Returns:
             np.ndarray: A 2D array of shape (total_block_len, 3), where each row
-            contains:
+                contains:
                 - kv_cache_start_index (int): The starting index in the KV cache
-                    for the corresponding slice.
+                  for the corresponding slice.
                 - new_kv_start_index (int): The starting index in the new KV
-                    cache for the corresponding slice.
+                  cache for the corresponding slice.
                 - slice_len (int): The length of the slice.
         """
         slices_start = self.input_batch.num_computed_tokens_cpu[:num_reqs]
@@ -809,31 +809,6 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return per_layer_attn_metadata, logits_indices, padded_num_reqs,\
             num_reqs, end_index
 
-    def _scatter_placeholders(
-        self,
-        embeds: torch.Tensor,
-        is_embed: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        if is_embed is None:
-            return embeds
-
-        placeholders = embeds.new_full(
-            (is_embed.shape[0], embeds.shape[-1]),
-            fill_value=torch.nan,
-        )
-        placeholders[is_embed] = embeds
-        return placeholders
-
-    def _gather_placeholders(
-        self,
-        placeholders: torch.Tensor,
-        is_embed: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        if is_embed is None:
-            return placeholders
-
-        return placeholders[is_embed]
-
     def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput"):
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
         if not scheduled_encoder_inputs:
@@ -893,12 +868,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # NOTE (NickLucche) here we diverge from logic in other runners, as we
         # assume to only have whole mm items to process. Hence we avoid the
         # intrinsic dynamism that `scatter_mm_placeholders` introduces.
-        for (mm_hash, pos_info), output in zip(
-                mm_hashes_pos,
-                encoder_outputs,
-        ):
-            if req_id not in self.encoder_cache:
-                self.encoder_cache[req_id] = {}
+        for (mm_hash, pos_info), output in zip(mm_hashes_pos, encoder_outputs):
             assert pos_info.is_embed is None, "Expected all positions to be"\
                 " contiguous and embeddings."
             self.encoder_cache[mm_hash] = output
@@ -1599,6 +1569,30 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.encoder_cache.clear()
         gc.collect()
 
+    def maybe_setup_cross_layer_kv_sharing(
+        self,
+        kv_caches: dict[str, torch.Tensor],
+        kv_cache_config: KVCacheConfig,
+    ) -> None:
+        """
+        Add layers that re-use KV cache to KV cache group of its target layer.
+        Mapping of KV cache tensors happens in `initialize_kv_cache_tensors()`
+        """
+        if not self.shared_kv_cache_layers:
+            # No cross-layer KV sharing, return
+            return
+
+        add_kv_sharing_layers_to_kv_cache_groups(
+            self.shared_kv_cache_layers,
+            kv_cache_config.kv_cache_groups,
+        )
+
+        for layer_name, target_layer_name in self.shared_kv_cache_layers.items(
+        ):
+            logger.debug("%s reuses KV cache of %s", layer_name,
+                         target_layer_name)
+            kv_caches[layer_name] = kv_caches[target_layer_name]
+
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
@@ -1664,14 +1658,8 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 else:
                     raise NotImplementedError
 
-        # Setup `kv_cache_config` and `kv_caches` for models
-        # with cross-layer KV sharing
-        if self.shared_kv_cache_layers:
-            initialize_kv_cache_for_kv_sharing(
-                self.shared_kv_cache_layers,
-                kv_cache_config.kv_cache_groups,
-                kv_caches,
-            )
+        # Set up cross-layer KV cache sharing if needed
+        self.maybe_setup_cross_layer_kv_sharing(kv_caches, kv_cache_config)
 
         bind_kv_cache(
             kv_caches,
@@ -1813,10 +1801,13 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         max_items_per_batch: int,
     ) -> BatchedTensorInputs:
         """Dummy data for profiling and precompiling multimodal models."""
+        assert self.mm_budget is not None
+
         dummy_decoder_data = self.mm_registry.get_decoder_dummy_data(
             model_config=self.model_config,
             seq_len=self.max_num_tokens,
             mm_counts={modality: 1},
+            cache=self.mm_budget.cache,
         )
         dummy_mm_data = dummy_decoder_data.multi_modal_data
 
@@ -1895,75 +1886,6 @@ def _get_padded_token_len(paddings: list[int], x: int) -> int:
     index = bisect.bisect_left(paddings, x)
     assert index < len(paddings)
     return paddings[index]
-
-
-def _make_src_and_dst_indices(
-    src_block_ids: list[int],
-    dst_block_ids: list[int],
-    src_device: Union[torch.device, str],
-    dst_device: Union[torch.device, str],
-) -> tuple[torch.Tensor, torch.Tensor]:
-    src_indices = torch.tensor(src_block_ids,
-                               device=src_device,
-                               dtype=torch.int64)
-    dst_indices = torch.tensor(dst_block_ids,
-                               device=dst_device,
-                               dtype=torch.int64)
-    return src_indices, dst_indices
-
-
-@torch.compile(backend="openxla")
-def _insert_blocks_to_tpu(
-    cpu_cache: torch.Tensor,
-    tpu_cache: torch.Tensor,
-    cpu_block_indices: torch.Tensor,
-    tpu_block_indices: torch.Tensor,
-) -> None:
-    torch.ops.xla.dynamo_set_buffer_donor_(tpu_cache, True)
-    tpu_cache[tpu_block_indices] = cpu_cache[cpu_block_indices].to(
-        tpu_cache.device)
-
-
-@torch.compile(backend="openxla")
-def _swap_out_tpu_blocks(
-    tpu_cache: torch.Tensor,
-    cpu_cache: torch.Tensor,
-    tpu_block_indices: torch.Tensor,
-    cpu_block_indices: torch.Tensor,
-) -> None:
-    """ tpu blocks to cpu blocks"""
-    torch.ops.xla.dynamo_set_buffer_donor_(tpu_cache, True)
-    cpu_cache[cpu_block_indices] = tpu_cache[tpu_block_indices].cpu()
-
-
-def copy_kv_blocks(
-    src_kv_caches: dict[str, torch.Tensor],
-    dst_kv_caches: dict[str, torch.Tensor],
-    src_block_ids: list[int],
-    dst_block_ids: list[int],
-    direction: Literal["h2d", "d2h"],
-) -> None:
-    """Copy kv blocks between different buffers."""
-    if not src_kv_caches or not dst_kv_caches or \
-       not src_block_ids or not dst_block_ids or \
-       len(src_block_ids) != len(dst_block_ids):
-        return
-
-    src_device = next(iter(src_kv_caches.values())).device
-    dst_device = next(iter(dst_kv_caches.values())).device
-
-    src_indices, dst_indices = _make_src_and_dst_indices(
-        src_block_ids=src_block_ids,
-        dst_block_ids=dst_block_ids,
-        src_device=src_device,
-        dst_device=dst_device)
-
-    _copy_fn = _insert_blocks_to_tpu if direction == "h2d" else \
-               _swap_out_tpu_blocks
-    for layer_name in src_kv_caches:
-        src_tensor = src_kv_caches[layer_name]
-        dst_tensor = dst_kv_caches[layer_name]
-        _copy_fn(src_tensor, dst_tensor, src_indices, dst_indices)
 
 
 def _get_padded_num_kv_cache_update_slices(num_tokens: int, max_num_reqs: int,

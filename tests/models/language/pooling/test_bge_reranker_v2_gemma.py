@@ -13,7 +13,14 @@ from .mteb_utils import VllmMtebEncoder, mteb_test_rerank_models
 
 RERANK_MODELS = [
     LASTPoolingRerankModelInfo("BAAI/bge-reranker-v2-gemma",
-                               architecture="GemmaForSequenceClassification"),
+                               architecture="GemmaForSequenceClassification",
+                               hf_overrides={
+                                   "architectures":
+                                   ["GemmaForSequenceClassification"],
+                                   "classifier_from_token": ["Yes"],
+                                   "method":
+                                   "no_post_processing",
+                               }),
 ]
 
 PROMPT = "Given a query A and a passage B, determine whether the passage contains an answer to the query by providing a prediction of either 'Yes' or 'No'."  # noqa: E501
@@ -97,7 +104,6 @@ class GemmaMtebEncoder(VllmMtebEncoder):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.prompt = PROMPT
         self.query_template = "A: {query}\n"
         self.document_template = "B: {doc}\n{prompt}"
 
@@ -112,29 +118,16 @@ class GemmaMtebEncoder(VllmMtebEncoder):
         _sentences = []
         for query, corpus, prompt in sentences:
             query = self.query_template.format(query=query)
-            corpus = self.document_template.format(doc=corpus, prompt=prompt)
+            corpus = self.document_template.format(doc=corpus, prompt=PROMPT)
             _sentences.append((query, corpus, prompt))
 
         return super().predict(_sentences, *args, **kwargs)
 
 
 @pytest.mark.parametrize("model_info", RERANK_MODELS)
-def test_rerank_models_mteb(vllm_runner, model_info: RerankModelInfo,
-                            monkeypatch) -> None:
-    monkeypatch.setenv("VLLM_USE_V1", "0")
-
-    assert model_info.architecture == "GemmaForSequenceClassification"
-
-    vllm_extra_kwargs: dict[str, Any] = {
-        "hf_overrides": {
-            "architectures": ["GemmaForSequenceClassification"],
-            "classifier_from_token": ["Yes"],
-            "method": "no_post_processing",
-        }
-    }
+def test_rerank_models_mteb(vllm_runner, model_info: RerankModelInfo) -> None:
 
     mteb_test_rerank_models(GemmaRerankerHfRunner,
                             vllm_runner,
                             model_info,
-                            vllm_extra_kwargs,
                             vllm_mteb_encoder=GemmaMtebEncoder)

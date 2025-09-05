@@ -165,7 +165,7 @@ class PythonicToolParser(ToolParser):
                             index] += delta.function.arguments
 
             # HACK: serving_chat.py inspects the internal state of tool parsers
-            # when determining it's final streaming delta, automatically
+            # when determining its final streaming delta, automatically
             # adding autocompleted JSON.
             # These two lines avoid that nonsense while ensuring finish_reason
             # is set to tool_calls when at least one tool is called.

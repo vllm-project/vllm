@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 import torch
 import torch.nn.functional as F
@@ -48,8 +48,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.utils import has_deep_gemm
-from vllm.utils.deep_gemm import (is_blackwell_deep_gemm_e8m0_used,
-                                  is_deep_gemm_supported)
+from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used, is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer_moe
 
 if TYPE_CHECKING:
@@ -138,10 +137,35 @@ class Fp8Config(QuantizationConfig):
                    ignored_layers=ignored_layers,
                    weight_block_size=weight_block_size)
 
+    def get_xpu_quant_method(self, layer: torch.nn.Module,
+                             prefix: str) -> Optional["QuantizeMethodBase"]:
+        from vllm.attention.layer import Attention
+        from vllm.model_executor.layers.quantization.ipex_quant import (
+            XPUFp8LinearMethod, XPUFp8MoEMethod)
+        fp8_config = Fp8Config(
+            is_checkpoint_fp8_serialized=self.is_checkpoint_fp8_serialized,
+            activation_scheme=self.activation_scheme,
+            ignored_layers=self.ignored_layers,
+            weight_block_size=self.weight_block_size)
+
+        if isinstance(layer, LinearBase):
+            if is_layer_skipped(prefix=prefix,
+                                ignored_layers=self.ignored_layers,
+                                fused_mapping=self.packed_modules_mapping):
+                return UnquantizedLinearMethod()
+            return XPUFp8LinearMethod(fp8_config)
+        elif isinstance(layer, FusedMoE):
+            return XPUFp8MoEMethod(fp8_config, layer)
+        elif isinstance(layer, Attention):
+            return Fp8KVCacheMethod(self)
+        return None
+
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention  # Avoid circular import
 
+        if current_platform.is_xpu():
+            return self.get_xpu_quant_method(layer, prefix)
         if isinstance(layer, LinearBase):
             if is_layer_skipped(prefix=prefix,
                                 ignored_layers=self.ignored_layers,
@@ -223,8 +247,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
         self.fp8_linear = Fp8LinearOp(
             act_quant_static=self.act_q_static,
-            act_quant_group_shape=self.act_q_group_shape,
-            cutlass_fp8_supported=cutlass_fp8_supported())
+            act_quant_group_shape=self.act_q_group_shape)
 
     def create_weights(
         self,
@@ -376,6 +399,8 @@ class Fp8LinearMethod(LinearMethodBase):
             # Update the layer with the new values.
             layer.weight = Parameter(qweight.t(), requires_grad=False)
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+            # layer.input_scale is None indicates dynamic quant and scale is
+            # computed from input.
             layer.input_scale = None
 
         # If checkpoint is fp8, handle that there are N scales for N
@@ -426,7 +451,7 @@ class Fp8LinearMethod(LinearMethodBase):
         # On B200, if E8M0 for DeepGemm is used, we need to
         # requantize the weight and input to the specific scale
         # at the same time.
-        if is_blackwell_deep_gemm_e8m0_used():
+        if is_deep_gemm_e8m0_used():
             assert layer.weight_block_size is not None
             block_sz = tuple(layer.weight_block_size)
             requant_weight_ue8m0_inplace(
@@ -733,7 +758,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
             # DeepGemm scales need to be transposed and aligned.  We try to do
             # it ahead of time for performance reasons.
-            if self.allow_deep_gemm and not is_blackwell_deep_gemm_e8m0_used():
+            if self.allow_deep_gemm and not is_deep_gemm_e8m0_used():
                 # Lazy import to avoid CUDA initialization problems.
                 if _is_col_major(layer.w13_weight_scale_inv):
                     layer.w13_weight_scale_inv = \
@@ -870,7 +895,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             del layer.w13_input_scale
             del layer.w2_input_scale
 
-        if is_blackwell_deep_gemm_e8m0_used():
+        if is_deep_gemm_e8m0_used():
             assert layer.weight_block_size is not None
             # Re-quantise the expert weights so their scales are UE8M0.
             block_sz = tuple(layer.weight_block_size)
@@ -897,6 +922,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
         moe: FusedMoEConfig,
+        layer: torch.nn.Module,
     ) -> FusedMoEPermuteExpertsUnpermute:
         from vllm.model_executor.layers.fused_moe import (
             BatchedTritonOrDeepGemmExperts, TritonOrDeepGemmExperts)
@@ -954,6 +980,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
@@ -961,7 +988,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         if enable_eplb:
             assert expert_load_view is not None
             assert logical_to_physical_map is not None
@@ -993,7 +1020,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     expert_offset=layer.ep_rank * layer.local_num_experts,
                     local_num_experts=layer.local_num_experts,
                     block_shape=self.quant_config.weight_block_size,
-                    routed_scaling=1.0,
+                    routed_scaling=routed_scaling_factor,
                 )
             else:
                 assert (not renormalize
@@ -1019,6 +1046,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype,
             enable_eplb=enable_eplb,

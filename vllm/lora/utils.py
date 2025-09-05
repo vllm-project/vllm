@@ -239,7 +239,7 @@ def get_adapter_absolute_path(lora_path: str) -> str:
     except (HfHubHTTPError, RepositoryNotFoundError, EntryNotFoundError,
             HFValidationError):
         # Handle errors that may occur during the download
-        # Return original path instead instead of throwing error here
+        # Return original path instead of throwing error here
         logger.exception("Error downloading the HuggingFace model")
         return lora_path
 

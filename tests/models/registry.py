@@ -6,10 +6,11 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
 
 import pytest
+import torch
 from packaging.version import Version
 from transformers import __version__ as TRANSFORMERS_VERSION
 
-from vllm.config import TokenizerMode
+from vllm.config import ModelDType, TokenizerMode
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,23 @@ class _HfExamplesInfo:
     The reason for the minimum/maximum version requirement.
     """
 
+    skip_tokenizer_init: bool = False
+    """
+    If true, skip initialization of tokenizer and detokenizer. 
+    """
+
+    dtype: ModelDType = "auto"
+    """
+    The data type for the model weights and activations.
+    """
+
+    enforce_eager: bool = False
+    """
+    Whether to enforce eager execution. If True, we will
+    disable CUDA graph and always execute the model in eager mode.
+    If False, we will use CUDA graph and eager execution in hybrid.
+    """
+
     is_available_online: bool = True
     """
     Set this to ``False`` if the name of this architecture no longer exists on
@@ -75,6 +93,9 @@ class _HfExamplesInfo:
     The specific revision (commit hash, tag, or branch) to use for the model.
     If not specified, the default revision will be used.
     """
+
+    max_num_seqs: Optional[int] = None
+    """Maximum number of sequences to be processed in a single iteration."""
 
     def check_transformers_version(
         self,
@@ -137,6 +158,9 @@ class _HfExamplesInfo:
 # yapf: disable
 _TEXT_GENERATION_EXAMPLE_MODELS = {
     # [Decoder-only]
+    "ApertusForCausalLM": _HfExamplesInfo("swiss-ai/Apertus-8B",
+                                          min_transformers_version="4.56.0",
+                                          trust_remote_code=True),
     "AquilaModel": _HfExamplesInfo("BAAI/AquilaChat-7B",
                                    trust_remote_code=True),
     "AquilaForCausalLM": _HfExamplesInfo("BAAI/AquilaChat2-7B",
@@ -151,7 +175,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "BailingMoeForCausalLM": _HfExamplesInfo("inclusionAI/Ling-lite-1.5",
                                          trust_remote_code=True),
     "BambaForCausalLM": _HfExamplesInfo("ibm-ai-platform/Bamba-9B-v1",
-                                        min_transformers_version="4.56.0",
+                                        min_transformers_version="4.55.3",
                                         extras={"tiny": "hmellor/tiny-random-BambaForCausalLM"}),  # noqa: E501
     "BloomForCausalLM": _HfExamplesInfo("bigscience/bloom-560m",
                                         {"1b": "bigscience/bloomz-1b1"}),
@@ -205,7 +229,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "GptOssForCausalLM": _HfExamplesInfo("lmsys/gpt-oss-20b-bf16"),
     "GraniteForCausalLM": _HfExamplesInfo("ibm/PowerLM-3b"),
     "GraniteMoeForCausalLM": _HfExamplesInfo("ibm/PowerMoE-3b"),
-    "GraniteMoeHybridForCausalLM": _HfExamplesInfo("ibm-granite/granite-4.0-tiny-preview"),  # noqa: E501
+    "GraniteMoeHybridForCausalLM": _HfExamplesInfo("ibm-granite/granite-4.0-tiny-preview", # noqa: E501
+                                                   min_transformers_version="4.55.3"),
     "GraniteMoeSharedForCausalLM": _HfExamplesInfo("ibm-research/moe-7b-1b-active-shared-experts"),  # noqa: E501
     "Grok1ModelForCausalLM": _HfExamplesInfo("hpcai-tech/grok-1",
                                              trust_remote_code=True),
@@ -225,7 +250,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                             trust_remote_code=True),
     "JAISLMHeadModel": _HfExamplesInfo("inceptionai/jais-13b-chat"),
     "JambaForCausalLM": _HfExamplesInfo("ai21labs/AI21-Jamba-1.5-Mini",
-                                        min_transformers_version="4.56.0",
+                                        min_transformers_version="4.55.3",
                                         extras={
                                             "tiny": "ai21labs/Jamba-tiny-dev",
                                             "random": "ai21labs/Jamba-tiny-random",  # noqa: E501
@@ -241,7 +266,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Llama4ForCausalLM": _HfExamplesInfo("meta-llama/Llama-4-Scout-17B-16E-Instruct", # noqa: E501
                                          is_available_online=False),
     "MambaForCausalLM": _HfExamplesInfo("state-spaces/mamba-130m-hf"),
-    "Mamba2ForCausalLM": _HfExamplesInfo("mistralai/Mamba-Codestral-7B-v0.1"),
+    "Mamba2ForCausalLM": _HfExamplesInfo("mistralai/Mamba-Codestral-7B-v0.1",
+                                         min_transformers_version="4.55.3",
+                                         extras={
+                                            "random": "yujiepan/mamba2-codestral-v0.1-tiny-random", # noqa: E501
+                                         }),
     "FalconMambaForCausalLM": _HfExamplesInfo("tiiuae/falcon-mamba-7b-instruct"),  # noqa: E501
     "MiniCPMForCausalLM": _HfExamplesInfo("openbmb/MiniCPM-2B-sft-bf16",
                                          trust_remote_code=True),
@@ -279,8 +308,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "PhiMoEForCausalLM": _HfExamplesInfo("microsoft/Phi-3.5-MoE-instruct",
                                          trust_remote_code=True),
     "Plamo2ForCausalLM": _HfExamplesInfo("pfnet/plamo-2-1b",
-                                         max_transformers_version="4.53",
-                                         transformers_version_reason="vLLM impl inherits PreTrainedModel and clashes with get_input_embeddings",  # noqa: E501
                                         trust_remote_code=True),
     "QWenLMHeadModel": _HfExamplesInfo("Qwen/Qwen-7B-Chat",
                                        max_transformers_version="4.53",
@@ -323,8 +350,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
 
 _EMBEDDING_EXAMPLE_MODELS = {
     # [Text-only]
-    "BertModel": _HfExamplesInfo("BAAI/bge-base-en-v1.5", v0_only=True),
-    "Gemma2Model": _HfExamplesInfo("BAAI/bge-multilingual-gemma2", v0_only=True),  # noqa: E501
+    "BertModel": _HfExamplesInfo("BAAI/bge-base-en-v1.5"),
+    "Gemma2Model": _HfExamplesInfo("BAAI/bge-multilingual-gemma2"),  # noqa: E501
     "GritLM": _HfExamplesInfo("parasail-ai/GritLM-7B-vllm"),
     "GteModel": _HfExamplesInfo("Snowflake/snowflake-arctic-embed-m-v2.0",
                                                trust_remote_code=True),
@@ -337,9 +364,9 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "LlamaModel": _HfExamplesInfo("llama", is_available_online=False),
     "MistralModel": _HfExamplesInfo("intfloat/e5-mistral-7b-instruct"),
     "ModernBertModel": _HfExamplesInfo("Alibaba-NLP/gte-modernbert-base",
-                                trust_remote_code=True, v0_only=True),
+                                trust_remote_code=True),
     "NomicBertModel": _HfExamplesInfo("nomic-ai/nomic-embed-text-v2-moe",
-                                               trust_remote_code=True, v0_only=True),  # noqa: E501
+                                               trust_remote_code=True),  # noqa: E501
     "Qwen2Model": _HfExamplesInfo("ssmits/Qwen2-7B-Instruct-embed-base"),
     "Qwen2ForRewardModel": _HfExamplesInfo("Qwen/Qwen2.5-Math-RM-72B",
                                            max_transformers_version="4.53",
@@ -347,16 +374,29 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "Qwen2ForProcessRewardModel": _HfExamplesInfo("Qwen/Qwen2.5-Math-PRM-7B",
                                                   max_transformers_version="4.53",
                                                   transformers_version_reason="HF model uses remote code that is not compatible with latest Transformers"),  # noqa: E501
-    "RobertaModel": _HfExamplesInfo("sentence-transformers/stsb-roberta-base-v2", v0_only=True),  # noqa: E501
-    "RobertaForMaskedLM": _HfExamplesInfo("sentence-transformers/all-roberta-large-v1", v0_only=True),  # noqa: E501
-    "XLMRobertaModel": _HfExamplesInfo("intfloat/multilingual-e5-small", v0_only=True),  # noqa: E501
+    "RobertaModel": _HfExamplesInfo("sentence-transformers/stsb-roberta-base-v2"),  # noqa: E501
+    "RobertaForMaskedLM": _HfExamplesInfo("sentence-transformers/all-roberta-large-v1"),  # noqa: E501
+    "XLMRobertaModel": _HfExamplesInfo("intfloat/multilingual-e5-small"),  # noqa: E501
     # [Multimodal]
     "LlavaNextForConditionalGeneration": _HfExamplesInfo("royokong/e5-v"),
     "Phi3VForCausalLM": _HfExamplesInfo("TIGER-Lab/VLM2Vec-Full",
                                          trust_remote_code=True),
     "Qwen2VLForConditionalGeneration": _HfExamplesInfo("MrLight/dse-qwen2-2b-mrl-v1"), # noqa: E501
-    "PrithviGeoSpatialMAE": _HfExamplesInfo("ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11", # noqa: E501
-                                            is_available_online=False),  # noqa: E501
+    "PrithviGeoSpatialMAE": _HfExamplesInfo("mgazz/Prithvi-EO-2.0-300M-TL-Sen1Floods11", # noqa: E501
+                                            dtype=torch.float16,
+                                            enforce_eager=True,
+                                            skip_tokenizer_init=True,
+                                            # This is to avoid the model
+                                            # going OOM in CI
+                                            max_num_seqs=32,
+                                            ),
+    "Terratorch": _HfExamplesInfo("mgazz/Prithvi-EO-2.0-300M-TL-Sen1Floods11",
+                                  dtype=torch.float16,
+                                  enforce_eager=True,
+                                  skip_tokenizer_init=True,
+                                  # This is to avoid the model going OOM in CI
+                                  max_num_seqs=32,
+                                  ),
 }
 
 _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
@@ -364,16 +404,19 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
     "GPT2ForSequenceClassification": _HfExamplesInfo("nie3e/sentiment-polish-gpt2-small"),  # noqa: E501
 
     # [Cross-encoder]
-    "BertForSequenceClassification": _HfExamplesInfo("cross-encoder/ms-marco-MiniLM-L-6-v2", v0_only=True),  # noqa: E501
-    "ModernBertForSequenceClassification": _HfExamplesInfo("Alibaba-NLP/gte-reranker-modernbert-base", v0_only=True), # noqa: E501
-    "RobertaForSequenceClassification": _HfExamplesInfo("cross-encoder/quora-roberta-base", v0_only=True),  # noqa: E501
-    "XLMRobertaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-m3", v0_only=True),  # noqa: E501
+    "BertForSequenceClassification": _HfExamplesInfo("cross-encoder/ms-marco-MiniLM-L-6-v2"),  # noqa: E501
+    "GteNewForSequenceClassification": _HfExamplesInfo("Alibaba-NLP/gte-multilingual-reranker-base",  # noqa: E501
+                                                       trust_remote_code=True,
+                                                       hf_overrides={
+                                                           "architectures": ["GteNewForSequenceClassification"]}),# noqa: E501
+    "ModernBertForSequenceClassification": _HfExamplesInfo("Alibaba-NLP/gte-reranker-modernbert-base"), # noqa: E501
+    "RobertaForSequenceClassification": _HfExamplesInfo("cross-encoder/quora-roberta-base"),  # noqa: E501
+    "XLMRobertaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-m3"),  # noqa: E501
 }
 
 _AUTOMATIC_CONVERTED_MODELS = {
     # Use as_seq_cls_model for automatic conversion
     "GemmaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-gemma",  # noqa: E501
-                                                      v0_only=True,
                                                       hf_overrides={"architectures": ["GemmaForSequenceClassification"], # noqa: E501
                                                                     "classifier_from_token": ["Yes"],  # noqa: E501
                                                                     "method": "no_post_processing"}),  # noqa: E501
@@ -396,6 +439,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                 transformers_version_reason="HF model is not compatible.",  # noqa: E501
                                                 hf_overrides={"architectures": ["DeepseekVLV2ForCausalLM"]}),  # noqa: E501
     "Emu3ForConditionalGeneration": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
+    "Ernie4_5_VLMoeForConditionalGeneration": _HfExamplesInfo("baidu/ERNIE-4.5-VL-28B-A3B-PT",  # noqa: E501
+                                                              trust_remote_code=True),
     "FuyuForCausalLM": _HfExamplesInfo("adept/fuyu-8b"),
     "Gemma3ForConditionalGeneration": _HfExamplesInfo("google/gemma-3-4b-it"),
     "Gemma3nForConditionalGeneration": _HfExamplesInfo("google/gemma-3n-E2B-it",    # noqa: E501
@@ -422,10 +467,16 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                         trust_remote_code=True),  # noqa: E501
     "InternVLChatModel": _HfExamplesInfo("OpenGVLab/InternVL2-1B",
                                          extras={"2B": "OpenGVLab/InternVL2-2B",
-                                                 "3.0": "OpenGVLab/InternVL3-1B"},  # noqa: E501
+                                                 "3.0": "OpenGVLab/InternVL3-1B",   # noqa: E501
+                                                 "3.5-qwen3": "OpenGVLab/InternVL3_5-1B",   # noqa: E501
+                                                 "3.5-qwen3moe": "OpenGVLab/InternVL3_5-30B-A3B",   # noqa: E501
+                                                 "3.5-gptoss": "OpenGVLab/InternVL3_5-GPT-OSS-20B-A4B-Preview"},  # noqa: E501
                                          trust_remote_code=True),
+    "InternVLForConditionalGeneration": _HfExamplesInfo("OpenGVLab/InternVL3-1B-hf"),    # noqa: E501
     "KeyeForConditionalGeneration": _HfExamplesInfo("Kwai-Keye/Keye-VL-8B-Preview", # noqa: E501
                                                     trust_remote_code=True),
+    "KeyeVL1_5ForConditionalGeneration": _HfExamplesInfo("Kwai-Keye/Keye-VL-1_5-8B", # noqa: E501
+                                                         trust_remote_code=True),
     "KimiVLForConditionalGeneration": _HfExamplesInfo("moonshotai/Kimi-VL-A3B-Instruct",  # noqa: E501
                                                       extras={"thinking": "moonshotai/Kimi-VL-A3B-Thinking"},  # noqa: E501
                                                       trust_remote_code=True),
@@ -443,10 +494,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                       max_transformers_version="4.48",  # noqa: E501
                                                       transformers_version_reason="HF model is not compatible.",  # noqa: E501
                                                       hf_overrides={"architectures": ["MantisForConditionalGeneration"]}),  # noqa: E501
+    "MiDashengLMModel": _HfExamplesInfo("mispeech/midashenglm-7b",
+                            trust_remote_code=True),
     "MiniCPMO": _HfExamplesInfo("openbmb/MiniCPM-o-2_6",
                                 trust_remote_code=True),
     "MiniCPMV": _HfExamplesInfo("openbmb/MiniCPM-Llama3-V-2_5",
-                                extras={"2.6": "openbmb/MiniCPM-V-2_6", "4.0": "openbmb/MiniCPM-V-4"},  # noqa: E501
+                                extras={"2.6": "openbmb/MiniCPM-V-2_6", "4.0": "openbmb/MiniCPM-V-4", "4.5": "openbmb/MiniCPM-V-4_5"},  # noqa: E501
                                 trust_remote_code=True),
     "MiniMaxVL01ForConditionalGeneration": _HfExamplesInfo("MiniMaxAI/MiniMax-VL-01", # noqa: E501
                                               trust_remote_code=True,
@@ -579,7 +632,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
 _TRANSFORMERS_BACKEND_MODELS = {
     "TransformersModel": _HfExamplesInfo("Qwen/Qwen3-Embedding-0.6B"),
     "TransformersForCausalLM": _HfExamplesInfo("hmellor/Ilama-3.2-1B", trust_remote_code=True),  # noqa: E501
-    "TransformersForMultimodalLM": _HfExamplesInfo("OpenGVLab/InternVL3-1B-hf"),
+    "TransformersForMultimodalLM": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
 }
 
 _EXAMPLE_MODELS = {

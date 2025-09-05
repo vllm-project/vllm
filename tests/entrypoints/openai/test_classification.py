@@ -226,3 +226,33 @@ def test_pooling(server: RemoteOpenAIServer, model_name: str):
         },
     )
     assert response.json()["error"]["type"] == "BadRequestError"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+def test_score(server: RemoteOpenAIServer, model_name: str):
+    # score api is only enabled for num_labels == 1.
+    response = requests.post(
+        server.url_for("score"),
+        json={
+            "model": model_name,
+            "text_1": "ping",
+            "text_2": "pong",
+        },
+    )
+    assert response.json()["error"]["type"] == "BadRequestError"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+def test_rerank(server: RemoteOpenAIServer, model_name: str):
+    # rerank api is only enabled for num_labels == 1.
+    response = requests.post(
+        server.url_for("rerank"),
+        json={
+            "model": model_name,
+            "query": "ping",
+            "documents": ["pong"],
+        },
+    )
+    assert response.json()["error"]["type"] == "BadRequestError"

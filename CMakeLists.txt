@@ -30,7 +30,7 @@ install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)" ALL_COMPONENTS)
 # Supported python versions.  These versions will be searched in order, the
 # first match will be selected.  These should be kept in sync with setup.py.
 #
-set(PYTHON_SUPPORTED_VERSIONS "3.9" "3.10" "3.11" "3.12", "3.13")
+set(PYTHON_SUPPORTED_VERSIONS "3.9" "3.10" "3.11" "3.12" "3.13")
 
 # Supported AMD GPU architectures.
 set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1200;gfx1201")
@@ -45,8 +45,8 @@ set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1
 # requirements.txt files and should be kept consistent.  The ROCm torch
 # versions are derived from docker/Dockerfile.rocm
 #
-set(TORCH_SUPPORTED_VERSION_CUDA "2.7.1")
-set(TORCH_SUPPORTED_VERSION_ROCM "2.7.0")
+set(TORCH_SUPPORTED_VERSION_CUDA "2.8.0")
+set(TORCH_SUPPORTED_VERSION_ROCM "2.8.0")
 
 #
 # Try to find python package with an executable that exactly matches
@@ -541,6 +541,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND FP4_ARCHS)
     set(SRCS
       "csrc/quantization/fp4/nvfp4_quant_kernels.cu"
+      "csrc/quantization/fp4/activation_nvfp4_quant_fusion_kernels.cu"
       "csrc/quantization/fp4/nvfp4_scaled_mm_sm120_kernels.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
@@ -559,6 +560,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND FP4_ARCHS)
     set(SRCS
       "csrc/quantization/fp4/nvfp4_quant_kernels.cu"
+      "csrc/quantization/fp4/activation_nvfp4_quant_fusion_kernels.cu"
       "csrc/quantization/fp4/nvfp4_experts_quant.cu"
       "csrc/quantization/fp4/nvfp4_scaled_mm_kernels.cu"
       "csrc/quantization/fp4/nvfp4_blockwise_moe_kernel.cu")

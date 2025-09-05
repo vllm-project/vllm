@@ -130,6 +130,13 @@ void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
 void silu_and_mul_quant(torch::Tensor& out, torch::Tensor& input,
                         torch::Tensor& scale);
 
+#ifndef USE_ROCM
+void silu_and_mul_nvfp4_quant(torch::Tensor& out,
+                              torch::Tensor& output_block_scale,
+                              torch::Tensor& input,
+                              torch::Tensor& input_global_scale);
+#endif
+
 void mul_and_silu(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_and_mul(torch::Tensor& out, torch::Tensor& input);

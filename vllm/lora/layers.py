@@ -166,7 +166,12 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         self.lora_a_stacked = torch.zeros(
             (
                 max_loras,
+<<<<<<< HEAD
                 self.base_layer.org_vocab_size + 0,  # No extra vocab size
+=======
+                self.base_layer.org_vocab_size +
+                0,  # No extra vocab size
+>>>>>>> 4430717cc275fc131eeb82be45d3ecc98eff017e
                 lora_config.max_lora_rank,
             ),
             dtype=lora_config.lora_dtype,
@@ -575,7 +580,7 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
 
 class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     """ColumnParallelLinear layer that is composed of 2 sublayers (slices)
-    packed together (eg. gate_proj + up_proj -> gate_up_proj).
+    packed together (e.g. gate_proj + up_proj -> gate_up_proj).
 
     This means we have 2 LoRAs, each applied to one half of the layer.
 

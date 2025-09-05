@@ -12,6 +12,7 @@ MODELS = [
     ########## BertModel
     CLSPoolingEmbedModelInfo("BAAI/bge-base-en",
                              architecture="BertModel",
+                             mteb_score=0.779336792,
                              enable_test=True),
     CLSPoolingEmbedModelInfo("BAAI/bge-base-zh",
                              architecture="BertModel",
@@ -52,10 +53,12 @@ MODELS = [
     ########## XLMRobertaModel
     CLSPoolingEmbedModelInfo("BAAI/bge-m3",
                              architecture="XLMRobertaModel",
+                             mteb_score=0.787343078,
                              enable_test=True),
     ########## Qwen2Model
     LASTPoolingEmbedModelInfo("BAAI/bge-code-v1",
                               architecture="Qwen2Model",
+                              mteb_score=0.75724465,
                               dtype="float32",
                               enable_test=True),
 ]
@@ -65,6 +68,7 @@ RERANK_MODELS = [
     CLSPoolingRerankModelInfo(
         "BAAI/bge-reranker-base",
         architecture="XLMRobertaForSequenceClassification",
+        mteb_score=0.32398,
         enable_test=True),
     CLSPoolingRerankModelInfo(
         "BAAI/bge-reranker-large",

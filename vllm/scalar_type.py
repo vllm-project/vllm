@@ -269,7 +269,7 @@ class ScalarType:
 
     @classmethod
     def uint(cls, size_bits: int, bias: Optional[int]) -> 'ScalarType':
-        """Create a unsigned integer scalar type."""
+        """Create an unsigned integer scalar type."""
         ret = cls(0, size_bits, False, bias if bias else 0)
         ret.id  # noqa B018: make sure the id is cached
         return ret
