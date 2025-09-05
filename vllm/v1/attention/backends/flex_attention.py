@@ -689,7 +689,8 @@ class FlexAttentionImpl(AttentionImpl):
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
-            kv_cache = [2, num_blocks, block_size, num_kv_heads, head_size]
+            kv_cache: shape =
+                [2, num_blocks, block_size, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -788,6 +789,7 @@ def get_kernel_options(query, block_m, block_n,
             device_props = torch.cuda.get_device_properties()
             max_shared_memory = device_props.shared_memory_per_block_optin
             if max_shared_memory < 144 * 1024:
-                kernel_options["BLOCK_M"] = 32
-                kernel_options["BLOCK_N"] = 32
+                kernel_options["BLOCK_M"] = kernel_options["BLOCK_M"] // 2
+                kernel_options["BLOCK_N"] = kernel_options["BLOCK_N"] // 2
+
     return kernel_options

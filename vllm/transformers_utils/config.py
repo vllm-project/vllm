@@ -27,19 +27,6 @@ from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm import envs
 from vllm.logger import init_logger
-# yapf conflicts with isort for this block
-# yapf: disable
-from vllm.transformers_utils.configs import (ChatGLMConfig, DeepseekVLV2Config,
-                                             EAGLEConfig, JAISConfig,
-                                             KimiVLConfig, MedusaConfig,
-                                             MLPSpeculatorConfig,
-                                             Nemotron_Nano_VL_Config,
-                                             NemotronConfig, OvisConfig,
-                                             RWConfig, SpeculatorsConfig,
-                                             Step3TextConfig, Step3VLConfig,
-                                             UltravoxConfig)
-# yapf: enable
-from vllm.transformers_utils.configs.mistral import adapt_config_dict
 from vllm.transformers_utils.utils import check_gguf_file
 
 if envs.VLLM_USE_MODELSCOPE:
@@ -67,24 +54,32 @@ def _get_hf_token() -> Optional[str]:
     return None
 
 
-_CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
-    "chatglm": ChatGLMConfig,
-    "deepseek_vl_v2": DeepseekVLV2Config,
-    "kimi_vl": KimiVLConfig,
-    "Llama_Nemotron_Nano_VL": Nemotron_Nano_VL_Config,
-    "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
-    "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
-    "jais": JAISConfig,
-    "mlp_speculator": MLPSpeculatorConfig,
-    "medusa": MedusaConfig,
-    "eagle": EAGLEConfig,
-    "speculators": SpeculatorsConfig,
-    "nemotron": NemotronConfig,
-    "ovis": OvisConfig,
-    "ultravox": UltravoxConfig,
-    "step3_vl": Step3VLConfig,
-    "step3_text": Step3TextConfig,
-}
+class LazyConfigDict(dict):
+
+    def __getitem__(self, key):
+        import vllm.transformers_utils.configs as configs
+        return getattr(configs, super().__getitem__(key))
+
+
+_CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
+    chatglm="ChatGLMConfig",
+    deepseek_vl_v2="DeepseekVLV2Config",
+    kimi_vl="KimiVLConfig",
+    Llama_Nemotron_Nano_VL="Nemotron_Nano_VL_Config",
+    RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
+    RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
+    jais="JAISConfig",
+    mlp_speculator="MLPSpeculatorConfig",
+    medusa="MedusaConfig",
+    midashenglm="MiDashengLMConfig",
+    eagle="EAGLEConfig",
+    speculators="SpeculatorsConfig",
+    nemotron="NemotronConfig",
+    ovis="OvisConfig",
+    ultravox="UltravoxConfig",
+    step3_vl="Step3VLConfig",
+    step3_text="Step3TextConfig",
+)
 
 _CONFIG_ATTRS_MAPPING: dict[str, str] = {
     "llm_config": "text_config",
@@ -461,6 +456,8 @@ def get_config(
                 model, revision, **kwargs)
             config_dict["max_position_embeddings"] = max_position_embeddings
 
+        from vllm.transformers_utils.configs.mistral import adapt_config_dict
+
         config = adapt_config_dict(config_dict)
 
         # Mistral configs may define sliding_window as list[int]. Convert it
@@ -505,6 +502,24 @@ def get_config(
 
     if quantization_config is not None:
         config.quantization_config = quantization_config
+        # auto-enable DeepGEMM UE8M0 on Hopper if model config requests it
+        scale_fmt = quantization_config.get("scale_fmt", None)
+        if scale_fmt in ("ue8m0", ):
+            if not envs.is_set("VLLM_USE_DEEP_GEMM_E8M0_HOPPER"):
+                os.environ["VLLM_USE_DEEP_GEMM_E8M0_HOPPER"] = "1"
+                logger.info_once(
+                    ("Detected quantization_config.scale_fmt=%s; "
+                     "enabling Hopper UE8M0."),
+                    scale_fmt,
+                )
+            elif not envs.VLLM_USE_DEEP_GEMM_E8M0_HOPPER:
+                logger.warning_once(
+                    ("Model config requests UE8M0 "
+                     "(quantization_config.scale_fmt=%s), but "
+                     "VLLM_USE_DEEP_GEMM_E8M0_HOPPER=0 is set; "
+                     "Hopper UE8M0 disabled."),
+                    scale_fmt,
+                )
 
     if hf_overrides_kw:
         logger.debug("Overriding HF config with %s", hf_overrides_kw)
