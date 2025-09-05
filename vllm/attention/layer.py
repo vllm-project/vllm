@@ -241,7 +241,8 @@ class Attention(nn.Module, AttentionLayerBase):
         """
         if self.calculate_kv_scales:
             attn_metadata = get_forward_context().attn_metadata
-            if attn_metadata.enable_kv_scales_calculation:
+            if (attn_metadata is not None and getattr(
+                    attn_metadata, "enable_kv_scales_calculation", False)):
                 self.calc_kv_scales(query, key, value)
         if self.use_output:
             output_shape = (output_shape
