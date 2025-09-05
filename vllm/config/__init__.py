@@ -2506,7 +2506,6 @@ class LoRAConfig:
 
         # Deprecation warning for enable_lora_bias
         if self.bias_enabled:
-            import warnings
             msg = "`enable_lora_bias` (bias_enabled) is deprecated and will be removed in a future release."
             warnings.warn(msg, DeprecationWarning, stacklevel=2)
             logger.warning(msg)
