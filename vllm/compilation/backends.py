@@ -328,24 +328,28 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
             ]
             global compilation_start_time
 
-            from .cuda_graph import CUDAGraphOptions
+            if (self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+                    and self.compilation_config.use_inductor_graph_partition):
+                from .cuda_graph import CUDAGraphOptions
 
-            num_layers = len(
-                list(v for (k, v) in self.vllm_config.compilation_config.
-                     static_forward_context.items() if isinstance(v, Attention))) + 1
-            static_graph_wrapper_class = resolve_obj_by_qualname(
-                current_platform.get_static_graph_wrapper_cls())
-            make_fn = lambda i: lambda f: static_graph_wrapper_class(
-                runnable=f,
-                vllm_config=self.vllm_config,
-                runtime_mode=CUDAGraphMode.PIECEWISE,
-                cudagraph_options=CUDAGraphOptions(True, i != 0, i ==
-                                                   num_layers - 1))
+                num_layers = len(
+                    list(v for (k, v) in self.vllm_config.compilation_config.
+                         static_forward_context.items()
+                         if isinstance(v, Attention))) + 1
+                static_graph_wrapper_class = resolve_obj_by_qualname(
+                    current_platform.get_static_graph_wrapper_cls())
 
-            self.compilation_config.inductor_compile_config[
-                "customized_partition_wrappers"] = [
-                    make_fn(i) for i in range(num_layers)
-                ]
+                make_fn = lambda i: lambda f: static_graph_wrapper_class(
+                    runnable=f,
+                    vllm_config=self.vllm_config,
+                    runtime_mode=CUDAGraphMode.PIECEWISE,
+                    cudagraph_options=CUDAGraphOptions(i == 0, i != 0, i ==
+                                                       num_layers - 1))
+
+                self.compilation_config.inductor_compile_config[
+                    "customized_partition_wrappers"] = [
+                        make_fn(i) for i in range(num_layers)
+                    ]
 
             compiled_graph_for_dynamic_shape = self.vllm_backend.\
                 compiler_manager.compile(
@@ -364,26 +368,30 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 len(self.compile_submod_names), sym_shape_indices,
                 compiled_graph_for_dynamic_shape, self.vllm_backend)
 
-            # if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
-            #     # resolve the static graph wrapper class (e.g. CUDAGraphWrapper
-            #     # class) as platform dependent.
-            #     static_graph_wrapper_class = resolve_obj_by_qualname(
-            #         current_platform.get_static_graph_wrapper_cls())
+            if (self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+                    and
+                    not self.compilation_config.use_inductor_graph_partition):
+                from .cuda_graph import CUDAGraphOptions
 
-            #     # Always assign PIECEWISE runtime mode to the
-            #     # CUDAGraphWrapper for piecewise_backend, to distinguish
-            #     # it from the FULL cudagraph runtime mode, no matter it
-            #     # is wrapped on a full or piecewise fx graph.
-            #     self.module.__dict__[target] = static_graph_wrapper_class(
-            #         runnable=piecewise_backend,
-            #         vllm_config=self.vllm_config,
-            #         runtime_mode=CUDAGraphMode.PIECEWISE,
-            #         cudagraph_options=CUDAGraphOptions(
-            #             debug_log_enable=piecewise_backend.is_first_graph,
-            #             gc_disable=not piecewise_backend.is_first_graph,
-            #             weak_ref_output=piecewise_backend.is_last_graph))
-            # else:
-            self.module.__dict__[target] = piecewise_backend
+                # resolve the static graph wrapper class (e.g. CUDAGraphWrapper
+                # class) as platform dependent.
+                static_graph_wrapper_class = resolve_obj_by_qualname(
+                    current_platform.get_static_graph_wrapper_cls())
+
+                # Always assign PIECEWISE runtime mode to the
+                # CUDAGraphWrapper for piecewise_backend, to distinguish
+                # it from the FULL cudagraph runtime mode, no matter it
+                # is wrapped on a full or piecewise fx graph.
+                self.module.__dict__[target] = static_graph_wrapper_class(
+                    runnable=piecewise_backend,
+                    vllm_config=self.vllm_config,
+                    runtime_mode=CUDAGraphMode.PIECEWISE,
+                    cudagraph_options=CUDAGraphOptions(
+                        debug_log_enable=piecewise_backend.is_first_graph,
+                        gc_disable=not piecewise_backend.is_first_graph,
+                        weak_ref_output=piecewise_backend.is_last_graph))
+            else:
+                self.module.__dict__[target] = piecewise_backend
 
             compilation_counter.num_piecewise_capturable_graphs_seen += 1
 
