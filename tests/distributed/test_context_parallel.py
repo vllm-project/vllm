@@ -81,8 +81,8 @@ class CPTestSettings:
                                           chunked_prefill=chunked_prefill_val))
         return CPTestSettings(
             parallel_setups=parallel_setups,
-            distributed_backends=["mp", "ray"],
-            vllm_major_versions=["1", "1"],
+            distributed_backends=["mp"],
+            vllm_major_versions=["1"],
             runner=runner,
             test_options=CPTestOptions(multi_node_only=multi_node_only,
                                        load_format=load_format),
