@@ -166,8 +166,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         self.lora_a_stacked = torch.zeros(
             (
                 max_loras,
-                self.base_layer.org_vocab_size +
-                0,  # No extra vocab size
+                self.base_layer.org_vocab_size + 0,  # No extra vocab size
                 lora_config.max_lora_rank,
             ),
             dtype=lora_config.lora_dtype,

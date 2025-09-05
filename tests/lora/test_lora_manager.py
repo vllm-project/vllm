@@ -44,11 +44,10 @@ def test_from_lora_tensors(sql_lora_files, device):
 
     peft_helper = PEFTHelper.from_local_dir(sql_lora_files,
                                             max_position_embeddings=4096)
-    lora_model = LoRAModel.from_lora_tensors(
-        1,
-        tensors,
-        peft_helper=peft_helper,
-        device=device)
+    lora_model = LoRAModel.from_lora_tensors(1,
+                                             tensors,
+                                             peft_helper=peft_helper,
+                                             device=device)
     for module_name, lora in lora_model.loras.items():
         assert lora.module_name == module_name
         assert lora.rank == 8
@@ -424,9 +423,8 @@ def test_lru_cache_worker_adapter_manager(dist_init, dummy_model, device,
         lora_dtype=DEFAULT_DTYPE,
     )
     worker_adapter_manager = LRUCacheWorkerLoRAManager(
-        4, 2,
-        dummy_model.unpadded_vocab_size,
-        lora_config, device, EMBEDDING_MODULES)
+        4, 2, dummy_model.unpadded_vocab_size, lora_config, device,
+        EMBEDDING_MODULES)
     worker_adapter_manager.create_lora_manager(dummy_model)
 
     mapping = LoRAMapping([], [])

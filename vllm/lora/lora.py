@@ -58,7 +58,6 @@ class LoRALayerWeights:
     def is_packed(self) -> bool:
         return False
 
-
     @classmethod
     def from_config(
         cls,
