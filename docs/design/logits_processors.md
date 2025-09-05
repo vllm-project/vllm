@@ -279,6 +279,21 @@ A vLLM logits processor must subclass `LogitsProcessor` and define (at minimum) 
 
 The `BatchUpdate` abstraction models the persistent batch as a list of requests, supporting the following operations to change batch state (note that the order in which the operations are mentioned below reflects the order in which they should be processed in `update_state()`):
 
+* **Remove:** remove (without replacement) request at index `i`
+
+    * A Remove is represented in `Batchupdate.removed` by an `int` (representing `i`)
+
+    * Effect of remove-at-index on batch:
+
+        ``` text
+        Batch: [A,B,C]
+        Remove @ i:  1
+
+        =>
+
+        New Batch: [A,x,C] # Discard B and leave an empty slot
+        ```
+
 * **Add:** add (or replace existing request with) a new request at index `i`. If a request is replaced, its associated state should be discarded.
 
     * An Add is represented in `Batchupdate.added` as a tuple of
@@ -311,21 +326,6 @@ The `BatchUpdate` abstraction models the persistent batch as a list of requests,
         =>
 
         New Batch: [A,B,C,D] # Add D, extending batch
-        ```
-
-* **Remove:** remove (without replacement) request at index `i`
-
-    * A Remove is represented in `Batchupdate.removed` by an `int` (representing `i`)
-
-    * Effect of remove-at-index on batch:
-
-        ``` text
-        Batch: [A,B,C]
-        Remove @ i:  1
-
-        =>
-
-        New Batch: [A,x,C] # Discard B and leave an empty slot
         ```
 
 * **Move:** move request at index `s` to index `d` OR swap requests at indices `s` and `d`
@@ -401,7 +401,7 @@ Logits processor `update_state()` implementations should assume the following mo
 
 Notes:
 
-* A logits processor `update_state()` method must process batch update operations in the following order: adds, removes, moves
+* A logits processor `update_state()` method must process batch update operations in the following order: removes, adds, moves
 
 * The index argument for Add operations refers to the index *at the time the Add occurred*, i.e. before any Move operations
     * Example: if a request is Added at index 5 and then swapped with index 3, the Add operation in `BatchUpdate.added` will be associated with index 5 not 3
