@@ -653,7 +653,10 @@ class EagleProposer:
         # optionally prune the draft model vocabulary
         self.hot_token_ids = None
         if self.vllm_config.speculative_config.draft_vocab_pruned:
-            self.hot_token_ids = load_draft_pruned_vocab(self.vllm_config.speculative_config.draft_vocab_pruned).to(self.model.device)
+            logger.info(f"Loading pruned draft model vocabulary from {self.vllm_config.speculative_config.draft_vocab_pruned}")
+            self.hot_token_ids = load_draft_vocab_pruned(self.vllm_config.speculative_config.draft_vocab_pruned).to(self.model.device)
+            head = self.model.model.embed_tokens.weight
+
 
     @torch.inference_mode()
     def dummy_run(
@@ -696,8 +699,9 @@ class EagleProposer:
         ) == 1, "All eagle layers should belong to the same kv cache group"
 
 
-def load_draft_vocab_pruned(token_map_path: str) -> list[int]:
+def load_draft_vocab_pruned(token_map_path: str) -> torch.Tensor:
     # todo: use vllm method to download a model
+    import os
     from huggingface_hub import snapshot_download
     if not os.path.exists(token_map_path):
         cache_dir = snapshot_download(
