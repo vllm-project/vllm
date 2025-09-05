@@ -657,7 +657,8 @@ class EagleProposer:
             self.hot_token_ids = load_draft_vocab_pruned(self.vllm_config.speculative_config.draft_vocab_pruned)
             device = next(self.model.model.parameters()).device
             self.hot_token_ids = self.hot_token_ids.to(device)
-            head = self.model.model.embed_tokens.weight
+            # self.model.model.embed_tokens.weight is the model head
+            self.model.model.embed_tokens.weight.data = self.model.model.embed_tokens.weight.data[self.hot_token_id]
 
 
     @torch.inference_mode()
