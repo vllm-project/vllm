@@ -8,43 +8,49 @@ from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
     silu_mul_fp8_quant_deep_gemm_cuda)
 from vllm.platforms import current_platform
 
-# (E, T, H)
-CASES = [
-    (1, 1, 128),
-    (1, 4, 128),
-    (2, 4, 256),
-    (32, 64, 256),
-    (17, 31, 768),
-    (1, 1, 128 * 1),
-    (1, 1, 128 * 2),
-    (1, 1, 128 * 3),
-    (1, 1, 128 * 4),
-    (8, 16, 128 * 1),
-    (8, 16, 128 * 2),
-    (8, 16, 128 * 3),
-    (8, 16, 128 * 4),
-    (8, 16, 7168),
-    (8, 16, 7168),
-    (8, 32, 7168),
-    (8, 64, 7168),
-    (8, 128, 7168),
-    (8, 256, 7168),
-    (8, 512, 7168),
-    (8, 1024, 7168),
-    (256, 8, 7168),
-    (256, 16, 7168),
-    (256, 32, 7168),
-    (256, 64, 7168),
-    (256, 128, 7168),
-    (256, 256, 7168),
-    (256, 512, 7168),
-    (256, 1024, 7168),
-]
+CASES = []
+
+for fp8_dtype in [
+        torch.float8_e4m3fn, torch.float8_e5m2, torch.float8_e8m0fnu
+]:
+    # (E, T, H)
+    CASES += [
+        (1, 1, 128, fp8_dtype),
+        (1, 4, 128, fp8_dtype),
+        (2, 4, 256, fp8_dtype),
+        (32, 64, 256, fp8_dtype),
+        (17, 31, 768, fp8_dtype),
+        (1, 1, 128 * 1, fp8_dtype),
+        (1, 1, 128 * 2, fp8_dtype),
+        (1, 1, 128 * 3, fp8_dtype),
+        (1, 1, 128 * 4, fp8_dtype),
+        (8, 16, 128 * 1, fp8_dtype),
+        (8, 16, 128 * 2, fp8_dtype),
+        (8, 16, 128 * 3, fp8_dtype),
+        (8, 16, 128 * 4, fp8_dtype),
+        (8, 16, 7168, fp8_dtype),
+        (8, 16, 7168, fp8_dtype),
+        (8, 32, 7168, fp8_dtype),
+        (8, 64, 7168, fp8_dtype),
+        (8, 128, 7168, fp8_dtype),
+        (8, 256, 7168, fp8_dtype),
+        (8, 512, 7168, fp8_dtype),
+        (8, 1024, 7168, fp8_dtype),
+        (256, 8, 7168, fp8_dtype),
+        (256, 16, 7168, fp8_dtype),
+        (256, 32, 7168, fp8_dtype),
+        (256, 64, 7168, fp8_dtype),
+        (256, 128, 7168, fp8_dtype),
+        (256, 256, 7168, fp8_dtype),
+        (256, 512, 7168, fp8_dtype),
+        (256, 1024, 7168, fp8_dtype),
+    ]
 
 
-@pytest.mark.parametrize("E,T,H", CASES)
+@pytest.mark.parametrize("E,T,H,fp8_type", CASES)
 @torch.inference_mode()
-def test_silu_mul_fp8_quant_deep_gemm(E, T, H, group_size=128, seed=0):
+def test_silu_mul_fp8_quant_deep_gemm(E, T, H, fp8_type):
+    group_size = 128
     current_platform.seed_everything(42)
 
     # Input tensor of shape (E, T, 2*H)
@@ -61,11 +67,10 @@ def test_silu_mul_fp8_quant_deep_gemm(E, T, H, group_size=128, seed=0):
     y_q, y_s = silu_mul_fp8_quant_deep_gemm_cuda(y,
                                                  tokens_per_expert,
                                                  num_parallel_tokens=16,
-                                                 group_size=group_size,
-                                                 eps=1e-10)
+                                                 group_size=group_size)
 
     torch.cuda.synchronize()
-    fp8_info = torch.finfo(torch.float8_e4m3fn)
+    fp8_info = torch.finfo(fp8_dtype)
     fp8_max = fp8_info.max
     fp8_min = fp8_info.min
     eps = 1e-10
@@ -80,7 +85,7 @@ def test_silu_mul_fp8_quant_deep_gemm(E, T, H, group_size=128, seed=0):
         ref_s = torch.empty((T, (H + group_size - 1) // group_size),
                             dtype=torch.float32,
                             device="cuda")
-        ref_q = torch.empty((T, H), dtype=torch.float8_e4m3fn, device="cuda")
+        ref_q = torch.empty((T, H), dtype=fp8_dtype, device="cuda")
 
         for t in range(nt):
             data = merged[e, t].float()
@@ -96,7 +101,7 @@ def test_silu_mul_fp8_quant_deep_gemm(E, T, H, group_size=128, seed=0):
                 scaled = data[:n_full_groups *
                               group_size] / scale.repeat_interleave(group_size)
                 ref_q_row[:n_full_groups * group_size] = scaled.clamp(
-                    fp8_min, fp8_max).to(torch.float8_e4m3fn)
+                    fp8_min, fp8_max).to(fp8_dtype)
                 ref_s[t, :n_full_groups] = scale
 
             # process remainder group
@@ -106,14 +111,15 @@ def test_silu_mul_fp8_quant_deep_gemm(E, T, H, group_size=128, seed=0):
                 amax = data_rem.abs().amax().clamp(min=eps)
                 scale = amax / fp8_max
                 scaled = data_rem / scale
-                ref_q_row[-rem:] = scaled.clamp(fp8_min, fp8_max).to(
-                    torch.float8_e4m3fn)
+                ref_q_row[-rem:] = scaled.clamp(fp8_min, fp8_max).to(fp8_dtype)
                 ref_s[t, -1] = scale
 
             ref_q[t] = ref_q_row
 
         y_se = y_s[e]
         y_qe = y_q[e]
+
+        print(f'{y_se}\n{ref_s}')
 
         torch.testing.assert_close(y_se[:nt], ref_s[:nt], rtol=0.01, atol=0.01)
         torch.testing.assert_close(

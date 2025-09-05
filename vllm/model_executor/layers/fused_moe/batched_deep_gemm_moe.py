@@ -22,7 +22,6 @@ def silu_mul_fp8_quant_deep_gemm_cuda(
     tokens_per_expert: torch.Tensor,  # (E,) number of valid tokens per expert
     num_parallel_tokens=16,
     group_size: int = 128,
-    eps: float = 1e-10,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert y.ndim == 3, "y must be (E, T, 2*H)"
     E, T, H2 = y.shape
@@ -47,9 +46,6 @@ def silu_mul_fp8_quant_deep_gemm_cuda(
                               dtype=torch.float32,
                               device=y.device)
 
-    f_info = torch.finfo(fp8_dtype)
-    fp8_max = f_info.max
-    fp8_min = f_info.min
     use_ue8m0 = is_deep_gemm_e8m0_used()
 
     if E <= 16:
@@ -67,8 +63,7 @@ def silu_mul_fp8_quant_deep_gemm_cuda(
                                                        T)))))
 
     torch.ops._C.silu_mul_fp8_quant_deep_gemm_cuda(y, tokens_per_expert, y_q,
-                                                   y_s, group_size, eps,
-                                                   fp8_min, fp8_max, use_ue8m0,
+                                                   y_s, group_size, use_ue8m0,
                                                    num_parallel_tokens)
 
     return y_q, y_s

@@ -142,8 +142,7 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
     const at::Tensor& counts,  // (E)
     at::Tensor& y_q,           // (E, T, H) [OUT]
     at::Tensor& y_s,           // (E, T, H//group_size) [OUT]
-    int64_t group_size, double eps, double fp8_min, double fp8_max,
-    bool use_ue8m0, int64_t num_parallel_tokens);
+    int64_t group_size, bool use_ue8m0, int64_t num_parallel_tokens);
 
 void mul_and_silu(torch::Tensor& out, torch::Tensor& input);
 
