@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Attention layer with PagedAttention and Triton prefix prefill."""
+"""Attention layer using Triton-only kernels (no-external dependencies)."""
 from dataclasses import dataclass
 from functools import cache
 from typing import ClassVar, Optional
@@ -17,7 +17,6 @@ from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.utils import (AttentionCGSupport,
                                               AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
@@ -176,6 +175,7 @@ class TritonAttentionBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
+        # "NHD layout"
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
@@ -274,7 +274,7 @@ class TritonAttentionImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: FlashAttentionMetadata,
+        attn_metadata: TritonAttentionMetadata,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
         output_block_scale: Optional[torch.Tensor] = None,
