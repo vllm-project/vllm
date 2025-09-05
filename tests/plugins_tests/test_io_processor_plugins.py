@@ -11,7 +11,7 @@ from vllm.entrypoints.openai.protocol import IOProcessorResponse
 from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 
-MODEL_NAME = "mgazz/Prithvi-EO-2.0-300M-TL-Sen1Floods11"
+MODEL_NAME = "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11"
 
 image_url = "https://huggingface.co/christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM/resolve/main/valencia_example_2024-10-26.tiff"  # noqa: E501
 
