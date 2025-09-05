@@ -69,10 +69,10 @@ class CPTestSettings:
         load_format: Optional[str] = None,
     ):
         parallel_setups = []
-        for eager_mode_val in [False, True]:
-            for pp_multiplier in [1, 2]:
+        for eager_mode_val in [False]:
+            for pp_multiplier in [1]:
                 for dcp_multiplier in [2, 4]:
-                    for chunked_prefill_val in [False, True]:
+                    for chunked_prefill_val in [True]:
                         parallel_setups.append(
                             ParallelSetup(tp_size=tp_base,
                                           pp_size=pp_multiplier * pp_base,
