@@ -8,8 +8,6 @@ from collections.abc import Iterable, Sequence
 from dataclasses import astuple, dataclass
 from typing import Any, Callable, NamedTuple, Optional
 
-import regex
-
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import GiB_bytes, cdiv, sha256_cbor_64bit
@@ -1154,90 +1152,3 @@ def unify_kv_cache_configs(kv_cache_configs: list[KVCacheConfig]):
         kv_cache_config.num_blocks = min_num_blocks
 
     return kv_cache_configs
-
-
-def _extract_layer_id_from_name(name: str) -> int:
-    """
-    Extract the numeric layer index from a layer name string.
-    
-    This function parses layer names that follow the pattern 
-    'language_model.model.layers.{layer_id}.{rest_of_path}' and extracts
-    the numeric layer ID from the 'layers.{layer_id}' segment.
-    
-    Args:
-        name (str): The layer name string to parse, expected to contain
-            a 'layers.{number}' pattern.
-    
-    Returns:
-        int: The extracted layer index as an integer.
-    
-    Raises:
-        ValueError: If the layer name doesn't contain a valid 
-            'layers.{number}' pattern.
-    
-    Example:
-        >>> name = 'language_model.model.layers.18.self_attn.attn'
-        >>> _extract_layer_id_from_name(name)
-        18
-    """
-    match = regex.search(r"layers\.(\d+)\.", name)
-    if match:
-        return int(match.group(1))
-    else:
-        raise ValueError(f"Failed to extract layer index from {name}")
-
-
-def get_layer_to_kv_cache_group_id_mapping(
-        kv_cache_config: KVCacheConfig
-) -> tuple[dict[str, int], dict[int, int]]:
-    """
-    Create mappings from layer names/IDs to KV cache group IDs for hybrid 
-    memory allocation.
-    
-    This function constructs two mapping dictionaries that allow efficient 
-    lookup of which KV cache group a given layer belongs to. This is 
-    essential for the hybrid memory allocator to properly manage memory 
-    allocation across different layers.
-    
-    The function processes each KV cache group and creates mappings for both 
-    the full layer names and the extracted numeric layer IDs. This enables 
-    fast lookups using either identifier format.
-    
-    Args:
-        kv_cache_config (KVCacheConfig): Configuration object 
-            containing KV cache groups and their associated layer names.
-    
-    Returns:
-        tuple[dict[str, int], dict[int, int]]: A tuple containing:
-            - layer_name_to_kv_cache_group_id: Maps full layer names (e.g., 
-              'language_model.model.layers.18.self_attn.attn') to their
-              corresponding KV cache group ID.
-            - layer_id_to_kv_cache_group_id: Maps numeric layer IDs (e.g., 
-                18) to their corresponding KV cache group ID.
-    
-    Raises:
-        ValueError: If a layer name cannot be parsed to extract 
-            the layer ID.
-    
-    Example:
-        >>> config = KVCacheConfig(kv_cache_groups=[...])
-        >>> name_map, id_map = get_layer_to_kv_cache_group_id_mapping(config)
-        >>> name_map['language_model.model.layers.18.self_attn.attn']
-        0
-        >>> id_map[5]
-        1
-    """
-    # NOTE(Kuntai): for hybrid memory allocator, we need to map from layer id
-    # or layer name to kv cache group id.
-    layer_name_to_kv_cache_group_id = {}
-    layer_id_to_kv_cache_group_id = {}
-    kv_cache_groups = kv_cache_config.kv_cache_groups
-
-    # construct the mapping from layer name/id to kv cache group id
-    for kv_cache_group_id, group in enumerate(kv_cache_groups):
-        for layer_name in group.layer_names:
-            layer_name_to_kv_cache_group_id[layer_name] = kv_cache_group_id
-            layer_id = _extract_layer_id_from_name(layer_name)
-            layer_id_to_kv_cache_group_id[layer_id] = kv_cache_group_id
-
-    return layer_name_to_kv_cache_group_id, layer_id_to_kv_cache_group_id
