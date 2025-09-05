@@ -18,7 +18,7 @@ import zmq
 from vllm.config import KVTransferConfig
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     NCCLLibrary, buffer_type, cudaStream_t, ncclComm_t, ncclDataTypeEnum)
-from vllm.distributed.kv_transfer.kv_connector.v1.p2p.tensor_memory_pool import (  # noqa: E501
+from vllm.distributed.kv_transfer.kv_connector.v1.p2p.tensor_memory_pool import (
     TensorMemoryPool)
 from vllm.utils import current_stream, get_ip
 
@@ -168,18 +168,15 @@ class P2pNcclEngine:
             self.http_address, self.zmq_address, self.proxy_address,
             self.send_type, self.buffer_size_threshold, self.nccl_num_channels)
 
-
     def _cleanup_connection(self, remote_address: str):
-        logger.warning(
-            "Cleaning up stale connection for remote_address: %s",
-            remote_address
-        )
+        logger.warning("Cleaning up stale connection for remote_address: %s",
+                       remote_address)
         if remote_address in self.comms:
-            # Note: ncclCommDestroy is ideally called, 
+            # Note: ncclCommDestroy is ideally called,
             # but the peer process is likely gone.
             # Simply removing the handle is the primary step.
             del self.comms[remote_address]
-        
+
         if remote_address in self.socks:
             sock = self.socks.pop(remote_address)
             try:
@@ -189,7 +186,6 @@ class P2pNcclEngine:
             except Exception as e:
                 logger.exception("Error closing stale ZMQ socket: %s", e)
 
-
     def create_connect(self, remote_address: typing.Optional[str] = None):
         assert remote_address is not None
         if remote_address in self.socks or remote_address in self.comms:
@@ -197,8 +193,8 @@ class P2pNcclEngine:
 
         sock = self.context.socket(zmq.DEALER)
         sock.setsockopt_string(zmq.IDENTITY, self.zmq_address)
-        sock.setsockopt(zmq.SNDTIMEO, 5000) # 5 seconds send timeout
-        sock.setsockopt(zmq.RCVTIMEO, 5000) # 5 seconds receive timeout
+        sock.setsockopt(zmq.SNDTIMEO, 5000)  # 5 seconds send timeout
+        sock.setsockopt(zmq.RCVTIMEO, 5000)  # 5 seconds receive timeout
         sock.connect(f"tcp://{remote_address}")
         self.socks[remote_address] = sock
 
@@ -216,7 +212,7 @@ class P2pNcclEngine:
                 logger.info("🤝ncclCommInitRank Success, %s👉%s, MyRank:%s",
                             self.zmq_address, remote_address, rank)
 
-        except Exception as e:
+        except Exception:
             self._cleanup_connection(remote_address)
             # Re-raise to prevent using a partially-formed connection
             raise
@@ -255,8 +251,8 @@ class P2pNcclEngine:
                    > self.buffer_size_threshold):
                 oldest_tenser_id = next(iter(self.send_store))
                 oldest_tenser = self.send_store.pop(oldest_tenser_id)
-                oldest_tenser_size = oldest_tenser.element_size(
-                ) * oldest_tenser.numel()
+                oldest_tenser_size = oldest_tenser.element_size() \
+                    * oldest_tenser.numel()
                 self.buffer_size -= oldest_tenser_size
                 logger.info(
                     "⛔[GET]Send to %s, tensor_id:%s, tensor_size:%d,"
@@ -297,9 +293,9 @@ class P2pNcclEngine:
             else:
                 duration = time.time() - start_time
                 logger.warning(
-                    "🔴[PUT]Recv From %s, tensor_id:%s, duration:%.3fms, "
-                    "rank:%d", remote_address, tensor_id, duration * 1000,
-                    self.rank)
+                    "🔴[PUT]Recv From %s, tensor_id:%s, "
+                    "duration:%.3fms, rank:%d", remote_address, tensor_id,
+                    duration * 1000, self.rank)
             return tensor
 
         # GET
@@ -309,22 +305,23 @@ class P2pNcclEngine:
         # Check and reconnect if necessary
         try:
             # Check and reconnect if necessary
-            if (remote_address not in self.socks or 
-                remote_address not in self.comms):
+            if (remote_address not in self.socks
+                    or remote_address not in self.comms):
                 self.create_connect(remote_address)
 
             sock = self.socks[remote_address]
             comm, rank = self.comms[remote_address]
-            
+
             data = {"cmd": "GET", "tensor_id": tensor_id}
             sock.send(msgpack.dumps(data))
 
             message = sock.recv()
             data = msgpack.loads(message)
             if data["ret"] != 0:
-                logger.warning("🔴[GET]Recv From %s, tensor_id: %s,"
-                               " peer returned error: %d",
-                               remote_address, tensor_id, data["ret"])
+                logger.warning(
+                    "🔴[GET]Recv From %s, tensor_id: %s, "
+                    "peer returned error: %d", remote_address, tensor_id,
+                    data["ret"])
                 return None
 
             with torch.cuda.stream(self.recv_stream):
@@ -335,11 +332,9 @@ class P2pNcclEngine:
             self.recv(comm, tensor, rank ^ 1, self.recv_stream)
             return tensor
 
-        except (Exception, zmq.ZMQError) as e:
+        except (Exception, zmq.ZMQError):
             self._cleanup_connection(remote_address)
             return None
-
-
 
     def listen_for_requests(self):
         while True:
@@ -352,7 +347,7 @@ class P2pNcclEngine:
             data = msgpack.loads(message)
             if data["cmd"] == "NEW":
                 if remote_address in self.comms:
-                     self._cleanup_connection(remote_address)
+                    self._cleanup_connection(remote_address)
 
                 unique_id = self.nccl.unique_id_from_bytes(
                     bytes(data["unique_id"]))
@@ -363,21 +358,18 @@ class P2pNcclEngine:
                             2, unique_id, rank)
                     self.comms[remote_address] = (comm, rank)
                     logger.info("🤝ncclCommInitRank Success, %s👈%s, MyRank:%s",
-                                self.zmq_address, remote_address,
-                                rank)
+                                self.zmq_address, remote_address, rank)
             elif data["cmd"] == "PUT":
                 tensor_id = data["tensor_id"]
                 if remote_address not in self.comms:
                     logger.warning(
                         "🔴[PUT] Received PUT from %s but no NCCL comm exists."
-                        "Requesting re-initialization.",
-                        remote_address
-                    )
+                        "Requesting re-initialization.", remote_address)
                     # Respond with code '2' to tell the sender to re-init.
-                    self.router_socket.send_multipart([
-                        remote_address_bytes, b"2"])
+                    self.router_socket.send_multipart(
+                        [remote_address_bytes, b"2"])
                     continue
-                
+
                 try:
                     with torch.cuda.stream(self.recv_stream):
                         tensor = torch.empty(data["shape"],
@@ -385,9 +377,9 @@ class P2pNcclEngine:
                                                  torch, data["dtype"]),
                                              device=self.device)
                     # Send '0' to signal OK to receive NCCL data
-                    self.router_socket.send_multipart([
-                        remote_address_bytes, b"0"])
-                    
+                    self.router_socket.send_multipart(
+                        [remote_address_bytes, b"0"])
+
                     # We've already confirmed comm exists
                     comm, rank = self.comms[remote_address]
                     self.recv(comm, tensor, rank ^ 1, self.recv_stream)
@@ -399,12 +391,11 @@ class P2pNcclEngine:
                         tensor = (addr, tensor.dtype, tensor.shape)
                         logger.warning(
                             "🔴[PUT] Recv Tensor, Out Of Threshold, %s👈%s, "
-                            "addr:%d",
-                            self.zmq_address, remote_address, addr)
+                            "addr:%d", self.zmq_address, remote_address, addr)
                     else:
                         self.buffer_size += tensor_size
                 except Exception as e:
-                    # In case of error during recv (e.g. OOM), 
+                    # In case of error during recv (e.g. OOM),
                     # we might not be able to reply.
                     # The sender's timeout will handle this.
                     tensor = None
@@ -427,7 +418,7 @@ class P2pNcclEngine:
                 tensor = None
                 with self.send_store_cv:
                     tensor = self.send_store.get(tensor_id)
-                    
+
                 if tensor is not None:
                     data = {
                         "ret": 0,
@@ -435,12 +426,13 @@ class P2pNcclEngine:
                         "dtype": str(tensor.dtype).replace("torch.", "")
                     }
                     self.router_socket.send_multipart(
-                        [remote_address_bytes, msgpack.dumps(data)])
-                    
+                        [remote_address_bytes,
+                         msgpack.dumps(data)])
+
                     try:
                         if remote_address not in self.comms:
-                           raise ConnectionError(
-                               f"NCCL comm not found for {remote_address}")
+                            raise ConnectionError(
+                                f"NCCL comm not found for {remote_address}")
                         comm, rank = self.comms[remote_address]
                         self.send(comm, tensor.to(self.device), rank ^ 1,
                                   self.send_stream)
@@ -458,7 +450,8 @@ class P2pNcclEngine:
                 else:
                     data = {"ret": 1}
                     self.router_socket.send_multipart(
-                        [remote_address_bytes, msgpack.dumps(data)])
+                        [remote_address_bytes,
+                         msgpack.dumps(data)])
             else:
                 logger.warning(
                     "🚧Unexpected, Received message from %s, data:%s",
@@ -500,18 +493,19 @@ class P2pNcclEngine:
     def send_sync(self, item: SendQueueItem) -> bool:
         if item.remote_address is None:
             return False
-        
+
         # Check and reconnect if necessary
         max_retries = 3
         for attempt in range(max_retries):
             try:
                 # Step 1: Ensure connection exists
-                if (item.remote_address not in self.socks or 
-                    item.remote_address not in self.comms):
-                    logger.info("No connection to %s, creating one (attempt %d/%d).",
-                                item.remote_address, attempt + 1, max_retries)
+                if (item.remote_address not in self.socks
+                        or item.remote_address not in self.comms):
+                    logger.info(
+                        "No connection to %s, creating one (attempt %d/%d).",
+                        item.remote_address, attempt + 1, max_retries)
                     self.create_connect(item.remote_address)
-                
+
                 sock = self.socks[item.remote_address]
                 comm, rank = self.comms[item.remote_address]
 
@@ -524,7 +518,7 @@ class P2pNcclEngine:
                     "shape": tensor.shape,
                     "dtype": str(tensor.dtype).replace("torch.", "")
                 }
-                
+
                 sock.send(msgpack.dumps(data))
                 response = sock.recv()
 
@@ -532,18 +526,17 @@ class P2pNcclEngine:
                 if response == b"0":  # OK
                     logger.debug("Peer %s is ready to receive.",
                                  item.remote_address)
-                    self.send(comm, tensor.to(self.device), 
-                              rank ^ 1, self.send_stream)
+                    self.send(comm, tensor.to(self.device), rank ^ 1,
+                              self.send_stream)
                     if self.send_type == "PUT_ASYNC":
                         self.have_sent_tensor_id(item.tensor_id)
                     return True  # Success
 
                 elif response == b"1":  # Peer OOM/Error
                     logger.error(
-                        "🔴 Peer %s reported Out Of Memory/Threshold."
-                        " Aborting send.",
-                        item.remote_address)
-                    return False # Unrecoverable error, do not retry
+                        "🔴 Peer %s reported Out Of Memory/Threshold. "
+                        "Aborting send.", item.remote_address)
+                    return False  # Unrecoverable error, do not retry
 
                 elif response == b"2":  # Re-initialize requested
                     logger.warning(
@@ -552,29 +545,29 @@ class P2pNcclEngine:
                         item.remote_address, attempt + 1, max_retries)
                     self._cleanup_connection(item.remote_address)
                     time.sleep(0.1)  # Small delay before retry
-                    continue # Go to next attempt in the loop
+                    continue  # Go to next attempt in the loop
 
                 else:
-                    logger.error("Received unknown response '%s' from peer %s.",
-                                 response, item.remote_address)
+                    logger.error(
+                        "Received unknown response '%s' from peer %s.",
+                        response, item.remote_address)
                     self._cleanup_connection(item.remote_address)
                     continue
 
             except (Exception, zmq.ZMQError) as e:
                 logger.error(
-                    "💥 Connection error during send_sync to %s "
-                    "(attempt %d/%d). Cleaning up and retrying.",
+                    "💥Connection error during send_sync to %s (attempt %d/%d)."
+                    " Cleaning up and retrying.",
                     item.remote_address,
                     attempt + 1,
                     max_retries,
                     exc_info=e)
                 self._cleanup_connection(item.remote_address)
-                time.sleep(0.1) # Small delay before retry
+                time.sleep(0.1)  # Small delay before retry
 
         logger.error("Failed to send tensor to %s after %d retries.",
                      item.remote_address, max_retries)
         return False
-
 
     def get_finished(
             self, finished_req_ids: set[str], no_compile_layers
