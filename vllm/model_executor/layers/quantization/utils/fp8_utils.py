@@ -56,7 +56,7 @@ def rocm_aiter_gemm_w8a8_blockscale_impl(
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
     # MI300's fp8nuz should be enough to detect if we call ck vs triton
-    if current_platform.is_fp8_fnuz():
+    if current_platform.is_fp8_fnuz() or not envs.VLLM_ROCM_USE_AITER_TRITON_LINEAR:
         from aiter import gemm_a8w8_blockscale
     else:
         from aiter.ops.triton.gemm_a8w8_blockscale import gemm_a8w8_blockscale
