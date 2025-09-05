@@ -16,7 +16,6 @@ from vllm.forward_context import (create_forward_context, get_forward_context,
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.v1.worker.ubatch_utils import UbatchSlice
 from vllm.v1.worker.ubatching import UBatchContext, make_ubatch_contexts
 
 logger = init_logger(__name__)
@@ -37,29 +36,6 @@ class CUDAGraphMetaData:
     cudagraph: torch.cuda.CUDAGraph
     ubatch_metadata: UbatchMetadata
     outputs: Optional[Any] = None
-
-
-def create_slices(self, split_point: int,
-                  query_start_loc: np.array) -> list[UbatchSlice]:
-    first_token_slice = slice(0, split_point)
-    second_token_slice = slice(split_point, query_start_loc[-1])
-
-    first_ubatch_last_request = np.searchsorted(query_start_loc,
-                                                split_point,
-                                                side="left")
-    first_req_slice = slice(0, first_ubatch_last_request)
-
-    second_ubatch_first_request = np.searchsorted(query_start_loc,
-                                                  split_point,
-                                                  side="right")
-    second_req_slice = slice(second_ubatch_first_request, split_point)
-
-    # Note there's an assumption here that there's 1 token per request
-    return [
-        UbatchSlice(first_req_slice, first_token_slice),
-        UbatchSlice(second_req_slice, second_token_slice)
-    ]
-
 
 class UBatchWrapper:
 

@@ -595,8 +595,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         should_attempt_ubatching = \
             self.parallel_config.enable_microbatching and \
             total_num_scheduled_tokens >= \
-            self.parallel_config.microbatching_token_threshold \
-            and max_num_scheduled_tokens == 1
+            self.parallel_config.microbatching_token_threshold
 
         # Don't microbatch unless every other DP worker is also microbatching
         num_pad_tokens = 0
