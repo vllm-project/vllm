@@ -46,7 +46,7 @@ class EAGLEConfig(PretrainedConfig):
         # Eagle model name should follow naming convention of
         # LlamaForCausalLM -> EagleLlamaForCausalLM
         # LlamaForCausalLM -> Eagle3LlamaForCausalLM
-        if method == "eagle":
+        if method in ("eagle", "ngram-eagle"):
             assert self.model is not None, \
                 "model should not be None when method is eagle"
             kwargs["architectures"] = [
@@ -62,7 +62,7 @@ class EAGLEConfig(PretrainedConfig):
             ]
         else:
             raise ValueError(f"Invalid method {method}. "
-                             "Supported methods are eagle and eagle3.")
+                             "Supported methods are eagle, ngram-eagle and eagle3.")
 
         super().__init__(**kwargs)
 

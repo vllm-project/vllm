@@ -1936,7 +1936,7 @@ class DeviceConfig:
             self.device = torch.device(self.device_type)
 
 
-SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "medusa",
+SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "ngram-eagle", "medusa",
                             "mlp_speculator", "draft_model", "deepseek_mtp",
                             "ernie_mtp"]
 
@@ -1950,6 +1950,9 @@ class SpeculativeConfig:
     num_speculative_tokens: SkipValidation[int] = None  # type: ignore
     """The number of speculative tokens, if provided. It will default to the
     number in the draft model config if present, otherwise, it is required."""
+    num_speculative_tokens_per_method: Optional[dict[str, int]] = None
+    """The number of speculative tokens for each method, if provided. Max of 
+    the values will be used if `num_speculative_tokens` is not provided."""
     model: Optional[str] = None
     """The name of the draft model, eagle head, or additional weights, if
     provided."""
@@ -2109,6 +2112,18 @@ class SpeculativeConfig:
                 raise ValueError("num_speculative_tokens was provided without "
                                  "speculative model.")
 
+        # set num_speculative_tokens from num_speculative_tokens_per_method
+        # for methods like ngram-eagle
+        if self.num_speculative_tokens_per_method is not None:
+            max_num_speculative_tokens = max(
+                self.num_speculative_tokens_per_method.values())
+            if self.num_speculative_tokens is None:
+                self.num_speculative_tokens = max_num_speculative_tokens
+            else:
+                assert self.num_speculative_tokens < max_num_speculative_tokens, (
+                    "num_speculative_tokens should be None or must be less than or equal to the "
+                    "max value in num_speculative_tokens_per_method.") 
+
         # Automatically configure the method for ngram when "model" is used
         # instead of "method"
         if self.method is None and (self.model is not None
@@ -2118,6 +2133,8 @@ class SpeculativeConfig:
         if self.method in ("ngram", "[ngram]"):
             # Unified to "ngram" internally
             self.method = "ngram"
+
+        if self.method in ("ngram", "ngram-eagle"):
             # Set default values if not provided
             if (self.prompt_lookup_min is None
                     and self.prompt_lookup_max is None):
@@ -2148,9 +2165,13 @@ class SpeculativeConfig:
             # draft related config as None here.
             self.draft_model_config = self.target_model_config
             self.draft_parallel_config = self.target_parallel_config
-        else:
-            self.prompt_lookup_max = 0
-            self.prompt_lookup_min = 0
+        
+        # allow ngram-eagle to use this code block similar to eagle
+        if self.method not in ("ngram"):
+
+            if self.method != "ngram-eagle":
+                self.prompt_lookup_max = 0
+                self.prompt_lookup_min = 0
 
             if self.model is not None:
                 self.draft_model_config = ModelConfig(
@@ -2179,7 +2200,7 @@ class SpeculativeConfig:
                 )
 
                 # Automatically detect the method
-                if self.method in ('eagle', 'eagle3'):
+                if self.method in ('eagle', 'eagle3', 'ngram-eagle'):
                     pass
                 elif "eagle-" in self.draft_model_config.model.lower() or \
                         "eagle3-" in self.draft_model_config.model.lower():
@@ -2216,7 +2237,7 @@ class SpeculativeConfig:
                         "eagle, or deepseek_mtp.")
 
                 # Replace hf_config for EAGLE draft_model
-                if self.method in ("eagle", "eagle3"):
+                if self.method in ("eagle", "eagle3", "ngram-eagle"):
                     if self.enable_chunked_prefill and not envs.VLLM_USE_V1:
                         raise ValueError(
                             "Chunked prefill and EAGLE are not compatible "
@@ -2422,7 +2443,7 @@ class SpeculativeConfig:
         return self.num_speculative_tokens
 
     def use_eagle(self) -> bool:
-        return self.method in ("eagle", "eagle3", "deepseek_mtp", "ernie_mtp")
+        return self.method in ("eagle", "eagle3", "ngram-eagle", "deepseek_mtp", "ernie_mtp")
 
     def __repr__(self) -> str:
         method = self.method
