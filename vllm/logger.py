@@ -39,7 +39,7 @@ DEFAULT_LOGGING_CONFIG = {
             "class": "logging.StreamHandler",
             "formatter": "vllm",
             "level": VLLM_LOGGING_LEVEL,
-            "stream":  VLLM_LOGGING_STREAM,
+            "stream": VLLM_LOGGING_STREAM,
         },
     },
     "loggers": {
