@@ -18,7 +18,7 @@ import requests
 #   --model-impl terratorch
 #   --task embed --trust-remote-code
 #   --skip-tokenizer-init --enforce-eager
-#   --io-processor-plugin prithvi_to_tiff_india
+#   --io-processor-plugin prithvi_to_tiff
 
 
 def main():
