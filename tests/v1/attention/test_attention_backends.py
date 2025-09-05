@@ -18,7 +18,7 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec
 BACKENDS_TO_TEST = [
     _Backend.FLASH_ATTN_VLLM_V1, _Backend.FLASHINFER_VLLM_V1,
     _Backend.FLEX_ATTENTION, _Backend.TRITON_ATTN_VLLM_V1, _Backend.TREE_ATTN,
-    "FLEX_ATTENTION_SLOW"
+    _Backend.XFORMERS_VLLM_V1, "FLEX_ATTENTION_SLOW"
 ]
 
 # Remove flashinfer from the list if it's not available
@@ -299,6 +299,7 @@ def test_backend_correctness(batch_spec_name: str, model: str):
     batch_spec = BATCH_SPECS[batch_spec_name]
     vllm_config = create_vllm_config(model_name=model,
                                      max_model_len=max(batch_spec.seq_lens),
+                                     block_size=128,
                                      num_gpu_blocks=8192)
     device = torch.device("cuda:0")
 

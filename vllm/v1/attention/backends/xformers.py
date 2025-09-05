@@ -9,7 +9,6 @@ import torch
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
-from vllm.attention.ops.triton_unified_attention import unified_attention
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import (
@@ -136,7 +135,8 @@ class XFormersAttentionMetadata:
     num_decodes: int = 0
 
     # Biases for different attention types.
-    attn_bias: Optional["AttentionBias"] = None
+    decode_attn_bias: Optional["AttentionBias"] = None
+    prefill_attn_bias: Optional["AttentionBias"] = None
 
     # Self-attention prefill/decode metadata cache
     _cached_prefill_metadata: Optional["XFormersAttentionMetadata"] = None
@@ -164,6 +164,8 @@ class XFormersAttentionMetadata:
             seq_lens=kv_seqlens,
             block_table=self.block_table[self.num_decodes:],
             slot_mapping=self.slot_mapping[self.num_decode_tokens:],
+            decode_attn_bias=self.decode_attn_bias,
+            prefill_attn_bias=self.prefill_attn_bias,
         )
         return self._cached_prefill_metadata
 
@@ -189,7 +191,8 @@ class XFormersAttentionMetadata:
             seq_lens=decode_kv_seqlens,
             block_table=self.block_table[:self.num_decodes],
             slot_mapping=self.slot_mapping[:self.num_decode_tokens],
-            attn_bias=self.attn_bias,
+            decode_attn_bias=self.decode_attn_bias,
+            prefill_attn_bias=self.prefill_attn_bias,
         )
         return self._cached_decode_metadata
 
@@ -239,17 +242,31 @@ class XFormersAttentionMetadataBuilder(
         block_table = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
 
-        bias = None
+        decode_bias = None
         if num_decodes > 0:
             # Construct the decoder bias.
             decode_q_seqlens = q_seqlens[:num_decodes]
             decode_kv_seqlens = kv_seqlens[:num_decodes]
-            bias = (
+            decode_bias = (
                 PagedBlockDiagonalCausalWithOffsetPaddedKeysMask.from_seqlens(
                     q_seqlen=decode_q_seqlens.tolist(),
                     kv_seqlen=decode_kv_seqlens.tolist(),
                     page_size=self.block_size,
                     block_tables=block_table[:num_decodes],
+                    device=block_table.device,
+                ))
+
+        prefill_bias = None
+        if num_prefills > 0:
+            # Construct the prefill bias.
+            prefill_q_seqlens = q_seqlens[num_decodes:]
+            prefill_kv_seqlens = kv_seqlens[num_decodes:]
+            prefill_bias = (
+                PagedBlockDiagonalCausalWithOffsetPaddedKeysMask.from_seqlens(
+                    q_seqlen=prefill_q_seqlens.tolist(),
+                    kv_seqlen=prefill_kv_seqlens.tolist(),
+                    page_size=self.block_size,
+                    block_tables=block_table[num_decodes:],
                     device=block_table.device,
                 ))
 
@@ -265,7 +282,8 @@ class XFormersAttentionMetadataBuilder(
             seq_lens=kv_seqlens,
             block_table=block_table,
             slot_mapping=slot_mapping,
-            attn_bias=bias,
+            decode_attn_bias=decode_bias,
+            prefill_attn_bias=prefill_bias,
         )
 
 
@@ -374,54 +392,50 @@ class XFormersAttentionImpl(AttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
+
+        # Reshape the k and v caches to [1, Bkv_T, G, H, D]
+        cache_k = key_cache.view(1, -1, self.num_kv_heads, 1,
+                                 self.head_size).expand(
+                                     1,
+                                     -1,
+                                     self.num_kv_heads,
+                                     self.num_queries_per_kv,
+                                     self.head_size,
+                                 )
+        cache_v = value_cache.view(1, -1, self.num_kv_heads, 1,
+                                   self.head_size).expand(
+                                       1,
+                                       -1,
+                                       self.num_kv_heads,
+                                       self.num_queries_per_kv,
+                                       self.head_size,
+                                   )
+
         if prefill_meta := attn_metadata.prefill_metadata:
-            descale_shape = (prefill_meta.query_start_loc.shape[0] - 1,
-                             key.shape[1])
-            unified_attention(
-                q=query[num_decode_tokens:num_actual_tokens],
-                k=key_cache,
-                v=value_cache,
-                out=output[num_decode_tokens:num_actual_tokens],
-                cu_seqlens_q=prefill_meta.query_start_loc,
-                max_seqlen_q=prefill_meta.max_query_len,
-                seqused_k=prefill_meta.seq_lens,
-                max_seqlen_k=prefill_meta.max_seq_len,
-                softmax_scale=self.scale,
-                causal=True,
-                alibi_slopes=self.alibi_slopes,
-                window_size=self.sliding_window,
-                block_table=prefill_meta.block_table,
-                softcap=self.logits_soft_cap,
-                q_descale=None,  # Not supported
-                k_descale=layer._k_scale.expand(descale_shape),
-                v_descale=layer._v_scale.expand(descale_shape),
-            )
+            # Query for prefill. KV is not needed because it is already cached.
+            prefill_query = query[num_decode_tokens:num_actual_tokens]
+            # Reshape query to [1, B_T, G, H, D].
+            q = prefill_query.view(1, -1, self.num_kv_heads,
+                                   self.num_queries_per_kv, self.head_size)
+
+            attn_bias = prefill_meta.prefill_attn_bias
+            output[
+                num_decode_tokens:
+                num_actual_tokens] = xops.memory_efficient_attention_forward(
+                    q,
+                    cache_k,
+                    cache_v,
+                    attn_bias=attn_bias,
+                    p=0.0,
+                    scale=self.scale,
+                ).view(prefill_query.shape)
 
         if decode_meta := attn_metadata.decode_metadata:
-            # Query for decode. KV is not needed because it is already cached.
             decode_query = query[:num_decode_tokens]
-            # Reshape query to [1, B_T, G, H, D].
             q = decode_query.view(1, -1, self.num_kv_heads,
                                   self.num_queries_per_kv, self.head_size)
-            # Reshape the k and v caches to [1, Bkv_T, G, H, D]
-            cache_k = key_cache.view(1, -1, self.num_kv_heads, 1,
-                                     self.head_size).expand(
-                                         1,
-                                         -1,
-                                         self.num_kv_heads,
-                                         self.num_queries_per_kv,
-                                         self.head_size,
-                                     )
-            cache_v = value_cache.view(1, -1, self.num_kv_heads, 1,
-                                       self.head_size).expand(
-                                           1,
-                                           -1,
-                                           self.num_kv_heads,
-                                           self.num_queries_per_kv,
-                                           self.head_size,
-                                       )
 
-            attn_bias = decode_meta.attn_bias
+            attn_bias = decode_meta.decode_attn_bias
             output[:
                    num_decode_tokens] = xops.memory_efficient_attention_forward(
                        q,
@@ -432,5 +446,4 @@ class XFormersAttentionImpl(AttentionImpl):
                        scale=self.scale,
                    ).view(decode_query.shape)
 
-        # Reshape the output tensor.
         return output
