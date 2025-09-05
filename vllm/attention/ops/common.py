@@ -36,7 +36,7 @@ def _correct_attn_cp_out_kernel(outputs_ptr, new_output_ptr, lses_ptr,
 
     # calc final lse
     lse = tl.load(lses_ptr + lse_offsets)
-    lse = tl.where(lse != lse or lse == float('inf'), -float('inf'), lse)
+    lse = tl.where((lse != lse) | (lse == float('inf')), -float('inf'), lse)
     lse_max = tl.max(lse, axis=0)
     lse -= lse_max
     lse_exp = tl.exp(lse)
@@ -58,7 +58,7 @@ def _correct_attn_cp_out_kernel(outputs_ptr, new_output_ptr, lses_ptr,
     lse_tmp = tl.load(lses_ptr + lse_offset)
     lse_finally = lse_tmp - lse
     lse_finally = tl.where(
-        lse_finally != lse_finally or lse_finally == float('inf'),
+        (lse_finally != lse_finally) | (lse_finally == float('inf')),
         -float('inf'), lse_finally)
     factor = tl.exp(lse_finally)
     output = tl.load(outputs_ptr + output_offsets)
