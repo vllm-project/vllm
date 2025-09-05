@@ -1,5 +1,3 @@
-#include "cuda_utils.h"
-
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/all.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -16,7 +14,6 @@
 #include "core/registration.h"
 
 #include <c10/util/Float8_e4m3fn.h>
-#include <c10/util/Float8_e5m2.h>
 
 namespace vllm {
 
@@ -166,7 +163,7 @@ __device__ __forceinline__ __nv_bfloat162 clip(__nv_bfloat162 v,
 
 // We use the following values for fp8 min/max:
 //  __nv_fp8_e4m3 = (-448, +448)
-//  __nv_fp8_e5m2 = (-57344.0, 57344.0
+//  __nv_fp8_e5m2 = (-57344.0, 57344.0)
 //  __nv_fp8_e8m0 = (5.877471754111438e-39, 1.7014118346046923e+38)
 template <class T>
 constexpr __nv_bfloat16 get_fp8_max() {
@@ -372,18 +369,8 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
                __bfloat162bfloat162(fp8_max));
     }
 
-    if constexpr (std::is_same_v<fp8_type, c10::Float8_e4m3fn> ||
-                  std::is_same_v<fp8_type, c10::Float8_e4m3fnuz>) {
-      auto fp8x4 = __nv_fp8x4_e4m3(results_bf162[0], results_bf162[1]);
-      *reinterpret_cast<__nv_fp8x4_e4m3*>(y_q_ptr) = fp8x4;
-    } else if constexpr (std::is_same_v<fp8_type, c10::Float8_e5m2> ||
-                         std::is_same_v<fp8_type, c10::Float8_e5m2fnuz>) {
-      auto fp8x4 = __nv_fp8x4_e5m2(results_bf162[0], results_bf162[1]);
-      *reinterpret_cast<__nv_fp8x4_e5m2*>(y_q_ptr) = fp8x4;
-    } else {
-      auto fp8x4 = __nv_fp8x4_e8m0(results_bf162[0], results_bf162[1]);
-      *reinterpret_cast<__nv_fp8x4_e8m0*>(y_q_ptr) = fp8x4;
-    }
+    auto fp8x4 = __nv_fp8x4_e4m3(results_bf162[0], results_bf162[1]);
+    *reinterpret_cast<__nv_fp8x4_e4m3*>(y_q_ptr) = fp8x4;
 
     y_q_ptr += stride_yq_t;
 
@@ -437,8 +424,7 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
   // fixed GROUP_SIZE of 128.
   TORCH_CHECK(input.dtype() == torch::kBFloat16);
   TORCH_CHECK(y_q.dtype() == torch::kFloat8_e4m3fn ||
-              y_q.dtype() == torch::kFloat8_e4m3fnuz ||
-              y_q.dtype() == torch::kFloat8_e8m0fnu);
+              y_q.dtype() == torch::kFloat8_e4m3fnuz);
   TORCH_CHECK(y_s.dtype() == torch::kFloat32);
   TORCH_CHECK(input.size(-1) % 256 == 0);
 
