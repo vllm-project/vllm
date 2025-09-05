@@ -61,7 +61,7 @@ class NewRequestData:
         return (f"NewRequestData("
                 f"req_id={self.req_id},"
                 f"prompt_token_ids={self.prompt_token_ids},"
-                f"prompt_embeds={prompt_embeds_shape},"
+                f"prompt_embeds_shape={prompt_embeds_shape},"
                 f"mm_kwargs={self.mm_kwargs},"
                 f"mm_hashes={self.mm_hashes},"
                 f"mm_positions={self.mm_positions},"
