@@ -191,6 +191,23 @@ class KVCacheBlock:
                 f"prev_free_block={prev_block_id}, "
                 f"next_free_block={next_block_id})")
 
+@dataclass
+class KVPrefixAlignedGroups:
+    """List of request ids for requests which we group together.
+    We group together consecutive requests."""
+    request_ids: list[str]
+
+    """Group metadata composed of list of 
+    (num_common_prefix_blocks, start_index, end_index). 
+    The requests corresponding to request_ids[start_index: end_index] 
+    form a group with the specified num_common_prefix_blocks."""
+    group_metadata: list[tuple[int, int, int]]
+
+    def extend(self, groups: "KVPrefixAlignedGroups"):
+        num_old_reqs = len(self.request_ids)
+        self.request_ids.extend(groups.request_ids)
+        self.group_metadata.extend([(a, b + num_old_reqs, c + num_old_reqs)
+                                    for a,b,c in groups.group_metadata])
 
 class FreeKVCacheBlockQueue:
     """This class organizes a list of KVCacheBlock objects to a doubly linked
