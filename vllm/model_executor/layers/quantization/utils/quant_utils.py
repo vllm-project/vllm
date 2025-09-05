@@ -41,7 +41,7 @@ class GroupShape(_GroupShape):
         return self.row == 1 and self.col == -1
 
     def is_per_group(self) -> bool:
-        return self.row == 1 and self.col > 1
+        return self.row == 1 and self.col >= 1
 
 
 GroupShape.PER_TENSOR = GroupShape(-1, -1)
