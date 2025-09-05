@@ -300,7 +300,7 @@ As examples, we provide some ready-to-use quantized mixed precision model to sho
 - amd/Mixtral-8x7B-Instruct-v0.1-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8
 
 ### 2. inference the quantized mixed precision model in vLLM.
-There can be virutally free to load the mixed precision model and then inference in vllm, compared with common PTQ models. For example, one can evaluate a mixed-precision model using lm_eval CLI as same as evaluating a PTQ model, such as:
+User can load the mixed precision model for inference in the vLLM in a virutally free way, compared with common PTQ models. For example, one can evaluate a mixed-precision model using lm_eval CLI as same as evaluating a PTQ model, such as:
 
 ```bash
 lm_eval --model vllm \
