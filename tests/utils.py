@@ -18,6 +18,7 @@ from contextlib import ExitStack, contextmanager, suppress
 from multiprocessing import Process
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional, Union
+from unittest.mock import patch
 
 import cloudpickle
 import httpx
@@ -1141,3 +1142,11 @@ def get_attn_backend_list_based_on_platform() -> list[str]:
         return attn_backend_list
     else:
         raise ValueError("Unsupported platform")
+
+
+@contextmanager
+def override_cutlass_fp8_supported(value: bool):
+    with patch(
+            "vllm.model_executor.layers.quantization.utils.w8a8_utils.cutlass_fp8_supported",
+            return_value=value):
+        yield

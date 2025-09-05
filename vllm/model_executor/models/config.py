@@ -256,7 +256,7 @@ class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         decoding_config = vllm_config.decoding_config
         if decoding_config.reasoning_backend == "":
-            decoding_config.reasoning_backend = "GptOss"
+            decoding_config.reasoning_backend = "openai_gptoss"
 
         # Increase the max capture size from 512 to 1024 for performance.
         # NOTE(woosuk): This will increase the number of CUDA graphs
