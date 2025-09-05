@@ -262,8 +262,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                                self.hidden_size,
                                                dtype=self.dtype,
                                                numpy=False)
-        self.is_inputs_embeds = self._make_buffer(self.max_num_tokens,
-                                                  dtype=torch.bool)
+        self.is_token_ids = self._make_buffer(self.max_num_tokens,
+                                              dtype=torch.bool)
 
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
@@ -753,18 +753,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         prompt_embeds_cpu_tensor = \
             self.input_batch.prompt_embeds_cpu_tensor.view(
             -1, self.input_batch.prompt_embeds_cpu_tensor.shape[-1])
-        is_prompt_embeds = self.input_batch.is_token_ids.flatten().logical_not(
-        )
+        is_token_ids = self.input_batch.is_token_ids.flatten()
         torch.index_select(
             prompt_embeds_cpu_tensor,
             0,
             torch.from_numpy(token_indices),
             out=self.inputs_embeds.cpu[:total_num_scheduled_tokens])
         torch.index_select(
-            is_prompt_embeds,
+            is_token_ids,
             0,
             torch.from_numpy(token_indices),
-            out=self.is_inputs_embeds.cpu[:total_num_scheduled_tokens])
+            out=self.is_token_ids.cpu[:total_num_scheduled_tokens])
 
         self.input_batch.block_table.compute_slot_mapping(
             req_indices, positions_np)
@@ -792,7 +791,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Copy the tensors to the GPU.
         self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
         self.inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
-        self.is_inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
+        self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
 
         if self.uses_mrope:
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -1597,8 +1596,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # If a batch only has token ids, then including the embedding layer
             # in the CUDA graph will be more performant (like in the else case
             # below).
-            token_ids_idx = self.is_inputs_embeds.gpu[:num_scheduled_tokens] \
-                .logical_not() \
+            token_ids_idx = self.is_token_ids.gpu[:num_scheduled_tokens] \
                 .nonzero(as_tuple=False) \
                 .squeeze(1)
             # Some tokens ids may need to become embeds
