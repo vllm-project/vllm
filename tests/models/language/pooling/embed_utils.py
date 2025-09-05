@@ -34,8 +34,10 @@ def correctness_test_embed_models(hf_runner,
                                   model_info: EmbedModelInfo,
                                   example_prompts,
                                   vllm_extra_kwargs=None,
-                                  hf_model_callback=None):
-    pytest.skip("Debug only, ci prefers to use mteb test.")
+                                  hf_model_callback=None,
+                                  skip=None):
+    if skip or skip is None:
+        pytest.skip("Debug only, ci prefers to use mteb test.")
 
     # The example_prompts has ending "\n", for example:
     # "Write a short story about a robot that dreams for the first time.\n"
