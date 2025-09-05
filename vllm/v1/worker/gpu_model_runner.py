@@ -3146,8 +3146,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             get_kv_transfer_group().register_kv_caches(kv_caches)
 
         if self.dcp_world_size > 1:
-            assert self.attn_groups[0][
-                0].backend is FlashMLABackend, "DCP only support flashmla now."
+            assert self.attn_groups[0][0].backend is FlashMLABackend, (
+                "DCP only support flashmla now."
+                "For a mla backend want to enable DCP, it is mandatory that the"
+                "corresponding decode attn kernel return the softmax lse.")
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """
