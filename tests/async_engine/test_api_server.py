@@ -52,6 +52,7 @@ def api_server(distributed_executor_backend: str):
     uvicorn_process.terminate()
 
 
+@pytest.mark.timeout(300)
 @pytest.mark.parametrize("distributed_executor_backend", ["mp", "ray"])
 def test_api_server(api_server, distributed_executor_backend: str):
     """
