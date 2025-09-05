@@ -753,7 +753,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         prompt_embeds_cpu_tensor = \
             self.input_batch.prompt_embeds_cpu_tensor.view(
             -1, self.input_batch.prompt_embeds_cpu_tensor.shape[-1])
-        is_prompt_embeds = self.input_batch.is_prompt_embeds.flatten()
+        is_prompt_embeds = self.input_batch.is_token_ids.flatten().logical_not(
+        )
         torch.index_select(
             prompt_embeds_cpu_tensor,
             0,
@@ -1803,6 +1804,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             self.input_batch.token_ids_cpu[req_idx,
                                            start_idx:end_idx] = sampled_ids
+            self.input_batch.is_token_ids[req_idx, start_idx:end_idx] = True
             self.input_batch.num_tokens_no_spec[req_idx] = end_idx
             self.input_batch.num_tokens[req_idx] = end_idx
             req_id = req_ids[req_idx]
