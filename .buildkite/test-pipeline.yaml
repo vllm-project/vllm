@@ -54,14 +54,24 @@ steps:
   - tests/worker
   - tests/standalone_tests/lazy_imports.py
   commands:
-  - python3 standalone_tests/lazy_imports.py
   - pytest -v -s mq_llm_engine # MQLLMEngine
   - pytest -v -s async_engine # AsyncLLMEngine
+  - pytest -v -s multimodal --ignore=multimodal/test_cache.py --ignore=multimodal/test_hasher.py --ignore=multimodal/test_image.py --ignore=multimodal/test_inputs.py --ignore=multimodal/test_processing.py --ignore=multimodal/test_registry.py --ignore=multimodal/test_video.py --ignore=multimodal/utils.py
+  - pytest -v -s worker # Worker
+
+- label: Async Engine, Inputs, Utils, Worker Test (CPU)
+  source_file_dependencies:
+  - vllm/
+  - tests/test_inputs.py
+  - tests/test_outputs.py
+  - tests/utils_
+  - tests/standalone_tests/lazy_imports.py
+  no_gpu: true
+  commands:
+  - python3 standalone_tests/lazy_imports.py
   - pytest -v -s test_inputs.py
   - pytest -v -s test_outputs.py
-  - pytest -v -s multimodal --ignore=multimodal/test_cache.py --ignore=multimodal/test_hasher.py --ignore=multimodal/test_image.py --ignore=multimodal/test_inputs.py --ignore=multimodal/test_processing.py --ignore=multimodal/test_registry.py --ignore=multimodal/test_video.py --ignore=multimodal/utils.py
-  - pytest -v -s utils_ # Utils
-  - pytest -v -s worker # Worker
+  - pytest -v -s utils_/test_tensor_schema.py utils_/test_utils.py
 
 - label: Multimodal Test (CPU)
   source_file_dependencies:
@@ -247,12 +257,19 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/engine
+  commands:
+  - pytest -v -s engine
+
+- label: Engine Test (CPU)
+  source_file_dependencies:
+  - vllm/
   - tests/test_sequence
   - tests/test_config
   - tests/test_logger
   - tests/test_vllm_port
+  no_gpu: true
   commands:
-  - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py
+  - pytest -v -s test_sequence.py test_config.py test_logger.py test_vllm_port.py
 
 - label: Engine Test - Tokenization (CPU)
   source_file_dependencies:
@@ -271,7 +288,7 @@ steps:
     # TODO: accuracy does not match, whether setting
     # VLLM_USE_FLASHINFER_SAMPLER or not on H100.
     - pytest -v -s v1/e2e
-    - pytest -v -s v1/engine --ignore=v1/engine/test_engine_args.py --ignore=v1/engine/test_fast_incdec_prefix_err.py --ignore=v1/engine/test_output_processor.py --ignore=v1/engine/test_processor_multi_modal_uuids.py --ignore=v1/engine/utils.py
+    - pytest -v -s v1/engine --ignore=v1/engine/test_fast_incdec_prefix_err.py --ignore=v1/engine/test_output_processor.py --ignore=v1/engine/test_processor_multi_modal_uuids.py --ignore=v1/engine/utils.py
 
 - label: V1 Test entrypoints
   mirror_hardwares: [amdexperimental]
@@ -313,7 +330,7 @@ steps:
     - pytest -v -s v1/structured_output/test_utils.py v1/test_utils.py v1/test_serial_utils.py
     - pytest -v -s v1/kv_connector/unit/test_output_aggreagator.py v1/kv_connector/unit/test_remote_decode_lifecycle.py v1/kv_connector/unit/test_remote_prefill_lifecycle.py v1/kv_connector/unit/utils.py
     - pytest -v -s v1/test_metrics_reader.py
-    - pytest -v -s v1/engine/test_engine_args.py v1/engine/test_fast_incdec_prefix_err.py v1/engine/test_output_processor.py v1/engine/test_processor_multi_modal_uuids.py v1/engine/utils.py
+    - pytest -v -s v1/engine/test_fast_incdec_prefix_err.py v1/engine/test_output_processor.py v1/engine/test_processor_multi_modal_uuids.py v1/engine/utils.py
 
 
 - label: Examples Test # 25min
