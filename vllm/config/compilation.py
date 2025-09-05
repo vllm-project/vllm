@@ -299,6 +299,8 @@ class CompilationConfig:
     minor release, i.e. v0.11.0 or v1.0.0. Please use cudagraph_mode instead.
     """
 
+    use_inductor_graph_partition: bool = False
+
     pass_config: PassConfig = field(default_factory=PassConfig)
     """Custom inductor passes, see PassConfig for more details"""
 
@@ -552,7 +554,8 @@ class CompilationConfig:
         elif len(self.splitting_ops) == 0:
             logger.warning_once("Using piecewise compilation with empty "
                                 "splitting_ops.")
-            if self.cudagraph_mode == CUDAGraphMode.PIECEWISE:
+            if (self.cudagraph_mode == CUDAGraphMode.PIECEWISE
+                    and not self.use_inductor_graph_partition):
                 logger.warning_once(
                     "When compilation level is piecewise with empty "
                     "splitting_ops, PIECEWISE cudagraph_mode will be "
@@ -560,7 +563,7 @@ class CompilationConfig:
                     "using attention backends that support cudagraph or set "
                     "cudagraph_mode to NONE explicitly if encountering "
                     "any problems.")
-                # self.cudagraph_mode = CUDAGraphMode.FULL
+                self.cudagraph_mode = CUDAGraphMode.FULL
             self.splitting_ops = []
 
         if envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput":
