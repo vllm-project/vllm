@@ -122,6 +122,15 @@ See examples below:
     )
     ```
 
+??? code "Passing custom logits processor FQCN to `AsyncLLM` in Python"
+
+    ``` python
+    # Pass in FQCN
+    engine_args = AsyncEngineArgs(model="facebook/opt-125m",
+                                  logits_processors=["your.module.path:DummyLogitsProcessor"])
+    async_llm = AsyncLLM.from_engine_args(engine_args)
+    ```
+
 ??? code "Passing custom logits processor FQCN to vLLM server via CLI"
 
     ```bash
@@ -172,6 +181,11 @@ You can pass one or more custom logits processor class objects to the `LLM` cons
         model="facebook/opt-125m",
         logits_processors=[DummyLogitsProcessor],
     )
+
+    # Pass class object to AsyncLLM constructor
+    engine_args = AsyncEngineArgs(model="facebook/opt-125m",
+                                  logits_processors=[DummyLogitsProcessor])
+    async_llm = AsyncLLM.from_engine_args(engine_args)
     ```
 
 ## Invoking a Custom Logits Processor Against a Request
