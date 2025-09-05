@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, Optional
 
 # yapf: disable
 import vllm.envs as envs
@@ -10,6 +10,7 @@ from vllm.distributed.kv_transfer.kv_connector.base import (
     KVConnectorBase, KVConnectorBaseType)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.logger import init_logger
+from vllm.v1.kv_cache_interface import KVCacheConfig
 
 # yapf: enable
 
@@ -39,6 +40,7 @@ class KVConnectorFactory:
     def create_connector(
         cls,
         config: "VllmConfig",
+        kv_cache_config: Optional[KVCacheConfig],
         role: KVConnectorRole,
     ) -> KVConnectorBase:
         if not envs.VLLM_USE_V1:
