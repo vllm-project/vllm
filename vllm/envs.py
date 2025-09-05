@@ -432,6 +432,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LOGGING_LEVEL":
     lambda: os.getenv("VLLM_LOGGING_LEVEL", "INFO").upper(),
 
+    # this is used for configuring the default logging stream
+    "VLLM_LOGGING_STREAM":
+    lambda: os.getenv("VLLM_LOGGING_STREAM", "ext://sys.stdout"),
+
     # if set, VLLM_LOGGING_PREFIX will be prepended to all log messages
     "VLLM_LOGGING_PREFIX":
     lambda: os.getenv("VLLM_LOGGING_PREFIX", ""),
@@ -464,7 +468,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "ROCM_FLASH": use ROCmFlashAttention
     # - "FLASHINFER": use flashinfer
     # - "FLASHMLA": use FlashMLA
-    # - "FLASH_ATTN_MLA": use FlashAttention for MLA
     "VLLM_ATTENTION_BACKEND":
     lambda: os.getenv("VLLM_ATTENTION_BACKEND", None),
 
