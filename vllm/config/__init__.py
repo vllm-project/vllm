@@ -1770,9 +1770,18 @@ class ModelConfig:
         # you can use --hf-overrides '{"head_dtype": "model"}' to disable it.
         # - The generate model defaults to not using fp32 head,
         # you can use --hf-overrides '{"head_dtype": "float32"}' to enable it.
-        return _get_head_dtype(config=self.hf_config,
-                               dtype=self.dtype,
-                               runner_type=self.runner_type)
+        head_dtype = _get_head_dtype(config=self.hf_config,
+                                     dtype=self.dtype,
+                                     runner_type=self.runner_type)
+
+        if head_dtype not in current_platform.supported_dtypes:
+            logger.warning_once(
+                "The current platform does not support [%s] head dtype, "
+                "falling back to model dtype [%s].", head_dtype, self.dtype)
+            return self.dtype
+
+        logger.debug_once("head dtype: %s", head_dtype)
+        return head_dtype
 
     def get_and_verify_max_len(self, max_model_len: int):
         # Consider max_model_len in tokenizer_config only when
