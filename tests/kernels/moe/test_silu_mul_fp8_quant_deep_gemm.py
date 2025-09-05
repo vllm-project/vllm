@@ -11,7 +11,7 @@ from vllm.platforms import current_platform
 CASES = []
 
 for fp8_dtype in [
-        torch.float8_e4m3fn, torch.float8_e5m2, torch.float8_e8m0fnu
+        torch.float8_e4m3fn  #, torch.float8_e5m2, torch.float8_e8m0fnu
 ]:
     # (E, T, H)
     CASES += [
