@@ -1,5 +1,9 @@
 # Logits Processors
 
+!!! important
+    Some logits processors design changes are still in progress and the API may
+    change in the near future. We hope to stabilize this part of the API soon
+
 This document describes how the vLLM engine interacts with logits processors, and the programming model which vLLM supports for implementing logits processors.
 
 ## Logits Processors Background

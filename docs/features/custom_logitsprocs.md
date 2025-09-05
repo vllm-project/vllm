@@ -1,5 +1,9 @@
 # Custom Logits Processors
 
+!!! important
+    Some logits processors design changes are still in progress and the API may
+    change in the near future. We hope to stabilize this part of the API soon
+
 A "custom" logits processor is written by a user of vLLM and is loaded into vLLM at initialization without needing to modify or recompile the vLLM source code. It is the opposite of a built-in logits processor.
 
 This document shows how to write, load and use a custom logits processor.
