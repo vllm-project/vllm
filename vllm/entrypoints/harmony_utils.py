@@ -225,39 +225,8 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
 
     output_items: list[ResponseOutputItem] = []
     recipient = message.recipient
-    if recipient is None:
-        # When recipient is None, treat as regular assistant message content
-        for content in message.content:
-            if message.channel == "commentary":
-                # Commentary channel content should be treated as reasoning
-                reasoning_item = ResponseReasoningItem(
-                    id=f"rs_{random_uuid()}",
-                    summary=[],
-                    type="reasoning",
-                    content=[
-                        ResponseReasoningTextContent(text=content.text,
-                                                     type="reasoning_text")
-                    ],
-                    status=None,
-                )
-                output_items.append(reasoning_item)
-            else:
-                # Other channels with None recipient, treat as regular output
-                output_text = ResponseOutputText(
-                    text=content.text,
-                    annotations=[],
-                    type="output_text",
-                    logprobs=None,
-                )
-                text_item = ResponseOutputMessage(
-                    id=f"msg_{random_uuid()}",
-                    content=[output_text],
-                    role="assistant",
-                    status="completed",
-                    type="message",
-                )
-                output_items.append(text_item)
-    elif recipient is not None and recipient.startswith("browser."):
+
+    if recipient is not None and recipient.startswith("browser."):
         if len(message.content) != 1:
             raise ValueError("Invalid number of contents in browser message")
         content = message.content[0]
@@ -308,8 +277,8 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
                     id=f"ft_{random_id}",
                 )
                 output_items.append(response_item)
-        elif (recipient is not None and (recipient.startswith("python")
-                                         or recipient.startswith("browser"))):
+        elif recipient is not None and (recipient.startswith("python")
+                                        or recipient.startswith("browser")):
             # When recipient starts with "python"/"browser", treat as reasoning
             for content in message.content:
                 reasoning_item = ResponseReasoningItem(
@@ -324,19 +293,16 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
                 )
                 output_items.append(reasoning_item)
         else:
-            # For other recipients in commentary channel, treat as reasoning
+            # For commentary channel with no recipient, treat as preamble
+            # (user-visible). Per OpenAI Harmony docs, shown to end-user
             for content in message.content:
-                reasoning_item = ResponseReasoningItem(
-                    id=f"rs_{random_uuid()}",
-                    summary=[],
-                    type="reasoning",
-                    content=[
-                        ResponseReasoningTextContent(text=content.text,
-                                                     type="reasoning_text")
-                    ],
-                    status=None,
+                text_item = ResponseOutputText(
+                    text=content.text,
+                    annotations=[],
+                    type="output_text",
+                    logprobs=None,
                 )
-                output_items.append(reasoning_item)
+                output_items.append(text_item)
     elif message.channel == "final":
         contents = []
         for content in message.content:
@@ -356,7 +322,26 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
         )
         output_items.append(text_item)
     else:
-        raise ValueError(f"Unknown channel: {message.channel}")
+        # For unknown channels or channel=None with recipient=None,
+        # treat as regular output
+        if recipient is None:
+            for content in message.content:
+                output_text = ResponseOutputText(
+                    text=content.text,
+                    annotations=[],
+                    type="output_text",
+                    logprobs=None,
+                )
+                text_item = ResponseOutputMessage(
+                    id=f"msg_{random_uuid()}",
+                    content=[output_text],
+                    role="assistant",
+                    status="completed",
+                    type="message",
+                )
+                output_items.append(text_item)
+        else:
+            raise ValueError(f"Unknown channel: {message.channel}")
     return output_items
 
 
