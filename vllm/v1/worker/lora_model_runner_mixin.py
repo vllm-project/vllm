@@ -197,7 +197,15 @@ class LoRAModelRunnerMixin:
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         if not self.lora_manager:
-            raise RuntimeError("LoRA is not enabled.")
+            # Initialize the tokenformer manager if not already done
+            # This handles the case where tokenformer adapters are loaded dynamically
+            if hasattr(self, 'model') and hasattr(self, 'device'):
+                from vllm.tokenformer.tokenformer_model_manager import TokenformerModelManager
+                self.lora_manager = TokenformerModelManager(model=self.model,
+                                                           device=self.device)
+                logger.info("Initialized TokenformerModelManager for dynamic adapter loading")
+            else:
+                raise RuntimeError("LoRA is not enabled and cannot initialize adapter manager.")
         return self.lora_manager.add_adapter(lora_request)
 
     def remove_lora(self, lora_id: int) -> bool:
