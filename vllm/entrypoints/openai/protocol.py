@@ -1848,7 +1848,10 @@ class ResponseUsage(OpenAIBaseModel):
 class ResponsesResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"resp_{random_uuid()}")
     created_at: int = Field(default_factory=lambda: int(time.time()))
-    harmony_messages: Optional[list[Message]] = None
+    # These are populated when the env flag
+    # VLLM_RESPONSES_API_ENABLE_HARMONY_MESSAGES_OUTPUT is set
+    input_harmony_messages: Optional[list[Message]] = None
+    output_harmony_messages: Optional[list[Message]] = None
     # error: Optional[ResponseError] = None
     # incomplete_details: Optional[IncompleteDetails] = None
     instructions: Optional[str] = None
@@ -1884,14 +1887,16 @@ class ResponsesResponse(OpenAIBaseModel):
         created_time: int,
         output: list[ResponseOutputItem],
         status: ResponseStatus,
-        harmony_messages: Optional[list[Message]] = None,
+        input_harmony_messages: Optional[list[Message]] = None,
+        output_harmony_messages: Optional[list[Message]] = None,
         usage: Optional[ResponseUsage] = None,
     ) -> "ResponsesResponse":
         return cls(
             id=request.request_id,
             created_at=created_time,
             instructions=request.instructions,
-            harmony_messages=harmony_messages,
+            input_harmony_messages=input_harmony_messages,
+            output_harmony_messages=output_harmony_messages,
             metadata=request.metadata,
             model=model_name,
             output=output,

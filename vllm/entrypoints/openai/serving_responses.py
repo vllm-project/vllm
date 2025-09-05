@@ -439,13 +439,17 @@ class OpenAIServingResponses(OpenAIServing):
                 # TODO: Use a vllm-specific Validation Error
                 return self.create_error_response(str(e))
 
-        harmony_messages = None
+        output_harmony_messages = None
+        input_harmony_messages = None
         if self.use_harmony:
             assert isinstance(context, HarmonyContext)
             output = self._make_response_output_items_with_harmony(context)
             if envs.VLLM_GPT_OSS_USE_CONTAINER_TOOL:
                 # TODO: Handle leftover parser state?
-                harmony_messages = context.messages
+                input_harmony_messages = context.input_messages
+                # .messages contains input and output, so just get the output
+                output_harmony_messages = context.messages[
+                    len(input_harmony_messages):]
             # TODO: these are all 0 for now!
             num_prompt_tokens = context.num_prompt_tokens
             num_generated_tokens = context.num_output_tokens
@@ -483,7 +487,8 @@ class OpenAIServingResponses(OpenAIServing):
             model_name=model_name,
             created_time=created_time,
             output=output,
-            harmony_messages=harmony_messages,
+            input_harmony_messages=input_harmony_messages,
+            output_harmony_messages=output_harmony_messages,
             status="completed",
             usage=usage,
         )

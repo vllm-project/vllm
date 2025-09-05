@@ -28,6 +28,7 @@ def server(monkeypatch_module: pytest.MonkeyPatch):
 
     with monkeypatch_module.context() as m:
         m.setenv("VLLM_ENABLE_RESPONSES_API_STORE", "1")
+        m.setenv("VLLM_RESPONSES_API_ENABLE_HARMONY_MESSAGES_OUTPUT", "1")
         with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
             yield remote_server
 
@@ -48,6 +49,11 @@ async def test_basic(client: OpenAI, model_name: str):
     assert response is not None
     print("response: ", response)
     assert response.status == "completed"
+    # For now, just validate that input and output harmony messages exist
+    # To validate that the env flag enables them to be passed through properly
+    # Actual unit tests will need to be implemented on a model specific basis
+    assert len(response.input_harmony_messages) != 0
+    assert len(response.output_harmony_messages) != 0
 
 
 @pytest.mark.asyncio
