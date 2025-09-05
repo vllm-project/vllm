@@ -2120,9 +2120,9 @@ class SpeculativeConfig:
             if self.num_speculative_tokens is None:
                 self.num_speculative_tokens = max_num_speculative_tokens
             else:
-                assert self.num_speculative_tokens < max_num_speculative_tokens, (
+                assert self.num_speculative_tokens <= max_num_speculative_tokens, (
                     "num_speculative_tokens should be None or must be less than or equal to the "
-                    "max value in num_speculative_tokens_per_method.") 
+                    "max value in num_speculative_tokens_per_method.")
 
         # Automatically configure the method for ngram when "model" is used
         # instead of "method"
