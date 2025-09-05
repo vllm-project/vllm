@@ -83,7 +83,7 @@ The pseudocode below shows the process by which the vLLM persistent batch notifi
 
 ### Applying Logits Processors to the Model Output Logits
 
-After updating persistent batch state, the vLLM model runner performs model inference to obtain logits. Then, the model runner invokes the sampler against the logits. In turn, part of the sampler's operation is to invoke the logits processors' `apply()` methods against the model output logit processors. This process is shown in the pseudocode below.
+After updating persistent batch state, the vLLM model runner performs model inference to obtain logits. Then, the model runner invokes the sampler against the logits. In turn, part of the sampler's operation is to invoke the logits processors' `apply()` methods against the model output logit processors, yielding transformed logits (the `apply()` methods may modify the logits in-place or out-of-place, although in-place is more memory-efficient). This process is shown in the pseudocode below.
 
 Note that the sampler will access the logits processors via `SamplingMetadata.logitsprocs`. When the vLLM engine constructs `SamplingMetadata` (not shown in the code below), the reference to the list of logits processors is passed from the persistent batch data structure to `SamplingMetadata`.
 
@@ -255,12 +255,16 @@ The previous sections alluded to the interfaces which vLLM logits processors mus
 
 A vLLM logits processor must subclass `LogitsProcessor` and define (at minimum) the following methods:
 
-* `__init__()`
+* `__init__(self, vllm_config: VllmConfig, device: torch.device, is_pin_memory: bool)`
+    * `vllm_config`: engine configuration data structure
+    * `device`: hardware accelerator device info
+    * `is_pin_memory`: flag indicating whether pin memory is available to support logits processor implementation
 
 * `apply(self, logits: torch.Tensor) -> torch.Tensor`:
     * Consume a `(num_requests) x (vocab_size)` logits tensor (`logits`)
     * Apply logits processor transformation at batch granularity
     * Return a transformed `(num_requests) x (vocab_size)` logits tensor
+    * You can modify the input logits processors in-place or out-of-place; in-place is more memory-efficient
 
 * `is_argmax_invariant(self) -> bool`:
     * Return `True` if the logits processor is argmax invariant (never changes what is the highest-logit-value token ID for a given request), `False` if the logits processor may modify argmax
@@ -269,13 +273,13 @@ A vLLM logits processor must subclass `LogitsProcessor` and define (at minimum) 
 * `update_state(self, batch_update: Optional["BatchUpdate"]) -> None`:
     * Consume a `BatchUpdate` data structure representing persistent batch state changes at the beginning of the current engine step
     * Use the `BatchUpdate` members to update logits processor internal state
-    * **Note:** batch update data structure may be `None`, signaling no state-change
+    * **Note:** batch update data structure may be `None`, signaling no change to the batch constituents. In this case, the LogitsProcessor might still want to update its state based on the updated `output_token_ids` lists that it could have retained when they were added.
 
 ### `BatchUpdate` data structure
 
-The `BatchUpdate` abstraction models the persistent batch as a list of requests, supporting the following operations to change batch state:
+The `BatchUpdate` abstraction models the persistent batch as a list of requests, supporting the following operations to change batch state (note that the order in which the operations are mentioned below reflects the order in which they should be processed in `update_state()`):
 
-* **Add:** add (or replace existing request with) a new request at index `i`
+* **Add:** add (or replace existing request with) a new request at index `i`. If a request is replaced, its associated state should be discarded.
 
     * An Add is represented in `Batchupdate.added` as a tuple of
 
@@ -283,7 +287,7 @@ The `BatchUpdate` abstraction models the persistent batch as a list of requests,
         (index, new request SamplingParams, prompt token ids, output token ids)
         ```
 
-    * `prompt token ids` and `output token ids` are references to the request's prompt token ids and output token ids lists, respectively. Note that the output token ids list grows with each engine step, and this growth is visible to the logits processor because output token ids are passed by reference
+    * `prompt token ids` and `output token ids` are references to the request's prompt token ids and output token ids lists, respectively. Note that the output token ids list grows with each engine step, and this growth is visible to the logits processor because output token ids are passed by reference. **This is important for LogitsProcessors that take into account the tokens generated so far**.
 
     * The implementation of the particular logits processor subclass determines whether or how the fields in the added request tuple are digested into an internal representation. For example, a logits processor that does not utilize prompt or output token ids may only need to utilize `index` and `SamplingParams` and discard the other tuple fields
 
@@ -397,7 +401,9 @@ Logits processor `update_state()` implementations should assume the following mo
 
 Notes:
 
-* The index argument for Add and Remove operations refers to the index *at the time the Add or Remove occurred*, i.e. before any Move operations
+* A logits processor `update_state()` method must process batch update operations in the following order: adds, removes, moves
+
+* The index argument for Add operations refers to the index *at the time the Add occurred*, i.e. before any Move operations
     * Example: if a request is Added at index 5 and then swapped with index 3, the Add operation in `BatchUpdate.added` will be associated with index 5 not 3
     * In other words Move operations can be assumed to be applied after Adds and Removes
 
@@ -516,7 +522,7 @@ BatchUpdate instance
 
 ### Built-In Logits Processors
 
-Built-in logits processors are always loaded when the vLLM engine starts. See the existing vLLM built-in logits processors in `vllm/v1/sample/logits_processor/builtin.py` for examples of how to write a new built-in vLLM logits processor. It makes sense to write a PR to introduce a new logits processor as a built-in if it is likely to be useful to a wide audience. vLLM currently supports the following built-in logits processors based on the programming model described above:
+Built-in logits processors are always loaded when the vLLM engine starts. See the existing vLLM built-in logits processors in `vllm/v1/sample/logits_processor/builtin.py` for examples of how to write a new built-in vLLM logits processor. It makes sense to write a PR to introduce a new logits processor as a built-in if it is likely to be useful to a wide audience. vLLM currently employs the following built-in logits processors based on the programming model described above:
 
 * Min-P
 
@@ -526,7 +532,7 @@ Built-in logits processors are always loaded when the vLLM engine starts. See th
 
 Review these logits processor implementations for guidance on writing built-in logits processors.
 
-Additionally, the following logits processors or logits-processor-like functionalities are hard-coded into the sampler for efficiency and do not utilize the programming model described above, but may be updated to use the aforemented logits processor programming model in the future:
+Additionally, the following logits-processor-like functionalities are hard-coded into the sampler and do not yet utilize the programming model described above. Most of them will be refactored to use the aforemented logits processor programming model.
 
 * Allowed token IDs
 

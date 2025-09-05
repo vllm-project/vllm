@@ -8,7 +8,7 @@ Review the [logits processor design documentation](../design/logits_processors.m
 
 ## Writing a Custom Logits Processor
 
-Custom logits processors must be subclasses of `vllm.v1.sample.logits_processor.LogitsProcessor`. Unlike built-in logits processors, custom logits processors may require configuration arguments that are not hard-coded into `SamplingParams` or the vLLM server REST API. To solve this problem, custom logits processors may leverage vLLM [custom arguments](./custom_arguments.md) support to receive configuration settings from the user (although your are also free to design a custom logits processor which utilizes the pre-existing fields in `SamplingParams`.)
+Custom logits processors must be subclasses of `vllm.v1.sample.logits_processor.LogitsProcessor`. Unlike built-in logits processors, custom logits processors may require configuration arguments that are not hard-coded into `SamplingParams` or the vLLM server REST API. To solve this problem, custom logits processors may leverage vLLM [custom arguments](./custom_arguments.md) support to receive configuration settings from the user (although you are also free to design a custom logits processor which utilizes the pre-existing fields in `SamplingParams`.)
 
 In vLLM logits processors operate at batch granularity. The contrived example below implements a custom logits processor which consumes a `(num\_requests) \times (vocab\_size)` logits tensor and masks out all tokens except for one (`target_token`) with `float(-inf)`. The logits processor is disabled for any request that does not specify `target_token`. To determine whether the logits processor is enabled and which token to leave unmasked, the logits processor checks `SamplingParams.extra_args` for a `target_token` custom argument associated with each request:
 
@@ -44,6 +44,8 @@ In vLLM logits processors operate at batch granularity. The contrived example be
                 if params.extra_args and (target_token :=
                                         params.extra_args.get("target_token")):
                     self.req_info[index] = target_token
+                else: 
+                    self.req_info.pop(index, None)
 
             if self.req_info:
                 # Process removed requests.
