@@ -174,21 +174,22 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     // strides (in elements)
     Idx_t stride_i_e, Idx_t stride_i_t, Idx_t stride_i_h, Idx_t stride_yq_e,
     Idx_t stride_yq_t, Idx_t stride_yq_h, Idx_t stride_ys_e, Idx_t stride_ys_t,
-    Idx_t stride_ys_g, Idx_t stride_counts_e,
+    Idx_t stride_ys_g, Idx_t stride_counts_e) {
+  // We use ushort(448 bf16) = 50144 and ushort(-448 bf16) = 17376
+  // since we can't constexpr cast to bf16. Thankfully, we can
+  // easily set the raw ushort bits.
+  static constexpr __nv_bfloat16 fp8_min(__nv_bfloat16_raw{.x = 50144});
+  static constexpr __nv_bfloat16 fp8_max(__nv_bfloat16_raw{.x = 17376});
 
-    // quant params
-    float fp8_min_fp32, float fp8_max_fp32) {
-  __nv_bfloat16 fp8_min = fp8_min_fp32;
-  __nv_bfloat16 fp8_max = fp8_max_fp32;
-  static constexpr float EPS = 1e-10f;
+  // Same for EPS = 1e-10
+  static constexpr __nv_bfloat16 EPS = (__nv_bfloat16_raw{.x = 11996});
   static constexpr uint32_t S_NUM_128 =
-      2 * (GROUP_SIZE / 8) * NUM_WARPS * NUM_STAGES;
+      2u * (GROUP_SIZE / 8u) * NUM_WARPS * NUM_STAGES;
   static constexpr auto THREAD_COUNT = NUM_WARPS * WARP_SIZE;
   static constexpr int HALF_THREAD_COUNT = THREAD_COUNT / 2;
   static constexpr uint32_t S_NUM_64 = S_NUM_128 * 2;
   static constexpr uint32_t S_NUM_32 = S_NUM_64 * 2;
   __shared__ __int128_t __align__(16) s_buff_128[S_NUM_128];
-  __shared__ Idx_t s_counts[1];
 
   const Idx_t tid = threadIdx.x;
   const Idx_t warp_id = tid / WARP_SIZE;
@@ -201,14 +202,9 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   Idx_t e = pid / G;
   Idx_t g = pid % G;
 
-  if (!tid) {
-    s_counts[0] = counts[e * stride_counts_e];
-  }
-
   const Idx_t stride_i_t_128 = stride_i_t / 8u;
 
-  __syncthreads();
-  const Idx_t n_tokens = s_counts[0];
+  const Idx_t n_tokens = counts[e * stride_counts_e];
 
   if (!n_tokens) {
     return;  // Exit ASAP.
@@ -432,42 +428,32 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
   if (use_ue8m0) {                                                             \
     vllm::silu_mul_fp8_quant_deep_gemm_kernel<__nv_bfloat16, NUM_WARPS, Idx_t, \
                                               NUM_PARALLEL_TOKENS, true>       \
-        <<<grid, block>>>(                                                     \
-            reinterpret_cast<__nv_bfloat16*>(input.data_ptr()),                \
-            (__nv_fp8_e4m3*)y_q.data_ptr(), y_s.data_ptr<float>(),             \
-            reinterpret_cast<uint32_t*>(counts.data_ptr<int>()), H, G,         \
-            stride_i_e, stride_i_t, stride_i_h, stride_yq_e, stride_yq_t,      \
-            stride_yq_h, stride_ys_e, stride_ys_t, stride_ys_g,                \
-            stride_counts_e, static_cast<float>(fp8_min),                      \
-            static_cast<float>(fp8_max));                                      \
+        <<<grid, block>>>(reinterpret_cast<__nv_bfloat16*>(input.data_ptr()),  \
+                          (__nv_fp8_e4m3*)y_q.data_ptr(),                      \
+                          y_s.data_ptr<float>(),                               \
+                          reinterpret_cast<uint32_t*>(counts.data_ptr<int>()), \
+                          H, G, stride_i_e, stride_i_t, stride_i_h,            \
+                          stride_yq_e, stride_yq_t, stride_yq_h, stride_ys_e,  \
+                          stride_ys_t, stride_ys_g, stride_counts_e);          \
   } else {                                                                     \
     vllm::silu_mul_fp8_quant_deep_gemm_kernel<__nv_bfloat16, NUM_WARPS, Idx_t, \
                                               NUM_PARALLEL_TOKENS, false>      \
-        <<<grid, block>>>(                                                     \
-            reinterpret_cast<__nv_bfloat16*>(input.data_ptr()),                \
-            (__nv_fp8_e4m3*)y_q.data_ptr(), y_s.data_ptr<float>(),             \
-            reinterpret_cast<uint32_t*>(counts.data_ptr<int>()), H, G,         \
-            stride_i_e, stride_i_t, stride_i_h, stride_yq_e, stride_yq_t,      \
-            stride_yq_h, stride_ys_e, stride_ys_t, stride_ys_g,                \
-            stride_counts_e, static_cast<float>(fp8_min),                      \
-            static_cast<float>(fp8_max));                                      \
+        <<<grid, block>>>(reinterpret_cast<__nv_bfloat16*>(input.data_ptr()),  \
+                          (__nv_fp8_e4m3*)y_q.data_ptr(),                      \
+                          y_s.data_ptr<float>(),                               \
+                          reinterpret_cast<uint32_t*>(counts.data_ptr<int>()), \
+                          H, G, stride_i_e, stride_i_t, stride_i_h,            \
+                          stride_yq_e, stride_yq_t, stride_yq_h, stride_ys_e,  \
+                          stride_ys_t, stride_ys_g, stride_counts_e);          \
   }
 
 #define KERNEL_CALL_H                                       \
-  if (H == 3 * GROUP_SIZE) {                                \
-    static constexpr int NUM_WARPS = 3;                     \
-    populate_launch_params(NUM_WARPS, NUM_PARALLEL_TOKENS); \
-    KERNEL_FN                                               \
-  } else if (H == 2 * GROUP_SIZE) {                         \
-    static constexpr int NUM_WARPS = 2;                     \
-    populate_launch_params(NUM_WARPS, NUM_PARALLEL_TOKENS); \
-    KERNEL_FN                                               \
-  } else if (H == GROUP_SIZE) {                             \
-    static constexpr int NUM_WARPS = 1;                     \
+  if (H % (4 * GROUP_SIZE) == 0) {                          \
+    static constexpr int NUM_WARPS = 4;                     \
     populate_launch_params(NUM_WARPS, NUM_PARALLEL_TOKENS); \
     KERNEL_FN                                               \
   } else {                                                  \
-    static constexpr int NUM_WARPS = 4;                     \
+    static constexpr int NUM_WARPS = 1;                     \
     populate_launch_params(NUM_WARPS, NUM_PARALLEL_TOKENS); \
     KERNEL_FN                                               \
   }
