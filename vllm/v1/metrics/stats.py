@@ -94,9 +94,11 @@ class IterationStats:
     MAX_HISTORY_LEN: int = 100
 
     """Minimum number of computed_prefill_tokens for being valid."""
-    MIN_COMPUTED_PREFILL_TOKENS: int = 20
+    DEFAULT_MIN_COMP_PREFILL_TOKENS: int = 10
 
-    def __init__(self, prefill_tps_history: Optional[Deque] = None):
+    def __init__(self,
+                 prefill_comp_speed_history: Optional[Deque] = None,
+                 min_comp_prefill_tokens: int = self.DEFAULT_MIN_COMP_PREFILL_TOKENS):
         self.iteration_timestamp = time.time()
         self.num_generation_tokens = 0
         self.num_prompt_tokens = 0
@@ -108,7 +110,8 @@ class IterationStats:
         self.time_per_output_tokens_iter: list[float] = []
         self.waiting_lora_adapters: dict[str, int] = {}
         self.running_lora_adapters: dict[str, int] = {}
-        self.prefill_tps_history = prefill_tps_history
+        self.prefill_comp_speed_history = prefill_comp_speed_history
+        self.min_comp_prefill_tokens = min_comp_prefill_tokens
 
     def _time_since(self, start: float) -> float:
         """Calculate an interval relative to this iteration's timestamp."""
@@ -184,10 +187,15 @@ class IterationStats:
         inference_time = req_stats.last_token_ts - req_stats.scheduled_ts
 
         computed_prefill_tokens = num_prompt_tokens - num_cached_tokens
-        if (self.prefill_tps_history is not None and
+        if (self.prefill_comp_speed_history is not None and
                 prefill_time > 0 and
-                computed_prefill_tokens >= self.MIN_COMPUTED_PREFILL_TOKENS):
-            self.prefill_tps_history.append(computed_prefill_tokens / prefill_time)
+                computed_prefill_tokens >= self.min_comp_prefill_tokens):
+            # find computation amount by trapezoid area formula
+            top = num_cached_tokens
+            bottom = num_prompt_tokens - 1
+            height = num_prompt_tokens - num_cached_tokens
+            amount = ((top + bottom) * height) / 2
+            self.prefill_comp_speed_history.append(amount / prefill_time)
 
         finished_req = \
             FinishedRequestStats(finish_reason=finish_reason,
@@ -201,11 +209,11 @@ class IterationStats:
                                  decode_time=decode_time)
         self.finished_requests.append(finished_req)
 
-    def get_avg_prefill_tps(self):
-        if (not self.prefill_tps_history or
-                len(self.prefill_tps_history) < self.MIN_HISTORY_LEN):
+    def get_avg_prefill_comp_speed(self):
+        if (not self.prefill_comp_speed_history or
+                len(self.prefill_comp_speed_history) < self.MIN_HISTORY_LEN):
             return 0
-        return sum(self.prefill_tps_history) / len(self.prefill_tps_history)
+        return sum(self.prefill_comp_speed_history) / len(self.prefill_comp_speed_history)
 
 class LoRARequestStates:
     """Per-LoRA request state stats."""
