@@ -85,6 +85,7 @@ class Attention(nn.Module, AttentionLayerBase):
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
         attn_backend: Optional[type[AttentionBackend]] = None,
+        rotary_emb: Optional[nn.Module] = None,
         **extra_impl_args,
     ) -> None:
         """
@@ -190,6 +191,7 @@ class Attention(nn.Module, AttentionLayerBase):
                              alibi_slopes, sliding_window, kv_cache_dtype,
                              logits_soft_cap, attn_type,
                              kv_sharing_target_layer_name, **extra_impl_args)
+        self.impl.rotary_emb = rotary_emb
         self.backend = backend_name_to_enum(self.attn_backend.get_name())
         self.dtype = dtype
 
@@ -237,8 +239,6 @@ class Attention(nn.Module, AttentionLayerBase):
         # definition specify the output tensor shape.
         output_shape: Optional[torch.Size] = None,
         positions: torch.Tensor = None,
-        cos_sin_cache: torch.Tensor = None,
-        is_neox: bool = False,
     ) -> torch.Tensor:
         """
         The KV cache is stored inside this class and is accessed via
@@ -293,12 +293,8 @@ class Attention(nn.Module, AttentionLayerBase):
                                 attn_metadata,
                                 output=output)
             else:
-                if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE:
-                    torch.ops.vllm.unified_attention_with_output(
-                        query, key, value, output, self.layer_name, None, positions, cos_sin_cache, is_neox)
-                else:
-                    torch.ops.vllm.unified_attention_with_output(
-                        query, key, value, output, self.layer_name)
+                torch.ops.vllm.unified_attention_with_output(
+                    query, key, value, output, self.layer_name, None, positions)
             return output.view(-1, hidden_size)
         else:
             if self.use_direct_call:
@@ -516,8 +512,6 @@ def unified_attention_with_output(
     layer_name: str,
     output_scale: Optional[torch.Tensor] = None,
     positions:  Optional[torch.Tensor] = None,
-    cos_sin_cache: Optional[torch.Tensor] = None,
-    is_neox: bool = False,
     output_block_scale: Optional[torch.Tensor] = None,
 ) -> None:
     wait_for_kv_layer_from_connector(layer_name)
@@ -555,8 +549,7 @@ def unified_attention_with_output(
                         kv_cache,
                         attn_metadata,
                         output=output,
-                        output_scale=output_scale,
-                        output_block_scale=output_block_scale)
+                        output_scale=output_scale)
 
     maybe_save_kv_layer_to_connector(layer_name, kv_cache)
 
@@ -571,7 +564,6 @@ def unified_attention_with_output_fake(
     positions:  Optional[torch.Tensor] = None,
     cos_sin_cache: Optional[torch.Tensor] = None,
     is_neox: bool = False,
-    output_block_scale: Optional[torch.Tensor] = None,
 ) -> None:
     return
 

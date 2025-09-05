@@ -29,6 +29,7 @@ logger = init_logger(__name__)
 
 if current_platform.is_rocm():
     VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE = envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE
+    VLLM_USE_AITER_TRITON_ROPE = envs.VLLM_ROCM_USE_AITER and envs.VLLM_USE_AITER_TRITON_ROPE
     if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE:
         from aiter.ops.triton.fused_kv_cache import (
             fused_qk_rope_reshape_and_cache)
@@ -338,8 +339,13 @@ class TritonAttentionImpl(AttentionImpl):
             key_cache, value_cache = kv_cache.unbind(0)
 
         if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE:
-            assert self.kv_sharing_target_layer_name is None, "self.kv_sharing_target_layer_name error"
-            cos, sin = cos_sin_cache.chunk(2, dim=-1)
+            assert hasattr(self, "rotary_emb"), "rotary_emb object is required"
+
+        if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE and query.shape[0] <= 256:
+            assert self.kv_sharing_target_layer_name is None, "self.kv_sharing_target_layer_name error"  
+            cos_sin_cache=self.rotary_emb.cos_sin_cache
+            is_neox=self.rotary_emb.is_neox_style
+            cos, sin = cos_sin_cache.chunk(2, dim = -1)
             is_fp8_kv_cache = self.kv_cache_dtype.startswith("fp8")
             if is_fp8_kv_cache:
                 key_cache_og_dtype = key_cache.dtype
@@ -370,6 +376,11 @@ class TritonAttentionImpl(AttentionImpl):
                 key_cache = key_cache.view(key_cache_og_dtype)
                 value_cache = value_cache.view(value_cache_og_dtype)
         else:
+            if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE:
+                if VLLM_USE_AITER_TRITON_ROPE:
+                    query, key = self.rotary_emb.forward_cuda(positions, query, key)
+                else:
+                    query, key = self.rotary_emb(positions, query, key)
             if self.kv_sharing_target_layer_name is None:
                 # Reshape the input keys and values and store them in the cache.
                 # Skip this if sharing KV cache with an earlier attention layer.
