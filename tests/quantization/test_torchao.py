@@ -75,5 +75,20 @@ def test_qwenvl_int8wo_model_loading_with_params(vllm_runner):
         print(output)
 
 
+@pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
+def test_phi4mini_int4wo_awq_model_loading_with_params(vllm_runner):
+    torch._dynamo.reset()
+    model_name = "torchao-testing/Qwen3-4B-int4wo-awq-0.13-dev"
+    with vllm_runner(model_name=model_name,
+                     quantization="torchao",
+                     dtype="bfloat16",
+                     pt_load_map_location="cuda:0") as llm:
+        output = llm.generate_greedy(["The capital of France is"],
+                                     max_tokens=32)
+
+        assert output
+        print(output)
+
+
 if __name__ == "__main__":
     pytest.main([__file__])
