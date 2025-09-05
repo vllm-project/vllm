@@ -295,6 +295,8 @@ class Worker(WorkerBase):
         with context:
             self.model_runner.initialize_kv_cache(kv_cache_config)
 
+        # The worker connector needs to know `kv_cache_config` to know
+        # how to map the layer to its corresponding KV cache group.
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
 
     def compile_or_warm_up_model(self) -> None:
