@@ -8,6 +8,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
                                                           KVConnectorRole)
+from vllm.v1.kv_cache_interface import KVCacheConfig
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -47,7 +48,10 @@ def is_v1_kv_transfer_group(
     return isinstance(connector, KVConnectorBase_V1)
 
 
-def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
+def ensure_kv_transfer_initialized(
+    vllm_config: "VllmConfig",
+    kv_cache_config: KVCacheConfig,
+) -> None:
     """
     Initialize KV cache transfer parallel group.
     """
@@ -62,19 +66,7 @@ def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
         if envs.VLLM_USE_V1:
             _KV_CONNECTOR_AGENT = KVConnectorFactory.create_connector(
                 config=vllm_config,
-                # NOTE(Kuntai):
-                # For worker connector, we don't pass kv_cache_config.
-                # This design is intentional, as the kv_cache_config
-                # differs between scheduler process and worker process
-                # and the scheduler process's kv_cache_config is more
-                # related to KV cache transfer.
-                # For example, the worker process's kv_cache_config
-                # may contain kv_cache_group for KV cache sharing
-                # layer and attention-free layers, both are not
-                # related to KV cache transfer.
-                # Thus, we ONLY send kv_cache_config to scheduler
-                # connector, and for worker we simply pass None.
-                kv_cache_config=None,
+                kv_cache_config=kv_cache_config,
                 role=KVConnectorRole.WORKER)
         else:
             raise ValueError("V0 is no longer supported")

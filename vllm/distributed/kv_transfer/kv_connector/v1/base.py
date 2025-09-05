@@ -80,7 +80,7 @@ class KVConnectorBase_V1(ABC):
     def __init__(
         self,
         vllm_config: "VllmConfig",
-        kv_cache_config: Optional["KVCacheConfig"],
+        kv_cache_config: KVCacheConfig,
         role: KVConnectorRole,
     ):
         logger.warning(

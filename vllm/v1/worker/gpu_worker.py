@@ -295,7 +295,7 @@ class Worker(WorkerBase):
         with context:
             self.model_runner.initialize_kv_cache(kv_cache_config)
 
-        ensure_kv_transfer_initialized(self.vllm_config)
+        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
 
     def compile_or_warm_up_model(self) -> None:
         # warm up sizes that are not in cudagraph capture sizes,

@@ -3,7 +3,7 @@
 import hashlib
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import safetensors
 import torch
@@ -81,8 +81,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
     # - to remove the overhead, need to add some "mask" in the ReqMeta class
 
     def __init__(self, vllm_config: "VllmConfig",
-                 kv_cache_config: Optional["KVCacheConfig"],
-                 role: KVConnectorRole):
+                 kv_cache_config: KVCacheConfig, role: KVConnectorRole):
         super().__init__(vllm_config=vllm_config, role=role)
         self._block_size = vllm_config.cache_config.block_size
         self._requests_need_load: dict[str, Request] = {}

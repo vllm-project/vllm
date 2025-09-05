@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING, Callable
 
 # yapf: disable
 import vllm.envs as envs
@@ -40,7 +40,7 @@ class KVConnectorFactory:
     def create_connector(
         cls,
         config: "VllmConfig",
-        kv_cache_config: Optional[KVCacheConfig],
+        kv_cache_config: KVCacheConfig,
         role: KVConnectorRole,
     ) -> KVConnectorBase:
         if not envs.VLLM_USE_V1:
@@ -59,7 +59,7 @@ class KVConnectorFactory:
         # - Co-locate with worker process
         # - Should only be used inside the forward context & attention layer
         # We build separately to enforce strict separation
-        return connector_cls(config, role)
+        return connector_cls(config, kv_cache_config, role)
 
     @classmethod
     def get_connector_class(

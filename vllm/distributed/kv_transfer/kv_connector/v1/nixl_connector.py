@@ -122,8 +122,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
 
 class NixlConnector(KVConnectorBase_V1):
 
-    def __init__(self, vllm_config: VllmConfig,
-                 kv_cache_config: Optional["KVCacheConfig"],
+    def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig,
                  role: KVConnectorRole):
         assert vllm_config.kv_transfer_config is not None
         assert vllm_config.kv_transfer_config.engine_id is not None
