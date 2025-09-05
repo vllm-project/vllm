@@ -648,6 +648,15 @@ class MambaManager(SingleTypeKVCacheManager):
             [] for _ in range(len(kv_cache_group_ids)))
         return computed_blocks
 
+    def remove_skipped_and_allocate_necessary(
+        self,
+        request_id: str,
+        num_computed_tokens: int,
+        num_extra_tokens_from_connector: int = 0,
+    ) -> list[KVCacheBlock]:
+        return self.allocate_new_blocks(
+            request_id, num_computed_tokens + num_extra_tokens_from_connector)
+
     def get_num_common_prefix_blocks(self, request_id: str,
                                      num_running_requests: int) -> int:
         return 0
@@ -658,15 +667,6 @@ class MambaManager(SingleTypeKVCacheManager):
         assert len(self.req_to_blocks[request_id]) == 1, (
             "MambaManager should only allocate 1 block for each request.")
         return new_blocks
-
-    def remove_skipped_and_allocate_necessary(
-        self,
-        request_id: str,
-        num_computed_tokens: int,
-        num_extra_tokens_from_connector: int = 0,
-    ) -> list[KVCacheBlock]:
-        return self.allocate_new_blocks(
-            request_id, num_computed_tokens + num_extra_tokens_from_connector)
 
     def get_num_blocks_to_allocate(
         self,
