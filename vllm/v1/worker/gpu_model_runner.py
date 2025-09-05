@@ -23,8 +23,6 @@ from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
-from vllm.v1.worker.ubatch_utils import UbatchSlice, UBatchSlices
-from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.config import (CompilationLevel, CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config, update_config)
 from vllm.distributed.eplb.eplb_state import EplbState
@@ -82,9 +80,12 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import (
     KVConnectorModelRunnerMixin, KVConnectorOutput)
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from vllm.v1.worker.ubatch_utils import (UbatchSlice, UBatchSlices,
+                                         create_slices)
 
 from .utils import (AttentionGroup, MultiModalBudget,
                     add_kv_sharing_layers_to_kv_cache_groups, bind_kv_cache,
@@ -2494,12 +2495,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # We only support decode-only cudagraphs
             assert num_reqs == num_tokens
             assert num_tokens % 2 == 0
-            ubatch_slices = [
-                UbatchSlice(slice(0, num_reqs // 2), slice(0,
-                                                           num_tokens // 2)),
-                UbatchSlice(slice(num_reqs // 2, num_reqs),
-                            slice(num_tokens // 2, num_tokens))
-            ]
+
+            num_tokens_per_ubatch = num_tokens // 2
+            dp_size = self.vllm_config.parallel_config.data_parallel_size
+            num_tokens_across_dp = torch.tensor([num_tokens_per_ubatch] *
+                                                dp_size,
+                                                device="cpu",
+                                                dtype=torch.int32)
+            ubatch_slices = create_slices(
+                self.query_start_loc.np[:num_reqs + 1], num_tokens_per_ubatch,
+                num_tokens)
 
         attn_metadata: Optional[PerLayerAttnMetadata] = None
 

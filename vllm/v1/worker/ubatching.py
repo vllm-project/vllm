@@ -12,6 +12,7 @@ from vllm.utils import current_stream
 _THREAD_ID_TO_CONTEXT: dict = {}
 _CURRENT_CONTEXTS: list[Optional['UBatchContext']] = [None, None]
 
+
 class UBatchContext:
     """
     Context manager for micro-batching synchronization using threading events.
@@ -110,7 +111,7 @@ class UBatchContext:
         self._signal_compute_done()
         self.update_stream(self.comm_stream)
         self._wait_comm_done()
-    
+
     def maybe_run_recv_hook(self):
         if self.recv_hook is not None:
             self.recv_hook()
@@ -121,7 +122,7 @@ class UBatchContext:
         self._cpu_yield()
         if self.current_stream == current_stream():
             self.update_stream(self.current_stream)
-    
+
     def yield_and_switch_from_compute_to_comm(self):
         assert current_stream() == self.compute_stream
         self._signal_compute_done()
@@ -142,30 +143,42 @@ class UBatchContext:
 def dbo_enabled() -> bool:
     return len(_THREAD_ID_TO_CONTEXT) > 0
 
+
 def dbo_current_ubatch_id() -> int:
     if len(_THREAD_ID_TO_CONTEXT) == 0:
         return 0
     return _THREAD_ID_TO_CONTEXT[threading.get_ident()]
 
+
 def _register_ubatch_function(func, context_offset):
+
     def wrapper(*args, **kwargs):
         if len(_THREAD_ID_TO_CONTEXT) > 0:
-            ctx_idx = _THREAD_ID_TO_CONTEXT[threading.get_ident()] + context_offset
+            ctx_idx = _THREAD_ID_TO_CONTEXT[
+                threading.get_ident()] + context_offset
             ctx = _CURRENT_CONTEXTS[ctx_idx]
             func(ctx, *args, **kwargs)
+
     return wrapper
 
-dbo_yield_and_switch_from_compute_to_comm = _register_ubatch_function(UBatchContext.yield_and_switch_from_compute_to_comm, 0)
-dbo_yield_and_switch_from_comm_to_compute = _register_ubatch_function(UBatchContext.yield_and_switch_from_comm_to_compute, 0)
+
+dbo_yield_and_switch_from_compute_to_comm = _register_ubatch_function(
+    UBatchContext.yield_and_switch_from_compute_to_comm, 0)
+dbo_yield_and_switch_from_comm_to_compute = _register_ubatch_function(
+    UBatchContext.yield_and_switch_from_comm_to_compute, 0)
 dbo_yield = _register_ubatch_function(UBatchContext.yield_, 0)
-dbo_maybe_run_recv_hook = _register_ubatch_function(UBatchContext.maybe_run_recv_hook, 0)
-dbo_switch_to_comm_sync = _register_ubatch_function(UBatchContext.switch_to_comm_sync, 0)
+dbo_maybe_run_recv_hook = _register_ubatch_function(
+    UBatchContext.maybe_run_recv_hook, 0)
+dbo_switch_to_comm_sync = _register_ubatch_function(
+    UBatchContext.switch_to_comm_sync, 0)
+
 
 def dbo_register_recv_hook(recv_hook):
     if len(_THREAD_ID_TO_CONTEXT) > 0:
         ctx_idx = _THREAD_ID_TO_CONTEXT[threading.get_ident()]
         next_ctx = _CURRENT_CONTEXTS[(ctx_idx + 1) % 2]
         next_ctx.recv_hook = recv_hook
+
 
 def make_ubatch_contexts(
     num_micro_batches: int,
