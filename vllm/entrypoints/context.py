@@ -249,12 +249,7 @@ class StreamingHarmonyContext(HarmonyContext):
             except Exception as e:
                 # Log the error but continue processing to avoid breaking stream
                 logger.warning("Parser error processing token %s: %s", tok, e)
-                # Reset parser to avoid state corruption
-                try:
-                    self.parser = get_streamable_parser_for_assistant()
-                    logger.info("Parser reset due to error")
-                except Exception as reset_error:
-                    logger.error("Failed to reset parser: %s", reset_error)
+                # Skip this token to avoid parser state corruption
                 # Don't update last_tok or token counts for failed tokens
         else:
             # Handle the case of tool output in direct message format
