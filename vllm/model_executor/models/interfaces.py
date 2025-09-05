@@ -868,9 +868,8 @@ class SupportsMRoPE(Protocol):
         MRO of your model class.
     """
 
-    @classmethod
     def get_mrope_input_positions(
-        cls,
+        self,
         input_tokens: list[int],
         hf_config: PretrainedConfig,
         image_grid_thw: Optional[Union[list[list[int]], torch.Tensor]],
