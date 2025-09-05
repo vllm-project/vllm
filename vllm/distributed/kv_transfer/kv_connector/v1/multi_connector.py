@@ -42,8 +42,7 @@ class MultiConnector(KVConnectorBase_V1):
     """
 
     def __init__(self, vllm_config: "VllmConfig",
-                 kv_cache_config: Optional["KVCacheConfig"],
-                 role: KVConnectorRole):
+                 kv_cache_config: KVCacheConfig, role: KVConnectorRole):
         super().__init__(vllm_config=vllm_config,
                          kv_cache_config=kv_cache_config,
                          role=role)

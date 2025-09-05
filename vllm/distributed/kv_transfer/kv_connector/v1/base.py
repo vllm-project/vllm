@@ -40,6 +40,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
@@ -47,7 +48,6 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
 # s_tensor_list, d_tensor_list, s_indices, d_indices, direction
