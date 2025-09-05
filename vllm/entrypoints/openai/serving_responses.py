@@ -1588,7 +1588,7 @@ class OpenAIServingResponses(OpenAIServing):
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
         created_time: Optional[int] = None,
-    ) -> AsyncGenerator[str, None]:
+    ) -> AsyncGenerator[ResponsesResponse, None]:
         # TODO:
         # 1. Handle disconnect
 
