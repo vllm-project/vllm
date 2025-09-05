@@ -8,7 +8,7 @@ from torch._C._distributed_c10d import ProcessGroup
 from torch.distributed import all_reduce, all_gather
 
 from vllm.distributed import get_ep_group, get_node_count
-from vllm.distributed.eplb import EplbWeightLoader
+from vllm.distributed.eplb.eplb_loader.eplb_weight_loader import EplbWeightLoader
 from vllm.distributed.eplb.eplb_data.eplb_data import EplbData
 from vllm.distributed.eplb.eplb_updator.abstract_updator import BaseUpdator
 from vllm.distributed.eplb.eplb_process.eplb_process import EplbProcess
