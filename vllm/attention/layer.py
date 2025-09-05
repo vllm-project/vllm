@@ -447,58 +447,42 @@ class TorchAttention(nn.Module):
         value: torch.Tensor,
     ) -> torch.Tensor:
         """Input shape: batch_size x seq_len x hidden_size"""
-        if query.dim() == 2:
-            # Handle 2D input [seq_len, hidden_size]
-            seq_len, hidden_size = query.size()
+        # Normalize to 3D by adding batch dimension if needed
+        is_2d = query.dim() == 2
+        if is_2d:
+            query = query.unsqueeze(0)
+            key = key.unsqueeze(0)
+            value = value.unsqueeze(0)
 
-            # Reshape to [seq_len, num_heads, head_dim]
-            query = query.view(seq_len, self.num_heads, self.head_dim)
-            key = key.view(seq_len, self.num_kv_heads, self.head_dim)
-            value = value.view(seq_len, self.num_kv_heads, self.head_dim)
+        bsz, q_len, _ = query.size()
+        kv_len = key.size(1)
 
-            # Handle MQA/GQA if needed
-            if (num_repeat := self.num_heads // self.num_kv_heads) > 1:
-                key = torch.repeat_interleave(key, num_repeat, dim=1)
-                value = torch.repeat_interleave(value, num_repeat, dim=1)
+        # Reshape to [batch_size, seq_len, num_heads, head_dim]
+        query = query.view(bsz, q_len, self.num_heads, self.head_dim)
+        key = key.view(bsz, kv_len, self.num_kv_heads, self.head_dim)
+        value = value.view(bsz, kv_len, self.num_kv_heads, self.head_dim)
 
-            # Add batch dimension and transpose for SDPA:
-            #  [1, num_heads, seq_len, head_dim]
-            query = query.transpose(0, 1).unsqueeze(
-                0)  # [1, num_heads, seq_len, head_dim]
-            key = key.transpose(0, 1).unsqueeze(0)
-            value = value.transpose(0, 1).unsqueeze(0)
+        # Handle MQA/GQA if needed
+        if (num_repeat := self.num_heads // self.num_kv_heads) > 1:
+            key = torch.repeat_interleave(key, num_repeat, dim=2)
+            value = torch.repeat_interleave(value, num_repeat, dim=2)
 
-            out = F.scaled_dot_product_attention(query,
-                                                 key,
-                                                 value,
-                                                 scale=self.scaling)
-            # Remove batch dim and transpose back:
-            #  [seq_len, num_heads, head_dim] -> [seq_len, hidden_size]
-            out = out.squeeze(0).transpose(0, 1).reshape(seq_len, hidden_size)
-            return out
-        else:
-            # Handle 3D input [batch_size, seq_len, hidden_size]
-            bsz, q_len, _ = query.size()
-            kv_len = key.size(1)
+        # Transpose for SDPA: [batch_size, num_heads, seq_len, head_dim]
+        query, key, value = (x.transpose(1, 2) for x in (query, key, value))
 
-            query = query.view(bsz, q_len, self.num_heads, self.head_dim)
-            key = key.view(bsz, kv_len, self.num_kv_heads, self.head_dim)
-            value = value.view(bsz, kv_len, self.num_kv_heads, self.head_dim)
+        out = F.scaled_dot_product_attention(query,
+                                             key,
+                                             value,
+                                             scale=self.scaling)
 
-            if (num_repeat := self.num_heads // self.num_kv_heads) > 1:
-                # Handle MQA and GQA
-                key = torch.repeat_interleave(key, num_repeat, dim=2)
-                value = torch.repeat_interleave(value, num_repeat, dim=2)
+        # Transpose back and reshape to original format
+        out = out.transpose(1, 2).reshape(bsz, q_len, -1)
 
-            query, key, value = (x.transpose(1, 2)
-                                 for x in (query, key, value))
-            out = F.scaled_dot_product_attention(query,
-                                                 key,
-                                                 value,
-                                                 scale=self.scaling)
-            out = out.transpose(1, 2)
+        # Remove batch dimension if input was 2D
+        if is_2d:
+            out = out.squeeze(0)
 
-            return out.reshape(bsz, q_len, -1)
+        return out
 
 
 def wait_for_kv_layer_from_connector(layer_name: str):
