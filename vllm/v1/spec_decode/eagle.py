@@ -654,7 +654,9 @@ class EagleProposer:
         self.hot_token_ids = None
         if self.vllm_config.speculative_config.draft_vocab_pruned:
             logger.info(f"Loading pruned draft model vocabulary from {self.vllm_config.speculative_config.draft_vocab_pruned}")
-            self.hot_token_ids = load_draft_vocab_pruned(self.vllm_config.speculative_config.draft_vocab_pruned).to(self.model.device)
+            self.hot_token_ids = load_draft_vocab_pruned(self.vllm_config.speculative_config.draft_vocab_pruned)
+            device = next(self.model.model.parameters()).device
+            self.hot_token_ids = self.hot_token_ids.to(device)
             head = self.model.model.embed_tokens.weight
 
 
