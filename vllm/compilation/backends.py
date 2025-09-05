@@ -329,7 +329,8 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
             global compilation_start_time
 
             if (self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-                    and self.compilation_config.use_inductor_graph_partition):
+                    and self.compilation_config.use_inductor_graph_partition
+                    and is_torch_equal_or_newer("2.9.0.dev")):
                 from .cuda_graph import CUDAGraphOptions
 
                 num_layers = len(

@@ -300,6 +300,24 @@ class CompilationConfig:
     """
 
     use_inductor_graph_partition: bool = False
+    """Use inductor graph partition to split the graph at cudagraph_unsafe ops.
+    This partition happens at inductor codegen time after all passes and fusions
+    are finished. It generates a single `call` function which wraps
+    cudagraph-safe ops into partition functions and leave cudagraph-unsafe ops
+    outside the partition functions. For a graph with N cudagraph-unsafe ops
+    (e.g., Attention), there would be N partition functions. To mark an op as
+    cudagraph unsafe, we can add `tags=(torch._C.Tag.cudagraph_unsafe)` when
+    register the custom op. 
+
+    This config supports both full cudagraph and piecewise cudagraph without
+    compiling twice. For piecewise cudagraph, it applies vLLM CUDAGraph wrapper
+    to each partition function. For N partition functions, there would be N
+    CUDAGraph wrapper.
+
+    For full CUDAGraph, we still apply a single CUDAGraph wrapper outside the
+    inductor `call` function. This captures away all the python-level partition
+    functions.
+    """
 
     pass_config: PassConfig = field(default_factory=PassConfig)
     """Custom inductor passes, see PassConfig for more details"""
@@ -462,6 +480,12 @@ class CompilationConfig:
                                  "mutually exclusive, prefer cudagraph_mode "
                                  "since full_cuda_graph is deprecated.")
             self.cudagraph_mode = CUDAGraphMode.FULL
+
+        if (self.use_inductor_graph_partition
+                and not is_torch_equal_or_newer("2.9.0.dev")):
+            raise ValueError("use_inductor_graph_partition is only "
+                             "supported with torch>=2.9.0.dev. Set "
+                             "use_inductor_graph_partition=False instead.")
 
     def init_backend(self, vllm_config: "VllmConfig") -> Union[str, Callable]:
         if self.level == CompilationLevel.NO_COMPILATION:
