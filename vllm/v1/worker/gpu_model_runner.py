@@ -1015,22 +1015,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # compute completion's mrope_positions on-the-fly
                 dst_start = mrope_pos_ptr
                 dst_end = mrope_pos_ptr + completion_part_len
-                if supports_mrope(self.model):
-                    self.model.get_mrope_input_positions(
-                        out=self.mrope_positions.np,
-                        out_offset=dst_start,
-                        mrope_position_delta=req.mrope_position_delta,
-                        context_len=num_computed_tokens + prompt_part_len,
-                        num_new_tokens=completion_part_len,
-                    )
-                else:
-                    MRotaryEmbedding.get_next_input_positions_tensor(
-                        out=self.mrope_positions.np,
-                        out_offset=dst_start,
-                        mrope_position_delta=req.mrope_position_delta,
-                        context_len=num_computed_tokens + prompt_part_len,
-                        num_new_tokens=completion_part_len,
-                    )
+
+                MRotaryEmbedding.get_next_input_positions_tensor(
+                    out=self.mrope_positions.np,
+                    out_offset=dst_start,
+                    mrope_position_delta=req.mrope_position_delta,
+                    context_len=num_computed_tokens + prompt_part_len,
+                    num_new_tokens=completion_part_len,
+                )
 
                 mrope_pos_ptr += completion_part_len
 
