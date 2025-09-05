@@ -1457,6 +1457,7 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
             self, image_input: Glm4vImageInputs) -> tuple[torch.Tensor, ...]:
         grid_thw = image_input["image_grid_thw"]
         assert grid_thw.ndim == 2
+        grid_thw_list = grid_thw.tolist()
 
         if image_input["type"] == "image_embeds":
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
@@ -1471,8 +1472,9 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
                 image_embeds = self.visual(pixel_values,
                                            grid_thw=grid_thw.tolist())
         merge_size = self.visual.spatial_merge_size
-        sizes = grid_thw.prod(-1) // merge_size // merge_size
-        return image_embeds.split(sizes.tolist())
+        sizes = (torch.tensor(grid_thw_list, dtype=torch.long).prod(-1) //
+                 (merge_size * merge_size)).tolist()
+        return image_embeds.split(sizes)
 
     def _process_video_input(
             self, video_input: Glm4vVideoInputs) -> tuple[torch.Tensor, ...]:
