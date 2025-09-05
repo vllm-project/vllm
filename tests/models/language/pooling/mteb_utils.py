@@ -165,7 +165,6 @@ def mteb_test_embed_models(hf_runner,
                            vllm_extra_kwargs=None,
                            hf_model_callback=None,
                            atol=MTEB_RERANK_TOL):
-
     if not model_info.enable_test:
         # A model family has many models with the same architecture,
         # and we don't need to test each one.
@@ -191,11 +190,11 @@ def mteb_test_embed_models(hf_runner,
             assert model_info.architecture in model_config.architectures
         assert (model_config._model_info.default_pooling_type ==
                 model_info.default_pooling_type)
-        vllm_outputs = vllm_model.embed(example_prompts)
 
         vllm_main_score = run_mteb_embed_task(VllmMtebEncoder(vllm_model),
                                               MTEB_EMBED_TASKS)
         vllm_dtype = vllm_model.llm.llm_engine.model_config.dtype
+        vllm_outputs = vllm_model.embed(example_prompts)
 
     if model_info.mteb_score is None:
         with hf_runner(model_info.name,
