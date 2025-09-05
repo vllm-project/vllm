@@ -60,11 +60,6 @@ class Scheduler(SchedulerInterface):
         self.structured_output_manager = structured_output_manager
         self.is_encoder_decoder = vllm_config.model_config.is_encoder_decoder
 
-        # NOTE(Kuntai): stuff kv_cache_config into vllm_config, so that
-        # KV cache connector can see the kv_cache_config and figure out
-        # which layer belongs to which kv_cache_group.
-        self.vllm_config.kv_cache_config = kv_cache_config
-
         # include_finished_set controls whether a separate set of finished
         # request ids should be included in the EngineCoreOutputs returned
         # by update_from_outputs(). This is currently used in the multi-engine
@@ -90,7 +85,10 @@ class Scheduler(SchedulerInterface):
                 "Encoder-decoder models are not currently supported "
                 "with KV connectors")
             self.connector = KVConnectorFactory.create_connector(
-                config=self.vllm_config, role=KVConnectorRole.SCHEDULER)
+                config=self.vllm_config,
+                kv_cache_config=kv_cache_config,
+                role=KVConnectorRole.SCHEDULER,
+            )
 
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,

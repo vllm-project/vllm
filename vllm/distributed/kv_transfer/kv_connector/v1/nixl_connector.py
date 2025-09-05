@@ -32,6 +32,7 @@ from vllm.platforms import _Backend, current_platform
 from vllm.utils import make_zmq_path, make_zmq_socket
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import RequestStatus
 
 if TYPE_CHECKING:
@@ -121,7 +122,9 @@ class NixlConnectorMetadata(KVConnectorMetadata):
 
 class NixlConnector(KVConnectorBase_V1):
 
-    def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
+    def __init__(self, vllm_config: VllmConfig,
+                 kv_cache_config: Optional["KVCacheConfig"],
+                 role: KVConnectorRole):
         assert vllm_config.kv_transfer_config is not None
         assert vllm_config.kv_transfer_config.engine_id is not None
         self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id

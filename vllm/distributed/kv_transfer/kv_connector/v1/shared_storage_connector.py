@@ -3,7 +3,7 @@
 import hashlib
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import safetensors
 import torch
@@ -14,6 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import MLACommonMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -79,7 +80,9 @@ class SharedStorageConnector(KVConnectorBase_V1):
     # It does extra work which will overwrite the existing prefix-cache in GPU
     # - to remove the overhead, need to add some "mask" in the ReqMeta class
 
-    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
+    def __init__(self, vllm_config: "VllmConfig",
+                 kv_cache_config: Optional["KVCacheConfig"],
+                 role: KVConnectorRole):
         super().__init__(vllm_config=vllm_config, role=role)
         self._block_size = vllm_config.cache_config.block_size
         self._requests_need_load: dict[str, Request] = {}

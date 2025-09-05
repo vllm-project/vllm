@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
 # s_tensor_list, d_tensor_list, s_indices, d_indices, direction
@@ -76,12 +77,18 @@ class KVConnectorMetadata(ABC):  # noqa: B024
 
 class KVConnectorBase_V1(ABC):
 
-    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
+    def __init__(
+        self,
+        vllm_config: "VllmConfig",
+        kv_cache_config: Optional["KVCacheConfig"],
+        role: KVConnectorRole,
+    ):
         logger.warning(
             "Initializing KVConnectorBase_V1. This API is experimental and "
             "subject to change in the future as we iterate the design.")
         self._connector_metadata: Optional[KVConnectorMetadata] = None
         self._vllm_config = vllm_config
+        self._kv_cache_config = kv_cache_config
         self._role = role
 
     @property

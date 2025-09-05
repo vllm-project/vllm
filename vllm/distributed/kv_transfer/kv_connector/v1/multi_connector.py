@@ -14,6 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
@@ -40,8 +41,12 @@ class MultiConnector(KVConnectorBase_V1):
     - Save to all connectors.
     """
 
-    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
-        super().__init__(vllm_config=vllm_config, role=role)
+    def __init__(self, vllm_config: "VllmConfig",
+                 kv_cache_config: Optional["KVCacheConfig"],
+                 role: KVConnectorRole):
+        super().__init__(vllm_config=vllm_config,
+                         kv_cache_config=kv_cache_config,
+                         role=role)
         self._connectors: list[KVConnectorBase_V1] = []
         ktcs = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "connectors")
@@ -53,7 +58,8 @@ class MultiConnector(KVConnectorBase_V1):
             temp_config.kv_transfer_config = KVTransferConfig(
                 **ktc, engine_id=engine_id)
             self._connectors.append(
-                KVConnectorFactory.create_connector(temp_config, role))
+                KVConnectorFactory.create_connector(temp_config,
+                                                    kv_cache_config, role))
 
         # A mapping from request id to the index of the connector chosen to
         # load the request from (if any).
