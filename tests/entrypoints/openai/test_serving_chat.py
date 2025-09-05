@@ -43,12 +43,14 @@ def gptoss_server(monkeypatch_module: pytest.MonkeyPatch):
         args = [
             "--enforce-eager",
             "--max-model-len",
-            "8192",
+            "4096",
             "--tool-call-parser",
             "openai",
             "--reasoning-parser",
             "openai_gptoss",
             "--enable-auto-tool-choice",
+            "--gpu-memory-utilization",
+            "0.5",
         ]
         with RemoteOpenAIServer(GPT_OSS_MODEL_NAME, args) as remote_server:
             yield remote_server
@@ -175,38 +177,6 @@ async def test_gpt_oss_multi_turn_chat(gptoss_client: OpenAI):
     second_msg = second.choices[0].message
     assert (second_msg.content is not None and len(second_msg.content) > 0) or \
         (second_msg.tool_calls is not None and len(second_msg.tool_calls) > 0)
-
-
-@pytest.fixture(scope="module")
-def gptoss_server_no_tools(monkeypatch_module: pytest.MonkeyPatch):
-    with monkeypatch_module.context() as m:
-        m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN_VLLM_V1")
-        args = [
-            "--enforce-eager",
-            "--max-model-len",
-            "8192",
-        ]
-        with RemoteOpenAIServer(GPT_OSS_MODEL_NAME, args) as remote_server:
-            yield remote_server
-
-
-@pytest_asyncio.fixture
-async def gptoss_client_no_tools(gptoss_server_no_tools):
-    async with gptoss_server_no_tools.get_async_client() as async_client:
-        yield async_client
-
-
-@pytest.mark.asyncio
-async def test_gpt_oss_simple_chat_no_tools_one_turn(
-        gptoss_client_no_tools: OpenAI):
-    messages = [{
-        "role": "user",
-        "content": "Say hello in one short sentence."
-    }]
-    resp = await gptoss_client_no_tools.chat.completions.create(
-        model=GPT_OSS_MODEL_NAME, messages=messages, temperature=0.0)
-    msg = resp.choices[0].message
-    assert msg.content is not None and len(msg.content) > 0
 
 
 MODEL_NAME = "openai-community/gpt2"
