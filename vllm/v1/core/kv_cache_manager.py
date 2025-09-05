@@ -219,6 +219,8 @@ class KVCacheManager:
                 hitting the prefix caching, excluding external tokens.
             new_computed_blocks: The cached blocks for the above new computed 
                 tokens.
+            num_extra_tokens_from_connector: The number of tokens that their
+                KV caches are not cached by vLLM but cached by the connector.
             num_lookahead_tokens: The number of speculative tokens to allocate.
                 This is used by spec decode proposers with kv-cache such 
                 as eagle.
@@ -228,17 +230,39 @@ class KVCacheManager:
 
         Blocks layout:
         ```
-        -----------------------------------------------------------------------
-        | < computed > | < new computed > |    < new >    | < pre-allocated > |
-        -----------------------------------------------------------------------
-        |                  < required >                   |
-        --------------------------------------------------
-        |                    < full >                  |
-        ------------------------------------------------
-                                          | <new full> |
-                                          --------------
+        ---------------------------------------------------------------------
+        | < comp > | < new_comp > | < connector > | < new > | < lookahead > |
+        ---------------------------------------------------------------------
+                                                  |  < to be computed >     |
+        ---------------------------------------------------------------------
+                                  |           < to be allocated >           |
+        ---------------------------------------------------------------------
+                                  |     < to be cached >    |
+        ---------------------------------------------------------------------
+                                  | not cached by |
+                                  | vLLM, but     |
+                                  | cached by     |
+                                  | connector     |
+        ---------------------------------------------------------------------
+        |   < cached by vLLM >    |
+        ---------------------------------------------------------------------
+        | ref_cnt  |
+        | increased|
+        ---------------------------------------------------------------------
+                   | ref_cnt not  |
+                   | increased yet|
+        ---------------------------------------------------------------------
+
         ```
-        The following *_blocks are illustrated in this layout.
+
+        Abbrivations:
+
+        comp      = request.num_computed_tokens
+        new_comp  = num_new_computed_tokens
+                  = len(new_computed_blocks) * block_size
+        connector = num_extra_tokens_from_connector
+        new       = num_new_tokens
+        lookahead = num_lookahead_tokens
 
         Returns:
             A list of new allocated blocks.
@@ -254,6 +278,14 @@ class KVCacheManager:
         """
             Check if we can allocate for this request.
         """
+
+        # Free unnecessary blocks (e.g. outside sliding window)
+        # in the prefix.
+        self.coordinator.remove_skipped_blocks(
+            request.request_id,
+            request.num_computed_tokens,
+        )
+        # Check if we have sufficient free blocks.
         if not self._can_allocate(
                 request,
                 num_new_tokens,
@@ -276,10 +308,12 @@ class KVCacheManager:
             for prefix caching purpose.
         """
         # Append new computed blocks to the request and increase their
-        # `ref_cnt` since they are now referenced by this request.
+        # `ref_cnt`, which means these blocks are now treated
+        # as being referenced by this request.
         # This will also increase the `ref_cnt` for blocks outside the
-        # sliding window, but this is temporary --- it will be freed
-        # in the next `remove_skipped_and_allocate_necessary` call.
+        # sliding window, but this is temporary --- the `ref_cnt` of
+        # these blocks will be decreased in the next
+        # `remove_skipped_and_allocate_necessary` call.
         if self.enable_caching:
             self.block_pool.touch(new_computed_block_list)
             self.coordinator.save_new_computed_blocks(
@@ -296,6 +330,9 @@ class KVCacheManager:
         # only the prefix tokens that are necessary
         # (e.g. inside sliding window) will be kept. All other prefix
         # tokens will have `null_block` instead.
+        # NOTE(Kuntai): the `remove_skipped_blocks` call above
+        # is also implemented based on
+        # `remove_skipped_and_allocate_necessary` call.
         new_blocks_prefix = KVCacheBlocks(
             self.coordinator.remove_skipped_and_allocate_necessary(
                 request.request_id,
