@@ -116,7 +116,7 @@ class HarmonyContext(ConversationContext):
         self.current_turn = TurnTokens()
         self.previous_turn = TurnTokens()
         self.is_first_turn = True
-        self.is_first_token_in_message = True  # For streaming support
+        self.first_tok_of_message = True  # For streaming support
 
     def _update_num_reasoning_tokens(self):
         # Count all analysis and commentary channels as reasoning tokens
@@ -308,7 +308,7 @@ class StreamingHarmonyContext(HarmonyContext):
         self.parser = get_streamable_parser_for_assistant()
         self.encoding = get_encoding()
         self.last_tok = None
-        self.is_first_token_in_message = True
+        self.first_tok_of_message = True
 
     @property
     def messages(self) -> list:
@@ -318,10 +318,10 @@ class StreamingHarmonyContext(HarmonyContext):
         if isinstance(output, RequestOutput):
             # append_output is called for each output token in streaming case,
             # so we only want to add the prompt tokens once for each message.
-            if self.is_first_token_in_message:
+            if self.first_tok_of_message:
                 self._update_prefill_token_usage(output)
                 self.current_turn.output_tokens = 0
-            # Reset self.is_first_token_in_message if needed:
+            # Reset self.first_tok_of_message if needed:
             # if the current token is the last one of the current message
             # (finished=True), then the next token processed will mark the
             # beginning of a new message

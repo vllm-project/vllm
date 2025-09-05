@@ -365,7 +365,7 @@ async def test_streaming_multi_turn_token_counting(mock_parser):
     assert context.num_output_tokens == 3  # Three output tokens
     assert context.num_cached_tokens == 0
     assert context.num_tool_output_tokens == 0  # No tool output in first turn
-    assert context.is_first_token_in_message is True  # Ready for next message
+    assert context.first_tok_of_message is True  # Ready for next message
 
     # Second turn: reasoning tokens in analysis channel
     mock_parser.current_channel = "analysis"  # Set to reasoning channel
