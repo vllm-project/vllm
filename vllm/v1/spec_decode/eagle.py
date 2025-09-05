@@ -650,7 +650,10 @@ class EagleProposer:
             logger.info("Loading EAGLE LM head weights from the target model.")
             self.model.lm_head = target_language_model.lm_head
 
-            # optionally prune the language model vocabulary
+        # optionally prune the language model vocabulary
+        if self.vllm_config.speculative_config.draft_vocab_pruned:
+            # todo: prune draft model vocabulary here
+            # self.model.model.embed_tokens.weight = None
 
     @torch.inference_mode()
     def dummy_run(
