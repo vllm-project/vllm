@@ -742,13 +742,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # where M is the max_model_len.
         token_indices = (positions_np +
                          req_indices * self.input_batch.token_ids_cpu.shape[1])
+        token_indices_tensor = torch.from_numpy(token_indices)
 
         # NOTE(woosuk): We use torch.index_select instead of np.take here
         # because torch.index_select is much faster than np.take for large
         # tensors.
         torch.index_select(self.input_batch.token_ids_cpu_tensor.flatten(),
                            0,
-                           torch.from_numpy(token_indices),
+                           token_indices_tensor,
                            out=self.input_ids.cpu[:total_num_scheduled_tokens])
         prompt_embeds_cpu_tensor = \
             self.input_batch.prompt_embeds_cpu_tensor.view(
@@ -757,12 +758,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         torch.index_select(
             prompt_embeds_cpu_tensor,
             0,
-            torch.from_numpy(token_indices),
+            token_indices_tensor,
             out=self.inputs_embeds.cpu[:total_num_scheduled_tokens])
         torch.index_select(
             is_token_ids,
             0,
-            torch.from_numpy(token_indices),
+            token_indices_tensor,
             out=self.is_token_ids.cpu[:total_num_scheduled_tokens])
 
         self.input_batch.block_table.compute_slot_mapping(
