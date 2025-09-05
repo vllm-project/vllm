@@ -164,6 +164,13 @@ class XPUPlatform(Platform):
                 vllm_config.scheduler_config.max_model_len,
                 DEFAULT_MAX_NUM_BATCHED_TOKENS)
 
+        if (envs.VLLM_KV_CACHE_LAYOUT is None
+                or envs.VLLM_KV_CACHE_LAYOUT != "NHD"):
+            os.environ["VLLM_KV_CACHE_LAYOUT"] = "NHD"
+            logger.info(
+                "Setting VLLM_KV_CACHE_LAYOUT to 'NHD' for XPU; "
+                "only NHD layout is supported by XPU attention kernels.")
+
     @classmethod
     def is_pin_memory_available(cls):
         return True
@@ -210,3 +217,27 @@ class XPUPlatform(Platform):
     @classmethod
     def opaque_attention_op(cls) -> bool:
         return True
+
+    @classmethod
+    def insert_blocks_to_device(
+        cls,
+        src_cache: torch.Tensor,
+        dst_cache: torch.Tensor,
+        src_block_indices: torch.Tensor,
+        dst_block_indices: torch.Tensor,
+    ) -> None:
+        """Copy blocks from src_cache to dst_cache on XPU."""
+        _src_cache = src_cache[:, src_block_indices]
+        dst_cache[:, dst_block_indices] = _src_cache.to(dst_cache.device)
+
+    @classmethod
+    def swap_out_blocks_to_host(
+        cls,
+        src_cache: torch.Tensor,
+        dst_cache: torch.Tensor,
+        src_block_indices: torch.Tensor,
+        dst_block_indices: torch.Tensor,
+    ) -> None:
+        """Copy blocks from XPU to host (CPU)."""
+        _src_cache = src_cache[:, src_block_indices]
+        dst_cache[:, dst_block_indices] = _src_cache.cpu()
