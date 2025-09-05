@@ -37,22 +37,34 @@ def monkeypatch_module():
 
 
 @pytest.fixture(scope="module")
-def gptoss_server(monkeypatch_module: pytest.MonkeyPatch):
-    with monkeypatch_module.context() as m:
-        m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN_VLLM_V1")
-        args = [
-            "--enforce-eager",
-            "--max-model-len",
-            "4096",
+@pytest.mark.parametrize("with_tool_parser", [True, False])
+def default_server_args(with_tool_parser):
+    args = [
+        # use half precision for speed and memory savings in CI environment
+        "--enforce-eager",
+        "--max-model-len",
+        "4096",
+        "--reasoning-parser",
+        "openai_gptoss",
+        "--gpu-memory-utilization",
+        "0.5",
+    ]
+    if with_tool_parser:
+        args.extend([
             "--tool-call-parser",
             "openai",
-            "--reasoning-parser",
-            "openai_gptoss",
             "--enable-auto-tool-choice",
-            "--gpu-memory-utilization",
-            "0.5",
-        ]
-        with RemoteOpenAIServer(GPT_OSS_MODEL_NAME, args) as remote_server:
+        ])
+    return args
+
+
+@pytest.fixture(scope="module")
+def gptoss_server(monkeypatch_module: pytest.MonkeyPatch,
+                  default_server_args: list[str]):
+    with monkeypatch_module.context() as m:
+        m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN_VLLM_V1")
+        with RemoteOpenAIServer(GPT_OSS_MODEL_NAME,
+                                default_server_args) as remote_server:
             yield remote_server
 
 
@@ -63,7 +75,9 @@ async def gptoss_client(gptoss_server):
 
 
 @pytest.mark.asyncio
-async def test_gpt_oss_chat_tool_call_streaming(gptoss_client: OpenAI):
+@pytest.mark.parametrize("with_tool_parser", [True, False])
+async def test_gpt_oss_chat_tool_call_streaming(gptoss_client: OpenAI,
+                                                with_tool_parser: bool):
     tools = [{
         "type": "function",
         "function": {
@@ -96,10 +110,14 @@ async def test_gpt_oss_chat_tool_call_streaming(gptoss_client: OpenAI):
     ]
 
     stream = await gptoss_client.chat.completions.create(
-        model=GPT_OSS_MODEL_NAME, messages=messages, tools=tools, stream=True)
+        model=GPT_OSS_MODEL_NAME,
+        messages=messages,
+        tools=tools if with_tool_parser else None,
+        stream=True)
 
     name = None
     args_buf = ""
+    content_buf = ""
     async for chunk in stream:
         delta = chunk.choices[0].delta
         if delta.tool_calls:
@@ -108,8 +126,15 @@ async def test_gpt_oss_chat_tool_call_streaming(gptoss_client: OpenAI):
                 name = tc.function.name
             if tc.function and tc.function.arguments:
                 args_buf += tc.function.arguments
-    assert name is not None
-    assert len(args_buf) > 0
+        if getattr(delta, "content", None):
+            content_buf += delta.content
+    if with_tool_parser:
+        assert name is not None
+        assert len(args_buf) > 0
+    else:
+        assert name is None
+        assert len(args_buf) == 0
+        assert len(content_buf) > 0
 
 
 @pytest.mark.asyncio
