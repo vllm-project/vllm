@@ -13,7 +13,7 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalEncDecInputs,
-                                    MultiModalInputs)
+                                    MultiModalInputs, MultiModalUUIDDict)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 
@@ -258,7 +258,8 @@ class InputPreprocessor:
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         *,
-        mm_hash_overrides: Optional[dict[str, list[str]]] = None,
+        mm_hash_overrides: Optional[Union[dict[str, list[str]],
+                                          MultiModalUUIDDict]] = None,
     ) -> MultiModalInputs:
         """
         Apply the model's multi-modal processor to a multi-modal prompt,
@@ -291,7 +292,8 @@ class InputPreprocessor:
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         *,
-        mm_hash_overrides: Optional[dict[str, list[str]]] = None,
+        mm_hash_overrides: Optional[Union[dict[str, list[str]],
+                                          MultiModalUUIDDict]] = None,
     ) -> MultiModalInputs:
         """
         Async version of
@@ -368,7 +370,8 @@ class InputPreprocessor:
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         *,
-        mm_hash_overrides: Optional[dict[str, list[str]]] = None,
+        mm_hash_overrides: Optional[Union[dict[str, list[str]],
+                                          MultiModalUUIDDict]] = None,
     ) -> Union[TokenInputs, MultiModalInputs]:
         prompt_token_ids = self._truncate_inputs(
             parsed_content["prompt_token_ids"], tokenization_kwargs)
@@ -397,7 +400,8 @@ class InputPreprocessor:
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         *,
-        mm_hash_overrides: Optional[dict[str, list[str]]] = None,
+        mm_hash_overrides: Optional[Union[dict[str, list[str]],
+                                          MultiModalUUIDDict]] = None,
     ) -> Union[TokenInputs, MultiModalInputs]:
         prompt_token_ids = self._truncate_inputs(
             parsed_content["prompt_token_ids"], tokenization_kwargs)
@@ -426,7 +430,8 @@ class InputPreprocessor:
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         *,
-        mm_hash_overrides: Optional[dict[str, list[str]]] = None,
+        mm_hash_overrides: Optional[Union[dict[str, list[str]],
+                                          MultiModalUUIDDict]] = None,
     ) -> Union[TokenInputs, MultiModalInputs]:
         prompt_text = parsed_content["prompt"]
 
@@ -462,7 +467,8 @@ class InputPreprocessor:
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         *,
-        mm_hash_overrides: Optional[dict[str, list[str]]] = None,
+        mm_hash_overrides: Optional[Union[dict[str, list[str]],
+                                          MultiModalUUIDDict]] = None,
     ) -> Union[TokenInputs, MultiModalInputs]:
         prompt_text = parsed_content["prompt"]
 
@@ -498,7 +504,8 @@ class InputPreprocessor:
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         *,
-        mm_hash_overrides: Optional[dict[str, list[str]]] = None,
+        mm_hash_overrides: Optional[Union[dict[str, list[str]],
+                                          MultiModalUUIDDict]] = None,
     ) -> SingletonInputs:
         """
         Extract the singleton inputs from a prompt.
@@ -545,7 +552,8 @@ class InputPreprocessor:
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         *,
-        mm_hash_overrides: Optional[dict[str, list[str]]] = None,
+        mm_hash_overrides: Optional[Union[dict[str, list[str]],
+                                          MultiModalUUIDDict]] = None,
     ) -> SingletonInputs:
         """
         Async version of
@@ -684,7 +692,8 @@ class InputPreprocessor:
         prompt: PromptType,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         *,
-        mm_hash_overrides: Optional[dict[str, list[str]]] = None,
+        mm_hash_overrides: Optional[Union[dict[str, list[str]],
+                                          MultiModalUUIDDict]] = None,
     ) -> EncoderDecoderInputs:
         """
         For encoder/decoder models only:
@@ -759,7 +768,8 @@ class InputPreprocessor:
         prompt: PromptType,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         *,
-        mm_hash_overrides: Optional[dict[str, list[str]]] = None,
+        mm_hash_overrides: Optional[Union[dict[str, list[str]],
+                                          MultiModalUUIDDict]] = None,
     ) -> EncoderDecoderInputs:
         """
         Async version of
@@ -826,7 +836,8 @@ class InputPreprocessor:
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         *,
-        mm_hash_overrides: Optional[dict[str, list[str]]] = None,
+        mm_hash_overrides: Optional[Union[dict[str, list[str]],
+                                          MultiModalUUIDDict]] = None,
     ) -> DecoderOnlyInputs:
         """
         For decoder-only models:
@@ -858,7 +869,8 @@ class InputPreprocessor:
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         *,
-        mm_hash_overrides: Optional[dict[str, list[str]]] = None,
+        mm_hash_overrides: Optional[Union[dict[str, list[str]],
+                                          MultiModalUUIDDict]] = None,
     ) -> DecoderOnlyInputs:
         """
         Async version of
@@ -879,7 +891,8 @@ class InputPreprocessor:
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         *,
-        mm_hash_overrides: Optional[dict[str, list[str]]] = None,
+        mm_hash_overrides: Optional[Union[dict[str, list[str]],
+                                          MultiModalUUIDDict]] = None,
     ) -> ProcessorInputs:
         """Preprocess the input prompt."""
         if self.model_config.is_encoder_decoder:
@@ -909,7 +922,8 @@ class InputPreprocessor:
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         *,
-        mm_hash_overrides: Optional[dict[str, list[str]]] = None,
+        mm_hash_overrides: Optional[Union[dict[str, list[str]],
+                                          MultiModalUUIDDict]] = None,
     ) -> ProcessorInputs:
         """
         Async version of

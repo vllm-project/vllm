@@ -119,6 +119,9 @@ class GPTQMarlinConfig(QuantizationConfig):
 
         self.quant_type = self.TYPE_MAP[(weight_bits, is_sym)]
 
+        # used to identify GPTQ model quantized by autoround
+        self.autoround_version = full_config.get("autoround_version", "")
+
     def __repr__(self) -> str:
         return (f"GPTQMarlinConfig(quant_type={self.quant_type}, "
                 f"group_size={self.group_size}, "
@@ -651,7 +654,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         assert self.fused_experts is None
 
         if enable_eplb:
