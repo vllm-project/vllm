@@ -55,7 +55,8 @@ from vllm.multimodal.utils import run_dp_sharded_vision_model
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (MultiModalEmbeddings, SupportsEagle3,
+                         SupportsMultiModal, SupportsPP)
 from .llama4 import Llama4ForCausalLM
 from .utils import (AutoWeightsLoader, flatten_bn, maybe_prefix,
                     merge_multimodal_embeddings)
@@ -716,8 +717,8 @@ class Mllama4DummyInputsBuilder(BaseDummyInputsBuilder[Mllama4ProcessingInfo]):
     info=Mllama4ProcessingInfo,
     dummy_inputs=Mllama4DummyInputsBuilder,
 )
-class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                     SupportsPP):
+class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
+                                     SupportsEagle3):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -1083,3 +1084,13 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
                                      stacked_params_mapping))
 
         return updated_params
+
+    # Eagle3 interface methods
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        """Set which layers to extract auxiliary hidden states from."""
+        self.language_model.model.aux_hidden_state_layers = layers
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        """Get default auxiliary hidden state layers for Eagle3."""
+        num_layers = len(self.language_model.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
