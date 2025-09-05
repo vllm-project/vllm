@@ -1,7 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 from .abstract_policy import EplbPolicy
-from .swift_balancer_policy import SwiftBalancer
 from .default_eplb_policy import DefaultEplb
+
 from .flashlb_policy import FlashLB
+from .swift_balancer_policy import SwiftBalancer
+
+
 
 class PolicyFactory:
 
@@ -25,6 +31,3 @@ class PolicyFactory:
         }
 
         return policy.get(policy_type, DefaultEplb)()
-
-
-

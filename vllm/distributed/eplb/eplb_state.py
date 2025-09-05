@@ -41,9 +41,9 @@ from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 
-from .rebalance_execute import rearrange_expert_weights_inplace
-from .eplb_policy.policy_factory import PolicyFactory
 from .eplb_policy.abstract_policy import EplbPolicy
+from .eplb_policy.policy_factory import PolicyFactory
+from .rebalance_execute import rearrange_expert_weights_inplace
 
 logger = init_logger(__name__)
 
