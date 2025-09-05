@@ -123,7 +123,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 "is not available. This may result in degraded performance. "
                 "Please `pip install vllm[flashinfer]` for best results.")
         self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
-        
+
     def _should_use_marlin(self):
         if envs.VLLM_MXFP4_USE_MARLIN is not None:
             return envs.VLLM_MXFP4_USE_MARLIN
@@ -267,10 +267,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         if self.use_marlin:
             prepare_moe_fp4_layer_for_marlin(layer)
         elif should_use_flashinfer_mxfp4():
+            from flashinfer.fp4_quantization import (
+                nvfp4_block_scale_interleave)
             from flashinfer.fused_moe.core import (
-                _maybe_get_cached_w2_permute_indices,
-            )
-            from flashinfer.fp4_quantization import nvfp4_block_scale_interleave
+                _maybe_get_cached_w2_permute_indices)
             layer.gemm1_alpha = Parameter(torch.tensor(
                 [1.702] * self.num_experts, dtype=torch.float32).cuda(),
                                           requires_grad=False)
@@ -353,11 +353,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     w13_weight[i].view(torch.uint8),
                     epilogue_tile_m,
                 )
-                gemm1_weights_mxfp4_shuffled.append(
-                    w13_weight[i]
-                    .view(torch.uint8)[permute_indices.to(w13_weight.device)]
-                    .contiguous()
-                )
+                gemm1_weights_mxfp4_shuffled.append(w13_weight[i].view(
+                    torch.uint8)[permute_indices.to(
+                        w13_weight.device)].contiguous())
                 # w13 scale shuffling
                 permute_sf_indices = _maybe_get_cached_w2_permute_indices(
                     self._cache_permute_indices,
@@ -366,35 +364,27 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     num_elts_per_sf=16,
                 )
                 gemm1_scales_mxfp4_shuffled.append(
-                    nvfp4_block_scale_interleave(
-                        w13_weight_scale[i]
-                        .view(torch.uint8)[
-                            permute_sf_indices.to(w13_weight_scale.device)
-                        ]
-                        .contiguous()
-                    )
-                )
+                    nvfp4_block_scale_interleave(w13_weight_scale[i].view(
+                        torch.uint8)[permute_sf_indices.to(
+                            w13_weight_scale.device)].contiguous()))
                 # w13 bias shuffling
                 permute_bias_indices = _maybe_get_cached_w2_permute_indices(
                     self._cache_permute_indices,
                     w13_bias[i].clone().reshape(-1, 1),
                     epilogue_tile_m,
                 )
-                gemm1_bias_shuffled.append(
-                    w13_bias[i].clone().reshape(-1, 1)[permute_bias_indices.to(w13_bias.device)]
-                    .contiguous()
-                )
+                gemm1_bias_shuffled.append(w13_bias[i].clone().reshape(
+                    -1,
+                    1)[permute_bias_indices.to(w13_bias.device)].contiguous())
                 # w2 weight shuffling
                 permute_indices = _maybe_get_cached_w2_permute_indices(
                     self._cache_permute_indices,
                     w2_weight[i].view(torch.uint8),
                     epilogue_tile_m,
                 )
-                gemm2_weights_mxfp4_shuffled.append(
-                    w2_weight[i]
-                    .view(torch.uint8)[permute_indices.to(w2_weight.device)]
-                    .contiguous()
-                )
+                gemm2_weights_mxfp4_shuffled.append(w2_weight[i].view(
+                    torch.uint8)[permute_indices.to(
+                        w2_weight.device)].contiguous())
                 # w2 scale shuffling
                 permute_sf_indices = _maybe_get_cached_w2_permute_indices(
                     self._cache_permute_indices,
@@ -403,24 +393,17 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     num_elts_per_sf=16,
                 )
                 gemm2_scales_mxfp4_shuffled.append(
-                    nvfp4_block_scale_interleave(
-                        w2_weight_scale[i]
-                        .view(torch.uint8)[
-                            permute_sf_indices.to(w2_weight_scale.device)
-                        ]
-                        .contiguous()
-                    )
-                )
+                    nvfp4_block_scale_interleave(w2_weight_scale[i].view(
+                        torch.uint8)[permute_sf_indices.to(
+                            w2_weight_scale.device)].contiguous()))
                 # w2 bias shuffling
                 permute_indices = _maybe_get_cached_w2_permute_indices(
                     self._cache_permute_indices,
                     w2_bias[i].clone().reshape(-1, 1),
                     epilogue_tile_m,
                 )
-                gemm2_bias_shuffled.append(
-                    w2_bias[i].clone().reshape(-1, 1)[permute_indices.to(w2_bias.device)]
-                    .contiguous()
-                )
+                gemm2_bias_shuffled.append(w2_bias[i].clone().reshape(
+                    -1, 1)[permute_indices.to(w2_bias.device)].contiguous())
 
             w13_weight = torch.stack(gemm1_weights_mxfp4_shuffled)
             w13_weight_scale = torch.stack(
