@@ -1200,7 +1200,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         # Split concatenated embeddings for each image item.
         merge_size = self.visual.spatial_merge_size
         sizes = (torch.tensor(grid_thw_list, dtype=torch.long).prod(-1) //
-                  (merge_size * merge_size)).tolist()
+                 (merge_size * merge_size)).tolist()
 
         return image_embeds.split(sizes)
 
@@ -1220,7 +1220,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         # Split concatenated embeddings for each video item.
         merge_size = self.visual.spatial_merge_size
         sizes = (torch.tensor(grid_thw_list, dtype=torch.long).prod(-1) //
-                  (merge_size * merge_size)).tolist()
+                 (merge_size * merge_size)).tolist()
 
         return video_embeds.split(sizes)
 
