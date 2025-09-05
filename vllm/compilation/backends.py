@@ -15,7 +15,6 @@ import torch.fx as fx
 from torch._dispatch.python import enable_python_dispatcher
 
 import vllm.envs as envs
-from vllm.attention.layer import Attention
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -331,26 +330,27 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
             if (self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
                     and self.compilation_config.use_inductor_graph_partition
                     and is_torch_equal_or_newer("2.9.0.dev")):
+                from torch._inductor.utils import CUDAGraphWrapperMetadata
+
                 from .cuda_graph import CUDAGraphOptions
 
-                num_layers = len(
-                    list(v for (k, v) in self.vllm_config.compilation_config.
-                         static_forward_context.items()
-                         if isinstance(v, Attention))) + 1
                 static_graph_wrapper_class = resolve_obj_by_qualname(
                     current_platform.get_static_graph_wrapper_cls())
 
-                make_fn = lambda i: lambda f: static_graph_wrapper_class(
-                    runnable=f,
-                    vllm_config=self.vllm_config,
-                    runtime_mode=CUDAGraphMode.PIECEWISE,
-                    cudagraph_options=CUDAGraphOptions(i == 0, i != 0, i ==
-                                                       num_layers - 1))
+                def customized_cudagraph_wrapper(
+                        f, metadata: CUDAGraphWrapperMetadata):
+                    partition_id = metadata.partition_index
+                    num_partitions = metadata.num_partitions
+                    return static_graph_wrapper_class(
+                        runnable=f,
+                        vllm_config=self.vllm_config,
+                        runtime_mode=CUDAGraphMode.PIECEWISE,
+                        cudagraph_options=CUDAGraphOptions(
+                            partition_id == 0, partition_id != 0,
+                            partition_id == num_partitions - 1))
 
-                self.compilation_config.inductor_compile_config[
-                    "customized_partition_wrappers"] = [
-                        make_fn(i) for i in range(num_layers)
-                    ]
+                torch._inductor.utils.set_customized_partition_wrappers(
+                    customized_cudagraph_wrapper)
 
             compiled_graph_for_dynamic_shape = self.vllm_backend.\
                 compiler_manager.compile(
