@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from dataclasses import dataclass,field
 from typing import NamedTuple, Optional
 
 import torch
@@ -121,6 +121,10 @@ class DraftTokenIds:
     req_ids: list[str]
     # num_reqs x num_draft_tokens
     draft_token_ids: list[list[int]]
+
+    should_advance: dict[str, bool] = field(default_factory=dict)
+
+    spec_token_ids: dict[str, list[int]] = field(default_factory=dict)
 
 
 EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],

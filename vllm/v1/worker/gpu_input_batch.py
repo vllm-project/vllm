@@ -24,6 +24,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
+from vllm.v1.structured_output.request import StructuredOutputRequest
 
 
 @dataclass
@@ -46,6 +47,12 @@ class CachedRequestState:
     mrope_position_delta: Optional[int] = None
 
     lora_request: Optional[LoRARequest] = None
+
+    structured_output_request: Optional[StructuredOutputRequest] = None
+
+    requests_stop_id: int = None
+
+    stop : bool = False
 
     def __post_init__(self):
         self.num_prompt_tokens = len(self.prompt_token_ids)

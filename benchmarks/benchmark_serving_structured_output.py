@@ -250,12 +250,22 @@ def sample_requests(
             )
             input_len = len(tokenizer(prompt).input_ids)
             completion = dataset["completion"][idx]
+            output_lengths = [
+                35, 119, 109, 32, 46, 84, 86, 78, 50, 21,
+                56, 57, 43, 49, 85, 76, 49, 81, 128, 57,
+                99, 101, 45, 26, 43, 16, 43, 48, 84, 41,
+                1, 31, 45, 49, 43, 117, 65, 50, 50, 43,
+                44, 128, 89, 100, 101, 32, 43, 52, 128, 66,
+                86, 24, 44, 80, 40, 41, 76, 51, 76, 79,
+                55, 91, 48, 82, 52, 42, 6
+            ]
 
             requests.append(
                 SampleRequest(
                     prompt=prompt,
                     prompt_len=input_len,
-                    expected_output_len=args.output_len,
+                    #expected_output_len=args.output_len,
+                    expected_output_len=output_lengths[idx],
                     schema=schema,
                     structure_type=args.structure_type,
                     completion=completion,

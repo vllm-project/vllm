@@ -193,6 +193,9 @@ class Scheduler(SchedulerInterface):
         # For logging.
         scheduled_timestamp = time.monotonic()
 
+        #for structured output 
+        structured_output_request_ids: dict[str,int] = {}
+
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
@@ -343,13 +346,7 @@ class Scheduler(SchedulerInterface):
                 # Skip request if the structured output request is still waiting
                 # for FSM compilation.
                 if request.status == RequestStatus.WAITING_FOR_FSM:
-                    structured_output_req = request.structured_output_request
-                    if structured_output_req and structured_output_req.grammar:
-                        request.status = RequestStatus.WAITING
-                    else:
-                        self.waiting.pop_request()
-                        skipped_waiting_requests.prepend_request(request)
-                        continue
+                    request.status = RequestStatus.WAITING
 
                 # Check that adding the request still respects the max_loras
                 # constraint.
@@ -559,9 +556,10 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_decode_tokens,
             req_to_new_blocks,
         )
-        structured_output_request_ids, grammar_bitmask = (
-            self.get_grammar_bitmask(self.running,
-                                     scheduled_spec_decode_tokens))
+
+        eos_token_ids = {req.request_id: req.eos_token_id for req in self.running}
+        structured_output_request_ids = self.get_structured_output_request_ids(self.running,
+                                     )
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -578,7 +576,7 @@ class Scheduler(SchedulerInterface):
             free_encoder_mm_hashes=self.encoder_cache_manager.
             get_freed_mm_hashes(),
             structured_output_request_ids=structured_output_request_ids,
-            grammar_bitmask=grammar_bitmask,
+            eos_token_ids=eos_token_ids,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -807,17 +805,13 @@ class Scheduler(SchedulerInterface):
             encoder_compute_budget,
         )
 
-    def get_grammar_bitmask(
+    def get_structured_output_request_ids(
         self,
         requests: list[Request],
-        scheduled_spec_decode_tokens: dict[str, list[int]],
     ):
         # NOTE: structured_output_request_ids maps
         # a request's (request that uses structured output)
         # request_id to its index in the batch.
-        # This will help us determine to slice the grammar bitmask
-        # and only applies valid mask for requests that
-        # uses structured decoding.
         structured_output_request_ids: dict[str, int] = {}
         for i, req in enumerate(requests):
             if req.use_structured_output:
@@ -826,16 +820,7 @@ class Scheduler(SchedulerInterface):
                 # Therefore, we might introduce some additional
                 # cycle to fill in the bitmask, which could be a big no-op.
                 structured_output_request_ids[req.request_id] = i
-
-        if not structured_output_request_ids:
-            bitmask = None
-        else:
-            bitmask = self.structured_output_manager.grammar_bitmask(
-                self.requests,
-                structured_output_request_ids,
-                scheduled_spec_decode_tokens,
-            )
-        return structured_output_request_ids, bitmask
+        return structured_output_request_ids
 
     def update_from_output(
         self,
@@ -918,14 +903,6 @@ class Scheduler(SchedulerInterface):
                 # NOTE: once we support N tokens per step (spec decode),
                 # the outer lists can be of length > 1.
                 new_logprobs = logprobs.slice(req_index, req_index + 1)
-
-            if new_token_ids and self.structured_output_manager.should_advance(
-                    request):
-                # NOTE: structured_output_request
-                # should not be None if use_structured_output, we have
-                # checked above, so safe to ignore type warning
-                request.structured_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
-                    req_id, new_token_ids)
 
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]
@@ -1052,10 +1029,8 @@ class Scheduler(SchedulerInterface):
             if not spec_token_ids:
                 # NOTE(woosuk): request.spec_token_ids should be updated.
                 request.spec_token_ids.clear()
-            elif self.structured_output_manager.should_advance(request):
-                metadata = request.structured_output_request
-                request.spec_token_ids = metadata.grammar.validate_tokens(  # type: ignore[union-attr]
-                    spec_token_ids)
+            elif draft_token_ids.should_advance[req_id]:
+                request.spec_token_ids = draft_token_ids.spec_token_ids[req_id]
             else:
                 request.spec_token_ids = spec_token_ids
 

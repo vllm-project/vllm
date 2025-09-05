@@ -15,6 +15,9 @@ from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
                                                      StructuredOutputGrammar)
 from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
+from vllm.v1.worker.gpu_input_batch import CachedRequestState
+from vllm.v1.utils import ConstantList
+import time
 
 if TYPE_CHECKING:
     import numpy as np
@@ -71,7 +74,7 @@ class StructuredOutputManager:
                     reasoning_backend)
                 self.reasoner = reasoner_cls(tokenizer=self.tokenizer)
 
-    def grammar_init(self, request: Request) -> None:
+    def grammar_init(self, request: CachedRequestState) -> None:
         if request.structured_output_request is None:
             return
 
@@ -125,7 +128,7 @@ class StructuredOutputManager:
 
     def _async_create_grammar(
         self,
-        request: Request,
+        request: CachedRequestState,
     ) -> StructuredOutputGrammar:
         key = request.structured_output_request.structured_output_key  # type: ignore[union-attr]
 
@@ -161,7 +164,7 @@ class StructuredOutputManager:
 
     def grammar_bitmask(
         self,
-        requests: dict[str, Request],
+        requests: dict[str, CachedRequestState],
         structured_output_request_ids: dict[str, int],
         scheduled_spec_decode_tokens: dict[str, list[int]],
     ) -> Optional[npt.NDArray[np.int32]]:
@@ -230,6 +233,8 @@ class StructuredOutputManager:
                     assert structured_output_request is not None
                     assert structured_output_request.grammar is not None
                 apply_bitmask = self.should_fill_bitmask(request)
+                while structured_output_request.grammar is None:
+                    time.sleep(0.0000001)
 
                 state_advancements = 0
                 req_tokens = scheduled_spec_decode_tokens.get(req_id, [])
@@ -256,7 +261,7 @@ class StructuredOutputManager:
         # and deserialization when sending this to the GPU workers.
         return bitmask_tensor.numpy()
 
-    def should_fill_bitmask(self, request: Request) -> bool:
+    def should_fill_bitmask(self, request: CachedRequestState) -> bool:
         if self.reasoner is not None:
             assert request.structured_output_request is not None
             if request.structured_output_request.reasoning_ended is None:
@@ -265,8 +270,8 @@ class StructuredOutputManager:
             return request.structured_output_request.reasoning_ended
         return True
 
-    def should_advance(self, request: Request) -> bool:
-        if not request.use_structured_output:
+    def should_advance(self, request: CachedRequestState) -> bool:
+        if not request.sampling_params.guided_decoding:
             return False
 
         # To determine whether we can advance the FSM.
@@ -283,7 +288,8 @@ class StructuredOutputManager:
                 return True
 
             # Check if reasoning ends in *this* step
-            if self.reasoner.is_reasoning_end(request.all_token_ids):
+            all_token_ids = ConstantList(request.prompt_token_ids) + ConstantList(request.output_token_ids)
+            if self.reasoner.is_reasoning_end(all_token_ids):
                 # Reasoning just ended, so we shouldn't advance til
                 # next pass
                 structured_req.reasoning_ended = True

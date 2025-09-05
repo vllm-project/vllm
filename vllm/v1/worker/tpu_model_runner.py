@@ -54,6 +54,8 @@ from vllm.v1.worker.kv_connector_model_runner_mixin import (
     KVConnectorModelRunnerMixin, KVConnectorOutput)
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.tpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.structured_output import StructuredOutputManager
+from vllm.v1.structured_output.request import StructuredOutputRequest
 
 from .utils import (MultiModalBudget, add_kv_sharing_layers_to_kv_cache_groups,
                     bind_kv_cache, sanity_check_mm_encoder_outputs)
@@ -302,6 +304,8 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         else:
             self.sample_from_logits_func = self.sample_from_logits
 
+        self.structured_output_manager = StructuredOutputManager(self.vllm_config)
+
     def _update_num_xla_graphs(self, case_str):
         check_comp = self.check_recompilation and not self.enforce_eager
         if not check_comp:
@@ -397,6 +401,9 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
             )
+
+            if self.requests[req_id].sampling_params.guided_decoding:
+                self.structured_output_manager.grammar_init(self.requests[req_id])
 
             req_ids_to_add.append(req_id)
 
@@ -982,15 +989,21 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     positions=self.position_ids,
                     inputs_embeds=inputs_embeds,
                 )
+
+            bitmask = self.structured_output_manager.grammar_bitmask(
+                self.requests,
+                scheduler_output.structured_output_request_ids,
+                scheduler_output.scheduled_spec_decode_tokens,
+            )
             hidden_states = self.select_hidden_states(hidden_states,
                                                       logits_indices)
             logits = self.compute_logits(hidden_states)
             tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
                 from_input_batch(self.input_batch, padded_num_reqs, self.device)
-            if scheduler_output.grammar_bitmask is not None:
+            if bitmask is not None:
                 require_struct_decoding, grammar_bitmask_padded, arange = \
                     self.prepare_structured_decoding_input(logits,
-                                                           scheduler_output)
+                                                           scheduler_output, bitmask)
                 logits = self.structured_decode(require_struct_decoding,
                                                 grammar_bitmask_padded, logits,
                                                 arange)
@@ -1112,6 +1125,23 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 finished_sending=finished_sending,
                 finished_recving=finished_recving,
             )
+        
+        for req_id,num_tokens_scheduled in scheduler_output.num_scheduled_tokens.items():
+            req_idx = self.input_batch.req_id_to_index[req_id]
+            generated_token_ids = valid_sampled_token_ids[req_idx] if valid_sampled_token_ids else []
+            count = 0
+            for num_new, output_token_id in enumerate(generated_token_ids, 1):
+                last_token_id = output_token_id
+                if (not self.requests[req_id].sampling_params.ignore_eos  and 
+                   last_token_id == scheduler_output.eos_token_ids[req_id]):
+                   count = num_new
+                   self.requests[req_id].stop = True
+                   break
+            if generated_token_ids and self.structured_output_manager.should_advance(self.requests[req_id]):
+                if count > 0:
+                    self.requests[req_id].structured_output_request.grammar.accept_tokens(req_id, generated_token_ids[:count])
+                else:
+                    self.requests[req_id].structured_output_request.grammar.accept_tokens(req_id, generated_token_ids)
 
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids,
@@ -1758,9 +1788,9 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return self.model.get_input_embeddings(*args, **kwargs)
 
     def prepare_structured_decoding_input(
-        self, logits: torch.Tensor, scheduler_output: "SchedulerOutput"
+        self, logits: torch.Tensor, scheduler_output: "SchedulerOutput", bitmask: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        grammar_bitmask = scheduler_output.grammar_bitmask
+        grammar_bitmask = bitmask
         assert grammar_bitmask is not None
         num_reqs, _ = logits.shape
 

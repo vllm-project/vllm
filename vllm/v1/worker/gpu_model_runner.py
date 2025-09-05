@@ -11,6 +11,7 @@ from copy import deepcopy
 from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
 import numpy as np
+import numpy.typing as npt
 import torch
 import torch.distributed
 import torch.nn as nn
@@ -82,6 +83,8 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.kv_connector_model_runner_mixin import (
     KVConnectorModelRunnerMixin, KVConnectorOutput)
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from vllm.v1.structured_output import StructuredOutputManager
+from vllm.v1.structured_output.request import StructuredOutputRequest
 
 from .utils import (AttentionGroup, MultiModalBudget,
                     add_kv_sharing_layers_to_kv_cache_groups, bind_kv_cache,
@@ -319,6 +322,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             dtype=torch.int64,
             device="cpu",
             pin_memory=self.pin_memory)
+        self.structured_output_manager = StructuredOutputManager(self.vllm_config)
 
     def _make_buffer(self, *args, dtype: torch.dtype) -> CpuGpuBuffer:
         return CpuGpuBuffer(*args,
@@ -469,8 +473,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
+                structured_output_request = StructuredOutputRequest(
+                    sampling_params=sampling_params,),
+                requests_stop_id = scheduler_output.eos_token_ids[req_id] if scheduler_output.eos_token_ids[req_id] else None,
+                
             )
             self.requests[req_id] = req_state
+            if self.requests[req_id].sampling_params.guided_decoding:
+                self.structured_output_manager.grammar_init(self.requests[req_id])
 
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             if self.uses_mrope:
@@ -1274,8 +1284,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
         logits: torch.Tensor,
+        bitmask: Optional[npt.NDArray[np.int32]],
     ):
-        grammar_bitmask = scheduler_output.grammar_bitmask
+        grammar_bitmask = bitmask
         if grammar_bitmask is None:
             return
 
@@ -1574,6 +1585,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
+            bitmask = self.structured_output_manager.grammar_bitmask(
+                self.requests,
+                scheduler_output.structured_output_request_ids,
+                scheduler_output.scheduled_spec_decode_tokens,
+            )
 
         if self.use_aux_hidden_state_outputs:
             hidden_states, aux_hidden_states = model_output
@@ -1614,8 +1630,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             logits = model_output_broadcast_data["logits"]
 
         # Apply structured output bitmasks if present
-        if scheduler_output.grammar_bitmask is not None:
-            self.apply_grammar_bitmask(scheduler_output, logits)
+        if bitmask is not None:
+            self.apply_grammar_bitmask(scheduler_output, logits, bitmask)
 
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
@@ -1739,6 +1755,22 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
 
         self.eplb_step()
+        for req_id,num_tokens_scheduled in scheduler_output.num_scheduled_tokens.items():
+            req_idx = self.input_batch.req_id_to_index[req_id]
+            generated_token_ids = valid_sampled_token_ids[req_idx] if valid_sampled_token_ids else []
+            count = 0
+            for num_new, output_token_id in enumerate(generated_token_ids, 1):
+                last_token_id = output_token_id
+                if (not self.requests[req_id].sampling_params.ignore_eos  and 
+                   last_token_id == scheduler_output.eos_token_ids[req_id]):
+                   count = num_new
+                   self.requests[req_id].stop = True
+                   break
+            if generated_token_ids and self.structured_output_manager.should_advance(self.requests[req_id]):
+                if count > 0:
+                    self.requests[req_id].structured_output_request.grammar.accept_tokens(req_id, generated_token_ids[:count])
+                else:
+                    self.requests[req_id].structured_output_request.grammar.accept_tokens(req_id, generated_token_ids)
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
@@ -1760,7 +1792,26 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         else:
             draft_token_ids = self._draft_token_ids
         self._draft_token_ids = None
-        return DraftTokenIds(req_ids, draft_token_ids)
+
+        should_advance: dict[str, bool] = {}
+        spec_token_ids: dict[str, list[int]] = {}
+
+        for i,req_id in enumerate(req_ids):
+            if self.structured_output_manager.should_advance(self.requests[req_id]) and not self.requests[req_id].stop:
+                should_advance[req_id] = True
+                count = 0
+                for num_new, output_token_id in enumerate(draft_token_ids[i], 1):
+                    last_token_id = output_token_id
+                    if last_token_id == self.requests[req_id].requests_stop_id:
+                        count = num_new
+                        break
+                if count == 0 or count == len(draft_token_ids[i]):
+                    spec_token_ids[req_id] = self.requests[req_id].structured_output_request.grammar.validate_tokens(draft_token_ids[i])
+                else:
+                    spec_token_ids[req_id] = self.requests[req_id].structured_output_request.grammar.validate_tokens(draft_token_ids[i][:count])
+            else:
+                should_advance[req_id] = False
+        return DraftTokenIds(req_ids, draft_token_ids, should_advance, spec_token_ids)
 
     def propose_draft_token_ids(
         self,
