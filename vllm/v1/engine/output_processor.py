@@ -13,7 +13,7 @@ from vllm.outputs import (CompletionOutput, PoolingOutput,
 from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
-from vllm.utils import length_from_prompt_token_ids_or_prompt_embeds
+from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
@@ -104,7 +104,7 @@ class RequestState:
         self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
         self.prompt_embeds = prompt_embeds
-        self.prompt_len = length_from_prompt_token_ids_or_prompt_embeds(
+        self.prompt_len = length_from_prompt_token_ids_or_embeds(
             self.prompt_token_ids, self.prompt_embeds)
         self.logprobs_processor = logprobs_processor
         self.detokenizer = detokenizer
@@ -488,7 +488,7 @@ class OutputProcessor:
         assert req_state.stats is not None
         iteration_stats.update_from_finished_request(
             finish_reason=finish_reason,
-            num_prompt_tokens=length_from_prompt_token_ids_or_prompt_embeds(
+            num_prompt_tokens=length_from_prompt_token_ids_or_embeds(
                 req_state.prompt_token_ids, req_state.prompt_embeds),
             max_tokens_param=req_state.max_tokens_param,
             req_stats=req_state.stats)

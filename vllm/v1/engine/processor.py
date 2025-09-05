@@ -18,7 +18,7 @@ from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
-from vllm.utils import length_from_prompt_token_ids_or_prompt_embeds
+from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.structured_output.backend_guidance import (
     validate_guidance_grammar)
@@ -399,7 +399,7 @@ class Processor:
             sampling_params = params.clone()
             # If unset max tokens, then generate up to the max_model_len.
             if sampling_params.max_tokens is None:
-                seq_len = length_from_prompt_token_ids_or_prompt_embeds(
+                seq_len = length_from_prompt_token_ids_or_embeds(
                     prompt_token_ids, prompt_embeds)
                 sampling_params.max_tokens = \
                     self.model_config.max_model_len - seq_len
@@ -475,7 +475,7 @@ class Processor:
             "type"] == "embeds" else prompt_inputs["prompt_token_ids"]
         prompt_embeds = prompt_inputs["prompt_embeds"] if prompt_inputs[
             "type"] == "embeds" else None
-        prompt_len = length_from_prompt_token_ids_or_prompt_embeds(
+        prompt_len = length_from_prompt_token_ids_or_embeds(
             prompt_ids, prompt_embeds)
         if not prompt_ids:
             if prompt_type == "encoder" and model_config.is_multimodal_model:

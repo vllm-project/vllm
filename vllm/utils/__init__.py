@@ -3434,7 +3434,7 @@ def decorate_logs(process_name: Optional[str] = None) -> None:
     _add_prefix(sys.stderr, process_name, pid)
 
 
-def length_from_prompt_token_ids_or_prompt_embeds(
+def length_from_prompt_token_ids_or_embeds(
     prompt_token_ids: Optional[list[int]],
     prompt_embeds: Optional[torch.Tensor],
 ) -> int:

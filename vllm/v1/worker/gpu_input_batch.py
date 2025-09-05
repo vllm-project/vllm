@@ -14,8 +14,7 @@ from vllm.multimodal.inputs import (MultiModalKwargsItem,
                                     MultiModalKwargsItems, PlaceholderRange)
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.utils import (length_from_prompt_token_ids_or_prompt_embeds,
-                        swap_dict_values)
+from vllm.utils import length_from_prompt_token_ids_or_embeds, swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import (BatchUpdateBuilder,
@@ -50,7 +49,7 @@ class CachedRequestState:
     lora_request: Optional[LoRARequest] = None
 
     def __post_init__(self):
-        self.num_prompt_tokens = length_from_prompt_token_ids_or_prompt_embeds(
+        self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
             self.prompt_token_ids, self.prompt_embeds)
 
     @property
@@ -317,7 +316,7 @@ class InputBatch:
         self.req_id_to_index[req_id] = req_index
 
         # Copy the prompt token ids and output token ids.
-        num_prompt_tokens = length_from_prompt_token_ids_or_prompt_embeds(
+        num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
             request.prompt_token_ids, request.prompt_embeds)
         self.num_prompt_tokens[req_index] = num_prompt_tokens
         start_idx = num_prompt_tokens

@@ -13,7 +13,7 @@ from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
 from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
-from vllm.utils import length_from_prompt_token_ids_or_prompt_embeds
+from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)
@@ -260,7 +260,7 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
         params = request.sampling_params
         assert params is not None
 
-        self.prompt_len = length_from_prompt_token_ids_or_prompt_embeds(
+        self.prompt_len = length_from_prompt_token_ids_or_embeds(
             request.prompt_token_ids, request.prompt_embeds)
 
         # Metadata for incremental detokenization.
