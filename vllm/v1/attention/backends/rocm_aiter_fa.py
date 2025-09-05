@@ -429,7 +429,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[int] = None,
         sinks: Optional[torch.Tensor] = None,
-        sinks: Optional[torch.Tensor] = None,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
