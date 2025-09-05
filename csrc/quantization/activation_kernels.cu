@@ -397,6 +397,10 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
     bool use_ue8m0, int64_t num_parallel_tokens) {
   // This kernel currently only supports H % 128 == 0 and assumes a
   // fixed GROUP_SIZE of 128.
+  TORCH_CHECK(input.dtype() == torch::kBFloat16);
+  TORCH_CHECK(y_q.dtype() == torch::kFloat8_e4m3fn ||
+              y_q.dtype() == torch::kFloat8_e4m3fnuz);
+  TORCH_CHECK(y_s.dtype() == torch::kFloat32);
   TORCH_CHECK(input.size(-1) % 256 == 0);
 
   using Idx_t = uint32_t;
