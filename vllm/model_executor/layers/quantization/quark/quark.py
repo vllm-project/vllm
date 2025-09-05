@@ -318,12 +318,11 @@ class QuarkConfig(QuantizationConfig):
         else:
             layer_quant_config = cast(
                 dict[str, Any], self.quant_config.get("layer_quant_config"))
-            layer_quant_configs = list()
             for name_pattern in layer_quant_config:
-                if layer_name in name_pattern:
-                    layer_quant_configs.append(
-                        layer_quant_config[name_pattern])
-                    return layer_quant_configs[0]
+                patterns = [p.strip() for p in name_pattern.split(',')]
+                for p in patterns:
+                    if fnmatch.fnmatch(layer_name, p):
+                        return layer_quant_config[name_pattern]
 
             layer_type = cast(str, type(module))
             layer_type_quant_config = cast(
