@@ -5,7 +5,7 @@ import copy
 import gc
 import os
 from contextlib import AbstractContextManager, nullcontext
-from typing import TYPE_CHECKING, Any, Optional, Callable, TypedDict
+from typing import TYPE_CHECKING, Any, Callable, Optional, TypedDict
 
 import torch
 import torch.distributed
@@ -22,7 +22,8 @@ from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
-from vllm.model_executor.model_loader.utils import process_weights_after_loading
+from vllm.model_executor.model_loader.utils import (
+    process_weights_after_loading)
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -66,11 +67,11 @@ class FlattenedTensorMetadata(TypedDict):
 class UpdateWeightsFromIPCRequest(TypedDict):
     # a list of tuple to specify tensor metadata
     named_tensors: list[FlattenedTensorMetadata]
-    # dict key is device_uuid, could get my own from `current_platform.get_device_uuid(self.device.index)` in vLLM
-    # dict value is a serialized ipc `handle`, vLLM can use `func, args = handle` and `func(*args)` to rebuild GPU tensor
-    # if `handles` is not None, means this is the first request in current update flow
+    # a serialized handle that vLLM can use `func, args = ipc_handle` and
+    # `func(*args)` to rebuild GPU tensor. If `ipc_handle` is not None,
+    # means this is the first request in current update flow and
     # vLLM should rebuild and save this GPU tensor as a shared buffer
-    ipc_handle: tuple[Callable, tuple] | None
+    ipc_handle: Optional[tuple[Callable, tuple]]
     # specify whether this request is the last request in current update flow
     end: bool
 
@@ -256,9 +257,10 @@ class Worker(WorkerBase):
         self.model_runner.reload_weights()
 
     def update_weights_from_ipc(self, zmq_handles: dict[str, str]):
+        assert self.device is not None
         socket = self._zmq_ctx.socket(zmq.REP)
         socket.connect(zmq_handles[self.device_uuid])
-        buffer: torch.Tensor | None = None
+        buffer: Optional[torch.Tensor] = None
         while True:
             kwargs: UpdateWeightsFromIPCRequest = socket.recv_pyobj()
             if kwargs["ipc_handle"] is not None:

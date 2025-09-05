@@ -27,6 +27,7 @@ with vLLM memory profiling and causes unexpected behavior.
 Learn more about Ray placement groups:
 https://docs.ray.io/en/latest/placement-groups.html
 """
+
 import gc
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -101,22 +102,28 @@ class RayTrainingActor:
     def update_weights(self):
         s = self.zmq_context.socket(zmq.REQ)
         s.bind(self.zmq_handle)
-        buffer = torch.empty(1<<30, dtype=torch.uint8, device="cuda:0")
+        buffer = torch.empty(1 << 30, dtype=torch.uint8, device="cuda:0")
         handle = reduce_tensor(buffer)
-        named_parameters: dict[str, torch.nn.Parameter] = dict(self.model.named_parameters())
+        named_parameters: dict[str, torch.nn.Parameter] = dict(
+            self.model.named_parameters()
+        )
         for i, (name, p) in enumerate(named_parameters.items()):
-            buffer[:p.nbytes].data.copy_(p.data.view(-1).view(dtype=torch.uint8))
-            s.send_pyobj({
-                "named_tensors": [{
-                    "name": name,
-                    "dtype": p.dtype,
-                    "shape": p.shape,
+            buffer[: p.nbytes].data.copy_(p.data.view(-1).view(dtype=torch.uint8))
+            s.send_pyobj(
+                {
+                    "named_tensors": [
+                        {
+                            "name": name,
+                            "dtype": p.dtype,
+                            "shape": p.shape,
+                            "offset": 0,
+                        }
+                    ],
+                    "ipc_handle": handle if i == 0 else None,
                     "offset": 0,
-                }],
-                "ipc_handle": handle if i == 0 else None,
-                "offset": 0,
-                "end": i == len(named_parameters) - 1,
-            })
+                    "end": i == len(named_parameters) - 1,
+                }
+            )
             s.recv()
         torch.cuda.synchronize()
         del buffer
@@ -202,18 +209,15 @@ zmq_handles = {}
 for actor in training_actors:
     zmq_handles.update(ray.get(actor.get_zmq_handles.remote()))
 
+
 def collective_rpc(llm):
-    ray.get(
-        llm.collective_rpc.remote(
-            "update_weights_from_ipc", args=(zmq_handles,)
-        )
-    )
+    ray.get(llm.collective_rpc.remote("update_weights_from_ipc", args=(zmq_handles,)))
+
 
 print("Update the weights of the inference engines (threaded).")
 with ThreadPoolExecutor(max_workers=len(inference_engines)) as executor:
     futures = [executor.submit(collective_rpc, llm) for llm in inference_engines]
-    for actor in training_actors:
-        ray.get(actor.update_weights.remote())
+    ray.get([actor.update_weights.remote() for actor in training_actors])
     for future in futures:
         future.result()
 
