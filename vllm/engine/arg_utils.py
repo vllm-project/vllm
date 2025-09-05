@@ -788,8 +788,10 @@ class EngineArgs:
             "--enable-lora",
             action=argparse.BooleanOptionalAction,
             help="If True, enable handling of LoRA adapters.")
-        lora_group.add_argument("--enable-lora-bias",
-                                **lora_kwargs["bias_enabled"])
+        lora_group.add_argument(
+            "--enable-lora-bias",
+            help="[DEPRECATED] Enable bias for LoRA adapters. This option will be removed in a future release.",
+            **lora_kwargs["bias_enabled"])
         lora_group.add_argument("--max-loras", **lora_kwargs["max_loras"])
         lora_group.add_argument("--max-lora-rank",
                                 **lora_kwargs["max_lora_rank"])

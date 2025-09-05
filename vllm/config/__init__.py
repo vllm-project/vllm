@@ -2469,8 +2469,9 @@ class LoRAConfig:
     per prompt. When run in offline mode, the lora IDs for n modalities
     will be automatically assigned to 1-n with the names of the modalities
     in alphabetic order."""
+
     bias_enabled: bool = False
-    """Enable bias for LoRA adapters."""
+    """[DEPRECATED] Enable bias for LoRA adapters. This option will be removed in a future release."""
 
     def compute_hash(self) -> str:
         """
@@ -2502,6 +2503,13 @@ class LoRAConfig:
             "`lora_extra_vocab_size` is deprecated and will be removed "
             "in v0.12.0. Additional vocabulary support for "
             "LoRA adapters is being phased out.")
+
+        # Deprecation warning for enable_lora_bias
+        if self.bias_enabled:
+            import warnings
+            msg = "`enable_lora_bias` (bias_enabled) is deprecated and will be removed in a future release."
+            warnings.warn(msg, DeprecationWarning, stacklevel=2)
+            logger.warning(msg)
 
         # Setting the maximum rank to 512 should be able to satisfy the vast
         # majority of applications.
