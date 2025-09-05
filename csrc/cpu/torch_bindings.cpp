@@ -88,7 +88,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    int tp_rank, int blocksparse_local_blocks,"
       "    int blocksparse_vert_stride, int blocksparse_block_size,"
       "    int blocksparse_head_sliding_step) -> ()");
+
   ops.impl("paged_attention_v1", torch::kCPU, &paged_attention_v1);
+
+  ops.def(
+      "dynamic_4bit_int_moe("
+      "Tensor x, Tensor topk_ids, Tensor topk_weights,"
+      "Tensor w13_packed, Tensor w2_packed, int H, int I, int I2,"
+      "int group_size, bool apply_router_weight_on_input, int activation_kind"
+      ") -> Tensor");
+
+  ops.impl("dynamic_4bit_int_moe", torch::kCPU, &dynamic_4bit_int_moe_cpu);
 
   // PagedAttention V2.
   ops.def(
