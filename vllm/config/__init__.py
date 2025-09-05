@@ -2471,7 +2471,8 @@ class LoRAConfig:
     in alphabetic order."""
 
     bias_enabled: bool = False
-    """[DEPRECATED] Enable bias for LoRA adapters. This option will be removed in a future release."""
+    """[DEPRECATED] Enable bias for LoRA adapters. This option will be removed in a
+    future release."""
 
     def compute_hash(self) -> str:
         """
@@ -2506,7 +2507,9 @@ class LoRAConfig:
 
         # Deprecation warning for enable_lora_bias
         if self.bias_enabled:
-            msg = "`enable_lora_bias` (bias_enabled) is deprecated and will be removed in a future release."
+            msg = (
+                "`enable_lora_bias` (bias_enabled) is deprecated and will be "
+                "removed in a future release.")
             warnings.warn(msg, DeprecationWarning, stacklevel=2)
 
         # Setting the maximum rank to 512 should be able to satisfy the vast
