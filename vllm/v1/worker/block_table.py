@@ -51,8 +51,13 @@ class BlockTable:
         self.slot_mapping = torch.zeros(self.max_num_batched_tokens,
                                         dtype=torch.int64,
                                         device=self.device)
-        self.dcp_world_size = get_dcp_group().world_size
-        self.dcp_rank = get_dcp_group().rank_in_group
+        try:
+            self.dcp_world_size = get_dcp_group().world_size
+            self.dcp_rank = get_dcp_group().rank_in_group
+        except AssertionError:
+            # DCP might not be initialized in testing
+            self.dcp_world_size = 1
+            self.dcp_rank = 0
 
     def append_row(
         self,
@@ -158,7 +163,12 @@ class MultiGroupBlockTable:
         # (max_model_len//dcp_world_size) tokens in kvcache,
         # so the block_size which used for calc max_num_blocks_per_req
         # must be multiplied by dcp_world_size.
-        dcp_world_size = get_dcp_group().world_size
+        try:
+            dcp_world_size = get_dcp_group().world_size
+        except AssertionError:
+            # DCP might not be initialized in testing
+            dcp_world_size = 1
+
         self.block_tables = [
             BlockTable(block_size, max_num_reqs,
                        cdiv(max_model_len, block_size * dcp_world_size),

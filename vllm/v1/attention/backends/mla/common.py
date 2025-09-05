@@ -452,8 +452,13 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)
         self.aot_schedule = current_platform.is_cuda()
-        self.dcp_world_size = get_dcp_group().world_size
-        self.dcp_rank = get_dcp_group().rank_in_group
+        try:
+            self.dcp_world_size = get_dcp_group().world_size
+            self.dcp_rank = get_dcp_group().rank_in_group
+        except AssertionError:
+            # DCP might not be initialized in testing
+            self.dcp_world_size = 1
+            self.dcp_rank = 0
 
         # Dont try to access the runner on AMD
         if self.aot_schedule:
