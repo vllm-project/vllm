@@ -6,7 +6,7 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from typing import TYPE_CHECKING, Callable, Final, Optional, Union
+from typing import Callable, Final, Optional, Union
 
 import jinja2
 import partial_json_parser
@@ -90,11 +90,6 @@ class OpenAIServingChat(OpenAIServing):
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
         self.enable_log_outputs = enable_log_outputs
-        self.use_harmony = model_config.hf_config.model_type == "gpt_oss"
-        if self.use_harmony:
-            # override the default tool_parser and auto tools for harmony
-            tool_parser = 'openai'
-            enable_auto_tools = True
 
         # set up tool use
         self.enable_auto_tools: bool = enable_auto_tools
@@ -146,6 +141,7 @@ class OpenAIServingChat(OpenAIServing):
         else:
             self.tool_call_id_type = 'random'
 
+        self.use_harmony = model_config.hf_config.model_type == "gpt_oss"
         if self.use_harmony:
             if "stop_token_ids" not in self.default_sampling_params:
                 self.default_sampling_params["stop_token_ids"] = []
@@ -1192,25 +1188,34 @@ class OpenAIServingChat(OpenAIServing):
                 logprobs = None
 
             if self.use_harmony:
-                if TYPE_CHECKING:
-                    assert self.tool_parser is not None
-                tool_parser = self.tool_parser(tokenizer)
-                # NOTE: We use token_ids for openai tool parser
-                tool_call_info = tool_parser.extract_tool_calls(
-                    "",
-                    request=request,
-                    token_ids=token_ids,  # type: ignore
-                )
-                reasoning_content, content = None, tool_call_info.content
-                if request.include_reasoning:
+                if self.tool_parser is not None:
+                    tool_parser = self.tool_parser(tokenizer)
+                    # NOTE: We use token_ids for openai tool parser
+                    tool_call_info = tool_parser.extract_tool_calls(
+                        "",
+                        request=request,
+                        token_ids=token_ids,  # type: ignore
+                    )
+                    reasoning_content, content = None, tool_call_info.content
+                    if request.include_reasoning:
+                        reasoning_content, content, _ = parse_chat_output(
+                            token_ids)
+                    message = ChatMessage(
+                        role=role,
+                        reasoning_content=reasoning_content,
+                        content=content,
+                        tool_calls=tool_call_info.tool_calls,
+                    )
+                else:
                     reasoning_content, content, _ = parse_chat_output(
                         token_ids)
-                message = ChatMessage(
-                    role=role,
-                    reasoning_content=reasoning_content,
-                    content=content,
-                    tool_calls=tool_call_info.tool_calls,
-                )
+                    if not request.include_reasoning:
+                        reasoning_content = None
+                    message = ChatMessage(
+                        role=role,
+                        reasoning_content=reasoning_content,
+                        content=content,
+                    )
 
                 choice_data = ChatCompletionResponseChoice(
                     index=output.index,
