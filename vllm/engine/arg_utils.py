@@ -1167,8 +1167,10 @@ class EngineArgs:
         # reuse the GPUs of TP group, and split one TP group into
         # tp_size//dcp_size DCP groups.
         assert self.tensor_parallel_size % self.decode_context_parallel_size \
-                == 0, "tensor_parallel_size must be divisible by \
-                decode_context_parallel_size."
+            == 0, (
+            f"tp_size={self.tensor_parallel_size} must be divisible by"
+            f"dcp_size={self.decode_context_parallel_size}."
+        )
 
         cache_config = CacheConfig(
             block_size=self.block_size,

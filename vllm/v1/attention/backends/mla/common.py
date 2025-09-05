@@ -452,8 +452,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)
         self.aot_schedule = current_platform.is_cuda()
-        self.dcp_world_size = \
-            vllm_config.parallel_config.decode_context_parallel_size
+        self.dcp_world_size = get_dcp_group().world_size
+        self.dcp_rank = get_dcp_group().rank_in_group
 
         # Dont try to access the runner on AMD
         if self.aot_schedule:
@@ -659,9 +659,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         # Note(hc): update seq_lens of decode reqs under DCP.
         if self.dcp_world_size > 1:
             seq_lens[:num_decodes] = seq_lens[:num_decodes] \
-                // self.dcp_world_size + \
-                (get_dcp_group().rank_in_group <= (seq_lens[:num_decodes] - 1) \
-                % self.dcp_world_size)
+                // self.dcp_world_size + (self.dcp_rank <= \
+                (seq_lens[:num_decodes] - 1) % self.dcp_world_size)
 
         assert num_decodes + num_prefills == num_reqs
         assert num_decode_tokens + num_prefill_tokens == num_tokens
@@ -982,6 +981,8 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             self._pad_v = self.vllm_flash_attn_version is None or not (
                 self.vllm_flash_attn_version == 3
                 and current_platform.get_device_capability()[0] == 9)
+
+        self.dcp_world_size: Optional[int] = None
 
     def _flash_attn_varlen_diff_headdims(self,
                                          q,
@@ -1411,6 +1412,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         k_scale: torch.Tensor,
     ) -> torch.Tensor:
         assert attn_metadata.prefill is not None
+        assert self.dcp_world_size is not None
 
         has_context = attn_metadata.prefill.chunked_context is not None
         kv_nope = self.kv_b_proj(kv_c_normed)[0].view(\
@@ -1430,11 +1432,11 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
         if has_context:
             suffix_output, suffix_lse = output
-            if get_dcp_group().world_size > 1:
+            if self.dcp_world_size > 1:
                 context_output, context_lse = \
                     self._context_parallel_compute_prefill_context(
                     q, kv_c_and_k_pe_cache, attn_metadata,
-                    k_scale=None, dcp_world_size=get_dcp_group().world_size)
+                    k_scale=None, dcp_world_size=self.dcp_world_size)
             else:
                 context_output, context_lse = \
                     self._compute_prefill_context(
@@ -1489,6 +1491,9 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             # to ensure all ranks within a DP group compute the
             # same expert outputs.
             return output.fill_(0)
+
+        if self.dcp_world_size is None:
+            self.dcp_world_size = get_dcp_group().world_size
 
         fp8_attention = self.kv_cache_dtype.startswith("fp8")
 
@@ -1569,19 +1574,19 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 decode_q_pe = decode_q_pe.reshape(q_pe_shape)
 
             decode_q = (decode_ql_nope, decode_q_pe)
-            if get_dcp_group().world_size > 1:
+            if self.dcp_world_size > 1:
                 assert not fp8_attention, "DCP not support fp8 kvcache now."
                 # concatenate decode_ql_nope and decode_q_pe -> (B, N, L + P)
                 decode_q = torch.cat(decode_q, dim=-1)
-                # Note(hc): decode_q do allgather in head dim.
+                # decode_q do allgather in head dim.
                 decode_q = get_dcp_group().all_gather(decode_q, dim=1)
 
             # call decode attn
             attn_out, lse = self._forward_decode(decode_q, kv_cache,
                                                  attn_metadata, layer)
 
-            # Note(hc): recorect dcp attn_out with lse.
-            if get_dcp_group().world_size > 1:
+            # recorect dcp attn_out with lse.
+            if self.dcp_world_size > 1:
                 assert lse is not None
                 attn_out = cp_lse_ag_out_rs(attn_out, lse, get_dcp_group())
 
