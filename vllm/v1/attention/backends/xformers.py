@@ -3,7 +3,7 @@
 """Attention layer with XFormersAttention."""
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import ClassVar, Optional
 
 import torch
 
@@ -193,6 +193,8 @@ class XFormersAttentionMetadata:
 class XFormersAttentionMetadataBuilder(
         AttentionMetadataBuilder[XFormersAttentionMetadata]):
 
+    reorder_batch_threshold: ClassVar[int] = 1
+
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -213,8 +215,9 @@ class XFormersAttentionMetadataBuilder(
         fast_build: bool = False,
     ) -> XFormersAttentionMetadata:
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
-            split_decodes_and_prefills(common_attn_metadata,
-                                       decode_threshold=1))
+            split_decodes_and_prefills(
+                common_attn_metadata,
+                decode_threshold=self.reorder_batch_threshold))
 
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         q_start_loc = common_attn_metadata.query_start_loc
