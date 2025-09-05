@@ -45,28 +45,19 @@ def normalize_value(x):
     if x is None or isinstance(x, (bool, int, float, str)):
         return x
 
-    # Enums by value (normalize underlying value recursively)
+    # Enums tagged by enum class to avoid collisions with primitives
     if isinstance(x, enum.Enum):
-        return normalize_value(x.value)
+        enum_type = f"{x.__class__.__module__}.{x.__class__.__qualname__}"
+        return (enum_type, normalize_value(x.value))
 
-    # Callables: classes, functions (incl. lambdas/nested), callable instances
+    # Callables: allow classes (types) only; reject functions/lambdas/methods
+    if isinstance(x, type):
+        module = getattr(x, "__module__", "")
+        qual = getattr(x, "__qualname__", getattr(x, "__name__", ""))
+        return ".".join([p for p in (module, qual) if p]) or repr(x)
     if callable(x):
-        fn = getattr(x, "__func__", x)  # bound methods -> function
-        code = getattr(fn, "__code__", None)
-        module = getattr(fn, "__module__", "")
-        qual = getattr(fn, "__qualname__", getattr(fn, "__name__", ""))
-        base = ".".join([p for p in (module, qual) if p]) or repr(fn)
-        if code is not None:
-            fname = pathlib.Path(getattr(code, "co_filename", "")).name
-            lineno = getattr(code, "co_firstlineno", None)
-            if fname and isinstance(lineno, int):
-                return f"{base}@{fname}:{lineno}"
-        # classes or callable instances (no __code__)
-        t = x if isinstance(x, type) else type(x)
-        t_module = getattr(t, "__module__", "")
-        t_qual = getattr(t, "__qualname__", getattr(t, "__name__", ""))
-        ident = ".".join([p for p in (t_module, t_qual) if p])
-        return ident or repr(t)
+        raise TypeError(
+            "normalize_value: function or callable instance unsupported")
 
     # Torch dtype without import (identify by type module/name)
     t = type(x)
