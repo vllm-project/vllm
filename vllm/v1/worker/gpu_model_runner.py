@@ -2497,11 +2497,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             assert num_tokens % 2 == 0
 
             num_tokens_per_ubatch = num_tokens // 2
-            dp_size = self.vllm_config.parallel_config.data_parallel_size
-            num_tokens_across_dp = torch.tensor([num_tokens_per_ubatch] *
-                                                dp_size,
-                                                device="cpu",
-                                                dtype=torch.int32)
             ubatch_slices = create_slices(
                 self.query_start_loc.np[:num_reqs + 1], num_tokens_per_ubatch,
                 num_tokens)
