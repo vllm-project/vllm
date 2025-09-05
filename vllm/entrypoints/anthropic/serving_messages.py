@@ -158,8 +158,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                     else:
                         openai_msg["content"] = content_parts
                 elif not tool_calls:
-                    # If no content and no tool calls, add empty content
-                    openai_msg["content"] = ""
+                    continue
 
             openai_messages.append(openai_msg)
 
