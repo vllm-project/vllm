@@ -1174,6 +1174,7 @@ class OpenAIServingChat(OpenAIServing):
         for output in final_res.outputs:
             token_ids = output.token_ids
             out_logprobs = output.logprobs
+            tool_call_info = None
 
             if request.logprobs and request.top_logprobs is not None:
                 assert out_logprobs is not None, "Did not output logprobs"
@@ -1221,8 +1222,9 @@ class OpenAIServingChat(OpenAIServing):
                     index=output.index,
                     message=message,
                     logprobs=logprobs,
-                    finish_reason="tool_calls"
-                    if tool_call_info.tools_called else
+                    finish_reason="tool_calls" if
+                    (tool_call_info is not None
+                     and tool_call_info.tools_called) else
                     output.finish_reason if output.finish_reason else "stop",
                     stop_reason=output.stop_reason,
                 )
