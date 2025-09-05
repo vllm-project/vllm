@@ -12,7 +12,6 @@ import pytest_asyncio
 import regex as re
 import requests
 # downloading lora to test lora requests
-from huggingface_hub import snapshot_download
 from openai import BadRequestError
 
 from vllm.transformers_utils.tokenizer import get_tokenizer
@@ -23,14 +22,8 @@ from ...utils import RemoteOpenAIServer
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 # technically these adapters use a different base model,
 # but we're not testing generation quality here
-LORA_NAME = "typeof/zephyr-7b-beta-lora"
 
 GUIDED_DECODING_BACKENDS = ["outlines", "xgrammar", "guidance"]
-
-
-@pytest.fixture(scope="module")
-def zephyr_lora_files():
-    return snapshot_download(repo_id=LORA_NAME)
 
 
 @pytest.fixture(scope="module")
