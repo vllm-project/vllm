@@ -1665,10 +1665,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             hidden_states = model_output
             aux_hidden_states = None
 
-    # Broadcast PP output for external_launcher (torchrun)
-    # to make sure we are synced across pp ranks
-    # TODO: Support overlapping mirco-batches
-    # https://github.com/vllm-project/vllm/issues/18019
+        # Broadcast PP output for external_launcher (torchrun)
+        # to make sure we are synced across pp ranks
+        # TODO: Support overlapping mirco-batches
+        # https://github.com/vllm-project/vllm/issues/18019
         broadcast_pp_output = \
             self.parallel_config.distributed_executor_backend \
             == "external_launcher" and len(get_pp_group().ranks) > 0
