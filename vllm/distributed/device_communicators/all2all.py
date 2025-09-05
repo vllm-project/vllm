@@ -7,7 +7,8 @@ import torch.distributed as dist
 
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.utils import has_deep_ep, has_pplx
+from vllm.utils import has_deep_ep, has_deep_gemm, has_pplx
+from vllm.v1.worker.ubatching import dbo_enabled
 
 from .base_device_communicator import All2AllManagerBase, Cache
 
@@ -196,6 +197,17 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
         # situation where we make objects with different num_sms, the hash key
         # in get_or_create must be updated.
         handle.set_num_sms(self.num_sms)
+        # configure DeepGEMM to use the remaining SMs for compute.
+        # This avoids contention with communication
+        if has_deep_gemm() and dbo_enabled():
+            import deep_gemm as dg
+            props = torch.cuda.get_device_properties(
+                torch.cuda.current_device())
+            total_sms = props.multi_processor_count
+            compute_sms = total_sms - self.num_sms
+            assert compute_sms > 0, "compute_sms must be greater than 0"
+            logger.info("Setting DeepGEMM num_sms to %d for dbo", compute_sms)
+            dg.set_num_sms(compute_sms)
         return handle
 
 
