@@ -36,20 +36,26 @@ def monkeypatch_module():
     mpatch.undo()
 
 
-@pytest.fixture(scope="module")
-def gptoss_server(monkeypatch_module: pytest.MonkeyPatch):
+@pytest.fixture(
+    scope="module",
+    params=[True, False],
+    ids=["tool_parser", "no_tool_parser"],
+)
+def gptoss_server(monkeypatch_module: pytest.MonkeyPatch,
+                  request: pytest.FixtureRequest):
     with monkeypatch_module.context() as m:
         m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN_VLLM_V1")
         args = [
             "--enforce-eager",
             "--max-model-len",
             "8192",
-            "--tool-call-parser",
-            "openai",
-            "--reasoning-parser",
-            "openai_gptoss",
-            "--enable-auto-tool-choice",
         ]
+        if request.param:
+            args.extend([
+                "--tool-call-parser",
+                "openai",
+                "--enable-auto-tool-choice",
+            ])
         with RemoteOpenAIServer(GPT_OSS_MODEL_NAME, args) as remote_server:
             yield remote_server
 
