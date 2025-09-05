@@ -520,6 +520,9 @@ class FusedMoEModularKernel(torch.nn.Module):
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
         self.shared_experts = shared_experts
+        # for EPLB
+        self.local_to_global_physical_experts = None
+        self.expert_map = None
         assert prepare_finalize.activation_format == \
             fused_experts.activation_formats[0], (
                 f"{prepare_finalize.__class__.__name__}."
@@ -844,14 +847,27 @@ class FusedMoEModularKernel(torch.nn.Module):
             (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
              _expert_topk_weights) = receiver()
 
-        # Process expert load statistics if we have the necessary components
-        # This provides a more efficient alternative to scatter_add_ in select_experts
+        # In EPLB(Expert Load Balance), update expert load from expert_num_tokens.
         if (expert_tokens_meta is not None and expert_load_view is not None and
             expert_tokens_meta.expert_num_tokens is not None):
+                # Initialize the mapping of the local physical experts
+                # to global physical experts, after which it will not change.
+                # `expert_load_view`: (num_physical_experts,)
+                # `expert_num_tokens`: (local_num_physical_experts,)
+                if self.expert_map is None:
+                    self.expert_map = expert_map.clone()
+                    self.local_to_global_physical_experts = \
+                        (self.expert_map != -1).nonzero(as_tuple=True)[0]
+                else:
+                    if not torch.equal(self.expert_map, expert_map):
+                        self.expert_map = expert_map.clone()
+                        self.local_to_global_physical_experts = \
+                            (self.expert_map != -1).nonzero(as_tuple=True)[0]
+
                 # Use pre-computed expert token counts from metadata
-                expert_load_view.scatter_add_(dim=0, 
-                                              index=torch.nonzero(expert_map != -1, as_tuple=False).squeeze(),
-                                              src=expert_tokens_meta.expert_num_tokens)
+                expert_load_view.scatter_add_(dim=0,
+                    index=self.local_to_global_physical_experts,
+                    src=expert_tokens_meta.expert_num_tokens)
 
         # Maybe prepare gathered topk_ids and topk_weights from other EP ranks.
         topk_ids = topk_ids if _expert_topk_ids is None else _expert_topk_ids

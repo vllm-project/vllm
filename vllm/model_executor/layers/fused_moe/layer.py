@@ -1535,16 +1535,12 @@ class FusedMoE(CustomOp):
 
             # 2. Record expert load metrics.
 
-            # When using FusedMoEModularKernel, 
+            # When using FusedMoEModularKernel,
             # expert load statistics are handled directly in the kernel using 
             # ExpertTokensMetadata.expert_num_tokens for better performance.
             # For other implementations or when metadata is not available, 
-            # we fall back to scatter_add_.
+            # we fall back to here.
             
-            # Check if we're using FusedMoEModularKernel and 
-            # if it has already processed the load.
-            # If not, use the traditional scatter_add_ approach.
-
             # There is no expert_num_tokens in 
             # expert_tokens_meta of DeepEPHTPrepareAndFinalize
             # so it is not supported DeepEPHTPrepareAndFinalize for now. 
@@ -1555,8 +1551,7 @@ class FusedMoE(CustomOp):
                 "DeepEPHTPrepareAndFinalize"))
 
             if not skip_expert_load_scatter_add:
-                logger.debug("expert_load_view update from topk_ids through scatter_add_.")
-                # Fallback to scatter_add_ for non-modular kernel implementations
+                logger.debug("expert_load_view update from topk_ids.")
                 topk_ids_flatten = topk_ids.flatten()
 
                 # Performance optimization:
@@ -1572,7 +1567,7 @@ class FusedMoE(CustomOp):
                                               index=index.long(),
                                               src=src.to(expert_load_view))
             else:
-                logger.debug("expert_load_view update in modular_kernel through add_.")
+                logger.debug("expert_load_view update in modular_kernel.")
 
             topk_ids = topk_ids.to(dtype=indices_type)
 
