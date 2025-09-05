@@ -24,21 +24,6 @@ class VerifyAndUpdateConfig:
         raise NotImplementedError
 
 
-class Gemma3EmbeddingConfig(VerifyAndUpdateConfig):
-
-    @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        if vllm_config.model_config.runner_type == "pooling":
-            # Using float16 in EmbeddingGemma leads to nan
-            import torch
-
-            from vllm.platforms import current_platform
-            if torch.bfloat16 in current_platform.supported_dtypes:
-                vllm_config.model_config.dtype = torch.bfloat16
-            else:
-                vllm_config.model_config.dtype = torch.float32
-
-
 class GteNewModelConfig(VerifyAndUpdateConfig):
 
     @staticmethod
