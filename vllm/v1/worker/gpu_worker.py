@@ -55,17 +55,22 @@ def rebuild_ipc(handle: tuple[Callable, tuple],
     return buffer
 
 
+class FlattenedTensorMetadata(TypedDict):
+    name: str
+    shape: torch.Size
+    dtype: torch.dtype
+    # specify the start offset of this tensor in shared ipc_buffer tensor
+    offset: int
+
+
 class UpdateWeightsFromIPCRequest(TypedDict):
     # a list of tuple to specify tensor metadata
-    # the info in tuple is [name, dtype, shape]
-    named_tensors: list[tuple[str, torch.dtype, torch.Size]]
+    named_tensors: list[FlattenedTensorMetadata]
     # dict key is device_uuid, could get my own from `current_platform.get_device_uuid(self.device.index)` in vLLM
     # dict value is a serialized ipc `handle`, vLLM can use `func, args = handle` and `func(*args)` to rebuild GPU tensor
     # if `handles` is not None, means this is the first request in current update flow
     # vLLM should rebuild and save this GPU tensor as a shared buffer
     ipc_handle: tuple[Callable, tuple] | None
-    # specify the start offset of named_tensors in ipc_buffer tensor
-    offset: int
     # specify whether this request is the last request in current update flow
     end: bool
 
@@ -262,16 +267,16 @@ class Worker(WorkerBase):
                 assert buffer.dtype == torch.uint8
             assert buffer is not None
             weights = []
-            offset = kwargs["offset"]
-            for name, dtype, shape in kwargs["named_tensors"]:
+            for item in kwargs["named_tensors"]:
+                shape = item["shape"]
                 if isinstance(shape, (list, tuple)):
                     shape = torch.Size(shape)
                 assert isinstance(shape, torch.Size)
+                dtype, offset = item["dtype"], item["offset"]
                 size = dtype.itemsize * shape.numel()
                 tensor = buffer[offset:offset +
                                 size].view(dtype=dtype).view(shape)
-                weights.append((name, tensor))
-                offset += size
+                weights.append((item["name"], tensor))
             self.model_runner.model.load_weights(weights=weights)
             del weights
             if kwargs["end"]:

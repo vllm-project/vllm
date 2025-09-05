@@ -107,7 +107,12 @@ class RayTrainingActor:
         for i, (name, p) in enumerate(named_parameters.items()):
             buffer[:p.nbytes].data.copy_(p.data.view(-1).view(dtype=torch.uint8))
             s.send_pyobj({
-                "named_tensors": [(name, p.dtype, p.shape)],
+                "named_tensors": [{
+                    "name": name,
+                    "dtype": p.dtype,
+                    "shape": p.shape,
+                    "offset": 0,
+                }],
                 "ipc_handle": handle if i == 0 else None,
                 "offset": 0,
                 "end": i == len(named_parameters) - 1,
