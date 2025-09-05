@@ -405,6 +405,22 @@ def merge_multimodal_embeddings_from_map(
     return inputs_embeds
 
 
+def _validate_multimodal_embeddings(
+    is_multimodal: torch.Tensor,
+    multimodal_embeddings: NestedTensors,
+    mm_embeds_flat: torch.Tensor,
+) -> None:
+    num_expected_tokens = is_multimodal.sum().item()
+    assert isinstance(num_expected_tokens, int)
+
+    if mm_embeds_flat.shape[0] != num_expected_tokens:
+        expr = _embedding_count_expression(multimodal_embeddings)
+
+        raise ValueError(
+            f"Attempted to assign {expr} = {mm_embeds_flat.shape[0]} "
+            f"multimodal tokens to {num_expected_tokens} placeholders")
+
+
 def _merge_multimodal_embeddings(
     inputs_embeds: torch.Tensor,
     is_multimodal: torch.Tensor,
@@ -418,23 +434,31 @@ def _merge_multimodal_embeddings(
     Note:
         This updates ``inputs_embeds`` in place.
     """
-    flattened = _flatten_embeddings(multimodal_embeddings)
-    try:
-        # This is equivalent to: inputs_embeds[is_multimodal] = flattened.
-        inputs_embeds.masked_scatter_(is_multimodal.unsqueeze(-1),
-                                      flattened.to(dtype=inputs_embeds.dtype))
-    except RuntimeError as e:
-        num_expected_tokens = is_multimodal.sum().item()
-        assert isinstance(num_expected_tokens, int)
+    mm_embeds_flat = _flatten_embeddings(multimodal_embeddings)
 
-        if flattened.shape[0] != num_expected_tokens:
-            expr = _embedding_count_expression(multimodal_embeddings)
-            raise ValueError(
-                f"Attempted to assign {expr} = {flattened.shape[0]} "
-                f"multimodal tokens to {num_expected_tokens} placeholders"
-            ) from e
-        else:
-            raise ValueError("Error during masked scatter operation") from e
+    if envs.VLLM_LOGGING_LEVEL == "DEBUG":
+        _validate_multimodal_embeddings(
+            is_multimodal,
+            multimodal_embeddings,
+            mm_embeds_flat,
+        )
+
+    try:
+        input_dtype = inputs_embeds.dtype
+        inputs_embeds[is_multimodal] = mm_embeds_flat.to(dtype=input_dtype)
+        # This is equivalent to:
+        # inputs_embeds[is_multimodal] = mm_embeds_flat.to(dtype=input_dtype)
+        # inputs_embeds.masked_scatter_(is_multimodal.unsqueeze(-1),
+        #                               mm_embeds_flat.to(dtype=input_dtype))
+    except RuntimeError as e:
+        # Raise the validation error if possible instead of the original error
+        _validate_multimodal_embeddings(
+            is_multimodal,
+            multimodal_embeddings,
+            mm_embeds_flat,
+        )
+
+        raise ValueError("Error during masked scatter operation") from e
 
     return inputs_embeds
 

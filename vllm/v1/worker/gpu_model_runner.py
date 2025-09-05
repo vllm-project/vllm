@@ -44,6 +44,7 @@ from vllm.model_executor.models.interfaces import (is_mixture_of_experts,
                                                    supports_transcription)
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling, is_pooling_model, is_text_generation_model)
+from vllm.model_executor.models.utils import _merge_multimodal_embeddings
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargsItem,
                                     PlaceholderRange)
@@ -254,6 +255,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             (self.max_num_tokens, self.hidden_size),
             dtype=self.dtype,
             device=self.device)
+
+        # Only relevant for multimodal models
+        if self.supports_mm_inputs:
+            self.is_mm_embed = self._make_buffer(self.max_num_tokens,
+                                                 dtype=torch.bool)
 
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
@@ -1167,8 +1173,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
         shift_computed_tokens: int = 0,
-    ) -> list[torch.Tensor]:
-        mm_embeds: list[torch.Tensor] = []
+    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+
+        is_mm_embed = self.is_mm_embed.cpu
+        is_mm_embed[:total_num_scheduled_tokens] = False
+        mm_embeds = list[torch.Tensor]()
+        req_start_idx = 0
+
         for req_id in self.input_batch.req_ids:
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
                 req_id]
@@ -1177,6 +1189,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 req_state.num_computed_tokens + shift_computed_tokens
             mm_positions = req_state.mm_positions
             mm_hashes = req_state.mm_hashes
+
             for i, pos_info in enumerate(mm_positions):
                 start_pos = pos_info.offset
                 num_encoder_tokens = pos_info.length
@@ -1208,12 +1221,38 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 if (is_embed := pos_info.is_embed) is not None:
                     is_embed = is_embed[start_idx:end_idx]
 
+                req_start_pos = req_start_idx + start_pos
+                is_mm_embed[req_start_pos+start_idx:req_start_pos + end_idx] \
+                    = True if is_embed is None else is_embed
+                print("req_start_pos", req_start_pos)
+                print("set", req_start_pos + start_idx, ":",
+                      req_start_pos + end_idx, "to",
+                      True if is_embed is None else is_embed)
+                print((is_mm_embed[:-1] != is_mm_embed[1:]).nonzero() + 1)
+                # For tests/models/multimodal/generation/test_common.py::test_custom_inputs_models[llava-test_case3],
+                # the expected output for the first item is:
+                # tensor([[   5],
+                #         [1157]])
+                # the expected output for the second item is:
+                # tensor([[   6],
+                #         [1158],
+                #         [1171],
+                #         [2904],
+                #         [2922],
+                #         [3498]])
+
                 mm_embeds_item = gather_mm_placeholders(
                     encoder_output[start_idx:end_idx],
                     is_embed=is_embed,
                 )
                 mm_embeds.append(mm_embeds_item)
-        return mm_embeds
+
+            req_start_idx += num_scheduled_tokens
+
+        is_mm_embed = self.is_mm_embed.copy_to_gpu(total_num_scheduled_tokens)
+        print("total_num_scheduled_tokens", total_num_scheduled_tokens)
+
+        return is_mm_embed, mm_embeds
 
     def get_model(self) -> nn.Module:
         # get raw model out of the cudagraph wrapper.
@@ -1507,18 +1546,25 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.supports_mm_inputs:
             # Run the multimodal encoder if any.
             self._execute_mm_encoder(scheduler_output)
-            mm_embeds = self._gather_mm_embeddings(scheduler_output)
+            is_mm_embed, mm_embeds = self._gather_mm_embeddings(
+                scheduler_output)
         else:
-            mm_embeds = []
+            is_mm_embed, mm_embeds = torch.tensor(False,
+                                                  device=self.device), []
 
         if self.supports_mm_inputs and get_pp_group().is_first_rank:
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
             inputs_embeds_scheduled = self.model.get_input_embeddings(
-                input_ids=self.input_ids.gpu[:num_scheduled_tokens],
-                multimodal_embeddings=mm_embeds or None,
-            )
+                self.input_ids.gpu[:num_scheduled_tokens])
+
+            if mm_embeds:
+                inputs_embeds_scheduled = _merge_multimodal_embeddings(
+                    inputs_embeds_scheduled,
+                    is_mm_embed,
+                    multimodal_embeddings=mm_embeds,
+                )
 
             # TODO(woosuk): Avoid the copy. Optimize.
             self.inputs_embeds[:num_scheduled_tokens].copy_(
@@ -1853,10 +1899,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         [h[token_indices] for h in aux_hidden_states], dim=-1)
                 else:
                     target_hidden_states = hidden_states[token_indices]
-            mm_embeds = None
+
             if self.supports_mm_inputs:
-                mm_embeds = self._gather_mm_embeddings(scheduler_output,
-                                                       shift_computed_tokens=1)
+                is_mm_embed, mm_embeds = self._gather_mm_embeddings(
+                    scheduler_output,
+                    shift_computed_tokens=1,
+                )
+            else:
+                is_mm_embed, mm_embeds = torch.tensor(False,
+                                                      device=self.device), []
 
             draft_token_ids = self.drafter.propose(
                 target_token_ids=target_token_ids,
@@ -1865,6 +1916,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 next_token_ids=next_token_ids,
                 sampling_metadata=sampling_metadata,
                 common_attn_metadata=common_attn_metadata,
+                is_mm_embed=is_mm_embed,
                 mm_embeds=mm_embeds,
             )
         return draft_token_ids
