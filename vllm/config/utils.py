@@ -9,8 +9,6 @@ from collections.abc import Mapping, Sequence, Set
 from dataclasses import fields
 from typing import TYPE_CHECKING, TypeVar
 
-from vllm.logger import init_logger
-
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
 
@@ -19,8 +17,6 @@ else:
     ConfigType = type
 
 ConfigT = TypeVar("ConfigT", bound=ConfigType)
-
-logger = init_logger(__name__)
 
 
 def config(cls: ConfigT) -> ConfigT:
@@ -107,7 +103,8 @@ def normalize_value(x):
         return x.to_json_string()
 
     # Unsupported type: e.g., modules, generators, open files, or objects
-    # without stable JSON/UUID; caller may ignore or provide a serializer.
+    # without a stable JSON/UUID representation. Hard-error to avoid
+    # under-hashing.
     raise TypeError(f"normalize_value: unsupported type '{type(x).__name__}'")
 
 
