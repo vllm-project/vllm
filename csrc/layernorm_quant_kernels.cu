@@ -6,7 +6,7 @@
  */
 
 #include "type_convert.cuh"
-#include "quantization/fp8/common.cuh"
+#include "quantization/8bit/fp8/common.cuh"
 #include "dispatch_utils.h"
 
 #include <torch/cuda.h>

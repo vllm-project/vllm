@@ -1,6 +1,6 @@
 #include "common.cuh"
 #include "dispatch_utils.h"
-#include "../vectorization_utils.cuh"
+#include "../../vectorization_utils.cuh"
 #include <c10/cuda/CUDAGuard.h>
 #include <ATen/cuda/Exceptions.h>
 
