@@ -27,33 +27,24 @@ class HiddenStatesProcessor:
         self,
         prompt_hidden_states_tensor: torch.Tensor,
     ) -> None:
-        """Update with prompt logprobs from EngineCore.
-
-        Args:
-          prompt_logprobs_tensors: tuple containing the prompt logprobs
-                                   tensors.
-
-        """
-
         # We only need to set the prompt hidden states once.
-        # TODO: check logprobs
         assert self.prompt_hidden_states is None
 
         self.prompt_hidden_states = prompt_hidden_states_tensor
 
     def pop_prompt_hidden_states(self) -> Optional[PromptLogprobs]:
-        """Pop and return all request prompt logprobs
+        """Pop and return all request prompt hidden states
 
-        The logprobs processor aggregates prompt chunk logprobs
+        The hidden states processor aggregates prompt chunk hidden states
         over one or more prefill chunks. This method returns
-        all prompt logprobs at once and then forgets them.
+        all prompt hidden states at once and then forgets them.
         Ensures correct RequestOutputKind.DELTA semantics
-        wherein all prompt logprobs are returned at once at
+        wherein all prompt hidden states are returned at once at
         the end of prefill.
 
         Returns:
-          None if prompt logprobs are disabled for this request.
-          List of all prompt logprobs, otherwise.
+          None if prompt hidden states are disabled for this request.
+          List of all prompt hidden states, otherwise.
         """
         plp = self.prompt_hidden_states
         if plp:
@@ -62,5 +53,4 @@ class HiddenStatesProcessor:
 
     def update_from_output(self, output: EngineCoreOutput) -> None:
         if output.prompt_hidden_states is not None:
-            print("lxy update_from_output")
             self._set_prompt_hidden_states(output.prompt_hidden_states)
