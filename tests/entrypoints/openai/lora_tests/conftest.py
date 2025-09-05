@@ -3,6 +3,7 @@
 
 import pytest
 
+
 @pytest.fixture(scope="session")
 def zephyr_lora_files():
     """Download zephyr LoRA files once per test session."""

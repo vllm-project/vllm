@@ -9,8 +9,7 @@ DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' +
 UNIVERSAL_EMBEDDING_ARGS = [
     "--runner", "pooling", "--dtype", "bfloat16", "--enforce-eager",
     "--max-model-len", "512", "--gpu-memory-utilization", "0.7",
-    "--max-num-seqs", "4", "--disable-log-stats", "--disable-log-requests",
-    "--chat-template", DUMMY_CHAT_TEMPLATE
+    "--max-num-seqs", "4", "--chat-template", DUMMY_CHAT_TEMPLATE
 ]
 
 
