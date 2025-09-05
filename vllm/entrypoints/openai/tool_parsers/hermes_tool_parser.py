@@ -44,7 +44,9 @@ class Hermes2ProToolParser(ToolParser):
         self.tool_call_end_token: str = "</tool_call>"
 
         self.tool_call_regex = re.compile(
-            r"<tool_call>(.*?)</tool_call>|<tool_call>(.*)", re.DOTALL)
+            r"<tool_call>\s*(.*?)\s*(?:</tool_call>|⚗|(?=<tool_call>)|$)",
+            re.DOTALL,
+        )
         self.scratch_pad_regex = re.compile(
             r"<scratch_pad>(.*?)</scratch_pad>", re.DOTALL)
 
@@ -123,8 +125,7 @@ class Hermes2ProToolParser(ToolParser):
                 # load the JSON, and then use it to build the Function and
                 # Tool Call
                 raw_function_calls = [
-                    json.loads(match[0] if match[0] else match[1])
-                    for match in function_call_tuples
+                    json.loads(m) for m in function_call_tuples
                 ]
                 tool_calls = [
                     ToolCall(
