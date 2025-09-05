@@ -1986,6 +1986,15 @@ class SpeculativeConfig:
     Hub. It can be a branch name, a tag name, or a commit id. If unspecified,
     will use the default version."""
 
+    # Draft model vocabulary
+    vocab_freq: Optional[str] = None
+    """The path to the token frequencies over the entire draft model vocabulary."""
+    vocab_freq_cutoff: Optional[float] = None
+    """The vocabulary frequency threshold for the draft model.
+    If `None`, do not prune the vocabulary. If >= 1, prune to top N most
+    frequent tokens. If < 1, prune tokens until cumulative relative frequency
+    mass reaches threshold"""
+
     # Advanced control
     disable_by_batch_size: Optional[int] = None
     """Disable speculative decoding for new incoming requests when the number
@@ -2454,7 +2463,7 @@ class LoRAConfig:
     lora_dtype: Union[torch.dtype, LoRADType] = "auto"
     """Data type for LoRA. If auto, will default to base model dtype."""
     lora_extra_vocab_size: int = 256
-    """(Deprecated) Maximum size of extra vocabulary that can be present in a 
+    """(Deprecated) Maximum size of extra vocabulary that can be present in a
     LoRA adapter. Will be removed in v0.12.0."""
     lora_vocab_padding_size: ClassVar[int] = current_platform\
         .get_lora_vocab_padding_size()
@@ -2683,8 +2692,8 @@ class PoolerConfig:
     """
     Maximum input length allowed for embedding generation. When set, allows
     inputs longer than max_embed_len to be accepted for embedding models.
-    When an input exceeds max_embed_len, it will be handled according to 
-    the original max_model_len validation logic. 
+    When an input exceeds max_embed_len, it will be handled according to
+    the original max_model_len validation logic.
     Defaults to None (i.e. set to max_model_len).
     """
 
