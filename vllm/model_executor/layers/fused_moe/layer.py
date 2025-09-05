@@ -2055,21 +2055,24 @@ class FusedMoE(CustomOp):
 
             # 2. Record expert load metrics.
 
-            # TODO(bowen): When using `FusedMoEModularKernel`, this
-            # can be done in a more unified way, since
-            # `FusedMoEPrepareAndFinalize` will return the expert
-            # token count, in some cases directly from the kernel.
-            # However, now there are many code paths not using
-            # the modular kernel, e.g. calling `fused_experts`,
-            # so we decide to keep the logic here.
-            #
-            # If later refactor moved all the MoE kernel calls
-            # to the modular kernel, we can move this logic there
-            # to achieve better efficiency.
+            # When using FusedMoEModularKernel,
+            # expert load statistics are handled directly in the kernel using 
+            # ExpertTokensMetadata.expert_num_tokens for better performance.
+            # For other implementations or when metadata is not available, 
+            # we fall back to here.
+            
+            # There is no expert_num_tokens in 
+            # expert_tokens_meta of DeepEPHTPrepareAndFinalize
+            # so it is not supported DeepEPHTPrepareAndFinalize for now. 
+            # TODO: Maybe it is better to support DeepEPHTPrepareAndFinalize.
+            skip_expert_load_scatter_add = ((fused_experts_method is not None) and 
+                isinstance(fused_experts_method, FusedMoEModularKernel) and 
+                (fused_experts_method.prepare_finalize.__class__ != 
+                "DeepEPHTPrepareAndFinalize"))
 
-            # `expert_load_view`: (num_physical_experts,)
-
-            topk_ids_flatten = topk_ids.flatten()
+            if not skip_expert_load_scatter_add:
+                logger.debug("expert_load_view update from topk_ids.")
+                topk_ids_flatten = topk_ids.flatten()
 
             # Performance optimization:
             # `masked_fill` is significantly faster than `masked_select`
@@ -2080,9 +2083,11 @@ class FusedMoE(CustomOp):
             # `src` is the valid mask, which is 1 for valid and 0 for invalid
             src = ~invalid_mask
 
-            expert_load_view.scatter_add_(dim=0,
-                                          index=index.long(),
-                                          src=src.to(expert_load_view))
+                expert_load_view.scatter_add_(dim=0,
+                                              index=index.long(),
+                                              src=src.to(expert_load_view))
+            else:
+                logger.debug("expert_load_view update in modular_kernel.")
 
             topk_ids = topk_ids.to(dtype=indices_type)
 
