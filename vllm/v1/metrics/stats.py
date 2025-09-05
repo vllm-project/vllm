@@ -98,7 +98,7 @@ class IterationStats:
 
     def __init__(self,
                  prefill_comp_speed_history: Optional[Deque] = None,
-                 min_comp_prefill_tokens: int = self.DEFAULT_MIN_COMP_PREFILL_TOKENS):
+                 min_comp_prefill_tokens: int = IterationStats.DEFAULT_MIN_COMP_PREFILL_TOKENS):
         self.iteration_timestamp = time.time()
         self.num_generation_tokens = 0
         self.num_prompt_tokens = 0
