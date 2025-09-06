@@ -6,7 +6,7 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from typing import Callable, Final, Optional, Union
+from typing import Any, Callable, Final, Optional, Union
 
 import jinja2
 import partial_json_parser
@@ -40,7 +40,7 @@ from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (
     MistralToolCall)
-from vllm.entrypoints.utils import get_max_tokens
+from vllm.entrypoints.utils import _validate_truncation_size, get_max_tokens
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -48,10 +48,13 @@ from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
+from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.transformers_utils.tokenizers import (maybe_serialize_tool_calls,
                                                 truncate_tool_call_ids,
                                                 validate_request_params)
 from vllm.utils import as_list
+from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.processor import Processor
 
 logger = init_logger(__name__)
 
@@ -158,6 +161,24 @@ class OpenAIServingChat(OpenAIServing):
         self.supports_code_interpreter = False
         self.python_tool = None
 
+        # Initialize processor for input processing (moved from AsyncLLM)
+        self.processor: Optional[Processor] = None
+
+    async def _initialize_processor(self) -> None:
+        """Initialize the processor with dependencies, independent of AsyncLLM.
+        """
+        if self.processor is None:
+            vllm_config = await self.engine_client.get_vllm_config()
+            if vllm_config.model_config.skip_tokenizer_init:
+                tokenizer = None
+            else:
+                tokenizer = init_tokenizer_from_configs(
+                    model_config=vllm_config.model_config,
+                    scheduler_config=vllm_config.scheduler_config,
+                    lora_config=vllm_config.lora_config)
+
+            self.processor = Processor(vllm_config, tokenizer)
+
     async def create_chat_completion(
         self,
         request: ChatCompletionRequest,
@@ -175,6 +196,9 @@ class OpenAIServingChat(OpenAIServing):
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
             return error_check_ret
+
+        # Initialize processor if not already done
+        await self._initialize_processor()
 
         # If the engine is dead, raise the engine's DEAD_ERROR.
         # This is required for the streaming case, where we return a
@@ -297,14 +321,47 @@ class OpenAIServingChat(OpenAIServing):
                         lora_request=lora_request,
                     )
                 else:
-                    generator = self.engine_client.generate(
-                        engine_prompt,
-                        sampling_params,
-                        request_id,
-                        lora_request=lora_request,
-                        trace_headers=trace_headers,
-                        priority=request.priority,
-                    )
+                    if isinstance(self.engine_client, AsyncLLM):
+                        assert self.processor is not None
+
+                        tokenization_kwargs: dict[str, Any] = {}
+                        _validate_truncation_size(
+                            self.max_model_len,
+                            sampling_params.truncate_prompt_tokens,
+                            tokenization_kwargs,
+                        )
+
+                        prompt_str, engine_request = (
+                            self.processor.process_inputs(
+                                request_id,
+                                engine_prompt,
+                                sampling_params,
+                                lora_request=lora_request,
+                                tokenization_kwargs=tokenization_kwargs,
+                                trace_headers=trace_headers,
+                                priority=request.priority,
+                            ))
+
+                        generator = self.engine_client.generate(
+                            engine_prompt,
+                            sampling_params,
+                            request_id,
+                            engine_request=engine_request,
+                            lora_request=lora_request,
+                            trace_headers=trace_headers,
+                            priority=request.priority,
+                            prompt_str=prompt_str,
+                            tokenization_kwargs=tokenization_kwargs,
+                        )
+                    else:
+                        generator = self.engine_client.generate(
+                            engine_prompt,
+                            sampling_params,
+                            request_id,
+                            lora_request=lora_request,
+                            trace_headers=trace_headers,
+                            priority=request.priority,
+                        )
 
                 generators.append(generator)
         except ValueError as e:
