@@ -19,6 +19,7 @@ import argparse
 import asyncio
 import gc
 import json
+import logging
 import os
 import random
 import time
@@ -43,6 +44,8 @@ from vllm.benchmarks.lib.ready_checker import wait_for_endpoint
 from vllm.benchmarks.lib.utils import (convert_to_pytorch_benchmark_format,
                                        write_to_json)
 from vllm.transformers_utils.tokenizer import get_tokenizer
+
+logger = logging.getLogger(__name__)
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
 
@@ -1114,7 +1117,11 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             "'--dataset-path' if required.")
 
     # Load the dataset.
+    start_load_dataset = time.perf_counter()
     input_requests = get_samples(args, tokenizer)
+    logger.info("Loaded %ld samples in %.2f seconds",
+                len(input_requests), time.perf_counter() - start_load_dataset)
+
     goodput_config_dict = check_goodput_args(args)
 
     # Collect the sampling parameters.
