@@ -370,7 +370,7 @@ async def test_code_interpreter(client: OpenAI, model_name: str):
     for item in response.output:
         if item.type == "message":
             output_string = item.content[0].text
-            index = output_string.find('9')
+            index = output_string.rfind('9')
             assert parse_integer_from_string(
                 output_string[index:]) == 977966748
 
