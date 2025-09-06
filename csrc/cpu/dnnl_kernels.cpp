@@ -145,7 +145,8 @@ void dynamic_scaled_int8_quant_impl(const scalar_t* input, int8_t* output,
       }
     }
 
-    float scale_val, azp_val;
+    float scale_val;
+    float azp_val = 0.0f;
     if constexpr (AZP) {
       float max_scalar = max_value.reduce_max();
       float min_scalar = min_value.reduce_min();
