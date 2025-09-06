@@ -30,7 +30,8 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     build_flashinfer_fp8_cutlass_moe_prepare_finalize,
     flashinfer_cutlass_moe_fp8, get_flashinfer_moe_backend,
     register_moe_scaling_factors, rotate_flashinfer_fp8_moe_weights,
-    select_cutlass_fp8_gemm_impl, swap_w13_to_w31)
+    select_cutlass_fp8_gemm_impl, should_use_flashinfer_moe_fp8,
+    swap_w13_to_w31)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     apply_fp4_marlin_linear, is_fp4_marlin_supported,
     prepare_fp4_layer_for_marlin, prepare_moe_fp4_layer_for_marlin)
@@ -42,8 +43,7 @@ from vllm.model_executor.parameter import (ModelWeightParameter,
                                            PerTensorScaleParameter)
 from vllm.scalar_type import scalar_types
 from vllm.utils import next_power_of_2
-from vllm.utils.flashinfer import (flashinfer_scaled_fp4_mm, has_flashinfer,
-                                   has_flashinfer_moe)
+from vllm.utils.flashinfer import flashinfer_scaled_fp4_mm, has_flashinfer
 
 logger = init_logger(__name__)
 
@@ -286,8 +286,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         self.flashinfer_moe_backend: Optional[FlashinferMoeBackend] = None
         self.fused_experts: Optional[
             mk.FusedMoEModularKernel] = None  # type: ignore
-        if envs.VLLM_USE_FLASHINFER_MOE_FP8 and has_flashinfer_moe():
-            self.flashinfer_moe_backend = get_flashinfer_moe_backend()
+        if should_use_flashinfer_moe_fp8(layer):
+            self.flashinfer_moe_backend = get_flashinfer_moe_backend(layer)
             logger.info_once(
                 f"Using FlashInfer {self.flashinfer_moe_backend.value} kernels"
             )
@@ -1012,7 +1012,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.flashinfer_moe_backend = None
 
         if self.allow_flashinfer:
-            self.flashinfer_moe_backend = get_flashinfer_moe_backend()
+            self.flashinfer_moe_backend = get_flashinfer_moe_backend(layer)
             logger.info_once(
                 f"Using FlashInfer {self.flashinfer_moe_backend.value} kernels"
                 " for ModelOptNvFp4FusedMoE.")
