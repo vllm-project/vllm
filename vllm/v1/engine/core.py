@@ -439,7 +439,7 @@ class EngineCore:
         """
         # Note on thread safety: no race condition.
         # `mm_receiver_cache` is reset at the end of LLMEngine init,
-        # and will only accessed in the input processing thread afterwards.
+        # and will only be accessed in the input processing thread afterwards.
         if self.mm_receiver_cache is not None and request.mm_features:
             request.mm_features = (
                 self.mm_receiver_cache.get_and_update_features(
