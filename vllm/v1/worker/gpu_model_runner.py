@@ -56,6 +56,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         GiB_bytes, LazyLoader, cdiv, check_use_alibi,
                         get_dtype_size, is_pin_memory_available, round_up,
                         supports_dynamo)
+from vllm.v1.attention.backends.mla.flashmla import FlashMLABackend
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
     create_fast_prefill_custom_backend,
@@ -187,6 +188,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             model_config.is_multimodal_raw_input_only_model)
 
         self.max_model_len = model_config.max_model_len
+        self.dcp_world_size = self.parallel_config.decode_context_parallel_size
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
 
@@ -301,10 +303,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.query_start_loc = self._make_buffer(self.max_num_reqs + 1,
                                                  dtype=torch.int32)
         self.seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
-        self.inputs_embeds = torch.zeros(
-            (self.max_num_tokens, self.hidden_size),
-            dtype=self.dtype,
-            device=self.device)
+        # Because inputs_embeds may be bfloat16 and we don't need a numpy
+        # version of this tensor, avoid a RuntimeError by not creating a
+        # numpy buffer.
+        self.inputs_embeds = self._make_buffer(self.max_num_tokens,
+                                               self.hidden_size,
+                                               dtype=self.dtype,
+                                               numpy=False)
 
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
@@ -372,11 +377,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             device="cpu",
             pin_memory=self.pin_memory)
 
-    def _make_buffer(self, *args, dtype: torch.dtype) -> CpuGpuBuffer:
-        return CpuGpuBuffer(*args,
+    def _make_buffer(self,
+                     *size: Union[int, torch.SymInt],
+                     dtype: torch.dtype,
+                     numpy: bool = True) -> CpuGpuBuffer:
+        # Bfloat16 torch tensors cannot be directly cast to a numpy array, so
+        # if a bfloat16 buffer is needed without a corresponding numpy array,
+        # don't bother instantiating the numpy array.
+        return CpuGpuBuffer(*size,
                             dtype=dtype,
                             device=self.device,
-                            pin_memory=self.pin_memory)
+                            pin_memory=self.pin_memory,
+                            with_numpy=numpy)
 
     def _init_model_kwargs(self, num_tokens: int):
         model_kwargs = dict[str, Any]()
@@ -428,6 +440,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             return
 
         if self.reorder_batch_threshold is not None:
+            if self.dcp_world_size > 1:
+                assert self.reorder_batch_threshold == 1, \
+                    "DCP not support reorder_batch_threshold > 1 now."
             reorder_batch_to_split_decodes_and_prefills(
                 self.input_batch,
                 scheduler_output,
@@ -1640,11 +1655,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
 
             # TODO(woosuk): Avoid the copy. Optimize.
-            self.inputs_embeds[:num_scheduled_tokens].copy_(
+            self.inputs_embeds.gpu[:num_scheduled_tokens].copy_(
                 inputs_embeds_scheduled)
 
             input_ids = None
-            inputs_embeds = self.inputs_embeds[:num_input_tokens]
+            inputs_embeds = self.inputs_embeds.gpu[:num_input_tokens]
             model_kwargs = {
                 **self._init_model_kwargs(num_scheduled_tokens),
                 **self._extract_mm_kwargs(scheduler_output),
@@ -2479,7 +2494,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                             num_scheduled_tokens, remove_lora):
             if self.supports_mm_inputs:
                 input_ids = None
-                inputs_embeds = self.inputs_embeds[:num_tokens]
+                inputs_embeds = self.inputs_embeds.gpu[:num_tokens]
                 model_kwargs = {
                     **self._init_model_kwargs(num_tokens),
                     **self._dummy_mm_kwargs(num_reqs),
@@ -2826,7 +2841,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Disable cudagraph capturing globally, so any unexpected cudagraph
         # capturing will be detected and raise an error after here.
         # Note: We don't put it into graph_capture context manager because
-        # we may doing lazy capturing in future that still allows capturing
+        # we may do lazy capturing in future that still allows capturing
         # after here.
         set_cudagraph_capturing_enabled(False)
 
@@ -3304,6 +3319,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if self.device.type == 'xpu':
                 get_kv_transfer_group().set_host_xfer_buffer_ops(
                     copy_kv_blocks)
+
+        if self.dcp_world_size > 1:
+            assert self.attn_groups[0][0].backend is FlashMLABackend, (
+                "DCP only support flashmla now."
+                "For a mla backend want to enable DCP, it is mandatory that the"
+                "corresponding decode attn kernel return the softmax lse.")
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """

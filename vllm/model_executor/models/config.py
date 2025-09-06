@@ -24,6 +24,14 @@ class VerifyAndUpdateConfig:
         raise NotImplementedError
 
 
+class Gemma3TextModelConfig:
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        hf_config = vllm_config.model_config.hf_config
+        hf_config.is_causal = not hf_config.use_bidirectional_attention
+
+
 class GteNewModelConfig(VerifyAndUpdateConfig):
 
     @staticmethod
@@ -409,6 +417,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
     "GteNewForSequenceClassification": GteNewModelConfig,
+    "Gemma3TextModel": Gemma3TextModelConfig,
     "NomicBertModel": NomicBertModelConfig,
     "Qwen2ForProcessRewardModel": Qwen2ForProcessRewardModelConfig,
     "Qwen2ForRewardModel": Qwen2ForRewardModelConfig,

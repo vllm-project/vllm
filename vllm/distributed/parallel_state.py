@@ -904,6 +904,18 @@ def get_tensor_model_parallel_group():
     return get_tp_group()
 
 
+_DCP: Optional[GroupCoordinator] = None
+
+
+def get_dcp_group() -> GroupCoordinator:
+    assert _DCP is not None, (
+        "decode context model parallel group is not initialized")
+    return _DCP
+
+
+# kept for backward compatibility
+get_context_model_parallel_group = get_dcp_group
+
 _PP: Optional[GroupCoordinator] = None
 
 _DP: Optional[GroupCoordinator] = None
@@ -1034,6 +1046,7 @@ def init_distributed_environment(
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
+    decode_context_model_parallel_size: Optional[int] = 1,
     backend: Optional[str] = None,
 ) -> None:
     """
@@ -1098,6 +1111,23 @@ def initialize_model_parallel(
                                     use_message_queue_broadcaster=True,
                                     group_name="tp")
 
+    # Build the DCP model-parallel groups.
+    global _DCP
+    assert _DCP is None, (
+        "decode context model parallel group is already initialized")
+    # Note(hc): In the current implementation of decode context parallel,
+    # dcp_size must not exceed tp_size, because the world size does not
+    # change by DCP, it simply reuse the GPUs of TP group, and split one
+    # TP group into tp_size//dcp_size DCP groups.
+    group_ranks = all_ranks.reshape(
+        -1, decode_context_model_parallel_size).unbind(0)
+    group_ranks = [x.tolist() for x in group_ranks]
+    _DCP = init_model_parallel_group(group_ranks,
+                                     get_world_group().local_rank,
+                                     backend,
+                                     use_message_queue_broadcaster=True,
+                                     group_name="dcp")
+
     # Build the pipeline model-parallel groups.
     global _PP
     assert _PP is None, (
@@ -1141,6 +1171,7 @@ def initialize_model_parallel(
 def ensure_model_parallel_initialized(
     tensor_model_parallel_size: int,
     pipeline_model_parallel_size: int,
+    decode_context_model_parallel_size: Optional[int] = 1,
     backend: Optional[str] = None,
 ) -> None:
     """Helper to initialize model parallel groups if they are not initialized,
@@ -1151,7 +1182,8 @@ def ensure_model_parallel_initialized(
         get_world_group().device_group)
     if not model_parallel_is_initialized():
         initialize_model_parallel(tensor_model_parallel_size,
-                                  pipeline_model_parallel_size, backend)
+                                  pipeline_model_parallel_size,
+                                  decode_context_model_parallel_size, backend)
         return
 
     assert (
@@ -1226,6 +1258,16 @@ def get_tensor_model_parallel_rank():
     return get_tp_group().rank_in_group
 
 
+def get_decode_context_model_parallel_world_size():
+    """Return world size for the decode context model parallel group."""
+    return get_dcp_group().world_size
+
+
+def get_decode_context_model_parallel_rank():
+    """Return my rank for the decode context model parallel group."""
+    return get_dcp_group().rank_in_group
+
+
 def get_node_count() -> int:
     """Return the total number of nodes in the distributed environment. """
     assert _NODE_COUNT is not None, (
@@ -1245,6 +1287,11 @@ def destroy_model_parallel():
     if _PP:
         _PP.destroy()
     _PP = None
+
+    global _DCP
+    if _DCP:
+        _DCP.destroy()
+    _DCP = None
 
     global _DP
     if _DP:

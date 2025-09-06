@@ -170,6 +170,11 @@ class ParallelConfig:
     Set to be private as it's not intended to be configured by users.
     """
 
+    decode_context_parallel_size: int = 1
+    """Number of decode context parallel groups, because the world size does
+    not change by dcp, it simply reuse the GPUs of TP group, and tp_size
+    needs to be divisible by dcp_size."""
+
     @property
     def world_size_across_dp(self) -> int:
         """world_size_across_dp is TPxPPxDP, it is the size of the world

@@ -2750,6 +2750,8 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
 _FLOAT16_NOT_SUPPORTED_MODELS = {
     "gemma2": "Numerical instability. Please use bfloat16 or float32 instead.",
     "gemma3": "Numerical instability. Please use bfloat16 or float32 instead.",
+    "gemma3_text":
+    "Numerical instability. Please use bfloat16 or float32 instead.",
     "plamo2": "Numerical instability. Please use bfloat16 or float32 instead.",
     "glm4": "Numerical instability. Please use bfloat16 or float32 instead.",
 }
@@ -3664,6 +3666,24 @@ class VllmConfig:
                 "CPU offload is not supported with `torch.compile` in v0 yet."
                 " Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
+
+        if self.cache_config.kv_sharing_fast_prefill:
+            if not envs.VLLM_USE_V1:
+                raise NotImplementedError(
+                    "Fast prefill optimization for KV sharing is not supported "
+                    "in V0 currently.")
+
+            if self.speculative_config is not None and \
+                self.speculative_config.use_eagle():
+                raise NotImplementedError(
+                    "Fast prefill optimization for KV sharing is not "
+                    "compatible with EAGLE as EAGLE requires correct logits "
+                    "for all tokens while fast prefill gives incorrect logits "
+                    "for prompt tokens.")
+
+            logger.warning_once(
+                "--kv-sharing-fast-prefill requires changes on model side for "
+                "correctness and to realize prefill savings. ")
 
         if ((not envs.VLLM_USE_V1) and self.lora_config is not None
                 and self.compilation_config.level
