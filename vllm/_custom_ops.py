@@ -1625,20 +1625,6 @@ def concat_and_cache_mla(
                                                 scale)
 
 
-def cp_fused_concat_and_cache_mla(
-    kv_c: torch.Tensor,
-    k_pe: torch.Tensor,
-    cp_local_token_select_indices: torch.Tensor,
-    kv_cache: torch.Tensor,
-    slot_mapping: torch.Tensor,
-    kv_cache_dtype: str,
-    scale: torch.Tensor,
-) -> None:
-    torch.ops._C_cache_ops.cp_fused_concat_and_cache_mla(
-        kv_c, k_pe, cp_local_token_select_indices, kv_cache, slot_mapping,
-        kv_cache_dtype, scale)
-
-
 def copy_blocks(key_caches: list[torch.Tensor],
                 value_caches: list[torch.Tensor],
                 block_mapping: torch.Tensor) -> None:
