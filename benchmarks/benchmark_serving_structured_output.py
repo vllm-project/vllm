@@ -440,6 +440,7 @@ async def benchmark(
     max_concurrency: Optional[int],
     structured_output_ratio: float,
     goodput_config_dict: Optional[dict[str, float]] = None,
+    context_len: Optional[int] = None,
 ):
     if backend in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[backend]
@@ -470,7 +471,7 @@ async def benchmark(
         ignore_eos=ignore_eos,
         extra_body=test_req_extra_body,
     )
-    test_output = await request_func(request_func_input=test_input)
+    test_output = await request_func(request_func_input=test_input, context_len=context_len)
     if not test_output.success:
         raise ValueError(
             "Initial test run failed - Please make sure benchmark arguments "
@@ -490,7 +491,7 @@ async def benchmark(
             ignore_eos=ignore_eos,
             extra_body=test_req_extra_body,
         )
-        profile_output = await request_func(request_func_input=profile_input)
+        profile_output = await request_func(request_func_input=profile_input, context_len=context_len)
         if profile_output.success:
             print("Profiler started")
 
@@ -508,11 +509,11 @@ async def benchmark(
     #                 if max_concurrency else contextlib.nullcontext())
     semaphore = asyncio.Semaphore(max_concurrency) if max_concurrency else None
 
-    async def limited_request_func(request_func_input, pbar):
+    async def limited_request_func(request_func_input, pbar, context_len):
         if semaphore is None:
-            return await request_func(request_func_input=request_func_input, pbar=pbar)
+            return await request_func(request_func_input=request_func_input, pbar=pbar, context_len=context_len)
         async with semaphore:
-            return await request_func(request_func_input=request_func_input, pbar=pbar)
+            return await request_func(request_func_input=request_func_input, pbar=pbar, context_len=context_len)
 
     benchmark_start_time = time.perf_counter()
     tasks: list[asyncio.Task] = []
@@ -533,7 +534,7 @@ async def benchmark(
         expected.append(request.completion)
         tasks.append(
             asyncio.create_task(
-                limited_request_func(request_func_input=request_func_input, pbar=pbar)
+                limited_request_func(request_func_input=request_func_input, pbar=pbar, context_len=context_len)
             )
         )
     outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
@@ -666,7 +667,7 @@ async def benchmark(
             output_len=test_request.expected_output_len,
             extra_body={test_request.structure_type: test_request.schema},
         )
-        profile_output = await request_func(request_func_input=profile_input)
+        profile_output = await request_func(request_func_input=profile_input, context_len=context_len)
         if profile_output.success:
             print("Profiler stopped")
 
@@ -824,6 +825,7 @@ def main(args: argparse.Namespace):
             max_concurrency=args.max_concurrency,
             structured_output_ratio=args.structured_output_ratio,
             goodput_config_dict=goodput_config_dict,
+            context_len=args.context_len,
         )
     )
 
@@ -1036,6 +1038,12 @@ def create_argument_parser():
         type=float,
         default=1.0,
         help="Ratio of Structured Outputs requests",
+    )
+    parser.add_argument(
+        "--context-len",
+        type=int,
+        default=None,
+        help="Total length of prompts and outputs",
     )
 
     return parser

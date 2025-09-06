@@ -394,6 +394,7 @@ async def benchmark(
     ramp_up_start_rps: Optional[int] = None,
     ramp_up_end_rps: Optional[int] = None,
     ready_check_timeout_sec: int = 600,
+    context_len: Optional[int] = None,
 ):
     task_type = (
         TaskType.EMBEDDING
@@ -418,12 +419,6 @@ async def benchmark(
         enable_cleanup_closed=True,
         force_close=False,
         ssl=("https://" in api_url),
-    )
-
-    session = aiohttp.ClientSession(
-        connector=connector,
-        trust_env=True,
-        timeout=aiohttp.ClientTimeout(total=6 * 60 * 60),
     )
 
     print("Starting initial single prompt test run...")
@@ -453,6 +448,17 @@ async def benchmark(
         multi_modal_content=test_mm_content,
         ignore_eos=ignore_eos,
         extra_body=extra_body,
+    )
+
+    cur_context_len = request_func_input.prompt_len + request_func_input.output_len if context_len is None else context_len
+    # NOTE: we estimate bufsize increasement by taking one token as approximately 4 bytes.
+    # 2**16 : the default read_bufsize of aiohttp.ClientSession
+    read_bufsize = cur_context_len * 4 + 2**16
+    session = aiohttp.ClientSession(
+        connector=connector,
+        trust_env=True,
+        timeout=aiohttp.ClientTimeout(total=6 * 60 * 60),
+        read_bufsize=read_bufsize,
     )
 
     test_output = await wait_for_endpoint(
@@ -486,7 +492,7 @@ async def benchmark(
                                          ignore_eos=ignore_eos,
                                          extra_body=extra_body)
         profile_output = await request_func(
-            request_func_input=profile_input, session=session)
+            request_func_input=profile_input, session=session, context_len=context_len)
         if profile_output.success:
             print("Profiler started")
 
@@ -512,15 +518,17 @@ async def benchmark(
     semaphore = (asyncio.Semaphore(max_concurrency)
                  if max_concurrency else None)
 
-    async def limited_request_func(request_func_input, session, pbar):
+    async def limited_request_func(request_func_input, session, pbar, context_len):
         if semaphore is None:
             return await request_func(request_func_input=request_func_input,
                                       session=session,
-                                      pbar=pbar)
+                                      pbar=pbar,
+                                      context_len=context_len)
         async with semaphore:
             return await request_func(request_func_input=request_func_input,
                                       session=session,
-                                      pbar=pbar)
+                                      pbar=pbar,
+                                      context_len=context_len)
 
     benchmark_start_time = time.perf_counter()
     tasks: list[asyncio.Task] = []
@@ -574,7 +582,8 @@ async def benchmark(
             asyncio.create_task(
                 limited_request_func(request_func_input=request_func_input,
                                      session=session,
-                                     pbar=pbar)))
+                                     pbar=pbar,
+                                     context_len=context_len)))
     outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
 
     if pbar is not None:
@@ -711,7 +720,7 @@ async def benchmark(
             logprobs=logprobs,
         )
         profile_output = await request_func(
-            request_func_input=profile_input, session=session)
+            request_func_input=profile_input, session=session, context_len=context_len)
         if profile_output.success:
             print("Profiler stopped")
 
@@ -1057,6 +1066,12 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="Maximum time to wait for the endpoint to become ready "
         "in seconds (default: 600 seconds / 10 minutes).",
     )
+    parser.add_argument(
+        "--context-len",
+        type=int,
+        default=None,
+        help="Total length of prompts and outputs",
+    )
 
 
 def main(args: argparse.Namespace) -> dict[str, Any]:
@@ -1166,6 +1181,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         ramp_up_start_rps=args.ramp_up_start_rps,
         ramp_up_end_rps=args.ramp_up_end_rps,
         ready_check_timeout_sec=args.ready_check_timeout_sec,
+        context_len=args.context_len,
     )
 
     # Save config and results to json
