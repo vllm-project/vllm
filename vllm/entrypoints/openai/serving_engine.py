@@ -368,13 +368,9 @@ class OpenAIServing:
             for i, engine_prompt in enumerate(ctx.engine_prompts):
                 request_id_item = f"{ctx.request_id}-{i}"
 
-                if ctx.request_prompts is None:
-                    return self.create_error_response(
-                        "Request prompts not available")
-
                 self._log_inputs(
                     request_id_item,
-                    ctx.request_prompts[i],
+                    engine_prompt,
                     params=pooling_params,
                     lora_request=ctx.lora_request,
                 )
