@@ -41,6 +41,8 @@ from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 
 import torch
 
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    EMPTY_KV_TRANSFER_STATS)
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
@@ -49,6 +51,8 @@ if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.config import VllmConfig
     from vllm.distributed.kv_events import KVCacheEvent
+    from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+        KVTransferStats)
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
@@ -343,3 +347,9 @@ class KVConnectorBase_V1(ABC):
             raise TypeError("get_required_kvcache_layout should not be called "
                             "on the abstract base class")
         return None
+
+    def get_kv_transfer_stats(self) -> "KVTransferStats":
+        """
+        Get the KV transfer stats for the connector.
+        """
+        return EMPTY_KV_TRANSFER_STATS

@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
+import msgspec
 import torch
 
 from vllm.config import KVTransferConfig, VllmConfig
@@ -13,6 +14,8 @@ from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVTransferStats)
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -32,6 +35,40 @@ class MultiKVConnectorMetadata(KVConnectorMetadata):
     extra_async_saves: Optional[dict[str, int]] = None
 
 
+class MultiKVTransferStats(KVTransferStats):
+    stats: dict[str, KVTransferStats] = msgspec.field(default_factory=dict)
+
+    def aggregate(self,
+                  other: "MultiKVTransferStats") -> "MultiKVTransferStats":
+        for connector_id, xfer_stats in other.stats.items():
+            if connector_id not in self.stats:
+                self[connector_id] = xfer_stats
+            else:
+                assert isinstance(xfer_stats, type(self.stats[connector_id]))
+                self[connector_id] = self[connector_id].aggregate(xfer_stats)
+        return self
+
+    def reset(self):
+        for xfer_stats in self.stats.values():
+            xfer_stats.reset()
+
+    def reduce(self) -> dict[str, Any]:
+        # TODO (NickLucche) Adjust for logging on separate lines
+        return {
+            connector_id: xfer_stats.reduce()
+            for connector_id, xfer_stats in self.stats.items()
+        }
+
+    def is_empty(self) -> bool:
+        return all(xfer_stats.is_empty() for xfer_stats in self.stats.values())
+
+    def __getitem__(self, connector_id: str) -> KVTransferStats:
+        return self.stats[connector_id]
+
+    def __setitem__(self, connector_id: str, xfer_stats: KVTransferStats):
+        self.stats[connector_id] = xfer_stats
+
+
 class MultiConnector(KVConnectorBase_V1):
     """
     A wrapper for using multiple KVConnectors at the same time.
@@ -45,6 +82,7 @@ class MultiConnector(KVConnectorBase_V1):
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
         super().__init__(vllm_config=vllm_config, role=role)
         self._connectors: list[KVConnectorBase_V1] = []
+        self._ktc_kv_transfer_config = []
         ktcs = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "connectors")
         assert ktcs is not None
@@ -56,6 +94,7 @@ class MultiConnector(KVConnectorBase_V1):
                 **ktc, engine_id=engine_id)
             self._connectors.append(
                 KVConnectorFactory.create_connector(temp_config, role))
+            self._ktc_kv_transfer_config.append(temp_config.kv_transfer_config)
 
         # A mapping from request id to the index of the connector chosen to
         # load the request from (if any).
@@ -247,3 +286,11 @@ class MultiConnector(KVConnectorBase_V1):
                              f"({', '.join(layouts) })."
                              f"All connectors must use the same layout.")
         return next(iter(layouts), None)
+
+    def get_kv_transfer_stats(self) -> MultiKVTransferStats:
+        # Group xfer stats by connector type.
+        xfer_stats_by_connector = MultiKVTransferStats()
+        for c in self._connectors:
+            xfer_stats = c.get_kv_transfer_stats()
+            xfer_stats_by_connector[c.__class__.__name__] = xfer_stats
+        return xfer_stats_by_connector
