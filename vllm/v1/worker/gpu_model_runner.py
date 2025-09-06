@@ -56,7 +56,6 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         GiB_bytes, LazyLoader, cdiv, check_use_alibi,
                         get_dtype_size, is_pin_memory_available, round_up,
                         supports_dynamo)
-from vllm.v1.attention.backends.mla.flashmla import FlashMLABackend
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
     create_fast_prefill_custom_backend,
@@ -3321,10 +3320,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     copy_kv_blocks)
 
         if self.dcp_world_size > 1:
-            assert self.attn_groups[0][0].backend is FlashMLABackend, (
-                "DCP only support flashmla now."
-                "For a mla backend want to enable DCP, it is mandatory that the"
-                "corresponding decode attn kernel return the softmax lse.")
+            assert self.attn_groups[0][0].backend.return_lse, (
+                "DCP only support attention backends that return"
+                " the softmax lse, but the backend "
+                f"{self.attn_groups[0][0].backend.get_name()} "
+                "does not return the softmax lse.")
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """

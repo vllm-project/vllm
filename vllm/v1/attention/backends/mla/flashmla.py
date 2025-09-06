@@ -25,6 +25,8 @@ logger = init_logger(__name__)
 
 class FlashMLABackend(MLACommonBackend):
 
+    return_lse: bool = True
+
     @staticmethod
     def get_name() -> str:
         return "FLASHMLA_VLLM_V1"

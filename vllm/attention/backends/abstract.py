@@ -40,6 +40,10 @@ class AttentionBackend(ABC):
     # makes sure the output tensor is allocated inside the cudagraph.
     accept_output_buffer: bool = False
 
+    # Whether the attention backend returns the softmax lse.
+    # Some features like context parallelism require the softmax lse.
+    return_lse: bool = False
+
     @staticmethod
     @abstractmethod
     def get_name() -> str:
