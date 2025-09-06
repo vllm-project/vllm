@@ -2956,11 +2956,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.calculate_reorder_batch_threshold()
 
         if self.dcp_world_size > 1:
-            assert self.attn_groups[0][0].backend.decode_return_lse, (
-                "DCP only support attention backends that return"
+            assert self.attn_groups[0][0].backend.can_return_lse_for_decode, (
+                "DCP only support attention backends that can return"
                 " the softmax lse for decode, but the backend "
                 f"{self.attn_groups[0][0].backend.get_name()} "
-                "does not return the softmax lse for decode.")
+                "cannot return the softmax lse for decode.")
 
     def initialize_cudagraph_capture(self) -> None:
         min_cg_support = AttentionCGSupport.ALWAYS

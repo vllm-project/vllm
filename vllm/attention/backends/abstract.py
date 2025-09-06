@@ -40,9 +40,9 @@ class AttentionBackend(ABC):
     # makes sure the output tensor is allocated inside the cudagraph.
     accept_output_buffer: bool = False
 
-    # Whether the attention backend returns the softmax lse for decode.
+    # Whether the attention backend can return the softmax lse for decode.
     # Some features like decode context parallelism require the softmax lse.
-    decode_return_lse: bool = False
+    can_return_lse_for_decode: bool = False
 
     @staticmethod
     @abstractmethod

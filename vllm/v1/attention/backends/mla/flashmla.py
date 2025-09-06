@@ -25,7 +25,7 @@ logger = init_logger(__name__)
 
 class FlashMLABackend(MLACommonBackend):
 
-    decode_return_lse: bool = True
+    can_return_lse_for_decode: bool = True
 
     @staticmethod
     def get_name() -> str:
