@@ -13,6 +13,9 @@ from typing_extensions import TypeVar
 
 import vllm.platforms
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer import (get_kv_transfer_group,
+                                          has_kv_transfer_group)
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -54,6 +57,7 @@ class ExecutorBase(ABC):
         self._init_executor()
         self.is_sleeping = False
         self.sleeping_tags: set[str] = set()
+        self.kv_output_aggregator = None
 
     @abstractmethod
     def _init_executor(self) -> None:
@@ -251,6 +255,14 @@ class ExecutorBase(ABC):
         """Checks if the executor is healthy. If not, it should raise an
         exception."""
         self.check_health()
+
+    def init_kv_output_aggregator(self) -> None:
+        """Init KVOutputAggregator"""
+        if has_kv_transfer_group():
+            kv_connector = get_kv_transfer_group()
+            self.kv_output_aggregator = KVOutputAggregator(
+                kv_connector.get_finished_count()
+                or self.parallel_config.world_size)
 
 
 class DistributedExecutorBase(ExecutorBase):
