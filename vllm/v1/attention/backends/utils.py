@@ -29,6 +29,8 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 from vllm.logger import init_logger
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm.v1.worker.ubatch_utils import UbatchSlice
+
 logger = init_logger(__name__)
 _KV_CACHE_LAYOUT_OVERRIDE = None
 
@@ -71,12 +73,6 @@ class CommonAttentionMetadata:
     # Needed by FastPrefillAttentionBuilder
     logits_indices_padded: Optional[torch.Tensor] = None
     num_logits_indices: Optional[int] = None
-
-
-@dataclass
-class UbatchSlice:
-    request_slice: slice
-    token_slice: slice
 
 
 def slice_query_start_locs(
@@ -124,6 +120,11 @@ def _make_metadata_with_slice(
     max_query_len = int(
         torch.max(torch.abs(query_start_loc_cpu[1:] -
                             query_start_loc_cpu[:-1])).item())
+
+    # This is to account for the case where we are in a dummy 
+    # run and query_start_loc_cpu is full of 0s
+    if max_query_len == 0:
+        max_query_len = attn_metadata.max_query_len
 
     block_table_tensor = attn_metadata.block_table_tensor[request_slice]
     slot_mapping = attn_metadata.slot_mapping[token_slice]

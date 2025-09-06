@@ -37,6 +37,7 @@ from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils import (direct_register_custom_op, has_deep_ep, has_pplx,
                         round_up)
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 if current_platform.is_cuda_alike():
     from .fused_batched_moe import BatchedTritonExperts
@@ -939,13 +940,13 @@ class FusedMoE(CustomOp):
                 or self.moe_parallel_config.use_deepep_ll_kernels
                 or self.moe_config.use_flashinfer_cutlass_kernels):
             self.batched_hidden_states = torch.zeros(
-                (moe.max_num_tokens, self.hidden_size),
+                (2, moe.max_num_tokens, self.hidden_size),
                 dtype=moe.in_dtype,
                 device=torch.cuda.current_device())
 
             # Note here we use `num_experts` which is logical expert count
             self.batched_router_logits = torch.zeros(
-                (moe.max_num_tokens, num_experts),
+                (2, moe.max_num_tokens, num_experts),
                 dtype=moe.in_dtype,
                 device=torch.cuda.current_device())
 
@@ -1647,14 +1648,23 @@ class FusedMoE(CustomOp):
             hidden_states = full_hidden_states[chunk_start:chunk_end, :]
             router_logits = full_router_logits[chunk_start:chunk_end, :]
 
-            assert (self.batched_hidden_states.size(0)  # type: ignore
+            batch_buffer_idx = dbo_current_ubatch_id()
+
+            assert self.batched_hidden_states is not None
+            assert self.batched_router_logits is not None
+            batched_hidden_states = self.batched_hidden_states[
+                batch_buffer_idx, :]
+            batched_router_logits = self.batched_router_logits[
+                batch_buffer_idx, :]
+
+            assert (batched_hidden_states.size(0)  # type: ignore
                     >= chunk_size)
-            assert (self.batched_router_logits.size(0)  # type: ignore
+            assert (batched_router_logits.size(0)  # type: ignore 
                     >= chunk_size)
-            staged_hidden_states = self.batched_hidden_states[:
-                                                              chunk_size, :]  # type: ignore
-            staged_router_logits = self.batched_router_logits[:
-                                                              chunk_size, :]  # type: ignore
+            staged_hidden_states = batched_hidden_states[:
+                                                         chunk_size, :]  # type: ignore
+            staged_router_logits = batched_router_logits[:
+                                                         chunk_size, :]  # type: ignore
             staged_hidden_states.copy_(hidden_states, non_blocking=True)
             staged_router_logits.copy_(router_logits, non_blocking=True)
 
