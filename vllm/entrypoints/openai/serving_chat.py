@@ -53,7 +53,6 @@ from vllm.transformers_utils.tokenizers import (maybe_serialize_tool_calls,
                                                 truncate_tool_call_ids,
                                                 validate_request_params)
 from vllm.utils import as_list
-from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.processor import Processor
 
 logger = init_logger(__name__)
@@ -321,6 +320,7 @@ class OpenAIServingChat(OpenAIServing):
                         lora_request=lora_request,
                     )
                 else:
+                    from vllm.v1.engine.async_llm import AsyncLLM
                     if isinstance(self.engine_client, AsyncLLM):
                         assert self.processor is not None
 
