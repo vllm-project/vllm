@@ -39,28 +39,22 @@ EAGLE_SPEC_CONFIG = {
 }
 
 PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
-    ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "auto", None),
-    ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto", None),
-    ("mistralai/Ministral-8B-Instruct-2410", "lm-format-enforcer", "auto",
-     None),
-    ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "mistral", None),
     ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", None),
+    ("Qwen/Qwen2.5-1.5B-Instruct", "guidance", "auto", None),
     ("Qwen/Qwen2.5-1.5B-Instruct", "lm-format-enforcer", "auto", None),
-    ("mistralai/Ministral-8B-Instruct-2410", "outlines", "auto", None),
+    ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "mistral", None),
+    ("Qwen/Qwen2.5-1.5B-Instruct", "outlines", "auto", None),
     ("mistralai/Ministral-8B-Instruct-2410", "outlines", "mistral", None),
-    ("mistralai/Ministral-8B-Instruct-2410", "outlines", "auto",
-     NGRAM_SPEC_CONFIG),
+    ("Qwen/Qwen2.5-1.5B-Instruct", "outlines", "auto", NGRAM_SPEC_CONFIG),
     #FIXME: This test is flaky on CI thus disabled
     #("Qwen/Qwen2.5-1.5B-Instruct", "guidance", "auto"),
-    ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto",
-     NGRAM_SPEC_CONFIG),
+    ("Qwen/Qwen2.5-1.5B-Instruct", "guidance", "auto", NGRAM_SPEC_CONFIG),
     ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", NGRAM_SPEC_CONFIG),
     ("meta-llama/Meta-Llama-3.1-8B-Instruct", "xgrammar", "auto",
      EAGLE_SPEC_CONFIG)
 ]
 
 PARAMS_MODELS_TOKENIZER_MODE = [
-    ("mistralai/Ministral-8B-Instruct-2410", "auto"),
     ("Qwen/Qwen2.5-1.5B-Instruct", "auto"),
 ]
 
@@ -749,7 +743,7 @@ def test_structured_output_batched_with_non_guided_requests(
     enforce_eager = bool(not current_platform.is_tpu())
 
     llm = LLM(
-        model="meta-llama/Meta-Llama-3.1-8B-Instruct",
+        model="meta-llama/Llama-3.2-1B-Instruct",
         enforce_eager=enforce_eager,
         max_model_len=1024,
         guided_decoding_backend=guided_decoding_backend,
