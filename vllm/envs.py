@@ -165,6 +165,7 @@ if TYPE_CHECKING:
     VLLM_HAS_FLASHINFER_CUBIN: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
+    VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS: bool = False
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = False
     VLLM_TUNED_CONFIG_FOLDER: Optional[str] = None
     VLLM_DISABLE_PAD_FOR_CUDAGRAPH: bool = False
@@ -995,6 +996,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8":
     lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8", "0"))),
 
+    # If set to 1, use the FlashInfer CUTLASS backend for
+    # MXFP8 (activation) x MXFP4 (weight) MoE.
+    # This is separate from the TRTLLMGEN path controlled by
+    # VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8.
+    "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS":
+    lambda: bool(int(
+        os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS", "0")
+        )),
+
     # If set to 1, use the FlashInfer
     # BF16 (activation) x MXFP4 (weight) MoE backend.
     "VLLM_USE_FLASHINFER_MOE_MXFP4_BF16":
@@ -1270,6 +1280,7 @@ def compute_hash() -> str:
         "VLLM_USE_FLASHINFER_MOE_FP8",
         "VLLM_USE_FLASHINFER_MOE_FP4",
         "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8",
+        "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS",
         "VLLM_USE_FLASHINFER_MOE_MXFP4_BF16",
         "VLLM_USE_CUDNN_PREFILL",
         "VLLM_USE_TRTLLM_ATTENTION",
