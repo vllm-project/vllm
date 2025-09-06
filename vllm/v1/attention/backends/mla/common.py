@@ -224,9 +224,12 @@ try:
     from vllm.vllm_flash_attn import flash_attn_varlen_func
     is_vllm_fa = True
 except ImportError:
-    # For rocm use upstream flash attention
-    if current_platform.is_rocm():
-        from flash_attn import flash_attn_varlen_func
+    try:
+        # For rocm use upstream flash attention
+        if current_platform.is_rocm():
+            from flash_attn import flash_attn_varlen_func
+    except ImportError:
+        flash_attn_varlen_func = None
     is_vllm_fa = False
 
 try:
