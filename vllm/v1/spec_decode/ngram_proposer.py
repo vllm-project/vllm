@@ -6,6 +6,9 @@ import numpy as np
 from numba import jit
 
 from vllm.config import VllmConfig
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class NgramProposer:
@@ -22,13 +25,18 @@ class NgramProposer:
         # Number of tokens follow the match. If there are less than k
         # tokens follow the match, we will return the maximum amount of
         # tokens until the end.
-        self.k = vllm_config.speculative_config.num_speculative_tokens
+        self.method = vllm_config.speculative_config.method
+        if self.method == "ngram-eagle":
+            self.k = vllm_config.speculative_config.num_speculative_tokens_per_method["ngram"]
+        else:
+            self.k = vllm_config.speculative_config.num_speculative_tokens
         # Maximum length of the model.
         self.max_model_len = vllm_config.model_config.max_model_len
 
         # Trigger Numba JIT compilation for N-gram proposer.
         # This usually takes less than 1 second.
         self.propose(np.zeros(1024, dtype=np.int32))
+        logger.info(f"NgramProposer: min_n={self.min_n}, max_n={self.max_n}, k={self.k}, max_model_len={self.max_model_len}")  # noqa: E501
 
     def propose(
         self,
