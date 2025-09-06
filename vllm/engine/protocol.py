@@ -20,6 +20,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import Device, collect_from_async_generator, random_uuid
+from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)
 
@@ -50,7 +51,7 @@ class EngineClient(ABC):
     @abstractmethod
     def generate(
         self,
-        prompt: PromptType,
+        prompt: Union[PromptType, EngineCoreRequest],
         sampling_params: SamplingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,

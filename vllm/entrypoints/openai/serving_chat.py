@@ -343,11 +343,11 @@ class OpenAIServingChat(OpenAIServing):
                         engine_request,
                         sampling_params,
                         request_id,
-                        prompt_str,
                         lora_request=lora_request,
-                        tokenization_kwargs=tokenization_kwargs,
                         trace_headers=trace_headers,
                         priority=request.priority,
+                        prompt_str=prompt_str,
+                        tokenization_kwargs=tokenization_kwargs,
                     )
 
                 generators.append(generator)
