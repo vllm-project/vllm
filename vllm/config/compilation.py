@@ -129,6 +129,8 @@ class CompilationConfig:
         - [`cudagraph_mode`][vllm.config.CompilationConfig.cudagraph_mode]
         - [`cudagraph_capture_sizes`]
         [vllm.config.CompilationConfig.cudagraph_capture_sizes]
+        - [`cudagraph_capture_prefill_size`]
+        [vllm.config.CompilationConfig.cudagraph_capture_prefill_size]
         - [`cudagraph_num_of_warmups`]
         [vllm.config.CompilationConfig.cudagraph_num_of_warmups]
         - [`cudagraph_copy_inputs`]
@@ -282,6 +284,12 @@ class CompilationConfig:
     """Sizes to capture cudagraph.
     - None (default): capture sizes are inferred from vllm config.
     - list[int]: capture sizes are specified as given."""
+    cudagraph_capture_prefill_size: Optional[int] = None
+    """Size of prefill requests for cuda graph capture in mixed batch
+    for FULL mode.
+    - None (default): not specify prefill token size in mixed batch.
+    - int: token size to capture cudagraph for prefill requests in 
+    mixed batch."""
     cudagraph_copy_inputs: bool = False
     """Whether to copy input tensors for
     cudagraph. If the caller can guarantee that the same input buffers
