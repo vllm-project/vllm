@@ -116,8 +116,8 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
 
     b32 b_frag_all[num_chunks][4]; // for all chunks, holds matrix fragment (which takes 4 regs of b16x2 * 32 threads)
 
-    uint blockid = blockIdx.x * warps_per_block + threadIdx.x / 32;
-    uint threadid = threadIdx.x % 32;
+    int blockid = blockIdx.x * warps_per_block + threadIdx.x / 32;
+    int threadid = threadIdx.x % 32;
     extern __shared__ b32 bfrag_arr[]; // num_chunks * warps_per_block * 128
     int real_num_chunks = ((blockid + 1) * num_chunks) > total_num_chunks ? (total_num_chunks - (blockid * num_chunks)) : num_chunks;
     int diff_num_chunks = real_num_chunks - num_chunks;
@@ -718,8 +718,8 @@ void __forceinline__ run_kernel(b16* a_mat, b16* out, int num_chunks, cudaStream
 }
 
 template <torch::ScalarType dtype>
-void run_fht(void* a_mat_ptr, void* out_ptr, uint32_t numel, uint32_t had_size, cudaStream_t stream) {
-    uint32_t num_chunks = numel / 256; // caller required to ensure divisible by 256
+void run_fht(void* a_mat_ptr, void* out_ptr, int numel, int had_size, cudaStream_t stream) {
+    int num_chunks = numel / 256; // caller required to ensure divisible by 256
     // for size 256, use (2, 1)
     // for size 32k use (8, 16)
     constexpr int chunks_per_warp_small = 1;// 8;
@@ -766,12 +766,12 @@ void run_fht(void* a_mat_ptr, void* out_ptr, uint32_t numel, uint32_t had_size, 
     }
 }
 
-template void run_fht<torch::ScalarType::Half>(void* a_mat_ptr, void* out_ptr, uint32_t numel, uint32_t had_size, cudaStream_t stream);
-template void run_fht<torch::ScalarType::BFloat16>(void* a_mat_ptr, void* out_ptr, uint32_t numel, uint32_t had_size, cudaStream_t stream);
+template void run_fht<torch::ScalarType::Half>(void* a_mat_ptr, void* out_ptr, int numel, int had_size, cudaStream_t stream);
+template void run_fht<torch::ScalarType::BFloat16>(void* a_mat_ptr, void* out_ptr, int numel, int had_size, cudaStream_t stream);
 
 }  // namespace hadacore
 
-constexpr bool is_power_of_two(uint32_t x) { return x && !(x & (x - 1)); }
+constexpr bool is_power_of_two(int x) { return x && !(x & (x - 1)); }
 
 void hadacore_transform(torch::Tensor& x) {
     const int had_size = x.size(-1);
