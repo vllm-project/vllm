@@ -6,6 +6,8 @@ from collections.abc import Iterable
 from functools import reduce
 from typing import Callable, TypeVar, Union, overload
 
+import torch
+
 _T = TypeVar("_T")
 _U = TypeVar("_U")
 
@@ -88,3 +90,39 @@ def json_reduce_leaves(
 def json_count_leaves(value: JSONTree[_T]) -> int:
     """Count the number of leaves in a nested JSON structure."""
     return sum(1 for _ in json_iter_leaves(value))
+
+
+def json_get_tensor_info(
+        value: JSONTree[_T]) -> dict[str, Union[int, float, list]]:
+    """Extract tensor statistics from nested JSON structure.
+    
+    Args:
+        value: Nested structure to analyze.
+        
+    Returns:
+        Dict with tensor_count, total_memory_mb, shapes, dtypes, devices,
+        total_elements.
+    """
+    tensors = [
+        leaf for leaf in json_iter_leaves(value)
+        if isinstance(leaf, torch.Tensor)
+    ]
+
+    if not tensors:
+        return {
+            'tensor_count': 0,
+            'total_memory_mb': 0.0,
+            'shapes': [],
+            'dtypes': [],
+            'devices': [],
+            'total_elements': 0
+        }
+
+    return {
+        'tensor_count': len(tensors),
+        'total_memory_mb': sum(t.nbytes for t in tensors) / (1024 * 1024),
+        'shapes': [tuple(t.shape) for t in tensors],
+        'dtypes': sorted(set(str(t.dtype) for t in tensors)),
+        'devices': sorted(set(str(t.device) for t in tensors)),
+        'total_elements': sum(t.numel() for t in tensors)
+    }

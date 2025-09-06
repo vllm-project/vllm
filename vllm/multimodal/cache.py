@@ -10,8 +10,8 @@ from typing_extensions import TypeAlias, override
 
 from vllm.logger import init_logger
 from vllm.utils import GiB_bytes, LRUCache
-from vllm.utils.jsontree import (json_count_leaves, json_map_leaves,
-                                 json_reduce_leaves)
+from vllm.utils.jsontree import (json_count_leaves, json_get_tensor_info,
+                                 json_map_leaves, json_reduce_leaves)
 
 from .inputs import (MultiModalFeatureSpec, MultiModalFieldElem,
                      MultiModalKwargs, MultiModalKwargsItem,
@@ -128,12 +128,16 @@ class MultiModalCache:
         )
 
         if debug:
-            leaf_count = json_count_leaves(value)
+            complexity = cls.get_item_complexity(value)
+            tensor_info = cls.get_tensor_info(value)
             logger.debug(
-                "Calculated size of %s to be %.2f GiB (%d leaves)",
+                "Calculated size of %s to be %.2f GiB "
+                "(%d leaves, %d tensors, %.2f MB tensor memory)",
                 type(value),
                 size / GiB_bytes,
-                leaf_count,
+                complexity,
+                tensor_info['tensor_count'],
+                tensor_info['total_memory_mb'],
             )
 
         return size
@@ -153,6 +157,21 @@ class MultiModalCache:
             The number of leaf elements in the nested structure.
         """
         return json_count_leaves(value)
+
+    @classmethod
+    def get_tensor_info(
+            cls,
+            value: MultiModalCacheValue) -> dict[str, Union[int, float, list]]:
+        """Get tensor statistics from multi-modal cache value.
+
+        Args:
+            value: Cache value to analyze.
+
+        Returns:
+            Dict with tensor_count, total_memory_mb, shapes, dtypes, devices,
+            total_elements.
+        """
+        return json_get_tensor_info(value)
 
     @classmethod
     def get_lru_cache(

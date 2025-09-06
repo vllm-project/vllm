@@ -978,6 +978,66 @@ def test_json_count_leaves():
     assert json_count_leaves(mixed_nested) == 4
 
 
+def test_json_get_tensor_info():
+    """Test json_get_tensor_info function from jsontree utility."""
+    from vllm.utils.jsontree import json_get_tensor_info
+
+    # Test with no tensors
+    no_tensors = {"a": 1, "b": [2, 3], "c": "text"}
+    info = json_get_tensor_info(no_tensors)
+    assert info['tensor_count'] == 0
+    assert info['total_memory_mb'] == 0.0
+    assert info['shapes'] == []
+    assert info['dtypes'] == []
+    assert info['devices'] == []
+    assert info['total_elements'] == 0
+
+    # Test with single tensor
+    tensor1 = torch.randn(2, 3, dtype=torch.float32)
+    single_tensor = {"tensor": tensor1}
+    info = json_get_tensor_info(single_tensor)
+    assert info['tensor_count'] == 1
+    assert info['total_memory_mb'] > 0
+    assert info['shapes'] == [(2, 3)]
+    assert 'torch.float32' in info['dtypes']
+    assert info['total_elements'] == 6
+
+    # Test with multiple tensors
+    tensor2 = torch.ones(4, dtype=torch.int64)
+    tensor3 = torch.zeros(2, 2, 2, dtype=torch.float16)
+    multi_tensors = {
+        "data": {
+            "features": tensor1,
+            "labels": tensor2
+        },
+        "metadata": tensor3
+    }
+    info = json_get_tensor_info(multi_tensors)
+    assert info['tensor_count'] == 3
+    assert info['total_elements'] == 6 + 4 + 8  # 2*3 + 4 + 2*2*2
+    assert len(info['shapes']) == 3
+    assert (2, 3) in info['shapes']
+    assert (4, ) in info['shapes']
+    assert (2, 2, 2) in info['shapes']
+
+    # Check dtypes are sorted and unique
+    expected_dtypes = ['torch.float16', 'torch.float32', 'torch.int64']
+    assert info['dtypes'] == expected_dtypes
+
+    # Test with mixed data types
+    mixed_data = {
+        "tensors": [tensor1, tensor2],
+        "numbers": [1, 2, 3],
+        "nested": {
+            "tensor": tensor3,
+            "text": "hello"
+        }
+    }
+    info = json_get_tensor_info(mixed_data)
+    assert info['tensor_count'] == 3
+    assert info['total_elements'] == 18
+
+
 def test_convert_ids_list_to_tokens():
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct")
     token_ids = tokenizer.encode("Hello, world!")
