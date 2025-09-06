@@ -19,6 +19,8 @@ from vllm.utils import (get_open_port, get_open_zmq_ipc_path, get_tcp_uri,
                         kill_process_tree)
 
 if TYPE_CHECKING:
+    import numpy as np
+
     from vllm.v1.engine.coordinator import DPCoordinator
     from vllm.v1.engine.utils import (CoreEngineActorManager,
                                       CoreEngineProcManager)
@@ -97,20 +99,31 @@ class ConstantList(Generic[T], Sequence):
 
 
 class CpuGpuBuffer:
+    """Buffer to easily copy tensors between CPU and GPU."""
 
     def __init__(
         self,
-        *args,
+        *size: Union[int, torch.SymInt],
         dtype: torch.dtype,
         device: torch.device,
         pin_memory: bool,
-    ):
-        self.cpu = torch.zeros(*args,
+        with_numpy: bool = True,
+    ) -> None:
+        self.cpu = torch.zeros(*size,
                                dtype=dtype,
                                device="cpu",
                                pin_memory=pin_memory)
-        self.np = self.cpu.numpy()
         self.gpu = self.cpu.to(device)
+        self.np: np.ndarray
+        # To keep type hints simple (avoiding generics and subclasses), we
+        # only conditionally create the numpy array attribute. This can cause
+        # AttributeError if `self.np` is accessed when `with_numpy=False`.
+        if with_numpy:
+            if dtype == torch.bfloat16:
+                raise ValueError(
+                    "Bfloat16 torch tensors cannot be directly cast to a "
+                    "numpy array, so call CpuGpuBuffer with with_numpy=False")
+            self.np = self.cpu.numpy()
 
     def copy_to_gpu(self, n: Optional[int] = None) -> torch.Tensor:
         if n is None:
