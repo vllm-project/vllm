@@ -56,6 +56,10 @@ class EPLBConfig:
     This is turned off by default since it will cause communication overhead.
     """
 
+    eplb_policy_type: int = 0
+    """
+    Choose the EPLB algorithm.
+    """
 
 @config
 @dataclass
@@ -100,6 +104,7 @@ class ParallelConfig:
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
     enable_eplb: bool = False
     """Enable expert parallelism load balancing for MoE layers."""
+
     eplb_config: EPLBConfig = field(default_factory=EPLBConfig)
     """Expert parallelism configuration."""
     num_redundant_experts: Optional[int] = None
