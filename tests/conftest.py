@@ -1,5 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# ruff: noqa
+
+from tblib import pickling_support
+
+# Install support for pickling exceptions so that we can nicely propagate
+# failures from tests running in a subprocess.
+# This should be run before any custom exception subclasses are defined.
+pickling_support.install()
+
 import http.server
 import json
 import math
@@ -1355,7 +1365,7 @@ class LocalAssetServer:
 @pytest.fixture(scope="session")
 def local_asset_server() -> Generator[LocalAssetServer, None, None]:
     """
-    Starts a thread based HTTP server bound to 127.0.0.1 on a random free port. 
+    Starts a thread based HTTP server bound to 127.0.0.1 on a random free port.
     The server currently servers images at:
     http://127.0.0.1:<port>/<name>.<ext>
     """
