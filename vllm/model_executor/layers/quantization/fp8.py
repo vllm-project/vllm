@@ -270,7 +270,8 @@ class Fp8LinearMethod(LinearMethodBase):
         layer.weight_block_size = None
 
         if self.block_quant:
-            tp_size = get_tensor_model_parallel_world_size()
+            tp_size = getattr(layer, "tp_size",
+                              get_tensor_model_parallel_world_size())
             assert self.quant_config.weight_block_size is not None
             layer.weight_block_size = self.quant_config.weight_block_size
             block_n, block_k = (
