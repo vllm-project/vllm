@@ -242,6 +242,7 @@ class LLMEngine:
 
         # 2) Process EngineCoreOutputs.
         iteration_stats = IterationStats() if self.log_stats else None
+        print("lxy call process_outputs")
         processed_outputs = self.output_processor.process_outputs(
             outputs.outputs,
             engine_core_timestamp=outputs.timestamp,

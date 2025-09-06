@@ -1073,8 +1073,10 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         req_ids = cast(list[str], self.input_batch.req_ids[:num_reqs])
 
         prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]] = {}
+        prompt_hidden_states_dict: dict[str, Optional[torch.Tensor]] = {}
         for req_id in self.input_batch.req_ids[:num_reqs]:
             prompt_logprobs_dict[req_id] = None
+            prompt_hidden_states_dict[req_id] = None
 
         max_gen_len = selected_token_ids.shape[-1]
         if max_gen_len == 1:
@@ -1120,6 +1122,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             sampled_token_ids=valid_sampled_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
+            prompt_hidden_states_dict=prompt_hidden_states_dict,
             pooler_output=[],
             kv_connector_output=kv_connector_output,
         )
