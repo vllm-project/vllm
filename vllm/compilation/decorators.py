@@ -21,6 +21,7 @@ from .monitor import start_monitoring_torch_compile
 logger = init_logger(__name__)
 
 IGNORE_COMPILE_KEY = "_ignore_compile_vllm"
+LAST_PIECEWISE_GRAPH_WEAKREF_KEY = "_last_graph_weakref_vllm"
 
 _T = TypeVar("_T", bound=type[nn.Module])
 
@@ -63,6 +64,14 @@ def support_torch_compile(
 @overload
 def support_torch_compile(
     *,
+    no_weak_ref_output: bool = False,
+) -> Callable[[_T], _T]:
+    ...
+
+
+@overload
+def support_torch_compile(
+    *,
     dynamic_arg_dims: Optional[dict[str, Union[int, list[int]]]],
 ) -> Callable[[_T], _T]:
     ...
@@ -78,6 +87,7 @@ def support_torch_compile(
     *,
     dynamic_arg_dims: Optional[dict[str, Union[int, list[int]]]] = None,
     enable_if: Optional[Callable[[VllmConfig], bool]] = None,
+    no_weak_ref_output: bool = False,
 ) -> Union[Callable[[_T], _T], _T]:
     """
     A decorator to add support for compiling the forward method of a class.
@@ -132,6 +142,32 @@ def support_torch_compile(
     returns a boolean value indicating whether to compile the model or not.
     This is useful if you want to compile the model only when certain
     conditions are met.
+
+    If `no_weak_ref_output` is set to `True`, the output of the last graph
+    of each compiled nn.Module will not be converted to a weakref.
+    This conversion saves memory but is only safe when the output of the last
+    graph is not used by any subsequent CUDA graphs in the model forward.
+    In full cudagraph mode, this is ignored as full cudagraphs are always
+    captured for the full model.
+    
+    This defaults to `True`, because in most cases the entire model is being
+    compiled, so the assumption that there is no other cuda graph after the last
+    graph holds. However, in rare cases, multiple submodules are compiled within
+    a single model. In this case, only the output of the last graph of the last
+    submodule is safe to be converted to a weakref. For example, if a model has
+    2 submodules mod_A and mod_B that are piecewise compiled + graph captured
+    separately, e.g.:
+
+    def forward(self, x):
+        a_out = self.mod_A(x)
+        b_out = self.mod_B(a_out)
+        return a_out + b_out
+    
+    Then the output of mod_A should NOT be converted to a weakref, because the
+    call to mod_B may overwrite `a_out`. This is because vLLM shares a global
+    memory pool for all CUDA graphs, causing PyTorch to re-use memory where
+    possible.  To avoid its output from being overwritten, mod_A should specify
+    `@support_torch_compile(no_weak_ref_output=True)`
     """
 
     def cls_decorator_helper(cls: _T) -> _T:
@@ -164,7 +200,7 @@ def support_torch_compile(
                 raise ValueError(
                     f"Argument {k} not found in the forward method of {cls}")
         return _support_torch_compile(cls, inferred_dynamic_arg_dims,
-                                      enable_if)
+                                      enable_if, no_weak_ref_output)
 
     if cls is not None:
         # use `support_torch_compile` as a decorator without arguments
@@ -178,10 +214,16 @@ def _support_torch_compile(
     cls: _T,
     dynamic_arg_dims: dict[str, Union[int, list[int]]],
     enable_if: Optional[Callable[[VllmConfig], bool]] = None,
+    no_weak_ref_output: bool = False,
 ) -> _T:
     """
     A decorator to add support for compiling the forward method of a class.
     """
+    setattr(cls, IGNORE_COMPILE_KEY, False)
+
+    # setting as attribute on cls ensures child class will override parent class
+    setattr(cls, LAST_PIECEWISE_GRAPH_WEAKREF_KEY, no_weak_ref_output)
+
     if TorchCompileWrapperWithCustomDispatcher in cls.__bases__:
         # support decorating multiple times
         return cls
@@ -192,8 +234,6 @@ def _support_torch_compile(
     cls.__bases__ = cls.__bases__ + (TorchCompileWrapperWithCustomDispatcher, )
 
     old_init = cls.__init__
-
-    setattr(cls, IGNORE_COMPILE_KEY, False)
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = '', **kwargs):
         old_init(self, vllm_config=vllm_config, prefix=prefix, **kwargs)
@@ -209,9 +249,14 @@ def _support_torch_compile(
         if self.do_not_compile:
             return
 
+        no_weak_ref_output =\
+            getattr(cls, LAST_PIECEWISE_GRAPH_WEAKREF_KEY, False)
+
         compilation_counter.num_models_seen += 1
         TorchCompileWrapperWithCustomDispatcher.__init__(
-            self, compilation_level=vllm_config.compilation_config.level)
+            self,
+            compilation_level=vllm_config.compilation_config.level,
+            no_weak_ref_output=no_weak_ref_output)
 
     cls.__init__ = __init__
 
