@@ -461,11 +461,6 @@ class ModelConfig:
         DP (which is controlled by `--data-parallel-size`).
         This is only supported on a per-model basis and falls back to
         `"weights"` if the encoder does not support DP."""
-    override_neuron_config: dict[str, Any] = field(default_factory=dict)
-    """Initialize non-default neuron config or override default neuron config
-    that are specific to Neuron devices, this argument will be used to
-    configure the neuron config that can not be gathered from the vllm
-    arguments. e.g. `{"cast_logits_dtype": "bfloat16"}`."""
     pooler_config: Optional["PoolerConfig"] = field(init=False)
     """Pooler config which controls the behaviour of output pooling in pooling
     models."""
@@ -784,10 +779,6 @@ class ModelConfig:
 
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
-
-        if (not current_platform.is_neuron() and self.override_neuron_config):
-            raise ValueError(
-                "`override_neuron_config` is only supported on Neuron.")
 
         # Avoid running try_verify_and_update_config multiple times
         self.config_updated = False
@@ -1696,13 +1687,7 @@ class ModelConfig:
         """
         For Mllama, VLLM overrides HF's is_encoder_decoder flag and sets it to
         True to enable cross-attention
-        Neuron needs all multimodal data to be in the decoder and does not
-        need to explicitly enable cross-attention
         """
-        if (current_platform.is_neuron()
-                and self.hf_config.model_type == "mllama"):
-            return False
-
         return is_encoder_decoder(self.hf_config)
 
     @property
@@ -1871,7 +1856,7 @@ class LoadConfig:
             self.ignore_patterns = ["original/**/*"]
 
 
-Device = Literal["auto", "cuda", "neuron", "cpu", "tpu", "xpu"]
+Device = Literal["auto", "cuda", "cpu", "tpu", "xpu"]
 
 
 @config
@@ -1927,9 +1912,7 @@ class DeviceConfig:
                 self.device_type = self.device.type
 
         # Some device types require processing inputs on CPU
-        if self.device_type in ["neuron"]:
-            self.device = torch.device("cpu")
-        elif self.device_type in ["tpu"]:
+        if self.device_type in ["tpu"]:
             self.device = None
         else:
             # Set device with device type
@@ -3941,7 +3924,6 @@ class VllmConfig:
             f"skip_tokenizer_init={self.model_config.skip_tokenizer_init}, "
             f"tokenizer_mode={self.model_config.tokenizer_mode}, "
             f"revision={self.model_config.revision}, "
-            f"override_neuron_config={self.model_config.override_neuron_config}, "  # noqa
             f"tokenizer_revision={self.model_config.tokenizer_revision}, "
             f"trust_remote_code={self.model_config.trust_remote_code}, "
             f"dtype={self.model_config.dtype}, "
