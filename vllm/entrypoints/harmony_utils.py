@@ -293,16 +293,20 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
                 )
                 output_items.append(reasoning_item)
         else:
-            # For commentary channel with no recipient, treat as preamble
-            # (user-visible). Per OpenAI Harmony docs, shown to end-user
+            # For commentary channel with no recipient, treat as reasoning
+            # This handles the case where recipient=None in commentary channel
             for content in message.content:
-                text_item = ResponseOutputText(
-                    text=content.text,
-                    annotations=[],
-                    type="output_text",
-                    logprobs=None,
+                reasoning_item = ResponseReasoningItem(
+                    id=f"rs_{random_uuid()}",
+                    summary=[],
+                    type="reasoning",
+                    content=[
+                        ResponseReasoningTextContent(text=content.text,
+                                                     type="reasoning_text")
+                    ],
+                    status=None,
                 )
-                output_items.append(text_item)
+                output_items.append(reasoning_item)
     elif message.channel == "final":
         contents = []
         for content in message.content:
