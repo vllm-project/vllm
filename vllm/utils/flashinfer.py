@@ -200,11 +200,6 @@ def use_trtllm_attention(
         logger.info_once("Using TRTLLM attention (query is quantized).")
         return True
 
-    # TRTLLM prefill attention does not support FP8 kv cache with
-    # non-quantized query
-    if is_prefill and kv_cache_dtype.startswith("fp8"):
-        return False
-
     # If sinks are being used, we must use TRTLLM attention as it's
     # the only backend that supports them
     if has_sinks:
