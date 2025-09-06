@@ -2458,7 +2458,6 @@ class LoRAConfig:
     LoRA adapter. Will be removed in v0.12.0."""
     lora_vocab_padding_size: ClassVar[int] = current_platform\
         .get_lora_vocab_padding_size()
-
     default_mm_loras: Optional[dict[str, str]] = None
     """Dictionary mapping specific modalities to LoRA model paths; this field
     is only applicable to multimodal models and should be leveraged when a
@@ -2469,10 +2468,9 @@ class LoRAConfig:
     per prompt. When run in offline mode, the lora IDs for n modalities
     will be automatically assigned to 1-n with the names of the modalities
     in alphabetic order."""
-
     bias_enabled: bool = False
     """[DEPRECATED] Enable bias for LoRA adapters. This option will be
-    removed in a future release."""
+    removed in v0.12.0."""
 
     def compute_hash(self) -> str:
         """
