@@ -14,7 +14,7 @@ from vllm.multimodal.inputs import (MultiModalKwargsItem,
                                     MultiModalKwargsItems, PlaceholderRange)
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.utils import swap_dict_values
+from vllm.utils import length_from_prompt_token_ids_or_embeds, swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import (BatchUpdateBuilder,
@@ -30,7 +30,8 @@ from vllm.v1.worker.block_table import MultiGroupBlockTable
 class CachedRequestState:
 
     req_id: str
-    prompt_token_ids: list[int]
+    prompt_token_ids: Optional[list[int]]
+    prompt_embeds: Optional[torch.Tensor]
     mm_kwargs: list[MultiModalKwargsItem]
     mm_positions: list[PlaceholderRange]
     mm_hashes: list[str]
@@ -48,7 +49,8 @@ class CachedRequestState:
     lora_request: Optional[LoRARequest] = None
 
     def __post_init__(self):
-        self.num_prompt_tokens = len(self.prompt_token_ids)
+        self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
+            self.prompt_token_ids, self.prompt_embeds)
 
     @property
     def num_tokens(self) -> int:
@@ -65,6 +67,10 @@ class CachedRequestState:
 
     def get_token_id(self, idx: int) -> int:
         if idx < self.num_prompt_tokens:
+            if self.prompt_token_ids is None:
+                raise ValueError(
+                    f"Tried to access token index {idx}, but that token was "
+                    "provided via prompt_embeds, and its ID is unknown.")
             return self.prompt_token_ids[idx]
         return self.output_token_ids[idx - self.num_prompt_tokens]
 
@@ -79,6 +85,8 @@ class InputBatch:
         device: torch.device,
         pin_memory: bool,
         vocab_size: int,
+        hidden_size: int,
+        dtype: torch.dtype,
         block_sizes: list[int],  # The block_size of each kv cache group
         logitsprocs: Optional[LogitsProcessors] = None,
         is_spec_decode: bool = False,
@@ -92,6 +100,8 @@ class InputBatch:
         self.device = device
         self.pin_memory = pin_memory
         self.vocab_size = vocab_size
+        self.hidden_size = hidden_size
+        self.dtype = dtype
 
         self._req_ids: list[Optional[str]] = []
         self.req_id_to_index: dict[str, int] = {}
@@ -107,6 +117,18 @@ class InputBatch:
             pin_memory=False,
         )
         self.token_ids_cpu = self.token_ids_cpu_tensor.numpy()
+        # Since this is a buffer, its initial values do not matter. Initializing
+        # with zeros is sufficiently slow that it can cause NCCL failures when
+        # starting up tensor parallel.
+        self.prompt_embeds_cpu_tensor = torch.empty(
+            (max_num_reqs, max_model_len, hidden_size),
+            device="cpu",
+            dtype=dtype,
+            pin_memory=False)
+        self.is_token_ids = torch.zeros((max_num_reqs, max_model_len),
+                                        device="cpu",
+                                        dtype=bool,
+                                        pin_memory=False)
         self.num_tokens = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_tokens_no_spec = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_prompt_tokens = np.zeros(max_num_reqs, dtype=np.int32)
@@ -294,15 +316,24 @@ class InputBatch:
         self.req_id_to_index[req_id] = req_index
 
         # Copy the prompt token ids and output token ids.
-        num_prompt_tokens = len(request.prompt_token_ids)
+        num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
+            request.prompt_token_ids, request.prompt_embeds)
         self.num_prompt_tokens[req_index] = num_prompt_tokens
-        self.token_ids_cpu[
-            req_index, :num_prompt_tokens] = request.prompt_token_ids
         start_idx = num_prompt_tokens
         end_idx = start_idx + len(request.output_token_ids)
+        if request.prompt_token_ids is not None:
+            self.token_ids_cpu[
+                req_index, :num_prompt_tokens] = request.prompt_token_ids
+            self.is_token_ids[req_index, :num_prompt_tokens] = True
+        else:
+            self.is_token_ids[req_index, :num_prompt_tokens] = False
+        if request.prompt_embeds is not None:
+            self.prompt_embeds_cpu_tensor[req_index, :num_prompt_tokens].copy_(
+                request.prompt_embeds)
         self.token_ids_cpu[req_index,
                            start_idx:end_idx] = request.output_token_ids
-        # Number of token ids in token_ids_cpu.
+        self.is_token_ids[req_index, start_idx:end_idx] = True
+        # Number of token ids in prompt (token_ids_cpu or prompt_embeds).
         # NOTE(woosuk): This may include spec decode tokens.
         self.num_tokens[req_index] = request.num_tokens
         # Number of tokens without spec decode tokens.
@@ -483,6 +514,15 @@ class InputBatch:
         self.token_ids_cpu[i1, ...] = self.token_ids_cpu[i2, ...]
         self.token_ids_cpu[i2, ...] = tmp
 
+        tmp_is_token_ids = self.is_token_ids[i1, ...].clone()
+        self.is_token_ids[i1, ...] = self.is_token_ids[i2, ...]
+        self.is_token_ids[i2, ...] = tmp_is_token_ids
+
+        tmp_prompt_embeds = self.prompt_embeds_cpu_tensor[i1, ...].clone()
+        self.prompt_embeds_cpu_tensor[i1, ...] = \
+            self.prompt_embeds_cpu_tensor[i2, ...]
+        self.prompt_embeds_cpu_tensor[i2, ...] = tmp_prompt_embeds
+
         self.block_table.swap_row(i1, i2)
 
         self.request_lora_mapping[i1], self.request_lora_mapping[i2] = \
@@ -570,6 +610,11 @@ class InputBatch:
             num_tokens = self.num_tokens[last_req_index]
             self.token_ids_cpu[empty_index, :num_tokens] = self.token_ids_cpu[
                 last_req_index, :num_tokens]
+            self.is_token_ids[empty_index, :num_tokens] = self.is_token_ids[
+                last_req_index, :num_tokens]
+            self.prompt_embeds_cpu_tensor[
+                empty_index, :num_tokens] = self.prompt_embeds_cpu_tensor[
+                    last_req_index, :num_tokens]
             self.num_tokens[empty_index] = num_tokens
             self.num_tokens_no_spec[empty_index] = self.num_tokens_no_spec[
                 last_req_index]

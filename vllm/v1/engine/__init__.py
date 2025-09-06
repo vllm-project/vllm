@@ -46,7 +46,8 @@ class EngineCoreRequest(
         gc=False):  # type: ignore[call-arg]
 
     request_id: str
-    prompt_token_ids: list[int]
+    prompt_token_ids: Optional[list[int]]
+    prompt_embeds: Optional[torch.Tensor]
     mm_features: Optional[list[MultiModalFeatureSpec]]
     sampling_params: Optional[SamplingParams]
     pooling_params: Optional[PoolingParams]

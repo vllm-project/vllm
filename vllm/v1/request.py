@@ -6,9 +6,12 @@ import time
 from functools import partial
 from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
+import torch
+
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
+from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
                             EngineCoreRequest, FinishReason)
 from vllm.v1.structured_output.request import StructuredOutputRequest
@@ -24,7 +27,8 @@ class Request:
     def __init__(
         self,
         request_id: str,
-        prompt_token_ids: list[int],
+        prompt_token_ids: Optional[list[int]],
+        prompt_embeds: Optional[torch.Tensor],
         sampling_params: Optional[SamplingParams],
         pooling_params: Optional[PoolingParams],
         eos_token_id: Optional[int],
@@ -77,9 +81,13 @@ class Request:
                 "sampling_params and pooling_params can't both be unset")
 
         self.prompt_token_ids = prompt_token_ids
-        self.num_prompt_tokens = len(self.prompt_token_ids)
+        self.prompt_embeds = prompt_embeds
+        self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
+            prompt_token_ids, prompt_embeds)
         self._output_token_ids: list[int] = []
-        self._all_token_ids: list[int] = self.prompt_token_ids.copy()
+        self._all_token_ids: list[int] = self.prompt_token_ids.copy(
+        ) if self.prompt_token_ids is not None else [0
+                                                     ] * self.num_prompt_tokens
         self.num_output_placeholders = 0  # Used in async scheduling.
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
@@ -125,6 +133,7 @@ class Request:
             request_id=request.request_id,
             client_index=request.client_index,
             prompt_token_ids=request.prompt_token_ids,
+            prompt_embeds=request.prompt_embeds,
             mm_features=request.mm_features,
             sampling_params=request.sampling_params,
             pooling_params=request.pooling_params,

@@ -61,6 +61,8 @@ def initialize_kv_cache(runner: GPUModelRunner):
         device=runner.device,
         pin_memory=runner.pin_memory,
         vocab_size=runner.model_config.get_vocab_size(),
+        hidden_size=runner.hidden_size,
+        dtype=runner.dtype,
         block_sizes=[
             kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
         ],
@@ -120,6 +122,7 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
             NewRequestData(
                 req_id=req_id,
                 prompt_token_ids=[1, 2, 3],
+                prompt_embeds=None,
                 mm_kwargs=[],
                 mm_hashes=[],
                 mm_positions=[],
