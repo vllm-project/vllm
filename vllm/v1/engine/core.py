@@ -159,6 +159,9 @@ class EngineCore:
             self.request_block_hasher = get_request_block_hasher(
                 block_size, caching_hash_fn)
 
+        self.step_fn = (self.step if self.batch_queue is None else
+                        self.step_with_batch_queue)
+
     def _initialize_kv_caches(
             self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
         start = time.time()
@@ -534,9 +537,6 @@ class EngineCoreProc(EngineCore):
                         "Input socket thread died during startup")
                 assert addresses.coordinator_input is not None
                 logger.info("Waiting for READY message from DP Coordinator...")
-
-        self.step_fn = (self.step if self.batch_queue is None else
-                        self.step_with_batch_queue)
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
