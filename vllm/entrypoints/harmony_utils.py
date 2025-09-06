@@ -250,7 +250,7 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
             type="web_search_call",
         )
         output_items.append(web_search_item)
-    elif message.channel == "analysis":
+    elif message.channel == "analysis" or (message.channel == "commentary" and recipient is None) or not message.channel:
         for content in message.content:
             reasoning_item = ResponseReasoningItem(
                 id=f"rs_{random_uuid()}",
