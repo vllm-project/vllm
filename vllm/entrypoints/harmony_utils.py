@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from __future__ import annotations
+
 import datetime
 import json
 from collections.abc import Iterable, Sequence
@@ -18,7 +21,8 @@ from openai_harmony import (Author, Conversation, DeveloperContent,
                             Role, StreamableParser, SystemContent, TextContent,
                             ToolDescription, load_harmony_encoding)
 
-from vllm.entrypoints.openai.protocol import ResponseInputOutputItem
+from vllm.entrypoints.openai.protocol import (ChatCompletionToolsParam,
+                                              ResponseInputOutputItem)
 from vllm.utils import random_uuid
 
 REASONING_EFFORT = {
@@ -63,13 +67,29 @@ def get_system_message(
     return sys_msg
 
 
-def get_developer_message(instructions: Optional[str] = None,
-                          tools: Optional[list[Tool]] = None) -> Message:
+def create_tool_definition(tool: Union[ChatCompletionToolsParam, Tool]):
+    if isinstance(tool, ChatCompletionToolsParam):
+        return ToolDescription.new(
+            name=tool.function.name,
+            description=tool.function.description,
+            parameters=tool.function.parameters,
+        )
+    return ToolDescription.new(
+        name=tool.name,
+        description=tool.description,
+        parameters=tool.parameters,
+    )
+
+
+def get_developer_message(
+    instructions: Optional[str] = None,
+    tools: Optional[list[Union[Tool, ChatCompletionToolsParam]]] = None,
+) -> Message:
     dev_msg_content = DeveloperContent.new()
     if instructions is not None:
         dev_msg_content = dev_msg_content.with_instructions(instructions)
     if tools is not None:
-        function_tools = []
+        function_tools: list[Union[Tool, ChatCompletionToolsParam]] = []
         for tool in tools:
             if tool.type in ("web_search_preview", "code_interpreter"):
                 # These are built-in tools that are added to the system message.
@@ -80,11 +100,7 @@ def get_developer_message(instructions: Optional[str] = None,
                 raise ValueError(f"tool type {tool.type} not supported")
         if function_tools:
             function_tool_descriptions = [
-                ToolDescription.new(
-                    name=tool.name,
-                    description=tool.description,
-                    parameters=tool.parameters,
-                ) for tool in function_tools
+                create_tool_definition(tool) for tool in function_tools
             ]
             dev_msg_content = dev_msg_content.with_function_tools(
                 function_tool_descriptions)
@@ -148,16 +164,46 @@ def parse_response_input(
     return msg
 
 
-def parse_chat_input(chat_msg) -> Message:
-    role = chat_msg["role"]
-    content = chat_msg["content"]
+def parse_chat_input(chat_msg) -> list[Message]:
+    if not isinstance(chat_msg, dict):
+        # Handle Pydantic models
+        chat_msg = chat_msg.model_dump(exclude_none=True)
+
+    role = chat_msg.get("role")
+
+    # Assistant message with tool calls
+    tool_calls = chat_msg.get("tool_calls")
+    if role == "assistant" and tool_calls:
+        msgs: list[Message] = []
+        for call in tool_calls:
+            func = call.get("function", {})
+            name = func.get("name", "")
+            arguments = func.get("arguments", "") or ""
+            msg = Message.from_role_and_content(Role.ASSISTANT, arguments)
+            msg = msg.with_channel("commentary")
+            msg = msg.with_recipient(f"functions.{name}")
+            msg = msg.with_content_type("json")
+            msgs.append(msg)
+        return msgs
+
+    # Tool role message (tool output)
+    if role == "tool":
+        name = chat_msg.get("name", "")
+        content = chat_msg.get("content", "") or ""
+        msg = Message.from_author_and_content(
+            Author.new(Role.TOOL, f"functions.{name}"),
+            content).with_channel("commentary")
+        return [msg]
+
+    # Default: user/assistant/system messages with content
+    content = chat_msg.get("content", "")
     if isinstance(content, str):
         contents = [TextContent(text=content)]
     else:
         # TODO: Support refusal.
         contents = [TextContent(text=c.get("text", "")) for c in content]
     msg = Message.from_role_and_contents(role, contents)
-    return msg
+    return [msg]
 
 
 def render_for_completion(messages: list[Message]) -> list[int]:
