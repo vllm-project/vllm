@@ -12,14 +12,26 @@ from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 # Create a concrete test implementation of BaseThinkingReasoningParser
 class TestThinkingReasoningParser(BaseThinkingReasoningParser):
     """Test implementation of BaseThinkingReasoningParser."""
-    start_token: str = "<test:think>"
-    end_token: str = "</test:think>"
+
+    @property
+    def start_token(self) -> str:
+        return "<test:think>"
+
+    @property
+    def end_token(self) -> str:
+        return "</test:think>"
 
 
 class TestThinkingReasoningParserAlt(BaseThinkingReasoningParser):
     """Alternative test implementation with different tokens."""
-    start_token: str = "<alt:start>"
-    end_token: str = "<alt:end>"
+
+    @property
+    def start_token(self) -> str:
+        return "<alt:start>"
+
+    @property
+    def end_token(self) -> str:
+        return "<alt:end>"
 
 
 # Use a test model
@@ -64,8 +76,14 @@ class TestBaseThinkingReasoningParserInit:
 
         # Create a parser with tokens not in vocabulary
         class MissingTokenParser(BaseThinkingReasoningParser):
-            start_token: str = "<missing:start>"
-            end_token: str = "<missing:end>"
+
+            @property
+            def start_token(self) -> str:
+                return "<missing:start>"
+
+            @property
+            def end_token(self) -> str:
+                return "<missing:end>"
 
         with pytest.raises(RuntimeError,
                            match="could not locate think start/end tokens"):
@@ -75,8 +93,14 @@ class TestBaseThinkingReasoningParserInit:
         """Test that initialization fails with empty token strings."""
 
         class EmptyTokenParser(BaseThinkingReasoningParser):
-            start_token: str = ""
-            end_token: str = ""
+
+            @property
+            def start_token(self) -> str:
+                return ""
+
+            @property
+            def end_token(self) -> str:
+                return ""
 
         with pytest.raises(ValueError,
                            match="start_token and end_token must be defined"):

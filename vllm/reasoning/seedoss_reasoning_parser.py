@@ -17,5 +17,12 @@ class SeedOSSReasoningParser(BaseThinkingReasoningParser):
     where the model doesn't generate the start token.
     """
 
-    start_token: str = "<seed:think>"
-    end_token: str = "</seed:think>"
+    @property
+    def start_token(self) -> str:
+        """The token that starts reasoning content."""
+        return "<seed:think>"
+
+    @property
+    def end_token(self) -> str:
+        """The token that ends reasoning content."""
+        return "</seed:think>"

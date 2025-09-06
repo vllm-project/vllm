@@ -21,8 +21,15 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
     output.
     """
 
-    start_token: str = "<think>"
-    end_token: str = "</think>"
+    @property
+    def start_token(self) -> str:
+        """The token that starts reasoning content."""
+        return "<think>"
+
+    @property
+    def end_token(self) -> str:
+        """The token that ends reasoning content."""
+        return "</think>"
 
     def extract_reasoning_content(
         self, model_output: str, request: Union[ChatCompletionRequest,

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from abc import abstractmethod
 from collections.abc import Sequence
 from typing import Optional, Union
 
@@ -18,14 +19,21 @@ class BaseThinkingReasoningParser(ReasoningParser):
     tokens to delimit reasoning content (
         e.g., <think>...</think>, <seed:think>...</seed:think>).
     
-    Subclasses should define:
-    - start_token: str - The token that starts reasoning content
-    - end_token: str - The token that ends reasoning content
+    Subclasses must implement the start and end tokens via abstract
+    properties.
     """
 
-    # These should be overridden in subclasses
-    start_token: str = ""
-    end_token: str = ""
+    @property
+    @abstractmethod
+    def start_token(self) -> str:
+        """The token that starts reasoning content."""
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def end_token(self) -> str:
+        """The token that ends reasoning content."""
+        raise NotImplementedError
 
     def __init__(self, tokenizer: AnyTokenizer):
         super().__init__(tokenizer)
