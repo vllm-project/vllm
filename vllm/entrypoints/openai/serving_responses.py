@@ -460,7 +460,7 @@ class OpenAIServingResponses(OpenAIServing):
         if self.use_harmony:
             assert isinstance(context, HarmonyContext)
             output = self._make_response_output_items_with_harmony(context)
-            # TODO: these are all 0 for now!
+            num_tool_output_tokens = context.num_tool_output_tokens
         else:
             assert isinstance(context, SimpleContext)
             final_res = context.last_output
@@ -473,6 +473,8 @@ class OpenAIServingResponses(OpenAIServing):
 
             # Calculate usage.
             assert final_res.prompt_token_ids is not None
+            num_tool_output_tokens = 0
+
         assert isinstance(context, (SimpleContext, HarmonyContext))
         num_prompt_tokens = context.num_prompt_tokens
         num_generated_tokens = context.num_output_tokens
@@ -486,7 +488,8 @@ class OpenAIServingResponses(OpenAIServing):
             input_tokens_details=InputTokensDetails(
                 cached_tokens=num_cached_tokens),
             output_tokens_details=OutputTokensDetails(
-                reasoning_tokens=num_reasoning_tokens),
+                reasoning_tokens=num_reasoning_tokens,
+                tool_output_tokens=num_tool_output_tokens),
         )
         response = ResponsesResponse.from_request(
             request,
