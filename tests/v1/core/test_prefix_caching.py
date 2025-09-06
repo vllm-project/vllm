@@ -356,8 +356,8 @@ def test_prefill_hybrid_model():
     # Then it is cache miss as the two type of layers have different hit length.
     test_partial_request_hit("8", [
         make_block_hash_with_group_id(block_hashes[2], 0),
-        make_block_hash_with_group_id(block_hashes[0], 0),
         make_block_hash_with_group_id(block_hashes[0], 1),
+        make_block_hash_with_group_id(block_hashes[0], 2),
     ], 0)
 
 

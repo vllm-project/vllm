@@ -3285,7 +3285,7 @@ def sha256_cbor(input) -> bytes:
     return hashlib.sha256(input_bytes).digest()
 
 
-def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], int]:
+def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], bytes]:
     """Get a hash function by name, or raise an error if
     the function is not found.
     Args:
