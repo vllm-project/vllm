@@ -12,7 +12,7 @@ from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 from .interface import Platform, PlatformEnum
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import ModelConfig, VllmConfig
 else:
     VllmConfig = None
 
@@ -45,16 +45,22 @@ class NeuronPlatform(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         parallel_config = vllm_config.parallel_config
         if parallel_config.worker_cls == "auto":
-            parallel_config.worker_cls = \
-                "vllm.worker.neuron_worker.NeuronWorker"
+            if envs.VLLM_USE_V1:
+                parallel_config.worker_cls = \
+                    "vllm.v1.worker.neuron_worker.NeuronWorker"
+                # TODO: validate the config. for example, some configs
+                # must (e.g., block_size, enable_chunked_prefill,
+                # etc.) be set or provided with default values.
+            else:
+                parallel_config.worker_cls = \
+                    "vllm.worker.neuron_worker.NeuronWorker"
+                if vllm_config.cache_config and vllm_config.model_config:
+                    # neuron needs block_size = max_model_len
+                    vllm_config.cache_config.block_size = \
+                        vllm_config.model_config.max_model_len  # type: ignore
 
         if parallel_config.world_size > 1:
             parallel_config.distributed_executor_backend = "uni"
-
-        if vllm_config.cache_config and vllm_config.model_config:
-            # neuron needs block_size = max_model_len
-            vllm_config.cache_config.block_size = \
-                vllm_config.model_config.max_model_len  # type: ignore
 
         if vllm_config.model_config and vllm_config.model_config.use_mla:
             logger.info(
@@ -90,6 +96,10 @@ class NeuronPlatform(Platform):
         except ImportError:
             neuronx_distributed_inference = None
         return neuronx_distributed_inference is not None
+
+    @classmethod
+    def supports_v1(cls, model_config: "ModelConfig") -> bool:
+        return True
 
     @classmethod
     @lru_cache
