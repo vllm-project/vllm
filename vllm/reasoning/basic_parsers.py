@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional, Union
 from collections.abc import Sequence
+from typing import Optional, Union
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaMessage, ResponsesRequest)

@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Sequence, Union
+from collections.abc import Sequence
+from typing import Union
 
 from vllm.entrypoints.openai.protocol import DeltaMessage
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParserManager
