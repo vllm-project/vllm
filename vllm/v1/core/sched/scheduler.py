@@ -154,12 +154,14 @@ class Scheduler(SchedulerInterface):
             cache_size=encoder_cache_size)
 
         speculative_config = vllm_config.speculative_config
-        self.use_eagle = False
+        use_eagle = False
         self.num_spec_tokens = self.num_lookahead_tokens = 0
         if speculative_config:
             self.num_spec_tokens = speculative_config.num_speculative_tokens
             if speculative_config.use_eagle():
-                self.use_eagle = True
+                use_eagle = True
+                self.num_lookahead_tokens = self.num_spec_tokens
+            if speculative_config.uses_draft_model():
                 self.num_lookahead_tokens = self.num_spec_tokens
 
         # Create the KV cache manager.
@@ -167,7 +169,7 @@ class Scheduler(SchedulerInterface):
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
             enable_caching=self.cache_config.enable_prefix_caching,
-            use_eagle=self.use_eagle,
+            use_eagle=use_eagle,
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=self.dcp_world_size,
