@@ -278,7 +278,8 @@ class LLMEngine:
                     self.cache_config.block_size,
                     "gpu_memory_utilization":
                     self.cache_config.gpu_memory_utilization,
-
+                    "kv_cache_memory_bytes":
+                    self.cache_config.kv_cache_memory_bytes,
                     # Quantization
                     "quantization":
                     self.model_config.quantization,
