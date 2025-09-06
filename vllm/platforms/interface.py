@@ -73,7 +73,6 @@ class PlatformEnum(enum.Enum):
     TPU = enum.auto()
     XPU = enum.auto()
     CPU = enum.auto()
-    NEURON = enum.auto()
     OOT = enum.auto()
     UNSPECIFIED = enum.auto()
 
