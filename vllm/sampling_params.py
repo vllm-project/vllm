@@ -195,7 +195,7 @@ class SamplingParams(
     _all_stop_token_ids: set[int] = msgspec.field(default_factory=set)
 
     # Fields used to construct logits processors
-    guided_decoding: Optional[GuidedDecodingParams] = None
+    guided_decoding: Optional[Union[GuidedDecodingParams, list[GuidedDecodingParams]]] = None
     """If provided, the engine will construct a guided decoding logits
     processor from these parameters."""
     logit_bias: Optional[dict[int, float]] = None
@@ -245,7 +245,7 @@ class SamplingParams(
                                                    msgspec.Meta(
                                                        ge=-1)]] = None,
         output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE,
-        guided_decoding: Optional[GuidedDecodingParams] = None,
+        guided_decoding: Optional[Union[GuidedDecodingParams, list[GuidedDecodingParams]]] = None,
         logit_bias: Optional[Union[dict[int, float], dict[str, float]]] = None,
         allowed_token_ids: Optional[list[int]] = None,
         extra_args: Optional[dict[str, Any]] = None,
@@ -516,6 +516,9 @@ class SamplingParams(
     def bad_words_token_ids(self) -> Optional[list[list[int]]]:
         # For internal use only. Backward compatibility not guaranteed
         return self._bad_words_token_ids
+
+    def exchange_decoding_params(self, guided_options):
+        self.guided_decoding = guided_options
 
     def clone(self) -> "SamplingParams":
         """Deep copy, but maybe not the LogitsProcessor objects.
