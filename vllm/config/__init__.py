@@ -171,6 +171,7 @@ class ModelImpl(str, enum.Enum):
     AUTO = "auto"
     VLLM = "vllm"
     TRANSFORMERS = "transformers"
+    TERRATORCH = "terratorch"
 
 
 def get_attr_docs(cls: type[Any]) -> dict[str, str]:
@@ -496,7 +497,9 @@ class ModelConfig:
     back to the Transformers implementation if no vLLM implementation is
     available.\n
     - "vllm" will use the vLLM model implementation.\n
-    - "transformers" will use the Transformers model implementation."""
+    - "transformers" will use the Transformers model implementation.\n
+    - "terratorch" will use the TerraTorch model implementation.
+    """
     override_attention_dtype: Optional[str] = None
     """Override dtype for attention"""
     logits_processors: Optional[list[Union[str, type[LogitsProcessor]]]] = None
@@ -1422,6 +1425,11 @@ class ModelConfig:
         # NOTE: Some configs may set head_dim=None in the config
         if getattr(self.hf_text_config, "head_dim", None) is not None:
             return self.hf_text_config.head_dim
+
+        # NOTE: Some models (such as PLaMo2.1) use `hidden_size_per_head`
+        if getattr(self.hf_text_config, "hidden_size_per_head",
+                   None) is not None:
+            return self.hf_text_config.hidden_size_per_head
 
         # FIXME(woosuk): This may not be true for all models.
         return (self.hf_text_config.hidden_size //
@@ -2742,6 +2750,8 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
 _FLOAT16_NOT_SUPPORTED_MODELS = {
     "gemma2": "Numerical instability. Please use bfloat16 or float32 instead.",
     "gemma3": "Numerical instability. Please use bfloat16 or float32 instead.",
+    "gemma3_text":
+    "Numerical instability. Please use bfloat16 or float32 instead.",
     "plamo2": "Numerical instability. Please use bfloat16 or float32 instead.",
     "glm4": "Numerical instability. Please use bfloat16 or float32 instead.",
 }
@@ -3247,7 +3257,7 @@ class KVTransferConfig:
 
     kv_parallel_size: int = 1
     """The number of parallel instances for KV cache transfer. For
-    PyNcclConnector, this should be 2."""
+    P2pNcclConnector, this should be 2."""
 
     kv_ip: str = "127.0.0.1"
     """The KV connector ip, used to build distributed connection."""
@@ -3656,6 +3666,24 @@ class VllmConfig:
                 "CPU offload is not supported with `torch.compile` in v0 yet."
                 " Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
+
+        if self.cache_config.kv_sharing_fast_prefill:
+            if not envs.VLLM_USE_V1:
+                raise NotImplementedError(
+                    "Fast prefill optimization for KV sharing is not supported "
+                    "in V0 currently.")
+
+            if self.speculative_config is not None and \
+                self.speculative_config.use_eagle():
+                raise NotImplementedError(
+                    "Fast prefill optimization for KV sharing is not "
+                    "compatible with EAGLE as EAGLE requires correct logits "
+                    "for all tokens while fast prefill gives incorrect logits "
+                    "for prompt tokens.")
+
+            logger.warning_once(
+                "--kv-sharing-fast-prefill requires changes on model side for "
+                "correctness and to realize prefill savings. ")
 
         if ((not envs.VLLM_USE_V1) and self.lora_config is not None
                 and self.compilation_config.level
