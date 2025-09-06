@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 
-from ...utils import CLSPoolingEmbedModelInfo, EmbedModelInfo
+from ...utils import (CLSPoolingEmbedModelInfo, EmbedModelInfo,
+                      LASTPoolingEmbedModelInfo)
 from .mteb_utils import mteb_test_embed_models
 
 # ST models with projector (Dense) layers
@@ -13,6 +14,10 @@ ST_PROJECTOR_MODELS = [
         mteb_score=0.688611955,
         enable_test=True,
     ),
+    LASTPoolingEmbedModelInfo("google/embeddinggemma-300m",
+                              architecture="Gemma3TextModel",
+                              mteb_score=0.7473819294684156,
+                              enable_test=True)
 ]
 
 

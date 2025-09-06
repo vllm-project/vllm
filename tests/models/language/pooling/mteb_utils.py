@@ -10,7 +10,8 @@ import numpy as np
 import pytest
 import requests
 
-from tests.models.utils import EmbedModelInfo, RerankModelInfo
+from tests.models.utils import (EmbedModelInfo, RerankModelInfo,
+                                check_embeddings_close)
 
 # Most embedding models on the STS12 task (See #17175):
 # - Model implementation and minor changes in tensor dtype
@@ -163,11 +164,13 @@ def mteb_test_embed_models(hf_runner,
                            model_info: EmbedModelInfo,
                            vllm_extra_kwargs=None,
                            hf_model_callback=None,
-                           atol=MTEB_RERANK_TOL):
+                           atol=MTEB_EMBED_TOL):
     if not model_info.enable_test:
         # A model family has many models with the same architecture,
         # and we don't need to test each one.
         pytest.skip("Skipping test.")
+
+    example_prompts = ["The chef prepared a delicious meal."]
 
     vllm_extra_kwargs = vllm_extra_kwargs or {}
     vllm_extra_kwargs["dtype"] = model_info.dtype
@@ -191,6 +194,7 @@ def mteb_test_embed_models(hf_runner,
         vllm_main_score = run_mteb_embed_task(VllmMtebEncoder(vllm_model),
                                               MTEB_EMBED_TASKS)
         vllm_dtype = vllm_model.llm.llm_engine.model_config.dtype
+        vllm_outputs = vllm_model.embed(example_prompts)
 
     if model_info.mteb_score is None:
         with hf_runner(model_info.name,
@@ -202,6 +206,16 @@ def mteb_test_embed_models(hf_runner,
 
             st_main_score = run_mteb_embed_task(hf_model, MTEB_EMBED_TASKS)
             st_dtype = next(hf_model.model.parameters()).dtype
+
+            # Test embed_dims and whether to use normalize
+            hf_outputs = hf_model.encode(example_prompts)
+            check_embeddings_close(
+                embeddings_0_lst=hf_outputs,
+                embeddings_1_lst=vllm_outputs,
+                name_0="hf",
+                name_1="vllm",
+                tol=1e-2,
+            )
     else:
         st_main_score = model_info.mteb_score
         st_dtype = "Constant"
