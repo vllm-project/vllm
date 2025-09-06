@@ -13,6 +13,10 @@ cmake_minimum_required(VERSION 3.26)
 # cmake --install . --component _C
 project(vllm_extensions LANGUAGES CXX)
 
+# vllm by default, can be overridden by using -DBUILD_DESTINATION=... (used by setup.py)
+set(BUILD_DESTINATION "vllm" CACHE STRING "build destiation")
+message(STATUS "Build destination: ${BUILD_DESTINATION}")
+
 # CUDA by default, can be overridden by using -DVLLM_TARGET_DEVICE=... (used by setup.py)
 set(VLLM_TARGET_DEVICE "cuda" CACHE STRING "Target device backend for vLLM")
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
@@ -217,7 +221,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND CUMEM_LIBS CUDA::cuda_driver)
   define_gpu_extension_target(
     cumem_allocator
-    DESTINATION vllm
+    DESTINATION ${BUILD_DESTINATION}
     LANGUAGE CXX
     SOURCES ${VLLM_CUMEM_EXT_SRC}
     LIBRARIES ${CUMEM_LIBS}
@@ -793,7 +797,7 @@ endif()
 message(STATUS "Enabling C extension.")
 define_gpu_extension_target(
   _C
-  DESTINATION vllm
+  DESTINATION ${BUILD_DESTINATION}
   LANGUAGE ${VLLM_GPU_LANG}
   SOURCES ${VLLM_EXT_SRC}
   COMPILE_FLAGS ${VLLM_GPU_FLAGS}
@@ -907,7 +911,7 @@ endif()
 message(STATUS "Enabling moe extension.")
 define_gpu_extension_target(
   _moe_C
-  DESTINATION vllm
+  DESTINATION ${BUILD_DESTINATION}
   LANGUAGE ${VLLM_GPU_LANG}
   SOURCES ${VLLM_MOE_EXT_SRC}
   COMPILE_FLAGS ${VLLM_GPU_FLAGS}
@@ -928,7 +932,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
 
   define_gpu_extension_target(
     _rocm_C
-    DESTINATION vllm
+    DESTINATION ${BUILD_DESTINATION}
     LANGUAGE ${VLLM_GPU_LANG}
     SOURCES ${VLLM_ROCM_EXT_SRC}
     COMPILE_FLAGS ${VLLM_GPU_FLAGS}

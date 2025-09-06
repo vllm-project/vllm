@@ -19,6 +19,7 @@ INIT_PATH: Final = REPO_ROOT / "vllm" / "__init__.py"
 # If you need to add items to whitelist, do it here.
 ALLOWED_IMPORTS: Final[frozenset[str]] = frozenset({
     "vllm.env_override",
+    "vllm.kernels",
 })
 ALLOWED_FROM_MODULES: Final[frozenset[str]] = frozenset({
     ".version",
