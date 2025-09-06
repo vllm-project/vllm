@@ -89,7 +89,7 @@ class Internlm2ToolParser(ToolParser):
         try:
             parsable_arr = action
 
-            # tool calls are generated in an object in inernlm2
+            # tool calls are generated in an object in internlm2
             # it's not support parallel tool calls
             try:
                 tool_call_arr: dict = partial_json_parser.loads(
