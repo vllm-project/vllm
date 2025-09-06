@@ -53,10 +53,6 @@ class StreamedResponseHandler:
 
         return messages
 
-    def get_remaining(self) -> str:
-        """Get any remaining data in the buffer."""
-        return self.buffer.strip()
-
 
 @dataclass
 class RequestFuncInput:
