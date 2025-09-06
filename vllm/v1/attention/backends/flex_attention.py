@@ -253,6 +253,26 @@ def causal_mask_mod(b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor,
     return q_idx >= kv_idx
 
 
+def sliding_window_causal_mask_mod(window_size: int):
+    """Create a sliding window causal mask function.
+
+    Args:
+        window_size: The size of the sliding window (number of tokens to look back)
+
+    Returns:
+        A mask function that implements sliding window causal attention
+    """
+    def mask_mod(b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor,
+                 kv_idx: torch.Tensor):
+        # Causal mask: can only attend to current and previous tokens
+        causal_mask = q_idx >= kv_idx
+        # Sliding window mask: can only attend to tokens within the window
+        window_mask = q_idx - kv_idx < window_size
+        return causal_mask & window_mask
+
+    return mask_mod
+
+
 @dataclass
 class FlexAttentionMetadata:
     causal: bool
@@ -292,6 +312,7 @@ class FlexAttentionMetadata:
     q_block_size: int = 16
     kv_block_size: int = 16
     transformed_score_mod: Optional[_score_mod_signature] = None
+    sliding_window: Optional[int] = None  # Add sliding window support
 
     def _convert_physical_to_logical(
         self,
@@ -503,6 +524,12 @@ class FlexAttentionMetadata:
         else:
             self.mask_mod = self.get_bidirectional_mask_mod()
 
+        # Set the appropriate logical mask based on sliding window
+        if self.sliding_window is not None:
+            self.logical_mask_mod = sliding_window_causal_mask_mod(self.sliding_window)
+        else:
+            self.logical_mask_mod = causal_mask_mod
+
         self.transformed_score_mod = self.get_transformed_score_mod()
 
         if self.direct_build and self.causal:
@@ -533,6 +560,9 @@ class FlexAttentionMetadataBuilder(
             "2.9.0.dev0") else 128
         self.kv_block_size: int = 16 if is_torch_equal_or_newer(
             "2.9.0.dev0") else 128
+
+        # Get sliding window from model config
+        self.sliding_window = getattr(self.model_config.hf_text_config, 'sliding_window', None)
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
@@ -598,6 +628,7 @@ class FlexAttentionMetadataBuilder(
             direct_build=self.direct_build,
             q_block_size=self.q_block_size,
             kv_block_size=self.kv_block_size,
+            sliding_window=self.sliding_window,
         )
         return out
 
@@ -641,8 +672,9 @@ class FlexAttentionImpl(AttentionImpl):
         else:
             self.alibi_slopes = None
         if sliding_window is not None:
-            raise NotImplementedError(
-                "FlexAttention does not support sliding window yet.")
+            # Convert sliding window to tuple format (left, right)
+            # For causal attention with sliding window, we look back 'sliding_window' tokens
+            self.sliding_window = (sliding_window - 1, 0)
         else:
             self.sliding_window = (-1, -1)
         self.kv_cache_dtype = kv_cache_dtype
