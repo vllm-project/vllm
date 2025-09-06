@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import hashlib
 import inspect
+import os
 from typing import Callable, Optional, TypeVar, Union, overload
 from unittest.mock import patch
 
@@ -9,6 +11,7 @@ import torch
 import torch.nn as nn
 from torch._dynamo.symbolic_convert import InliningInstructionTranslator
 
+import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import CompilationLevel, VllmConfig
@@ -32,11 +35,11 @@ def ignore_torch_compile(cls: _T) -> _T:
     a support_torch_compile decorator, but we don't want to
     compile the class `cls` that inherits the parent class.
     This only ignores compiling the forward of the class the
-    decorator is applied to. 
+    decorator is applied to.
 
     If the parent has ignore_torch_compile but the child has
     support_torch_compile, the child will still be compiled.
-    
+
     If the class has one or more submodules
     that have support_torch_compile decorator applied, compile will
     not be ignored for those submodules.
@@ -174,6 +177,13 @@ def support_torch_compile(
     return cls_decorator_helper
 
 
+def _model_hash_key(fn) -> str:
+    sha256_hash = hashlib.sha256()
+    sha256_hash.update(fn.__qualname__.encode())
+    sha256_hash.update(str(fn.__code__.co_firstlineno).encode())
+    return sha256_hash.hexdigest()
+
+
 def _support_torch_compile(
     cls: _T,
     dynamic_arg_dims: dict[str, Union[int, list[int]]],
@@ -221,6 +231,35 @@ def _support_torch_compile(
         # need to compile the model inside.
         if self.do_not_compile or torch.compiler.is_compiling():
             return self.forward(*args, **kwargs)
+
+        if getattr(self, "aot_compiled_fn", None) is not None:
+            return self.aot_compiled_fn(self, *args, **kwargs)
+
+        cache_dir = None
+        aot_compilation_path = None
+        if envs.VLLM_USE_AOT_COMPILE:
+            hash_key = _model_hash_key(self.forward)
+            cache_dir = os.path.join(
+                envs.VLLM_CACHE_ROOT,
+                "aot_compilation",
+                hash_key,
+            )
+
+            rank = self.vllm_config.parallel_config.rank
+            dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+            cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}")
+            aot_compilation_path = os.path.join(cache_dir, "model")
+            try:
+                with open(aot_compilation_path, "rb") as f:
+                    aot_compiled_fn = torch.compiler.load_compiled_function(f)
+                    self.aot_compiled_fn = aot_compiled_fn
+            except Exception as e:
+                if os.path.exists(aot_compilation_path):
+                    logger.warning(
+                        "Cannot load aot compilation from path %s, error: %s",
+                        aot_compilation_path, str(e))
+                if envs.VLLM_FORCE_AOT_LOAD:
+                    raise e
 
         # the first compilation needs to have dynamic shapes marked
         if len(self.compiled_codes) < 1:
@@ -302,7 +341,16 @@ def _support_torch_compile(
             with patch.object(InliningInstructionTranslator, 'inline_call',
                               patched_inline_call), torch._dynamo.config.patch(
                                   **dynamo_config_patches):
-                output = self.compiled_callable(*args, **kwargs)
+                if envs.VLLM_USE_AOT_COMPILE:
+                    self.aot_compiled_fn = self.aot_compile(*args, **kwargs)
+                    output = self.aot_compiled_fn(self, *args, **kwargs)
+                    assert aot_compilation_path is not None
+                    assert cache_dir is not None
+                    os.makedirs(cache_dir, exist_ok=True)
+                    self.aot_compiled_fn.save_compiled_function(
+                        aot_compilation_path)
+                else:
+                    output = self.compiled_callable(*args, **kwargs)
             return output
 
         # usually, capturing the model once is enough, and then we can
