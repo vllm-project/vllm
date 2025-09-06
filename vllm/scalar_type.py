@@ -269,7 +269,7 @@ class ScalarType:
 
     @classmethod
     def uint(cls, size_bits: int, bias: Optional[int]) -> 'ScalarType':
-        """Create a unsigned integer scalar type."""
+        """Create an unsigned integer scalar type."""
         ret = cls(0, size_bits, False, bias if bias else 0)
         ret.id  # noqa B018: make sure the id is cached
         return ret
@@ -327,6 +327,8 @@ class scalar_types:
     uint8 = ScalarType.uint(8, None)
     float8_e4m3fn = ScalarType.float_(4, 3, True, NanRepr.EXTD_RANGE_MAX_MIN)
     float8_e5m2 = ScalarType.float_IEEE754(5, 2)
+    float8_e8m0fnu = ScalarType(8, 0, False, 0, True,
+                                NanRepr.EXTD_RANGE_MAX_MIN)
     float16_e8m7 = ScalarType.float_IEEE754(8, 7)
     float16_e5m10 = ScalarType.float_IEEE754(5, 10)
 

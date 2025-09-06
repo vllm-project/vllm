@@ -15,6 +15,7 @@ import torch
 import uvloop
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerBase
+from typing_extensions import deprecated
 
 from benchmark_dataset import (
     AIMODataset,
@@ -95,7 +96,6 @@ def run_vllm(
         end = time.perf_counter()
     else:
         assert lora_requests is None, "BeamSearch API does not support LoRA"
-        prompts = [request.prompt for request in requests]
         # output_len should be the same for all requests.
         output_len = requests[0].expected_output_len
         for request in requests:
@@ -167,7 +167,8 @@ async def run_vllm_async(
     from vllm import SamplingParams
 
     async with build_async_engine_client_from_engine_args(
-        engine_args, disable_frontend_multiprocessing
+        engine_args,
+        disable_frontend_multiprocessing=disable_frontend_multiprocessing,
     ) as llm:
         model_config = await llm.get_model_config()
         assert all(
@@ -381,6 +382,10 @@ def get_requests(args, tokenizer):
     return dataset_cls(**common_kwargs).sample(**sample_kwargs)
 
 
+@deprecated(
+    "benchmark_throughput.py is deprecated and will be removed in a "
+    "future version. Please use 'vllm bench throughput' instead.",
+)
 def main(args: argparse.Namespace):
     if args.seed is None:
         args.seed = 0
@@ -591,8 +596,8 @@ def validate_args(args):
     # https://github.com/vllm-project/vllm/issues/16222
     if args.data_parallel_size > 1:
         raise ValueError(
-            "Data parallel is not supported in offline benchmark, \
-            please use benchmark serving instead"
+            "Data parallel is not supported in offline benchmark, "
+            "please use benchmark serving instead"
         )
 
 
@@ -714,7 +719,7 @@ def create_argument_parser():
         "[length * (1 - range_ratio), length * (1 + range_ratio)].",
     )
 
-    # hf dtaset
+    # hf dataset
     parser.add_argument(
         "--hf-subset", type=str, default=None, help="Subset of the HF dataset."
     )

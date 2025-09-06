@@ -123,13 +123,12 @@ OpenAI Python client library does not officially support `reasoning_content` att
     printed_content = False
 
     for chunk in stream:
-        reasoning_content = None
-        content = None
-        # Check the content is reasoning_content or content
-        if hasattr(chunk.choices[0].delta, "reasoning_content"):
-            reasoning_content = chunk.choices[0].delta.reasoning_content
-        elif hasattr(chunk.choices[0].delta, "content"):
-            content = chunk.choices[0].delta.content
+        # Safely extract reasoning_content and content from delta,
+        # defaulting to None if attributes don't exist or are empty strings
+        reasoning_content = (
+            getattr(chunk.choices[0].delta, "reasoning_content", None) or None
+        )
+        content = getattr(chunk.choices[0].delta, "content", None) or None
 
         if reasoning_content is not None:
             if not printed_reasoning_content:
@@ -144,7 +143,7 @@ OpenAI Python client library does not officially support `reasoning_content` att
             print(content, end="", flush=True)
     ```
 
-Remember to check whether the `reasoning_content` exists in the response before accessing it. You could checkout the [example](https://github.com/vllm-project/vllm/blob/main/examples/online_serving/openai_chat_completion_with_reasoning_streaming.py).
+Remember to check whether the `reasoning_content` exists in the response before accessing it. You could check out the [example](https://github.com/vllm-project/vllm/blob/main/examples/online_serving/openai_chat_completion_with_reasoning_streaming.py).
 
 ## Tool Calling
 

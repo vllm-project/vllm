@@ -25,6 +25,7 @@ MNK_FACTORS = [
     (2, 1024, 1536),
     (2, 3072, 1024),
     (2, 3072, 1536),
+    (7, 3072, 1536),
     (64, 1024, 1024),
     (64, 1024, 1536),
     (64, 3072, 1024),
@@ -427,8 +428,8 @@ def test_run_cutlass_moe_fp8(
         topk_ids[0][1] = 1
 
         workspace13_shape = (m * topk, max(2 * n, k))
-        workspace2_shape = (m * topk, n)
-        output_shape = (m * topk, k)
+        workspace2_shape = (m * topk, max(n, k))
+        output_shape = (m, k)
 
         workspace13 = torch.empty(prod(workspace13_shape),
                                   device="cuda",
@@ -458,7 +459,7 @@ def test_run_cutlass_moe_fp8(
             global_num_experts, expert_map, mt.w1_scale, mt.w2_scale,
             a1q_scale, None, ab_strides1, ab_strides2, c_strides1, c_strides2,
             workspace13, workspace2, None, mt.a.dtype, per_act_token,
-            per_out_channel, False)
+            per_out_channel, False, topk_weights)
 
         workspace13.random_()
         output_random_workspace = torch.empty(output_shape,

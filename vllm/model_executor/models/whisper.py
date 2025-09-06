@@ -4,7 +4,7 @@
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import nullcontext
-from typing import Optional, TypedDict, Union, cast
+from typing import Annotated, Literal, Optional, Union, cast
 
 import numpy as np
 import torch
@@ -33,13 +33,14 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, NestedTensors
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs)
+                                    MultiModalKwargsItems)
 from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
 from vllm.multimodal.processing import (BaseProcessingInfo,
                                         EncDecMultiModalProcessor,
                                         PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.transformers_utils.processor import cached_get_processor
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (MultiModalEmbeddings, SupportsMultiModal,
                          SupportsTranscription, SupportsV0Only)
@@ -109,56 +110,18 @@ ISO639_1_SUPPORTED_LANGS = {
     "vi": "Vietnamese",
     "cy": "Welsh"
 }
-ISO639_1_OTHER_LANGS = {
-    "lo": "Lao",
-    "jw": "Javanese",
-    "tk": "Turkmen",
-    "yi": "Yiddish",
-    "so": "Somali",
-    "bn": "Bengali",
-    "nn": "Norwegian Nynorsk",
-    "si": "Sinhala",
-    "yo": "Yoruba",
-    "sa": "Sanskrit",
-    "mi": "Māori",
-    "fo": "Faroese",  # codespell:ignore
-    "mt": "Maltese",
-    "tg": "Tajik",
-    "mg": "Malagasy",
-    "haw": "Hawaiian",
-    "km": "Khmer",
-    "br": "Breton",
-    "ps": "Pashto",
-    "ln": "Lingala",
-    "la": "Latin",
-    "ml": "Malayalam",
-    "sq": "Albanian",
-    "su": "Sundanese",
-    "eu": "Basque",
-    "ka": "Georgian",
-    "uz": "Uzbek",
-    "sn": "Shona",
-    "ht": "Haitian",
-    "as": "Assamese",
-    "mn": "Mongolian",
-    "te": "Telugu",
-    "pa": "Panjabi",
-    "tt": "Tatar",
-    "gu": "Gujarati",
-    "oc": "Occitan",
-    "ha": "Hausa",
-    "ba": "Bashkir",
-    "my": "Burmese",
-    "sd": "Sindhi",
-    "am": "Amharic",
-    "lb": "Luxembourgish",
-    "bo": "Tibetan"
-}
 
 
-class WhisperAudioInputs(TypedDict):
-    input_features: NestedTensors
-    """Shape: `(batch_size, 128, M)`"""
+class WhisperAudioInputs(TensorSchema):
+    """
+    Dimensions:
+        - b: Batch size
+        - nmb: Number of mel bins
+        - t: Time frames (M)
+    """
+
+    input_features: Annotated[Optional[NestedTensors],
+                              TensorShape("b", "nmb", "t")]
 
 
 class WhisperPositionalEmbedding(nn.Embedding):
@@ -668,23 +631,22 @@ class WhisperProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self) -> WhisperConfig:
         return self.ctx.get_hf_config(WhisperConfig)
 
-    def get_hf_processor(self,
-                         sampling_rate: Optional[int] = None
-                         ) -> WhisperProcessor:
-        # HACK: Transformers 4.53.0 has issue with whisper tokenizer to
+    def get_hf_processor(self, **kwargs: object) -> WhisperProcessor:
+        # HACK: Transformers 4.53.2 has issue with whisper tokenizer to
         # initialize processor. We use a monkeypatch to fix it here.
         # See: https://github.com/vllm-project/vllm/issues/20224
         processor_class = WhisperProcessor
         tokenizer_class = ("WhisperTokenizer", "WhisperTokenizerFast")
         if processor_class.tokenizer_class != tokenizer_class:
             processor_class.tokenizer_class = tokenizer_class
-        return self.ctx.get_hf_processor(processor_class)
+        return self.ctx.get_hf_processor(processor_class, **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"audio": 1}
 
-    def get_feature_extractor(self) -> WhisperFeatureExtractor:
-        hf_processor = self.get_hf_processor()
+    def get_feature_extractor(self,
+                              **kwargs: object) -> WhisperFeatureExtractor:
+        hf_processor = self.get_hf_processor(**kwargs)
         feature_extractor = hf_processor.feature_extractor  # type: ignore
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor
@@ -747,7 +709,7 @@ class WhisperMultiModalProcessor(
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if mm_data:
-            feature_extractor = self.info.get_feature_extractor()
+            feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
             mm_data = dict(audio=mm_data.pop("audios"))
             mm_kwargs = dict(
                 **mm_kwargs,
@@ -774,7 +736,7 @@ class WhisperMultiModalProcessor(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         num_tokens = self.info.get_num_audio_tokens()
         return [
@@ -807,22 +769,20 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
 
     # Whisper only supports audio-conditioned generation.
     supports_transcription_only = True
+    supported_languages = ISO639_1_SUPPORTED_LANGS
 
     @classmethod
-    def validate_language(cls, language: str) -> bool:
-        if language in ISO639_1_SUPPORTED_LANGS:
-            return True
-        elif language in ISO639_1_OTHER_LANGS:
+    def validate_language(cls, language: Optional[str]) -> Optional[str]:
+        if language is None:
+            # TODO language should be optional and can be guessed.
+            # For now we default to en. See
+            # https://github.com/huggingface/transformers/blob/main/src/transformers/models/whisper/generation_whisper.py#L1520
             logger.warning(
-                "The selected language %s has limited accuracy with"
-                " reported WER>=0.5. Results may be less accurate "
-                "for this choice.", language)
-            return True
-        else:
-            raise ValueError(f"Unsupported language: {language}."
-                             "Language should be one of:" +
-                             f" {list(ISO639_1_SUPPORTED_LANGS.values())}" +
-                             f"or {list(ISO639_1_OTHER_LANGS.values())}")
+                "Defaulting to language='en'. If you wish to transcribe "
+                "audio in a different language, pass the `language` field "
+                "in the TranscriptionRequest.")
+            language = "en"
+        return super().validate_language(language)
 
     @classmethod
     def get_generation_prompt(
@@ -830,9 +790,13 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
             audio: np.ndarray,
             model_config: ModelConfig,  # not needed here
             stt_config: SpeechToTextConfig,
-            language: str,
-            task_type: str,
-            request_prompt: str) -> PromptType:
+            language: Optional[str],
+            task_type: Literal["transcribe", "translate"],
+            request_prompt: str,
+            to_language: Optional[str]) -> PromptType:
+        if language is None:
+            raise ValueError(
+                "Language must be specified when creating the Whisper prompt")
         prompt = {
             "encoder_prompt": {
                 # Whisper does not support encoder prompt.

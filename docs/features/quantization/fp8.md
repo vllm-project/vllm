@@ -79,15 +79,16 @@ Since simple RTN does not require data for weight quantization and the activatio
 Install `vllm` and `lm-evaluation-harness` for evaluation:
 
 ```bash
-pip install vllm lm-eval==0.4.4
+pip install vllm git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d#egg=lm-eval[api]
 ```
 
 Load and run the model in `vllm`:
 
 ```python
 from vllm import LLM
-model = LLM("./Meta-Llama-3-8B-Instruct-FP8-Dynamic")
-result = model.generate("Hello my name is")
+
+llm = LLM("./Meta-Llama-3-8B-Instruct-FP8-Dynamic")
+result = llm.generate("Hello my name is")
 print(result[0].outputs[0].text)
 ```
 
@@ -125,9 +126,10 @@ In this mode, all Linear modules (except for the final `lm_head`) have their wei
 
 ```python
 from vllm import LLM
-model = LLM("facebook/opt-125m", quantization="fp8")
+
+llm = LLM("facebook/opt-125m", quantization="fp8")
 # INFO 06-10 17:55:42 model_runner.py:157] Loading model weights took 0.1550 GB
-result = model.generate("Hello, my name is")
+result = llm.generate("Hello, my name is")
 print(result[0].outputs[0].text)
 ```
 

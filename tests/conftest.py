@@ -1,10 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import http.server
 import json
+import math
+import mimetypes
 import os
+import socket
 import tempfile
+import threading
+from collections.abc import Generator
 from enum import Enum
-from typing import Any, Callable, Optional, TypedDict, TypeVar, Union
+from typing import Any, Callable, Optional, TypedDict, TypeVar, Union, cast
 
 import numpy as np
 import pytest
@@ -23,7 +29,7 @@ from vllm import LLM, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
-from vllm.config import TaskOption, _get_and_verify_dtype
+from vllm.config import ConvertOption, RunnerOption, _get_and_verify_dtype
 from vllm.connections import global_http_connection
 from vllm.distributed import (cleanup_dist_env_and_memory,
                               init_distributed_environment,
@@ -31,8 +37,10 @@ from vllm.distributed import (cleanup_dist_env_and_memory,
 from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
                          to_enc_dec_tuple_list, zip_enc_dec_prompts)
 from vllm.logger import init_logger
+from vllm.multimodal.utils import fetch_image
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
+from vllm.sequence import Logprob
 from vllm.transformers_utils.utils import maybe_model_redirect
 
 logger = init_logger(__name__)
@@ -454,9 +462,16 @@ class HfRunner:
         # output is final logits
         all_inputs = self.get_inputs(prompts)
         outputs = []
+        problem_type = getattr(self.config, "problem_type", "")
+
         for inputs in all_inputs:
             output = self.model(**self.wrap_device(inputs))
-            logits = output.logits.softmax(dim=-1)[0].tolist()
+            if problem_type == "regression":
+                logits = output.logits[0].tolist()
+            elif problem_type == "multi_label_classification":
+                logits = output.logits.sigmoid()[0].tolist()
+            else:
+                logits = output.logits.softmax(dim=-1)[0].tolist()
             outputs.append(logits)
 
         return outputs
@@ -594,7 +609,7 @@ class HfRunner:
     def _hidden_states_to_logprobs(
         self,
         hidden_states: tuple[tuple[torch.Tensor, ...], ...],
-        num_logprobs: int,
+        num_logprobs: Optional[int],
     ) -> tuple[list[dict[int, float]], int]:
         seq_logprobs = self._hidden_states_to_seq_logprobs(hidden_states)
         output_len = len(hidden_states)
@@ -622,7 +637,7 @@ class HfRunner:
         self,
         prompts: list[str],
         max_tokens: int,
-        num_logprobs: int,
+        num_logprobs: Optional[int],
         images: Optional[PromptImageInput] = None,
         audios: Optional[PromptAudioInput] = None,
         videos: Optional[PromptVideoInput] = None,
@@ -669,7 +684,7 @@ class HfRunner:
         self,
         encoder_decoder_prompts: list[ExplicitEncoderDecoderPrompt[str, str]],
         max_tokens: int,
-        num_logprobs: int,
+        num_logprobs: Optional[int],
         images: Optional[PromptImageInput] = None,
         **kwargs: Any,
     ) -> list[TokensTextLogprobs]:
@@ -769,12 +784,13 @@ class VllmRunner:
     def __init__(
         self,
         model_name: str,
-        task: TaskOption = "auto",
+        runner: RunnerOption = "auto",
+        convert: ConvertOption = "auto",
         tokenizer_name: Optional[str] = None,
         tokenizer_mode: str = "auto",
         trust_remote_code: bool = True,
         seed: Optional[int] = 0,
-        max_model_len: int = 1024,
+        max_model_len: Optional[int] = 1024,
         dtype: str = "auto",
         disable_log_stats: bool = True,
         tensor_parallel_size: int = 1,
@@ -784,9 +800,10 @@ class VllmRunner:
         enforce_eager: Optional[bool] = False,
         **kwargs,
     ) -> None:
-        self.model = LLM(
+        self.llm = LLM(
             model=model_name,
-            task=task,
+            runner=runner,
+            convert=convert,
             tokenizer=tokenizer_name,
             tokenizer_mode=tokenizer_mode,
             trust_remote_code=trust_remote_code,
@@ -854,9 +871,9 @@ class VllmRunner:
                                  videos=videos,
                                  audios=audios)
 
-        req_outputs = self.model.generate(inputs,
-                                          sampling_params=sampling_params,
-                                          **kwargs)
+        req_outputs = self.llm.generate(inputs,
+                                        sampling_params=sampling_params,
+                                        **kwargs)
 
         outputs: list[tuple[list[list[int]], list[str]]] = []
         for req_output in req_outputs:
@@ -902,9 +919,9 @@ class VllmRunner:
                                  videos=videos,
                                  audios=audios)
 
-        req_outputs = self.model.generate(inputs,
-                                          sampling_params=sampling_params,
-                                          **kwargs)
+        req_outputs = self.llm.generate(inputs,
+                                        sampling_params=sampling_params,
+                                        **kwargs)
 
         toks_str_logsprobs_prompt_logprobs = (
             self._final_steps_generate_w_logprobs(req_outputs))
@@ -924,8 +941,8 @@ class VllmRunner:
         '''
 
         assert sampling_params.logprobs is not None
-        req_outputs = self.model.generate(encoder_decoder_prompts,
-                                          sampling_params=sampling_params)
+        req_outputs = self.llm.generate(encoder_decoder_prompts,
+                                        sampling_params=sampling_params)
         toks_str_logsprobs_prompt_logprobs = (
             self._final_steps_generate_w_logprobs(req_outputs))
         # Omit prompt logprobs if not required by sampling params
@@ -956,7 +973,7 @@ class VllmRunner:
         self,
         prompts: list[str],
         max_tokens: int,
-        num_logprobs: int,
+        num_logprobs: Optional[int],
         num_prompt_logprobs: Optional[int] = None,
         images: Optional[PromptImageInput] = None,
         audios: Optional[PromptAudioInput] = None,
@@ -981,11 +998,40 @@ class VllmRunner:
                                         videos=videos,
                                         **kwargs)
 
+    def generate_prompt_perplexity(self, prompts: list[str]) -> list[float]:
+        """
+        Return the perplexity score associated with generating the prompts
+
+        :param prompts: list of prompts to score
+        :return: perplexity score of each prompt
+        """
+        outputs = self.generate_greedy_logprobs(prompts,
+                                                max_tokens=1,
+                                                num_logprobs=None,
+                                                num_prompt_logprobs=0)
+
+        perplexities = []
+        for output in outputs:
+            output = cast(TokensTextLogprobsPromptLogprobs, output)
+            token_datas = cast(list[Optional[dict[int, Logprob]]], output[3])
+            assert token_datas[0] is None
+            token_log_probs = []
+            for token_data in token_datas[1:]:
+                assert token_data is not None
+                assert len(token_data) == 1
+                token_log_prob = list(token_data.values())[0].logprob
+                token_log_probs.append(token_log_prob)
+
+            perplexity = math.exp(-sum(token_log_probs) / len(token_log_probs))
+            perplexities.append(perplexity)
+
+        return perplexities
+
     def generate_encoder_decoder_greedy_logprobs(
         self,
         encoder_decoder_prompts: list[ExplicitEncoderDecoderPrompt[str, str]],
         max_tokens: int,
-        num_logprobs: int,
+        num_logprobs: Optional[int],
         num_prompt_logprobs: Optional[int] = None,
         skip_special_tokens: bool = True,
     ) -> Union[list[TokensTextLogprobs],
@@ -1012,15 +1058,17 @@ class VllmRunner:
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
+        concurrency_limit: Optional[int] = None,
     ) -> list[tuple[list[list[int]], list[str]]]:
         inputs = self.get_inputs(prompts,
                                  images=images,
                                  videos=videos,
                                  audios=audios)
 
-        outputs = self.model.beam_search(
-            inputs,
-            BeamSearchParams(beam_width=beam_width, max_tokens=max_tokens))
+        outputs = self.llm.beam_search(inputs,
+                                       BeamSearchParams(beam_width=beam_width,
+                                                        max_tokens=max_tokens),
+                                       concurrency_limit=concurrency_limit)
         returned_outputs = []
         for output in outputs:
             token_ids = [x.tokens for x in output.sequences]
@@ -1029,7 +1077,7 @@ class VllmRunner:
         return returned_outputs
 
     def classify(self, prompts: list[str]) -> list[list[float]]:
-        req_outputs = self.model.classify(prompts)
+        req_outputs = self.llm.classify(prompts)
         return [req_output.outputs.probs for req_output in req_outputs]
 
     def embed(self,
@@ -1044,11 +1092,15 @@ class VllmRunner:
                                  videos=videos,
                                  audios=audios)
 
-        req_outputs = self.model.embed(inputs, *args, **kwargs)
+        req_outputs = self.llm.embed(inputs, *args, **kwargs)
         return [req_output.outputs.embedding for req_output in req_outputs]
 
     def encode(self, prompts: list[str]) -> list[list[float]]:
-        req_outputs = self.model.encode(prompts)
+        req_outputs = self.llm.encode(prompts)
+        return [req_output.outputs.data for req_output in req_outputs]
+
+    def reward(self, prompts: list[str]) -> list[list[float]]:
+        req_outputs = self.llm.reward(prompts)
         return [req_output.outputs.data for req_output in req_outputs]
 
     def score(
@@ -1058,18 +1110,30 @@ class VllmRunner:
         *args,
         **kwargs,
     ) -> list[float]:
-        req_outputs = self.model.score(text_1, text_2, *args, **kwargs)
+        req_outputs = self.llm.score(text_1, text_2, *args, **kwargs)
         return [req_output.outputs.score for req_output in req_outputs]
 
     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
-        executor = self.model.llm_engine.model_executor
-        return executor.apply_model(func)
+        if hasattr(self.llm.llm_engine, "model_executor"):
+            # This works either in V0 or in V1 with
+            # VLLM_ENABLE_V1_MULTIPROCESSING=0
+            executor = self.llm.llm_engine.model_executor
+            return executor.apply_model(func)
+
+        # This works in V1 with VLLM_ALLOW_INSECURE_SERIALIZATION=1
+        def _apply_model(self):
+            return func(self.get_model())
+
+        return self.llm.llm_engine.collective_rpc(_apply_model)
+
+    def get_llm(self) -> LLM:
+        return self.llm
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        del self.model
+        del self.llm
         cleanup_dist_env_and_memory()
 
 
@@ -1195,3 +1259,119 @@ def cli_config_file():
 def cli_config_file_with_model():
     """Return the path to the CLI config file with model."""
     return os.path.join(_TEST_DIR, "config", "test_config_with_model.yaml")
+
+
+class AssetHandler(http.server.BaseHTTPRequestHandler):
+    # _IMAGE_CACHE : Dict[str, bytes] = {}
+
+    def log_message(self, *args, **kwargs):
+        pass
+
+    def do_GET(self):
+        # Accepts paths like: /1280px-Venn_diagram_rgb.jpg
+        filename = self.path.lstrip("/")
+        if not filename or "." not in filename:
+            self.send_error(404, "Missing filename (expected /<name>.<ext>)")
+            return
+
+        base, ext = filename.rsplit(".", 1)
+        ext = ext.lower()
+
+        if ext not in ["jpg", "png"]:
+            self.send_error(404, f"Unsupported extension: .{ext}")
+            return
+
+        try:
+            data = ImageAsset(base).read_bytes(ext=ext)
+        except Exception as e:
+            self.send_error(500, f"Failed to load asset: {ext} {base} {e} ")
+            return
+
+        ctype, _ = mimetypes.guess_type(filename)
+        if ctype is None:
+            ctype = {"jpg": "image/jpg", "png": "image/png"}[ext]
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+def _find_free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+class LocalAssetServer:
+
+    address: str
+    port: int
+    server: Optional[http.server.ThreadingHTTPServer]
+    thread: Optional[threading.Thread]
+
+    def __init__(self, address: str = "127.0.0.1") -> None:
+        self.address = address
+        self.port = -1
+        self.server = None
+        self.thread = None
+
+    def __enter__(self):
+        self.port = _find_free_port()
+        self.server = http.server.ThreadingHTTPServer(
+            (self.address, self.port), AssetHandler)
+        self.thread = threading.Thread(target=self.server.serve_forever,
+                                       daemon=True)
+        self.thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if self.server:
+            self.server.shutdown()
+            del self.server
+
+        if self.thread:
+            self.thread.join()
+            del self.thread
+
+        if exc_type is None:
+            return None
+
+        return False
+
+    @property
+    def base_url(self) -> str:
+        assert self.port is not None
+        return f"http://{self.address}:{self.port}"
+
+    def url_for(self, name: str) -> str:
+        """e.g., name='RGBA_comp.png' -> 'http://127.0.0.1:PORT/RGBA_comp.png'"""
+        return f"{self.base_url}/{name}"
+
+    def get_image_asset(self, name: str) -> Image.Image:
+        return fetch_image(self.url_for(name))
+
+
+@pytest.fixture(scope="session")
+def local_asset_server() -> Generator[LocalAssetServer, None, None]:
+    """
+    Starts a thread based HTTP server bound to 127.0.0.1 on a random free port. 
+    The server currently servers images at:
+    http://127.0.0.1:<port>/<name>.<ext>
+    """
+    with LocalAssetServer() as srv:
+        yield srv
+
+
+@pytest.fixture
+def image_url(request, local_asset_server) -> str:
+    # request.param is one of the IMAGE_ASSETS filenames
+    name = request.param
+    return local_asset_server.url_for(name)
+
+
+@pytest.fixture
+def image_urls(request, local_asset_server) -> list[str]:
+    """Indirect fixture: takes a list of names, returns list of full URLs."""
+    names: list[str] = request.param
+    return [local_asset_server.url_for(name) for name in names]

@@ -12,11 +12,15 @@ The class provides the following primitives:
             times for a given request and should be side-effect free.
         update_state_after_alloc() - update KVConnector state after
             temporary buffer alloc by the CacheManager.
+        update_connector_output() - update KVConnector state after
+            output is received from worker-side connectors.
         request_finished() - called when a request is finished, with
             the computed kv cache blocks for the request.
             Returns whether KV cache should be freed now or will be
             freed asynchronously and optionally returns KV transfer
             params.
+        take_events() - returns new KV events that were collected
+            by the connector since the last call.
 
     Worker-side: runs in each worker, loads/saves KV cache to/from
     the Connector based on the metadata.
@@ -32,19 +36,28 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Optional
+from collections.abc import Iterable
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 
 import torch
 
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.config import VllmConfig
+    from vllm.distributed.kv_events import KVCacheEvent
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
+
+# s_tensor_list, d_tensor_list, s_indices, d_indices, direction
+CopyBlocksOp = Callable[[
+    dict[str, torch.Tensor], dict[
+        str, torch.Tensor], list[int], list[int], Literal["h2d", "d2h"]
+], None]
 
 logger = init_logger(__name__)
 
@@ -122,8 +135,15 @@ class KVConnectorBase_V1(ABC):
         Initialize with the KV caches. Useful for pre-registering the
         KV Caches in the KVConnector (e.g. for NIXL).
 
-        Args: kv_caches:
-            dictionary of layer names, kv cache
+        Args: 
+            kv_caches: dictionary of layer names, kv cache
+        """
+        return
+
+    def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
+        """
+        Set the xPU-specific ops for copying KV between host and device.
+        Needed when host buffer is used for kv transfer (e.g., in NixlConnector)
         """
         return
 
@@ -194,7 +214,7 @@ class KVConnectorBase_V1(ABC):
         """
         Notifies worker-side connector ids of requests that have
         finished generating tokens on the worker.
-        The scheduler process (via the MultiprocExecutor) will use this output
+        The scheduler process (via the Executors) will use this output
         to track which workers are done.
 
         Returns:
@@ -270,6 +290,16 @@ class KVConnectorBase_V1(ABC):
         """
         pass
 
+    def update_connector_output(self, connector_output: KVConnectorOutput):
+        """
+        Update KVConnector state from worker-side connectors output.
+
+        Args:
+            connector_output (KVConnectorOutput): the worker-side
+                connectors output.
+        """
+        return
+
     def request_finished(
         self,
         request: "Request",
@@ -286,3 +316,30 @@ class KVConnectorBase_V1(ABC):
             returned by the engine.
         """
         return False, None
+
+    def take_events(self) -> Iterable["KVCacheEvent"]:
+        """
+        Take the KV cache events from the connector.
+
+        Yields:
+            New KV cache events since the last call.
+        """
+        return ()
+
+    @classmethod
+    def get_required_kvcache_layout(
+            cls, vllm_config: "VllmConfig") -> Optional[str]:
+        """
+        Get the required KV cache layout for this connector.
+        Args:
+            vllm_config (VllmConfig): the vllm config.
+
+        Returns:
+            str: the required KV cache layout. e.g. HND, or NHD.
+            None if the connector does not require a specific layout.
+        """
+
+        if cls is KVConnectorBase_V1:
+            raise TypeError("get_required_kvcache_layout should not be called "
+                            "on the abstract base class")
+        return None

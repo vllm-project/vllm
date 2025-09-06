@@ -10,7 +10,8 @@ import numpy as np
 import pytest
 import requests
 
-from tests.models.utils import EmbedModelInfo, RerankModelInfo
+from tests.models.utils import (EmbedModelInfo, RerankModelInfo,
+                                check_embeddings_close)
 
 # Most embedding models on the STS12 task (See #17175):
 # - Model implementation and minor changes in tensor dtype
@@ -30,7 +31,7 @@ class VllmMtebEncoder(mteb.Encoder):
 
     def __init__(self, vllm_model):
         super().__init__()
-        self.model = vllm_model
+        self.llm = vllm_model
         self.rng = np.random.default_rng(seed=42)
 
     def encode(
@@ -43,7 +44,7 @@ class VllmMtebEncoder(mteb.Encoder):
         # issues by randomizing the order.
         r = self.rng.permutation(len(sentences))
         sentences = [sentences[i] for i in r]
-        outputs = self.model.embed(sentences, use_tqdm=False)
+        outputs = self.llm.embed(sentences, use_tqdm=False)
         embeds = np.array(outputs)
         embeds = embeds[np.argsort(r)]
         return embeds
@@ -61,10 +62,10 @@ class VllmMtebEncoder(mteb.Encoder):
         queries = [s[0] for s in sentences]
         corpus = [s[1] for s in sentences]
 
-        outputs = self.model.score(queries,
-                                   corpus,
-                                   truncate_prompt_tokens=-1,
-                                   use_tqdm=False)
+        outputs = self.llm.score(queries,
+                                 corpus,
+                                 truncate_prompt_tokens=-1,
+                                 use_tqdm=False)
         scores = np.array(outputs)
         scores = scores[np.argsort(r)]
         return scores
@@ -162,43 +163,71 @@ def mteb_test_embed_models(hf_runner,
                            vllm_runner,
                            model_info: EmbedModelInfo,
                            vllm_extra_kwargs=None,
-                           hf_model_callback=None):
+                           hf_model_callback=None,
+                           atol=MTEB_EMBED_TOL):
     if not model_info.enable_test:
         # A model family has many models with the same architecture,
         # and we don't need to test each one.
         pytest.skip("Skipping test.")
 
+    example_prompts = ["The chef prepared a delicious meal."]
+
     vllm_extra_kwargs = vllm_extra_kwargs or {}
     vllm_extra_kwargs["dtype"] = model_info.dtype
 
+    if model_info.hf_overrides is not None:
+        vllm_extra_kwargs["hf_overrides"] = model_info.hf_overrides
+
     with vllm_runner(model_info.name,
-                     task="embed",
+                     runner="pooling",
                      max_model_len=None,
+                     enforce_eager=True,
                      **vllm_extra_kwargs) as vllm_model:
 
+        model_config = vllm_model.llm.llm_engine.model_config
+
         if model_info.architecture:
-            assert (model_info.architecture
-                    in vllm_model.model.llm_engine.model_config.architectures)
+            assert model_info.architecture in model_config.architectures
+        assert (model_config._model_info.default_pooling_type ==
+                model_info.default_pooling_type)
 
         vllm_main_score = run_mteb_embed_task(VllmMtebEncoder(vllm_model),
                                               MTEB_EMBED_TASKS)
-        vllm_dtype = vllm_model.model.llm_engine.model_config.dtype
+        vllm_dtype = vllm_model.llm.llm_engine.model_config.dtype
+        vllm_outputs = vllm_model.embed(example_prompts)
 
-    with hf_runner(model_info.name,
-                   is_sentence_transformer=True,
-                   dtype="float32") as hf_model:
+    if model_info.mteb_score is None:
+        with hf_runner(model_info.name,
+                       is_sentence_transformer=True,
+                       dtype="float32") as hf_model:
 
-        if hf_model_callback is not None:
-            hf_model_callback(hf_model)
+            if hf_model_callback is not None:
+                hf_model_callback(hf_model)
 
-        st_main_score = run_mteb_embed_task(hf_model, MTEB_EMBED_TASKS)
-        st_dtype = next(hf_model.model.parameters()).dtype
+            st_main_score = run_mteb_embed_task(hf_model, MTEB_EMBED_TASKS)
+            st_dtype = next(hf_model.model.parameters()).dtype
 
+            # Test embed_dims and whether to use normalize
+            hf_outputs = hf_model.encode(example_prompts)
+            check_embeddings_close(
+                embeddings_0_lst=hf_outputs,
+                embeddings_1_lst=vllm_outputs,
+                name_0="hf",
+                name_1="vllm",
+                tol=1e-2,
+            )
+    else:
+        st_main_score = model_info.mteb_score
+        st_dtype = "Constant"
+
+    print("Model:", model_info.name)
     print("VLLM:", vllm_dtype, vllm_main_score)
     print("SentenceTransformers:", st_dtype, st_main_score)
     print("Difference:", st_main_score - vllm_main_score)
 
-    assert st_main_score == pytest.approx(vllm_main_score, abs=MTEB_EMBED_TOL)
+    # We are not concerned that the vllm mteb results are better
+    # than SentenceTransformers, so we only perform one-sided testing.
+    assert st_main_score - vllm_main_score < atol
 
 
 def run_mteb_rerank(cross_encoder, tasks, languages):
@@ -278,28 +307,41 @@ def mteb_test_rerank_models(hf_runner,
     vllm_extra_kwargs = vllm_extra_kwargs or {}
     vllm_extra_kwargs["dtype"] = model_info.dtype
 
+    if model_info.hf_overrides is not None:
+        vllm_extra_kwargs["hf_overrides"] = model_info.hf_overrides
+
     with vllm_runner(model_info.name,
-                     task="score",
+                     runner="pooling",
                      max_model_len=None,
                      max_num_seqs=8,
+                     enforce_eager=True,
                      **vllm_extra_kwargs) as vllm_model:
 
-        model_config = vllm_model.model.llm_engine.model_config
+        model_config = vllm_model.llm.llm_engine.model_config
 
         if model_info.architecture:
             assert (model_info.architecture in model_config.architectures)
         assert model_config.hf_config.num_labels == 1
+        assert (model_config._model_info.default_pooling_type ==
+                model_info.default_pooling_type)
 
         vllm_main_score = run_mteb_rerank(vllm_mteb_encoder(vllm_model),
                                           tasks=MTEB_RERANK_TASKS,
                                           languages=MTEB_RERANK_LANGS)
         vllm_dtype = model_config.dtype
 
-    st_main_score, st_dtype = mteb_test_rerank_models_hf(
-        hf_runner, model_info.name, hf_model_callback)
+    if model_info.mteb_score is None:
+        st_main_score, st_dtype = mteb_test_rerank_models_hf(
+            hf_runner, model_info.name, hf_model_callback)
+    else:
+        st_main_score = model_info.mteb_score
+        st_dtype = "Constant"
 
+    print("Model:", model_info.name)
     print("VLLM:", vllm_dtype, vllm_main_score)
     print("SentenceTransformers:", st_dtype, st_main_score)
     print("Difference:", st_main_score - vllm_main_score)
 
-    assert st_main_score == pytest.approx(vllm_main_score, abs=atol)
+    # We are not concerned that the vllm mteb results are better
+    # than SentenceTransformers, so we only perform one-sided testing.
+    assert st_main_score - vllm_main_score < atol

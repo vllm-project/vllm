@@ -2,13 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A layer that samples the next tokens from the model's outputs."""
 
+from typing import Optional
+
 import torch
 import torch.nn as nn
 
+from vllm.config import LogprobsMode
 from vllm.utils import is_pin_memory_available
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.bad_words import apply_bad_words
+from vllm.v1.sample.ops.logprobs import batched_count_greater_than
 from vllm.v1.sample.ops.penalties import apply_all_penalties
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 
@@ -16,11 +20,52 @@ _SAMPLING_EPS = 1e-5
 
 
 class Sampler(nn.Module):
+    """
+    A layer that samples the next tokens from the model's outputs
+    with the following steps in order:
 
-    def __init__(self):
+    1. If logprobs are requested:  
+        a) If `logprobs_mode` is `raw_logprobs`, compute logprobs
+           as the final logprobs to return.  
+        b) If `logprobs_mode` is `raw_logits`, clone the logits
+           as the final logprobs to return.  
+    2. Convert logits to float32.  
+    3. Apply allowed token ids whitelist.  
+    4. Apply bad words exclusion.  
+    5. Apply logit processors which are not argmax-invariant,
+       i.e. that can impact greedy sampling.  
+        a) Min tokens processor  
+        b) Logit bias processor  
+    6. Apply penalties  
+        a) Repetition penalty  
+        b) Frequency penalty  
+        c) Presence penalty  
+    7. Sample the next tokens. `sample` method performs the following steps:  
+        a) If not `all_random`, perform greedy sampling. If `all_greedy`,
+           return the greedily sampled tokens and final logprobs if requested.  
+        b) Apply temperature.  
+        c) Apply logit processors which are argmax-invariant, by default
+           the min_p processor.  
+        d) Apply top_k and/or top_p.  
+        e) Sample the next tokens with the probability distribution.  
+        f) If `all_random` or temperature >= epsilon (1e-5), return the
+           randomly sampled tokens and final logprobs if requested. Else,
+           return the greedily sampled tokens and logprobs if requested.  
+    8. Gather the logprobs of the top `max_num_logprobs` and sampled token
+       (if requested). Note that if the sampled token is within the top
+       `max_num_logprobs`, the logprob will be eventually merged in
+       `LogprobsProcessor` during output processing. Therefore, the
+       final output may contain either `max_num_logprobs + 1` or
+       `max_num_logprobs` logprobs.  
+    9. Return the final `SamplerOutput`.
+    """
+
+    def __init__(self,
+                 logprobs_mode: LogprobsMode = LogprobsMode.RAW_LOGPROBS):
         super().__init__()
-        self.topk_topp_sampler = TopKTopPSampler()
+        self.topk_topp_sampler = TopKTopPSampler(logprobs_mode)
         self.pin_memory = is_pin_memory_available()
+        self.logprobs_mode = logprobs_mode
 
     def forward(
         self,
@@ -31,11 +76,12 @@ class Sampler(nn.Module):
         # temperature scaling) for the top-k logprobs.
         # This is different from the V0 sampler, which uses the logits that
         # is used for sampling (after penalties and temperature scaling).
-        # TODO(rob): provide option for logprobs post sampling.
-        # See https://vllm-dev.slack.com/archives/C07UUL8E61Z/p1735907856007919 # noqa: E501
         num_logprobs = sampling_metadata.max_num_logprobs
         if num_logprobs is not None:
-            raw_logprobs = self.compute_logprobs(logits)
+            if self.logprobs_mode == LogprobsMode.RAW_LOGPROBS:
+                raw_logprobs = self.compute_logprobs(logits)
+            elif self.logprobs_mode == LogprobsMode.RAW_LOGITS:
+                raw_logprobs = logits.clone()
 
         # Use float32 for the logits.
         logits = logits.to(torch.float32)
@@ -45,13 +91,16 @@ class Sampler(nn.Module):
         logits = self.apply_bad_words(logits, sampling_metadata)
 
         # Apply logits processors which can impact greedy sampling
-        for processor in (sampling_metadata.logitsprocs.non_argmax_invariant):
+        for processor in sampling_metadata.logitsprocs.non_argmax_invariant:
             logits = processor.apply(logits)
 
         # Apply penalties (e.g., min_tokens, freq_penalties).
         logits = self.apply_penalties(logits, sampling_metadata)
+
         # Sample the next token.
-        sampled = self.sample(logits, sampling_metadata)
+        sampled, processed_logprobs = self.sample(logits, sampling_metadata)
+        if processed_logprobs is not None:
+            raw_logprobs = processed_logprobs
         # Convert sampled token ids to int64 (long) type to ensure compatibility
         # with subsequent operations that may use these values as indices.
         # This conversion is necessary because FlashInfer sampling operations
@@ -91,7 +140,7 @@ class Sampler(nn.Module):
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Sample logits based on sampling metadata.
 
         The various logits processing functions called in this method
@@ -105,7 +154,13 @@ class Sampler(nn.Module):
         else:
             greedy_sampled = self.greedy_sample(logits)
             if sampling_metadata.all_greedy:
-                return greedy_sampled
+                processed_logprobs = None
+                if sampling_metadata.max_num_logprobs is not None:
+                    if self.logprobs_mode == LogprobsMode.PROCESSED_LOGITS:
+                        processed_logprobs = logits
+                    elif self.logprobs_mode == LogprobsMode.PROCESSED_LOGPROBS:
+                        processed_logprobs = self.compute_logprobs(logits)
+                return greedy_sampled, processed_logprobs
 
         assert sampling_metadata.temperature is not None
 
@@ -118,7 +173,7 @@ class Sampler(nn.Module):
             logits = processor.apply(logits)
 
         # Apply top_k and/or top_p.
-        random_sampled = self.topk_topp_sampler(
+        random_sampled, processed_logprobs = self.topk_topp_sampler(
             logits,
             sampling_metadata.generators,
             sampling_metadata.top_k,
@@ -126,7 +181,7 @@ class Sampler(nn.Module):
         )
 
         if greedy_sampled is None:
-            return random_sampled
+            return random_sampled, processed_logprobs
 
         sampled = torch.where(
             sampling_metadata.temperature < _SAMPLING_EPS,
@@ -134,7 +189,7 @@ class Sampler(nn.Module):
             random_sampled,
             out=greedy_sampled,  # Reuse tensor
         )
-        return sampled
+        return sampled, processed_logprobs
 
     def compute_logprobs(self, logits: torch.Tensor) -> torch.Tensor:
         return logits.log_softmax(dim=-1, dtype=torch.float32)
@@ -174,7 +229,7 @@ class Sampler(nn.Module):
         token_logprobs = logprobs.gather(-1, token_ids)
 
         # Compute the ranks of the actual token.
-        token_ranks = (logprobs >= token_logprobs).sum(-1)
+        token_ranks = batched_count_greater_than(logprobs, token_logprobs)
 
         # Concatenate together with the topk.
         indices = torch.cat((token_ids, topk_indices), dim=1)

@@ -4,7 +4,7 @@
 # Adapted from https://github.com/fixie-ai/ultravox/blob/ecd58c4041030bae2ad15aa6bcf04ab43199ea02/ultravox/model/ultravox_model.py
 """PyTorch Ultravox model."""
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Literal, Optional, TypedDict, Union
+from typing import Annotated, Any, Literal, Optional, Union
 
 import torch
 from torch import nn
@@ -23,7 +23,7 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs, NestedTensors)
+                                    MultiModalKwargsItems, NestedTensors)
 from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
@@ -31,6 +31,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
@@ -39,32 +40,41 @@ from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     merge_multimodal_embeddings,
                     merge_multimodal_embeddings_from_map)
 
-_AUDIO_PLACEHOLDER_OVERRIDE = "<|reserved_special_token_0|>"
-_AUDIO_PLACEHOLDER_TOKEN = 128002
-_AUDIO_TOKENS_PER_SECOND = 6.25
+_AUDIO_PLACEHOLDER_OVERRIDE = "<|audio|>"
 _MAX_ENCODER_BATCH_SIZE = 16
 
 
-class UltravoxAudioFeatureInputs(TypedDict):
+class UltravoxAudioFeatureInputs(TensorSchema):
+    """
+    Dimensions:
+    - b: batch size
+    - n: number of chunks
+    - t: Time frames (M)
+    - nmb: Number of mel bins
+    """
     type: Literal["audio_features"]
-    data: Union[torch.Tensor, list[torch.Tensor], list[list[torch.Tensor]]]
-    """Shape: `(batch_size, num_chunks, 80, M)`"""
-    lens: Union[torch.Tensor, list[torch.Tensor]]
-    """
-    Length of the audio frames. Used for attention mask in WhisperEncoder.
-    Shape: `(batch_size, num_chunks)`
-    """
-    token_len: Union[torch.Tensor, list[torch.Tensor]]
-    """
-    Length of the audio tokens. Used for flattening the audio features.
-    Shape: `(batch_size, num_chunks)`
-    """
+    data: Annotated[Union[torch.Tensor, list[torch.Tensor],
+                          list[list[torch.Tensor]]],
+                    TensorShape("b", "n", "nmb", "t", dynamic_dims={"n"})]
+    lens: Annotated[Union[torch.Tensor, list[torch.Tensor]],
+                    TensorShape("b", "n", dynamic_dims={"n"})]
+    """Length of the audio frames. Used for attention mask in WhisperEncoder."""
+    token_len: Annotated[Union[torch.Tensor, list[torch.Tensor]],
+                         TensorShape("b", "n", dynamic_dims={"n"})]
+    """Length of the audio tokens. Used for flattening the audio features."""
 
 
-class UltravoxAudioEmbeddingInputs(TypedDict):
+class UltravoxAudioEmbeddingInputs(TensorSchema):
+    """
+    Dimensions:
+    - b: batch size
+    - na: number of audios
+    - afs: audio feature size
+    - hs: hidden size
+    """
     type: Literal["audio_embeds"]
-    data: NestedTensors
-    """Shape: `(batch_size, num_audios, audio_feature_size, hidden_size)`"""
+    data: Annotated[Union[torch.Tensor, list[torch.Tensor]],
+                    TensorShape("b", "na", "afs", "hs")]
 
 
 UltravoxAudioInputs = Union[UltravoxAudioFeatureInputs,
@@ -73,30 +83,21 @@ UltravoxAudioInputs = Union[UltravoxAudioFeatureInputs,
 
 class UltravoxProcessingInfo(BaseProcessingInfo):
 
-    def get_hf_processor(
-        self,
-        *,
-        # Ignored in initialization
-        sampling_rate: Optional[int] = None,
-        **kwargs: object,
-    ) -> ProcessorMixin:
+    def get_hf_processor(self, **kwargs: object) -> ProcessorMixin:
+        config = self.ctx.model_config.hf_config
         hf_processor = self.ctx.get_hf_processor(**kwargs)
 
         # NOTE: Ultravox processing definition uses '<|eot_id|>' as the
         # placeholder that will cause confusion with the actual end of turn
-        # token, thus we override placeholder with a reserved special
-        # token.
+        # token, thus we override placeholder with a reserved token.
         hf_processor.audio_token_replacement = _AUDIO_PLACEHOLDER_OVERRIDE
-        hf_processor.audio_replacement_token_id = _AUDIO_PLACEHOLDER_TOKEN
+        hf_processor.audio_replacement_token_id = config.audio_token_index
+
         return hf_processor
 
-    def get_feature_extractor(
-        self,
-        *,
-        # Ignored in initialization
-        sampling_rate: Optional[int] = None,
-    ) -> WhisperFeatureExtractor:
-        hf_processor = self.get_hf_processor(sampling_rate=sampling_rate)
+    def get_feature_extractor(self,
+                              **kwargs: object) -> WhisperFeatureExtractor:
+        hf_processor = self.get_hf_processor(**kwargs)
         audio_processor = hf_processor.audio_processor  # type: ignore
         feature_extractor = audio_processor.feature_extractor  # type: ignore
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
@@ -157,7 +158,7 @@ class UltravoxMultiModalProcessor(
         audios = mm_data.pop("audios", [])
         assert isinstance(audios, list)
 
-        feature_extractor = self.info.get_feature_extractor()
+        feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
         mm_kwargs = dict(
             **mm_kwargs,
             sampling_rate=feature_extractor.sampling_rate,
@@ -205,7 +206,7 @@ class UltravoxMultiModalProcessor(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, Any],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
@@ -214,7 +215,8 @@ class UltravoxMultiModalProcessor(
         # Each audio can be split into multiple chunks.
         # chunks_start_idx[i] indicates the start index of the chunks
         # belonging to the i-th audio.
-        num_chunks = out_mm_kwargs.get("audio_num_chunks", torch.zeros(0))
+        out_mm_data = out_mm_kwargs.get_data()
+        num_chunks = out_mm_data.get("audio_num_chunks", torch.zeros(0))
         chunks_start_idx: torch.Tensor = torch.cumsum(num_chunks,
                                                       dim=0,
                                                       dtype=torch.int32)
@@ -224,7 +226,7 @@ class UltravoxMultiModalProcessor(
         def get_replacement_ultravox(item_idx: int):
             start = chunks_start_idx[item_idx]
             end = chunks_start_idx[item_idx + 1]
-            audio_token_len = out_mm_kwargs["audio_token_len"][start:end].sum()
+            audio_token_len = out_mm_data["audio_token_len"][start:end].sum()
             return [replacement_id] * int(audio_token_len)  # type: ignore
 
         return [
@@ -274,7 +276,7 @@ class UltravoxProjector(nn.Module):
         else:
             self.act = get_act_fn(config.projector_act)
 
-        dim_out = config.text_config.hidden_size
+        dim_out = config.text_hidden_size
         self.linear_2 = nn.Linear(dim_mid, dim_out, bias=False)
 
         # Ultravox v0.4.1 and below use layer_norm after the second linear layer
@@ -494,26 +496,12 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             return None
 
         if audio_features is not None:
-            if not isinstance(audio_features, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of audio features. "
-                                 f"Got type: {type(audio_features)}")
-            if not isinstance(audio_lens, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of audio_lens. "
-                                 f"Got type: {type(audio_features)}")
-            if not isinstance(audio_token_len, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of audio_token_len. "
-                                 f"Got type: {type(audio_features)}")
-
             return UltravoxAudioFeatureInputs(type="audio_features",
                                               data=audio_features,
                                               lens=audio_lens,
                                               token_len=audio_token_len)
 
         if audio_embeds is not None:
-            if not isinstance(audio_embeds, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of audio embeds. "
-                                 f"Got type: {type(audio_embeds)}")
-
             return UltravoxAudioEmbeddingInputs(type="audio_embeds",
                                                 data=audio_embeds)
 
@@ -572,9 +560,14 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None \
-            and len(multimodal_embeddings) != 0:
+        # The audio token index is not included in the embedding table
+        # We need to remove it before embedding lookup
+        safe_input_ids = input_ids.clone()
+        safe_input_ids[safe_input_ids == self.config.audio_token_index] = 0
+        inputs_embeds = self.language_model.get_input_embeddings(
+            safe_input_ids)
+        if multimodal_embeddings is not None and len(
+                multimodal_embeddings) > 0:
 
             # TODO(ywang96): remove this block after v0 is deprecated.
             if not envs.VLLM_USE_V1:
@@ -585,7 +578,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             else:
                 inputs_embeds = merge_multimodal_embeddings(
                     input_ids, inputs_embeds, multimodal_embeddings,
-                    _AUDIO_PLACEHOLDER_TOKEN)
+                    self.config.audio_token_index)
         return inputs_embeds
 
     def forward(self,
@@ -623,10 +616,14 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
                                                       multimodal_embeddings)
             input_ids = None
 
-        hidden_states = self.language_model.model(input_ids,
-                                                  positions,
-                                                  intermediate_tensors,
-                                                  inputs_embeds=inputs_embeds)
+        language_model = self.language_model
+        if hasattr(language_model, "language_model"):
+            language_model = language_model.language_model
+
+        hidden_states = language_model.model(input_ids,
+                                             positions,
+                                             intermediate_tensors,
+                                             inputs_embeds=inputs_embeds)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,

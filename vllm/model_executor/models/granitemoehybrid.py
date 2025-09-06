@@ -11,7 +11,8 @@ from transformers import GraniteMoeHybridConfig
 
 from vllm import envs
 from vllm.attention.layer import Attention
-from vllm.config import CacheConfig, VllmConfig
+from vllm.compilation.decorators import support_torch_compile
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import get_forward_context
@@ -22,7 +23,8 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba2_metadata import (
     Mamba2Metadata, prepare_mamba2_metadata)
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
-from vllm.model_executor.layers.mamba.mamba_utils import get_mamba_state_shape
+from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateDtypeCalculator, MambaStateShapeCalculator)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -48,6 +50,7 @@ class GraniteMoeHybridMambaDecoderLayer(nn.Module):
     def __init__(self,
                  config: GraniteMoeHybridConfig,
                  layer_idx: int,
+                 model_config: Optional[ModelConfig] = None,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = "") -> None:
@@ -68,6 +71,8 @@ class GraniteMoeHybridMambaDecoderLayer(nn.Module):
                                 head_dim=config.mamba_d_head,
                                 rms_norm_eps=config.rms_norm_eps,
                                 activation=config.hidden_act,
+                                model_config=model_config,
+                                cache_config=cache_config,
                                 quant_config=quant_config,
                                 prefix=f"{prefix}.mixer")
 
@@ -104,9 +109,9 @@ class GraniteMoeHybridMambaDecoderLayer(nn.Module):
     ):
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.mamba(hidden_states, mamba_cache_params,
-                                   mamba2_metadata)
-        hidden_states = residual + hidden_states * self.residual_multiplier
+        output = torch.empty_like(hidden_states)
+        self.mamba(hidden_states, output, mamba_cache_params, mamba2_metadata)
+        hidden_states = residual + output * self.residual_multiplier
 
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
@@ -135,6 +140,7 @@ class GraniteMoeHybridAttentionDecoderLayer(nn.Module):
         self,
         config: GraniteMoeHybridConfig,
         layer_idx: int,
+        model_config: Optional[ModelConfig] = None,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -215,6 +221,7 @@ class GraniteMoeHybridAttention(nn.Module):
     def __init__(
         self,
         config: GraniteMoeHybridConfig,
+        model_config: Optional[ModelConfig] = None,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -307,12 +314,14 @@ ALL_DECODER_LAYER_TYPES = {
 }
 
 
+@support_torch_compile
 class GraniteMoeHybridModel(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
+        model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
@@ -337,6 +346,7 @@ class GraniteMoeHybridModel(nn.Module):
             return layer_class(
                 config,
                 layer_idx,
+                model_config,
                 cache_config,
                 quant_config=quant_config,
                 prefix=prefix,
@@ -387,8 +397,7 @@ class GraniteMoeHybridModel(nn.Module):
             residual = intermediate_tensors["residual"]
 
         num_attn = 0
-        for i in range(len(self.layers)):
-            layer = self.layers[i]
+        for i, layer in enumerate(self.layers):
             if isinstance(layer, GraniteMoeHybridAttentionDecoderLayer):
                 num_attn += 1
 
@@ -461,7 +470,10 @@ class GraniteMoeHybridModel(nn.Module):
             # Mapping different experts' layout:
             #  from HF (input_linear, output_linear, router)
             #  to vLLM (experts_w13({e}.w1, {e}.w2), experts_w3({e}.w3), gate)
-            if n.endswith('.block_sparse_moe.input_linear.weight'):
+            # The renaming and parameter loading logic is the same for weight
+            # and weight_scale tensors so we can reuse them without issues.
+            if (n.endswith('.block_sparse_moe.input_linear.weight') or
+                    n.endswith('.block_sparse_moe.input_linear.weight_scale')):
                 for e in range(p.size(0)):
                     w1_name = n.replace(
                         '.block_sparse_moe.input_linear.weight',
@@ -480,7 +492,8 @@ class GraniteMoeHybridModel(nn.Module):
                                  w3_name,
                                  shard_id='w3',
                                  expert_id=e)
-            elif n.endswith('.block_sparse_moe.output_linear.weight'):
+            elif (n.endswith('.block_sparse_moe.output_linear.weight') or
+                  n.endswith('.block_sparse_moe.output_linear.weight_scale')):
                 for e in range(p.size(0)):
                     w2_name = n.replace(
                         '.block_sparse_moe.output_linear.weight',
@@ -525,6 +538,18 @@ class GraniteMoeHybridForCausalLM(nn.Module, HasInnerState, SupportsLoRA,
     embedding_padding_modules = ["lm_head"]
 
     @classmethod
+    def get_mamba_state_dtype_from_config(
+        cls,
+        vllm_config: "VllmConfig",
+    ) -> tuple[torch.dtype, torch.dtype]:
+
+        return MambaStateDtypeCalculator.mamba2_state_dtype(
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.cache_config.mamba_ssm_cache_dtype,
+        )
+
+    @classmethod
     def get_mamba_state_shape_from_config(
         cls,
         vllm_config: "VllmConfig",
@@ -545,7 +570,7 @@ class GraniteMoeHybridForCausalLM(nn.Module, HasInnerState, SupportsLoRA,
         hf_config = vllm_config.model_config.hf_config
         intermediate_size = hf_config.mamba_expand * hf_config.hidden_size
 
-        return get_mamba_state_shape(
+        return MambaStateShapeCalculator.mamba2_state_shape(
             intermediate_size=intermediate_size,
             tp_world_size=parallel_config.tensor_parallel_size,
             n_groups=hf_config.mamba_n_groups,
@@ -622,10 +647,13 @@ class GraniteMoeHybridForCausalLM(nn.Module, HasInnerState, SupportsLoRA,
                 mamba_state_shape = \
                     self.get_mamba_state_shape_from_config(
                         self.vllm_config, use_v1=False)
+                mamba_state_dtype = \
+                    self.get_mamba_state_dtype_from_config(
+                    self.vllm_config)
                 self.mamba_cache = MambaCacheManager(self.vllm_config,
-                                                     self.model_config.dtype,
                                                      num_mamba_layers,
-                                                     *mamba_state_shape)
+                                                     *mamba_state_shape,
+                                                     *mamba_state_dtype)
 
             mamba_cache_params = self.mamba_cache.current_run_tensors(**kwargs)
 

@@ -12,7 +12,7 @@ from vllm.inputs import TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.pooler import Pooler, PoolingType
+from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 
@@ -90,17 +90,17 @@ class JinaVLForSequenceClassification(Qwen2VLForConditionalGeneration,
                          prefix=maybe_prefix(prefix, "qwen2_vl"))
         config = vllm_config.model_config.hf_config
         pooler_config = vllm_config.model_config.pooler_config
-
-        # logit bias for sigmoid normalization
-        self.LOGIT_BIAS = 2.65
+        assert pooler_config is not None
 
         self.score = JinaVLScorer(config)
-
-        self.pooler = Pooler.from_config_with_defaults(
-            pooler_config,
-            pooling_type=PoolingType.LAST,
-            normalize=False,
-            softmax=True)
+        self.pooler = DispatchPooler({
+            "encode":
+            Pooler.for_encode(pooler_config),
+            "classify":
+            Pooler.for_classify(pooler_config, classifier=self.score),
+            "score":
+            Pooler.for_classify(pooler_config, classifier=self.score),
+        })
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
@@ -134,9 +134,7 @@ class JinaVLForSequenceClassification(Qwen2VLForConditionalGeneration,
             inputs_embeds=inputs_embeds,
             **kwargs,
         )
-
-        logits = self.score(hidden_states) - self.LOGIT_BIAS
-        return logits
+        return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)

@@ -21,13 +21,8 @@ def test_max_tokens_none():
 def model_config():
     return ModelConfig(
         MODEL_NAME,
-        task="auto",
-        tokenizer=MODEL_NAME,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
         seed=0,
         dtype="float16",
-        revision=None,
     )
 
 
@@ -61,8 +56,7 @@ def test_sampling_params_from_request_with_no_guided_decoding_backend(
 
 
 @pytest.mark.parametrize("request_level_guided_decoding_backend,expected",
-                         [("xgrammar", "xgrammar"),
-                          ("lm-format-enforcer", "lm-format-enforcer"),
+                         [("xgrammar", "xgrammar"), ("guidance", "guidance"),
                           ("outlines", "outlines")])
 def test_sampling_params_from_request_with_guided_decoding_backend(
         request_level_guided_decoding_backend: str, expected: str,
