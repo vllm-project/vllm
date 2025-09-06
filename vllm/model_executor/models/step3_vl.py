@@ -21,7 +21,6 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
-                                               ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
@@ -667,35 +666,21 @@ class Step3VisionAttention(nn.Module):
 
         self.q_size = self.num_heads * self.head_dim
 
-        if use_data_parallel:
-            self.qkv_proj = ReplicatedLinear(
-                self.embed_dim,
-                3 * self.q_size,
-                bias=True,
-                quant_config=quant_config,
-                prefix=prefix,
-            )
-            self.out_proj = ReplicatedLinear(
-                self.total_num_heads * self.head_dim,
-                self.embed_dim,
-                bias=True,
-                quant_config=quant_config,
-                prefix=prefix,
-            )
-        else:
-            self.qkv_proj = QKVParallelLinear(
-                self.embed_dim,
-                self.head_dim,
-                self.total_num_heads,
-                bias=True,
-                quant_config=quant_config,
-                prefix=prefix,
-            )
-            self.out_proj = RowParallelLinear(self.embed_dim,
-                                              self.embed_dim,
-                                              bias=True,
-                                              quant_config=quant_config,
-                                              prefix=prefix)
+        self.qkv_proj = QKVParallelLinear(
+            self.embed_dim,
+            self.head_dim,
+            self.total_num_heads,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
+            disable_tp=use_data_parallel,
+        )
+        self.out_proj = RowParallelLinear(self.embed_dim,
+                                          self.embed_dim,
+                                          bias=True,
+                                          quant_config=quant_config,
+                                          prefix=f"{prefix}.out_proj",
+                                          disable_tp=use_data_parallel)
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads,
@@ -740,20 +725,18 @@ class Step3VisionMLP(nn.Module):
         super().__init__()
         self.config = config
         self.activation_fn = get_act_fn(config.hidden_act)
-        cls_fc1 = (ReplicatedLinear
-                   if use_data_parallel else ColumnParallelLinear)
-        self.fc1 = cls_fc1(config.hidden_size,
-                           config.intermediate_size,
-                           bias=True,
-                           quant_config=quant_config,
-                           prefix=prefix)
-        cls_fc2 = (ReplicatedLinear
-                   if use_data_parallel else RowParallelLinear)
-        self.fc2 = cls_fc2(config.intermediate_size,
-                           config.hidden_size,
-                           bias=True,
-                           quant_config=quant_config,
-                           prefix=prefix)
+        self.fc1 = ColumnParallelLinear(config.hidden_size,
+                                        config.intermediate_size,
+                                        bias=True,
+                                        quant_config=quant_config,
+                                        prefix=f"{prefix}.fc1",
+                                        disable_tp=use_data_parallel)
+        self.fc2 = RowParallelLinear(config.intermediate_size,
+                                     config.hidden_size,
+                                     bias=True,
+                                     quant_config=quant_config,
+                                     prefix=f"{prefix}.fc2",
+                                     disable_tp=use_data_parallel)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.fc1(hidden_states)
