@@ -168,6 +168,7 @@ if TYPE_CHECKING:
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = False
     VLLM_TUNED_CONFIG_FOLDER: Optional[str] = None
     VLLM_DISABLE_PAD_FOR_CUDAGRAPH: bool = False
+    VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
 
 
 def get_default_cache_root():
@@ -1178,6 +1179,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE":
     lambda: bool(int(os.getenv(\
             "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE", "0"))),
+
+    # Represent block hashes in KV cache events as 64-bit integers instead of
+    # raw bytes. Defaults to True for backward compatibility.
+    "VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES":
+    lambda: bool(int(os.getenv("VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES", "1"))),
 
     # Enables support for the "store" option in the OpenAI Responses API.
     # When set to 1, vLLM's OpenAI server will retain the input and output

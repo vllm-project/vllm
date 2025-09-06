@@ -45,8 +45,8 @@ MEDIUM_GPU = "GPU"
 
 
 class BlockStored(KVCacheEvent):
-    block_hashes: list[BlockHash]
-    parent_block_hash: Optional[BlockHash]
+    block_hashes: list[Union[BlockHash, int]]
+    parent_block_hash: Optional[Union[BlockHash, int]]
     token_ids: list[int]
     block_size: int
     lora_id: Optional[int]
@@ -54,7 +54,7 @@ class BlockStored(KVCacheEvent):
 
 
 class BlockRemoved(KVCacheEvent):
-    block_hashes: list[BlockHash]
+    block_hashes: list[Union[BlockHash, int]]
     medium: Optional[str]
 
 

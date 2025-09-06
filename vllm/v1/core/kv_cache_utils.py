@@ -6,8 +6,9 @@ import os
 from collections import defaultdict, deque
 from collections.abc import Iterable, Sequence
 from dataclasses import astuple, dataclass
-from typing import Any, Callable, NewType, Optional
+from typing import Any, Callable, NewType, Optional, Union
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import GiB_bytes, cdiv, sha256_cbor
@@ -49,6 +50,12 @@ def get_block_hash(key: BlockHashWithGroupId) -> BlockHash:
 def get_group_id(key: BlockHashWithGroupId) -> int:
     """Extract the group id from a ``BlockHashWithGroupId``."""
     return int.from_bytes(key[-4:], "big", signed=False)
+
+
+def maybe_convert_block_hash(hash_bytes: BlockHash) -> Union[BlockHash, int]:
+    return int.from_bytes(hash_bytes, byteorder="big") & (
+        (1 << 64) -
+        1) if envs.VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES else hash_bytes
 
 
 logger = init_logger(__name__)
