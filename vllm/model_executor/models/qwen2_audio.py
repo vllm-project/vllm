@@ -63,7 +63,7 @@ class Qwen2AudioFeatureInputs(TensorSchema):
     """
     type: Literal["audio_features"]
     input_features: Annotated[
-        [torch.Tensor, list[torch.Tensor]],
+        Union[torch.Tensor, list[torch.Tensor]],
         TensorShape("na", "nmb", 3000),
     ]
 
