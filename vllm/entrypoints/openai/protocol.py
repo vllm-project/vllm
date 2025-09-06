@@ -33,6 +33,7 @@ except ImportError:  # For newer openai versions (>= 1.100.0)
 from openai.types.responses.response import ToolChoice
 from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
+from openai_harmony import Message
 from pydantic import (BaseModel, ConfigDict, Field, TypeAdapter,
                       ValidationInfo, field_validator, model_validator)
 from typing_extensions import TypeAlias
@@ -1855,6 +1856,10 @@ class ResponseUsage(OpenAIBaseModel):
 class ResponsesResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"resp_{random_uuid()}")
     created_at: int = Field(default_factory=lambda: int(time.time()))
+    # These are populated when the env flag
+    # VLLM_RESPONSES_API_ENABLE_HARMONY_MESSAGES_OUTPUT is set
+    input_harmony_messages: Optional[list[Message]] = None
+    output_harmony_messages: Optional[list[Message]] = None
     # error: Optional[ResponseError] = None
     # incomplete_details: Optional[IncompleteDetails] = None
     instructions: Optional[str] = None
@@ -1890,12 +1895,16 @@ class ResponsesResponse(OpenAIBaseModel):
         created_time: int,
         output: list[ResponseOutputItem],
         status: ResponseStatus,
+        input_harmony_messages: Optional[list[Message]] = None,
+        output_harmony_messages: Optional[list[Message]] = None,
         usage: Optional[ResponseUsage] = None,
     ) -> "ResponsesResponse":
         return cls(
             id=request.request_id,
             created_at=created_time,
             instructions=request.instructions,
+            input_harmony_messages=input_harmony_messages,
+            output_harmony_messages=output_harmony_messages,
             metadata=request.metadata,
             model=model_name,
             output=output,
@@ -2187,7 +2196,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     to_language: Optional[str] = None
     """The language of the output audio we transcribe to.
 
-    Please note that this is not currently used by supported models at this 
+    Please note that this is not currently used by supported models at this
     time, but it is a placeholder for future use, matching translation api.
     """
 
