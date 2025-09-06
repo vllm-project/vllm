@@ -66,6 +66,8 @@ class ParallelConfig:
     """Number of pipeline parallel groups."""
     tensor_parallel_size: int = 1
     """Number of tensor parallel groups."""
+    context_parallel_size: int = 1
+    """Number of context parallel groups."""
     data_parallel_size: int = 1
     """Number of data parallel groups. MoE layers will be sharded according to
     the product of the tensor parallel size and data parallel size."""
@@ -96,6 +98,8 @@ class ParallelConfig:
     between local data parallel ranks, but an external LB balances
     between vLLM nodes/replicas. Set explicitly in conjunction with
     --data-parallel-start-rank."""
+    enable_sequence_parallel: bool = False
+    """Enable sequence parallel."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
     enable_eplb: bool = False
@@ -307,7 +311,7 @@ class ParallelConfig:
 
         # Continue with the rest of the initialization
         self.world_size = self.pipeline_parallel_size * \
-            self.tensor_parallel_size
+            self.tensor_parallel_size * self.context_parallel_size
 
         if self.data_parallel_size_local > self.data_parallel_size:
             raise ValueError(
