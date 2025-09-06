@@ -14,7 +14,7 @@ from transformers import (BatchFeature, WhisperConfig, WhisperFeatureExtractor,
 from transformers.models.whisper.modeling_whisper import sinusoids
 
 from vllm.attention import Attention, AttentionType
-from vllm.attention.layer import MultiHeadAttention, TorchAttention
+from vllm.attention.layer import MultiHeadAttention
 from vllm.attention.layers.cross_attention import CrossAttention
 from vllm.config import (CacheConfig, ModelConfig, SpeechToTextConfig,
                          VllmConfig)
@@ -145,7 +145,6 @@ class WhisperAttention(nn.Module):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
-        standalone_encoder: bool = False,
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -181,16 +180,8 @@ class WhisperAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.out_proj",
         )
-        if standalone_encoder:
+        if attn_type == AttentionType.ENCODER:
             self.attn = MultiHeadAttention(
-                self.num_heads,
-                self.head_dim,
-                self.scaling,
-                num_kv_heads=self.num_kv_heads,
-            )
-        elif attn_type == AttentionType.ENCODER:
-            # Simple attention with pytorch, no cache
-            self.attn = TorchAttention(
                 self.num_heads,
                 self.head_dim,
                 self.scaling,
@@ -352,11 +343,7 @@ class WhisperMLP(nn.Module):
 
 class WhisperEncoderLayer(nn.Module):
 
-    def __init__(self,
-                 *,
-                 vllm_config: VllmConfig,
-                 prefix: str = "",
-                 is_standalone_encoder: bool = False):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
@@ -370,7 +357,6 @@ class WhisperEncoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
-            standalone_encoder=is_standalone_encoder,
         )
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
         self.mlp = WhisperMLP(
@@ -466,12 +452,10 @@ class WhisperEncoder(nn.Module):
                  *,
                  vllm_config: VllmConfig,
                  prefix: str = "",
-                 is_standalone_encoder: bool = False,
                  init_in_fp32: bool = False):
         super().__init__()
         config = vllm_config.model_config.hf_config
         embed_dim = config.d_model
-        self.is_standalone_encoder = is_standalone_encoder
         self.num_mel_bins = config.num_mel_bins
         self.max_source_positions = config.max_source_positions
         self.embed_scale = (math.sqrt(embed_dim)
@@ -489,9 +473,7 @@ class WhisperEncoder(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.encoder_layers,
             lambda prefix: WhisperEncoderLayer(vllm_config=vllm_config,
-                                               prefix=f"{prefix}.layers",
-                                               is_standalone_encoder=
-                                               is_standalone_encoder),
+                                               prefix=f"{prefix}.layers"),
             prefix=f"{prefix}.layers",
         )
         self.layer_norm = nn.LayerNorm(config.d_model)
