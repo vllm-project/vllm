@@ -187,7 +187,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.vocab_size = model_config.get_vocab_size()
 
         if self.lora_config is not None:
-            self.vocab_size += self.lora_config.lora_extra_vocab_size
+            # No additional vocabulary for LoRA
 
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
