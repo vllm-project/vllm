@@ -2955,6 +2955,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Calculate reorder batch threshold (if needed)
         self.calculate_reorder_batch_threshold()
 
+        if self.dcp_world_size > 1:
+            assert self.attn_groups[0][0].backend.return_lse, (
+                "DCP only support attention backends that return"
+                " the softmax lse, but the backend "
+                f"{self.attn_groups[0][0].backend.get_name()} "
+                "does not return the softmax lse.")
+
     def initialize_cudagraph_capture(self) -> None:
         min_cg_support = AttentionCGSupport.ALWAYS
         min_cg_builder_name = None
@@ -3318,13 +3325,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if self.device.type == 'xpu':
                 get_kv_transfer_group().set_host_xfer_buffer_ops(
                     copy_kv_blocks)
-
-        if self.dcp_world_size > 1:
-            assert self.attn_groups[0][0].backend.return_lse, (
-                "DCP only support attention backends that return"
-                " the softmax lse, but the backend "
-                f"{self.attn_groups[0][0].backend.get_name()} "
-                "does not return the softmax lse.")
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """
