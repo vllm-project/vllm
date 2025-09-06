@@ -6,7 +6,7 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from typing import Callable, Final, Optional, Union
+from typing import Any, Callable, Final, Optional, Union
 
 import jinja2
 import partial_json_parser
@@ -40,7 +40,7 @@ from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (
     MistralToolCall)
-from vllm.entrypoints.utils import get_max_tokens
+from vllm.entrypoints.utils import _validate_truncation_size, get_max_tokens
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -320,11 +320,32 @@ class OpenAIServingChat(OpenAIServing):
                         lora_request=lora_request,
                     )
                 else:
-                    generator = self.engine_client.generate(
+                    assert self.processor is not None
+
+                    tokenization_kwargs: dict[str, Any] = {}
+                    _validate_truncation_size(
+                        self.max_model_len,
+                        sampling_params.truncate_prompt_tokens,
+                        tokenization_kwargs,
+                    )
+
+                    prompt_str, engine_request = self.processor.process_inputs(
+                        request_id,
                         engine_prompt,
                         sampling_params,
-                        request_id,
                         lora_request=lora_request,
+                        tokenization_kwargs=tokenization_kwargs,
+                        trace_headers=trace_headers,
+                        priority=request.priority,
+                    )
+
+                    generator = self.engine_client.generate(
+                        engine_request,
+                        sampling_params,
+                        request_id,
+                        prompt_str,
+                        lora_request=lora_request,
+                        tokenization_kwargs=tokenization_kwargs,
                         trace_headers=trace_headers,
                         priority=request.priority,
                     )

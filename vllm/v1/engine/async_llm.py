@@ -4,7 +4,6 @@ import asyncio
 import os
 import socket
 import time
-import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
 from typing import Any, Optional, Union
@@ -260,9 +259,9 @@ class AsyncLLM(EngineClient):
     async def add_request(
         self,
         request_id: str,
-        prompt: PromptType,
+        request: Union[EngineCoreRequest, PromptType],
+        prompt_str: Optional[str],
         params: Union[SamplingParams, PoolingParams],
-        arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
@@ -270,12 +269,6 @@ class AsyncLLM(EngineClient):
         data_parallel_rank: Optional[int] = None,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
-
-        warnings.warn(
-            "Processor in AsyncLLM is deprecated. "
-            "Processor has been moved to the API server layer. ",
-            DeprecationWarning,
-            stacklevel=2)
 
         if self.errored:
             raise EngineDeadError()
@@ -286,9 +279,15 @@ class AsyncLLM(EngineClient):
         queue = RequestOutputCollector(output_kind=params.output_kind)
 
         # Convert Input --> Request.
-        prompt_str, request = self.processor.process_inputs(
-            request_id, prompt, params, arrival_time, lora_request,
-            tokenization_kwargs, trace_headers, priority, data_parallel_rank)
+        if isinstance(request, PromptType):
+            assert prompt_str is None
+            logger.warning_once(
+                "Processor in AsyncLLM is deprecated. "
+                "Processor has been moved to the API server layer. ")
+            prompt_str, request = self.processor.process_inputs(
+                request_id, request, params, None, lora_request,
+                tokenization_kwargs, trace_headers, priority,
+                data_parallel_rank)
 
         if is_pooling or params.n == 1:
             await self._add_request(request, prompt_str, None, 0, queue)
@@ -327,10 +326,12 @@ class AsyncLLM(EngineClient):
     # re-multiplexed in the API server anyhow.
     async def generate(
         self,
-        prompt: PromptType,
+        prompt: Union[PromptType, EngineCoreRequest],
         sampling_params: SamplingParams,
         request_id: str,
+        prompt_str: Optional[str] = None,
         lora_request: Optional[LoRARequest] = None,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
@@ -363,18 +364,21 @@ class AsyncLLM(EngineClient):
             # to handle startup failure gracefully in the OpenAI server.
             self._run_output_handler()
 
-            tokenization_kwargs: dict[str, Any] = {}
-            truncate_prompt_tokens = sampling_params.truncate_prompt_tokens
+            #TODO: remove _validate_truncation_size out of this function
+            if tokenization_kwargs is None:
+                tokenization_kwargs = {}
+                truncate_prompt_tokens = sampling_params.truncate_prompt_tokens
 
-            _validate_truncation_size(
-                self.model_config.max_model_len,
-                truncate_prompt_tokens,
-                tokenization_kwargs,
-            )
+                _validate_truncation_size(
+                    self.model_config.max_model_len,
+                    truncate_prompt_tokens,
+                    tokenization_kwargs,
+                )
 
             q = await self.add_request(
                 request_id,
                 prompt,
+                prompt_str,
                 sampling_params,
                 lora_request=lora_request,
                 trace_headers=trace_headers,
@@ -530,7 +534,7 @@ class AsyncLLM(EngineClient):
             self._run_output_handler()
 
             if tokenization_kwargs is None:
-                tokenization_kwargs = dict[str, Any]()
+                tokenization_kwargs = {}
             _validate_truncation_size(
                 self.model_config.max_model_len,
                 truncate_prompt_tokens,
@@ -540,11 +544,12 @@ class AsyncLLM(EngineClient):
             q = await self.add_request(
                 request_id,
                 prompt,
+                None,
                 pooling_params,
                 lora_request=lora_request,
+                tokenization_kwargs=tokenization_kwargs,
                 trace_headers=trace_headers,
                 priority=priority,
-                tokenization_kwargs=tokenization_kwargs,
             )
 
             # The output_handler task pushes items into the queue.
