@@ -6,6 +6,9 @@ import msgspec
 import zmq
 from msgspec.msgpack import Decoder
 
+from vllm import envs
+from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
+
 
 #
 # Types copied from vllm.distributed.kv_events
@@ -22,8 +25,8 @@ class KVCacheEvent(
 
 
 class BlockStored(KVCacheEvent):
-    block_hashes: list[int]
-    parent_block_hash: Optional[int]
+    block_hashes: list[Union[BlockHash, int]]
+    parent_block_hash: Optional[Union[BlockHash, int]]
     token_ids: list[int]
     block_size: int
     lora_id: Optional[int]
@@ -31,7 +34,7 @@ class BlockStored(KVCacheEvent):
 
 
 class BlockRemoved(KVCacheEvent):
-    block_hashes: list[int]
+    block_hashes: list[Union[BlockHash, int]]
     medium: Optional[str]
 
 
@@ -46,6 +49,17 @@ class KVEventBatch(EventBatch):
 def process_event(event_batch):
     print(f"Received event batch at {event_batch.ts}:")
     for event in event_batch.events:
+        if envs.VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES and hasattr(event, "block_hashes"):
+            event.block_hashes = [
+                h if isinstance(h, int) else maybe_convert_block_hash(h)
+                for h in event.block_hashes
+            ]
+            if hasattr(event, "parent_block_hash"):
+                event.parent_block_hash = (
+                    event.parent_block_hash
+                    if isinstance(event.parent_block_hash, int)
+                    else maybe_convert_block_hash(event.parent_block_hash)
+                )
         print(f"  - {event}")
 
 
