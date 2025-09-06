@@ -42,7 +42,7 @@ def benchmark_activation(
     else:
         layer = CustomOp.op_registry[func_name]()
 
-    x = torch.randn(num_tokens, dim, dtype=torch_dtype, device=device)
+    x = torch.randn(num_tokens, dim, dtype=dtype, device=device)
     compiled_layer = torch.compile(layer.forward_native)
 
     if provider == "custom":
