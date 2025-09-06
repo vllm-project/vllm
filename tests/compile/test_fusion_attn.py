@@ -12,12 +12,13 @@ from tests.v1.attention.utils import (BatchSpec, _Backend,
                                       create_common_attn_metadata)
 from vllm import LLM, SamplingParams
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
-from vllm.attention import Attention
+from vllm.attention import Attention, AttentionMetadata
 from vllm.attention.selector import global_force_attn_backend_context_manager
 from vllm.compilation.fusion import QUANT_OPS
 from vllm.compilation.fusion_attn import ATTN_OP, AttnFusionPass
 from vllm.compilation.fx_utils import find_op_nodes
 from vllm.compilation.noop_elimination import NoOpEliminationPass
+from vllm.compilation.post_cleanup import PostCleanupPass
 from vllm.config import (CacheConfig, CompilationConfig, CompilationLevel,
                          ModelConfig, PassConfig, SchedulerConfig, VllmConfig,
                          set_current_vllm_config)
@@ -40,13 +41,12 @@ backend_unfused: Optional[TestBackend] = None
 @pytest.mark.parametrize(
     "model, quant_key",
     [("amd/Llama-3.1-8B-Instruct-FP8-KV", kFp8StaticTensorSym)])
-@pytest.mark.parametrize(
-    "use_triton_fa", [True, False] if current_platform.is_rocm() else [False])
+@pytest.mark.parametrize("use_triton_fa", [True, False])
 @pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
-@pytest.mark.skipif(not current_platform.is_cuda_alike(),
-                    reason="Only test CUDA and ROCm")
-def test_attention_fusion(example_prompts, monkeypatch, model: str,
-                          quant_key: QuantKey, use_triton_fa: bool):
+@pytest.mark.skipif(not current_platform.is_rocm(),
+                    reason="V0 attention fusion only supported on ROCm.")
+def test_attention_fusion_v0(example_prompts, monkeypatch, model: str,
+                             quant_key: QuantKey, use_triton_fa: bool):
     # Clean Dynamo cache to avoid reusing other test cases
     # (for some reason the reset at the end is not enough)
     torch._dynamo.reset()
@@ -188,7 +188,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
             device=self.device,
         )
 
-    def build_attn_metadata(self, batch_size: int):
+    def build_attn_metadata(self, batch_size: int) -> AttentionMetadata:
         """Initialize attention metadata."""
 
         # Create common attn metadata
@@ -395,7 +395,9 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
         noop_pass = NoOpEliminationPass(vllm_config)
         attn_pass = lambda *args, **kw: AttnFusionPass(vllm_config)(*args, **kw
                                                                     )
-        test_backend = TestBackend(noop_pass, attn_pass)
+        cleanup_pass = PostCleanupPass(vllm_config)
+
+        test_backend = TestBackend(noop_pass, attn_pass, cleanup_pass)
 
         # Compile model with fusion enabled
         model_compiled = torch.compile(model_fused,

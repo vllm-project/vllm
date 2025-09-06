@@ -11,6 +11,8 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import set_env_var
 
+from .post_cleanup import PostCleanupPass
+
 if current_platform.is_cuda_alike():
     from .activation_quant_fusion import ActivationQuantFusionPass
     from .fusion import RMSNormQuantFusionPass
@@ -58,6 +60,10 @@ class PostGradPassManager(CustomGraphPass):
                 if pass_.is_applicable_for_shape(shape):
                     pass_(graph)
 
+            # post-cleanup goes before fix_functionalization
+            # because it requires a functional graph
+            self.post_cleanup(graph)
+
             # always run fix_functionalization last
             self.fix_functionalization(graph)
 
@@ -79,6 +85,9 @@ class PostGradPassManager(CustomGraphPass):
             self.passes += [AttnFusionPass(config)]
         if self.pass_config.enable_fi_allreduce_fusion:
             self.passes += [AllReduceFusionPass(config)]
+
+        # needs a functional graph
+        self.post_cleanup = PostCleanupPass(config)
         self.fix_functionalization = FixFunctionalizationPass(config)
 
     def add(self, pass_: InductorPass):

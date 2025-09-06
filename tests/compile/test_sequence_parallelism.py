@@ -9,6 +9,7 @@ from vllm.compilation.fix_functionalization import FixFunctionalizationPass
 from vllm.compilation.fusion import RMSNormQuantFusionPass
 from vllm.compilation.fx_utils import find_auto_fn, find_auto_fn_maybe, is_func
 from vllm.compilation.noop_elimination import NoOpEliminationPass
+from vllm.compilation.post_cleanup import PostCleanupPass
 from vllm.compilation.sequence_parallelism import SequenceParallelismPass
 from vllm.compilation.vllm_inductor_pass import VllmInductorPass
 from vllm.config import (CompilationConfig, DeviceConfig, ModelConfig,
@@ -254,9 +255,10 @@ def sequence_parallelism_pass_on_test_model(
                                            dtype=dtype,
                                            seed=42)
 
-    sequence_parallelism_pass = SequenceParallelismPass(vllm_config)
     noop_pass = NoOpEliminationPass(vllm_config)
+    sequence_parallelism_pass = SequenceParallelismPass(vllm_config)
     func_pass = FixFunctionalizationPass(vllm_config)
+    cleanup_pass = PostCleanupPass(vllm_config)
 
     passes_for_backend: list[VllmInductorPass] = \
         [noop_pass, sequence_parallelism_pass]
@@ -264,6 +266,8 @@ def sequence_parallelism_pass_on_test_model(
     if enable_fusion:
         fusion_pass = RMSNormQuantFusionPass(vllm_config)
         passes_for_backend.append(fusion_pass)
+
+    passes_for_backend.append(cleanup_pass)
 
     backend_no_func = TestBackend(*passes_for_backend)
     backend_func = TestBackend(*passes_for_backend, func_pass)
