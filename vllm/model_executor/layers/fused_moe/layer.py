@@ -710,7 +710,7 @@ def determine_expert_map(
 
     # Create a tensor of size num_experts filled with -1
     expert_map = torch.full((global_num_experts, ), -1, dtype=torch.int32)
-    # Create a expert map for the local experts
+    # Create an expert map for the local experts
     start_idx = ep_rank * base_experts + min(ep_rank, remainder)
     expert_map[start_idx:start_idx + local_num_experts] = torch.arange(
         0, local_num_experts, dtype=torch.int32)
@@ -806,7 +806,7 @@ class FusedMoE(CustomOp):
 
         self.global_num_experts = num_experts + num_redundant_experts
 
-        # we padding globally so EP buffer allocation works
+        # we are padding globally so EP buffer allocation works
         if quant_config and quant_config.get_name() == "mxfp4":
             from vllm.model_executor.layers.quantization.mxfp4 import (  # noqa: E501
                 should_use_flashinfer_mxfp4)
