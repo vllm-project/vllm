@@ -17,30 +17,14 @@ seq_len_range = [1, 16, 64, 128, 256, 512, 1024, 2048, 4096]
 intermediate_size = [3072, 9728, 12288]
 configs = list(itertools.product(batch_size_range, seq_len_range, intermediate_size))
 
-FUNC_NAME = "silu_and_mul"
-DTYPE = "half"
 
-
-@triton.testing.perf_report(
-    triton.testing.Benchmark(
-        x_names=["batch_size", "seq_len", "intermediate_size"],
-        x_vals=configs,
-        line_arg="provider",
-        line_vals=["custom", "compiled"],
-        line_names=["Custom OP", "Compiled"],
-        styles=[("blue", "-"), ("green", "-")],
-        ylabel="ms",
-        plot_name="activation-op-performance",
-        args={"func_name": "silu_and_mul", "dtype": "half"},
-    )
-)
 def benchmark_activation(
-    batch_size,
-    seq_len,
-    intermediate_size,
-    provider,
-    func_name=FUNC_NAME,
-    dtype=DTYPE,
+    batch_size: int,
+    seq_len: int,
+    intermediate_size: int,
+    provider: str,
+    func_name: str,
+    dtype: str,
 ):
     device = "cuda"
     torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
@@ -92,11 +76,30 @@ if __name__ == "__main__":
         default="silu_and_mul",
     )
     parser.add_argument(
-        "--dtype", type=str, choices=["half", "bfloat16", "float"], default="half"
+        "--dtype", type=str, choices=["half", "bfloat16", "float"], default="bfloat16"
     )
     args = parser.parse_args()
     assert args
-    FUNC_NAME = args.func_name
-    DTYPE = args.dtype
 
-    benchmark_activation.run(print_data=True)
+    func_name = args.func_name
+    dtype = args.dtype
+
+    perf_report = triton.testing.perf_report(
+        triton.testing.Benchmark(
+            x_names=["batch_size", "seq_len", "intermediate_size"],
+            x_vals=configs,
+            line_arg="provider",
+            line_vals=["custom", "compiled"],
+            line_names=[f"Custom OP ({func_name})", f"Compiled ({func_name})"],
+            styles=[("blue", "-"), ("green", "-")],
+            ylabel="ms",
+            plot_name=f"activation-op-performance-{func_name}",
+            args={},
+        )
+    )
+
+    perf_report(
+        lambda batch_size, seq_len, intermediate_size, provider: benchmark_activation(
+            batch_size, seq_len, intermediate_size, provider, func_name, dtype
+        )
+    ).run(print_data=True)
