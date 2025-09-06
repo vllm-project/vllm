@@ -54,7 +54,6 @@ SystemEnv = namedtuple(
         'is_xnnpack_available',
         'cpu_info',
         'rocm_version',  # vllm specific field
-        'neuron_sdk_version',  # vllm specific field
         'vllm_version',  # vllm specific field
         'vllm_build_flags',  # vllm specific field
         'gpu_topo',  # vllm specific field
@@ -275,15 +274,6 @@ def get_rocm_version(run_lambda):
                                      r'HIP version: (\S+)')
 
 
-def get_neuron_sdk_version(run_lambda):
-    # Adapted from your install script
-    try:
-        result = run_lambda(["neuron-ls"])
-        return result if result[0] == 0 else 'N/A'
-    except Exception:
-        return 'N/A'
-
-
 def get_vllm_version():
     from vllm import __version__, __version_tuple__
 
@@ -306,10 +296,9 @@ def get_vllm_version():
 
 def summarize_vllm_build_flags():
     # This could be a static method if the flags are constant, or dynamic if you need to check environment variables, etc.
-    return 'CUDA Archs: {}; ROCm: {}; Neuron: {}'.format(
+    return 'CUDA Archs: {}; ROCm: {}'.format(
         os.environ.get('TORCH_CUDA_ARCH_LIST', 'Not Set'),
         'Enabled' if os.environ.get('ROCM_HOME') else 'Disabled',
-        'Enabled' if os.environ.get('NEURON_CORES') else 'Disabled',
     )
 
 
@@ -601,7 +590,6 @@ def get_env_info():
     conda_packages = get_conda_packages(run_lambda)
 
     rocm_version = get_rocm_version(run_lambda)
-    neuron_sdk_version = get_neuron_sdk_version(run_lambda)
     vllm_version = get_vllm_version()
     vllm_build_flags = summarize_vllm_build_flags()
     gpu_topo = get_gpu_topo(run_lambda)
@@ -635,7 +623,6 @@ def get_env_info():
         is_xnnpack_available=is_xnnpack_available(),
         cpu_info=get_cpu_info(run_lambda),
         rocm_version=rocm_version,
-        neuron_sdk_version=neuron_sdk_version,
         vllm_version=vllm_version,
         vllm_build_flags=vllm_build_flags,
         gpu_topo=gpu_topo,
@@ -702,7 +689,6 @@ env_info_fmt += """
          vLLM Info
 ==============================
 ROCM Version                 : {rocm_version}
-Neuron SDK Version           : {neuron_sdk_version}
 vLLM Version                 : {vllm_version}
 vLLM Build Flags:
   {vllm_build_flags}
