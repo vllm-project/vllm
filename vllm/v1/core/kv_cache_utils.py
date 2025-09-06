@@ -217,17 +217,20 @@ class KVPrefixTrieNode:
        another Trie node if it contains the parent node as a prefix."""
 
     def __init__(self,
+                 depth: int = 0,
                  parent: "KVPrefixTrieNode" = None,
                  block_id: int = 0,
                  min_accessible_leaf_id: float = 0,
                  leaf_cnt: int = 0):
         """
         Args:
+          depth: The block_depth of the KVCacheBlock corresponding to this node.
           parent: The parent of this node.
           block_id: The id of the KVCacheBlock encompassed by this node.
             min_accessible_leaf_id: The minimum node_id of a leaf node traversable from           this node.
         """
 
+        self.depth = depth
         # The parent of this node in its KVCacheTrie
         self.parent: KVPrefixTrieNode = parent
         # A map from child node's block_id to the node itself
@@ -272,6 +275,7 @@ class KVPrefixTrieNode:
             child_node.leaf_cnt += 1
             return child_node
         child_node = KVPrefixTrieNode(
+            depth=self.depth+1,
             parent=self,
             block_id=block_id,
             min_accessible_leaf_id=float('inf'),

@@ -2740,22 +2740,36 @@ class PoolerConfig:
         return hash_str
 
 @config
+class MultiCascadeGroupingConfig(str, enum.Enum):
+    """Methods for grouping requests for multi-cascade
+    attention."""
+
+    LEAF_PASS = "leaf_pass"
+    """Only group requests if their latest KVCacheBlock 
+    is the same."""
+
+    FULL_PASS = "full_pass"
+    """Group requests even if they share a partially 
+    common prefix. Takes longer than leaf_pass but results
+    in larger groups."""
+
+@config
 @dataclass
 class MultiCascadeConfig:
     """Contains configurations for deciding how to schedule
     multi-cascade attention."""
 
+    absorption_threshold: float = 0.8
     """Threshold parameter that specifies whether to 
     group more leaves with lower prefix length (low
     absorption threshold), or fewer leaves with higher 
     common prefix length (higher absorption threshold)."""
-    absorption_threshold: float = 0.8
 
-    class GroupAllocationMethod(str, enum.Enum):
-        LEAF_PASS = "leaf_pass"
-        FULL_PASS = "full_pass"
+    allocate_method = MultiCascadeGroupingConfig.LEAF_PASS
+    """Method used to group requests with common prefixes. 
+    Logic behind grouping is in vllm.v1.core.multi_cascade_manager.
+    Defaults to leaf_pass."""
 
-    allocate_method = GroupAllocationMethod.LEAF_PASS
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.float16,
