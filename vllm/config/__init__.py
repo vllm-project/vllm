@@ -386,6 +386,9 @@ class ModelConfig:
     preventing potential numerical issues. Note that even if this is set to
     False, cascade attention will be only used when the heuristic tells that
     it's beneficial."""
+    disable_multi_cascade_attn: bool = False
+    """Disable multi-cascade attention for V1. Multi-cascade attention is useful
+    when serving requests with multiple common prefixes in the same batch."""
     skip_tokenizer_init: bool = False
     """Skip initialization of tokenizer and detokenizer. Expects valid
     `prompt_token_ids` and `None` for prompt from the input. The generated
@@ -471,6 +474,13 @@ class ModelConfig:
     """Initialize non-default pooling config or override default pooling config
     for the pooling model. e.g. `{"pooling_type": "mean", "normalize": false}`.
     """
+    multi_cascade_config: "MultiCascadeConfig" = field(default_factory="MultiCascadeConfig")
+    """Multi-cascade config which controls behaviour of request grouping when
+    multi-cascade attention is enabled."""
+    override_multi_cascade_config: Optional[Union[dict, "MultiCascadeConfig"]] = None
+    """Initialize non-default multi-cascade config or override default multi-cascade
+    config."""
+
     logits_processor_pattern: Optional[str] = None
     """Optional regex pattern specifying valid logits processor qualified names
     that can be passed with the `logits_processors` extra completion argument.
@@ -751,6 +761,8 @@ class ModelConfig:
             revision=self.revision,
         )
 
+        self.multi_cascade_config = self._init_multi_cascade_config()
+
         # Interleaved attention is not supported by some backends in V0
         if (not self.disable_sliding_window
                 and is_interleaved(self.hf_text_config)
@@ -917,6 +929,14 @@ class ModelConfig:
             return pooler_config
 
         return None
+
+    def _init_multi_cascade_config(self) -> "MultiCascadeConfig":
+        if isinstance(self.override_multi_cascade_config, dict):
+            self.override_multi_cascade_config = MultiCascadeConfig(
+                **self.override_multi_cascade_config)
+        multi_cascade_config = (self.override_multi_cascade_config or
+                                   MultiCascadeConfig())
+        return multi_cascade_config
 
     def _verify_tokenizer_mode(self) -> None:
         tokenizer_mode = cast(TokenizerMode, self.tokenizer_mode.lower())
@@ -2719,6 +2739,23 @@ class PoolerConfig:
                                usedforsecurity=False).hexdigest()
         return hash_str
 
+@config
+@dataclass
+class MultiCascadeConfig:
+    """Contains configurations for deciding how to schedule
+    multi-cascade attention."""
+
+    """Threshold parameter that specifies whether to 
+    group more leaves with lower prefix length (low
+    absorption threshold), or fewer leaves with higher 
+    common prefix length (higher absorption threshold)."""
+    absorption_threshold: float = 0.8
+
+    class GroupAllocationMethod(str, enum.Enum):
+        LEAF_PASS = "leaf_pass"
+        FULL_PASS = "full_pass"
+
+    allocate_method = GroupAllocationMethod.LEAF_PASS
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.float16,

@@ -66,6 +66,10 @@ class CacheConfig:
     enable_prefix_caching: Optional[bool] = None
     """Whether to enable prefix caching. Disabled by default for V0. Enabled by
     default for V1."""
+    enable_kv_prefix_trie: Optional[bool] = None
+    """Whether to enable kv prefix trie for detecting common prefixes. 
+    This flag must be set to true when multi-cascade_attention or 
+    JCT scheduling is enabled."""
     prefix_caching_hash_algo: PrefixCachingHashAlgo = "builtin"
     """Set the hash algorithm for prefix caching:\n
     - "builtin" is Python's built-in hash.\n

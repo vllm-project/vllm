@@ -209,6 +209,198 @@ class KVPrefixAlignedGroups:
         self.group_metadata.extend([(a, b + num_old_reqs, c + num_old_reqs)
                                     for a,b,c in groups.group_metadata])
 
+
+class KVPrefixTrieNode:
+    """Node that stores each KVCacheBlock still in use by
+       the GPUModelRunner. The root of the Trie is a sentinel node which
+       points to KVCacheBlocks with distinct prefixes. A node is the child of
+       another Trie node if it contains the parent node as a prefix."""
+
+    def __init__(self,
+                 parent: "KVPrefixTrieNode" = None,
+                 block_id: int = 0,
+                 min_accessible_leaf_id: float = 0,
+                 leaf_cnt: int = 0):
+        """
+        Args:
+          parent: The parent of this node.
+          block_id: The id of the KVCacheBlock encompassed by this node.
+            min_accessible_leaf_id: The minimum node_id of a leaf node traversable from           this node.
+        """
+
+        # The parent of this node in its KVCacheTrie
+        self.parent: KVPrefixTrieNode = parent
+        # A map from child node's block_id to the node itself
+        self.child_map: dict[int, KVPrefixTrieNode] = {}
+        # A list of child nodes. I believe the reason we need this is
+        # because the order in which we insert child nodes matters. I
+        # will double check.
+        self.child_list: list[KVPrefixTrieNode] = []
+        # A set of the request ids of requests ending with this leaf node
+        self.node_req_ids: set[str] = set()
+        # The block id of the KVCacheBlock associated with this node
+        self.block_id = block_id
+        # This is important for alloc_full_pass method in KVCachePrefixTrie
+        # It allows us to know how many requests have been grouped when traversing
+        # a specific node in alloc_full_pass. Because the logic only pertains to
+        # alloc_full_pass, there may be a cleaner solution.
+        self.min_accessible_leaf_id = min_accessible_leaf_id
+        # The number of groups of requests reachable by this node
+        self.num_groups = 0
+        # Set to node.weight if node.weight is large enough. Else, set to
+        # the sum of the group_weight of the node's child nodes.
+        self.groups_weight = 0
+        # The number of leaf nodes reachable from this node
+        self.leaf_cnt = leaf_cnt
+
+    def add_child(self, block_id: int) -> "KVPrefixTrieNode":
+        """
+        Responsible for adding a child node corresponding to block with given
+        block_id. Manages the leaf_cnt of the child_node. Only parent nodes can edit
+        the leaf_cnt of their child_node.
+
+        Args:
+            block_id: The id of the block corresponding to the node we want to make
+            a child.
+        Returns:
+            The child node we added to children of self.
+        """
+
+        # Nodes cannot edit their own leaf_cnt. Only the leaf_cnt of their children.
+        if block_id in self.child_map:
+            child_node = self.child_map[block_id]
+            child_node.leaf_cnt += 1
+            return child_node
+        child_node = KVPrefixTrieNode(
+            parent=self,
+            block_id=block_id,
+            min_accessible_leaf_id=float('inf'),
+            leaf_cnt=1)
+        self.child_map[block_id] = child_node
+        self.child_list.append(child_node)
+        return child_node
+
+    def remove_child(self, block_id: int):
+        """
+        Called when we want to remove a request, and all nodes associated with that
+        request. Decrements ref_cnt of node with given block_id, and removes from
+        trie if ref_cnt becomes 0.
+
+        Args:
+            block_id: The id of the block corresponding to the node we want to make
+            a child.
+        """
+        if block_id not in self.child_map:
+            return
+        child_node = self.child_map[block_id]
+        child_node.leaf_cnt -= 1
+        if child_node.leaf_cnt == 0:
+            del self.child_map[block_id]
+            self.child_list.remove(child_node)
+            child_node.parent = None
+
+    def add_request(self, req_id: str):
+        self.node_req_ids.add(req_id)
+
+    def remove_request(self, req_id: str):
+        self.node_req_ids.remove(req_id)
+
+    @property
+    def weight(self) -> float:
+        """
+        Returns:
+            The importance given to a given node when allocating groups.
+        """
+        return self.depth * (self.leaf_cnt - 1)
+
+class KVPrefixTrie:
+    """Prefix Trie of KVCacheBlocks for Multi-Cascade Attention"""
+
+    def __init__(self):
+        # node_id == 0 means node is a sentinel
+        self.sentinel = KVPrefixTrieNode()
+        # Values in dict are of the form (req_id, is_scheduled)
+        self.req_to_scheduled: dict[str, bool] = {}
+        self.req_id_to_block_id: dict[str, int] = {}
+        self.block_id_to_req_id: defaultdict[int, set[str]] = defaultdict(set)
+        self.block_id_to_leaf_node: dict[int, KVPrefixTrieNode] = {}
+        self.num_groups = 0
+
+    def insert(self, request: Request, blocks: list[KVCacheBlock]):
+        """
+        Inserts blocks corresponding to the given request into the trie. If request
+        already exists in trie, update path to request.
+        Args:
+            request: Request whose blocks we parse.
+            blocks: Blocks which we add to the trie.
+
+        If request does not have a path in the prefix trie:
+          1. Traces through KVCacheBlocks which prefix the request's tokens
+          2. If a KVCacheBlock is not in the trie, add a KVPrefixTrieNode                corresponding to that block along will all blocks thereon for the request              to the trie.
+          4. Update each traversed node's metadata (useful for allocating requests
+             into groups based on their common prefixes).
+          3. Mark this path as the proper sequence of cached KVCacheBlocks to
+             associate with this request.
+        Else:
+          1. Get the last node in the prefix trie corresponding to the request and
+             add nodes corresponding to the blocks parameter as detailed above.
+        """
+
+        if not blocks:
+            return
+        req_id = request.request_id
+
+        # First check if request is already in trie. Start inserting from
+        # leaf block corresponding to the request if so, else start
+        # from sentinel.
+        curr_block_id = self.req_id_to_block_id.get(req_id, 0)
+        curr_block_node = self.sentinel
+        if curr_block_id:
+            req_ids = self.block_id_to_req_id[curr_block_id]
+            curr_block_node = self.block_id_to_leaf_node[curr_block_id]
+            req_ids.remove(req_id)
+            if not req_ids:
+                del self.block_id_to_req_id[curr_block_id]
+                del self.block_id_to_leaf_node[curr_block_id]
+
+        for i in range(len(blocks)):
+            curr_block_node.add_request(req_id)
+            parent_block_node = curr_block_node
+            curr_block = blocks[i]
+            curr_block_node = parent_block_node.add_child(curr_block.block_id)
+
+        leaf_block_id = curr_block_node.block_id
+        self.req_to_scheduled[req_id] = True
+        self.req_id_to_block_id[req_id] = leaf_block_id
+        self.block_id_to_req_id[leaf_block_id].add(req_id)
+        self.block_id_to_leaf_node[leaf_block_id] = curr_block_node
+
+    def remove(self, req_id: str):
+        """
+        Calls remove_child on nodes corresponding to given request.
+        Args:
+            req_id: Request id for request which we remove from trie.
+        """
+
+        if req_id not in self.req_id_to_block_id:
+            return
+        del self.req_to_scheduled[req_id]
+        block_id = self.req_id_to_block_id.pop(req_id)
+        self.block_id_to_req_id[block_id].remove(req_id)
+        if not self.block_id_to_req_id[block_id]:
+            del self.block_id_to_req_id[block_id]
+        node = self.block_id_to_leaf_node[block_id]
+
+        curr_node = node
+        if curr_node.block_id not in self.block_id_to_req_id:
+            del self.block_id_to_leaf_node[curr_node.block_id]
+
+        while curr_node and curr_node != self.sentinel:
+            curr_node.remove_request(req_id)
+            parent_node = curr_node.parent
+            parent_node.remove_child(curr_node.block_id)
+            curr_node = parent_node
+
 class FreeKVCacheBlockQueue:
     """This class organizes a list of KVCacheBlock objects to a doubly linked
     list of free blocks. We implement this class instead of using Python
@@ -869,6 +1061,7 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
         kv_cache_tensors=kv_cache_tensors,
         kv_cache_groups=create_kv_cache_group_specs(kv_cache_spec,
                                                     grouped_layer_names),
+        enable_kv_prefix_trie=vllm_config.cache_config.enable_kv_prefix_trie
     )
 
     num_tokens = num_blocks * vllm_config.cache_config.block_size
@@ -1029,6 +1222,7 @@ def _get_kv_cache_config_uniform_page_size(
         num_blocks=num_blocks,
         kv_cache_tensors=kv_cache_tensors,
         kv_cache_groups=kv_cache_groups,
+        enable_kv_prefix_trie=vllm_config.cache_config.enable_kv_prefix_trie
     )
 
     min_block_size = min(
@@ -1047,7 +1241,8 @@ def _get_kv_cache_config_uniform_page_size(
 
 
 def _get_kv_cache_config_attention_free() -> KVCacheConfig:
-    return KVCacheConfig(num_blocks=1, kv_cache_tensors=[], kv_cache_groups=[])
+    return KVCacheConfig(num_blocks=1, kv_cache_tensors=[],
+                         kv_cache_groups=[], enable_kv_prefix_trie=False)
 
 
 def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
