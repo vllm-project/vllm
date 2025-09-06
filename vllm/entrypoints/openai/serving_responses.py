@@ -44,8 +44,9 @@ from vllm.entrypoints.context import (ConversationContext, HarmonyContext,
                                       SimpleContext, StreamingHarmonyContext)
 from vllm.entrypoints.harmony_utils import (
     get_developer_message, get_stop_tokens_for_assistant_actions,
-    get_system_message, get_user_message, parse_output_message,
-    parse_remaining_state, parse_response_input, render_for_completion)
+    get_system_message, get_user_message, has_custom_tools,
+    parse_output_message, parse_remaining_state, parse_response_input,
+    render_for_completion)
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -266,6 +267,8 @@ class OpenAIServingResponses(OpenAIServing):
                 builtin_tool_list.append("browser")
             if self.tool_server.has_tool("python"):
                 builtin_tool_list.append("python")
+            if self.tool_server.has_tool("container"):
+                builtin_tool_list.append("container")
 
         if self.tool_server is not None:
             available_tools = builtin_tool_list
@@ -448,7 +451,8 @@ class OpenAIServingResponses(OpenAIServing):
 
         async with AsyncExitStack() as exit_stack:
             try:
-                await context.init_tool_sessions(self.tool_server, exit_stack)
+                await context.init_tool_sessions(self.tool_server, exit_stack,
+                                                 request.request_id)
                 async for _ in result_generator:
                     pass
             except asyncio.CancelledError:
@@ -710,13 +714,21 @@ class OpenAIServingResponses(OpenAIServing):
             # New conversation.
             reasoning_effort = (request.reasoning.effort
                                 if request.reasoning else None)
+            # Temporary: OpenAI types doesn't have container tool
+            # so we used MCP to cover that, up for change
             tool_types = [tool.type for tool in request.tools]
+            if envs.VLLM_GPT_OSS_USE_CONTAINER_TOOL:
+                tool_types.append("container")
             enable_browser = ("web_search_preview" in tool_types
                               and self.tool_server is not None
                               and self.tool_server.has_tool("browser"))
             enable_code_interpreter = ("code_interpreter" in tool_types
                                        and self.tool_server is not None
                                        and self.tool_server.has_tool("python"))
+            enable_container = ("container" in tool_types
+                                and self.tool_server is not None
+                                and self.tool_server.has_tool("container"))
+            with_custom_tools = has_custom_tools(tool_types)
             sys_msg = get_system_message(
                 reasoning_effort=reasoning_effort,
                 browser_description=self.tool_server.get_tool_description(
@@ -725,11 +737,17 @@ class OpenAIServingResponses(OpenAIServing):
                 python_description=self.tool_server.get_tool_description(
                     "python") if enable_code_interpreter
                 and self.tool_server is not None else None,
+                container_description=self.tool_server.get_tool_description(
+                    "container")
+                if enable_container and self.tool_server is not None else None,
+                instructions=request.instructions,
+                with_custom_tools=with_custom_tools,
             )
             messages.append(sys_msg)
-            dev_msg = get_developer_message(request.instructions,
-                                            request.tools)
-            messages.append(dev_msg)
+            if with_custom_tools:
+                dev_msg = get_developer_message(
+                    instructions=request.instructions, tools=request.tools)
+                messages.append(dev_msg)
         else:
             # Continue the previous conversation.
             # FIXME(woosuk): Currently, request params like reasoning and
@@ -1613,7 +1631,8 @@ class OpenAIServingResponses(OpenAIServing):
         async with AsyncExitStack() as exit_stack:
             processer = None
             if self.use_harmony:
-                await context.init_tool_sessions(self.tool_server, exit_stack)
+                await context.init_tool_sessions(self.tool_server, exit_stack,
+                                                 request.request_id)
                 processer = self._process_harmony_streaming_events
             else:
                 processer = self._process_simple_streaming_events
