@@ -413,7 +413,8 @@ class ResponsesRequest(OpenAIBaseModel):
                               dict) and item.get('type') == 'function_call':
                     # Convert dict to ResponseFunctionToolCall object
                     try:
-                        from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
+                        from openai.types.responses.response_function_tool_call import (
+                            ResponseFunctionToolCall)
                         function_call_obj = ResponseFunctionToolCall(**item)
                         fixed_input.append(function_call_obj)
                     except Exception:

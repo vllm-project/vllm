@@ -9,7 +9,8 @@ preventing regression of the function call parsing issue.
 """
 
 import pytest
-from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
+from openai.types.responses.response_function_tool_call import (
+    ResponseFunctionToolCall)
 
 from vllm.entrypoints.openai.protocol import ResponsesRequest
 
