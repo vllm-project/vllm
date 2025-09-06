@@ -23,7 +23,6 @@ from torch import nn
 from transformers.models.gemma3n.configuration_gemma3n import Gemma3nTextConfig
 
 from vllm.attention import Attention
-from vllm.compilation.backends import set_model_tag
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -791,6 +790,11 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
 
         first_kv_shared_layer_idx = (config.num_hidden_layers -
                                      config.num_kv_shared_layers)
+
+        # NOTE(sarckk): importing this top level seems to cause issues
+        # during running of tests.
+        from vllm.compilation.backends import set_model_tag
+
         # Layer idx 0-19 are self-decoder layers in You Only Cache Once (YOCO)
         with set_model_tag("self_decoder"):
             self.self_decoder = Gemma3nSelfDecoder(
