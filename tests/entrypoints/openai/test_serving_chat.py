@@ -53,7 +53,7 @@ def default_server_args(with_tool_parser: bool):
         "--reasoning-parser",
         "openai_gptoss",
         "--gpu-memory-utilization",
-        "0.5",
+        "0.8",
     ]
     if with_tool_parser:
         args.extend([
