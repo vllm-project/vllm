@@ -4,6 +4,7 @@ import asyncio
 import os
 import socket
 import time
+from collections import deque
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
 from typing import Any, Optional, Union
@@ -431,12 +432,13 @@ class AsyncLLM(EngineClient):
 
         async def output_handler():
             try:
+                prefill_comp_speed_history = deque(maxlen=IterationStats.MAX_HISTORY_LEN)
                 while True:
                     # 1) Pull EngineCoreOutputs from the EngineCore.
                     outputs = await engine_core.get_output_async()
                     num_outputs = len(outputs.outputs)
 
-                    iteration_stats = IterationStats() if (
+                    iteration_stats = IterationStats(prefill_comp_speed_history) if (
                         log_stats and num_outputs) else None
 
                     # Split outputs into chunks of at most
