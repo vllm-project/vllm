@@ -307,6 +307,7 @@ def _test_backend_correctness(
     backend_to_test: list[Union[_Backend, str]],
     mask_mod,
     *,
+    block_size: int = 16,
     atol: float = 1e-2,
     rtol: float = 1e-2,
 ):
@@ -328,6 +329,7 @@ def _test_backend_correctness(
     current_platform.seed_everything(42)
     vllm_config = create_vllm_config(model_name=model,
                                      max_model_len=max(batch_spec.seq_lens),
+                                     block_size=block_size,
                                      num_gpu_blocks=8192)
     device = torch.device("cuda:0")
 
@@ -513,8 +515,27 @@ def test_causal_backend_correctness(batch_spec_name: str, model: str):
         return (q_idx + context_len) >= kv_idx
 
     batch_spec = BATCH_SPECS[batch_spec_name]
-    _test_backend_correctness(batch_spec, model, BACKENDS_TO_TEST,
-                              causal_mask_mod)
+    LARGE_BLOCK_BACKENDS = ([_Backend.FLEX_ATTENTION]
+                            if is_torch_equal_or_newer("2.9.0.dev0") else [])
+    SMALL_BLOCK_BACKENDS = [
+        x for x in BACKENDS_TO_TEST if x not in LARGE_BLOCK_BACKENDS
+    ]
+    _test_backend_correctness(batch_spec,
+                              model,
+                              SMALL_BLOCK_BACKENDS,
+                              causal_mask_mod,
+                              rtol=1e-2,
+                              atol=2.5e-2)
+
+    # Fast FlexAttention needs to run with block_size=128
+    if LARGE_BLOCK_BACKENDS:
+        _test_backend_correctness(batch_spec,
+                                  model,
+                                  LARGE_BLOCK_BACKENDS,
+                                  causal_mask_mod,
+                                  block_size=128,
+                                  rtol=1e-2,
+                                  atol=2.5e-2)
 
 
 SLIDING_WINDOW_BACKENDS_TO_TEST = [
@@ -551,9 +572,25 @@ def test_sliding_window_backend_correctness(batch_spec_name: str, model: str):
     sliding_window_mask_mod_fn = partial(sliding_window_mask_mod,
                                          sliding_window=sliding_window)
 
+    LARGE_BLOCK_BACKENDS = ([_Backend.FLEX_ATTENTION]
+                            if is_torch_equal_or_newer("2.9.0.dev0") else [])
+    SMALL_BLOCK_BACKENDS = [
+        x for x in SLIDING_WINDOW_BACKENDS_TO_TEST
+        if x not in LARGE_BLOCK_BACKENDS
+    ]
     _test_backend_correctness(batch_spec,
                               model,
-                              SLIDING_WINDOW_BACKENDS_TO_TEST,
+                              SMALL_BLOCK_BACKENDS,
                               sliding_window_mask_mod_fn,
                               rtol=1e-2,
                               atol=2.5e-2)
+
+    # Fast FlexAttention needs to run with block_size=128
+    if LARGE_BLOCK_BACKENDS:
+        _test_backend_correctness(batch_spec,
+                                  model,
+                                  LARGE_BLOCK_BACKENDS,
+                                  sliding_window_mask_mod_fn,
+                                  block_size=128,
+                                  rtol=1e-2,
+                                  atol=2.5e-2)
