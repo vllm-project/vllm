@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# Datastructures defining a GPU input batch
 
 from dataclasses import dataclass
 from typing import Optional, Union
