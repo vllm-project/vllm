@@ -485,6 +485,7 @@ direct_register_custom_op(
     mutates_args=[],
     fake_impl=unified_attention_fake,
     dispatch_key=current_platform.dispatch_key,
+    tags=(torch._C.Tag.cudagraph_unsafe, ),
 )
 
 
@@ -535,4 +536,5 @@ direct_register_custom_op(
     mutates_args=["output", "output_block_scale"],
     fake_impl=unified_attention_with_output_fake,
     dispatch_key=current_platform.dispatch_key,
+    tags=(torch._C.Tag.cudagraph_unsafe, ),
 )

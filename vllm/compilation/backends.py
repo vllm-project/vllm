@@ -326,6 +326,32 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 i for i, x in enumerate(args) if isinstance(x, torch.SymInt)
             ]
             global compilation_start_time
+
+            if (self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+                    and self.compilation_config.use_inductor_graph_partition
+                    and is_torch_equal_or_newer("2.9.0.dev")):
+                from torch._inductor.utils import CUDAGraphWrapperMetadata
+
+                from .cuda_graph import CUDAGraphOptions
+
+                static_graph_wrapper_class = resolve_obj_by_qualname(
+                    current_platform.get_static_graph_wrapper_cls())
+
+                def customized_cudagraph_wrapper(
+                        f, metadata: CUDAGraphWrapperMetadata):
+                    partition_id = metadata.partition_index
+                    num_partitions = metadata.num_partitions
+                    return static_graph_wrapper_class(
+                        runnable=f,
+                        vllm_config=self.vllm_config,
+                        runtime_mode=CUDAGraphMode.PIECEWISE,
+                        cudagraph_options=CUDAGraphOptions(
+                            partition_id == 0, partition_id != 0,
+                            partition_id == num_partitions - 1))
+
+                torch._inductor.utils.set_customized_partition_wrappers(
+                    customized_cudagraph_wrapper)
+
             compiled_graph_for_dynamic_shape = self.vllm_backend.\
                 compiler_manager.compile(
                 submod,
@@ -336,7 +362,6 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 num_graphs=len(self.compile_submod_names),
                 runtime_shape=None)
             # Lazy import here to avoid circular import
-            from .cuda_graph import CUDAGraphOptions
             from .cuda_piecewise_backend import PiecewiseBackend
 
             piecewise_backend = PiecewiseBackend(
@@ -344,7 +369,11 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 len(self.compile_submod_names), sym_shape_indices,
                 compiled_graph_for_dynamic_shape, self.vllm_backend)
 
-            if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+            if (self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+                    and
+                    not self.compilation_config.use_inductor_graph_partition):
+                from .cuda_graph import CUDAGraphOptions
+
                 # resolve the static graph wrapper class (e.g. CUDAGraphWrapper
                 # class) as platform dependent.
                 static_graph_wrapper_class = resolve_obj_by_qualname(

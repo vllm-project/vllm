@@ -41,7 +41,9 @@ class CudagraphDispatcher:
 
         assert not self.cudagraph_mode.requires_piecewise_compilation() or \
             (self.compilation_config.level == CompilationLevel.PIECEWISE and
-             self.compilation_config.splitting_ops_contain_attention()), \
+            self.compilation_config.splitting_ops_contain_attention()) or\
+            (self.compilation_config.use_inductor_graph_partition and \
+            not self.compilation_config.splitting_ops_contain_attention()), \
             "Compilation level should be CompilationLevel.PIECEWISE when "\
             "cudagraph_mode piecewise cudagraphs is used, "\
             f"cudagraph_mode={self.cudagraph_mode}, "\
