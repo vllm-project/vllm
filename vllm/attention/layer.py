@@ -428,14 +428,10 @@ class MultiHeadAttention(nn.Module):
                                          value,
                                          softmax_scale=self.scale)
         else:
-            # Fallback to torch SDPA for unsupported backends
-            query, key, value = (x.transpose(1, 2)
-                                 for x in (query, key, value))
-            out = F.scaled_dot_product_attention(query,
-                                                 key,
-                                                 value,
-                                                 scale=self.scale)
-            out = out.transpose(1, 2)
+            # ViT attention hasn't supported this backend yet
+            raise NotImplementedError(
+                f"ViT attention hasn't supported {self.attn_backend} "
+                f"backend yet.")
 
         return out.reshape(bsz, q_len, -1)
 

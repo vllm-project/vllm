@@ -1104,12 +1104,12 @@ class PixtralHFAttention(nn.Module):
         q, k = apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=0)
 
         # Reshape for MultiHeadAttention: (batch, seq, hidden_size)
-        q_reshaped = q.transpose(1, 2).contiguous().view(batch, patches, -1)
-        k_reshaped = k.transpose(1, 2).contiguous().view(batch, patches, -1)
-        v_reshaped = v.transpose(1, 2).contiguous().view(batch, patches, -1)
+        q = q.contiguous().view(batch, patches, -1)
+        k = k.contiguous().view(batch, patches, -1)
+        v = v.contiguous().view(batch, patches, -1)
 
         # Use unified MultiHeadAttention with automatic backend selection
-        out = self.attn(q_reshaped, k_reshaped, v_reshaped)
+        out = self.attn(q, k, v)
 
         attn_output, _ = self.o_proj(out)
 
