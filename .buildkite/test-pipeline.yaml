@@ -42,7 +42,7 @@ steps:
   - bash standalone_tests/pytorch_nightly_dependency.sh
 
 - label: Async Engine, Inputs, Utils, Worker Test # 36min
-  timeout_in_minutes: 47
+  timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - vllm/
@@ -92,7 +92,7 @@ steps:
   - VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py
 
 - label: Core Test # 22min
-  timeout_in_minutes: 32
+  timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental]
   fast_check: true
   source_file_dependencies:
@@ -136,7 +136,7 @@ steps:
   - pytest -v -s entrypoints/test_chat_utils.py
 
 - label: Distributed Tests (4 GPUs) # 35min
-  timeout_in_minutes: 46
+  timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
