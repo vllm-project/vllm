@@ -22,6 +22,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” 
 #include <c10/cuda/CUDAGuard.h>
 
 #include "core/registration.h"
+#include "dispatch_utils.h"
 
 namespace hadacore {
 
@@ -787,16 +788,10 @@ void hadacore_transform(torch::Tensor& x) {
     at::cuda::CUDAGuard device_guard{(char)x.get_device()};
     auto stream = at::cuda::getCurrentCUDAStream().stream();
 
-    auto dtype = x.scalar_type();
-    if (dtype == torch::ScalarType::Half) {
-        hadacore::run_fht<torch::ScalarType::Half>(x.data_ptr(), x.data_ptr(),
-                                                   x.numel(), had_size, stream);
-    } else if (dtype == torch::ScalarType::BFloat16) {
-        hadacore::run_fht<torch::ScalarType::BFloat16>(x.data_ptr(), x.data_ptr(),
-                                                       x.numel(), had_size, stream);
-    } else {
-        TORCH_CHECK(false, "Only fp16 and bf16 supported currently");
-    }
+    VLLM_DISPATCH_HALF_TYPES(x.scalar_type(), "hadacore_transform_runfht", [&] {
+      auto constexpr SCALAR_TYPE = c10::CppTypeToScalarType<scalar_t>::value;
+      hadacore::run_fht<SCALAR_TYPE>(x.data_ptr(), x.data_ptr(), x.numel(), had_size, stream);
+    });
 
     x = x.reshape(res_shape);
 }
