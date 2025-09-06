@@ -27,6 +27,15 @@ class PrefixCacheStats:
 
 
 @dataclass
+class EngineStateStats:
+    """Stats for the engine state (sleep or awake)."""
+    # Whether engine is sleeping or not
+    sleep: int = 0
+    # Sleep level.
+    level: int = 0
+
+
+@dataclass
 class SchedulerStats:
     """Stats associated with the scheduler."""
 
@@ -43,6 +52,8 @@ class SchedulerStats:
         default_factory=PrefixCacheStats)
 
     spec_decoding_stats: Optional[SpecDecodingStats] = None
+
+    engine_stats: Optional[EngineStateStats] = None
 
     num_corrupted_reqs: int = 0
 
