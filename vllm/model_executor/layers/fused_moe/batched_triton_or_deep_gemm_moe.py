@@ -5,11 +5,14 @@ from typing import Optional
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
     BatchedDeepGemmExperts)
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedTritonExperts)
+
+logger = init_logger(__name__)
 
 
 class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
@@ -24,6 +27,11 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                  block_shape: Optional[list[int]] = None,
                  per_act_token_quant: bool = False,
                  allow_deep_gemm: bool = False):
+        logger.info(
+            "[MoE Debug] BatchedTritonOrDeepGemmExperts.__init__ called with: "
+            "max_num_tokens=%s, num_dispatchers=%s, use_fp8_w8a8=%s, "
+            "allow_deep_gemm=%s, block_shape=%s", max_num_tokens,
+            num_dispatchers, use_fp8_w8a8, allow_deep_gemm, block_shape)
         assert not use_int8_w8a8, "NYI"
         assert not use_int8_w8a16, "NYI"
         assert not use_int4_w4a16, "NYI"
@@ -49,15 +57,33 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             block_shape=self.block_shape,
         )
 
+        logger.debug(
+            "[MoE Debug] BatchedTritonOrDeepGemmExperts init: "
+            "allow_deep_gemm=%s, use_fp8_w8a8=%s, block_shape=%s, "
+            "DEEPGEMM_BLOCK_SHAPE=%s", allow_deep_gemm, use_fp8_w8a8,
+            self.block_shape, BatchedDeepGemmExperts.DEEPGEMM_BLOCK_SHAPE)
+
         self.allow_deep_gemm = (allow_deep_gemm and use_fp8_w8a8
                                 and self.block_shape
                                 == BatchedDeepGemmExperts.DEEPGEMM_BLOCK_SHAPE)
+
+        logger.debug(
+            "[MoE Debug] Final allow_deep_gemm decision: %s "
+            "(conditions: allow=%s, fp8=%s, shape_match=%s)",
+            self.allow_deep_gemm, allow_deep_gemm, use_fp8_w8a8,
+            self.block_shape == BatchedDeepGemmExperts.DEEPGEMM_BLOCK_SHAPE)
 
         self.batched_deep_gemm_experts = BatchedDeepGemmExperts(
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
             block_shape=self.block_shape,  # type: ignore[arg-type]
         ) if self.allow_deep_gemm else None
+
+        if self.allow_deep_gemm:
+            logger.debug(
+                "[MoE Debug] Created BatchedDeepGemmExperts successfully")
+        else:
+            logger.debug("[MoE Debug] Using BatchedTritonExperts fallback")
 
         assert (self.batched_deep_gemm_experts is not None
                 or self.batched_triton_experts is not None)
@@ -154,11 +180,27 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
     ):
+        logger.info(
+            "[MoE Debug] BatchedTritonOrDeepGemmExperts.apply() ENTRY: "
+            "allow_deep_gemm=%s, hidden_states.shape=%s, global_num_experts=%s",
+            self.allow_deep_gemm, hidden_states.shape, global_num_experts)
+
         experts = (self.batched_deep_gemm_experts
                    if self.allow_deep_gemm else self.batched_triton_experts)
+
+        # Log which expert implementation is being used
+        if self.allow_deep_gemm:
+            logger.info(
+                "[MoE Debug] Using BatchedDeepGemmExperts for forward pass")
+        else:
+            logger.info(
+                "[MoE Debug] Using BatchedTritonExperts for forward pass")
+
         assert experts is not None
         experts.apply(output, hidden_states, w1, w2, topk_weights, topk_ids,
                       activation, global_num_experts, expert_map, w1_scale,
                       w2_scale, w1_zp, w2_zp, a1q_scale, a2_scale, workspace13,
                       workspace2, expert_tokens_meta,
                       apply_router_weight_on_input)
+
+        logger.info("[MoE Debug] BatchedTritonOrDeepGemmExperts.apply() EXIT")

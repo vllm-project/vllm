@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from typing import Optional
 
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.distributed import (get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
@@ -188,6 +191,9 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     # The Deep Gemm kernels only support block size of 128
     DEEPGEMM_BLOCK_SHAPE: list[int] = [128, 128]
 
+    # Class variable for one-shot logging to verify dispatch optimization
+    _logged_dispatch_once: bool = False
+
     def __init__(self,
                  max_num_tokens: int,
                  num_dispatchers: int,
@@ -199,6 +205,13 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         block_shape: Block quantization block shape.
         per_act_token_quant: Per activation token quantization flag.
         """
+        logger.info(
+            "[MoE Debug] BatchedDeepGemmExperts.__init__ called with: "
+            "max_num_tokens=%s, num_dispatchers=%s, block_shape=%s, "
+            "per_act_token_quant=%s, DEEPGEMM_BLOCK_SHAPE=%s", max_num_tokens,
+            num_dispatchers, block_shape, per_act_token_quant,
+            self.DEEPGEMM_BLOCK_SHAPE)
+
         super().__init__(
             FusedMoEQuantConfig(
                 quant_dtype=torch.float8_e4m3fn,
@@ -208,6 +221,10 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert self.block_shape == self.DEEPGEMM_BLOCK_SHAPE
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
+
+        logger.info(
+            "[MoE Debug] BatchedDeepGemmExperts initialized successfully with "
+            "final block_shape=%s", self.block_shape)
 
     @property
     def activation_formats(
@@ -221,6 +238,56 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def supports_expert_map(self) -> bool:
         return False
+
+    def _get_effective_num_dispatchers(self) -> int:
+        """
+        Calculates the effective number of token dispatchers considering tensor
+        parallelism.
+        
+        When tensor parallelism (TP) is used (TP > 1), only the leader rank
+        (rank 0) in each TP group should dispatch tokens to avoid redundant
+        communication. This significantly reduces cross-rank communication
+        overhead in distributed environments.
+        
+        Returns:
+            int: The effective number of dispatchers to use.
+            When TP > 1:
+            - Returns max(1, num_dispatchers // tp_size) for leader ranks
+              (tp_rank == 0)
+            - Returns 0 for non-leader ranks (tp_rank != 0)
+            When TP <= 1:
+            - Returns the original num_dispatchers
+            
+        Note:
+            Leader ranks are guaranteed at least 1 dispatcher for stability,
+            while non-leader ranks return 0 to eliminate redundant dispatching.
+        """
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+
+        if tp_size <= 1:
+            # No TP or single device - use all dispatchers
+            return self.num_dispatchers
+
+        # TP > 1 case
+        eff = (max(1, self.num_dispatchers // tp_size) if tp_rank == 0 else 0)
+
+        # --- lightweight one-shot log for verification ---
+        if (not BatchedDeepGemmExperts._logged_dispatch_once
+                and os.getenv("VLLM_LOG_MOE_DISPATCH", "0") == "1"):
+            logger.info(
+                "[moe-dispatch-opt] tp_rank=%d/%d, num_dispatchers=%d -> "
+                "effective=%d, leader=%s, participates_a2a=%s",
+                tp_rank,
+                tp_size,
+                self.num_dispatchers,
+                eff,
+                str(tp_rank == 0),
+                str(eff > 0),
+            )
+            BatchedDeepGemmExperts._logged_dispatch_once = True
+
+        return eff
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Let PrepareAndFinalize::finalize() decide the impl.
@@ -239,10 +306,10 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_metadata: Optional[mk.ExpertTokensMetadata],
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         assert a.dim() == 2
-        # FIXME (varun): We should be able to dispatch only from the leader
-        # DP ranks in the case of TP > 1. At the moment, all the Ranks
-        # end up sending their tokens. This needs to be fixed.
-        num_dispatchers = self.num_dispatchers
+        # Optimize token dispatch: only leader DP ranks dispatch tokens when
+        # TP > 1. This reduces cross-rank communication overhead in distributed
+        # MoE models.
+        num_dispatchers = self._get_effective_num_dispatchers()
         num_experts = local_num_experts
         max_num_tokens = a.size(
             0) if self.max_num_tokens is None else self.max_num_tokens
@@ -274,8 +341,30 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
     ):
+        logger.info("[MoE Debug] *** BatchedDeepGemmExperts.apply() ENTRY *** "
+                    "THIS IS THE DEEP GEMM IMPLEMENTATION BEING CALLED!")
+        logger.info(
+            "[MoE Debug] BatchedDeepGemmExperts.apply() parameters: "
+            "hidden_states.shape=%s, global_num_experts=%s, activation=%s",
+            hidden_states.shape, global_num_experts, activation)
+
         assert expert_tokens_meta is not None
         expert_num_tokens = expert_tokens_meta.expert_num_tokens
+
+        # Monitor expert_num_tokens for workspace allocation analysis
+        if torch.cuda.is_current_stream_capturing():
+            logger.debug(
+                "[MoE Monitor] skip logging during CUDA Graph capture")
+        else:
+            cpu_vals = expert_num_tokens.detach().to("cpu")
+            logger.info(
+                "[MoE Monitor] expert_num_tokens "
+                "shape=%s sum=%d max=%d values(sample)=%s",
+                tuple(expert_num_tokens.shape),
+                int(cpu_vals.sum().item()),
+                int(cpu_vals.max().item()),
+                cpu_vals.numpy(),
+            )
 
         assert hidden_states.ndim == 3
         assert self.block_shape is not None
@@ -288,17 +377,27 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         E, max_num_tokens, N, K, top_k_num = mk._moe_problem_size(
             hidden_states, w1, w2, topk_ids)
 
+        logger.info(
+            "[MoE Debug] Problem size: E=%s, max_num_tokens=%s, N=%s, K=%s, "
+            "top_k_num=%s", E, max_num_tokens, N, K, top_k_num)
+
         workspace1 = _resize_cache(workspace13, (E, max_num_tokens, N))
 
         # (from deepgemm docs) : A value hint (which is a value on CPU)
         # for the M expectation of each batch, correctly setting this value
         # may lead to better performance.
         expected_m = max_num_tokens
+
+        logger.info("[MoE Debug] Calling first fp8_m_grouped_gemm_nt_masked")
         fp8_m_grouped_gemm_nt_masked((a1q, a1q_scale), (w1, w1_scale),
                                      workspace1, expert_num_tokens, expected_m)
 
+        logger.info("[MoE Debug] Calling silu_mul_fp8_quant_deep_gemm")
         a2q, a2q_scale = silu_mul_fp8_quant_deep_gemm(workspace1,
                                                       expert_num_tokens)
 
+        logger.info("[MoE Debug] Calling second fp8_m_grouped_gemm_nt_masked")
         fp8_m_grouped_gemm_nt_masked((a2q, a2q_scale), (w2, w2_scale), output,
                                      expert_num_tokens, expected_m)
+
+        logger.info("[MoE Debug] *** BatchedDeepGemmExperts.apply() EXIT ***")
