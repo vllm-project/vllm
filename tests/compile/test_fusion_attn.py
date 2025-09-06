@@ -12,12 +12,13 @@ from tests.v1.attention.utils import (BatchSpec, _Backend,
                                       create_common_attn_metadata)
 from vllm import LLM, SamplingParams
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
-from vllm.attention import Attention
+from vllm.attention import Attention, AttentionMetadata
 from vllm.attention.selector import global_force_attn_backend_context_manager
 from vllm.compilation.fusion import QUANT_OPS
 from vllm.compilation.fusion_attn import ATTN_OP, AttnFusionPass
 from vllm.compilation.fx_utils import find_op_nodes
 from vllm.compilation.noop_elimination import NoOpEliminationPass
+from vllm.compilation.post_cleanup import PostCleanupPass
 from vllm.config import (CacheConfig, CompilationConfig, CompilationLevel,
                          ModelConfig, PassConfig, SchedulerConfig, VllmConfig,
                          set_current_vllm_config)
@@ -197,7 +198,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
             device=self.device,
         )
 
-    def build_attn_metadata(self, batch_size: int, use_hnd: bool):
+    def build_attn_metadata(self, batch_size: int, use_hnd: bool) -> AttentionMetadata:
         """Initialize attention metadata."""
 
         # Create common attn metadata
@@ -437,7 +438,9 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
         noop_pass = NoOpEliminationPass(vllm_config)
         attn_pass = lambda *args, **kw: AttnFusionPass(vllm_config)(*args, **kw
                                                                     )
-        test_backend = TestBackend(noop_pass, attn_pass)
+        cleanup_pass = PostCleanupPass(vllm_config)
+
+        test_backend = TestBackend(noop_pass, attn_pass, cleanup_pass)
 
         # Compile model with fusion enabled
         model_compiled = torch.compile(model_fused,

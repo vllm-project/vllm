@@ -17,7 +17,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 
 from .inductor_pass import enable_fake_mode
-from .multi_output_match import MultiOutputMatch
 from .vllm_inductor_pass import VllmInductorPass
 
 logger = init_logger(__name__)
@@ -207,7 +206,6 @@ class FusedAddRMSNormStaticQuantPattern(RMSNormQuantPattern):
             inputs,
             pm.fwd_only,
             pm_pass,
-            extra_check=lambda m: MultiOutputMatch(m).process(),
         )
 
 
@@ -273,7 +271,6 @@ class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
             inputs,
             pm.fwd_only,
             pm_pass,
-            extra_check=lambda m: MultiOutputMatch(m).process(),
         )
 
 
@@ -339,7 +336,6 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
             inputs,
             pm.fwd_only,
             pm_pass,
-            extra_check=lambda m: MultiOutputMatch(m).process(),
         )
 
 
