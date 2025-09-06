@@ -457,6 +457,8 @@ class EngineArgs:
     """Custom logitproc types"""
 
     async_scheduling: bool = SchedulerConfig.async_scheduling
+    max_delayed_iterations: int = SchedulerConfig.max_delayed_iterations
+    max_num_delayed_tokens: int = SchedulerConfig.max_num_delayed_tokens
 
     kv_sharing_fast_prefill: bool = \
         CacheConfig.kv_sharing_fast_prefill
@@ -880,6 +882,12 @@ class EngineArgs:
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"])
         scheduler_group.add_argument("--async-scheduling",
                                      **scheduler_kwargs["async_scheduling"])
+        scheduler_group.add_argument(
+            "--max-delayed-iterations",
+            **scheduler_kwargs["max_delayed_iterations"])
+        scheduler_group.add_argument(
+            "--max-num-delayed-tokens",
+            **scheduler_kwargs["max_num_delayed_tokens"])
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
@@ -1360,6 +1368,8 @@ class EngineArgs:
             disable_hybrid_kv_cache_manager=self.
             disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
+            max_delayed_iterations=self.max_delayed_iterations,
+            max_num_delayed_tokens=self.max_num_delayed_tokens,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:

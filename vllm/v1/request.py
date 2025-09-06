@@ -116,6 +116,10 @@ class Request:
             self.get_hash_new_full_blocks = partial(block_hasher, self)
             self.block_hashes = self.get_hash_new_full_blocks()
 
+        # Delayed iterations is number of iterations that this
+        # request has been waiting in scheduler.queued.
+        self.delayed_iterations = 0
+
     @classmethod
     def from_engine_core_request(
         cls, request: EngineCoreRequest,
@@ -201,6 +205,7 @@ class RequestStatus(enum.IntEnum):
     WAITING_FOR_REMOTE_KVS = enum.auto()
     RUNNING = enum.auto()
     PREEMPTED = enum.auto()
+    QUEUED = enum.auto()
     # Note: anything after PREEMPTED will be considered
     # as a finished status.
     FINISHED_STOPPED = enum.auto()

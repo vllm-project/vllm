@@ -159,6 +159,19 @@ class SchedulerConfig:
     structured outputs, speculative decoding, and pipeline parallelism.
     """
 
+    max_delayed_iterations: int = 0
+    """The maximum number of iterations that a request can be delayed even
+    when resources are available. This allows prefill phase to run on a
+    larger batch size, which may be more efficient than running each request
+    as soon as possible.
+    """
+
+    max_num_delayed_tokens: int = 0
+    """The threshold over which prefill will run without delaying.
+    Must be less than max_num_batched_tokens. See also
+    max_delayed_iterations. 
+    """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
