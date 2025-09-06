@@ -419,8 +419,6 @@ class EngineArgs:
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: Union[str, Type[object]] = SchedulerConfig.scheduler_cls
 
-    override_neuron_config: dict[str, Any] = \
-        get_field(ModelConfig, "override_neuron_config")
     override_pooler_config: Optional[Union[dict, PoolerConfig]] = \
         ModelConfig.override_pooler_config
     compilation_config: CompilationConfig = \
@@ -561,8 +559,6 @@ class EngineArgs:
                                  help=model_kwargs["hf_token"]["help"])
         model_group.add_argument("--hf-overrides",
                                  **model_kwargs["hf_overrides"])
-        model_group.add_argument("--override-neuron-config",
-                                 **model_kwargs["override_neuron_config"])
         model_group.add_argument("--override-pooler-config",
                                  **model_kwargs["override_pooler_config"])
         model_group.add_argument("--logits-processor-pattern",
@@ -992,7 +988,6 @@ class EngineArgs:
             mm_processor_kwargs=self.mm_processor_kwargs,
             mm_processor_cache_gb=self.mm_processor_cache_gb,
             mm_encoder_tp_mode=self.mm_encoder_tp_mode,
-            override_neuron_config=self.override_neuron_config,
             override_pooler_config=self.override_pooler_config,
             logits_processor_pattern=self.logits_processor_pattern,
             generation_config=self.generation_config,

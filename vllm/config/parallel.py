@@ -377,10 +377,7 @@ class ParallelConfig:
             from vllm.executor import ray_utils
             backend: DistributedExecutorBackend = "mp"
             ray_found = ray_utils.ray_is_available()
-            if current_platform.is_neuron():
-                # neuron uses single process to control multiple devices
-                backend = "uni"
-            elif current_platform.is_tpu() and envs.VLLM_XLA_USE_SPMD:
+            if current_platform.is_tpu() and envs.VLLM_XLA_USE_SPMD:
                 backend = "uni"
             elif (current_platform.is_cuda()
                   and cuda_device_count_stateless() < self.world_size):
