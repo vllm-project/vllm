@@ -26,7 +26,7 @@
 """Inference-only Qwen2-VL model compatible with HuggingFace weights."""
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
-from typing import Any, Callable, Literal, Optional, TypedDict, Union
+from typing import Annotated, Any, Callable, Literal, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -70,6 +70,7 @@ from vllm.platforms import _Backend, current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
@@ -86,78 +87,119 @@ _MAX_FRAMES_PER_VIDEO = 16
 # === Vision Inputs === #
 
 
-class Qwen2VLImagePixelInputs(TypedDict):
-    type: Literal["pixel_values"]
-    pixel_values: torch.Tensor
-    """Shape:
-    `(num_patches, num_channels * patch_size * patch_size)`
+class Qwen2VLImagePixelInputs(TensorSchema):
     """
-
-    image_grid_thw: torch.Tensor
-    """Shape: `(num_images, 3)`
-    This should be in `(grid_t, grid_h, grid_w)` format.
-    """
-
-
-class Qwen2VLImageEmbeddingInputs(TypedDict):
-    type: Literal["image_embeds"]
-    image_embeds: torch.Tensor
-    """Supported types:
-    - list[`torch.Tensor`]: A list of tensors holding all images' features.
-        Each tensor holds an image's features.
-    - `torch.Tensor`: A tensor holding all images' features
-        (concatenation of all images' feature tensors).
+    Dimensions:
+        - np: The total number of patches over each image over each prompt in
+              the batch
+        - ni: Number of images
+        - cps: Number of channels * patch_size * patch_size
     
-    Tensor shape: `(num_image_features, hidden_size)`
-    - `num_image_features` varies based on
-        the number and resolution of the images.
-    - `hidden_size` must match the hidden size of language model backbone.
+    Historical context:
+        - pixel_values shape: (num_patches, num_channels * patch_size * 
+          patch_size)
+        - image_grid_thw shape: (num_images, 3) in (grid_t, grid_h, grid_w)
+          format
     """
+    type: Literal["pixel_values"]
 
-    image_grid_thw: torch.Tensor
-    """Shape: `(num_images, 3)`
-    This should be in `(grid_t, grid_h, grid_w)` format.
+    pixel_values: Annotated[
+        torch.Tensor,
+        TensorShape("np", "cps"),
+    ]
+
+    image_grid_thw: Annotated[
+        torch.Tensor,
+        TensorShape("ni", 3),
+    ]
+
+
+class Qwen2VLImageEmbeddingInputs(TensorSchema):
     """
+    Dimensions:
+        - nf: Number of image features
+        - hs: Hidden size
+        - ni: Number of images
+    
+    Historical context:
+        - image_embeds shape: (num_image_features, hidden_size)
+        - num_image_features varies based on the number and resolution of the
+          images.
+        - hidden_size must match the hidden size of language model backbone.
+        - image_grid_thw shape: (num_images, 3) in (grid_t, grid_h, grid_w)
+          format
+    """
+    type: Literal["image_embeds"]
+
+    image_embeds: Annotated[
+        torch.Tensor,
+        TensorShape("nf", "hs"),
+    ]
+
+    image_grid_thw: Annotated[
+        torch.Tensor,
+        TensorShape("ni", 3),
+    ]
 
 
 Qwen2VLImageInputs = Union[Qwen2VLImagePixelInputs,
                            Qwen2VLImageEmbeddingInputs]
 
 
-class Qwen2VLVideoPixelInputs(TypedDict):
-    type: Literal["pixel_values_videos"]
-    pixel_values_videos: torch.Tensor
-    """Shape:
-    `(num_patches,
-      num_channels * temporal_patch_size * patch_size * patch_size)`
+class Qwen2VLVideoPixelInputs(TensorSchema):
     """
-
-    video_grid_thw: torch.Tensor
-    """Shape: `(num_videos, 3)`
-
-    This should be in `(grid_t, grid_h, grid_w)` format.
-    """
-
-
-class Qwen2VLVideoEmbeddingInputs(TypedDict):
-    type: Literal["video_embeds"]
-    video_embeds: torch.Tensor
-    """Supported types:
-    - list[`torch.Tensor`]: A list of tensors holding all videos' features.
-        Each tensor holds an video's features.
-    - `torch.Tensor`: A tensor holding all videos' features
-        (concatenation of all videos' feature tensors).
+    Dimensions:
+        - np: The total number of patches over each video over each prompt in
+              the batch
+        - ctps: Number of channels * temporal_patch_size * patch_size * 
+          patch_size
+        - nv: Number of videos
     
-    Tensor shape: `(num_image_features, hidden_size)`
-    - `num_image_features` varies based on 
-        the number and resolution of the videos.
-    - `hidden_size` must match the hidden size of language model backbone.
+    Historical context:
+        - pixel_values_videos shape: (num_patches, num_channels * 
+          temporal_patch_size * patch_size * patch_size)
+        - video_grid_thw shape: (num_videos, 3) in (grid_t, grid_h, grid_w)
+          format
     """
+    type: Literal["pixel_values_videos"]
 
-    video_grid_thw: torch.Tensor
-    """Shape: `(num_videos, 3)`
-    This should be in `(grid_t, grid_h, grid_w)` format.
+    pixel_values_videos: Annotated[
+        torch.Tensor,
+        TensorShape("np", "ctps"),
+    ]
+
+    video_grid_thw: Annotated[
+        torch.Tensor,
+        TensorShape("nv", 3),
+    ]
+
+
+class Qwen2VLVideoEmbeddingInputs(TensorSchema):
     """
+    Dimensions:
+        - nf: Number of video features
+        - hs: Hidden size
+        - nv: Number of videos
+    
+    Historical context:
+        - video_embeds shape: (num_video_features, hidden_size)
+        - num_video_features varies based on the number and resolution of the
+          videos.
+        - hidden_size must match the hidden size of language model backbone.
+        - video_grid_thw shape: (num_videos, 3) in (grid_t, grid_h, grid_w)
+          format
+    """
+    type: Literal["video_embeds"]
+
+    video_embeds: Annotated[
+        torch.Tensor,
+        TensorShape("nf", "hs"),
+    ]
+
+    video_grid_thw: Annotated[
+        torch.Tensor,
+        TensorShape("nv", 3),
+    ]
 
 
 Qwen2VLVideoInputs = Union[Qwen2VLVideoPixelInputs,
@@ -1126,10 +1168,6 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             image_grid_thw = self._validate_and_reshape_mm_tensor(
                 image_grid_thw, "image grid_thw")
 
-            if not isinstance(pixel_values, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of image pixel values. "
-                                 f"Got type: {type(pixel_values)}")
-
             return Qwen2VLImagePixelInputs(type="pixel_values",
                                            pixel_values=pixel_values,
                                            image_grid_thw=image_grid_thw)
@@ -1140,9 +1178,6 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             image_grid_thw = self._validate_and_reshape_mm_tensor(
                 image_grid_thw, "image grid_thw")
 
-            if not isinstance(image_embeds, torch.Tensor):
-                raise ValueError("Incorrect type of image embeddings. "
-                                 f"Got type: {type(image_embeds)}")
             return Qwen2VLImageEmbeddingInputs(type="image_embeds",
                                                image_embeds=image_embeds,
                                                image_grid_thw=image_grid_thw)
@@ -1174,9 +1209,6 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             video_grid_thw = self._validate_and_reshape_mm_tensor(
                 video_grid_thw, "video grid_thw")
 
-            if not isinstance(video_embeds, torch.Tensor):
-                raise ValueError("Incorrect type of video embeddings. "
-                                 f"Got type: {type(video_embeds)}")
             return Qwen2VLVideoEmbeddingInputs(type="video_embeds",
                                                video_embeds=video_embeds,
                                                video_grid_thw=video_grid_thw)
