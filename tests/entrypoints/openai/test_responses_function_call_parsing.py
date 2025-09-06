@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 """
 Unit tests for ResponsesRequest function call parsing.
 
@@ -28,18 +27,14 @@ def test_function_call_dict_parsing():
     }
 
     # Create ResponsesRequest with function call dictionary
-    request_data = {
-        'input': [function_call_dict],
-        'model': 'test-model'
-    }
+    request_data = {'input': [function_call_dict], 'model': 'test-model'}
 
     request = ResponsesRequest(**request_data)
     parsed_function_call = request.input[0]
 
     # Verify that the dictionary was parsed as ResponseFunctionToolCall
     assert isinstance(parsed_function_call, ResponseFunctionToolCall), (
-        f"Expected ResponseFunctionToolCall, got {type(parsed_function_call)}"
-    )
+        f"Expected ResponseFunctionToolCall, got {type(parsed_function_call)}")
 
     # Verify all attributes are preserved
     assert parsed_function_call.arguments == '{"location": "Tokyo"}'
@@ -59,14 +54,10 @@ def test_direct_function_call_object_preservation():
         name='get_temperature',
         type='function_call',
         id='ft_12345',
-        status='completed'
-    )
+        status='completed')
 
     # Create ResponsesRequest with the object
-    request_data = {
-        'input': [function_call_obj],
-        'model': 'test-model'
-    }
+    request_data = {'input': [function_call_obj], 'model': 'test-model'}
 
     request = ResponsesRequest(**request_data)
     parsed_function_call = request.input[0]
@@ -96,7 +87,8 @@ def test_mixed_input_types_with_function_calls():
             },  # Regular dictionary input
             function_call_dict  # Function call dict
         ],
-        'model': 'test-model'
+        'model':
+        'test-model'
     }
 
     request = ResponsesRequest(**request_data)
@@ -106,7 +98,7 @@ def test_mixed_input_types_with_function_calls():
     assert isinstance(request.input[0], dict)
     assert request.input[0]['role'] == 'user'
     assert request.input[0]['content'] == 'Hello, how can I help?'
-    
+
     assert isinstance(request.input[1], ResponseFunctionToolCall)
     assert request.input[1].name == 'search'
     assert request.input[1].arguments == '{"query": "weather"}'
@@ -129,10 +121,7 @@ def test_function_call_with_complex_arguments(arguments):
         'status': 'completed'
     }
 
-    request_data = {
-        'input': [complex_function_call],
-        'model': 'test-model'
-    }
+    request_data = {'input': [complex_function_call], 'model': 'test-model'}
 
     request = ResponsesRequest(**request_data)
     parsed_function_call = request.input[0]

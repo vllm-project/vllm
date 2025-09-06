@@ -409,7 +409,8 @@ class ResponsesRequest(OpenAIBaseModel):
         if isinstance(input_data, list):
             fixed_input = []
             for item in input_data:
-                if isinstance(item, dict) and item.get('type') == 'function_call':
+                if isinstance(item,
+                              dict) and item.get('type') == 'function_call':
                     # Convert dict to ResponseFunctionToolCall object
                     try:
                         from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
