@@ -325,9 +325,10 @@ class AsyncLLM(EngineClient):
     # re-multiplexed in the API server anyhow.
     async def generate(
         self,
-        prompt: Union[PromptType, EngineCoreRequest],
+        prompt: PromptType,
         sampling_params: SamplingParams,
         request_id: str,
+        engine_request: Optional[EngineCoreRequest] = None,
         prompt_str: Optional[str] = None,
         lora_request: Optional[LoRARequest] = None,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
@@ -374,15 +375,19 @@ class AsyncLLM(EngineClient):
                     tokenization_kwargs,
                 )
 
+            request: Union[EngineCoreRequest, PromptType] = engine_request
+            if engine_request is None:
+                request = prompt
+
             q = await self.add_request(
                 request_id,
-                prompt,
+                request,
                 prompt_str,
                 sampling_params,
                 lora_request=lora_request,
+                tokenization_kwargs=tokenization_kwargs,
                 trace_headers=trace_headers,
                 priority=priority,
-                tokenization_kwargs=tokenization_kwargs,
                 data_parallel_rank=data_parallel_rank,
             )
 

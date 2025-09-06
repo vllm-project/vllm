@@ -322,6 +322,8 @@ class OpenAIServingChat(OpenAIServing):
                     )
                 else:
                     if isinstance(self.engine_client, AsyncLLM):
+                        assert self.processor is not None
+
                         tokenization_kwargs: dict[str, Any] = {}
                         _validate_truncation_size(
                             self.max_model_len,
@@ -341,9 +343,10 @@ class OpenAIServingChat(OpenAIServing):
                             ))
 
                         generator = self.engine_client.generate(
-                            engine_request,
+                            engine_prompt,
                             sampling_params,
                             request_id,
+                            engine_request=engine_request,
                             lora_request=lora_request,
                             trace_headers=trace_headers,
                             priority=request.priority,
