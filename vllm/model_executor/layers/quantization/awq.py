@@ -5,6 +5,7 @@ from typing import Any, Optional, Union
 
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
@@ -54,6 +55,8 @@ class AWQConfig(QuantizationConfig):
         return "awq"
 
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
+        if envs.VLLM_USE_TRITON_AWQ:
+            return [torch.half, torch.bfloat16]
         return [torch.half]
 
     @classmethod
