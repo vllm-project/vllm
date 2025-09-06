@@ -34,6 +34,7 @@ class BatchDescriptor(NamedTuple):
     """
     num_tokens: int
     uniform_decode: bool = False
+    num_reqs: Optional[int] = None
     """
     False can also be used for an uniform decode batch to dispatch to the 
     cudagraph supporting non-uniform batches.
@@ -44,7 +45,9 @@ class BatchDescriptor(NamedTuple):
         """
         Return a non-uniform version of current batch descriptor.
         """
-        return BatchDescriptor(self.num_tokens, uniform_decode=False)
+        return BatchDescriptor(self.num_tokens,
+                               uniform_decode=False,
+                               num_reqs=self.num_reqs)
 
 
 def _compute_chunked_local_num_tokens(num_tokens_across_dp_cpu: list[int],
