@@ -76,7 +76,6 @@ steps:
 - label: Basic Correctness Test # 20min
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental]
-  fast_check: true
   torch_nightly: true
   source_file_dependencies:
   - vllm/
@@ -94,7 +93,6 @@ steps:
 - label: Core Test # 22min
   timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental]
-  fast_check: true
   source_file_dependencies:
   - vllm/core
   - vllm/distributed
@@ -106,7 +104,6 @@ steps:
   timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
-  fast_check: true
   torch_nightly: true
   source_file_dependencies:
   - vllm/
@@ -123,7 +120,6 @@ steps:
   timeout_in_minutes: 130
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
-  fast_check: true
   torch_nightly: true
   source_file_dependencies:
   - vllm/
@@ -535,7 +531,6 @@ steps:
 - label: OpenAI-Compatible Tool Use # 23 min
   timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental]
-  fast_check: false
   source_file_dependencies:
     - vllm/
     - tests/tool_use
@@ -549,31 +544,34 @@ steps:
 - label: Basic Models Test # 57min
   timeout_in_minutes: 75
   mirror_hardwares: [amdexperimental]
+  fast_check: true
   torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models
   commands:
-    - pytest -v -s models/test_transformers.py
-    - pytest -v -s models/test_registry.py
-    - pytest -v -s models/test_utils.py
-    - pytest -v -s models/test_vision.py
-    - pytest -v -s models/test_initialization.py
+    - pytest -v -s --durations=100 models/test_transformers.py
+    - pytest -v -s --durations=100 models/test_registry.py
+    - pytest -v -s --durations=100 models/test_utils.py
+    - pytest -v -s --durations=100 models/test_vision.py
+    - pytest -v -s --durations=100 models/test_initialization.py
 
 - label: Language Models Test (Standard) # 35min
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
+  fast_check: true
   torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/language
   commands:
     - pip freeze | grep -E 'torch'
-    - pytest -v -s models/language -m core_model
+    - pytest -v -s --durations=100 models/language -m core_model
 
 - label: Language Models Test (Hybrid) # 35 min
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
+  fast_check: true
   torch_nightly: true
   source_file_dependencies:
   - vllm/
@@ -583,7 +581,7 @@ steps:
     # Note: also needed to run plamo2 model in vLLM
     - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.2.5'
     - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
-    - pytest -v -s models/language/generation -m hybrid_model
+    - pytest -v -s --durations=100 models/language/generation -m hybrid_model
 
 - label: Language Models Test (Extended Generation) # 80min
   timeout_in_minutes: 110
