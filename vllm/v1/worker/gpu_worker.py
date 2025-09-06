@@ -362,7 +362,6 @@ class Worker(WorkerBase):
             intermediate_tensors = IntermediateTensors(
                 get_pp_group().recv_tensor_dict(
                     all_gather_group=get_tp_group()))
-
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
         if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput)):
@@ -382,8 +381,8 @@ class Worker(WorkerBase):
 
         # In case of PP with kv transfer, we need to pass through the
         # kv_connector_output
-        if (not kv_connector_output.finished_sending
-                and not kv_connector_output.finished_recving):
+        if (not kv_connector_output.cu_finished_sending
+                and not kv_connector_output.cu_finished_recving):
             return EMPTY_MODEL_RUNNER_OUTPUT
 
         output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)

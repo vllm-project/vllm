@@ -6,15 +6,17 @@ Define KV connector functionality mixin for model runners.
 import copy
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from typing import Generator  # noqa: UP035
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Union
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_shutdown,
                                           get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import init_logger
+from vllm.sequence import IntermediateTensors
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, KVConnectorOutput,
                              ModelRunnerOutput)
 
@@ -63,8 +65,29 @@ class KVConnectorModelRunnerMixin:
         return None, None
 
     @staticmethod
-    def kv_connector_no_forward(scheduler_output: "SchedulerOutput",
-                                vllm_config: VllmConfig) -> ModelRunnerOutput:
+    def merge_kv_connector_output(
+        kv_connector_output: Optional[KVConnectorOutput],
+        intermediate_tensors: Optional[IntermediateTensors]
+    ) -> KVConnectorOutput:
+        output = KVConnectorOutput()
+        if kv_connector_output is not None:
+            output.add_finished(kv_connector_output.cu_finished_sending,
+                                kv_connector_output.cu_finished_recving)
+        if (intermediate_tensors is not None
+                and hasattr(intermediate_tensors, "kv_connector_output")
+                and intermediate_tensors.kv_connector_output is not None):
+            output.add_finished(
+                intermediate_tensors.kv_connector_output.cu_finished_sending,
+                intermediate_tensors.kv_connector_output.cu_finished_recving)
+
+        return output
+
+    @staticmethod
+    def kv_connector_no_forward(
+        scheduler_output: "SchedulerOutput",
+        intermediate_tensors: Optional[IntermediateTensors],
+        vllm_config: VllmConfig
+    ) -> Union[ModelRunnerOutput, IntermediateTensors]:
         # KV send/recv even if no work to do.
         with set_forward_context(
                 None, vllm_config
@@ -72,13 +95,27 @@ class KVConnectorModelRunnerMixin:
                 scheduler_output, wait_for_save=False) as kv_connector_output:
             pass
 
-        if (not kv_connector_output.finished_sending
-                and not kv_connector_output.finished_recving):
-            return EMPTY_MODEL_RUNNER_OUTPUT
+        kv_connector_output = \
+            KVConnectorModelRunnerMixin.merge_kv_connector_output(
+            kv_connector_output, intermediate_tensors)
 
-        output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
-        output.kv_connector_output = kv_connector_output
-        return output
+        if get_pp_group().is_last_rank:
+            if (not kv_connector_output.cu_finished_sending
+                    and not kv_connector_output.cu_finished_recving):
+                return EMPTY_MODEL_RUNNER_OUTPUT
+
+            output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
+            output.kv_connector_output = kv_connector_output
+            logger.info("kv_connector_no_forward output %s", output)
+            return output
+        else:
+            if intermediate_tensors is None:
+                intermediate_tensors = IntermediateTensors({
+                    "hidden_states": None,
+                    "residual": None
+                })
+            intermediate_tensors.kv_connector_output = kv_connector_output
+            return intermediate_tensors
 
     @staticmethod
     def maybe_get_kv_connector_output(
@@ -96,7 +133,6 @@ class KVConnectorModelRunnerMixin:
         wait_for_save: bool = True
     ) -> Generator[KVConnectorOutput, None, None]:
         output = KVConnectorOutput()
-
         # Update KVConnector with the KVConnector metadata forward().
         kv_connector = get_kv_transfer_group()
         assert isinstance(kv_connector, KVConnectorBase)
@@ -115,7 +151,8 @@ class KVConnectorModelRunnerMixin:
             if wait_for_save:
                 kv_connector.wait_for_save()
 
-            output.finished_sending, output.finished_recving = (
-                kv_connector.get_finished(scheduler_output.finished_req_ids))
+            finished_sending, finished_recving = kv_connector.get_finished(
+                scheduler_output.finished_req_ids)
+            output.add_finished(finished_sending, finished_recving)
 
             kv_connector.clear_connector_metadata()

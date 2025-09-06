@@ -947,6 +947,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 return EMPTY_MODEL_RUNNER_OUTPUT
 
             return self.kv_connector_no_forward(scheduler_output,
+                                                intermediate_tensors,
                                                 self.vllm_config)
 
         if self.supports_mm_inputs:
