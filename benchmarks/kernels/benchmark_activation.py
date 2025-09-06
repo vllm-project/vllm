@@ -24,10 +24,9 @@ def benchmark_activation(
     intermediate_size: int,
     provider: str,
     func_name: str,
-    dtype: str,
+    dtype: torch.dtype,
 ):
     device = "cuda"
-    torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
     num_tokens = batch_size * seq_len
     dim = intermediate_size
     current_platform.seed_everything(42)
@@ -82,7 +81,7 @@ if __name__ == "__main__":
     assert args
 
     func_name = args.func_name
-    dtype = args.dtype
+    dtype = STR_DTYPE_TO_TORCH_DTYPE[args.dtype]
 
     perf_report = triton.testing.perf_report(
         triton.testing.Benchmark(
@@ -93,7 +92,7 @@ if __name__ == "__main__":
             line_names=["Custom OP", "Compiled"],
             styles=[("blue", "-"), ("green", "-")],
             ylabel="ms",
-            plot_name=f"activation-op-performance-{func_name}",
+            plot_name=f"{func_name}-op-performance",
             args={},
         )
     )
