@@ -109,7 +109,7 @@ class EplbState:
 
     expert_load_pass: torch.Tensor
     """
-    Expert load during this forward pass. 
+    Expert load during this forward pass.
     We use the token count each expert processes as the load.
 
     Shape: (num_moe_layers, num_physical_experts)
@@ -433,7 +433,25 @@ class EplbState:
                         "(profile)" if is_profile else "")
 
         if global_expert_load is None:
-            # Map the physical expert load to global logical experts
+            # This mapping is only used here, so we do not store it in the
+            # state
+            if self.physical_to_logical_map.size(
+                    -1) < model.num_physical_experts:
+                # Pad with zeros to expand
+                padding_needed = (model.num_physical_experts -
+                                  self.physical_to_logical_map.size(-1))
+                local_physical_to_logical_map = torch.nn.functional.pad(
+                    self.physical_to_logical_map, (0, padding_needed))
+                self.expert_load_window = torch.nn.functional.pad(
+                    self.expert_load_window,
+                    (0, padding_needed),
+                    value=0,
+                )
+            else:
+                local_physical_to_logical_map = (self.physical_to_logical_map[
+                    ..., :model.num_physical_experts])
+
+            # Map the local physical expert load to global logical experts
             logical_expert_load_window = torch.zeros(
                 self.expert_load_window_size,
                 model.num_moe_layers,
@@ -443,7 +461,7 @@ class EplbState:
             )
             logical_expert_load_window.scatter_add_(
                 dim=-1,
-                index=self.physical_to_logical_map.unsqueeze(0).expand_as(
+                index=local_physical_to_logical_map.unsqueeze(0).expand_as(
                     self.expert_load_window).long(),
                 src=self.expert_load_window,
             )
@@ -540,6 +558,23 @@ class EplbState:
             )
             self.logical_to_physical_map.copy_(new_logical_to_physical_map)
             self.logical_replica_count.copy_(new_logical_replica_count)
+
+            num_physical_experts = self.physical_to_logical_map.shape[-1]
+            if num_physical_experts < self.expert_load_window.shape[-1]:
+                self.expert_load_window = self.expert_load_window[
+                    ..., :num_physical_experts]
+
+            # Update expert_load_pass tensor size to match
+            # model.num_physical_experts
+            current_num_experts = self.expert_load_pass.size(-1)
+            if num_physical_experts > current_num_experts:
+                padding_needed = (num_physical_experts - current_num_experts)
+                self.expert_load_pass = torch.nn.functional.pad(
+                    self.expert_load_pass, (0, padding_needed))
+            elif num_physical_experts < current_num_experts:
+                self.expert_load_pass = self.expert_load_pass[
+                    ..., :num_physical_experts]
+            model.update_expert_load_view(self.expert_load_pass)
 
         if is_main_rank:
             assert time_start is not None
