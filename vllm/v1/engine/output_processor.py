@@ -114,7 +114,6 @@ class RequestState:
 
         # Track abort state for synchronized cleanup
         self.is_marked_for_abort = False
-        self.abort_sent_to_engine = False
 
     @classmethod
     def from_new_request(
