@@ -53,6 +53,7 @@ from vllm.transformers_utils.tokenizers import (maybe_serialize_tool_calls,
                                                 truncate_tool_call_ids,
                                                 validate_request_params)
 from vllm.utils import as_list
+from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.processor import Processor
 
 logger = init_logger(__name__)
@@ -320,35 +321,44 @@ class OpenAIServingChat(OpenAIServing):
                         lora_request=lora_request,
                     )
                 else:
-                    assert self.processor is not None
+                    if isinstance(self.engine_client, AsyncLLM):
+                        tokenization_kwargs: dict[str, Any] = {}
+                        _validate_truncation_size(
+                            self.max_model_len,
+                            sampling_params.truncate_prompt_tokens,
+                            tokenization_kwargs,
+                        )
 
-                    tokenization_kwargs: dict[str, Any] = {}
-                    _validate_truncation_size(
-                        self.max_model_len,
-                        sampling_params.truncate_prompt_tokens,
-                        tokenization_kwargs,
-                    )
+                        prompt_str, engine_request = (
+                            self.processor.process_inputs(
+                                request_id,
+                                engine_prompt,
+                                sampling_params,
+                                lora_request=lora_request,
+                                tokenization_kwargs=tokenization_kwargs,
+                                trace_headers=trace_headers,
+                                priority=request.priority,
+                            ))
 
-                    prompt_str, engine_request = self.processor.process_inputs(
-                        request_id,
-                        engine_prompt,
-                        sampling_params,
-                        lora_request=lora_request,
-                        tokenization_kwargs=tokenization_kwargs,
-                        trace_headers=trace_headers,
-                        priority=request.priority,
-                    )
-
-                    generator = self.engine_client.generate(
-                        engine_request,
-                        sampling_params,
-                        request_id,
-                        lora_request=lora_request,
-                        trace_headers=trace_headers,
-                        priority=request.priority,
-                        prompt_str=prompt_str,
-                        tokenization_kwargs=tokenization_kwargs,
-                    )
+                        generator = self.engine_client.generate(
+                            engine_request,
+                            sampling_params,
+                            request_id,
+                            lora_request=lora_request,
+                            trace_headers=trace_headers,
+                            priority=request.priority,
+                            prompt_str=prompt_str,
+                            tokenization_kwargs=tokenization_kwargs,
+                        )
+                    else:
+                        generator = self.engine_client.generate(
+                            engine_prompt,
+                            sampling_params,
+                            request_id,
+                            lora_request=lora_request,
+                            trace_headers=trace_headers,
+                            priority=request.priority,
+                        )
 
                 generators.append(generator)
         except ValueError as e:
