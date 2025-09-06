@@ -72,6 +72,7 @@ class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
 
         Args:
             scheduler_output: The scheduler output to execute.
+            non_block: If True, the method will return a Future.
 
         Returns:
             The model runner output.
