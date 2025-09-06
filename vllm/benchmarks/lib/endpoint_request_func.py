@@ -42,13 +42,17 @@ class StreamedResponseHandler:
         # if self.buffer is not empty, check if it is a complete message
         # by removing data: prefix and check if it is a valid JSON
         if self.buffer.startswith("data: "):
-            message = self.buffer.removeprefix("data: ").strip()
-            if message:
+            message_content = self.buffer.removeprefix("data: ").strip()
+            if message_content == "[DONE]":
+                messages.append(self.buffer.strip())
+                self.buffer = ""
+            elif message_content:
                 try:
-                    json.loads(message)
-                    messages.append(message)
+                    json.loads(message_content)
+                    messages.append(self.buffer.strip())
                     self.buffer = ""
                 except json.JSONDecodeError:
+                    # Incomplete JSON, wait for more chunks.
                     pass
 
         return messages
