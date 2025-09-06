@@ -145,18 +145,11 @@ class CacheConfig:
 
         self._verify_cache_dtype()
         self._verify_prefix_caching()
-        self._verify_kv_sharing_fast_prefill()
 
     def metrics_info(self):
         # convert cache_config to dict(key: str, value: str) for prometheus
         # metrics info
         return {key: str(value) for key, value in self.__dict__.items()}
-
-    def _verify_kv_sharing_fast_prefill(self) -> None:
-        if self.kv_sharing_fast_prefill and not envs.VLLM_USE_V1:
-            raise NotImplementedError(
-                "Fast prefill optimization for KV sharing is not supported "
-                "in V0 currently.")
 
     @model_validator(mode='after')
     def _verify_args(self) -> Self:
