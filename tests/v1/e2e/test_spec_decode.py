@@ -130,6 +130,8 @@ def test_ngram_correctness(
     [
         # TODO: Re-enable this once tests/models/test_initialization.py is fixed, see PR #22333 #22611  # noqa: E501
         # (("eagle3", "Qwen/Qwen3-8B", "AngelSlim/Qwen3-8B_eagle3", 1), False),
+        # TODO: Re-enable this once transfomers release with cf487cd(transfomers git) # noqa: E501
+        # (("eagle3", "tencent/Hunyuan-1.8B-Instruct", "AngelSlim/Hunyuan-1.8B-Instruct_eagle3", 1), False), #noqa: E501
         (("eagle", "meta-llama/Llama-3.1-8B-Instruct",
           "yuhuili/EAGLE-LLaMA3.1-Instruct-8B", 1), False),
         (("eagle3", "meta-llama/Llama-3.1-8B-Instruct",
@@ -150,6 +152,8 @@ def test_ngram_correctness(
     ids=[
         # TODO: Re-enable this once tests/models/test_initialization.py is fixed, see PR #22333 #22611  # noqa: E501
         # "qwen3_eagle3",
+        # TODO: Re-enable this once transfomers release with cf487cd(transfomers git) # noqa: E501
+        # "hunyuan_eagle3",
         "llama3_eagle",
         "llama3_eagle3",
         "llama4_eagle",
@@ -192,6 +196,9 @@ def test_eagle_correctness(
             m.setenv("VLLM_ROCM_USE_AITER", "1")
 
         method, model_name, spec_model_name, tp_size = model_setup
+
+        if "Hunyuan" in model_name and attn_backend == "TREE_ATTN":
+            pytest.skip("TREE ATTN not support Hunyuan Model yet")
 
         ref_llm = LLM(model=model_name,
                       max_model_len=2048,
