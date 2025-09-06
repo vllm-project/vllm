@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
 import torch
 from torch.nn.parameter import Parameter
@@ -310,7 +310,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             w13_bias = layer.w13_bias.data.to(torch.float32)
             w2_bias = layer.w2_bias.data.to(torch.float32)
 
-            # Swap w1 and w3 as the defenition of
+            # Swap w1 and w3 as the definition of
             # swiglu is different in the trtllm-gen
             def swap_every_two_rows(x, axis=-1):
                 shape = x.shape
@@ -554,7 +554,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
 
         if enable_eplb:
             raise NotImplementedError("EPLB is not supported for mxfp4")

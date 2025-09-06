@@ -3,8 +3,9 @@
 
 from typing import Optional
 
-from vllm.sequence import (VLLM_INVALID_TOKEN_ID, Logprob, SamplingParams,
-                           Sequence, SequenceGroup)
+from vllm.logprobs import Logprob
+from vllm.sequence import (VLLM_INVALID_TOKEN_ID, SamplingParams, Sequence,
+                           SequenceGroup)
 
 from .detokenizer_utils import (convert_prompt_ids_to_tokens,
                                 detokenize_incrementally)

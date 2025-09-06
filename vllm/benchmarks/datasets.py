@@ -1228,6 +1228,16 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
                           default=None,
                           help="Split of the HF dataset.")
     hf_group.add_argument(
+        "--hf-name",
+        type=str,
+        default=None,
+        help=(
+            "Name of the dataset on HuggingFace "
+            "(e.g., 'lmarena-ai/VisionArena-Chat'). "
+            "Specify this if your dataset-path is a local path."
+        ),
+    )
+    hf_group.add_argument(
         "--hf-output-len",
         type=int,
         default=None,
@@ -1307,28 +1317,53 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
     elif args.dataset_name == "hf":
         # all following datasets are implemented from the
         # HuggingFaceDataset base class
-        if args.dataset_path in VisionArenaDataset.SUPPORTED_DATASET_PATHS:
+        if (
+            args.dataset_path in VisionArenaDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in VisionArenaDataset.SUPPORTED_DATASET_PATHS
+        ):
             dataset_class = VisionArenaDataset
             args.hf_split = "train"
             args.hf_subset = None
-        elif args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS:
+        elif (
+            args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in InstructCoderDataset.SUPPORTED_DATASET_PATHS
+        ):
             dataset_class = InstructCoderDataset
             args.hf_split = "train"
-        elif args.dataset_path in MTBenchDataset.SUPPORTED_DATASET_PATHS:
+        elif (
+            args.dataset_path in MTBenchDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in MTBenchDataset.SUPPORTED_DATASET_PATHS
+        ):
             dataset_class = MTBenchDataset
             args.hf_split = "train"
-        elif args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS:
+        elif (
+            args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in ConversationDataset.SUPPORTED_DATASET_PATHS
+        ):
             dataset_class = ConversationDataset
-        elif args.dataset_path in AIMODataset.SUPPORTED_DATASET_PATHS:
+        elif (
+            args.dataset_path in AIMODataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in AIMODataset.SUPPORTED_DATASET_PATHS
+        ):
             dataset_class = AIMODataset
             args.hf_split = "train"
-        elif args.dataset_path in NextEditPredictionDataset.SUPPORTED_DATASET_PATHS:  # noqa: E501
+        elif (
+            args.dataset_path
+            in NextEditPredictionDataset.SUPPORTED_DATASET_PATHS  # noqa: E501
+            or args.hf_name in NextEditPredictionDataset.SUPPORTED_DATASET_PATHS
+        ):
             dataset_class = NextEditPredictionDataset
             args.hf_split = "train"
-        elif args.dataset_path in ASRDataset.SUPPORTED_DATASET_PATHS:
+        elif (
+            args.dataset_path in ASRDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in ASRDataset.SUPPORTED_DATASET_PATHS
+        ):
             dataset_class = ASRDataset
             args.hf_split = "train"
-        elif args.dataset_path in MLPerfDataset.SUPPORTED_DATASET_PATHS:
+        elif (
+            args.dataset_path in MLPerfDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in MLPerfDataset.SUPPORTED_DATASET_PATHS
+        ):
             dataset_class = MLPerfDataset
             args.hf_split = "train"
         else:
@@ -1358,6 +1393,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
             dataset_split=args.hf_split,
             random_seed=args.seed,
             no_stream=args.no_stream,
+            hf_name=args.hf_name,
         ).sample(
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
@@ -1710,6 +1746,7 @@ class HuggingFaceDataset(BenchmarkDataset):
         dataset_split: str,
         no_stream: bool = False,
         dataset_subset: Optional[str] = None,
+        hf_name: Optional[str] = None,
         **kwargs,
     ) -> None:
         super().__init__(dataset_path=dataset_path, **kwargs)
@@ -1717,6 +1754,7 @@ class HuggingFaceDataset(BenchmarkDataset):
         self.dataset_split = dataset_split
         self.dataset_subset = dataset_subset
         self.load_stream = not no_stream
+        self.hf_name = hf_name or dataset_path
         self.load_data()
 
     def load_data(self) -> None:
@@ -1827,10 +1865,9 @@ class VisionArenaDataset(HuggingFaceDataset):
         for i, item in enumerate(self.data):
             if len(sampled_requests) >= num_requests:
                 break
-            parser_fn = self.SUPPORTED_DATASET_PATHS.get(self.dataset_path)
+            parser_fn = self.SUPPORTED_DATASET_PATHS.get(self.hf_name)
             if parser_fn is None:
-                raise ValueError(
-                    f"Unsupported dataset path: {self.dataset_path}")
+                raise ValueError(f"Unsupported dataset path: {self.hf_name}")
             prompt = parser_fn(item)
             mm_content = process_image(item["images"][0])
             prompt_len = len(tokenizer(prompt).input_ids)
@@ -2099,10 +2136,9 @@ class NextEditPredictionDataset(HuggingFaceDataset):
     def sample(self, tokenizer: PreTrainedTokenizerBase, num_requests: int,
                request_id_prefix: str = "",
                **kwargs):
-        formatting_prompt_func = self.MAPPING_PROMPT_FUNCS.get(
-            self.dataset_path)
+        formatting_prompt_func = self.MAPPING_PROMPT_FUNCS.get(self.hf_name)
         if formatting_prompt_func is None:
-            raise ValueError(f"Unsupported dataset path: {self.dataset_path}")
+            raise ValueError(f"Unsupported dataset path: {self.hf_name}")
         samples = []
         for i, sample in enumerate(self.data):
             sample = formatting_prompt_func(sample)

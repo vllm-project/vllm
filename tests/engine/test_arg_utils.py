@@ -167,7 +167,7 @@ def test_get_kwargs():
     # dict should have json tip in help
     json_tip = "Should either be a valid JSON string or JSON keys"
     assert json_tip in kwargs["json_tip"]["help"]
-    # nested config should should construct the nested config
+    # nested config should construct the nested config
     assert kwargs["nested_config"]["type"]('{"field": 2}') == NestedConfig(2)
 
 

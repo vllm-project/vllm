@@ -218,7 +218,7 @@ if __name__ == "__main__":
         "--xaxis",
         type=str,
         default="# of max concurrency.",
-        help="column name to use as X Axis in comparision graph",
+        help="column name to use as X Axis in comparison graph",
     )
     args = parser.parse_args()
 

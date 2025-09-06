@@ -128,8 +128,10 @@ class Worker(LocalOrDistributedWorkerBase):
         if self.profiler is None:
             raise RuntimeError("Profiler is not enabled.")
         self.profiler.stop()
-        print(
-            self.profiler.key_averages().table(sort_by="self_cuda_time_total"))
+        # only print profiler results on rank 0
+        if self.local_rank == 0:
+            print(self.profiler.key_averages().table(
+                sort_by="self_cuda_time_total"))
 
     def sleep(self, level: int = 1) -> None:
         free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
@@ -232,7 +234,7 @@ class Worker(LocalOrDistributedWorkerBase):
         KV blocks may be allocated without OOMs.
 
         The engine will first conduct a profiling of the existing memory usage.
-        Then, it calculate the maximum possible number of GPU and CPU blocks
+        Then, it calculates the maximum possible number of GPU and CPU blocks
         that can be allocated with the remaining free memory.
 
         Tip:

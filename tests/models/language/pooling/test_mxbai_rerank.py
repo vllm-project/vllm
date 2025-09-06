@@ -20,6 +20,7 @@ RERANK_MODELS = [
     LASTPoolingRerankModelInfo("mixedbread-ai/mxbai-rerank-base-v2",
                                architecture="Qwen2ForSequenceClassification",
                                hf_overrides=mxbai_rerank_hf_overrides,
+                               mteb_score=0.273,
                                enable_test=True),
     LASTPoolingRerankModelInfo("mixedbread-ai/mxbai-rerank-large-v2",
                                architecture="Qwen2ForSequenceClassification",

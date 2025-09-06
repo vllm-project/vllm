@@ -38,9 +38,9 @@ from vllm.entrypoints.utils import get_max_tokens
 from vllm.inputs.data import (EmbedsPrompt, TokensPrompt, is_embeds_prompt,
                               is_tokens_prompt)
 from vllm.logger import init_logger
+from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
-from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import as_list, merge_async_iterators
 

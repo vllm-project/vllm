@@ -30,7 +30,7 @@ def test_initialize_kv_cache_for_kv_sharing_different_attn_groups():
     }
 
     # Layers 0 and 1 both belong in KV cache group 0
-    # However, if they have have different attention backends, they will be
+    # However, if they have different attention backends, they will be
     # placed in different attention groups for KV cache group 0
     kv_cache_groups = [
         KVCacheGroupSpec(["model.layers.0", "model.layers.1"],

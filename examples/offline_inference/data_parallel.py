@@ -88,6 +88,11 @@ def parse_args():
         help=("Fraction of GPU memory vLLM is allowed to allocate (0.0, 1.0]."),
     )
     parser.add_argument(
+        "--compilation-config",
+        type=int,
+        help=("Compilation optimization (O) level 0-3."),
+    )
+    parser.add_argument(
         "--quantization",
         type=str,
     )
@@ -106,6 +111,7 @@ def main(
     trust_remote_code,
     max_num_seqs,
     max_model_len,
+    compilation_config,
     gpu_memory_utilization,
     quantization,
 ):
@@ -162,6 +168,7 @@ def main(
         max_model_len=max_model_len,
         gpu_memory_utilization=gpu_memory_utilization,
         quantization=quantization,
+        compilation_config=compilation_config,
     )
     outputs = llm.generate(prompts, sampling_params)
     # Print the outputs.
@@ -218,6 +225,7 @@ if __name__ == "__main__":
                 args.trust_remote_code,
                 args.max_num_seqs,
                 args.max_model_len,
+                args.compilation_config,
                 args.gpu_memory_utilization,
                 args.quantization,
             ),

@@ -702,7 +702,7 @@ def test_hybrid_attention_mamba_tensor_shapes(monkeypatch):
     KVCacheTensors for the attention and mamba layers
     (via _reshape_kv_cache_tensors function). This test verifies
     that the views are compatible: writing a mamba block
-    will not corrupt an attention block and vice-versa
+    will not corrupt an attention block and vice versa
     '''
 
     current_platform.seed_everything(42)

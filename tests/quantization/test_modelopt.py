@@ -27,7 +27,7 @@ def use_v0_only(monkeypatch):
                     reason="ModelOpt FP8 is not supported on this GPU type.")
 def test_modelopt_fp8_checkpoint_setup(vllm_runner):
     """Test ModelOpt FP8 checkpoint loading and structure validation."""
-    # TODO: provide a small publically available test checkpoint
+    # TODO: provide a small publicly available test checkpoint
     model_path = ("/home/scratch.omniml_data_1/zhiyu/ckpts/test_ckpts/"
                   "TinyLlama-1.1B-Chat-v1.0-fp8-0710")
 

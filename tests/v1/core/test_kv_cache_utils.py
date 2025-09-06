@@ -247,7 +247,7 @@ def test_free_kv_cache_block_queue_append_n():
 
 def test_free_kv_cache_block_queue_popleft_n():
     blocks = [KVCacheBlock(block_id=i) for i in range(6)]
-    # Create a empty FreeKVCacheBlockQueue with these blocks
+    # Create an empty FreeKVCacheBlockQueue with these blocks
     queue = FreeKVCacheBlockQueue(
         [blocks[1], blocks[3], blocks[5], blocks[4], blocks[0], blocks[2]])
     assert queue.num_free_blocks == 6

@@ -189,7 +189,7 @@ async def get_request(
         # NOTE: If we simply accumulate the random delta values
         # from the gamma distribution, their sum would have 1-2% gap
         # from target_total_delay_s. The purpose of the following logic is to
-        # close the gap for stablizing the throughput data
+        # close the gap for stabilizing the throughput data
         # from different random seeds.
         target_total_delay_s = total_requests / request_rate
         normalize_factor = target_total_delay_s / delay_ts[-1]

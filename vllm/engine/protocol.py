@@ -15,6 +15,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.outputs import CompletionOutput, PoolingRequestOutput, RequestOutput
+from vllm.plugins.io_processors.interface import IOProcessor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -266,6 +267,9 @@ class EngineClient(ABC):
     ) -> AnyTokenizer:
         """Get the appropriate tokenizer for the request"""
         ...
+
+    async def get_io_processor(self) -> IOProcessor:
+        raise NotImplementedError
 
     @abstractmethod
     async def is_tracing_enabled(self) -> bool:
