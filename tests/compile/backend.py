@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import weakref
 from collections.abc import Sequence
 from copy import deepcopy
 from typing import Callable, Union
@@ -10,7 +11,24 @@ from torch._ops import OpOverload
 
 from vllm.compilation.fx_utils import find_op_nodes
 from vllm.compilation.inductor_pass import InductorPass
-from vllm.config import get_current_vllm_config
+from vllm.compilation.vllm_inductor_pass import VllmInductorPass
+from vllm.config import VllmConfig, get_current_vllm_config
+
+
+class LazyInitPass(InductorPass):
+    """
+    If there's a pass that we want to initialize lazily in a test,
+    we can wrap it in LazyInitPass, which will initialize the pass when invoked
+    and then immediately invoke it.
+    """
+
+    def __init__(self, pass_cls: type[VllmInductorPass],
+                 vllm_config: VllmConfig):
+        self.pass_cls = pass_cls
+        self.vllm_config = weakref.proxy(vllm_config)  # avoid cycle
+
+    def __call__(self, graph: fx.Graph) -> None:
+        self.pass_cls(self.vllm_config)(graph)
 
 
 class TestBackend:

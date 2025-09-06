@@ -6,7 +6,7 @@ from typing import Optional
 import pytest
 import torch._dynamo
 
-from tests.compile.backend import TestBackend
+from tests.compile.backend import LazyInitPass, TestBackend
 from tests.models.utils import check_outputs_equal
 from tests.v1.attention.utils import (BatchSpec, _Backend,
                                       create_common_attn_metadata)
@@ -97,7 +97,7 @@ def test_attention_fusion_v0(example_prompts, monkeypatch, model: str,
 
     # AttnFusionPass needs attention layers to be registered in config upon init
     # so we initialize it during compilation.
-    attn_pass = lambda *args, **kw: AttnFusionPass(vllm_config)(*args, **kw)
+    attn_pass = LazyInitPass(AttnFusionPass, vllm_config)
     backend = TestBackend(NoOpEliminationPass(vllm_config), attn_pass)
     llm2 = LLM(model,
                enforce_eager=True,
@@ -393,8 +393,7 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
 
         # Create test backend with fusion passes enabled
         noop_pass = NoOpEliminationPass(vllm_config)
-        attn_pass = lambda *args, **kw: AttnFusionPass(vllm_config)(*args, **kw
-                                                                    )
+        attn_pass = LazyInitPass(AttnFusionPass, vllm_config)
         cleanup_pass = PostCleanupPass(vllm_config)
 
         test_backend = TestBackend(noop_pass, attn_pass, cleanup_pass)
