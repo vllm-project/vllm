@@ -1,0 +1,44 @@
+From b89d34bba6fdff51b601c989240413e4fb35f8fe Mon Sep 17 00:00:00 2001
+From: louie-tsai <louie.tsai@intel.com>
+Date: Fri, 29 Aug 2025 02:33:30 +0800
+Subject: [PATCH] Quick Fix for List issue
+
+Signed-off-by: louie-tsai <louie.tsai@intel.com>
+---
+ vllm/model_executor/layers/quantization/utils/fp8_utils.py | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/vllm/model_executor/layers/quantization/utils/fp8_utils.py b/vllm/model_executor/layers/quantization/utils/fp8_utils.py
+index 7b324dce3..d4b4ebd6c 100644
+--- a/vllm/model_executor/layers/quantization/utils/fp8_utils.py
++++ b/vllm/model_executor/layers/quantization/utils/fp8_utils.py
+@@ -6,7 +6,7 @@ import functools
+ import json
+ import os
+ from collections.abc import Sequence
+-from typing import Any, Callable, Optional, Union
++from typing import Any, Callable, List, Optional, Union
+ 
+ import torch
+ 
+@@ -114,7 +114,7 @@ def dispatch_w8a8_blockscale_func(
+ def apply_w8a8_block_fp8_linear(
+     input: torch.Tensor,
+     weight: torch.Tensor,
+-    block_size: list[int],
++    block_size: List[int],
+     weight_scale: torch.Tensor,
+     input_scale: Optional[torch.Tensor] = None,
+     bias: Optional[torch.Tensor] = None,
+@@ -193,7 +193,7 @@ def apply_w8a8_block_fp8_linear(
+ def apply_w8a8_block_fp8_linear_fake(
+     input: torch.Tensor,
+     weight: torch.Tensor,
+-    block_size: list[int],
++    block_size: List[int],
+     weight_scale: torch.Tensor,
+     input_scale: Optional[torch.Tensor] = None,
+     bias: Optional[torch.Tensor] = None,
+-- 
+2.43.0
+
