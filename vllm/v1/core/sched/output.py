@@ -6,6 +6,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
+from vllm import bc_linter_include
+
 if TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
@@ -19,6 +21,7 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 
+@bc_linter_include
 @dataclass
 class NewRequestData:
 
@@ -92,7 +95,8 @@ class CachedRequestData:
     # When PP is not used, new_token_ids will be empty.
     new_token_ids: list[list[int]]
     new_block_ids: list[Optional[tuple[list[int], ...]]]
-    num_computed_tokens: list[int]
+    # NOTE: this class is NOT protected by `@bc_linter_include`, expect no bc failure
+    num_computed_tokens: list[float]
 
     @property
     def num_reqs(self) -> int:
@@ -109,6 +113,7 @@ class CachedRequestData:
         )
 
 
+@bc_linter_include
 @dataclass
 class SchedulerOutput:
 
@@ -126,7 +131,8 @@ class SchedulerOutput:
     num_scheduled_tokens: dict[str, int]
     # Total number of tokens scheduled for all requests.
     # Equal to sum(num_scheduled_tokens.values())
-    total_num_scheduled_tokens: int
+     # NOTE: this class is protected by `@bc_linter_include`, expect bc failure
+    total_num_scheduled_tokens: float
     # req_id -> spec_token_ids
     # If a request does not have any spec decode tokens, it will not be
     # included in the dictionary.
