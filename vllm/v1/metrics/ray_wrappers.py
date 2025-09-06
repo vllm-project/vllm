@@ -7,10 +7,17 @@ from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.spec_decode.metrics import SpecDecodingProm
 
 try:
+    from ray import serve
+    from ray.serve.context import ReplicaContext
     from ray.util import metrics as ray_metrics
     from ray.util.metrics import Metric
 except ImportError:
     ray_metrics = None
+
+
+def _get_replica_id() -> str:
+    ctx: ReplicaContext = serve.get_replica_context()
+    return ctx.replica_id.unique_id
 
 
 class RayPrometheusMetric:
@@ -21,6 +28,18 @@ class RayPrometheusMetric:
                 "RayPrometheusMetric requires Ray to be installed.")
 
         self.metric: Metric = None
+        self.replica_id = _get_replica_id()
+
+    def replica_tags(self) -> dict:
+        return {"ReplicaId": self.replica_id}
+
+    def append_label(self,
+                     labelnames: Optional[list[str]] = None,
+                     label_name=str):
+        labelnames_list = list(labelnames) if labelnames else []
+        labelnames_list.append("ReplicaId")
+        labelnames_tuple = tuple(labelnames_list)
+        return labelnames_tuple
 
     def labels(self, *labels, **labelskwargs):
         if labelskwargs:
@@ -31,6 +50,12 @@ class RayPrometheusMetric:
             self.metric.set_default_tags(labelskwargs)
 
         if labels:
+            tag_keys = list(self.metric._tag_keys)
+            if "ReplicaId" in tag_keys and len(labels) == len(tag_keys) - 1:
+                replica_idx = tag_keys.index("ReplicaId")
+                labels_list = list(labels)
+                labels_list.insert(replica_idx, _get_replica_id())
+                labels = tuple(labels_list)
             if len(labels) != len(self.metric._tag_keys):
                 raise ValueError(
                     "Number of labels must match the number of tag keys. "
@@ -52,22 +77,25 @@ class RayGaugeWrapper(RayPrometheusMetric):
                  documentation: Optional[str] = "",
                  labelnames: Optional[list[str]] = None,
                  multiprocess_mode: Optional[str] = ""):
-
+        super().__init__()
         # All Ray metrics are keyed by WorkerId, so multiprocess modes like
         # "mostrecent", "all", "sum" do not apply. This logic can be manually
         # implemented at the observability layer (Prometheus/Grafana).
         del multiprocess_mode
-        labelnames_tuple = tuple(labelnames) if labelnames else None
+
+        labelnames_tuple = super().append_label(labelnames, "ReplicaId")
+
         self.metric = ray_metrics.Gauge(name=name,
                                         description=documentation,
                                         tag_keys=labelnames_tuple)
 
     def set(self, value: Union[int, float]):
-        return self.metric.set(value)
+        return self.metric.set(value, tags=super().replica_tags())
 
     def set_to_current_time(self):
         # ray metrics doesn't have set_to_current time, https://docs.ray.io/en/latest/_modules/ray/util/metrics.html
-        return self.metric.set(time.time())
+        return self.metric.set(time.time(),
+                               tags={"ReplicaId": self.replica_id})
 
 
 class RayCounterWrapper(RayPrometheusMetric):
@@ -78,7 +106,9 @@ class RayCounterWrapper(RayPrometheusMetric):
                  name: str,
                  documentation: Optional[str] = "",
                  labelnames: Optional[list[str]] = None):
-        labelnames_tuple = tuple(labelnames) if labelnames else None
+        super().__init__()
+        labelnames_tuple = super().append_label(labelnames, "ReplicaId")
+
         self.metric = ray_metrics.Counter(name=name,
                                           description=documentation,
                                           tag_keys=labelnames_tuple)
@@ -86,7 +116,7 @@ class RayCounterWrapper(RayPrometheusMetric):
     def inc(self, value: Union[int, float] = 1.0):
         if value == 0:
             return
-        return self.metric.inc(value)
+        return self.metric.inc(value, tags=super().replica_tags())
 
 
 class RayHistogramWrapper(RayPrometheusMetric):
@@ -98,7 +128,9 @@ class RayHistogramWrapper(RayPrometheusMetric):
                  documentation: Optional[str] = "",
                  labelnames: Optional[list[str]] = None,
                  buckets: Optional[list[float]] = None):
-        labelnames_tuple = tuple(labelnames) if labelnames else None
+        super().__init__()
+        labelnames_tuple = super().append_label(labelnames, "ReplicaId")
+
         boundaries = buckets if buckets else []
         self.metric = ray_metrics.Histogram(name=name,
                                             description=documentation,
@@ -106,7 +138,7 @@ class RayHistogramWrapper(RayPrometheusMetric):
                                             boundaries=boundaries)
 
     def observe(self, value: Union[int, float]):
-        return self.metric.observe(value)
+        return self.metric.observe(value, tags=super().replica_tags())
 
 
 class RaySpecDecodingProm(SpecDecodingProm):
