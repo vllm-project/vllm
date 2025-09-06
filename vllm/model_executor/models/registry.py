@@ -155,6 +155,7 @@ _EMBEDDING_MODELS = {
     "BertModel": ("bert", "BertEmbeddingModel"),
     "DeciLMForCausalLM": ("nemotron_nas", "DeciLMForCausalLM"),
     "Gemma2Model": ("gemma2", "Gemma2ForCausalLM"),
+    "Gemma3TextModel": ("gemma3", "Gemma3Model"),
     "GlmForCausalLM": ("glm", "GlmForCausalLM"),
     "GPT2ForSequenceClassification": ("gpt2", "GPT2ForSequenceClassification"),
     "GritLM": ("gritlm", "GritLM"),
