@@ -2507,9 +2507,8 @@ class LoRAConfig:
 
         # Deprecation warning for enable_lora_bias
         if self.bias_enabled:
-            msg = ("`enable_lora_bias` is deprecated  "
-                   "and will be removed in a future release.")
-            warnings.warn(msg, DeprecationWarning, stacklevel=2)
+            logger.warning("`enable_lora_bias` is deprecated "
+                           "and will be removed in v0.12.0.")
 
         # Setting the maximum rank to 512 should be able to satisfy the vast
         # majority of applications.
