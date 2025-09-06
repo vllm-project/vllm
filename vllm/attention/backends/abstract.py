@@ -265,6 +265,9 @@ class AttentionImpl(ABC, Generic[T]):
     # even if they can return lse (for efficiency reasons)
     need_to_return_lse_for_decode: bool = False
 
+    dcp_world_size: int
+    dcp_rank: int
+
     def __new__(cls, *args, **kwargs):
         # use __new__ so that all subclasses will call this
         self = super().__new__(cls)
