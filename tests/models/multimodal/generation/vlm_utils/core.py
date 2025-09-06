@@ -42,7 +42,7 @@ def run_test(
     tensor_parallel_size: int = 1,
     vllm_embeddings: Optional[torch.Tensor] = None,
 ):
-    """Modality agnostic test test executor for comparing HF/vLLM outputs."""
+    """Modality agnostic test executor for comparing HF/vLLM outputs."""
     # In the case of embeddings, vLLM takes separate input tensors
     vllm_inputs = vllm_embeddings if vllm_embeddings is not None else inputs
 
