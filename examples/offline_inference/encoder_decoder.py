@@ -166,7 +166,7 @@ def main(args):
         dtype="float",
         hf_overrides=model_config.hf_overrides,
     )
-    tokenizer = llm.llm_engine.get_tokenizer_group()
+    tokenizer = llm.llm_engine.get_tokenizer()
     prompts = create_all_prompt_types(
         encoder_prompts_raw=model_config.encoder_prompts,
         decoder_prompts_raw=model_config.decoder_prompts,
