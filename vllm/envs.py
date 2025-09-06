@@ -168,6 +168,7 @@ if TYPE_CHECKING:
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = False
     VLLM_TUNED_CONFIG_FOLDER: Optional[str] = None
     VLLM_DISABLE_PAD_FOR_CUDAGRAPH: bool = False
+    VLLM_HEAD_DTYPE: Optional[str] = None
 
 
 def get_default_cache_root():
@@ -1199,6 +1200,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Allows vllm to find tuned config under customized folder
     "VLLM_TUNED_CONFIG_FOLDER":
     lambda: os.getenv("VLLM_TUNED_CONFIG_FOLDER", None),
+
+    # "head" refers to the last Linear layer(s) of an LLM.
+    # The default head_dtype based on runner_type.
+    # - The pooling model defaults to using fp32 head,
+    # you can use VLLM_HEAD_DTYPE="model" to disable it.
+    # - The generate model defaults to not using fp32 head,
+    # you can use VLLM_HEAD_DTYPE="float32" to enable it.
+    "VLLM_HEAD_DTYPE":
+        lambda: os.getenv("VLLM_HEAD_DTYPE", None),
 
 }
 
