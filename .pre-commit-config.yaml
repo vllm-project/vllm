@@ -49,6 +49,8 @@ repos:
   rev: 0.6.17
   hooks:
     - id: pip-compile
+      # Workaround for MacOS per https://github.com/vllm-project/vllm/issues/16940
+      entry: bash -c 'if [[ "$(uname -s)" == "Darwin" ]]; then echo "⏭ Skipping pip-compile on macOS"; exit 0; else exec uv pip compile "$@"; fi' bash
       args: [requirements/test.in, -o, requirements/test.txt, --index-strategy, unsafe-best-match, --torch-backend, cu128]
       files: ^requirements/test\.(in|txt)$
 - repo: local
