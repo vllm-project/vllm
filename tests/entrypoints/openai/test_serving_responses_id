@@ -1,0 +1,490 @@
+# tests/entrypoints/openai/test_responses_ids.py
+
+import json
+import types
+import uuid
+import pytest
+
+# Module under test
+import vllm.entrypoints.openai.serving_responses as sr
+from vllm.sampling_params import SamplingParams
+
+
+def _mk_msg(channel: str, text: str, recipient=None):
+    """Minimal message object with the attributes your code reads."""
+    return types.SimpleNamespace(
+        recipient=recipient,
+        channel=channel,
+        content=[types.SimpleNamespace(text=text)],
+    )
+
+
+class _ParserStub:
+    def __init__(
+        self,
+        messages=None,
+        delta="",
+        current_channel=None,
+        current_recipient=None,
+    ):
+        self.messages = messages or []
+        self.last_content_delta = delta
+        self.current_channel = current_channel
+        self.current_recipient = current_recipient
+
+
+class _CtxStub:
+    """Looks like StreamingHarmonyContext enough for the stream loop."""
+    def __init__(
+        self,
+        expect_start=False,
+        messages=None,
+        delta="",
+        action_turn=False,
+        current_channel=None,
+        current_recipient=None,
+    ):
+        self._expect_start = expect_start
+        self.parser = _ParserStub(
+            messages=messages or [],
+            delta=delta,
+            current_channel=current_channel,
+            current_recipient=current_recipient,
+        )
+        self._action_turn = action_turn
+
+    # Methods the loop calls
+    def is_expecting_start(self) -> bool:
+        return self._expect_start
+
+    def is_assistant_action_turn(self) -> bool:
+        return self._action_turn
+
+
+async def _collect_stream(async_gen):
+    """Collect SSE-like lines into (event_type, payload_dict) tuples."""
+    events = []
+    async for line in async_gen:
+        if isinstance(line, (bytes, bytearray)):
+            line = line.decode("utf-8", errors="ignore")
+        if not line or not line.startswith("event:"):
+            continue
+        parts = line.strip().split("\n")
+        if len(parts) < 2 or not parts[0].startswith("event:") or not parts[1].startswith("data:"):
+            continue
+        etype = parts[0].split("event:", 1)[1].strip()
+        data_json = parts[1].split("data:", 1)[1].strip()
+        try:
+            payload = json.loads(data_json)
+        except Exception:
+            continue
+        events.append((etype, payload))
+    return events
+
+
+def _install_streaming_context_monkeypatch(monkeypatch):
+    """Make our stub pass the isinstance(context, StreamingHarmonyContext) check."""
+    monkeypatch.setattr(sr, "StreamingHarmonyContext", _CtxStub, raising=True)
+
+
+def _to_jsonable(obj):
+    """Recursively convert shim objects & SimpleNamespace into plain types."""
+    if isinstance(obj, _EvtShim):
+        return _to_jsonable(obj._payload)
+    if isinstance(obj, types.SimpleNamespace):
+        return {k: _to_jsonable(getattr(obj, k)) for k in vars(obj)}
+    if isinstance(obj, dict):
+        return {k: _to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_jsonable(x) for x in obj]
+    return obj
+
+
+class _EvtShim:
+    """Permissive stand-in for both event models and data models."""
+    def __init__(self, **kw):
+        self.type = kw.get("type", "unknown")
+        self.sequence_number = kw.get("sequence_number", -1)
+        self._payload = kw
+
+    def model_dump_json(self, **kwargs):
+        return json.dumps(_to_jsonable(self._payload))
+
+
+class _ShimModule:
+    """Module-like object where ANY attribute is a class returning _EvtShim.
+       Supports nested namespaces (e.g., .response_function_web_search.ActionSearch)."""
+    def __getattr__(self, name):
+        # Return nested "module" for specific namespaces
+        if name in ("response_function_web_search",):
+            return _ShimModule()
+        # Otherwise return a ctor that creates _EvtShim payloads
+        def _ctor(**kw):
+            return _EvtShim(**kw)
+        return _ctor
+
+
+def _install_event_shims(monkeypatch):
+    """Replace Pydantic event classes and the openai_responses_types module."""
+    for name in [
+        # events
+        "ResponseCreatedEvent",
+        "ResponseInProgressEvent",
+        "ResponseOutputItemAddedEvent",
+        "ResponseContentPartAddedEvent",
+        "ResponseOutputTextDeltaEvent",
+        "ResponseReasoningTextDoneEvent",
+        "ResponseOutputTextDoneEvent",
+        "ResponseContentPartDoneEvent",
+        "ResponseOutputItemDoneEvent",
+        "ResponseErrorEvent",
+        "ResponseCompletedEvent",
+        # data models sometimes referenced directly
+        "ResponseOutputText",
+        "ResponseOutputMessage",
+        "ResponseReasoningItem",
+        "ResponseReasoningTextContent",
+        "ResponseTextDeltaEvent",
+        "ResponseReasoningTextDeltaEvent",
+    ]:
+        if hasattr(sr, name):
+            monkeypatch.setattr(sr, name, _EvtShim, raising=True)
+
+    monkeypatch.setattr(sr, "openai_responses_types", _ShimModule(), raising=True)
+
+
+def _install_responsesresponse_monkeypatch(
+    monkeypatch, *, model_name="dummy-model", created_time=1234567890
+):
+    """Patch ResponsesResponse.from_request to return a minimal serializable object."""
+    class _DummyResp:
+        def __init__(self):
+            self._payload = {
+                "id": "resp_dummy",
+                "object": "response",
+                "created_at": created_time,
+                "model": model_name,
+                "status": "in_progress",
+                "output": [],
+                "parallel_tool_calls": False,
+                "tool_choice": "none",
+                "tools": [],
+                "metadata": None,
+                "usage": None,
+                "seed": None,
+                "system_fingerprint": None,
+            }
+        def model_dump(self):
+            return dict(self._payload)
+        def model_dump_json(self, **kwargs):
+            return json.dumps(self.model_dump())
+
+    monkeypatch.setattr(
+        sr,
+        "ResponsesResponse",
+        types.SimpleNamespace(from_request=lambda *a, **k: _DummyResp()),
+        raising=True,
+    )
+
+
+async def _dummy_full_generator(*args, **kwargs):
+    """Return a minimal 'final response' object; event shim will accept any shape."""
+    class _Final:
+        def __init__(self):
+            self._payload = {
+                "id": "resp_final",
+                "object": "response",
+                "created_at": 0,
+                "model": "dummy-model",
+                "status": "completed",
+                "output": [],
+                "parallel_tool_calls": False,
+                "tool_choice": "none",
+                "tools": [],
+            }
+        def model_dump(self):
+            return dict(self._payload)
+        def model_dump_json(self, **kw):
+            return json.dumps(self.model_dump())
+    return _Final()
+
+
+def _new_serving_instance_with_harmony(monkeypatch):
+    """Create an instance and set attrs expected by the streaming path."""
+    srv = object.__new__(sr.OpenAIServingResponses)
+    srv.use_harmony = True
+    srv.tool_server = None
+    monkeypatch.setattr(srv, "responses_full_generator", _dummy_full_generator, raising=True)
+    return srv
+
+
+# ------------------------------ Tests ----------------------------------
+
+@pytest.mark.asyncio
+async def test_uuid_generation_and_binding(monkeypatch):
+    """
+    Proves that:
+      - uuid.uuid4() is invoked exactly once per `expect_start=True` (per output)
+      - The returned UUID is the item_id used by all events within that output
+    """
+
+    _install_streaming_context_monkeypatch(monkeypatch)
+    _install_event_shims(monkeypatch)
+    _install_responsesresponse_monkeypatch(monkeypatch, created_time=111)
+
+    # Spy + deterministic UUIDs
+    calls = []
+    uuids = [f"uuid-{i}" for i in range(3)]
+    seq = iter(uuids)
+
+    def _spy_uuid4():
+        val = next(seq)
+        calls.append(val)
+        class _U:
+            def __str__(self): return val
+        return _U()
+
+    monkeypatch.setattr(uuid, "uuid4", _spy_uuid4)
+
+    # Three outputs (three starts) → three uuid calls expected
+    async def fake_result_generator():
+        yield _CtxStub(expect_start=True, messages=[_mk_msg("analysis", "r1")])     # uses uuid-0
+        yield _CtxStub(expect_start=True, messages=[_mk_msg("final", "f2")])        # uses uuid-1
+        yield _CtxStub(expect_start=True, messages=[_mk_msg("final", "f3")])        # uses uuid-2
+
+    srv = _new_serving_instance_with_harmony(monkeypatch)
+
+    gen = sr.OpenAIServingResponses.responses_stream_generator(
+        srv,
+        request=types.SimpleNamespace(),
+        sampling_params=SamplingParams(),
+        result_generator=fake_result_generator(),
+        context=_CtxStub(),
+        model_name="dummy-model",
+        tokenizer=None,
+        request_metadata=types.SimpleNamespace(),
+        created_time=111,
+    )
+
+    events = await _collect_stream(gen)
+
+    # Assert uuid generator was called once per start
+    assert calls == ["uuid-0", "uuid-1", "uuid-2"]
+
+    # Bucket item_ids observed per output_index
+    items_by_output = {}
+    for etype, ev in events:
+        oi = ev.get("output_index")
+        if oi is None:
+            continue
+        # item_id may appear either directly or inside ev["item"]["id"]
+        item_id = ev.get("item_id")
+        if item_id is None:
+            if isinstance(ev.get("item"), dict):
+                item_id = ev["item"].get("id")
+        if item_id is None:
+            continue
+        items_by_output.setdefault(oi, set()).add(item_id)
+
+    # We expect exactly one item_id per output, matching uuid call order.
+    all_item_sets = list(items_by_output.values())
+    assert {"uuid-0"} in all_item_sets
+    assert {"uuid-1"} in all_item_sets
+    assert {"uuid-2"} in all_item_sets
+    for s in all_item_sets:
+        assert len(s) == 1, f"Output had multiple item_ids: {s}"
+
+
+@pytest.mark.asyncio
+async def test_content_index_progression_and_reset(monkeypatch):
+    """
+    Verifies:
+      - content_index increases within an output
+      - content_index resets across outputs (indirectly by monotonicity-per-output)
+    """
+
+    _install_streaming_context_monkeypatch(monkeypatch)
+    _install_event_shims(monkeypatch)
+
+    # Deterministic UUIDs (just to make mapping easier)
+    uuids = iter([f"uuid-{i}" for i in range(10)])
+    monkeypatch.setattr(uuid, "uuid4", lambda: types.SimpleNamespace(__str__=lambda self: next(uuids)))
+
+    _install_responsesresponse_monkeypatch(monkeypatch, created_time=222)
+
+    async def fake_result_generator():
+        # Output A: reasoning
+        yield _CtxStub(expect_start=True, messages=[_mk_msg("analysis", "think…")])
+        # Output B: final
+        yield _CtxStub(expect_start=True, messages=[_mk_msg("final", "Hello")])
+
+    srv = _new_serving_instance_with_harmony(monkeypatch)
+
+    gen = sr.OpenAIServingResponses.responses_stream_generator(
+        srv,
+        request=types.SimpleNamespace(),
+        sampling_params=SamplingParams(),
+        result_generator=fake_result_generator(),
+        context=_CtxStub(),
+        model_name="dummy-model",
+        tokenizer=None,
+        request_metadata=types.SimpleNamespace(),
+        created_time=222,
+    )
+
+    events = await _collect_stream(gen)
+
+    # Group content_index by output_index and assert monotonicity
+    content_by_output = {}
+    for (etype, ev) in [(t, p) for (t, p) in events if "output_index" in p]:
+        oi = ev["output_index"]
+        ci = ev.get("content_index")
+        if ci is None:
+            continue
+        content_by_output.setdefault(oi, []).append(ci)
+
+    for oi, cidxs in content_by_output.items():
+        assert cidxs == sorted(cidxs), f"content_index should increase within output {oi}, got {cidxs}"
+
+
+@pytest.mark.asyncio
+async def test_delta_path_adds_item_and_part_then_text_delta(monkeypatch):
+    """
+    Covers the non-final delta path:
+      - start
+      - assistant/content delta step → output_item.added → content_part.added → output_text.delta
+    Also verifies the same item_id is used for all three events.
+    """
+
+    _install_streaming_context_monkeypatch(monkeypatch)
+    _install_event_shims(monkeypatch)
+
+    uuids = iter([f"uuid-{i}" for i in range(10)])
+    monkeypatch.setattr(uuid, "uuid4", lambda: types.SimpleNamespace(__str__=lambda self: next(uuids)))
+
+    _install_responsesresponse_monkeypatch(monkeypatch, created_time=333)
+
+    async def fake_result_generator():
+        yield _CtxStub(expect_start=True)
+        # The delta path checks parser.current_channel == "final" and recipient is None
+        yield _CtxStub(
+            messages=[_mk_msg("assistant", "", recipient=None)],
+            delta="Hi",
+            current_channel="final",
+            current_recipient=None,
+        )
+
+    srv = _new_serving_instance_with_harmony(monkeypatch)
+
+    gen = sr.OpenAIServingResponses.responses_stream_generator(
+        srv,
+        request=types.SimpleNamespace(),
+        sampling_params=SamplingParams(),
+        result_generator=fake_result_generator(),
+        context=_CtxStub(),
+        model_name="dummy-model",
+        tokenizer=None,
+        request_metadata=types.SimpleNamespace(),
+        created_time=333,
+    )
+
+    events = await _collect_stream(gen)
+
+    seen_types = [t for t in dict.fromkeys(t for t, _ in events)]
+    assert "response.output_item.added" in seen_types
+    assert "response.content_part.added" in seen_types
+    assert "response.output_text.delta" in seen_types
+
+    # All share the same item_id (proves that current_item_id set at start is reused)
+    same = []
+    for t, ev in events:
+        if t in (
+            "response.output_item.added",
+            "response.content_part.added",
+            "response.output_text.delta",
+        ):
+            if "item_id" in ev:
+                same.append(ev["item_id"])
+            if "item" in ev and isinstance(ev["item"], dict) and "id" in ev["item"]:
+                same.append(ev["item"]["id"])
+    assert len(set(same)) == 1, f"delta path item_id mismatch: {set(same)}"
+
+    # content_index increases across content_part.added → output_text.delta
+    idx_added = [
+        ev["content_index"]
+        for tt, ev in events
+        if tt == "response.content_part.added" and "content_index" in ev
+    ]
+    idx_delta = [
+        ev["content_index"]
+        for tt, ev in events
+        if tt == "response.output_text.delta" and "content_index" in ev
+    ]
+    assert idx_added and idx_delta
+    assert max(idx_added) < min(idx_delta), "delta should come after part.added"
+
+
+# --------------------------- Negative (xfail) ---------------------------
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(strict=True, reason="Negative test: should fail if item_id is reused across outputs")
+async def test_negative_reused_item_id_detected(monkeypatch):
+    """
+    NEGATIVE TEST (opt-in via xfail):
+    We simulate a regression where every output gets the SAME item_id by
+    monkeypatching uuid.uuid4() to return a constant.
+
+    Expectation: Our check that different outputs must have different item_ids
+    will fail (and thus this test xfail 'passes' as expected).
+    """
+
+    _install_streaming_context_monkeypatch(monkeypatch)
+    _install_event_shims(monkeypatch)
+    _install_responsesresponse_monkeypatch(monkeypatch, created_time=444)
+
+    # Force a BUG: same UUID every time -> same item_id across outputs
+    def _const_uuid4():
+        class _U:
+            def __str__(self): return "uuid-constant"
+        return _U()
+    monkeypatch.setattr(uuid, "uuid4", _const_uuid4)
+
+    async def fake_result_generator():
+        # Two separate outputs (each expect_start=True)
+        yield _CtxStub(expect_start=True, messages=[_mk_msg("analysis", "r1")])
+        yield _CtxStub(expect_start=True, messages=[_mk_msg("final", "f2")])
+
+    srv = _new_serving_instance_with_harmony(monkeypatch)
+
+    gen = sr.OpenAIServingResponses.responses_stream_generator(
+        srv,
+        request=types.SimpleNamespace(),
+        sampling_params=SamplingParams(),
+        result_generator=fake_result_generator(),
+        context=_CtxStub(),
+        model_name="dummy-model",
+        tokenizer=None,
+        request_metadata=types.SimpleNamespace(),
+        created_time=444,
+    )
+
+    events = await _collect_stream(gen)
+
+    # Gather item_ids per output_index
+    items_by_output = {}
+    for etype, ev in events:
+        oi = ev.get("output_index")
+        if oi is None:
+            continue
+        item_id = ev.get("item_id")
+        if item_id is None and isinstance(ev.get("item"), dict):
+            item_id = ev["item"].get("id")
+        if item_id is None:
+            continue
+        items_by_output.setdefault(oi, set()).add(item_id)
+
+    # We *expect* this to FAIL because the forced bug reuses the same id.
+    unique_ids = {tuple(sorted(v)) for v in items_by_output.values() if v}
+    # Require at least two different item_ids across outputs:
+    assert len({x for s in unique_ids for x in s}) >= 2, \
+        f"Negative test: detected reused item_id across outputs: {unique_ids}"
