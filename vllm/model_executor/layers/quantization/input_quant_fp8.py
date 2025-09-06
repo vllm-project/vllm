@@ -23,28 +23,63 @@ _FP8_MIN_SCALING_FACTOR = 1.0 / (_FP8_MAX * 512.0)
 @CustomOp.register("quant_fp8")
 class QuantFP8(CustomOp):
     """
-    Quantize input tensor to per-tensor or per-token FP8.
+    Quantize input tensor to FP8 (per-tensor, per-token, or per-group).
     This CustomOp supports both static and dynamic quantization.
     """
 
     def __init__(self,
                  static: bool,
                  group_shape: GroupShape,
-                 num_token_padding: Optional[int] = None):
+                 num_token_padding: Optional[int] = None,
+                 column_major_scales: bool = False):
         """
-
         :param static: static or dynamic quantization
-        :param group_shape: quantization group shape (PER_TOKEN or PER_TENSOR)
-        :param num_token_padding: Pad the token dimension of output to this size
+        :param group_shape: quantization group shape (PER_TOKEN, PER_TENSOR,
+            or arbitrary block size)
+        :param num_token_padding: Pad the token dimension of output to this
+            size
+        :param column_major_scales: For group quantization, output scales in
+            column major format
         """
         super().__init__()
-        self.num_token_padding = num_token_padding
-        assert group_shape in {GroupShape.PER_TOKEN, GroupShape.PER_TENSOR}
-        assert not static or group_shape == GroupShape.PER_TENSOR, \
-            "Only per-tensor scales supported for static quantization."
         self.static = static
         self.group_shape = group_shape
-        self.use_per_token_if_dynamic = group_shape == GroupShape.PER_TOKEN
+        self.num_token_padding = num_token_padding
+        self.column_major_scales = column_major_scales
+
+        self.is_group_quant = group_shape.is_per_group()
+        if self.is_group_quant:
+            assert not static, "Group quantization only supports dynamic mode"
+            self.group_size = group_shape.col
+        else:
+            assert group_shape in {GroupShape.PER_TOKEN, GroupShape.PER_TENSOR}
+            assert not static or group_shape == GroupShape.PER_TENSOR, \
+                "Only per-tensor scales supported for static quantization."
+            self.use_per_token_if_dynamic = group_shape == GroupShape.PER_TOKEN
+
+    def _quantize_group(self,
+                        x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+            per_token_group_quant_fp8)
+        return per_token_group_quant_fp8(
+            x,
+            group_size=self.group_size,
+            column_major_scales=self.column_major_scales,
+            dtype=_FP8_DTYPE)
+
+    def _compute_dynamic_scale(
+            self, x: torch.Tensor,
+            scale_ub: Optional[torch.Tensor]) -> torch.Tensor:
+        if self.group_shape == GroupShape.PER_TOKEN:
+            x_max, _ = x.abs().max(dim=-1)
+            x_max = x_max.unsqueeze(-1).to(torch.float32)
+            if scale_ub is not None:
+                x_max = x_max.clamp(max=scale_ub)
+        else:
+            x_max = x.abs().max().unsqueeze(-1).to(torch.float32)
+
+        scale = x_max / _FP8_MAX
+        return scale.clamp(min=_FP8_MIN_SCALING_FACTOR)
 
     def forward_cuda(
         self,
@@ -52,11 +87,14 @@ class QuantFP8(CustomOp):
         scale: Optional[torch.Tensor] = None,
         scale_ub: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.is_group_quant:
+            assert scale is None, "Group quantization is always dynamic"
+            return self._quantize_group(x)
+
         assert (scale is not None) == self.static
         assert scale_ub is None or (not self.static and self.group_shape
                                     == GroupShape.PER_TOKEN
                                     and scale_ub.numel() == 1)
-
         return ops.scaled_fp8_quant(
             x,
             scale,
@@ -70,22 +108,17 @@ class QuantFP8(CustomOp):
         scale: Optional[torch.Tensor] = None,
         scale_ub: Optional[torch.Tensor] = None,
     ):
+        if self.is_group_quant:
+            assert scale is None, "Group quantization is always dynamic"
+            return self._quantize_group(x)
+
         assert (scale is not None) == self.static
         assert scale_ub is None or (not self.static and self.group_shape
                                     == GroupShape.PER_TOKEN
                                     and scale_ub.numel() == 1)
 
         if scale is None:
-            if self.group_shape == GroupShape.PER_TOKEN:
-                x_max, _ = x.abs().max(dim=-1)
-                x_max = x_max.unsqueeze(-1).to(torch.float32)
-                if scale_ub is not None:
-                    x_max = x_max.clamp(max=scale_ub)
-            else:
-                x_max = x.abs().max().unsqueeze(-1).to(torch.float32)
-
-            scale = x_max / _FP8_MAX
-            scale = scale.clamp(min=_FP8_MIN_SCALING_FACTOR)
+            scale = self._compute_dynamic_scale(x, scale_ub)
 
         # Even for dynamic per-token scales,
         # reciprocal performs slightly better than division
