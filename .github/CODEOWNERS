@@ -27,7 +27,8 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 
 # vLLM V1
 /vllm/v1 @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @comaniac @alexm-redhat
-/vllm/v1/structured_output @mgoin @russellb @aarnphm
+/vllm/v1/structured_output @mgoin @russellb @aarnphm @benchislett
+/vllm/v1/spec_decode @benchislett
 /vllm/v1/attention/backends/triton_attn.py @tdoublep
 
 # Test ownership
