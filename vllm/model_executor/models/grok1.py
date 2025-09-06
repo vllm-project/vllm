@@ -332,7 +332,6 @@ class Grok1DecoderLayer(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.attn",
                 config=config,  # Pass config to Grok1Attention
-                reduce_results=False,
                 alt_stream=self.alt_stream,
             )
         else:
@@ -348,7 +347,6 @@ class Grok1DecoderLayer(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.self_attn",
                 config=config,  # Pass config to Grok1Attention
-                reduce_results=False,
                 alt_stream=self.alt_stream,
             )
 
@@ -669,8 +667,7 @@ class Grok1ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         lora_config = vllm_config.lora_config
         # Check the model architecture to handle parameter differences between Grok1 and Grok2.
         architectures = getattr(config, "architectures", [])
-        is_grok1 = architectures and architectures[
-            0] == "Grok1ModelForCausalLM"
+        is_grok1 = architectures and architectures[0] == "Grok1ModelForCausalLM"
         num_experts = config.num_experts if is_grok1 else config.num_local_experts
 
         self.config = config
@@ -678,8 +675,7 @@ class Grok1ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.quant_config = quant_config
         self.load_presharded_moe = (
             getattr(config, "load_presharded_moe", True) and num_experts > 0
-            and get_tensor_model_parallel_world_size() > 1
-            and not is_grok1)
+            and get_tensor_model_parallel_world_size() > 1 and not is_grok1)
 
         self.model = Grok1Model(vllm_config=vllm_config,
                                 load_presharded_moe=self.load_presharded_moe,
