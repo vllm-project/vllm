@@ -72,6 +72,18 @@ class CommonAttentionMetadata:
     logits_indices_padded: Optional[torch.Tensor] = None
     num_logits_indices: Optional[int] = None
 
+    # Needed by CrossAttentionBuilder
+    scheduled_encoder_inputs: Optional[dict] = None
+    """Dict mapping req_id to encoder input IDs for cross-attention"""
+    max_encoder_len: Optional[int] = None
+    """Maximum encoder sequence length"""
+    requests: Optional[dict] = None
+    """Request states needed for cross-attention slot mapping"""
+    kv_cache_config: Optional[Any] = None
+    """KV cache config needed for cross-attention"""
+    device: Optional[torch.device] = None
+    """Device for tensor operations"""
+
 
 @dataclass
 class UbatchSlice:
