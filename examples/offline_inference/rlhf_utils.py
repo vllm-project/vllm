@@ -82,21 +82,6 @@ class ColocateWorkerExtension:
         self.device_uuid = current_platform.get_device_uuid(self.device.index)
         return self.device_uuid
 
-    def update_weights_from_ipc_handles(self, ipc_handles):
-        handles = ipc_handles[self.device_uuid]
-        device_id = self.device.index
-        weights = []
-        for name, handle in handles.items():
-            func, args = handle
-            list_args = list(args)
-            # the key is to change device id to the current device id
-            # in case two processes have different CUDA_VISIBLE_DEVICES
-            list_args[6] = device_id
-            tensor = func(*list_args)
-            weights.append((name, tensor))
-        self.model_runner.model.load_weights(weights=weights)
-        torch.cuda.synchronize()
-
     def check_weights_changed(self):
         """
         Check if the weights are updated to 0.

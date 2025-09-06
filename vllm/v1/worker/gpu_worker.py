@@ -5,11 +5,12 @@ import copy
 import gc
 import os
 from contextlib import AbstractContextManager, nullcontext
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional, TypedDict
 
 import torch
 import torch.distributed
 import torch.nn as nn
+import zmq
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -21,6 +22,8 @@ from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
+from vllm.model_executor.model_loader.utils import (
+    process_weights_after_loading)
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -39,6 +42,38 @@ logger = init_logger(__name__)
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.core.sched.output import SchedulerOutput
+
+
+def rebuild_ipc(handle: tuple[Callable, tuple],
+                device_id: Optional[int] = None) -> torch.Tensor:
+    func, args = handle
+    list_args = list(args)
+    if device_id is not None:
+        # the key is to change device id to the current device id
+        # in case two processes have different CUDA_VISIBLE_DEVICES
+        list_args[6] = device_id
+    buffer = func(*list_args)
+    return buffer
+
+
+class FlattenedTensorMetadata(TypedDict):
+    name: str
+    shape: torch.Size
+    dtype: torch.dtype
+    # specify the start offset of this tensor in shared ipc_buffer tensor
+    offset: int
+
+
+class UpdateWeightsFromIPCRequest(TypedDict):
+    # a list of tuple to specify tensor metadata
+    named_tensors: list[FlattenedTensorMetadata]
+    # a serialized handle that vLLM can use `func, args = ipc_handle` and
+    # `func(*args)` to rebuild GPU tensor. If `ipc_handle` is not None,
+    # means this is the first request in current update flow and
+    # vLLM should rebuild and save this GPU tensor as a shared buffer
+    ipc_handle: Optional[tuple[Callable, tuple]]
+    # specify whether this request is the last request in current update flow
+    end: bool
 
 
 class Worker(WorkerBase):
@@ -63,6 +98,7 @@ class Worker(WorkerBase):
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
 
+        self._zmq_ctx = zmq.Context()
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
 
@@ -186,6 +222,8 @@ class Worker(WorkerBase):
                     f"{GiB(self.requested_memory)} GiB). Decrease GPU memory "
                     f"utilization or reduce GPU memory used by other processes."
                 )
+            self.device_uuid = current_platform.get_device_uuid(
+                self.device.index)
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
@@ -217,6 +255,45 @@ class Worker(WorkerBase):
 
     def reload_weights(self) -> None:
         self.model_runner.reload_weights()
+
+    def update_weights_from_ipc(self, zmq_handles: dict[str, str]):
+        assert self.device is not None
+        socket = self._zmq_ctx.socket(zmq.REP)
+        socket.connect(zmq_handles[self.device_uuid])
+        buffer: Optional[torch.Tensor] = None
+        while True:
+            kwargs: UpdateWeightsFromIPCRequest = socket.recv_pyobj()
+            if kwargs["ipc_handle"] is not None:
+                assert buffer is None
+                buffer = rebuild_ipc(kwargs["ipc_handle"], self.device.index)
+                assert buffer.dtype == torch.uint8
+            assert buffer is not None
+            weights = []
+            for item in kwargs["named_tensors"]:
+                shape = item["shape"]
+                if isinstance(shape, (list, tuple)):
+                    shape = torch.Size(shape)
+                assert isinstance(shape, torch.Size)
+                dtype, offset = item["dtype"], item["offset"]
+                size = dtype.itemsize * shape.numel()
+                tensor = buffer[offset:offset +
+                                size].view(dtype=dtype).view(shape)
+                weights.append((item["name"], tensor))
+            self.model_runner.model.load_weights(weights=weights)
+            del weights
+            if kwargs["end"]:
+                process_weights_after_loading(self.model_runner.model,
+                                              self.model_config, self.device)
+                break
+            torch.cuda.synchronize()
+            socket.send(b"")
+        torch.cuda.synchronize()
+        socket.send(b"")
+
+        socket.close()
+        del buffer
+        gc.collect()
+        torch.cuda.empty_cache()
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
