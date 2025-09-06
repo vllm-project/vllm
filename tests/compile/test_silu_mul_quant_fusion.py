@@ -118,7 +118,8 @@ def test_fusion_silu_and_mul_quant(num_tokens, hidden_size, model_class,
     fusion_pass = ActivationQuantFusionPass(config)
 
     backend = TestBackend(NoOpEliminationPass(config), fusion_pass)
-    model = model_class(hidden_size, cuda_force_torch)
+    model = model_class(hidden_size=hidden_size,
+                        cuda_force_torch=cuda_force_torch)
 
     # First dimension dynamic
     x = torch.rand(num_tokens, hidden_size * 2)
