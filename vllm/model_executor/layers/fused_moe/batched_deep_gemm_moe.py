@@ -352,12 +352,19 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_num_tokens = expert_tokens_meta.expert_num_tokens
 
         # Monitor expert_num_tokens for workspace allocation analysis
-        logger.info(
-            "[MoE Monitor] expert_num_tokens shape: %s, sum: %s, max: %s, "
-            "values: %s", expert_num_tokens.shape,
-            expert_num_tokens.sum().item(),
-            expert_num_tokens.max().item(),
-            expert_num_tokens.cpu().numpy())
+        if torch.cuda.is_current_stream_capturing():
+            logger.debug(
+                "[MoE Monitor] skip logging during CUDA Graph capture")
+        else:
+            cpu_vals = expert_num_tokens.detach().to("cpu")
+            logger.info(
+                "[MoE Monitor] expert_num_tokens "
+                "shape=%s sum=%d max=%d values(sample)=%s",
+                tuple(expert_num_tokens.shape),
+                int(cpu_vals.sum().item()),
+                int(cpu_vals.max().item()),
+                cpu_vals.numpy(),
+            )
 
         assert hidden_states.ndim == 3
         assert self.block_shape is not None
