@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-from contextlib import ExitStack
+import functools
 
 from torch import fx as fx
 
@@ -29,6 +28,24 @@ from .sequence_parallelism import SequenceParallelismPass
 logger = init_logger(__name__)
 
 
+def with_pattern_match_debug(fn):
+    """
+    Function decorator that turns on inductor pattern match debug
+    for the duration of the call.
+    Used to avoid logging builtin Inductor pattern matching.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        if (debug_val := envs.VLLM_PATTERN_MATCH_DEBUG) is not None:
+            # optionally check rank here
+            with set_env_var("TORCHINDUCTOR_PATTERN_MATCH_DEBUG", debug_val):
+                return fn(*args, **kwargs)
+        return fn(*args, **kwargs)
+
+    return wrapper
+
+
 class PostGradPassManager(CustomGraphPass):
     """
     The pass manager for post-grad passes.
@@ -47,25 +64,19 @@ class PostGradPassManager(CustomGraphPass):
     def __init__(self):
         self.passes: list[InductorPass] = []
 
+    @with_pattern_match_debug
     def __call__(self, graph: fx.Graph):
-        with ExitStack() as stack:
-            if envs.VLLM_PATTERN_MATCH_DEBUG is not None:
-                # and get_tensor_model_parallel_rank() == 0:
-                stack.enter_context(
-                    set_env_var('TORCHINDUCTOR_PATTERN_MATCH_DEBUG',
-                                envs.VLLM_PATTERN_MATCH_DEBUG))
+        shape = get_pass_context().runtime_shape
+        for pass_ in self.passes:
+            if pass_.is_applicable_for_shape(shape):
+                pass_(graph)
 
-            shape = get_pass_context().runtime_shape
-            for pass_ in self.passes:
-                if pass_.is_applicable_for_shape(shape):
-                    pass_(graph)
+        # post-cleanup goes before fix_functionalization
+        # because it requires a functional graph
+        self.post_cleanup(graph)
 
-            # post-cleanup goes before fix_functionalization
-            # because it requires a functional graph
-            self.post_cleanup(graph)
-
-            # always run fix_functionalization last
-            self.fix_functionalization(graph)
+        # always run fix_functionalization last
+        self.fix_functionalization(graph)
 
     def configure(self, config: VllmConfig):
         self.pass_config = config.compilation_config.pass_config
