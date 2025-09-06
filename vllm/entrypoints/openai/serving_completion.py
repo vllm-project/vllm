@@ -452,6 +452,12 @@ class OpenAIServingCompletion(OpenAIServing):
                             completion_tokens=completion_tokens,
                             total_tokens=prompt_tokens + completion_tokens,
                         )
+                        # Add token details if available
+                        if (self.enable_prompt_tokens_details
+                                and num_cached_tokens):
+                            chunk.usage.prompt_tokens_details = (
+                                PromptTokenUsageInfo(
+                                    cached_tokens=num_cached_tokens))
 
                     response_json = chunk.model_dump_json(exclude_unset=False)
                     yield f"data: {response_json}\n\n"
