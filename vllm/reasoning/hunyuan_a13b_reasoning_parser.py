@@ -91,8 +91,9 @@ class HunyuanA13BReasoningParser(ReasoningParser):
         return []
 
     def extract_reasoning_content(
-            self, model_output: str, request: ChatCompletionRequest
-    ) -> tuple[Optional[str], Optional[str]]:
+        self, model_output: str, model_output_tokens: Sequence[int],
+        request: ChatCompletionRequest
+    ) -> tuple[Optional[str], Optional[list[int]], Optional[str]]:
         """Extract the reasoning content & content sections, respectively.
         If the sequence doesn't match what we expect, i.e., the model generates
         something else, all content is considered non-reasoning content.
@@ -106,14 +107,17 @@ class HunyuanA13BReasoningParser(ReasoningParser):
             reasoning content and non-reasoning content.
         """
 
+        reasoning_content_tokens = None
+
         re_match = self.full_match_reasoning_regex.findall(model_output)
         if re_match:
             reasoning_content, response_content = re_match[0]
             if len(reasoning_content) == 0:
                 reasoning_content = None
+                reasoning_content_tokens = None
             if len(response_content) == 0:
                 response_content = None
-            return reasoning_content, response_content
+            return reasoning_content, reasoning_content_tokens, response_content
 
         fallback_regex = self.half_match_reasoning_regex
         fallback_match = fallback_regex.findall(model_output)
@@ -129,9 +133,9 @@ class HunyuanA13BReasoningParser(ReasoningParser):
             if len(response_content) == 0:
                 response_content = None
 
-            return reasoning_content, response_content
+            return reasoning_content, reasoning_content_tokens, response_content
 
-        return None, model_output
+        return None, None, model_output
 
     def _is_strict_increasing_subsequence(self, subsequence: Sequence[int],
                                           sequence: Sequence[int]) -> bool:
