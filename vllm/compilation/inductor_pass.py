@@ -28,8 +28,8 @@ _pass_context = None
 
 class PassContext:
 
-    def __init__(self, runtime_shape: Optional[int]):
-        self.runtime_shape = runtime_shape
+    def __init__(self, compile_range: Optional[tuple[int, int]]):
+        self.compile_range = compile_range
 
 
 def get_pass_context() -> PassContext:
@@ -39,13 +39,13 @@ def get_pass_context() -> PassContext:
 
 
 @contextmanager
-def pass_context(runtime_shape: Optional[int]):
+def pass_context(compile_range: Optional[tuple[int, int]]):
     """A context manager that stores the current pass context,
     usually it is a list of sizes to specialize.
     """
     global _pass_context
     prev_context = _pass_context
-    _pass_context = PassContext(runtime_shape)
+    _pass_context = PassContext(compile_range)
     try:
         yield
     finally:
@@ -96,7 +96,8 @@ class InductorPass(CustomGraphPass):
         encoded = json.dumps(dict_, sort_keys=True).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
 
-    def is_applicable_for_shape(self, shape: Optional[int]):
+    def is_applicable_for_range(self, compile_range: Optional[tuple[int,
+                                                                    int]]):
         return True
 
 
