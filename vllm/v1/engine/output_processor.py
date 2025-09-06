@@ -112,6 +112,10 @@ class RequestState:
         self.stats = RequestStateStats(
             arrival_time=arrival_time) if log_stats else None
 
+        # Track abort state for synchronized cleanup
+        self.is_marked_for_abort = False
+        self.abort_sent_to_engine = False
+
     @classmethod
     def from_new_request(
         cls,
@@ -302,24 +306,31 @@ class OutputProcessor:
         self,
         request_ids: Iterable[str],
     ) -> list[str]:
+        """Mark requests for deletion.
+
+        Keep request state intact until the engine core confirms 
+        the abort with a final output.
+        """
         request_ids_to_abort = []
         for request_id in request_ids:
-            req_state = self.request_states.pop(request_id, None)
-            if req_state is not None:
+            req_state = self.request_states.get(request_id, None)
+            if req_state is not None and not req_state.is_marked_for_abort:
+                req_state.is_marked_for_abort = True
                 self.lora_states.abort_request(req_state)
                 request_ids_to_abort.append(request_id)
-                # Produce final abort output.
-                if req_state.queue is not None and (
-                        request_output := req_state.make_request_output(
-                            [], None, FinishReason.ABORT, None, None)):
-                    req_state.queue.put(request_output)
+
             elif parent := self.parent_requests.get(request_id):
-                # Abort children prior to removing the parent.
-                if parent.child_requests:
-                    child_reqs = list(parent.child_requests)
-                    child_reqs = self.abort_requests(child_reqs)
-                    request_ids_to_abort.extend(child_reqs)
-                self.parent_requests.pop(request_id, None)
+                # Handle parent request abortion
+                if not parent.is_marked_for_abort:
+                    # Mark parent for deletion but keep in parent_requests
+                    parent.is_marked_for_abort = True
+
+                    # Recursively abort all child requests
+                    if parent.child_requests:
+                        child_reqs = list(parent.child_requests)
+                        child_reqs = self.abort_requests(child_reqs)
+                        request_ids_to_abort.extend(child_reqs)
+
         return request_ids_to_abort
 
     def add_request(
@@ -426,17 +437,29 @@ class OutputProcessor:
                     # LLMEngine: return list of RequestOutputs.
                     request_outputs.append(request_output)
 
-            # Free completed requests.
+            # Handle request completion or abort confirmation
             if finish_reason is not None:
-                self.request_states.pop(req_id)
-                # Remove parent request if applicable.
-                parent_req = req_state.parent_req
-                if parent_req and not parent_req.child_requests:
-                    self.parent_requests.pop(parent_req.request_id, None)
-                if not engine_core_output.finished:
-                    # If req not finished in EngineCore, but Detokenizer
-                    # detected stop string, abort needed in EngineCore.
-                    reqs_to_abort.append(req_id)
+                if finish_reason == FinishReason.ABORT:
+                    # This is confirmation of abort from engine
+                    # clean up staged request
+                    if req_state.is_marked_for_abort:
+                        # Remove the request state now that abort is confirmed
+                        self.request_states.pop(req_id)
+                        parent_req = req_state.parent_req
+                        if parent_req and not parent_req.child_requests:
+                            self.parent_requests.pop(parent_req.request_id,
+                                                     None)
+                else:
+                    # Normal completion - remove immediately
+                    self.request_states.pop(req_id)
+                    parent_req = req_state.parent_req
+                    if parent_req and not parent_req.child_requests:
+                        self.parent_requests.pop(parent_req.request_id, None)
+
+                    if not engine_core_output.finished:
+                        # If req not finished in EngineCore, but Detokenizer
+                        # detected stop string, abort needed in EngineCore.
+                        reqs_to_abort.append(req_id)
 
                 # Track per-request stats
                 self._update_stats_from_finished(req_state, finish_reason,

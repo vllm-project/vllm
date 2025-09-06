@@ -27,7 +27,7 @@ from vllm.v1.core.sched.request_queue import (SchedulingPolicy,
                                               create_request_queue)
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
-                            EngineCoreOutputs)
+                            EngineCoreOutputs, FinishReason)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
@@ -128,6 +128,9 @@ class Scheduler(SchedulerInterface):
         # requests so that they can free the cached states for those requests.
         # This is flushed at the end of each scheduling step.
         self.finished_req_ids: set[str] = set()
+
+        # Pending abort outputs to be included in next step's outputs
+        self.pending_abort_outputs_by_client: dict[int, list] = {}
 
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
@@ -976,6 +979,15 @@ class Scheduler(SchedulerInterface):
             self._update_from_kv_xfer_finished(
                 model_runner_output.kv_connector_output)
 
+        # Include pending abort outputs from finish_requests()
+        if self.pending_abort_outputs_by_client:
+            for client_index, abort_outputs_list in \
+                self.pending_abort_outputs_by_client.items():
+                if client_index not in outputs:
+                    outputs[client_index] = []
+                outputs[client_index].extend(abort_outputs_list)
+            self.pending_abort_outputs_by_client.clear()
+
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.
         engine_core_outputs = {
@@ -1119,9 +1131,33 @@ class Scheduler(SchedulerInterface):
             self.waiting.remove_requests(waiting_requests_to_remove)
 
         # Second pass: set status and free requests
+        abort_outputs_by_client: dict[int, list[EngineCoreOutput]] = {}
         for request in valid_requests:
             request.status = finished_status
+
+            if finished_status == RequestStatus.FINISHED_ABORTED:
+                abort_output = EngineCoreOutput(
+                    request_id=request.request_id,
+                    new_token_ids=[],
+                    pooling_output=None,
+                    finish_reason=FinishReason.ABORT,
+                    stop_reason=None,
+                    num_cached_tokens=request.num_cached_tokens,
+                    kv_transfer_params=None,
+                )
+                client_index = request.client_index
+                if client_index not in abort_outputs_by_client:
+                    abort_outputs_by_client[client_index] = []
+                abort_outputs_by_client[client_index].append(abort_output)
+
             self._free_request(request)
+
+        if abort_outputs_by_client:
+            for client_index, outputs_list in abort_outputs_by_client.items():
+                if client_index not in self.pending_abort_outputs_by_client:
+                    self.pending_abort_outputs_by_client[client_index] = []
+                self.pending_abort_outputs_by_client[client_index].extend(
+                    outputs_list)
 
     def _free_request(self, request: Request) -> Optional[dict[str, Any]]:
         assert request.is_finished()
