@@ -238,7 +238,8 @@ class QuarkConfig(QuantizationConfig):
                 "Quark model is not in OCP MX format: not scale_format e8m0")
             return False
 
-        # Input and weight dtype needs to be fp4.
+        # Input and weight dtypes need to be any of fp4,
+        # fp6_e3m2 or fp6_e3m2, possibly mixed.
         if weight_quant.get("dtype") not in [
                 "fp4", "fp6_e3m2", "fp6_e2m3"
         ] or input_quant.get("dtype") not in ["fp4", "fp6_e3m2", "fp6_e2m3"]:

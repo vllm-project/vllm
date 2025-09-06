@@ -1547,6 +1547,9 @@ def fused_experts_impl(
         }:
             assert hidden_states.size(1) == (w1.size(2) *
                                              4) // 3, "hidden size mismatch"
+        else:
+            raise NotImplementedError(
+                f"Unsupported ocp_mx_scheme={ocp_mx_scheme}")
     else:
         assert hidden_states.size(1) == w1.size(2), (
             f"Hidden size mismatch {hidden_states.size(1)} != {w1.size(2)}")
@@ -1654,6 +1657,9 @@ def fused_experts_impl(
                                quant_dtype="fp6_e2m3",
                                float_dtype=hidden_states.dtype)
             w2_scale = None
+        else:
+            raise NotImplementedError(
+                f"Unsupported ocp_mx_scheme={ocp_mx_scheme}")
 
     for chunk in range((num_tokens // CHUNK_SIZE) + 1):
         begin_chunk_idx, end_chunk_idx = (chunk * CHUNK_SIZE,
