@@ -49,7 +49,8 @@ from vllm.transformers_utils.config import (
     try_get_tokenizer_config, uses_mrope)
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
-from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS, LayerBlockType,
+from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
+                        STR_DUAL_CHUNK_FLASH_ATTN_VAL, LayerBlockType,
                         LazyLoader, common_broadcastable_dtype, random_uuid)
 
 if TYPE_CHECKING:
@@ -170,6 +171,7 @@ class ModelImpl(str, enum.Enum):
     AUTO = "auto"
     VLLM = "vllm"
     TRANSFORMERS = "transformers"
+    TERRATORCH = "terratorch"
 
 
 def get_attr_docs(cls: type[Any]) -> dict[str, str]:
@@ -459,11 +461,6 @@ class ModelConfig:
         DP (which is controlled by `--data-parallel-size`).
         This is only supported on a per-model basis and falls back to
         `"weights"` if the encoder does not support DP."""
-    override_neuron_config: dict[str, Any] = field(default_factory=dict)
-    """Initialize non-default neuron config or override default neuron config
-    that are specific to Neuron devices, this argument will be used to
-    configure the neuron config that can not be gathered from the vllm
-    arguments. e.g. `{"cast_logits_dtype": "bfloat16"}`."""
     pooler_config: Optional["PoolerConfig"] = field(init=False)
     """Pooler config which controls the behaviour of output pooling in pooling
     models."""
@@ -495,7 +492,9 @@ class ModelConfig:
     back to the Transformers implementation if no vLLM implementation is
     available.\n
     - "vllm" will use the vLLM model implementation.\n
-    - "transformers" will use the Transformers model implementation."""
+    - "transformers" will use the Transformers model implementation.\n
+    - "terratorch" will use the TerraTorch model implementation.
+    """
     override_attention_dtype: Optional[str] = None
     """Override dtype for attention"""
     logits_processors: Optional[list[Union[str, type[LogitsProcessor]]]] = None
@@ -764,10 +763,6 @@ class ModelConfig:
 
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
-
-        if (not current_platform.is_neuron() and self.override_neuron_config):
-            raise ValueError(
-                "`override_neuron_config` is only supported on Neuron.")
 
         # Avoid running try_verify_and_update_config multiple times
         self.config_updated = False
@@ -1288,6 +1283,10 @@ class ModelConfig:
                     self.hf_config.dual_chunk_attention_config[
                         "sparse_attention_enabled"] = True
 
+            if envs.VLLM_ATTENTION_BACKEND != STR_DUAL_CHUNK_FLASH_ATTN_VAL:
+                raise ValueError("please set VLLM_ATTENTION_BACKEND to "
+                                 f"{STR_DUAL_CHUNK_FLASH_ATTN_VAL}")
+
     def verify_async_output_proc(self, parallel_config, speculative_config,
                                  device_config) -> None:
         if not self.use_async_output_proc:
@@ -1401,6 +1400,11 @@ class ModelConfig:
         # NOTE: Some configs may set head_dim=None in the config
         if getattr(self.hf_text_config, "head_dim", None) is not None:
             return self.hf_text_config.head_dim
+
+        # NOTE: Some models (such as PLaMo2.1) use `hidden_size_per_head`
+        if getattr(self.hf_text_config, "hidden_size_per_head",
+                   None) is not None:
+            return self.hf_text_config.hidden_size_per_head
 
         # FIXME(woosuk): This may not be true for all models.
         return (self.hf_text_config.hidden_size //
@@ -1667,13 +1671,7 @@ class ModelConfig:
         """
         For Mllama, VLLM overrides HF's is_encoder_decoder flag and sets it to
         True to enable cross-attention
-        Neuron needs all multimodal data to be in the decoder and does not
-        need to explicitly enable cross-attention
         """
-        if (current_platform.is_neuron()
-                and self.hf_config.model_type == "mllama"):
-            return False
-
         return is_encoder_decoder(self.hf_config)
 
     @property
@@ -1842,7 +1840,7 @@ class LoadConfig:
             self.ignore_patterns = ["original/**/*"]
 
 
-Device = Literal["auto", "cuda", "neuron", "cpu", "tpu", "xpu"]
+Device = Literal["auto", "cuda", "cpu", "tpu", "xpu"]
 
 
 @config
@@ -1898,9 +1896,7 @@ class DeviceConfig:
                 self.device_type = self.device.type
 
         # Some device types require processing inputs on CPU
-        if self.device_type in ["neuron"]:
-            self.device = torch.device("cpu")
-        elif self.device_type in ["tpu"]:
+        if self.device_type in ["tpu"]:
             self.device = None
         else:
             # Set device with device type
@@ -2429,7 +2425,6 @@ class LoRAConfig:
     LoRA adapter. Will be removed in v0.12.0."""
     lora_vocab_padding_size: ClassVar[int] = current_platform\
         .get_lora_vocab_padding_size()
-
     default_mm_loras: Optional[dict[str, str]] = None
     """Dictionary mapping specific modalities to LoRA model paths; this field
     is only applicable to multimodal models and should be leveraged when a
@@ -2441,7 +2436,8 @@ class LoRAConfig:
     will be automatically assigned to 1-n with the names of the modalities
     in alphabetic order."""
     bias_enabled: bool = False
-    """Enable bias for LoRA adapters."""
+    """[DEPRECATED] Enable bias for LoRA adapters. This option will be
+    removed in v0.12.0."""
 
     def compute_hash(self) -> str:
         """
@@ -2473,6 +2469,11 @@ class LoRAConfig:
             "`lora_extra_vocab_size` is deprecated and will be removed "
             "in v0.12.0. Additional vocabulary support for "
             "LoRA adapters is being phased out.")
+
+        # Deprecation warning for enable_lora_bias
+        if self.bias_enabled:
+            logger.warning("`enable_lora_bias` is deprecated "
+                           "and will be removed in v0.12.0.")
 
         # Setting the maximum rank to 512 should be able to satisfy the vast
         # majority of applications.
@@ -2635,24 +2636,46 @@ class PoolerConfig:
     ## for embeddings models
     normalize: Optional[bool] = None
     """
-    Whether to normalize the embeddings outputs.
+    Whether to normalize the embeddings outputs. Defaults to True.
     """
     dimensions: Optional[int] = None
     """
     Reduce the dimensions of embeddings if model
-    support matryoshka representation.
+    support matryoshka representation. Defaults to None.
+    """
+    enable_chunked_processing: Optional[bool] = None
+    """
+    Whether to enable chunked processing for long inputs that exceed the model's
+    maximum position embeddings. When enabled, long inputs will be split into
+    chunks, processed separately, and then aggregated using weighted averaging.
+    This allows embedding models to handle arbitrarily long text without CUDA
+    errors. Defaults to False.
+    """
+    max_embed_len: Optional[int] = None
+    """
+    Maximum input length allowed for embedding generation. When set, allows
+    inputs longer than max_embed_len to be accepted for embedding models.
+    When an input exceeds max_embed_len, it will be handled according to 
+    the original max_model_len validation logic. 
+    Defaults to None (i.e. set to max_model_len).
     """
 
     ## for classification models
     activation: Optional[bool] = None
     """
     Whether to apply activation function to the classification outputs.
+    Defaults to True.
+    """
+    logit_bias: Optional[float] = None
+    """
+    If provided, apply classification logit biases. Defaults to None.
     """
 
     ## for reward models
     softmax: Optional[bool] = None
     """
     Whether to apply softmax to the reward outputs.
+    Defaults to True.
     """
     step_tag_id: Optional[int] = None
     """
@@ -2665,25 +2688,6 @@ class PoolerConfig:
     A list of indices for the vocabulary dimensions to be extracted,
     such as the token IDs of ``good_token`` and ``bad_token`` in the
     ``math-shepherd-mistral-7b-prm`` model.
-    """
-
-    enable_chunked_processing: Optional[bool] = None
-    """
-    Whether to enable chunked processing for long inputs that exceed the model's
-    maximum position embeddings. When enabled, long inputs will be split into
-    chunks, processed separately, and then aggregated using weighted averaging.
-    This allows embedding models to handle arbitrarily long text without CUDA
-    errors. Defaults to False.
-    """
-
-    max_embed_len: Optional[int] = None
-    """
-    Maximum input length allowed for embedding generation. When set, allows
-    inputs longer than max_embed_len to be accepted for embedding models.
-    This parameter enables accepting long inputs without requiring
-    VLLM_ALLOW_LONG_MAX_MODEL_LEN environment variable. When an input exceeds
-    max_embed_len, it will be handled according to the original max_model_len
-    validation logic. Defaults to None (i.e. set to max_model_len).
     """
 
     def compute_hash(self) -> str:
@@ -2718,6 +2722,8 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
 _FLOAT16_NOT_SUPPORTED_MODELS = {
     "gemma2": "Numerical instability. Please use bfloat16 or float32 instead.",
     "gemma3": "Numerical instability. Please use bfloat16 or float32 instead.",
+    "gemma3_text":
+    "Numerical instability. Please use bfloat16 or float32 instead.",
     "plamo2": "Numerical instability. Please use bfloat16 or float32 instead.",
     "glm4": "Numerical instability. Please use bfloat16 or float32 instead.",
 }
@@ -3223,7 +3229,7 @@ class KVTransferConfig:
 
     kv_parallel_size: int = 1
     """The number of parallel instances for KV cache transfer. For
-    PyNcclConnector, this should be 2."""
+    P2pNcclConnector, this should be 2."""
 
     kv_ip: str = "127.0.0.1"
     """The KV connector ip, used to build distributed connection."""
@@ -3633,6 +3639,24 @@ class VllmConfig:
                 " Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
+        if self.cache_config.kv_sharing_fast_prefill:
+            if not envs.VLLM_USE_V1:
+                raise NotImplementedError(
+                    "Fast prefill optimization for KV sharing is not supported "
+                    "in V0 currently.")
+
+            if self.speculative_config is not None and \
+                self.speculative_config.use_eagle():
+                raise NotImplementedError(
+                    "Fast prefill optimization for KV sharing is not "
+                    "compatible with EAGLE as EAGLE requires correct logits "
+                    "for all tokens while fast prefill gives incorrect logits "
+                    "for prompt tokens.")
+
+            logger.warning_once(
+                "--kv-sharing-fast-prefill requires changes on model side for "
+                "correctness and to realize prefill savings. ")
+
         if ((not envs.VLLM_USE_V1) and self.lora_config is not None
                 and self.compilation_config.level
                 != CompilationLevel.NO_COMPILATION):
@@ -3884,7 +3908,6 @@ class VllmConfig:
             f"skip_tokenizer_init={self.model_config.skip_tokenizer_init}, "
             f"tokenizer_mode={self.model_config.tokenizer_mode}, "
             f"revision={self.model_config.revision}, "
-            f"override_neuron_config={self.model_config.override_neuron_config}, "  # noqa
             f"tokenizer_revision={self.model_config.tokenizer_revision}, "
             f"trust_remote_code={self.model_config.trust_remote_code}, "
             f"dtype={self.model_config.dtype}, "
