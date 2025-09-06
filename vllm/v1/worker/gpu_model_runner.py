@@ -56,6 +56,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         GiB_bytes, LazyLoader, cdiv, check_use_alibi,
                         get_dtype_size, is_pin_memory_available, round_up,
                         supports_dynamo)
+from vllm.v1.attention.backends.mla.flashmla import FlashMLABackend
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
     create_fast_prefill_custom_backend,
@@ -187,6 +188,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             model_config.is_multimodal_raw_input_only_model)
 
         self.max_model_len = model_config.max_model_len
+        self.dcp_world_size = self.parallel_config.decode_context_parallel_size
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
 
@@ -428,6 +430,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             return
 
         if self.reorder_batch_threshold is not None:
+            if self.dcp_world_size > 1:
+                assert self.reorder_batch_threshold == 1, \
+                    "DCP not support reorder_batch_threshold > 1 now."
             reorder_batch_to_split_decodes_and_prefills(
                 self.input_batch,
                 scheduler_output,
@@ -3304,6 +3309,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if self.device.type == 'xpu':
                 get_kv_transfer_group().set_host_xfer_buffer_ops(
                     copy_kv_blocks)
+
+        if self.dcp_world_size > 1:
+            assert self.attn_groups[0][0].backend is FlashMLABackend, (
+                "DCP only support flashmla now."
+                "For a mla backend want to enable DCP, it is mandatory that the"
+                "corresponding decode attn kernel return the softmax lse.")
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """

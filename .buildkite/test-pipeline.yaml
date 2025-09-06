@@ -837,7 +837,7 @@ steps:
   - pytest -v -s models/test_oot_registration.py # it needs a clean process
   - pytest -v -s plugins/lora_resolvers # unit tests for in-tree lora resolver plugins
 
-- label: Pipeline Parallelism Test # 45min
+- label: Pipeline + Context Parallelism Test # 45min
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
@@ -851,6 +851,7 @@ steps:
   commands:
   - pytest -v -s distributed/test_pp_cudagraph.py
   - pytest -v -s distributed/test_pipeline_parallel.py
+  # - pytest -v -s distributed/test_context_parallel.py # TODO: enable it on Hopper runners or add triton MLA support
 
 - label: LoRA TP Test (Distributed) # 17 min
   timeout_in_minutes: 30
