@@ -675,8 +675,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
 
 def determine_expert_map(
-        ep_size: int, ep_rank: int,
-        global_num_experts: int) -> tuple[int, Optional[torch.Tensor]]:
+    ep_size: int,
+    ep_rank: int,
+    global_num_experts: int,
+    round_robin_expert_placement: bool = False,
+) -> tuple[int, Optional[torch.Tensor]]:
     """
         Calculates how many experts should be assigned to each rank for EP and
         creates a mapping from global to local expert index. Experts are
@@ -686,6 +689,8 @@ def determine_expert_map(
         Args:
             ep_size (int): The size of the expert parallel group
             global_num_experts (int): The total number of experts in the model.
+            round_robin_expert_placement (bool): Whether to enable round robin
+                expert placement.
 
         Returns:
             tuple[int, Optional[torch.Tensor]]: A tuple containing:
@@ -710,10 +715,21 @@ def determine_expert_map(
 
     # Create a tensor of size num_experts filled with -1
     expert_map = torch.full((global_num_experts, ), -1, dtype=torch.int32)
-    # Create a expert map for the local experts
-    start_idx = ep_rank * base_experts + min(ep_rank, remainder)
-    expert_map[start_idx:start_idx + local_num_experts] = torch.arange(
-        0, local_num_experts, dtype=torch.int32)
+
+    if round_robin_expert_placement:
+        local_log_experts = torch.arange(ep_rank,
+                                         global_num_experts,
+                                         ep_size,
+                                         dtype=torch.int32)
+
+        expert_map[local_log_experts] = torch.arange(0,
+                                                     local_num_experts,
+                                                     dtype=torch.int32)
+    else:
+        # Create a expert map for the local experts
+        start_idx = ep_rank * base_experts + min(ep_rank, remainder)
+        expert_map[start_idx:start_idx + local_num_experts] = torch.arange(
+            0, local_num_experts, dtype=torch.int32)
     return (local_num_experts, expert_map)
 
 
@@ -834,10 +850,18 @@ class FusedMoE(CustomOp):
             else:
                 assert num_redundant_experts == 0, \
                     "Redundant experts are only supported with EPLB."
+
+            # Round robin expert placement is only supported for models with
+            # multiple expert groups and no redundant experts.
+            enable_round_robin = (
+                self.ep_size > 1 and num_redundant_experts == 0 and \
+                num_expert_group is not None and num_expert_group > 1)
             self.local_num_experts, self.expert_map = determine_expert_map(
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
-                global_num_experts=self.global_num_experts)
+                global_num_experts=self.global_num_experts,
+                round_robin_expert_placement=enable_round_robin,
+            )
             logger.info_once(
                 "[EP Rank %s/%s] Expert parallelism is enabled. Local/global"
                 " number of experts: %s/%s. Experts local to global index map:"
