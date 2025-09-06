@@ -3,6 +3,7 @@
 """Attention layer with FlexAttention."""
 
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Optional, Union
 
 import torch
@@ -253,6 +254,12 @@ def causal_mask_mod(b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor,
     return q_idx >= kv_idx
 
 
+def sliding_window_mask_mod(b, h, q_idx, kv_idx, sliding_window: int):
+    causal_mask = q_idx >= kv_idx
+    window_mask = q_idx - kv_idx <= sliding_window
+    return causal_mask & window_mask
+
+
 @dataclass
 class FlexAttentionMetadata:
     causal: bool
@@ -292,6 +299,7 @@ class FlexAttentionMetadata:
     q_block_size: int = 16
     kv_block_size: int = 16
     transformed_score_mod: Optional[_score_mod_signature] = None
+    sliding_window: Optional[int] = None
 
     def _convert_physical_to_logical(
         self,
@@ -473,6 +481,10 @@ class FlexAttentionMetadata:
 
     def build_block_mask(self) -> BlockMask:
         if self.causal:
+            if self.sliding_window is not None:
+                self.logical_mask_mod = partial(
+                    sliding_window_mask_mod,
+                    sliding_window=self.sliding_window)
             mask_mod = self.get_causal_mask_mod()
             kv_len = self.total_cache_tokens
         else:
@@ -606,7 +618,7 @@ class FlexAttentionMetadataBuilder(
 
 
 class FlexAttentionImpl(AttentionImpl):
-    sliding_window: Optional[tuple[int, int]]
+    sliding_window: Optional[int]
     alibi_slopes: Optional[torch.Tensor]
     logits_soft_cap: Optional[float]
 
@@ -640,11 +652,9 @@ class FlexAttentionImpl(AttentionImpl):
                 "FlexAttention does not support alibi slopes yet.")
         else:
             self.alibi_slopes = None
-        if sliding_window is not None:
-            raise NotImplementedError(
-                "FlexAttention does not support sliding window yet.")
-        else:
-            self.sliding_window = (-1, -1)
+
+        self.sliding_window = sliding_window
+
         self.kv_cache_dtype = kv_cache_dtype
         self.logits_soft_cap = logits_soft_cap
         if self.logits_soft_cap is not None:
@@ -710,6 +720,18 @@ class FlexAttentionImpl(AttentionImpl):
             # return torch.empty_like(query)
 
         num_actual_tokens = attn_metadata.num_actual_tokens
+
+        if self.sliding_window and attn_metadata.sliding_window is None:
+            attn_metadata.sliding_window = self.sliding_window
+            if attn_metadata.direct_build:
+                attn_metadata.logical_mask_mod = partial(
+                    sliding_window_mask_mod,
+                    sliding_window=self.sliding_window)
+                attn_metadata.mask_mod = attn_metadata.get_causal_mask_mod()
+                attn_metadata.block_mask = (
+                    attn_metadata._build_block_mask_direct())
+            else:
+                attn_metadata.block_mask = attn_metadata.build_block_mask()
 
         if not attn_metadata.causal:
             assert self.attn_type == AttentionType.ENCODER_ONLY
