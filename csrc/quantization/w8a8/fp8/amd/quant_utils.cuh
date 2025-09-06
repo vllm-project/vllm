@@ -5,7 +5,7 @@
 #include <hip/hip_bf16.h>
 #include <hip/hip_bfloat16.h>
 
-#include "../../../attention/attention_dtypes.h"
+#include "../../../../attention/attention_dtypes.h"
 
 namespace vllm {
 #ifdef USE_ROCM
