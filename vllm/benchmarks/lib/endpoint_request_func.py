@@ -17,6 +17,47 @@ from tqdm.asyncio import tqdm
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
 
+class StreamedResponseHandler:
+    """Handles streaming HTTP responses by accumulating chunks until complete
+    messages are available."""
+
+    def __init__(self):
+        self.buffer = ""
+
+    def add_chunk(self, chunk_bytes: bytes) -> list[str]:
+        """Add a chunk of bytes to the buffer and return any complete
+        messages."""
+        chunk_str = chunk_bytes.decode("utf-8")
+        self.buffer += chunk_str
+
+        messages = []
+
+        # Split by double newlines (SSE message separator)
+        while "\n\n" in self.buffer:
+            message, self.buffer = self.buffer.split("\n\n", 1)
+            message = message.strip()
+            if message:
+                messages.append(message)
+
+        # if self.buffer is not empty, check if it is a complete message
+        # by removing data: prefix and check if it is a valid JSON
+        if self.buffer.startswith("data: "):
+            message = self.buffer.removeprefix("data: ").strip()
+            if message:
+                try:
+                    json.loads(message)
+                    messages.append(message)
+                    self.buffer = ""
+                except json.JSONDecodeError:
+                    pass
+
+        return messages
+
+    def get_remaining(self) -> str:
+        """Get any remaining data in the buffer."""
+        return self.buffer.strip()
+
+
 @dataclass
 class RequestFuncInput:
     """The input for the request function."""
@@ -102,46 +143,50 @@ async def async_request_openai_completions(
                                 headers=headers) as response:
             if response.status == 200:
                 first_chunk_received = False
-                async for chunk_bytes in response.content:
+                handler = StreamedResponseHandler()
+
+                async for chunk_bytes in response.content.iter_any():
                     chunk_bytes = chunk_bytes.strip()
                     if not chunk_bytes:
                         continue
-                    chunk_bytes = chunk_bytes.decode("utf-8")
-                    # NOTE: SSE comments (often used as pings) start with
-                    # a colon. These are not JSON data payload and should
-                    # be skipped.
-                    if chunk_bytes.startswith(":"):
-                        continue
 
-                    chunk = chunk_bytes.removeprefix("data: ")
+                    messages = handler.add_chunk(chunk_bytes)
+                    for message in messages:
+                        # NOTE: SSE comments (often used as pings) start with
+                        # a colon. These are not JSON data payload and should
+                        # be skipped.
+                        if message.startswith(":"):
+                            continue
 
-                    if chunk != "[DONE]":
-                        data = json.loads(chunk)
+                        chunk = message.removeprefix("data: ")
 
-                        # NOTE: Some completion API might have a last
-                        # usage summary response without a token so we
-                        # want to check a token was generated
-                        if choices := data.get("choices"):
-                            # Note that text could be empty here
-                            # e.g. for special tokens
-                            text = choices[0].get("text")
-                            timestamp = time.perf_counter()
-                            # First token
-                            if not first_chunk_received:
-                                first_chunk_received = True
-                                ttft = time.perf_counter() - st
-                                output.ttft = ttft
+                        if chunk != "[DONE]":
+                            data = json.loads(chunk)
 
-                            # Decoding phase
-                            else:
-                                output.itl.append(timestamp -
-                                                  most_recent_timestamp)
+                            # NOTE: Some completion API might have a last
+                            # usage summary response without a token so we
+                            # want to check a token was generated
+                            if choices := data.get("choices"):
+                                # Note that text could be empty here
+                                # e.g. for special tokens
+                                text = choices[0].get("text")
+                                timestamp = time.perf_counter()
+                                # First token
+                                if not first_chunk_received:
+                                    first_chunk_received = True
+                                    ttft = time.perf_counter() - st
+                                    output.ttft = ttft
 
-                            most_recent_timestamp = timestamp
-                            generated_text += text or ""
-                        elif usage := data.get("usage"):
-                            output.output_tokens = usage.get(
-                                "completion_tokens")
+                                # Decoding phase
+                                else:
+                                    output.itl.append(timestamp -
+                                                    most_recent_timestamp)
+
+                                most_recent_timestamp = timestamp
+                                generated_text += text or ""
+                            elif usage := data.get("usage"):
+                                output.output_tokens = usage.get(
+                                    "completion_tokens")
                 if first_chunk_received:
                     output.success = True
                 else:
@@ -158,6 +203,7 @@ async def async_request_openai_completions(
         output.success = False
         exc_info = sys.exc_info()
         output.error = "".join(traceback.format_exception(*exc_info))
+        print(f"{output.error=}")
 
     if pbar:
         pbar.update(1)
