@@ -1078,8 +1078,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 block_shape=self.quant_config.weight_block_size,
                 expert_map=expert_map)
         elif self.use_marlin:
-            assert activation == "silu", (
-                f"{activation} not supported for Marlin MoE.")
             return torch.ops.vllm.fused_marlin_moe(
                 x,
                 layer.w13_weight,
@@ -1094,6 +1092,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 quant_type_id=scalar_types.float8_e4m3fn.id,
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
+                activation=activation,
                 expert_map=expert_map)
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
             assert self.block_quant is None
