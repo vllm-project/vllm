@@ -90,7 +90,7 @@ if __name__ == "__main__":
             x_vals=configs,
             line_arg="provider",
             line_vals=["custom", "compiled"],
-            line_names=[f"Custom OP ({func_name})", f"Compiled ({func_name})"],
+            line_names=["Custom OP", "Compiled"],
             styles=[("blue", "-"), ("green", "-")],
             ylabel="ms",
             plot_name=f"activation-op-performance-{func_name}",
