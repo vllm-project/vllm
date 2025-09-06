@@ -761,3 +761,22 @@ def fast_topk(values: torch.Tensor, topk: int,
     else:
         # Use topk for efficiency with larger k values
         return torch.topk(values, topk, dim=dim)
+
+
+def normalize_eagle_architecture(arch: str) -> str:
+    """Normalize EAGLE architecture names to consistent format.
+
+    # LlamaForCausalLM      ->  EagleLlamaForCausalLM
+    # Qwen2ForCausalLM      ->  EagleQwen2ForCausalLM
+    # Qwen2ForCausalLMEagle ->  EagleQwen2ForCausalLM
+    # EagleQwen2ForCausalLM ->  EagleQwen2ForCausalLM
+    
+    """
+    # Remove Eagle suffix if present, then add Eagle prefix
+    if arch.endswith("Eagle"):
+        base_arch = arch[:-5]  # Remove "Eagle" suffix
+    elif arch.startswith("Eagle"):
+        return arch  # Already has Eagle prefix
+    else:
+        base_arch = arch
+    return f"Eagle{base_arch}"
