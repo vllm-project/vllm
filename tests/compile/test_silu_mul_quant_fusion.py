@@ -70,6 +70,10 @@ class TestSiluMulNvfp4QuantModel(torch.nn.Module):
 
     def __init__(self, hidden_size: int, x: torch.Tensor, **kwargs):
         super().__init__()
+        from vllm.compilation.activation_quant_fusion import (
+            silu_and_mul_nvfp4_quant_supported)
+        assert silu_and_mul_nvfp4_quant_supported
+
         self.silu_and_mul = SiluAndMul()
 
         # create nvfp4 weight

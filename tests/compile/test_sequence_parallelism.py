@@ -106,7 +106,7 @@ class TestQuantModel(torch.nn.Module):
         # Initialize weights
         torch.nn.init.normal_(self.gate_proj, std=0.02)
 
-        self.fp8_linear = Fp8LinearOp(use_per_token_if_dynamic=False)
+        self.fp8_linear = Fp8LinearOp(act_quant_static=True)
 
         self.scale = torch.rand(1, dtype=torch.float32)
         # Create a weight that is compatible with torch._scaled_mm,
@@ -139,8 +139,7 @@ class TestQuantModel(torch.nn.Module):
         # layer normalization
         norm_output, residual_output = self.norm(all_reduce, residual)
 
-        # for static input quantization
-        # self.fp8_linear is initialized with use_per_token_if_dynamic=False
+        # scaled_mm with static input quantization
         fp8_linear_result = self.fp8_linear.apply(norm_output,
                                                   self.w,
                                                   self.wscale,
