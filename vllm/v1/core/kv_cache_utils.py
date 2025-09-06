@@ -2,7 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """KV-Cache Utilities."""
 
+import json
+import math
 import os
+import time
 from collections import defaultdict, deque
 from collections.abc import Iterable, Sequence
 from dataclasses import astuple, dataclass
@@ -153,6 +156,24 @@ class KVCacheBlock:
 
     # Whether the block is a null block that should never be cached.
     is_null: bool = False
+    # Request type for the corresponding block
+    _type_info: str = "default"
+    # Last accesseed timestamp
+    last_accessed: float = 0
+
+    def incr_ref(self):
+        self.ref_cnt += 1
+
+    def decr_ref(self):
+        self.ref_cnt -= 1
+
+    @property
+    def type_info(self) -> str:
+        return self._type_info
+
+    @type_info.setter
+    def type_info(self, type_info: str):
+        self._type_info = type_info
 
     @property
     def block_hash(self) -> Optional[BlockHashWithGroupId]:
@@ -267,7 +288,7 @@ class FreeKVCacheBlockQueue:
         self.num_free_blocks -= 1
         return first_block
 
-    def popleft_n(self, n: int) -> list[KVCacheBlock]:
+    def popleft_n(self, n: int, **kwargs) -> list[KVCacheBlock]:
         """Pop the first n free blocks and reduce num_free_blocks by n.
 
         Args:
@@ -383,6 +404,234 @@ class FreeKVCacheBlockQueue:
             ret.append(curr_block)
             curr_block = curr_block.next_free_block
         return ret
+
+
+class WorkloadAwareFreeKVCacheBlockQueue(FreeKVCacheBlockQueue):
+    """
+    
+    This class (WAQ) is an enhanced version of FreeKVCacheBlockQueue (FeQ).
+    
+    The main difference between WAQ and FeQ is that
+    WAQ organizes multiple double-linked queues,
+    totaling `num_free_blocks` blocks. 
+    Each double-linked queue represents a workload category;
+    all blocks in a given queue belong to the same category.
+
+    Initially, there is only one default queue
+    since blocks have no assigned category.
+    During allocation, each `KVCacheBlock` is assigned a
+    `type_info` tag indicating its workload category.
+
+    When `append` is called, 
+    WAQ inserts the KVCacheBlock into its category's queue.
+    If the queue doesn't exist, it will be created.
+
+    When `remove` is called,
+    the block is removed from its category's queue in O(1) time.
+
+    When `popLeft` is called, WAQ considers all queues and
+    selects the block with the lowest reuse probability.
+    Since blocks within each queue remain sorted by last accessed time (LRU),
+    only the first block in each queue needs evaluation. 
+    The block with the minimal reuse probability is chosen as the victim.
+    
+    When a block is allocated and then freed, 
+    it will also be appended back with the eviction order:
+    1. Insert to the corresponding workload queue.
+    2. The least recent used block is at the front (LRU).
+    3. If two blocks have the same last accessed time (allocated by the
+       same sequence), the one with more hash tokens (the tail of a block
+       chain) is at the front.
+    Note that we maintain this order by reversing the block order when free
+    blocks of a request. This operation is outside of this class.
+
+    Args:
+        blocks: A list of KVCacheBlock objects.
+        wa_offline_param_path: The path of the offline parameter.
+        
+    """
+
+    def __init__(self, blocks: list[KVCacheBlock],
+                 wa_offline_param_path: Optional[str]) -> None:
+        self.num_free_blocks = len(blocks)
+        try:
+            if wa_offline_param_path is None:
+                raise FileNotFoundError
+            with open(wa_offline_param_path) as file:
+                self.offline_params = json.load(file)
+        except FileNotFoundError:
+            if wa_offline_param_path == "TEST":  # only for test
+                print("[WABlockQueue] Use empty offline_params, note that "
+                      "this should be called when testing")
+                self.offline_params = {"a": {}, "p": {}}
+            else:
+                print(
+                    f"[WABlockQueue]offline param file {wa_offline_param_path} "
+                    "not found. Please generate it by profiler")
+        self.life_range = 5
+
+        print(f"[WABlockQueue] initialize with {wa_offline_param_path=}"
+              f"blocks_number={len(blocks)}")
+        self.workload_to_head_tail: dict[
+            str, list[Optional[KVCacheBlock]]] = dict()
+        self.block_to_workload: dict[int, str] = dict()
+
+        # Initialize the doubly linked list of free blocks.
+        # Construct the original default linked list
+        self.default_free_list_head: Optional[KVCacheBlock] = blocks[0]
+        self.default_free_list_tail: Optional[KVCacheBlock] = blocks[-1]
+        for i in range(self.num_free_blocks):
+            if i > 0:
+                blocks[i].prev_free_block = blocks[i - 1]
+            if i < self.num_free_blocks - 1:
+                blocks[i].next_free_block = blocks[i + 1]
+            self.block_to_workload[i] = "default"
+        self.workload_to_head_tail["default"] = [
+            self.default_free_list_head, self.default_free_list_tail
+        ]
+
+    def _get_priority(self, workload, cur_time, last_accessed, time_range):
+        if workload not in self.offline_params[
+                "a"] or workload not in self.offline_params["p"]:
+            a = 0
+            p = 1
+        else:
+            a = self.offline_params["a"][workload]
+            p = self.offline_params["p"][workload]
+        priority = math.exp(-a * (cur_time - last_accessed))
+        pt = math.exp(-a * (cur_time - last_accessed + time_range))
+        return (priority - pt) * p
+
+    def popleft(self) -> KVCacheBlock:
+        """Pop the least priority free block and reduce num_free_blocks by 1.
+
+        Returns:
+            The first free block.
+        """
+        selected_block = None
+        min_prioirty = 1e9
+        cur_time = time.time()
+        for workload, (list_head, _) in self.workload_to_head_tail.items():
+            # if empty in list head, just skip it
+            if list_head is None:
+                continue
+            assert workload == list_head.type_info, (
+                f"{workload=}, {list_head.type_info=}, mismatch")
+            if workload == "default":  # new blocks, first
+                selected_block = list_head
+                break
+            cur_priority = self._get_priority(workload, cur_time,
+                                              list_head.last_accessed,
+                                              self.life_range)
+            if cur_priority < min_prioirty:
+                min_prioirty = cur_priority
+                selected_block = list_head
+
+        if selected_block is None:
+            raise ValueError("No free blocks available")
+        self.remove(selected_block)
+        return selected_block
+
+    def remove(self, block: KVCacheBlock) -> None:
+        """Remove a block in the free list and reduce num_free_blocks by 1.
+
+        Args:
+            block: The block to remove.
+        """
+        workload = block.type_info
+        assert workload in self.workload_to_head_tail
+
+        if block.prev_free_block is not None:
+            # Link the previous block to the next block.
+            block.prev_free_block.next_free_block = block.next_free_block
+        if block.next_free_block is not None:
+            # Link the next block to the previous block.
+            block.next_free_block.prev_free_block = block.prev_free_block
+
+        if block == self.workload_to_head_tail[workload][0]:
+            # Update the head if the block is the head.
+            self.workload_to_head_tail[workload][0] = block.next_free_block
+        if block == self.workload_to_head_tail[workload][1]:
+            # Update the tail if the block is the tail.
+            self.workload_to_head_tail[workload][1] = block.prev_free_block
+
+        # Remove the block from the linked list.
+        block.prev_free_block = block.next_free_block = None
+        self.num_free_blocks -= 1
+
+    def append(self, block: KVCacheBlock) -> None:
+        """Put a block back into the free list and increase
+        num_free_blocks by 1.
+
+        Args:
+            block: The block to append.
+        """
+        workload = block.type_info
+        assert workload != "default", (
+            f"{workload=}, should not be default when first append")
+
+        # try get the last block in it's workload
+        last_block = self.workload_to_head_tail.get(workload, [None, None])[1]
+
+        if last_block is not None:
+            # case1: workload exists and not empty, append new blocks
+            # Link the last block to the new block.
+            last_block.next_free_block = block
+            block.prev_free_block = last_block
+            self.workload_to_head_tail[workload][1] = block
+        else:
+            # case2: workload not exists, create new
+            # Create a new list for the workload.
+            self.workload_to_head_tail[workload] = [block, block]
+            block.prev_free_block = None
+
+        block.next_free_block = None
+        self.num_free_blocks += 1
+
+    def append_n(self, blocks: list[KVCacheBlock]) -> None:
+        """Put a list of blocks back into the free list
+
+        Args:
+            blocks: The blocks to append.
+        """
+        if len(blocks) == 0:
+            return
+        for block in blocks:
+            self.append(block)
+
+    def get_all_free_blocks(self) -> list[KVCacheBlock]:
+        """Get all free blocks in the free list. Mainly used for testing.
+
+        Returns:
+            A list of free blocks.
+        """
+        ret = []
+        for workload, (list_head, _) in self.workload_to_head_tail.items():
+            curr_block = list_head
+            while curr_block is not None:
+                ret.append(curr_block)
+                curr_block = curr_block.next_free_block
+        return ret
+
+    def popleft_n(self, n: int, **kwargs) -> list[KVCacheBlock]:
+        """Pop the first n free blocks and reduce num_free_blocks by n.
+
+        Args:
+            n: The number of blocks to pop.
+
+        Returns:
+            A list of n free blocks.
+        """
+        if n == 0:
+            return []
+        assert self.num_free_blocks >= n
+        type_info = kwargs.get("type_info", "")
+        res = []
+        for _ in range(n):
+            block = self.popleft()
+            block.type_info = type_info
+            res.append(block)
+        return res
 
 
 def need_extra_keys(request: Request) -> bool:
