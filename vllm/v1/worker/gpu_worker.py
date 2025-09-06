@@ -601,6 +601,9 @@ class Worker(WorkerBase):
         self.model_runner.save_tensorized_model(
             tensorizer_config=tensorizer_config, )
 
+    def shutdown(self) -> None:
+        self.model_runner.ensure_kv_transfer_shutdown()
+
 
 def init_worker_distributed_environment(
     vllm_config: VllmConfig,
