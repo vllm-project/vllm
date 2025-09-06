@@ -679,8 +679,10 @@ def main(args: argparse.Namespace):
         search_space = get_configs_compute_bound(is_fp16, block_quant_shape)
         print(f"Start tuning over {len(search_space)} configurations...")
         if use_deep_gemm:
-            print("Only supports tuning triton kernels, set use_deep_gemm=False.")
-            use_deep_gemm = False
+            raise ValueError(
+                "Tuning with --use-deep-gemm is not supported as it only tunes Triton "
+                "kernels. Please remove the flag."
+            )
         start = time.time()
         configs = _distribute(
             "tune",
