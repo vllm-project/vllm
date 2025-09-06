@@ -2458,7 +2458,6 @@ class LoRAConfig:
     LoRA adapter. Will be removed in v0.12.0."""
     lora_vocab_padding_size: ClassVar[int] = current_platform\
         .get_lora_vocab_padding_size()
-
     default_mm_loras: Optional[dict[str, str]] = None
     """Dictionary mapping specific modalities to LoRA model paths; this field
     is only applicable to multimodal models and should be leveraged when a
@@ -2470,7 +2469,8 @@ class LoRAConfig:
     will be automatically assigned to 1-n with the names of the modalities
     in alphabetic order."""
     bias_enabled: bool = False
-    """Enable bias for LoRA adapters."""
+    """[DEPRECATED] Enable bias for LoRA adapters. This option will be
+    removed in v0.12.0."""
 
     def compute_hash(self) -> str:
         """
@@ -2502,6 +2502,11 @@ class LoRAConfig:
             "`lora_extra_vocab_size` is deprecated and will be removed "
             "in v0.12.0. Additional vocabulary support for "
             "LoRA adapters is being phased out.")
+
+        # Deprecation warning for enable_lora_bias
+        if self.bias_enabled:
+            logger.warning("`enable_lora_bias` is deprecated "
+                           "and will be removed in v0.12.0.")
 
         # Setting the maximum rank to 512 should be able to satisfy the vast
         # majority of applications.
