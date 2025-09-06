@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import cast
+
 import pytest
 import torch
 
@@ -99,8 +101,9 @@ class TestSiluMulNvfp4QuantModel(torch.nn.Module):
 @pytest.mark.parametrize("num_tokens", [64])
 @pytest.mark.parametrize("hidden_size", [128])
 @pytest.mark.parametrize(
-    "model_class", [TestSiluMulFp8QuantModel, TestSiluMulNvfp4QuantModel]
-    if is_nvfp4_supported() else [TestSiluMulFp8QuantModel])
+    "model_class",
+    cast(list[type], [TestSiluMulFp8QuantModel, TestSiluMulNvfp4QuantModel]
+         if is_nvfp4_supported() else [TestSiluMulFp8QuantModel]))
 # cuda_force_torch used to test torch code path on platforms that
 # cutlass_fp8_supported() == True.
 @pytest.mark.parametrize("cuda_force_torch",
