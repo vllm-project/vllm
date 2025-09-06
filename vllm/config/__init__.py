@@ -1120,7 +1120,8 @@ class ModelConfig:
                 elif quant_algo is not None:
                     raise ValueError(
                         f"Unknown ModelOpt quant algo: {quant_algo}")
-
+                else:
+                    return None
         return quant_cfg
 
     def _verify_quantization(self) -> None:
@@ -2400,7 +2401,7 @@ class SpeculativeConfig:
                              "speculative decoding is > 1, but got "
                              f"{self.disable_by_batch_size=}")
 
-        eagle3_target_supported = ["llama", "qwen"]
+        eagle3_target_supported = ["llama", "qwen", "gpt_oss"]
         if self.method == "eagle3" and self.target_model_config and not any(
                 supported_model in
                 self.target_model_config.hf_text_config.model_type
