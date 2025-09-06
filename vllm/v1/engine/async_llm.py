@@ -277,6 +277,13 @@ class AsyncLLM(EngineClient):
         # Create a new output collector for the request.
         queue = RequestOutputCollector(output_kind=params.output_kind)
 
+        if isinstance(params, SamplingParams) and isinstance(
+                params.predicted_outputs, str) and self.tokenizer is not None:
+            params.predicted_outputs = self.tokenizer.encode(
+                params.predicted_outputs,
+                add_special_tokens=False  # Usually don't want special tokens
+            )
+
         # Convert Input --> Request.
         prompt_str, request = self.processor.process_inputs(
             request_id, prompt, params, arrival_time, lora_request,

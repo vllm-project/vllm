@@ -202,6 +202,12 @@ class LLMEngine:
             raise TypeError(
                 f"request_id must be a string, got {type(request_id)}")
 
+        if isinstance(params, SamplingParams) and isinstance(
+                params.predicted_outputs, str) and self.tokenizer is not None:
+            params.predicted_outputs = self.tokenizer.encode(
+                params.predicted_outputs,
+                add_special_tokens=False  # Usually don't want special tokens
+            )
         # Process raw inputs into the request.
         prompt_str, request = self.processor.process_inputs(
             request_id, prompt, params, arrival_time, lora_request,
