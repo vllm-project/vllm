@@ -11,6 +11,7 @@ from torch._ops import OpOverload
 
 from vllm.compilation.fx_utils import find_op_nodes
 from vllm.compilation.inductor_pass import InductorPass
+from vllm.compilation.pass_manager import with_pattern_match_debug
 from vllm.compilation.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig, get_current_vllm_config
 
@@ -58,6 +59,7 @@ class TestBackend:
                           example_inputs,
                           config_patches=self.inductor_config)
 
+    @with_pattern_match_debug
     def post_pass(self, graph: fx.Graph):
         self.graph_pre_pass = deepcopy(graph)
         for pass_ in self.custom_passes:

@@ -385,7 +385,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_STANDALONE_COMPILE":
     lambda: os.environ.get("VLLM_USE_STANDALONE_COMPILE", "1") == "1",
 
-    # Debug pattern matching inside custom passes
+    # Debug pattern matching inside custom passes.
+    # Should be set to the fx.Node name (e.g. 'getitem_34' or 'scaled_mm_3').
     "VLLM_PATTERN_MATCH_DEBUG":
     lambda: os.environ.get("VLLM_PATTERN_MATCH_DEBUG", None),
 
