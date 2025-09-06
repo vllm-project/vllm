@@ -131,7 +131,6 @@ void silu_and_mul_quant(torch::Tensor& out, torch::Tensor& input,
                         torch::Tensor& scale);
 
 #ifndef USE_ROCM
-
 void silu_and_mul_nvfp4_quant(torch::Tensor& out,
                               torch::Tensor& output_block_scale,
                               torch::Tensor& input,
