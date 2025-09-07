@@ -18,6 +18,7 @@ from vllm.transformers_utils.configs.jais import JAISConfig
 from vllm.transformers_utils.configs.kimi_vl import KimiVLConfig
 from vllm.transformers_utils.configs.lite_whisper import LiteWhisperConfig
 from vllm.transformers_utils.configs.medusa import MedusaConfig
+from vllm.transformers_utils.configs.midashenglm import MiDashengLMConfig
 from vllm.transformers_utils.configs.mlp_speculator import MLPSpeculatorConfig
 from vllm.transformers_utils.configs.moonvit import MoonViTConfig
 from vllm.transformers_utils.configs.nemotron import NemotronConfig
@@ -38,6 +39,7 @@ __all__ = [
     "JAISConfig",
     "LiteWhisperConfig",
     "MedusaConfig",
+    "MiDashengLMConfig",
     "MLPSpeculatorConfig",
     "MoonViTConfig",
     "KimiVLConfig",

@@ -250,6 +250,11 @@ class InputBatch:
 
         self.pooling_params: dict[str, PoolingParams] = {}
 
+        # Cached reference to the GPU tensor of previously sampled tokens
+        self.prev_sampled_token_ids: Optional[torch.Tensor] = None
+        self.prev_sampled_token_ids_invalid_indices: Optional[set[int]] = None
+        self.prev_req_id_to_index: Optional[dict[str, int]] = None
+
     @property
     def req_ids(self) -> list[str]:
         # None elements should only be present transiently
@@ -584,7 +589,7 @@ class InputBatch:
 
             if self.is_pooling_model:
                 last_req_index -= 1
-                # Samping state not used by pooling models.
+                # Sampling state not used by pooling models.
                 continue
 
             # Autoregressive models require detailed tracking of condense
