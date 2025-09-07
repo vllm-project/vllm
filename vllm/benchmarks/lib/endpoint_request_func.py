@@ -395,36 +395,40 @@ async def async_request_openai_audio(
                                     data=form,
                                     headers=headers) as response:
                 if response.status == 200:
-                    async for chunk_bytes in response.content:
+                    handler = StreamedResponseHandler()
+
+                    async for chunk_bytes in response.content.iter_any():
                         chunk_bytes = chunk_bytes.strip()
                         if not chunk_bytes:
                             continue
 
-                        chunk = chunk_bytes.decode("utf-8").removeprefix(
-                            "data: ")
-                        if chunk != "[DONE]":
-                            timestamp = time.perf_counter()
-                            data = json.loads(chunk)
+                        messages = handler.add_chunk(chunk_bytes)
+                        for message in messages:
+                            chunk = message.decode("utf-8").removeprefix(
+                                "data: ")
+                            if chunk != "[DONE]":
+                                timestamp = time.perf_counter()
+                                data = json.loads(chunk)
 
-                            if choices := data.get("choices"):
-                                content = choices[0]["delta"].get(
-                                    "content")
-                                # First token
-                                if ttft == 0.0:
-                                    ttft = timestamp - st
-                                    output.ttft = ttft
+                                if choices := data.get("choices"):
+                                    content = choices[0]["delta"].get(
+                                        "content")
+                                    # First token
+                                    if ttft == 0.0:
+                                        ttft = timestamp - st
+                                        output.ttft = ttft
 
-                                # Decoding phase
-                                else:
-                                    output.itl.append(
-                                        timestamp - most_recent_timestamp)
+                                    # Decoding phase
+                                    else:
+                                        output.itl.append(
+                                            timestamp - most_recent_timestamp)
 
-                                generated_text += content or ""
-                            elif usage := data.get("usage"):
-                                output.output_tokens = usage.get(
-                                    "completion_tokens")
+                                    generated_text += content or ""
+                                elif usage := data.get("usage"):
+                                    output.output_tokens = usage.get(
+                                        "completion_tokens")
 
-                            most_recent_timestamp = timestamp
+                                most_recent_timestamp = timestamp
 
                     output.generated_text = generated_text
                     output.success = True
