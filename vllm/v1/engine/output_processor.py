@@ -342,7 +342,12 @@ class OutputProcessor:
     ) -> None:
         request_id = request.request_id
         if request_id in self.request_states:
-            raise ValueError(f"Request id {request_id} already running.")
+            existing_state = self.request_states[request_id]
+            if existing_state.is_marked_for_abort:
+                raise ValueError(f"Request id {request_id} is pending abort "
+                                 f"confirmation and cannot be reused yet.")
+            else:
+                raise ValueError(f"Request id {request_id} already running.")
 
         tokenizer = None if not self.tokenizer else \
             self.tokenizer.get_lora_tokenizer(request.lora_request)
