@@ -203,7 +203,6 @@ async def async_request_openai_completions(
         output.success = False
         exc_info = sys.exc_info()
         output.error = "".join(traceback.format_exception(*exc_info))
-        print(f"{output.error=}")
 
     if pbar:
         pbar.update(1)
@@ -273,41 +272,44 @@ async def async_request_openai_chat_completions(
         async with session.post(url=api_url, json=payload,
                                 headers=headers) as response:
             if response.status == 200:
-                async for chunk_bytes in response.content:
+                handler = StreamedResponseHandler()
+                async for chunk_bytes in response.content.iter_any():
                     chunk_bytes = chunk_bytes.strip()
                     if not chunk_bytes:
                         continue
-                    chunk_bytes = chunk_bytes.decode("utf-8")
-                    # NOTE: SSE comments (often used as pings) start with
-                    # a colon. These are not JSON data payload and should
-                    # be skipped.
-                    if chunk_bytes.startswith(":"):
-                        continue
 
-                    chunk = chunk_bytes.removeprefix("data: ")
+                    messages = handler.add_chunk(chunk_bytes)
+                    for message in messages:
+                        # NOTE: SSE comments (often used as pings) start with
+                        # a colon. These are not JSON data payload and should
+                        # be skipped.
+                        if message.startswith(":"):
+                            continue
 
-                    if chunk != "[DONE]":
-                        timestamp = time.perf_counter()
-                        data = json.loads(chunk)
+                        chunk = message.removeprefix("data: ")
 
-                        if choices := data.get("choices"):
-                            content = choices[0]["delta"].get("content")
-                            # First token
-                            if ttft == 0.0:
-                                ttft = timestamp - st
-                                output.ttft = ttft
+                        if chunk != "[DONE]":
+                            timestamp = time.perf_counter()
+                            data = json.loads(chunk)
 
-                            # Decoding phase
-                            else:
-                                output.itl.append(timestamp -
-                                                  most_recent_timestamp)
+                            if choices := data.get("choices"):
+                                content = choices[0]["delta"].get("content")
+                                # First token
+                                if ttft == 0.0:
+                                    ttft = timestamp - st
+                                    output.ttft = ttft
 
-                            generated_text += content or ""
-                        elif usage := data.get("usage"):
-                            output.output_tokens = usage.get(
-                                "completion_tokens")
+                                # Decoding phase
+                                else:
+                                    output.itl.append(timestamp -
+                                                    most_recent_timestamp)
 
-                        most_recent_timestamp = timestamp
+                                generated_text += content or ""
+                            elif usage := data.get("usage"):
+                                output.output_tokens = usage.get(
+                                    "completion_tokens")
+
+                            most_recent_timestamp = timestamp
 
                 output.generated_text = generated_text
                 output.success = True
