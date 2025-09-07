@@ -271,8 +271,9 @@ class StructuredOutputManager:
         return True
 
     def should_advance(self, request: CachedRequestState) -> bool:
-        if request.sampling_params.guided_decoding is None:
-            return False
+        if request.sampling_params is not None :
+            if request.sampling_params.guided_decoding is None:
+                return False
 
         # To determine whether we can advance the FSM.
         # Supports thinking usage where we skip the reasoning components.

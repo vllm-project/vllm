@@ -480,8 +480,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 
             )
             self.requests[req_id] = req_state
-            if self.requests[req_id].sampling_params is not None and self.requests[req_id].sampling_params.guided_decoding is not None:
-                self.structured_output_manager.grammar_init(self.requests[req_id])
+            if self.requests[req_id].sampling_params is not None :
+                if self.requests[req_id].sampling_params.guided_decoding is not None:
+                    self.structured_output_manager.grammar_init(self.requests[req_id])
 
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             if self.uses_mrope:
@@ -1762,18 +1763,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             count = 0
             for num_new, output_token_id in enumerate(generated_token_ids, 1):
                 last_token_id = output_token_id
-                if (self.requests[req_id].sampling_params is not None and 
-                    not self.requests[req_id].sampling_params.ignore_eos  and 
-                   last_token_id == scheduler_output.eos_token_ids[req_id]):
-                   count = num_new
-                   self.requests[req_id].stop = True
-                   break
+                if self.requests[req_id].sampling_params is not None :
+                    if not self.requests[req_id].sampling_params.ignore_eos  \
+                    and last_token_id == scheduler_output.eos_token_ids[req_id] :
+                        count = num_new
+                        self.requests[req_id].stop = True
+                        break
             if generated_token_ids and self.structured_output_manager.should_advance(self.requests[req_id]):
-                if self.requests[req_id].structured_output_request is not None and self.requests[req_id].structured_output_request.grammar is not None:
-                    if count > 0:
-                        self.requests[req_id].structured_output_request.grammar.accept_tokens(req_id, generated_token_ids[:count])
-                    else:
-                        self.requests[req_id].structured_output_request.grammar.accept_tokens(req_id, generated_token_ids)
+                if self.requests[req_id].structured_output_request is not None :
+                    if self.requests[req_id].structured_output_request.grammar is not None:
+
+                        if count > 0:
+                            self.requests[req_id].structured_output_request.grammar.accept_tokens(req_id, generated_token_ids[:count])
+                        else:
+                            self.requests[req_id].structured_output_request.grammar.accept_tokens(req_id, generated_token_ids)
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
@@ -1808,11 +1811,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     if last_token_id == self.requests[req_id].requests_stop_id:
                         count = num_new
                         break
-                if self.requests[req_id].structured_output_request is not None and self.requests[req_id].structured_output_request.grammar is not None:
-                    if count == 0 or count == len(draft_token_ids[i]):
-                        spec_token_ids[req_id] = self.requests[req_id].structured_output_request.grammar.validate_tokens(draft_token_ids[i])
-                    else:
-                        spec_token_ids[req_id] = self.requests[req_id].structured_output_request.grammar.validate_tokens(draft_token_ids[i][:count])
+                if self.requests[req_id].structured_output_request is not None :
+                    if self.requests[req_id].structured_output_request.grammar is not None:
+                        if count == 0 or count == len(draft_token_ids[i]):
+                            spec_token_ids[req_id] = self.requests[req_id].structured_output_request.grammar.validate_tokens(draft_token_ids[i])
+                        else:
+                            spec_token_ids[req_id] = self.requests[req_id].structured_output_request.grammar.validate_tokens(draft_token_ids[i][:count])
             else:
                 should_advance[req_id] = False
         return DraftTokenIds(req_ids, draft_token_ids, should_advance, spec_token_ids)
