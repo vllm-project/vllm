@@ -1590,23 +1590,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def _preprocess(
         self,
+        num_input_tokens: int,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> tuple[int, int, Optional[torch.Tensor], Optional[torch.Tensor],
-               Optional[torch.Tensor], torch.Tensor,
+    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor], torch.Tensor,
                Optional[IntermediateTensors], dict[str, Any]]:
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        # dispatcher planning
-        cudagraph_runtime_mode, batch_descriptor, num_input_tokens = \
-            self.cudagraph_dispatcher.plan(
-                num_scheduled_tokens=num_scheduled_tokens,
-                num_reqs=self.input_batch.num_reqs,
-                max_query_len=max_query_len)
-
-        # Padding for DP
-        num_pad, num_tokens_across_dp = self.get_dp_padding(num_input_tokens)
-        num_input_tokens += num_pad
 
         # _prepare_inputs may reorder the batch, so we must gather multi
         # modal outputs after that to ensure the correct order
@@ -1656,11 +1646,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_input_tokens, intermediate_tensors, True)
 
         return (
-            cudagraph_runtime_mode,
-            batch_descriptor,
-            num_scheduled_tokens,
-            num_input_tokens,
-            num_tokens_across_dp,
             input_ids,
             inputs_embeds,
             positions,
@@ -1863,18 +1848,27 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
              num_scheduled_tokens_np, spec_decode_common_attn_metadata,
              max_query_len) = self._prepare_inputs(scheduler_output)
 
+            # cudagraph dispatcher planing + padding
+            num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+            cudagraph_runtime_mode, batch_descriptor, num_input_tokens = \
+                self.cudagraph_dispatcher.plan(
+                    num_scheduled_tokens=num_scheduled_tokens,
+                    num_reqs=self.input_batch.num_reqs,
+                    max_query_len=max_query_len)
+
+            # Padding for DP
+            num_pad, num_tokens_across_dp = self.get_dp_padding(
+                num_input_tokens)
+            num_input_tokens += num_pad
+
             (
-                cudagraph_runtime_mode,
-                batch_descriptor,
-                num_scheduled_tokens,
-                num_input_tokens,
-                num_tokens_across_dp,
                 input_ids,
                 inputs_embeds,
                 positions,
                 intermediate_tensors,
                 model_kwargs,
-            ) = self._preprocess(scheduler_output, intermediate_tensors)
+            ) = self._preprocess(num_input_tokens, scheduler_output,
+                                 intermediate_tensors)
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
