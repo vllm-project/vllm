@@ -133,6 +133,7 @@ class Scheduler(SchedulerInterface):
 
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
+        self.failed_recving_kv_req_ids: set[str] = set()
 
         # Encoder-related.
         # Calculate encoder cache size if applicable
@@ -1262,18 +1263,33 @@ class Scheduler(SchedulerInterface):
         if request.request_id not in self.finished_recving_kv_req_ids:
             return False
 
-        # Now that the blocks are ready, actually cache them.
-        (block_ids, ) = self.kv_cache_manager.get_block_ids(request.request_id)
-        num_computed_tokens = len(block_ids) * self.block_size
-        # Handle the case where num request tokens less than one block.
-        num_computed_tokens = min(num_computed_tokens, request.num_tokens)
-        if num_computed_tokens == request.num_tokens:
-            num_computed_tokens -= 1
-        # This will cache the blocks iff caching is enabled.
-        self.kv_cache_manager.cache_blocks(request, num_computed_tokens)
+        if request.request_id in self.failed_recving_kv_req_ids:
+            # Request had KV load failures; num_computed_tokens was already
+            # updated in _update_requests_with_invalid_blocks
+            if request.num_computed_tokens:
+                # Cache any valid computed tokens.
+                self.kv_cache_manager.cache_blocks(request,
+                                                   request.num_computed_tokens)
+            else:
+                # No valid computed tokens, release allocated blocks.
+                # There may be a local cache hit on retry.
+                self.kv_cache_manager.free(request)
 
-        # Update the request state for scheduling.
-        request.num_computed_tokens = num_computed_tokens
+            self.failed_recving_kv_req_ids.remove(request.request_id)
+        else:
+            # Now that the blocks are ready, actually cache them.
+            (block_ids, ) = self.kv_cache_manager.get_block_ids(
+                request.request_id)
+            num_computed_tokens = len(block_ids) * self.block_size
+            # Handle the case where num request tokens less than one block.
+            num_computed_tokens = min(num_computed_tokens, request.num_tokens)
+            if num_computed_tokens == request.num_tokens:
+                num_computed_tokens -= 1
+            # This will cache the blocks iff caching is enabled.
+            self.kv_cache_manager.cache_blocks(request, num_computed_tokens)
+
+            # Update the request state for scheduling.
+            request.num_computed_tokens = num_computed_tokens
 
         # Return that we are ready.
         self.finished_recving_kv_req_ids.remove(request.request_id)
@@ -1309,8 +1325,8 @@ class Scheduler(SchedulerInterface):
 
     def _update_requests_with_invalid_blocks(
             self, requests: Iterable[Request],
-            invalid_block_ids: set[int]) -> tuple[set[Request], int, set[int]]:
-        affected_requests: set[Request] = set()
+            invalid_block_ids: set[int]) -> tuple[set[str], int, set[int]]:
+        affected_req_ids: set[str] = set()
         num_tokens_to_reschedule = 0
         # If a block is invalid and shared by multiple requests in the batch,
         # all requests must be rescheduled, but only the first will recompute
@@ -1367,9 +1383,9 @@ class Scheduler(SchedulerInterface):
                                                  request.num_cached_tokens)
                     request.num_computed_tokens = request.num_cached_tokens
 
-                affected_requests.add(request)
+                affected_req_ids.add(request.request_id)
 
-        return (affected_requests, num_tokens_to_reschedule,
+        return (affected_req_ids, num_tokens_to_reschedule,
                 marked_invalid_block_ids)
 
     def _handle_invalid_blocks(self, invalid_block_ids: set[int]) -> set[str]:
@@ -1380,36 +1396,28 @@ class Scheduler(SchedulerInterface):
         async_load_reqs = (
             req for req in self.waiting
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS)
-        (affected_requests, num_tokens_to_reschedule,
+        (affected_req_ids, num_tokens_to_reschedule,
          marked_invalid_block_ids) = (
              self._update_requests_with_invalid_blocks(async_load_reqs,
                                                        invalid_block_ids))
 
-        total_requests_to_reschedule += len(affected_requests)
+        total_requests_to_reschedule += len(affected_req_ids)
         total_tokens_to_reschedule += num_tokens_to_reschedule
 
-        for request in affected_requests:
-            if request.num_computed_tokens:
-                # Cache any valid computed tokens.
-                self.kv_cache_manager.cache_blocks(request,
-                                                   request.num_computed_tokens)
-            else:
-                # No valid computed tokens, release allocated blocks.
-                # There may be a local cache hit on retry.
-                self.kv_cache_manager.free(request)
-
-            request.status = RequestStatus.WAITING
+        # Mark requests with async KV load failures; they will be rescheduled
+        # once loading completes
+        self.failed_recving_kv_req_ids |= affected_req_ids
 
         # Remove async loaded invalid blocks already handled,
         # as they cannot be shared with running requests.
         invalid_block_ids.difference_update(marked_invalid_block_ids)
 
         # --- Handle sync KV loads (running requests) ---
-        affected_requests, num_tokens_to_reschedule, _ = (
+        affected_req_ids, num_tokens_to_reschedule, _ = (
             self._update_requests_with_invalid_blocks(self.running,
                                                       invalid_block_ids))
 
-        total_requests_to_reschedule += len(affected_requests)
+        total_requests_to_reschedule += len(affected_req_ids)
         total_tokens_to_reschedule += num_tokens_to_reschedule
 
         if total_requests_to_reschedule:
@@ -1420,4 +1428,4 @@ class Scheduler(SchedulerInterface):
 
         # Return the IDs of affected running requests to skip in
         # update_from_output.
-        return {r.request_id for r in affected_requests}
+        return affected_req_ids

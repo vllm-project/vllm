@@ -102,10 +102,10 @@ def test_async_load_failure(
         if request.request_id == request2.request_id:
             assert request.num_computed_tokens == (min_invalid_block_idx *
                                                    scheduler.block_size)
-            assert request.status == RequestStatus.WAITING
         else:
             assert request.num_computed_tokens == 0
-            assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert scheduler.failed_recving_kv_req_ids == {request2.request_id}
     assert scheduler.connector.get_num_new_matched_tokens.call_count == 3
 
 
