@@ -242,7 +242,7 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
             self._num_kv_splits,
         )
 
-        return o, lse
+        return o, (lse if self.need_to_return_lse_for_decode else None)
 
     # TODO: Currently we leave it here only for backup in case something is
     #       wrong with the new SM100 CUTLASS MLA kernel
