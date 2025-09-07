@@ -86,12 +86,7 @@ class RogueSharedStorageConnector(SharedStorageConnector):
             meta = self._get_connector_metadata()
             assert isinstance(meta, RogueSharedStorageConnectorMetadata)
             if meta.req_to_block_ids:
-                finished_recving = {
-                    req_id
-                    for req_id, block_ids in meta.req_to_block_ids.items()
-                    if len(set(block_ids).intersection(self._invalid_block_ids)) == 0
-                }
-                return None, finished_recving
+                return None, set(meta.req_to_block_ids)
 
         return None, None
 
