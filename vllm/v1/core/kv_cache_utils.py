@@ -1112,16 +1112,15 @@ def get_kv_cache_config(
         # KV cache of all layers are the same, which is true for
         # most models. Allocate the same amount of memory for
         # each layer.
-        kvCacheConfig = _get_kv_cache_config_uniform_type(vllm_config, kv_cache_spec,
-                                                 available_memory)
+        kvCacheConfig = _get_kv_cache_config_uniform_type(
+            vllm_config, kv_cache_spec, available_memory)
     elif is_kv_cache_page_size_uniform(kv_cache_spec):
         # Model contains multiple attention types, but KV cache of all layers
         # have the same physical memory per block per layer. Split the layers
         # into groups with the same number of layers, and thus same total page
         # size.
-        kvCacheConfig = _get_kv_cache_config_uniform_page_size(vllm_config,
-                                                      kv_cache_spec,
-                                                      available_memory)
+        kvCacheConfig = _get_kv_cache_config_uniform_page_size(
+            vllm_config, kv_cache_spec, available_memory)
     if kvCacheConfig:
         if vllm_config.cache_config:
             delay_batch_size = vllm_config.cache_config.delay_batch_size

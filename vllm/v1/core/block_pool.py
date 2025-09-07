@@ -260,7 +260,7 @@ class BlockPool:
         self.delay_free_blocks.append(list(ordered_blocks))
         if len(self.delay_free_blocks) >= self.delay_batch_size or refresh:
             self._free_delay_blocks()
-    
+
     def _free_delay_blocks(self):
         if not self.delay_free_blocks:
             return
