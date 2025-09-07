@@ -32,11 +32,11 @@ def ignore_torch_compile(cls: _T) -> _T:
     a support_torch_compile decorator, but we don't want to
     compile the class `cls` that inherits the parent class.
     This only ignores compiling the forward of the class the
-    decorator is applied to. 
+    decorator is applied to.
 
     If the parent has ignore_torch_compile but the child has
     support_torch_compile, the child will still be compiled.
-    
+
     If the class has one or more submodules
     that have support_torch_compile decorator applied, compile will
     not be ignored for those submodules.
@@ -182,6 +182,7 @@ def _support_torch_compile(
     """
     A decorator to add support for compiling the forward method of a class.
     """
+    ic(dynamic_arg_dims)
     if TorchCompileWrapperWithCustomDispatcher in cls.__bases__:
         # support decorating multiple times
         return cls

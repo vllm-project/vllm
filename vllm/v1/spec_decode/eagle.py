@@ -243,11 +243,15 @@ class EagleProposer:
                 hidden_states=hidden_states,
                 common_attn_metadata=common_attn_metadata,
             )
-            ic(draft_token_ids_list)
+
+            if self.vllm_config.speculative_config.draft_vocab_pruned is not None:
+                draft_token_ids_list = self.hot_token_ids[draft_token_ids_list]
+
             # [batch_size, num_tree_tokens]
             return torch.cat(draft_token_ids_list, dim=1)
 
         draft_token_ids = logits.argmax(dim=-1)
+
         ic(draft_token_ids)
         if self.vllm_config.speculative_config.draft_vocab_pruned is not None:
             draft_token_ids = self.hot_token_ids[draft_token_ids]
@@ -677,8 +681,8 @@ class EagleProposer:
                 head.data = head.data[self.hot_token_ids]
                 del self.model.lm_head.weight
                 self.model.lm_head.weight = head
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
+                # torch.cuda.empty_cache()
+                # torch.cuda.synchronize()
             else:
                 print('no lm_head')
 

@@ -1567,7 +1567,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         ), self.maybe_get_kv_connector_output(
                 scheduler_output) as kv_connector_output:
 
-            ic(self.model.model.embed_tokens.weight.shape)
             model_output = self.model(
                 input_ids=input_ids,
                 positions=positions,
@@ -2229,6 +2228,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             is_profile: If True, this is a profile run.
             remove_lora: If False, dummy LoRAs are not destroyed after the run
         """
+        ic(cudagraph_runtime_mode)
         assert cudagraph_runtime_mode in {
             CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
         }
