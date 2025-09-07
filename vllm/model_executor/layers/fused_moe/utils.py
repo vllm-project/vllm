@@ -5,15 +5,14 @@ from typing import Optional, Union
 
 import torch
 
-from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.fp8_quant_ops import (
+    quantize_fp8_per_group, quantize_fp8_per_tensor, quantize_fp8_per_token)
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_group_quant_int8, per_token_quant_int8)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     quant_dequant_mxfp4)
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_quantize)
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv
@@ -123,28 +122,18 @@ def _fp8_quantize(
     """
     if block_shape is None:
         if per_act_token:
-            group_shape = GroupShape.PER_TOKEN
+            return quantize_fp8_per_token(A, A_scale)
         else:
-            group_shape = GroupShape.PER_TENSOR
-
-        quant_op = QuantFP8(static=(A_scale is not None),
-                            group_shape=group_shape)
-        A, A_scale = quant_op(A, A_scale)
+            return quantize_fp8_per_tensor(A, A_scale)
     else:
-        assert not per_act_token
-        assert len(block_shape) == 2
+        assert not per_act_token, \
+            "per_act_token not supported with block_shape"
+        assert A_scale is None, \
+            "Group quantization doesn't support static scales"
+        assert len(block_shape) == 2, "block_shape must be [m, k]"
         _, block_k = block_shape[0], block_shape[1]
-
-        group_shape = GroupShape(1, block_k)
-        quant_op = QuantFP8(
-            static=False,  # Group quantization is always dynamic
-            group_shape=group_shape,
-            column_major_scales=False  # Use row-major for MoE
-        )
-        A, A_scale = quant_op(A)
-        assert cdiv(A.size(-1), block_k) == A_scale.size(-1)
-
-    return A, A_scale
+        return quantize_fp8_per_group(
+            A, block_k, column_major_scales=False)  # Use row-major for MoE
 
 
 def _int8_quantize(

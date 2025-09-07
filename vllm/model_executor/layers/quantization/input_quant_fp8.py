@@ -7,6 +7,8 @@ import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.quantization.utils.fp8_quant_ops import (
+    quantize_fp8_per_group, quantize_fp8_per_tensor, quantize_fp8_per_token)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape)
 from vllm.platforms import current_platform
@@ -14,10 +16,6 @@ from vllm.platforms import current_platform
 # Using the default value (240.0) from pytorch will cause accuracy
 # issue on dynamic quantization models. Here use 224.0 for fnuz on ROCm.
 _FP8_DTYPE = current_platform.fp8_dtype()
-_FP8_FINFO = torch.finfo(_FP8_DTYPE)
-_FP8_MAX = 224.0 if current_platform.is_fp8_fnuz() else _FP8_FINFO.max
-_FP8_MIN = -224.0 if current_platform.is_fp8_fnuz() else _FP8_FINFO.min
-_FP8_MIN_SCALING_FACTOR = 1.0 / (_FP8_MAX * 512.0)
 
 
 @CustomOp.register("quant_fp8")
@@ -57,30 +55,6 @@ class QuantFP8(CustomOp):
                 "Only per-tensor scales supported for static quantization."
             self.use_per_token_if_dynamic = group_shape == GroupShape.PER_TOKEN
 
-    def _quantize_group(self,
-                        x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-            per_token_group_quant_fp8)
-        return per_token_group_quant_fp8(
-            x,
-            group_size=self.group_size,
-            column_major_scales=self.column_major_scales,
-            dtype=_FP8_DTYPE)
-
-    def _compute_dynamic_scale(
-            self, x: torch.Tensor,
-            scale_ub: Optional[torch.Tensor]) -> torch.Tensor:
-        if self.group_shape == GroupShape.PER_TOKEN:
-            x_max, _ = x.abs().max(dim=-1)
-            x_max = x_max.unsqueeze(-1).to(torch.float32)
-            if scale_ub is not None:
-                x_max = x_max.clamp(max=scale_ub)
-        else:
-            x_max = x.abs().max().unsqueeze(-1).to(torch.float32)
-
-        scale = x_max / _FP8_MAX
-        return scale.clamp(min=_FP8_MIN_SCALING_FACTOR)
-
     def forward_cuda(
         self,
         x: torch.Tensor,
@@ -89,7 +63,7 @@ class QuantFP8(CustomOp):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.is_group_quant:
             assert scale is None, "Group quantization is always dynamic"
-            return self._quantize_group(x)
+            return self._quantize_group_cuda(x)
 
         assert (scale is not None) == self.static
         assert scale_ub is None or (not self.static and self.group_shape
@@ -110,20 +84,17 @@ class QuantFP8(CustomOp):
     ):
         if self.is_group_quant:
             assert scale is None, "Group quantization is always dynamic"
-            return self._quantize_group(x)
+            return self._quantize_group_native(x)
 
         assert (scale is not None) == self.static
         assert scale_ub is None or (not self.static and self.group_shape
                                     == GroupShape.PER_TOKEN
                                     and scale_ub.numel() == 1)
 
-        if scale is None:
-            scale = self._compute_dynamic_scale(x, scale_ub)
-
-        # Even for dynamic per-token scales,
-        # reciprocal performs slightly better than division
-        out = x.to(torch.float32) * scale.reciprocal()
-        out = out.clamp(_FP8_MIN, _FP8_MAX).to(_FP8_DTYPE)
+        if self.use_per_token_if_dynamic and scale is None:
+            out, scale = quantize_fp8_per_token(x, scale, scale_ub)
+        else:
+            out, scale = quantize_fp8_per_tensor(x, scale)
 
         # This currently generates an extra Triton kernel in compilation.
         # Fortunately, we don't use padding if compiling.
@@ -134,3 +105,18 @@ class QuantFP8(CustomOp):
             out = F.pad(out, (0, 0, 0, padding), "constant", 0.0)
 
         return out, scale
+
+    def _quantize_group_cuda(
+            self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+            per_token_group_quant_fp8)
+        return per_token_group_quant_fp8(
+            x,
+            group_size=self.group_size,
+            column_major_scales=self.column_major_scales,
+            dtype=_FP8_DTYPE)
+
+    def _quantize_group_native(
+            self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        return quantize_fp8_per_group(x, self.group_size,
+                                      self.column_major_scales)
