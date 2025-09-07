@@ -162,9 +162,12 @@ class ScaledMMReduceScatterPattern(BasePattern):
                 scale_a,
                 scale_b,
                 "avg",
-                scatter_dim=0,
-                out_dtype=self.dtype,
-                group_name=self.tp.device_group.group_name,
+                0,  # scatter_dim
+                self.tp.device_group.group_name,  # group_name
+                None,  # bias_node
+                None,  # result_scale_node
+                self.dtype,  # out_dtype
+                False,  # use_fast_accum
             )
 
             return gemm_rs
@@ -274,9 +277,12 @@ class CutlassScaledMMReduceScatterPattern(BasePattern):
                 scale_a,
                 scale_b,
                 "avg",
-                scatter_dim=0,
-                out_dtype=self.dtype,
-                group_name=self.tp.device_group.group_name,
+                0,  # scatter_dim
+                self.tp.device_group.group_name,  # group_name
+                None,  # bias_node
+                None,  # result_scale_node
+                self.dtype,  # out_dtype
+                False,  # use_fast_accum
             )
 
             return gemm_rs
