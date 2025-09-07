@@ -41,9 +41,8 @@ EAGLE_SPEC_CONFIG = {
 PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
     ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "auto", None),
     ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto", None),
-    #FIXME: This test is flaky on CI thus disabled
-    #("mistralai/Ministral-8B-Instruct-2410", "lm-format-enforcer", "auto",
-    # None),
+    ("mistralai/Ministral-8B-Instruct-2410", "lm-format-enforcer", "auto",
+     None),
     ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "mistral", None),
     ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", None),
     ("Qwen/Qwen2.5-1.5B-Instruct", "lm-format-enforcer", "auto", None),
@@ -123,6 +122,7 @@ def test_structured_output(
         guided_decoding_backend=guided_decoding_backend,
         guided_decoding_disable_any_whitespace=(guided_decoding_backend
                                                 in {"xgrammar", "guidance"}),
+        seed=120,
         tokenizer_mode=tokenizer_mode,
         speculative_config=speculative_config)
 
