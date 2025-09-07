@@ -677,12 +677,10 @@ class EagleProposer:
                 head.data = head.data[self.hot_token_ids]
                 del self.model.lm_head.weight
                 self.model.lm_head.weight = head
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
             else:
                 print('no lm_head')
-
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
-
 
 
     @torch.inference_mode()
