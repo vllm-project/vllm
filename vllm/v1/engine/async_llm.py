@@ -279,7 +279,7 @@ class AsyncLLM(EngineClient):
         queue = RequestOutputCollector(output_kind=params.output_kind)
 
         # Convert Input --> Request.
-        if isinstance(request, PromptType):
+        if not isinstance(request, EngineCoreRequest):
             assert prompt_str is None
             logger.warning_once(
                 "Processor in AsyncLLM is deprecated. "
