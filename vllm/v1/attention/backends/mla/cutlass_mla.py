@@ -210,7 +210,7 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
             sm_scale,
             num_kv_splits,
         )
-        return out[:, :H].contiguous(), lse
+        return out[:, :H].contiguous(), lse[:, :H].contiguous()
 
     def _sm100_forward_decode(
         self,
