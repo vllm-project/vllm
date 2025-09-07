@@ -170,7 +170,10 @@ class LlamaAttention(nn.Module):
                               quant_config=quant_config)
 
         sliding_window = None
-        if layer_types := getattr(config, "layer_types", None):
+        if (layer_types := getattr(config, "layer_types",
+                                   None)) and layer_idx < len(layer_types):
+            # Fix for Eagle3 compatibility: check bounds before
+            # accessing layer_types
             is_sliding = layer_types[layer_idx] == "sliding_attention"
             if is_sliding:
                 sliding_window = config.sliding_window
