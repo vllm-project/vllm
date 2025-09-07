@@ -80,8 +80,8 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
 from vllm.v1.worker.gpu_block_table import BlockTables
-from vllm.v1.worker.gpu_input_batch import InputBatch
-from vllm.v1.worker.gpu_worker_states import RequestState, prepare_inputs
+from vllm.v1.worker.gpu_input_batch import InputBatch, prepare_inputs
+from vllm.v1.worker.gpu_worker_states import RequestState
 from vllm.v1.worker.kv_connector_model_runner_mixin import (
     KVConnectorModelRunnerMixin, KVConnectorOutput)
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
