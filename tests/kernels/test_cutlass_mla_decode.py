@@ -180,6 +180,7 @@ def test_cutlass_mla_decode(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size,
     out_torch_slice = out_torch[:, 0, :, :]  # [b, h_q, dv]
     lse_torch_slice = lse_torch[:, 0, :]  # [b, h_q]
     cal_diff(out_cutlass, out_torch_slice, "out", use_fp8)
+    # lse has larger numerical error, so use a larger threshold
     cal_diff(lse_cutlass, lse_torch_slice, "lse", use_fp8, diff_threshold=1e-3)
 
     t = triton.testing.do_bench(cutlass_mla)
