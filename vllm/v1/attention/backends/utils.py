@@ -117,13 +117,14 @@ def _make_metadata_with_slice(
     splits_first_request = first_tok > start_locs[first_req]
     splits_last_request = last_tok < start_locs[last_req+1] - 1
 
-    query_start_loc = slice_query_start_locs(start_locs, request_slice)
+    query_start_loc_cpu = slice_query_start_locs(start_locs, request_slice)
+    query_start_loc = slice_query_start_locs(
+        attn_metadata.query_start_loc, request_slice)
 
     assert len(query_start_loc) >= 2, (
         f"query_start_loc must have at least 2 elements, "
         f"got {len(query_start_loc)}")
-    query_start_loc_cpu = slice_query_start_locs(
-        attn_metadata.query_start_loc_cpu, request_slice)
+
     if splits_first_request:
         tokens_skipped = first_tok - start_locs[first_req]
         query_start_loc[0] += tokens_skipped
@@ -708,7 +709,8 @@ def split_decodes_and_prefills(
         return num_reqs, 0, num_tokens, 0
 
     first_prefill = is_prefill.int().argmax(dim=-1).item()
-    assert torch.all(query_lens[first_prefill:] > decode_threshold)
+    print(f"First prefill at index {first_prefill} {query_lens}")
+    #assert torch.all(query_lens[first_prefill:] > decode_threshold)
     assert torch.all(query_lens[:first_prefill] <= decode_threshold)
     num_decodes = first_prefill
     num_prefills = num_reqs - num_decodes

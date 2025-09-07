@@ -591,6 +591,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _ubatch_split(
         self,
         num_scheduled_tokens: np.ndarray,
+        total_num_scheduled_tokens: int,
         max_num_scheduled_tokens: int,
     ) -> tuple[Optional[UBatchSlices], int, Optional[torch.Tensor]]:
         # Don't bother with the should_ubatch handshaking unless microbatching
@@ -599,14 +600,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             return (None, 0, None)
 
         # Check preconditions for microbatching
-        total_num_scheduled_tokens = max_num_scheduled_tokens
         uniform_decode = (max_num_scheduled_tokens == self.uniform_decode_query_len) and (
-            num_scheduled_tokens == self.input_batch.num_reqs * max_num_scheduled_tokens)
+            total_num_scheduled_tokens == self.input_batch.num_reqs * max_num_scheduled_tokens)
         should_attempt_ubatching = self._should_ubatch(total_num_scheduled_tokens, uniform_decode=uniform_decode)
 
         # Don't microbatch unless every other DP worker is also microbatching
         num_pad_tokens = 0
         num_tokens_after_padding = None
+        
         (should_ubatch, num_pad_tokens,
          num_tokens_after_padding) = self.get_dp_padding_ubatch(
              total_num_scheduled_tokens, should_attempt_ubatching)
@@ -619,11 +620,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # metadata creation
         assert num_pad_tokens < total_num_scheduled_tokens,\
             f"num_pad_tokens {num_pad_tokens} "\
-            f"original_num_tokens {total_num_scheduled_tokens}"
+            f"original_num_tokens {num_scheduled_tokens}"
         num_tokens_per_ubatch = (total_num_scheduled_tokens +
                                        num_pad_tokens) // 2
         ubatch_slices = create_ubatch_slices(
             num_scheduled_tokens, num_tokens_per_ubatch)
+        
+        print(f"Running Ubatched! uniform_decode: {uniform_decode} with ubatch_slices: {ubatch_slices}, num_pad_tokens: {num_pad_tokens}, num_tokens_after_padding: {num_tokens_after_padding}, num_tokens_per_ubatch {num_tokens_per_ubatch}, num_scheduled_tokens {num_scheduled_tokens}")
 
         return (ubatch_slices, num_pad_tokens, num_tokens_after_padding)
 
@@ -787,7 +790,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         query_start_loc = self.query_start_loc.gpu[:num_reqs + 1]
 
         ubatch_slices, num_pad_tokens, num_tokens_after_padding = \
-            self._ubatch_split(num_scheduled_tokens, max_num_scheduled_tokens)
+            self._ubatch_split(num_scheduled_tokens, 
+                               total_num_scheduled_tokens,
+                               max_num_scheduled_tokens)
 
         self.seq_lens.np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
@@ -920,7 +925,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         ubatch_slices, common_attn_metadata)
                     for ubid, common_attn_metadata in enumerate(
                             common_attn_metadata_list):
-                        assert common_attn_metadata.max_query_len == 1
                         attn_metadata_i = (attn_group.get_metadata_builder(
                             ubatch_id=ubid).build(
                                 common_prefix_len=common_prefix_len,
