@@ -24,7 +24,7 @@ import random
 import time
 import warnings
 from collections.abc import AsyncGenerator, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from datetime import datetime
 from typing import Any, Literal, Optional
 
@@ -430,9 +430,17 @@ async def benchmark(
             "timestamp": datetime.now().isoformat(),
         })
 
+    results_per_req = []
+    time_0 = time.time()
     async for request, current_request_rate in get_request(
             input_requests, request_rate, burstiness, ramp_up_strategy,
             ramp_up_start_rps, ramp_up_end_rps):
+        request_res = {}
+        results_per_req.append(request_res)
+        request_res["time"] = time.time() - time_0
+        request_res["prompt_len"] = request.prompt_len
+        request_res["expected_output_len"] = request.expected_output_len
+        
         if ramp_up_strategy is not None:
             current_int_rps = int(current_request_rate)
             if current_int_rps > last_int_rps:
@@ -488,6 +496,9 @@ async def benchmark(
         pbar.close()
 
     benchmark_duration = time.perf_counter() - benchmark_start_time
+    
+    for request_res, output in zip(results_per_req, outputs):
+        request_res.update(asdict(output))
 
     metrics, actual_output_lens = calculate_metrics(
         input_requests=input_requests,
@@ -576,7 +587,7 @@ async def benchmark(
 
     print("=" * 50)
 
-    return result
+    return result, results_per_req
 
 
 def check_goodput_args(args):
@@ -775,7 +786,8 @@ def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--result-dir",
         type=str,
-        default=None,
+        # default=None,
+        required=True,
         help="Specify directory to save benchmark json results."
         "If not specified, results are saved in the current directory.",
     )
@@ -981,7 +993,7 @@ def main(args: argparse.Namespace):
     gc.collect()
     gc.freeze()
 
-    benchmark_result = asyncio.run(
+    benchmark_result, results_per_request = asyncio.run(
         benchmark(
             endpoint_type=args.endpoint_type,
             api_url=api_url,
@@ -1068,22 +1080,56 @@ def main(args: argparse.Namespace):
                                if args.max_concurrency is not None else "")
         label = label or endpoint_type
         if args.ramp_up_strategy is not None:
-            file_name = f"{label}-ramp-up-{args.ramp_up_strategy}-{args.ramp_up_start_rps}qps-{args.ramp_up_end_rps}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json" # noqa
+            main_res_filename = f"{label}-ramp-up-{args.ramp_up_strategy}-{args.ramp_up_start_rps}qps-{args.ramp_up_end_rps}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json" # noqa
         else:
-            file_name = f"{label}-{args.request_rate}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  # noqa
+            main_res_filename = f"{label}-{args.request_rate}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  # noqa
         if args.result_filename:
-            file_name = args.result_filename
-        if args.result_dir:
-            os.makedirs(args.result_dir, exist_ok=True)
-            file_name = os.path.join(args.result_dir, file_name)
-        with open(file_name,
+            main_res_filename = args.result_filename
+        
+        # Iterate results directory
+        assert args.result_dir is not None
+        result_dir = args.result_dir
+        os.makedirs(result_dir, exist_ok=True)
+        items = os.listdir(result_dir)
+        
+        # Filter only folders with numeric names
+        numbered_folders = []
+        for item in items:
+            item_path = os.path.join(result_dir, item)
+            if os.path.isdir(item_path) and item.isdigit():
+                numbered_folders.append(int(item))
+
+        # Determine the next folder number
+        if numbered_folders:
+            next_number = max(numbered_folders) + 1
+        else:
+            next_number = 0
+
+        # Create the new folder
+        sub_result_dir = os.path.join(result_dir, str(next_number))
+        os.makedirs(sub_result_dir)
+        
+        # save arguments
+        args_dict = vars(args)
+        args_filename = os.path.join(sub_result_dir, "args.json")
+        with open(args_filename, "w", encoding="utf-8") as outfile:
+            json.dump(args_dict, outfile, indent=2)
+            
+        # save result per request
+        res_per_req_filename = os.path.join(sub_result_dir, "per_request.json")
+        with open(res_per_req_filename, "w", encoding="utf-8") as outfile:
+            json.dump(results_per_request, outfile, indent=2)
+
+        # save main results
+        main_res_filename = os.path.join(sub_result_dir, main_res_filename)
+        with open(main_res_filename,
                   mode="a+" if args.append_result else "w",
                   encoding="utf-8") as outfile:
             # Append a newline.
             if args.append_result and outfile.tell() != 0:
                 outfile.write("\n")
             json.dump(result_json, outfile)
-        save_to_pytorch_benchmark_format(args, result_json, file_name)
+        save_to_pytorch_benchmark_format(args, result_json, main_res_filename)
 
 
 if __name__ == "__main__":
