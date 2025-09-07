@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import enum
 import json
 import os
 import time
 from functools import cache, partial
 from pathlib import Path
-from typing import Any, Callable, Optional, TypeVar, Union
+from typing import Any, Callable, Literal, Optional, TypeVar, Union
 
 import huggingface_hub
 from huggingface_hub import get_safetensors_metadata, hf_hub_download
@@ -99,12 +98,6 @@ _AUTO_CONFIG_KWARGS_OVERRIDES: dict[str, dict[str, Any]] = {
         "has_no_defaults_at_init": True
     },
 }
-
-
-class ConfigFormat(str, enum.Enum):
-    AUTO = "auto"
-    HF = "hf"
-    MISTRAL = "mistral"
 
 
 class HFConfigParser(ConfigParserBase):
@@ -207,6 +200,12 @@ _CONFIG_FORMAT_TO_CONFIG_PARSER: dict[str, type[ConfigParserBase]] = {
     "hf": HFConfigParser,
     "mistral": MistralConfigParser,
 }
+
+ConfigFormat = Literal[
+    "auto",
+    "hf",
+    "mistral",
+]
 
 
 def get_config_parser(config_format: str) -> ConfigParserBase:
@@ -504,7 +503,7 @@ def get_config(
     trust_remote_code: bool,
     revision: Optional[str] = None,
     code_revision: Optional[str] = None,
-    config_format: Union[ConfigFormat, str] = ConfigFormat.AUTO,
+    config_format: Union[str, ConfigFormat] = "auto",
     hf_overrides_kw: Optional[dict[str, Any]] = None,
     hf_overrides_fn: Optional[Callable[[PretrainedConfig],
                                        PretrainedConfig]] = None,
@@ -517,19 +516,19 @@ def get_config(
         kwargs["gguf_file"] = Path(model).name
         model = Path(model).parent
 
-    if config_format == ConfigFormat.AUTO:
+    if config_format == "auto":
         try:
             if is_gguf or file_or_path_exists(
                     model, HF_CONFIG_NAME, revision=revision):
-                config_format_str = ConfigFormat.HF.value
+                config_format = "hf"
             elif file_or_path_exists(model,
                                      MISTRAL_CONFIG_NAME,
                                      revision=revision):
-                config_format_str = ConfigFormat.MISTRAL.value
+                config_format = "mistral"
             else:
                 raise ValueError(
                     "Could not detect config format for no config file found. "
-                    "With ConfigFormat.AUTO, ensure your model has either"
+                    "With config_format 'auto', ensure your model has either"
                     "config.json (HF format) or params.json (Mistral format)."
                     "Otherwise please specify your_custom_config_format"
                     "in engine args for customized config parser")
@@ -550,11 +549,8 @@ def get_config(
                 "supported.\n").format(model=model)
 
             raise ValueError(error_message) from e
-    else:
-        config_format_str = config_format.value if isinstance(
-            config_format, ConfigFormat) else config_format
 
-    config_parser = get_config_parser(config_format_str)
+    config_parser = get_config_parser(config_format)
     config_dict, config = config_parser.parse(
         model,
         trust_remote_code=trust_remote_code,
@@ -995,7 +991,7 @@ def _maybe_retrieve_max_pos_from_hf(model, revision, **kwargs) -> int:
         hf_config = get_config(model=model,
                                trust_remote_code=trust_remote_code_val,
                                revision=revision,
-                               config_format=ConfigFormat.HF)
+                               config_format="hf")
         if hf_value := hf_config.get_text_config().max_position_embeddings:
             max_position_embeddings = hf_value
     except Exception as e:
