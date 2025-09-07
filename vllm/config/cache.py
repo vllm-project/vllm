@@ -117,6 +117,8 @@ class CacheConfig:
     attention metadata for eligible layers to be overridden with metadata
     necessary for implementing this optimization in some models (e.g. Gemma3n)
     """
+    delay_batch_size: int = 16
+    """The batch size of the delayed release"""
 
     def compute_hash(self) -> str:
         """
