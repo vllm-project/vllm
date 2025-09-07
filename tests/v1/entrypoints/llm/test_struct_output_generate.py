@@ -122,6 +122,7 @@ def test_structured_output(
         guided_decoding_backend=guided_decoding_backend,
         guided_decoding_disable_any_whitespace=(guided_decoding_backend
                                                 in {"xgrammar", "guidance"}),
+        seed=120,
         tokenizer_mode=tokenizer_mode,
         speculative_config=speculative_config)
 
