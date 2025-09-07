@@ -1084,3 +1084,9 @@ def main(args: argparse.Namespace):
                 outfile.write("\n")
             json.dump(result_json, outfile)
         save_to_pytorch_benchmark_format(args, result_json, file_name)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="hello")
+    add_cli_args(parser)
+    main(parser.parse_args())
