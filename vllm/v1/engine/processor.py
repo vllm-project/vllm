@@ -64,15 +64,14 @@ class Processor:
         params: SamplingParams,
     ) -> None:
         max_logprobs = self.model_config.max_logprobs
-        vocab_size = self.model_config.get_vocab_size()
         if max_logprobs == -1:
-            max_logprobs = vocab_size
+            max_logprobs = self.model_config.get_vocab_size()
 
         # Validate sample logprobs.
         if params.logprobs:
             num_logprobs = params.logprobs
             if num_logprobs == -1:
-                num_logprobs = vocab_size
+                num_logprobs = self.model_config.get_vocab_size()
             if num_logprobs > max_logprobs:
                 raise ValueError(
                     f"Requested sample logprobs of {num_logprobs}, "
@@ -82,7 +81,7 @@ class Processor:
         if params.prompt_logprobs:
             num_prompt_logprobs = params.prompt_logprobs
             if num_prompt_logprobs == -1:
-                num_prompt_logprobs = vocab_size
+                num_prompt_logprobs = self.model_config.get_vocab_size()
             if num_prompt_logprobs > max_logprobs:
                 raise ValueError(
                     f"Requested prompt logprobs of {num_prompt_logprobs}, "
