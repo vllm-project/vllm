@@ -374,7 +374,8 @@ class KeyeSiglipAttention(nn.Module):
         )
 
         # Detect attention implementation.
-        self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
+        self.attn_backend, self.use_upstream_fa = get_vit_attn_backend(
+            head_size=self.head_dim)
         if self.attn_backend not in {_Backend.FLASH_ATTN, _Backend.XFORMERS}:
             raise RuntimeError(
                 f"Keye-VL does not support {self.attn_backend} backend now.")
@@ -428,7 +429,10 @@ class KeyeSiglipAttention(nn.Module):
             )
 
         if self.attn_backend == _Backend.FLASH_ATTN:
-            from flash_attn import flash_attn_varlen_func
+            if self.use_upstream_fa:
+                from flash_attn import flash_attn_varlen_func
+            else:
+                from vllm.vllm_flash_attn import flash_attn_varlen_func
 
             q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
 

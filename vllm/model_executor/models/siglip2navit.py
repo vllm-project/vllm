@@ -236,7 +236,8 @@ class Siglip2Attention(nn.Module):
         self.use_rope = config.use_rope
 
         # Detect attention implementation.
-        self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
+        self.attn_backend, self.use_upstream_fa = get_vit_attn_backend(
+            head_size=self.head_dim)
         if self.attn_backend not in {
                 _Backend.FLASH_ATTN, _Backend.TORCH_SDPA,
                 _Backend.ROCM_AITER_FA
@@ -280,7 +281,10 @@ class Siglip2Attention(nn.Module):
             if self.attn_backend == _Backend.ROCM_AITER_FA:
                 from aiter import flash_attn_varlen_func
             else:
-                from flash_attn import flash_attn_varlen_func
+                if self.use_upstream_fa:
+                    from flash_attn import flash_attn_varlen_func
+                else:
+                    from vllm.vllm_flash_attn import flash_attn_varlen_func
             attn_output = flash_attn_varlen_func(
                 queries, keys, values, cu_seqlens, cu_seqlens, max_seqlen,
                 max_seqlen).reshape(seq_length, -1)

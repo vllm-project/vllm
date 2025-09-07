@@ -209,18 +209,25 @@ class CudaPlatformBase(Platform):
         return torch.cuda.max_memory_allocated(device)
 
     @classmethod
-    def get_vit_attn_backend(cls, support_fa: bool = False) -> _Backend:
-        if cls.has_device_capability(80) and support_fa:
-            from transformers.utils import is_flash_attn_2_available
-            if is_flash_attn_2_available():
-                return _Backend.FLASH_ATTN
-            logger.warning_once(
-                "Current `vllm-flash-attn` has a bug inside vision "
-                "module, so we use xformers backend instead. You can "
-                "run `pip install flash-attn` to use flash-attention "
-                "backend.")
+    def get_vit_attn_backend(cls, head_size: int) -> tuple[_Backend, bool]:
+        if cls.has_device_capability(80):
+            if head_size % 32 == 0:
+                # Use vllm-flash-attn
+                return _Backend.FLASH_ATTN, False
+            if head_size % 32 != 0:
+                from transformers.utils import is_flash_attn_2_available
+                if is_flash_attn_2_available():
+                    # Use upstream FA
+                    return _Backend.FLASH_ATTN, True
+                else:
+                    # Fallback to XFORMERS
+                    logger.warning_once(
+                        "Using xformers for ViT attention backend. "
+                        "To use flash attention for ViT"
+                        "please install flash_attn")
+                    return _Backend.XFORMERS, False
         # Fallback for Volta/Turing GPUs or FA not supported
-        return _Backend.XFORMERS
+        return _Backend.XFORMERS, False
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,

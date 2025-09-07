@@ -23,6 +23,7 @@ from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.models.vision import get_vit_attn_backend
 from vllm.platforms import _Backend, current_platform
 from vllm.utils import direct_register_custom_op
 
@@ -349,13 +350,11 @@ class MultiHeadAttention(nn.Module):
             f"divisible by num_kv_heads ({self.num_kv_heads})"
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-        dtype = torch.get_default_dtype()
-        attn_backend = get_attn_backend(head_size,
-                                        dtype,
-                                        kv_cache_dtype=None,
-                                        block_size=16,
-                                        is_attention_free=False)
-        backend = backend_name_to_enum(attn_backend.get_name())
+        # dtype = torch.get_default_dtype()
+
+        # Determine the attention backend
+        backend, use_upstream_fa = get_vit_attn_backend(head_size=head_size)
+
         if current_platform.is_rocm():
             # currently, only torch_sdpa is supported on rocm
             self.attn_backend = _Backend.TORCH_SDPA
@@ -374,6 +373,20 @@ class MultiHeadAttention(nn.Module):
         if (self.attn_backend == _Backend.XFORMERS
                 and not check_xformers_availability()):
             self.attn_backend = _Backend.TORCH_SDPA
+
+        if self.attn_backend in {
+                _Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1
+        }:
+            if use_upstream_fa:
+                from flash_attn import flash_attn_varlen_func
+                self._flash_attn_varlen_func = flash_attn_varlen_func
+            else:
+                from vllm.vllm_flash_attn import flash_attn_varlen_func
+                self._flash_attn_varlen_func = flash_attn_varlen_func
+
+        logger.info_once(
+            f"MultiHeadAttention attn_backend: {self.attn_backend}, "
+            f"use_upstream_fa: {use_upstream_fa}")
 
     def forward(
         self,
@@ -399,11 +412,6 @@ class MultiHeadAttention(nn.Module):
                 _Backend.FLASH_ATTN,
                 _Backend.FLASH_ATTN_VLLM_V1,
         }:
-            if self.head_size % 32 != 0:
-                # import from upstream flash_attn
-                from flash_attn import flash_attn_varlen_func
-            else:
-                from vllm.vllm_flash_attn import flash_attn_varlen_func
 
             cu_seqlens_q = torch.arange(0, (bsz + 1) * q_len,
                                         step=q_len,
@@ -414,7 +422,7 @@ class MultiHeadAttention(nn.Module):
                                         dtype=torch.int32,
                                         device=key.device)
 
-            out = flash_attn_varlen_func(
+            out = self._flash_attn_varlen_func(
                 query.flatten(0, 1),
                 key.flatten(0, 1),
                 value.flatten(0, 1),

@@ -175,16 +175,15 @@ class RocmPlatform(Platform):
     ]
 
     @classmethod
-    def get_vit_attn_backend(cls, support_fa: bool = False) -> _Backend:
-        if support_fa:
-            if (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA
-                    and on_gfx9()):
-                # Note: AITER FA is only supported for Qwen-VL models.
-                # TODO: Add support for other VL models in their model class.
-                return _Backend.ROCM_AITER_FA
-            if on_gfx9():
-                return _Backend.FLASH_ATTN
-        return _Backend.TORCH_SDPA
+    def get_vit_attn_backend(cls, head_size: int) -> tuple[_Backend, bool]:
+        if (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA
+                and on_gfx9()):
+            # Note: AITER FA is only supported for Qwen-VL models.
+            # TODO: Add support for other VL models in their model class.
+            return _Backend.ROCM_AITER_FA, False
+        if on_gfx9():
+            return _Backend.FLASH_ATTN, False
+        return _Backend.TORCH_SDPA, False
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,

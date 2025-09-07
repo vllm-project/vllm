@@ -170,7 +170,8 @@ class Ernie4_5_VisionAttention(nn.Module):
                                       prefix=f"{prefix}.proj")
 
         # Detect attention implementation.
-        self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
+        self.attn_backend, self.use_upstream_fa = get_vit_attn_backend(
+            head_size=self.hidden_size_per_attention_head)
         if self.attn_backend not in {
                 _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS,
                 _Backend.ROCM_AITER_FA
@@ -233,7 +234,10 @@ class Ernie4_5_VisionAttention(nn.Module):
             if self.attn_backend == _Backend.ROCM_AITER_FA:
                 from aiter import flash_attn_varlen_func
             else:
-                from flash_attn import flash_attn_varlen_func
+                if self.use_upstream_fa:
+                    from flash_attn import flash_attn_varlen_func
+                else:
+                    from vllm.vllm_flash_attn import flash_attn_varlen_func
 
             q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
 
@@ -457,7 +461,7 @@ class Ernie4_5_VisionTransformer(nn.Module):
                 ), "vit's config.hidden must be equal to config.embed_dim"
         self.ln = nn.LayerNorm(hidden_size, eps=1e-6)
 
-        self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
+        self.attn_backend, _ = get_vit_attn_backend(head_size=head_dim)
 
     @property
     def dtype(self) -> torch.dtype:

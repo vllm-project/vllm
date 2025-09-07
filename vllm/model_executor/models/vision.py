@@ -68,17 +68,18 @@ def get_vision_encoder_info(
     raise NotImplementedError(msg)
 
 
-def get_vit_attn_backend(support_fa: bool = False) -> _Backend:
+def get_vit_attn_backend(head_size: int) -> tuple[_Backend, bool]:
     """
     Get the available attention backend for Vision Transformer.
+    
+    Returns:
+        Tuple of (backend, use_upstream_fa)
     """
-    # TODO(Isotr0py): Remove `support_fa` after support FA for all ViTs attn.
-
     selected_backend: Optional[_Backend] = get_env_variable_attn_backend()
     if selected_backend is not None:
-        return selected_backend
+        return selected_backend, False
 
-    return current_platform.get_vit_attn_backend(support_fa)
+    return current_platform.get_vit_attn_backend(head_size)
 
 
 def resolve_visual_encoder_outputs(
