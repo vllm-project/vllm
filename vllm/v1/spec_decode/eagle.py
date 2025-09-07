@@ -145,6 +145,8 @@ class EagleProposer:
             dtype=torch.int32,
         ).repeat(max_batch_size, 1)
 
+        self.hot_token_ids = None
+
     def propose(
         self,
         # [num_tokens]
@@ -227,6 +229,7 @@ class EagleProposer:
         logits = self.model.compute_logits(sample_hidden_states, None)
         positions = target_positions[last_token_indices]
         hidden_states = hidden_states[last_token_indices]
+        ic(logits.shape)
 
         if isinstance(attn_metadata, TreeAttentionMetadata):
             # Draft using tree attention.
@@ -237,10 +240,15 @@ class EagleProposer:
                 hidden_states=hidden_states,
                 common_attn_metadata=common_attn_metadata,
             )
+            ic(draft_token_ids_list)
             # [batch_size, num_tree_tokens]
             return torch.cat(draft_token_ids_list, dim=1)
 
         draft_token_ids = logits.argmax(dim=-1)
+        ic(draft_token_ids)
+        if self.vllm_config.speculative_config.draft_vocab_pruned is not None:
+            draft_token_ids = self.hot_token_ids[draft_token_ids]
+            ic(draft_token_ids)
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1:
@@ -630,7 +638,9 @@ class EagleProposer:
         # share embed_tokens with the target model if needed
         if get_pp_group().world_size == 1 \
                 and self.model.model.embed_tokens.weight.shape \
-            == target_language_model.model.embed_tokens.weight.shape:
+            == target_language_model.model.embed_tokens.weight.shape \
+                and self.vllm_config.speculative_config.draft_vocab_pruned \
+                    is None:
             logger.info(
                 "Assuming the EAGLE head shares the same vocab embedding"
                 " with the target model.")
@@ -646,19 +656,22 @@ class EagleProposer:
         # some model definition do not define lm_head explicitly
         # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
         if self.vllm_config.speculative_config.method != "eagle3" and \
-                hasattr(target_language_model, "lm_head"):
+                hasattr(target_language_model, "lm_head") and \
+                    self.vllm_config.speculative_config.draft_vocab_pruned \
+                        is None:
             logger.info("Loading EAGLE LM head weights from the target model.")
             self.model.lm_head = target_language_model.lm_head
 
         # optionally prune the draft model vocabulary
-        self.hot_token_ids = None
-        if self.vllm_config.speculative_config.draft_vocab_pruned:
+        if self.vllm_config.speculative_config.draft_vocab_pruned is not None:
+            # ic(self.model.model.embed_tokens.weight.data.shape)
             logger.info(f"Loading pruned draft model vocabulary from {self.vllm_config.speculative_config.draft_vocab_pruned}")
             self.hot_token_ids = load_draft_vocab_pruned(self.vllm_config.speculative_config.draft_vocab_pruned)
             device = next(self.model.model.parameters()).device
             self.hot_token_ids = self.hot_token_ids.to(device)
             # `self.model.model.embed_tokens.weight` is the model head
             self.model.model.embed_tokens.weight.data = self.model.model.embed_tokens.weight.data[self.hot_token_ids]
+        # ic(self.model.model.embed_tokens.weight.data.shape)
 
 
     @torch.inference_mode()

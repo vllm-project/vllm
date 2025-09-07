@@ -1567,6 +1567,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         ), self.maybe_get_kv_connector_output(
                 scheduler_output) as kv_connector_output:
 
+            ic(self.model.model.embed_tokens.weight.shape)
             model_output = self.model(
                 input_ids=input_ids,
                 positions=positions,
@@ -1961,7 +1962,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                                   self.device)
             if hasattr(self, "drafter"):
                 logger.info("Loading drafter model...")
+                ic(self.model.model.embed_tokens.weight.data.shape)
                 self.drafter.load_model(self.model)
+                ic(self.model.model.embed_tokens.weight.data.shape)
+                ic(self.drafter.model.model.embed_tokens.weight.data.shape)
+                ic(self.model.lm_head.weight.data.shape)
+                ic(self.drafter.model.model.embed_tokens.weight.data.shape)
             if self.use_aux_hidden_state_outputs:
                 if supports_eagle3(self.model):
                     self.model.set_aux_hidden_state_layers(
