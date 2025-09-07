@@ -152,6 +152,9 @@ class OpenAIServingCompletion(OpenAIServing):
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
+        # Extract data_parallel_rank from request (router can inject it)
+        data_parallel_rank = getattr(request, 'data_parallel_rank', None)
+
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
@@ -226,6 +229,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         lora_request=lora_request,
                         trace_headers=trace_headers,
                         priority=request.priority,
+                        data_parallel_rank=data_parallel_rank,
                     )
 
                 generators.append(generator)
