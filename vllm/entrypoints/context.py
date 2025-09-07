@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
 import json
 import logging
 from abc import ABC, abstractmethod
@@ -56,8 +57,11 @@ class ConversationContext(ABC):
         pass
 
     @abstractmethod
-    async def init_tool_sessions(self, tool_server: Optional[ToolServer],
-                                 exit_stack: AsyncExitStack) -> None:
+    async def __aenter__(self):
+        pass
+
+    @abstractmethod
+    async def __aexit__(self, exc_type, exc, tb):
         pass
 
 
@@ -88,8 +92,10 @@ class SimpleContext(ConversationContext):
     def render_for_completion(self) -> list[int]:
         raise NotImplementedError("Should not be called.")
 
-    async def init_tool_sessions(self, tool_server: Optional[ToolServer],
-                                 exit_stack: AsyncExitStack) -> None:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
         pass
 
 
@@ -99,10 +105,15 @@ class HarmonyContext(ConversationContext):
         self,
         messages: list,
         available_tools: list[str],
+        tool_server: Optional[ToolServer],
     ):
         self._messages = messages
         self.available_tools = available_tools
         self._tool_sessions: dict[str, Union[ClientSession, Tool]] = {}
+        self._tool_server = tool_server
+        self._async_exit_stack: Optional[AsyncExitStack] = None
+        self._reference_count = 0
+        self._reference_count_lock = asyncio.Lock()
 
         self.parser = get_streamable_parser_for_assistant()
         self.num_init_messages = len(messages)
@@ -145,18 +156,18 @@ class HarmonyContext(ConversationContext):
 
     def _update_prefill_token_usage(self, output: RequestOutput) -> None:
         """Update token usage statistics for the prefill phase of generation.
-        
+
         The prefill phase processes the input prompt tokens. This method:
         1. Counts the prompt tokens for this turn
         2. Calculates tool output tokens for multi-turn conversations
         3. Updates cached token counts
         4. Tracks state for next turn calculations
-        
+
         Tool output tokens are calculated as:
-        current_prompt_tokens - last_turn_prompt_tokens - 
+        current_prompt_tokens - last_turn_prompt_tokens -
         last_turn_output_tokens
         This represents tokens added between turns (typically tool responses).
-        
+
         Args:
             output: The RequestOutput containing prompt token information
         """
@@ -202,18 +213,18 @@ class HarmonyContext(ConversationContext):
 
     def _update_decode_token_usage(self, output: RequestOutput) -> int:
         """Update token usage statistics for the decode phase of generation.
-        
+
         The decode phase processes the generated output tokens. This method:
         1. Counts output tokens from all completion outputs
         2. Updates the total output token count
         3. Tracks tokens generated in the current turn
-        
+
         In streaming mode, this is called for each token generated.
         In non-streaming mode, this is called once with all output tokens.
-        
+
         Args:
             output: The RequestOutput containing generated token information
-            
+
         Returns:
             int: Number of output tokens processed in this call
         """
@@ -236,6 +247,17 @@ class HarmonyContext(ConversationContext):
         return recipient is not None and (recipient.startswith("browser.")
                                           or recipient.startswith("python"))
 
+    async def _get_tool_session(
+            self, tool_name: str) -> Union["ClientSession", Tool]:
+        if (tool_name not in self._tool_sessions
+                and self._tool_server is not None):
+            assert (self._async_exit_stack is not None
+                    ), "Async exit stack not set. Please report this issue."
+            self._tool_sessions[
+                tool_name] = await self._async_exit_stack.enter_async_context(
+                    self._tool_server.new_session(tool_name))
+        return self._tool_sessions[tool_name]
+
     async def call_tool(self) -> list[Message]:
         if not self.messages:
             return []
@@ -244,10 +266,10 @@ class HarmonyContext(ConversationContext):
         if recipient is not None:
             if recipient.startswith("browser."):
                 return await self.call_search_tool(
-                    self._tool_sessions["browser"], last_msg)
+                    self._get_tool_session("browser"), last_msg)
             elif recipient.startswith("python"):
                 return await self.call_python_tool(
-                    self._tool_sessions["python"], last_msg)
+                    self._get_tool_session("python"), last_msg)
         raise ValueError("No tool call found")
 
     def render_for_completion(self) -> list[int]:
@@ -289,14 +311,21 @@ class HarmonyContext(ConversationContext):
                     recipient=Role.ASSISTANT)
         ]
 
-    async def init_tool_sessions(self, tool_server: Optional[ToolServer],
-                                 exit_stack: AsyncExitStack) -> None:
-        if tool_server:
-            for tool_name in self.available_tools:
-                if tool_name not in self._tool_sessions:
-                    self._tool_sessions[
-                        tool_name] = await exit_stack.enter_async_context(
-                            tool_server.new_session(tool_name))
+    async def __aenter__(self):
+        async with self._reference_count_lock:
+            self._reference_count += 1
+            if self._async_exit_stack is None:
+                self._async_exit_stack = AsyncExitStack()
+                await self._async_exit_stack.__aenter__()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        async with self._reference_count_lock:
+            self._reference_count -= 1
+            if (self._reference_count == 0
+                    and self._async_exit_stack is not None):
+                await self._async_exit_stack.__aexit__(exc_type, exc, tb)
+                self._async_exit_stack = None
 
 
 class StreamingHarmonyContext(HarmonyContext):
