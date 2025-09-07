@@ -74,6 +74,7 @@ DEFAULT_CONDA_PATTERNS = {
     "zmq",
     "nvidia",
     "pynvml",
+    "flashinfer-python",
 }
 
 DEFAULT_PIP_PATTERNS = {
@@ -89,6 +90,7 @@ DEFAULT_PIP_PATTERNS = {
     "zmq",
     "nvidia",
     "pynvml",
+    "flashinfer-python",
 }
 
 
