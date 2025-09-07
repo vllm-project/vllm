@@ -531,8 +531,26 @@ class Qwen2_5OmniConditionalGenerationMixin:
             raise ValueError(f"Incorrect type of {name}. "
                              f"Got type: {type(mm_input)}")
         if isinstance(mm_input, torch.Tensor):
+            # Check for empty tensor to prevent torch.concat error
+            if mm_input.numel() == 0:
+                # Return appropriate empty tensor based on dimension
+                if dim == 0:
+                    return torch.empty(0,
+                                       dtype=mm_input.dtype,
+                                       device=mm_input.device)
+                else:
+                    # For other dimensions, maintain shape but set specified
+                    # dim to 0
+                    shape = list(mm_input.shape)
+                    shape[dim] = 0
+                    return torch.empty(shape,
+                                       dtype=mm_input.dtype,
+                                       device=mm_input.device)
             return torch.concat(list(mm_input), dim=dim)
         else:
+            # Check for empty list to prevent torch.concat error
+            if len(mm_input) == 0:
+                return torch.empty(0)
             return torch.concat(mm_input, dim=dim)
 
     def _parse_and_validate_audio_input(
