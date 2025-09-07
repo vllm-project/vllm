@@ -85,30 +85,19 @@ class DeepseekV2MLP(nn.Module):
         # across the ranks within the tp_group. In this case the weights are
         # replicated and no collective ops are needed.
         # Otherwise we use standard TP with an allreduce at the end.
-        if is_sequence_parallel:
-            self.gate_up_proj = MergedReplicatedLinear(
-                hidden_size, [intermediate_size] * 2,
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.gate_up_proj")
-            self.down_proj = ReplicatedLinear(intermediate_size,
-                                              hidden_size,
-                                              bias=False,
-                                              quant_config=quant_config,
-                                              prefix=f"{prefix}.down_proj")
-
-        else:
-            self.gate_up_proj = MergedColumnParallelLinear(
-                hidden_size, [intermediate_size] * 2,
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.gate_up_proj")
-            self.down_proj = RowParallelLinear(intermediate_size,
-                                               hidden_size,
-                                               bias=False,
-                                               quant_config=quant_config,
-                                               reduce_results=reduce_results,
-                                               prefix=f"{prefix}.down_proj")
+        self.gate_up_proj = MergedColumnParallelLinear(
+            hidden_size, [intermediate_size] * 2,
+            bias=False,
+            quant_config=quant_config,
+            disable_tp=is_sequence_parallel,
+            prefix=f"{prefix}.gate_up_proj")
+        self.down_proj = RowParallelLinear(intermediate_size,
+                                           hidden_size,
+                                           bias=False,
+                                           quant_config=quant_config,
+                                           reduce_results=reduce_results,
+                                           disable_tp=is_sequence_parallel,
+                                           prefix=f"{prefix}.down_proj")
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
