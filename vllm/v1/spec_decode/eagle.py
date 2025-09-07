@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ast
+import copy
 from dataclasses import replace
 from importlib.util import find_spec
 from typing import Optional, Protocol
@@ -70,6 +71,9 @@ class EagleProposer:
         # the draft model's hidden size can be different from the target model's
         # hidden size (e.g., Llama 3.3 70B).
         self.hidden_size = self.draft_model_config.get_hidden_size()
+
+        # for pruning the draft model vocabulary
+        self.hot_token_ids = None
 
         self.is_multimodal_model = vllm_config.model_config \
             .is_multimodal_model
@@ -145,7 +149,6 @@ class EagleProposer:
             dtype=torch.int32,
         ).repeat(max_batch_size, 1)
 
-        self.hot_token_ids = None
 
     def propose(
         self,
@@ -638,9 +641,7 @@ class EagleProposer:
         # share embed_tokens with the target model if needed
         if get_pp_group().world_size == 1 \
                 and self.model.model.embed_tokens.weight.shape \
-            == target_language_model.model.embed_tokens.weight.shape \
-                and self.vllm_config.speculative_config.draft_vocab_pruned \
-                    is None:
+            == target_language_model.model.embed_tokens.weight.shape:
             logger.info(
                 "Assuming the EAGLE head shares the same vocab embedding"
                 " with the target model.")
@@ -656,22 +657,32 @@ class EagleProposer:
         # some model definition do not define lm_head explicitly
         # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
         if self.vllm_config.speculative_config.method != "eagle3" and \
-                hasattr(target_language_model, "lm_head") and \
-                    self.vllm_config.speculative_config.draft_vocab_pruned \
-                        is None:
+                hasattr(target_language_model, "lm_head"):
             logger.info("Loading EAGLE LM head weights from the target model.")
-            self.model.lm_head = target_language_model.lm_head
+
+            if self.vllm_config.speculative_config.draft_vocab_pruned is not None:
+                self.model.lm_head = copy.deepcopy(target_language_model.lm_head)
+            else:
+                self.model.lm_head = target_language_model.lm_head
 
         # optionally prune the draft model vocabulary
         if self.vllm_config.speculative_config.draft_vocab_pruned is not None:
-            # ic(self.model.model.embed_tokens.weight.data.shape)
             logger.info(f"Loading pruned draft model vocabulary from {self.vllm_config.speculative_config.draft_vocab_pruned}")
             self.hot_token_ids = load_draft_vocab_pruned(self.vllm_config.speculative_config.draft_vocab_pruned)
-            device = next(self.model.model.parameters()).device
-            self.hot_token_ids = self.hot_token_ids.to(device)
-            # `self.model.model.embed_tokens.weight` is the model head
-            self.model.model.embed_tokens.weight.data = self.model.model.embed_tokens.weight.data[self.hot_token_ids]
-        # ic(self.model.model.embed_tokens.weight.data.shape)
+
+            if hasattr(self.model, "lm_head"):
+                print('have lm_head')
+                head = self.model.lm_head.weight
+                self.hot_token_ids = self.hot_token_ids.to(head.device)
+                head.data = head.data[self.hot_token_ids]
+                del self.model.lm_head.weight
+                self.model.lm_head.weight = head
+            else:
+                print('no lm_head')
+
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
 
 
     @torch.inference_mode()

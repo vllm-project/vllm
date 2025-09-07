@@ -1967,7 +1967,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 ic(self.model.model.embed_tokens.weight.data.shape)
                 ic(self.drafter.model.model.embed_tokens.weight.data.shape)
                 ic(self.model.lm_head.weight.data.shape)
-                ic(self.drafter.model.model.embed_tokens.weight.data.shape)
+                ic(self.drafter.model.lm_head.weight.data.shape)
             if self.use_aux_hidden_state_outputs:
                 if supports_eagle3(self.model):
                     self.model.set_aux_hidden_state_layers(
