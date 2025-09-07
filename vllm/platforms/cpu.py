@@ -27,7 +27,7 @@ class CpuPlatform(Platform):
     dispatch_key: str = "CPU"
 
     @classmethod
-    def bf16_support_mac(cls) -> bool:
+    def _bf16_support_mac(cls) -> bool:
         """Check if the Apple Silicon device supports bf16.
         
         This checks both hardware capabilities and PyTorch support for bf16
