@@ -176,8 +176,30 @@ def kernel_unified_attention_2d(
     # this prefix can be skipped)
     num_blocks = cdiv_fn(max_seq_prefix_len, BLOCK_SIZE)
 
-    # iterate through tiles
-    for j in range(0, num_blocks):
+    # ---- Sliding-window tile pruning --------------------
+    # Default: keep previous global behavior
+    j_lo = 0
+    j_hi_excl = num_blocks
+    if SLIDING_WINDOW > 0:
+        # Query rows covered by this Q-block
+        qpos_lo = q_block_local_idx * BLOCK_Q
+        qpos_hi = tl.minimum(
+            qpos_lo + (BLOCK_M - 1) // num_queries_per_kv,
+            cur_batch_query_len - 1,
+        )
+        # Union of allowed absolute key indices across the block:
+        #   [context_len + qpos_lo - (SLIDING_WINDOW - 1), ...,
+        #    context_len + qpos_hi]
+        first_allowed_seq = tl.maximum(
+            0, context_len + qpos_lo - SLIDING_WINDOW + 1)
+        last_allowed_seq = context_len + qpos_hi
+        # Convert to KV tile indices and clamp
+        j_lo = tl.minimum(first_allowed_seq // BLOCK_SIZE, num_blocks)
+        j_hi_excl = tl.minimum((last_allowed_seq // BLOCK_SIZE) + 1,
+                               num_blocks)
+
+    # iterate through tiles (now limited to the live window range)
+    for j in range(j_lo, j_hi_excl):
 
         physical_block_idx = tl.load(block_tables_ptr + block_table_offset + j)
 
