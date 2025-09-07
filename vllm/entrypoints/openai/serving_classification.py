@@ -54,14 +54,11 @@ class ClassificationMixin(OpenAIServing):
             ctx.tokenizer = await self.engine_client.get_tokenizer(
                 ctx.lora_request)
 
-            (
-                ctx.request_prompts,
-                ctx.engine_prompts,
-            ) = await self._preprocess_completion(
-                ctx.request,
-                ctx.tokenizer,
-                ctx.request.input,
-            )
+            renderer = self._get_renderer(ctx.tokenizer)
+            ctx.engine_prompts = await renderer.render_prompt(
+                prompt_or_prompts=ctx.request.input,
+                max_length=self.max_model_len,
+                truncate_prompt_tokens=ctx.request.truncate_prompt_tokens)
 
             return None
 
