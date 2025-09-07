@@ -417,7 +417,7 @@ def create_sources(impl_configs: list[ImplConfig], num_impl_files=8):
             ))
 
     def prepacked_type_key(prepack_type: PrepackTypeConfig):
-        # For now we we can just use the first accumulator type seen since
+        # For now, we can just use the first accumulator type seen since
         # the tensor core shapes/layouts don't vary based on accumulator
         # type so we can generate less code this way
         return (prepack_type.a, prepack_type.b_num_bits, prepack_type.convert)
