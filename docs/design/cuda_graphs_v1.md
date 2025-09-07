@@ -153,9 +153,10 @@ class AttentionCGSupport(enum.Enum):
 
 Suppose we have hybrid attention backends (e.g., in mamba mixer models). In that case, we seek the minimum capability of all backends to determine the final capability of the model, and we might resolve the incompatible cudagraph mode by downgrading the mode to the best fit one. For example, downgrading `FULL` mode to `FULL_AND_PIECEWISE` mode if the minimum capability is `UNIFORM_BATCH`, or `PIECEWISE` mode if the minimum capability is `NEVER` for -O3 compilation level. For the complete fallback policy, please see the code of [initialize_cudagraph_capture][vllm.v1.worker.gpu_model_runner.GPUModelRunner.initialize_cudagraph_capture].
 
-We have a collection of backends supporting full cudagraph. See the table below for a reference:
+The following table lists backends that support full cudagraph at the time of writing.
+
 | Attention Backend | cudagraph_support | Comments |
-|-------------------|---------| --------|
+|:---|:---|:---|
 | FlashAttention v2 | `UNIFORM_BATCH` | Actually `ALWAYS` but workaround to fallback to `FULL_AND_PIECEWISE` for performance reason |
 | FlashAttention v3 | `ALWAYS` | has unified routine for both batches, so `FULL` mode is good |
 | Triton Attention | `ALWAYS` | prefer `FULL_AND_PIECEWISE` since it has different kernels for prefill/mixed and pure decode batches |
