@@ -550,7 +550,6 @@ class WorkerProc:
                     logger.info("Parent process exited, terminating worker")
                     # Send signal to self to trigger clean shutdown
                     shutdown_event.set()
-                    os.kill(os.getpid(), signal.SIGTERM)
                 except Exception as e:
                     logger.warning("Death monitoring error: %s", e)
 
@@ -588,6 +587,8 @@ class WorkerProc:
 
             if ready_writer is not None:
                 logger.exception("WorkerProc failed to start.")
+            elif shutdown_event.is_set():
+                logger.info("WorkerProc shutting down.")
             else:
                 logger.exception("WorkerProc failed.")
 
