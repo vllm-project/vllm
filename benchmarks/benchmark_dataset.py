@@ -513,6 +513,7 @@ class CustomDataset(BenchmarkDataset):
             if len(sampled_requests) >= num_requests:
                 break
             prompt = item["prompt"]
+            output_len=item["output_tokens"]
 
             # apply template
             if not skip_chat_template:
