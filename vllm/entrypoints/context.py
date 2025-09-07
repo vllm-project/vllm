@@ -315,6 +315,9 @@ class HarmonyContext(ConversationContext):
         async with self._reference_count_lock:
             self._reference_count += 1
             if self._async_exit_stack is None:
+                assert (self._reference_count == 1
+                        ), "Reference count of exit stack should be "
+                "1 when initializing exit stack."
                 self._async_exit_stack = AsyncExitStack()
                 await self._async_exit_stack.__aenter__()
         return self
