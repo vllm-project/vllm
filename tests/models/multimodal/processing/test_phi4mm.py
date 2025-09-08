@@ -32,7 +32,8 @@ def test_processor_override(
 ):
     """Ensure Phi4MMMultiModalProcessor handles dynamic_hd properly."""
     # Avoid initializing CUDA early
-    from vllm.model_executor.models.phi4_multimodal import _IMAGE_PLACEHOLDER_TOKEN_ID
+    from vllm.model_executor.models.phi4_multimodal import (
+        _IMAGE_PLACEHOLDER_TOKEN_ID)
 
     ctx = build_model_context(
         model_id,
