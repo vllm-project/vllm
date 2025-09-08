@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import time
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -197,13 +196,9 @@ def benchmark(
             int(T * 0.7), T, size=(E,), dtype=torch.int32, device="cuda"
         )
     elif gen_strategy == "max_t":
-        tokens_per_expert = (
-            torch.randint(0, T, size=(E,), dtype=torch.int32, device="cuda") * 0 + T
-        )
+        tokens_per_expert = torch.ones(size=(E,), dtype=torch.int32, device="cuda") * T
     elif gen_strategy == "first_t":
-        tokens_per_expert = (
-            torch.randint(0, T, size=(E,), dtype=torch.int32, device="cuda") * 0
-        )
+        tokens_per_expert = torch.zeros(size=(E,), dtype=torch.int32, device="cuda") * 0
         tokens_per_expert[0] = T
     elif gen_strategy == "sorted":
         tokens_per_expert = torch.randint(
@@ -218,14 +213,22 @@ def benchmark(
         k(y, tokens_per_expert, num_parallel_tokens=num_parallel_tokens, group_size=G)
     torch.cuda.synchronize()
 
-    # Benchmark
-    torch.cuda.synchronize()
-    start = time.perf_counter()
-    for _ in range(runs):
-        k(y, tokens_per_expert, num_parallel_tokens=num_parallel_tokens, group_size=G)
-    torch.cuda.synchronize()
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
 
-    avg_time = (time.perf_counter() - start) / runs * 1000
+    # Benchmark
+    latencies: list[float] = []
+    for _ in range(runs):
+        torch.cuda.synchronize()
+
+        start_event.record()
+        k(y, tokens_per_expert, num_parallel_tokens=num_parallel_tokens, group_size=G)
+        end_event.record()
+        end_event.synchronize()
+        latencies.append(start_event.elapsed_time(end_event))
+
+    avg_time_ms = sum(latencies) / runs
+    avg_time_s = avg_time_ms / 1000
 
     # Calculate actual work done (only count valid tokens)
     actual_tokens = tokens_per_expert.sum().item()
@@ -234,16 +237,16 @@ def benchmark(
     # GFLOPS: operations per element = exp + 3 muls + 1 div + quantization ops ≈ 8 ops
     ops_per_element = 8
     total_ops = actual_elements * ops_per_element
-    gflops = total_ops / (avg_time / 1000) / 1e9
+    gflops = total_ops / avg_time_s / 1e9
 
     # Memory bandwidth: bfloat16 inputs (2 bytes), fp8 output (1 byte), scales (4 bytes)
     input_bytes = actual_tokens * 2 * H * 2  # 2*H bfloat16 inputs
     output_bytes = actual_tokens * H * 1  # H fp8 outputs
     scale_bytes = actual_tokens * (H // G) * 4  # scales in float32
     total_bytes = input_bytes + output_bytes + scale_bytes
-    memory_bw = total_bytes / (avg_time / 1000) / 1e9
+    memory_bw = total_bytes / avg_time_s / 1e9
 
-    return avg_time, gflops, memory_bw, (memory_bw / (3.35 * 1024)) * 100
+    return avg_time_ms, gflops, memory_bw, (memory_bw / (3.35 * 1024)) * 100
 
 
 def create_comparison_plot(
@@ -276,7 +279,7 @@ def create_comparison_plot(
         ax.text(
             x[i],
             max_height + max_height * 0.02,
-            f"{speedup:.1f}x",
+            f"{speedup:.2f}x",
             ha="center",
             va="bottom",
             fontweight="bold",
@@ -415,8 +418,8 @@ for id, strategy in enumerate(strategies):
         speedup = baseline_results[i][0] / cuda_results[i][0]
         config_label = f"E={E:3d},T={T:4d},H={H:4d}"
         print(
-            f"{config_label:<20} {cuda_times[i]:8.3f} "
-            f"{baseline_times[i]:8.3f} {speedup:6.2f}x"
+            f"{config_label:<20} {cuda_results[i][0]:8.5f} "
+            f"{baseline_results[i][0]:8.5f} {speedup:6.2f}x"
         )
 
 print(f"\n{'=' * 60}")
