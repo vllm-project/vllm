@@ -4,7 +4,7 @@
 # pylint: disable=unused-argument
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional, Union, cast
+from typing import Optional, Union, cast
 
 import torch
 import torch.nn as nn
@@ -20,6 +20,7 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_reduce)
 from vllm.distributed.utils import divide
 from vllm.forward_context import get_forward_context
+from vllm.lora.punica_wrapper import PunicaWrapperBase
 # yapf: disable
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase,
@@ -32,9 +33,6 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.platforms import current_platform
-
-if TYPE_CHECKING:
-    from vllm.lora.punica_wrapper import PunicaWrapperBase
 
 
 def _get_lora_device(base_layer: nn.Module) -> torch.device:
