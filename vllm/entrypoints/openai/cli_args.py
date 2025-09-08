@@ -204,7 +204,7 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
         frontend_kwargs["lora_modules"]["type"] = optional_type(str)
         frontend_kwargs["lora_modules"]["action"] = LoRAParserAction
 
-        # Special case: Middleware needs append action
+        # Special case: Middleware needs to append action
         frontend_kwargs["middleware"]["action"] = "append"
         frontend_kwargs["middleware"]["type"] = str
         if "nargs" in frontend_kwargs["middleware"]:

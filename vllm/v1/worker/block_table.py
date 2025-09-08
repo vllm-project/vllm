@@ -98,7 +98,7 @@ class BlockTable:
         # here because M (max_model_len) is not necessarily divisible by
         # block_size.
         if self.dcp_world_size > 1:
-            # Note(hc): The DCP implement store kvcache with a interleave
+            # Note(hc): The DCP implement store kvcache with an interleave
             # style, the kvcache for the token whose token_idx is i is
             # always stored on the GPU whose dcp_rank equals i % cp_world_size:
 

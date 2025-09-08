@@ -1169,7 +1169,7 @@ class ModelConfig:
             ]
             # Any custom overrides will be in quantization_methods so we place
             # them at the start of the list so custom overrides have preference
-            # over the built in ones.
+            # over the built-in ones.
             quantization_methods = quantization_methods + overrides
 
             # Detect which checkpoint is it
