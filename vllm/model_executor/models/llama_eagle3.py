@@ -304,14 +304,17 @@ class LlamaForCausalLMEagle3(Eagle3LlamaForCausalLM):
 
     def _ensure_draft_vocab_size(self, vllm_config: VllmConfig):
         """Ensure draft_vocab_size is set in the draft model config."""
-        if (vllm_config.speculative_config and 
+        if (vllm_config.speculative_config and
             vllm_config.speculative_config.draft_model_config and
-            hasattr(vllm_config.speculative_config.draft_model_config, 'hf_config')):
+            hasattr(vllm_config.speculative_config.draft_model_config,
+                    'hf_config')):
             
-            hf_config = vllm_config.speculative_config.draft_model_config.hf_config
+            hf_config = (vllm_config.speculative_config.draft_model_config.
+                         hf_config)
             
             # If draft_vocab_size is not set, use the target model's vocab_size
-            if not hasattr(hf_config, 'draft_vocab_size') or hf_config.draft_vocab_size is None:
+            if (not hasattr(hf_config, 'draft_vocab_size') or
+                    hf_config.draft_vocab_size is None):
                 target_vocab_size = vllm_config.model_config.get_vocab_size()
                 hf_config.draft_vocab_size = target_vocab_size
 
