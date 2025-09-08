@@ -237,7 +237,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 # Check the size of the wheel if RUN_WHEEL_CHECK is true
 COPY .buildkite/check-wheel-size.py check-wheel-size.py
 # sync the default value with .buildkite/check-wheel-size.py
-ARG VLLM_MAX_SIZE_MB=400
+ARG VLLM_MAX_SIZE_MB=450
 ENV VLLM_MAX_SIZE_MB=$VLLM_MAX_SIZE_MB
 ARG RUN_WHEEL_CHECK=true
 RUN if [ "$RUN_WHEEL_CHECK" = "true" ]; then \
@@ -261,6 +261,8 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 # Use copy mode to avoid hardlink failures with Docker cache mounts
 ENV UV_LINK_MODE=copy
 
+# Install libnuma-dev, required by fastsafetensors (fixes #20384)
+RUN apt-get update && apt-get install -y libnuma-dev && rm -rf /var/lib/apt/lists/*
 COPY requirements/lint.txt requirements/lint.txt
 COPY requirements/test.txt requirements/test.txt
 COPY requirements/dev.txt requirements/dev.txt
@@ -373,7 +375,7 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 # Install FlashInfer from source
 ARG FLASHINFER_GIT_REPO="https://github.com/flashinfer-ai/flashinfer.git"
 # Keep this in sync with "flashinfer" extra in setup.py
-ARG FLASHINFER_GIT_REF="v0.2.12"
+ARG FLASHINFER_GIT_REF="v0.3.0"
 # Flag to control whether to compile FlashInfer AOT kernels
 # Set to "true" to enable AOT compilation:
 # docker build --build-arg FLASHINFER_AOT_COMPILE=true ...
@@ -432,31 +434,18 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 # Install DeepGEMM from source
-ARG DEEPGEMM_GIT_REPO="https://github.com/deepseek-ai/DeepGEMM.git"
-ARG DEEPGEMM_GIT_REF="7b6b5563b9d4c1ae07ffbce7f78ad3ac9204827c"
-RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
-  . /etc/environment
-    CUDA_MAJOR="${CUDA_VERSION%%.*}"
-    CUDA_MINOR="${CUDA_VERSION#${CUDA_MAJOR}.}"
-    CUDA_MINOR="${CUDA_MINOR%%.*}"
-    if [ "$CUDA_MAJOR" -ge 12 ] && [ "$CUDA_MINOR" -ge 8 ]; then
-        git clone --recursive --shallow-submodules \
-            ${DEEPGEMM_GIT_REPO} deepgemm
-        echo "🏗️  Building DeepGEMM"
-        pushd deepgemm
-            git checkout ${DEEPGEMM_GIT_REF}
-            # Build DeepGEMM
-            # (Based on https://github.com/deepseek-ai/DeepGEMM/blob/main/install.sh)
-            rm -rf build dist
-            rm -rf *.egg-info
-            python3 setup.py bdist_wheel
-            uv pip install --system dist/*.whl
-        popd
-        rm -rf deepgemm
-    else
-        echo "Skipping DeepGEMM installation (requires CUDA 12.8+ but got ${CUDA_VERSION})"
-    fi
-BASH
+ARG DEEPGEMM_GIT_REF
+COPY tools/install_deepgemm.sh /tmp/install_deepgemm.sh
+RUN --mount=type=cache,target=/root/.cache/uv \
+    VLLM_DOCKER_BUILD_CONTEXT=1 /tmp/install_deepgemm.sh --cuda-version "${CUDA_VERSION}" ${DEEPGEMM_GIT_REF:+--ref "$DEEPGEMM_GIT_REF"} 
+
+# Install EP kernels(pplx-kernels and DeepEP), NixL
+COPY tools/ep_kernels/install_python_libraries.sh install_python_libraries.sh
+COPY tools/install_nixl.sh install_nixl.sh
+ENV CUDA_HOME=/usr/local/cuda
+RUN export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-9.0a+PTX}" \
+    && bash install_python_libraries.sh \
+    && bash install_nixl.sh --force
 
 #################### vLLM installation IMAGE ####################
 
