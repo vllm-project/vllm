@@ -1833,13 +1833,13 @@ def cutlass_mla_decode(out: torch.Tensor, q_nope: torch.Tensor,
     return out
 
 
-def sm100_cutlass_mla_decode(out: torch.Tensor, q_nope: torch.Tensor,
-                             q_pe: torch.Tensor,
+def sm100_cutlass_mla_decode(out: torch.Tensor, lse: torch.Tensor,
+                             q_nope: torch.Tensor, q_pe: torch.Tensor,
                              kv_c_and_k_pe_cache: torch.Tensor,
                              seq_lens: torch.Tensor, page_table: torch.Tensor,
                              workspace: torch.Tensor, scale: float,
                              num_kv_splits: int) -> torch.Tensor:
-    torch.ops._C.sm100_cutlass_mla_decode(out, q_nope, q_pe,
+    torch.ops._C.sm100_cutlass_mla_decode(out, lse, q_nope, q_pe,
                                           kv_c_and_k_pe_cache, seq_lens,
                                           page_table, workspace, scale,
                                           num_kv_splits)
