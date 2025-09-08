@@ -19,32 +19,22 @@
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
-  "id": 7,
+  "id": 47,
   "links": [],
   "panels": [
     {
       "collapsed": true,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 0
-      },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
       "id": 20,
       "panels": [],
       "title": "Request Over Time",
       "type": "row"
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
+          "color": { "mode": "palette-classic" },
           "custom": {
             "axisBorderShow": false,
             "axisCenteredZero": false,
@@ -56,142 +46,62 @@
             "drawStyle": "line",
             "fillOpacity": 0,
             "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
             "insertNulls": false,
             "lineInterpolation": "linear",
             "lineWidth": 1,
             "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
+            "scaleDistribution": { "type": "linear" },
             "showPoints": "auto",
             "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
+            "stacking": { "group": "A", "mode": "none" },
+            "thresholdsStyle": { "mode": "off" }
           },
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
+            "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 80 }]
           },
-          "unit": "Requests/sec"
+          "unit": "req/s"
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 6,
-        "w": 10,
-        "x": 0,
-        "y": 1
-      },
+      "gridPos": { "h": 6, "w": 10, "x": 0, "y": 1 },
       "id": 1,
       "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
+        "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
       },
       "pluginVersion": "11.3.0",
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
           "editorMode": "code",
-          "expr": "sum by (model_name) (\r\n  rate(vllm:request_success_total{model_name=~\"${Deployment_id}\"}[$__interval])\r\n)",
+          "expr": "sum by (model_name) (\n  rate(vllm:request_success_total{model_name=~\"$Deployment_id\"}[$__rate_interval])\n)",
           "interval": "1",
           "legendFormat": "{{model_name}}",
           "range": true,
           "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "editorMode": "code",
-          "expr": "sum by (model_name) (\r\n  rate(vllm:request_success_total{model_name=~\"$Deployment_id\"}[$__interval]) # Use =~ for regex matching with variable, and $__interval\r\n  * on() group_left()\r\n  vector(1)\r\n  unless (\r\n    # Adjusted for UTC: 10 AM CDT (your local time) is 15:00 UTC. 4 PM CDT is 21:00 UTC.\r\n    # day_of_week() 0=Sunday, 6=Saturday\r\n    hour() < 15 or hour() >= 21 or day_of_week() == 0 or day_of_week() == 6\r\n  )\r\n)",
-          "hide": true,
-          "instant": false,
-          "legendFormat": "Static__{{model_name}}",
-          "range": true,
-          "refId": "B"
         }
       ],
       "title": "Successful Requests Over Time",
-      "transformations": [
-        {
-          "disabled": true,
-          "id": "filterFieldsByName",
-          "options": {
-            "byVariable": true,
-            "include": {
-              "variable": "$rush_hours_type"
-            }
-          }
-        }
-      ],
       "type": "timeseries"
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
+          "color": { "mode": "thresholds" },
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
+            "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 80 }]
           },
-          "unit": "Requests/sec"
+          "unit": "req/s"
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 3,
-        "w": 7,
-        "x": 10,
-        "y": 1
-      },
+      "gridPos": { "h": 3, "w": 7, "x": 10, "y": 1 },
       "id": 2,
       "options": {
         "colorMode": "value",
@@ -199,13 +109,7 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "mean"
-          ],
-          "fields": "",
-          "values": false
-        },
+        "reduceOptions": { "calcs": ["mean"], "fields": "", "values": false },
         "showPercentChange": false,
         "textMode": "auto",
         "wideLayout": true
@@ -214,7 +118,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "avg(rate(vllm:request_success_total{model_name=~\"$Deployment_id\"}[$__range]))",
+          "expr": "sum(rate(vllm:request_success_total{model_name=~\"$Deployment_id\"}[$__rate_interval]))",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -224,49 +128,22 @@
       "type": "stat"
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
+          "color": { "mode": "thresholds" },
           "mappings": [
-            {
-              "options": {
-                "Calcultaions": {
-                  "index": 0,
-                  "text": "Last (not null)"
-                }
-              },
-              "type": "value"
-            }
+            { "options": { "Calcultaions": { "index": 0, "text": "Last (not null)" } }, "type": "value" }
           ],
           "thresholds": {
             "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
+            "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 80 }]
           },
           "unit": "ms"
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 3,
-        "w": 7,
-        "x": 17,
-        "y": 1
-      },
+      "gridPos": { "h": 3, "w": 7, "x": 17, "y": 1 },
       "id": 3,
       "options": {
         "colorMode": "value",
@@ -274,13 +151,7 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "showPercentChange": false,
         "textMode": "auto",
         "wideLayout": true
@@ -289,7 +160,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "histogram_quantile(0.50, sum by(le, model_name) (rate(vllm:e2e_request_latency_seconds_bucket{model_name=~\"$Deployment_id\"}[$__interval])))",
+          "expr": "histogram_quantile(0.50, sum by(le, model_name) (rate(vllm:e2e_request_latency_seconds_bucket{model_name=~\"$Deployment_id\"}[$__rate_interval])))",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -299,49 +170,22 @@
       "type": "stat"
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
+          "color": { "mode": "thresholds" },
           "mappings": [
-            {
-              "options": {
-                "Calculation": {
-                  "index": 0,
-                  "text": "Last (not null)"
-                }
-              },
-              "type": "value"
-            }
+            { "options": { "Calculation": { "index": 0, "text": "Last (not null)" } }, "type": "value" }
           ],
           "thresholds": {
             "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
+            "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 80 }]
           },
           "unit": "ms"
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 3,
-        "w": 7,
-        "x": 10,
-        "y": 4
-      },
+      "gridPos": { "h": 3, "w": 7, "x": 10, "y": 4 },
       "id": 4,
       "options": {
         "colorMode": "value",
@@ -349,13 +193,7 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "showPercentChange": false,
         "textMode": "auto",
         "wideLayout": true
@@ -364,7 +202,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "histogram_quantile(0.90, sum by(le, model_name) (rate(vllm:e2e_request_latency_seconds_bucket{model_name=~\"$Deployment_id\"}[$__interval])))",
+          "expr": "histogram_quantile(0.90, sum by(le, model_name) (rate(vllm:e2e_request_latency_seconds_bucket{model_name=~\"$Deployment_id\"}[$__rate_interval])))",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -374,49 +212,22 @@
       "type": "stat"
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
+          "color": { "mode": "thresholds" },
           "mappings": [
-            {
-              "options": {
-                "Calculation": {
-                  "index": 0,
-                  "text": "Last (not null)"
-                }
-              },
-              "type": "value"
-            }
+            { "options": { "Calculation": { "index": 0, "text": "Last (not null)" } }, "type": "value" }
           ],
           "thresholds": {
             "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
+            "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 80 }]
           },
           "unit": "ms"
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 3,
-        "w": 7,
-        "x": 17,
-        "y": 4
-      },
+      "gridPos": { "h": 3, "w": 7, "x": 17, "y": 4 },
       "id": 5,
       "options": {
         "colorMode": "value",
@@ -424,13 +235,7 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "showPercentChange": false,
         "textMode": "auto",
         "wideLayout": true
@@ -439,7 +244,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by(le, model_name) (rate(vllm:e2e_request_latency_seconds_bucket{model_name=~\"$Deployment_id\"}[$__interval])))",
+          "expr": "histogram_quantile(0.99, sum by(le, model_name) (rate(vllm:e2e_request_latency_seconds_bucket{model_name=~\"$Deployment_id\"}[$__rate_interval])))",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -450,160 +255,69 @@
     },
     {
       "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 7
-      },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 7 },
       "id": 19,
       "panels": [],
       "title": "Size Distribution",
       "type": "row"
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
+          "color": { "mode": "palette-classic" },
           "custom": {
             "fillOpacity": 80,
             "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
             "lineWidth": 1,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            }
+            "stacking": { "group": "A", "mode": "none" }
           },
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
+            "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 80 }]
           },
           "unit": "cps"
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 6,
-        "w": 10,
-        "x": 0,
-        "y": 8
-      },
+      "gridPos": { "h": 6, "w": 10, "x": 0, "y": 8 },
       "id": 6,
       "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
+        "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
       },
       "pluginVersion": "11.3.0",
       "targets": [
         {
           "editorMode": "code",
-          "expr": "sum by (le, model_name) (rate(vllm:request_prompt_tokens_bucket{model_name=~\"$Deployment_id\"}[$__interval]))",
+          "expr": "sum by (le, model_name) (rate(vllm:request_prompt_tokens_bucket{model_name=~\"$Deployment_id\"}[$__rate_interval]))",
           "legendFormat": "{{model_name}} le={{le}}",
           "range": true,
           "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "editorMode": "code",
-          "expr": "sum by (le, model_name) (\r\n  rate(vllm:request_prompt_tokens_bucket{model_name=~\"$Deployment_id\"}[$__interval])\r\n  and on() (\r\n    (hour() >= 15 and hour() < 21) and (day_of_week() >= 1 and day_of_week() <= 5) # UTC adjusted for 10 AM-4 PM CDT\r\n  )\r\n)",
-          "hide": true,
-          "instant": false,
-          "legendFormat": "Static__{{model_name}}",
-          "range": true,
-          "refId": "B"
         }
       ],
       "title": "Input Token Size Distribution",
-      "transformations": [
-        {
-          "disabled": true,
-          "id": "filterFieldsByName",
-          "options": {
-            "byVariable": true,
-            "include": {
-              "variable": "$rush_hours_type"
-            }
-          }
-        }
-      ],
       "type": "histogram"
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
+          "color": { "mode": "thresholds" },
           "mappings": [
-            {
-              "options": {
-                "calculation ": {
-                  "index": 0,
-                  "text": "Last (not null)"
-                }
-              },
-              "type": "value"
-            }
+            { "options": { "calculation ": { "index": 0, "text": "Last (not null)" } }, "type": "value" }
           ],
           "thresholds": {
             "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
+            "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 80 }]
           },
           "unit": "cps"
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 3,
-        "w": 7,
-        "x": 10,
-        "y": 8
-      },
+      "gridPos": { "h": 3, "w": 7, "x": 10, "y": 8 },
       "id": 9,
       "options": {
         "colorMode": "value",
@@ -611,13 +325,7 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "showPercentChange": false,
         "textMode": "auto",
         "wideLayout": true
@@ -626,7 +334,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "histogram_quantile(\r\n  0.90, # Calculate the 90th percentile\r\n  sum by(le, model_name) ( # Aggregate the bucket rates, keeping 'le' (bucket boundary) and 'model_name' labels\r\n    rate(\r\n      vllm:request_prompt_tokens_bucket{model_name=~\"$Deployment_id\"}[$__interval] # Get the per-second rate of tokens falling into each bucket\r\n    )\r\n  )\r\n)",
+          "expr": "histogram_quantile(0.90, sum by(le, model_name) (rate(vllm:request_prompt_tokens_bucket{model_name=~\"$Deployment_id\"}[$__rate_interval])))",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -636,49 +344,22 @@
       "type": "stat"
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
+          "color": { "mode": "thresholds" },
           "mappings": [
-            {
-              "options": {
-                "Calcultion": {
-                  "index": 0,
-                  "text": "Last (not null)"
-                }
-              },
-              "type": "value"
-            }
+            { "options": { "Calcultion": { "index": 0, "text": "Last (not null)" } }, "type": "value" }
           ],
           "thresholds": {
             "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
+            "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 80 }]
           },
           "unit": "cps"
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 3,
-        "w": 7,
-        "x": 17,
-        "y": 8
-      },
+      "gridPos": { "h": 3, "w": 7, "x": 17, "y": 8 },
       "id": 8,
       "options": {
         "colorMode": "value",
@@ -686,13 +367,7 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "showPercentChange": false,
         "textMode": "auto",
         "wideLayout": true
@@ -701,7 +376,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "histogram_quantile(\r\n  0.50, # Calculate the 50th percentile (median)\r\n  sum by(le, model_name) ( # Aggregate the bucket rates, keeping 'le' (bucket boundary) and 'model_name' labels\r\n    rate(\r\n      vllm:request_prompt_tokens_bucket{model_name=~\"$Deployment_id\"}[$__interval] # Get the per-second rate of tokens falling into each bucket\r\n    )\r\n  )\r\n)",
+          "expr": "histogram_quantile(0.50, sum by(le, model_name) (rate(vllm:request_prompt_tokens_bucket{model_name=~\"$Deployment_id\"}[$__rate_interval])))",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -711,49 +386,22 @@
       "type": "stat"
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
+          "color": { "mode": "thresholds" },
           "mappings": [
-            {
-              "options": {
-                "Calcultaion": {
-                  "index": 0,
-                  "text": "mean"
-                }
-              },
-              "type": "value"
-            }
+            { "options": { "Calcultaion": { "index": 0, "text": "mean" } }, "type": "value" }
           ],
           "thresholds": {
             "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
+            "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 80 }]
           },
           "unit": "cps"
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 3,
-        "w": 7,
-        "x": 10,
-        "y": 11
-      },
+      "gridPos": { "h": 3, "w": 7, "x": 10, "y": 11 },
       "id": 7,
       "options": {
         "colorMode": "value",
@@ -761,13 +409,7 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "showPercentChange": false,
         "textMode": "auto",
         "wideLayout": true
@@ -776,7 +418,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "# Calculate the sum of the rate of prompt tokens per second\r\nsum(rate(vllm:prompt_tokens_total{model_name=~\"$Deployment_id\"}[$__interval]))\r\n/\r\n# Divide by the sum of the rate of successful requests per second\r\nsum(rate(vllm:request_success_total{model_name=~\"$Deployment_id\"}[$__interval]))",
+          "expr": "sum(rate(vllm:prompt_tokens_total{model_name=~\"$Deployment_id\"}[$__rate_interval]))\n/\nsum(rate(vllm:request_success_total{model_name=~\"$Deployment_id\"}[$__rate_interval]))",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -786,49 +428,22 @@
       "type": "stat"
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
+          "color": { "mode": "thresholds" },
           "mappings": [
-            {
-              "options": {
-                "Calculation": {
-                  "index": 0,
-                  "text": "Last (not null)"
-                }
-              },
-              "type": "value"
-            }
+            { "options": { "Calculation": { "index": 0, "text": "Last (not null)" } }, "type": "value" }
           ],
           "thresholds": {
             "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
+            "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 80 }]
           },
           "unit": "cps"
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 3,
-        "w": 7,
-        "x": 17,
-        "y": 11
-      },
+      "gridPos": { "h": 3, "w": 7, "x": 17, "y": 11 },
       "id": 10,
       "options": {
         "colorMode": "value",
@@ -836,13 +451,7 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "showPercentChange": false,
         "textMode": "auto",
         "wideLayout": true
@@ -851,7 +460,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "histogram_quantile(\r\n  0.99, # Calculate the 99th percentile\r\n  sum by(le, model_name) ( # Aggregate the bucket rates, keeping 'le' (bucket boundary) and 'model_name' labels\r\n    rate(\r\n      vllm:request_prompt_tokens_bucket{model_name=~\"$Deployment_id\"}[$__interval] # Get the per-second rate of tokens falling into each bucket\r\n    )\r\n  )\r\n)",
+          "expr": "histogram_quantile(0.99, sum by(le, model_name) (rate(vllm:request_prompt_tokens_bucket{model_name=~\"$Deployment_id\"}[$__rate_interval])))",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -862,27 +471,17 @@
     },
     {
       "collapsed": true,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 14
-      },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
       "id": 18,
       "panels": [],
       "title": "Input Token Over Time",
       "type": "row"
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
+          "color": { "mode": "palette-classic" },
           "custom": {
             "axisBorderShow": false,
             "axisCenteredZero": false,
@@ -894,70 +493,37 @@
             "drawStyle": "line",
             "fillOpacity": 0,
             "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
             "insertNulls": false,
             "lineInterpolation": "linear",
             "lineWidth": 1,
             "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
+            "scaleDistribution": { "type": "linear" },
             "showPoints": "auto",
             "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
+            "stacking": { "group": "A", "mode": "none" },
+            "thresholdsStyle": { "mode": "off" }
           },
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
+            "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 80 }]
           },
           "unit": "cps"
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 6,
-        "w": 10,
-        "x": 0,
-        "y": 15
-      },
+      "gridPos": { "h": 6, "w": 10, "x": 0, "y": 15 },
       "id": 11,
       "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
+        "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
       },
       "pluginVersion": "11.3.0",
       "targets": [
         {
           "editorMode": "code",
-          "expr": "# Calculates the rate of input tokens per second over time\r\nsum by (model_name) (rate(vllm:prompt_tokens_total{model_name=~\"$Deployment_id\"}[$__interval]))",
+          "expr": "sum by (model_name) (rate(vllm:prompt_tokens_total{model_name=~\"$Deployment_id\"}[$__rate_interval]))",
           "legendFormat": "{{model_name}}",
           "range": true,
           "refId": "A"
@@ -967,49 +533,22 @@
       "type": "timeseries"
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
+          "color": { "mode": "thresholds" },
           "mappings": [
-            {
-              "options": {
-                "Calculation": {
-                  "index": 0,
-                  "text": "mean"
-                }
-              },
-              "type": "value"
-            }
+            { "options": { "Calculation": { "index": 0, "text": "mean" } }, "type": "value" }
           ],
           "thresholds": {
             "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
+            "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 80 }]
           },
           "unit": "cps"
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 3,
-        "w": 7,
-        "x": 10,
-        "y": 15
-      },
+      "gridPos": { "h": 3, "w": 7, "x": 10, "y": 15 },
       "id": 12,
       "options": {
         "colorMode": "value",
@@ -1017,13 +556,7 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "showPercentChange": false,
         "textMode": "auto",
         "wideLayout": true
@@ -1032,7 +565,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "#Calculates average prompt tokens per second over the selected time range and Divide by the total number of seconds in the time range (provided by Grafana)\r\nsum(increase(vllm:prompt_tokens_total{model_name=~\"$Deployment_id\"}[$__range]))\r\n/ \r\n$__range_s\r\n\r\n#This is not working, for reference\r\n# Calculates total output tokens over period, divided by total seconds in period\r\n#sum(increase(vllm:generation_tokens_total{model_name=~\"$Deployment_id\"}[$__range]))\r\n#/\r\n#(max_over_time(time()[1s] offset $__range) - min_over_time(time()[1s] offset $__range))",
+          "expr": "sum(rate(vllm:prompt_tokens_total{model_name=~\"$Deployment_id\"}[$__rate_interval]))",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -1043,27 +576,17 @@
     },
     {
       "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 21
-      },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 21 },
       "id": 17,
       "panels": [],
       "title": "Output Token Over Time",
       "type": "row"
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
+          "color": { "mode": "palette-classic" },
           "custom": {
             "axisBorderShow": false,
             "axisCenteredZero": false,
@@ -1075,70 +598,37 @@
             "drawStyle": "line",
             "fillOpacity": 0,
             "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
             "insertNulls": false,
             "lineInterpolation": "linear",
             "lineWidth": 1,
             "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
+            "scaleDistribution": { "type": "linear" },
             "showPoints": "auto",
             "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
+            "stacking": { "group": "A", "mode": "none" },
+            "thresholdsStyle": { "mode": "off" }
           },
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
+            "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 80 }]
           },
           "unit": "cps"
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 6,
-        "w": 10,
-        "x": 0,
-        "y": 22
-      },
+      "gridPos": { "h": 6, "w": 10, "x": 0, "y": 22 },
       "id": 13,
       "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
+        "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
       },
       "pluginVersion": "11.3.0",
       "targets": [
         {
           "editorMode": "code",
-          "expr": "# Calculates the rate of output tokens per second over time\r\nsum by (model_name) (rate(vllm:generation_tokens_total{model_name=~\"$Deployment_id\"}[$__interval]))",
+          "expr": "sum by (model_name) (rate(vllm:generation_tokens_total{model_name=~\"$Deployment_id\"}[$__rate_interval]))",
           "legendFormat": "{{model_name}}",
           "range": true,
           "refId": "A"
@@ -1148,49 +638,22 @@
       "type": "timeseries"
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
+          "color": { "mode": "thresholds" },
           "mappings": [
-            {
-              "options": {
-                "Calculation": {
-                  "index": 0,
-                  "text": "mean"
-                }
-              },
-              "type": "value"
-            }
+            { "options": { "Calculation": { "index": 0, "text": "mean" } }, "type": "value" }
           ],
           "thresholds": {
             "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
+            "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 80 }]
           },
           "unit": "cps"
         },
         "overrides": []
       },
-      "gridPos": {
-        "h": 3,
-        "w": 7,
-        "x": 10,
-        "y": 22
-      },
+      "gridPos": { "h": 3, "w": 7, "x": 10, "y": 22 },
       "id": 14,
       "options": {
         "colorMode": "value",
@@ -1198,13 +661,7 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "showPercentChange": false,
         "textMode": "auto",
         "wideLayout": true
@@ -1213,7 +670,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "# Calculates total output tokens over period, divided by total seconds in period\r\nsum(increase(vllm:generation_tokens_total{model_name=~\"$Deployment_id\"}[$__range]))\r\n/\r\n$__range_s # Grafana variable: total seconds in the selected dashboard time range",
+          "expr": "sum(rate(vllm:generation_tokens_total{model_name=~\"$Deployment_id\"}[$__rate_interval]))",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -1229,25 +686,16 @@
   "templating": {
     "list": [
       {
-        "name": "DS_PROMETHEUS",
-        "type": "datasource",
+        "current": { "text": "Prometheus", "value": "4184fc20-68a7-483a-8d9b-7caa59c680dd" },
         "label": "datasource",
+        "name": "DS_PROMETHEUS",
+        "options": [],
         "query": "prometheus",
         "refresh": 1,
-        "current": {
-          "text": "Prometheus",
-          "value": "prometheus"
-        }
+        "type": "datasource"
       },
       {
-        "current": {
-          "text": [
-            "All"
-          ],
-          "value": [
-            "$__all"
-          ]
-        },
+        "current": { "text": ["All"], "value": ["$__all"] },
         "definition": "label_values(vllm:request_success_total,model_name)",
         "includeAll": true,
         "label": "Deployment_ID",
@@ -1265,61 +713,32 @@
         "type": "query"
       },
       {
-        "current": {
-          "text": "All hours",
-          "value": "All hours"
-        },
+        "current": { "text": "All hours", "value": "All hours" },
         "hide": 2,
         "label": "Rush Hours Only",
         "name": "rush_hours",
         "options": [
-          {
-            "selected": true,
-            "text": "false",
-            "value": "All hours"
-          },
-          {
-            "selected": false,
-            "text": "true",
-            "value": "Rush hours"
-          }
+          { "selected": true, "text": "false", "value": "All hours" },
+          { "selected": false, "text": "true", "value": "Rush hours" }
         ],
         "query": "false : All hours, true : Rush hours",
         "type": "custom"
       },
       {
-        "current": {
-          "text": "All",
-          "value": "All"
-        },
+        "current": { "text": "All", "value": "All" },
         "hide": 2,
         "label": "Rush Hours Type",
         "name": "rush_hours_type",
         "options": [
-          {
-            "selected": true,
-            "text": "^All__.*$",
-            "value": "All"
-          },
-          {
-            "selected": false,
-            "text": "^Static__.*$",
-            "value": "Static"
-          },
-          {
-            "selected": false,
-            "text": "^Dynamic__.*$",
-            "value": "Dynamic"
-          }
+          { "selected": true, "text": "^All__.*$", "value": "All" },
+          { "selected": false, "text": "^Static__.*$", "value": "Static" },
+          { "selected": false, "text": "^Dynamic__.*$", "value": "Dynamic" }
         ],
         "query": "^All__.*$ : All, ^Static__.*$ : Static, ^Dynamic__.*$ : Dynamic",
         "type": "custom"
       },
       {
-        "current": {
-          "text": "",
-          "value": ""
-        },
+        "current": { "text": "", "value": "" },
         "hide": 2,
         "name": "query0",
         "options": [],
@@ -1330,13 +749,12 @@
       }
     ]
   },
-  "time": {
-    "from": "now/d+10h",
-    "to": "now/d+16h"
-  },
+  "time": { "from": "now-12h", "to": "now" },
+  "timepicker": {},
   "timezone": "browser",
-  "uid": "query-statistics",
-  "title": "Query Statistics_New",
-  "version": 73,
+  "title": "Query Statistics_New4",
+  "uid": "query-statistics4",
+  "version": 2,
   "weekStart": ""
 }
+
