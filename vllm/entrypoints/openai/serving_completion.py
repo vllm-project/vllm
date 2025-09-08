@@ -131,6 +131,7 @@ class OpenAIServingCompletion(OpenAIServing):
             renderer = self._get_renderer(tokenizer)
             max_input_tokens_len = self.max_model_len - (request.max_tokens
                                                          or 0)
+
             engine_prompts = await renderer.render_prompt_and_embeds(
                 prompt_or_prompts=request.prompt,
                 prompt_embeds=request.prompt_embeds,
@@ -138,7 +139,8 @@ class OpenAIServingCompletion(OpenAIServing):
                 truncate_prompt_tokens=request.truncate_prompt_tokens,
                 add_special_tokens=request.add_special_tokens,
                 cache_salt=request.cache_salt,
-                needs_detokenization=request.echo,
+                needs_detokenization=bool(request.echo
+                                          and not request.return_token_ids),
             )
         except ValueError as e:
             logger.exception("Error in preprocessing prompt inputs")
@@ -373,6 +375,8 @@ class OpenAIServingCompletion(OpenAIServing):
                     assert request.max_tokens is not None
                     if request.echo and not has_echoed[i]:
                         assert prompt_token_ids is not None
+                        if request.return_token_ids:
+                            prompt_text = ""
                         assert prompt_text is not None
                         if request.max_tokens == 0:
                             # only return the prompt
@@ -520,6 +524,8 @@ class OpenAIServingCompletion(OpenAIServing):
             for output in final_res.outputs:
                 assert request.max_tokens is not None
                 if request.echo:
+                    if request.return_token_ids:
+                        prompt_text = ""
                     assert prompt_text is not None
                     if request.max_tokens == 0:
                         token_ids = prompt_token_ids
