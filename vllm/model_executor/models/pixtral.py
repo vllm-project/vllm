@@ -23,7 +23,6 @@ from transformers.models.pixtral.modeling_pixtral import (
     PixtralRotaryEmbedding, apply_rotary_pos_emb, position_ids_in_meshgrid)
 from transformers.tokenization_utils_base import TextInput
 
-from vllm.attention.layer import MultiHeadAttention
 from vllm.config import VllmConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
@@ -1081,10 +1080,6 @@ class PixtralHFAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        # Use unified MultiHeadAttention with automatic backend selection
-        self.attn = MultiHeadAttention(self.n_heads, self.head_dim,
-                                       1.0 / math.sqrt(self.head_dim))
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1103,14 +1098,21 @@ class PixtralHFAttention(nn.Module):
         cos, sin = position_embeddings
         q, k = apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=0)
 
-        # Reshape for MultiHeadAttention: (batch, seq, hidden_size)
-        q = q.contiguous().view(batch, patches, -1)
-        k = k.contiguous().view(batch, patches, -1)
-        v = v.contiguous().view(batch, patches, -1)
+        if USE_XFORMERS_OPS:
+            # Transpose q and k back for attention
+            q = q.transpose(1, 2).contiguous()
+            k = k.transpose(1, 2).contiguous()
+            out = xops.memory_efficient_attention(q,
+                                                  k,
+                                                  v,
+                                                  attn_bias=attention_mask)
+        else:
+            v = v.transpose(1, 2)
+            out = nn.functional.scaled_dot_product_attention(
+                q, k, v, attn_mask=attention_mask)
+            out = out.transpose(1, 2)
 
-        # Use unified MultiHeadAttention with automatic backend selection
-        out = self.attn(q, k, v)
-
+        out = out.view(batch, patches, self.n_heads * self.head_dim)
         attn_output, _ = self.o_proj(out)
 
         return attn_output, None

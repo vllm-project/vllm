@@ -29,7 +29,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
-
 NORM2FN = {
     'rms_norm': RMSNorm,
     'layer_norm': nn.LayerNorm,
@@ -255,10 +254,10 @@ class InternSdpaAttention(nn.Module):
                                   var_hidden_size=self.embed_dim)
 
         self.proj = nn.Linear(self.dummy_dim, self.embed_dim)
-        
+
         # Use unified MultiHeadAttention with automatic backend selection
-        self.attn = MultiHeadAttention(
-            self.num_heads, self.head_dim, self.scale)
+        self.attn = MultiHeadAttention(self.num_heads, self.head_dim,
+                                       self.scale)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, N, C = x.shape
@@ -273,9 +272,9 @@ class InternSdpaAttention(nn.Module):
             B_, N_, H_, D_ = q.shape
             q = self.q_norm(q.flatten(-2, -1)).view(B_, N_, H_, D_)
             k = self.k_norm(k.flatten(-2, -1)).view(B_, N_, H_, D_)
-        
+
         # Use unified MultiHeadAttention with automatic backend selection
-        x = self.attn(q, k, v) 
+        x = self.attn(q, k, v)
 
         x = self.proj(x)
         return x
