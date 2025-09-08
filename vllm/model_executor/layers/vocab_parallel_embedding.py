@@ -420,6 +420,9 @@ class VocabParallelEmbedding(CustomOp):
         output = tensor_model_parallel_all_reduce(output_parallel)
         return output
 
+    def forward_cuda(self, input_):
+        return self.forward_native(input_)
+
     def extra_repr(self) -> str:
         s = f"num_embeddings={self.num_embeddings_per_partition}"
         s += f", embedding_dim={self.embedding_dim}"
