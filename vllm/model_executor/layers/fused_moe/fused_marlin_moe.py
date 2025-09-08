@@ -76,8 +76,7 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
     quant_type = ScalarType.from_id(quant_type_id)
     assert quant_type in [
         scalar_types.uint4, scalar_types.uint8b128, scalar_types.uint4b8,
-        scalar_types.float8_e4m3fn, scalar_types.float4_e2m1f,
-        scalar_types.int8
+        scalar_types.float8_e4m3fn, scalar_types.float4_e2m1f
     ]
 
     bit4_scalar_types = [
