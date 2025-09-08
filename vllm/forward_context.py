@@ -137,7 +137,7 @@ class DPMetadata:
         # If num_tokens_across_dp is None, it will be computed by all_reduce
         # Otherwise, num_tokens_across_dp[dp_rank] should be equal to batchsize
         assert (num_tokens_across_dp is None
-                or num_tokens_across_dp[dp_rank] == batchsize)
+                or num_tokens_across_dp[dp_rank] == batchsize), f"{num_tokens_across_dp[dp_rank]} {batchsize}"
         if num_tokens_across_dp is None:
             num_tokens_across_dp = DPMetadata.num_tokens_across_dp(
                 batchsize, dp_size, dp_rank)

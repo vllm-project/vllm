@@ -23,8 +23,8 @@ from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
-from vllm.v1.worker.ubatch_utils import UbatchSlice, UBatchSlices
-from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
+from vllm.v1.worker.ubatch_utils import (UbatchSlice, UBatchSlices)
+from vllm.v1.worker.gpu_ubatch_wrapper import (UBatchWrapper, get_dp_padding_ubatch, ubatch_split)
 from vllm.config import (CompilationLevel, CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config, update_config)
 from vllm.distributed.eplb.eplb_state import EplbState
@@ -786,9 +786,31 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.query_start_loc.copy_to_gpu()
         query_start_loc = self.query_start_loc.gpu[:num_reqs + 1]
 
+        num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
+        num_tokens_padded =  num_tokens_unpadded
+        if (self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+                and num_tokens_unpadded <= self.cudagraph_batch_sizes[-1]):
+            # Use piecewise CUDA graphs.
+            # Add padding to the batch size.
+            num_tokens_padded = self.vllm_config.pad_for_cudagraph(
+                num_tokens_unpadded)
+            logger.info("Attempting to pad for cudagraphs")
+        else:
+            # Eager mode.
+            # Pad tokens to multiple of tensor_parallel_size when
+            # enabled collective fusion for SP
+            tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+            if self.vllm_config.compilation_config.pass_config. \
+                enable_sequence_parallelism and tp_size > 1:
+                from vllm.utils import round_up
+                num_tokens_padded = round_up(num_tokens_unpadded, tp_size)
+
+        logger.info(f"NUM TOKENS {num_tokens_unpadded} NUM PADDED TOKENS {num_tokens_padded}")
         ubatch_slices, num_pad_tokens, num_tokens_after_padding = \
-            self._ubatch_split(max_num_scheduled_tokens,
-                               scheduler_output)
+            ubatch_split(max_num_scheduled_tokens,
+                         num_tokens_unpadded,
+                         num_tokens_padded,
+                         self.vllm_config)
 
         self.seq_lens.np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
@@ -1491,9 +1513,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                                 dtype=torch.int32)
         return max_tokens_across_dp_cpu - num_tokens, num_tokens_after_padding
 
-    def get_padding(
+    def get_local_padding(
             self,
-            num_tokens_unpadded: int) -> tuple[int, Optional[torch.Tensor]]:
+            num_tokens_unpadded: int) -> int:
 
         num_tokens_padded = num_tokens_unpadded
 
@@ -1504,6 +1526,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Add padding to the batch size.
             num_tokens_padded = self.vllm_config.pad_for_cudagraph(
                 num_tokens_unpadded)
+            logger.info("Attempting to pad for cudagraphs")
         else:
             # Eager mode.
             # Pad tokens to multiple of tensor_parallel_size when
@@ -1515,10 +1538,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_tokens_padded = round_up(num_tokens_unpadded, tp_size)
 
         num_pad_tokens = num_tokens_padded - num_tokens_unpadded
-        num_dp_pad_tokens, num_tokens_after_padding = self.get_dp_padding(
-            num_tokens_padded)
-
-        return num_dp_pad_tokens + num_pad_tokens, num_tokens_after_padding
+        return num_pad_tokens
 
     def get_dp_padding_ubatch(
         self, total_num_scheduled_tokens: int, should_attempt_ubatching: bool
@@ -1677,7 +1697,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_input_tokens += num_pad_tokens
             self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
         elif ubatch_slices is None:
-            num_pad, num_tokens_after_padding = self.get_padding(
+            num_input_tokens += self.get_local_padding(num_input_tokens)
+            num_pad, num_tokens_after_padding = self.get_dp_padding(
                 num_input_tokens)
             num_input_tokens += num_pad
 
@@ -2429,8 +2450,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 allow_microbatching
 
             (should_ubatch, num_pad,
-             num_tokens_across_dp) = self.get_dp_padding_ubatch(
-                 num_tokens, should_ubatch)
+             num_tokens_across_dp) = get_dp_padding_ubatch(
+                 num_tokens, num_tokens, should_ubatch, self.vllm_config)
 
             # Currently the dummy run should only be ubatching during
             # cuda graph capture, meaning all DP ranks should already
