@@ -123,12 +123,33 @@ When enabled, vLLM collects load statistics with every forward pass and periodic
 
 ### EPLB Parameters
 
+Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. The available keys and their descriptions are:
+
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `--eplb-window-size` | Number of engine steps to track for rebalancing decisions | - |
-| `--eplb-step-interval` | Frequency of rebalancing (every N engine steps) | - |
-| `--eplb-log-balancedness` | Log balancedness metrics (avg tokens per expert ÷ max tokens per expert) | `false` |
-| `--num-redundant-experts` | Additional global experts per EP rank beyond equal distribution | `0` |
+| `window_size`| Number of engine steps to track for rebalancing decisions | 1000 |
+| `step_interval`| Frequency of rebalancing (every N engine steps) | 3000 |
+| `log_balancedness` | Log balancedness metrics (avg tokens per expert ÷ max tokens per expert) | `false` |
+| `num_redundant_experts` | Additional global experts per EP rank beyond equal distribution | `0` |
+
+For example:
+
+```bash
+vllm serve Qwen/Qwen3-30B-A3B \
+  --enable-eplb \
+  --eplb-config '{"window_size":1000,"step_interval":3000,"num_redundant_experts":2,"log_balancedness":true}'
+```
+
+??? tip "Prefer individual arguments instead of JSON?"
+
+    ```bash
+    vllm serve Qwen/Qwen3-30B-A3B \
+            --enable-eplb \
+            --eplb-config.window_size 1000 \
+            --eplb-config.step_interval 3000 \
+            --eplb-config.num_redundant_experts 2 \
+            --eplb-config.log_balancedness true
+    ```
 
 ### Expert Distribution Formula
 
@@ -146,12 +167,10 @@ VLLM_ALL2ALL_BACKEND=pplx VLLM_USE_DEEP_GEMM=1 vllm serve deepseek-ai/DeepSeek-V
     --data-parallel-size 8 \        # Data parallelism  
     --enable-expert-parallel \      # Enable EP
     --enable-eplb \                 # Enable load balancer
-    --eplb-log-balancedness \       # Log balancing metrics
-    --eplb-window-size 1000 \       # Track last 1000 engine steps
-    --eplb-step-interval 3000       # Rebalance every 3000 steps
+    --eplb-config '{"window_size":1000,"step_interval":3000,"num_redundant_experts":2,"log_balancedness":true}'
 ```
 
-For multi-node deployment, add these EPLB flags to each node's command. We recommend setting `--num-redundant-experts` to 32 in large scale use cases so the most popular experts are always available.
+For multi-node deployment, add these EPLB flags to each node's command. We recommend setting `--eplb-config '{"num_redundant_experts":32}'` to 32 in large scale use cases so the most popular experts are always available.
 
 ## Disaggregated Serving (Prefill/Decode Split)
 
