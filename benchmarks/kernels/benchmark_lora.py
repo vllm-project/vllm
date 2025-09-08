@@ -637,7 +637,7 @@ def bench_optype(
     # Clear LoRA optimization hash-maps.
     _LORA_A_PTR_DICT.clear()
     _LORA_B_PTR_DICT.clear()
-    # Run bench function so that _LORA_A_PTR_DICT and _LORA_B_PTR_DICT are setup
+    # Run bench function so that _LORA_A_PTR_DICT and _LORA_B_PTR_DICT are set up
     for kwargs in kwargs_list:
         op_type.bench_fn()(**kwargs)
     torch.cuda.synchronize()

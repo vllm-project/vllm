@@ -117,7 +117,7 @@ def run_gemma3n(question: str, audio_count: int) -> ModelRequestData:
 
 # Granite Speech
 def run_granite_speech(question: str, audio_count: int) -> ModelRequestData:
-    # NOTE - the setting in this example are somehat different than what is
+    # NOTE - the setting in this example are somewhat different from what is
     # optimal for granite speech, and it is generally recommended to use beam
     # search. Check the model README for suggested settings.
     # https://huggingface.co/ibm-granite/granite-speech-3.3-8b
