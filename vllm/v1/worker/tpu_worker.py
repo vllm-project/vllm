@@ -332,6 +332,9 @@ class TPUWorker:
             parallel_config.tensor_parallel_size,
             parallel_config.pipeline_parallel_size)
 
+    def shutdown(self) -> None:
+        self.model_runner.ensure_kv_transfer_shutdown()
+
 
 if USE_TPU_COMMONS:
     from tpu_commons.worker import TPUWorker as TPUCommonsWorker
