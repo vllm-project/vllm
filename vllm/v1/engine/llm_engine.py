@@ -4,7 +4,7 @@
 from collections import deque
 from collections.abc import Mapping
 from copy import copy
-from typing import Any, Callable, Optional, Union, Deque
+from typing import Any, Callable, Optional, Union
 
 from typing_extensions import TypeVar
 
@@ -71,7 +71,7 @@ class LLMEngine:
 
         self.log_stats = log_stats
         self.stat_logger: Optional[StatLoggerBase] = None
-        self.prefill_comp_speed_history: Optional[Deque] = None
+        self.prefill_comp_speed_history: Optional[deque] = None
         if self.log_stats:
             self.stat_logger = PrometheusStatLogger(vllm_config)
             self.prefill_comp_speed_history = deque(maxlen=IterationStats.MAX_HISTORY_LEN)

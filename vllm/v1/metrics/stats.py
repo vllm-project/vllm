@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
+from collections import deque
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional, Deque
+from typing import TYPE_CHECKING, Optional
 
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
@@ -97,7 +98,7 @@ class IterationStats:
     DEFAULT_MIN_COMP_PREFILL_TOKENS: int = 10
 
     def __init__(self,
-                 prefill_comp_speed_history: Optional[Deque] = None,
+                 prefill_comp_speed_history: Optional[deque] = None,
                  min_comp_prefill_tokens: int = DEFAULT_MIN_COMP_PREFILL_TOKENS):
         self.iteration_timestamp = time.time()
         self.num_generation_tokens = 0

@@ -450,12 +450,13 @@ class PrometheusStatLogger(StatLoggerBase):
             labelnames=labelnames)
         self.histogram_decode_time_request = make_per_engine(
             histogram_decode_time_request, engine_indexes, model_name)
-x
+
         # Average tokens per seconds of requests in prefill
         gauge_avg_prefill_comp_speed = self._gauge_cls(
             name="vllm:avg_prefill_comp_speed",
             documentation=
-            f"Avg. prefill computation speed of the {IterationStats.MAX_HISTORY_LEN} most "
+            f"Avg. prefill computation speed of the "
+            f"{IterationStats.MAX_HISTORY_LEN} most "
             f"recent finished requests.",
             labelnames=labelnames)
         self.gauge_avg_prefill_comp_speed = make_per_engine(
