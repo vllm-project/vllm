@@ -6,7 +6,7 @@ from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 from vllm.benchmarks.datasets import add_dataset_parser, get_samples
 from vllm.inputs import TokensPrompt
-from vllm.v1.metrics.reader import Counter, Vector
+from vllm.v1.metrics.reader import Counter, Vector, Histogram
 
 try:
     from vllm.utils import FlexibleArgumentParser
@@ -137,6 +137,7 @@ def main():
         gpu_memory_utilization=0.8,
         speculative_config=speculative_config,
         disable_log_stats=False,
+        max_model_len=2048,
         limit_mm_per_prompt={"image": 5},
         disable_chunked_mm_input=True,
     )
@@ -167,11 +168,16 @@ def main():
     total_num_output_tokens = sum(
         len(output.outputs[0].token_ids) for output in outputs
     )
+    total_prefill_time = 0.0
+    total_decode_time = 0.0
     num_drafts = 0
     num_draft_tokens = 0
     num_accepted_tokens = 0
+    num_prompt_tokens = 0
     acceptance_counts = [0] * args.num_spec_tokens
+
     for metric in metrics:
+        print(metric)
         if metric.name == "vllm:spec_decode_num_drafts":
             assert isinstance(metric, Counter)
             num_drafts += metric.value
@@ -185,13 +191,40 @@ def main():
             assert isinstance(metric, Vector)
             for pos in range(len(metric.values)):
                 acceptance_counts[pos] += metric.values[pos]
+        elif metric.name == "vllm:prompt_tokens":
+            assert isinstance(metric, Counter)
+            num_prompt_tokens += metric.value
+        elif metric.name == "vllm:request_prefill_time_seconds":
+            assert isinstance(metric, Histogram)
+            total_prefill_time += metric.sum
+        elif metric.name == "vllm:request_decode_time_seconds":
+            assert isinstance(metric, Histogram)
+            total_decode_time += metric.sum
 
+    # speed stats
+    prefill_speed = num_prompt_tokens / total_prefill_time
+    decode_speed = total_num_output_tokens / total_decode_time
+    total_tokens = num_prompt_tokens + total_num_output_tokens
+    total_time = total_prefill_time + total_decode_time
+    overall_speed = total_tokens / total_time
+
+    print("-" * 20, 'speed', '-'*20)
+    print(f"prefill speed: {prefill_speed:.2f} tokens/sec")
+    print(f"decode speed: {decode_speed:.2f} tokens/sec")
+    print(f"overall speed: {overall_speed:.2f} tokens/sec")
+    print(f"total processing time: {total_time:.2f} seconds")
+    print(f"total tokens processed: {total_tokens}")
     print("-" * 50)
+    print()
+
+    # speculative decoding stats
+    acceptance_length = 1 + (num_accepted_tokens / num_drafts) if num_drafts > 0 else 1
+
+    print("-" * 20, 'speculative decoding', '-'*20)
     print(f"total_num_output_tokens: {total_num_output_tokens}")
     print(f"num_drafts: {num_drafts}")
     print(f"num_draft_tokens: {num_draft_tokens}")
     print(f"num_accepted_tokens: {num_accepted_tokens}")
-    acceptance_length = 1 + (num_accepted_tokens / num_drafts) if num_drafts > 0 else 1
     print(f"mean acceptance length: {acceptance_length:.2f}")
     print("-" * 50)
 
@@ -199,7 +232,7 @@ def main():
     for i in range(len(acceptance_counts)):
         acceptance_rate = acceptance_counts[i] / num_drafts if num_drafts > 0 else 0
         print(f"acceptance at token {i}: {acceptance_rate:.2f}")
-
+    print("-" * 50)
 
 if __name__ == "__main__":
     main()
