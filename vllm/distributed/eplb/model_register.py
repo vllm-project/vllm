@@ -72,12 +72,15 @@ def get_all_moe_loads(self):
         after the first depend on how expert_load_view is structured (e.g.,
         (num_physical_experts) or (num_ranks, num_physical_experts)).
     """
-    all_moe_loads = torch.stack(
-        [self.model.layers[layer_id].mlp.experts.expert_load_view \
+    if self.num_moe_layers == 0:
+        # 空 MoE：返回空张量，避免 torch.stack([]) 抛错
+        return torch.empty((0, 0), dtype=torch.int64)
+        
+    return torch.stack(
+        [self.model.layers[self.num_dense_layers + layer_id].mlp.experts.expert_load_view \
          for layer_id in range(self.num_moe_layers)],
         dim=0
     )
-    return all_moe_loads
 
 
 def clear_all_moe_loads(self):
@@ -90,7 +93,7 @@ def clear_all_moe_loads(self):
         self: The model instance.
     """
     for layer_id in range(self.num_moe_layers):
-        self.model.layers[layer_id].mlp.experts.clear_moe_load()
+        self.model.layers[self.num_dense_layers + layer_id].mlp.experts.clear_moe_load()
 
 
 def model_register(model, model_config):
@@ -113,9 +116,10 @@ def model_register(model, model_config):
     config = model_config.hf_config
 
     if config.model_type == "qwen3_moe":
+        model.num_dense_layers = 0
         model.num_moe_layers = config.num_hidden_layers
     elif config.model_type == "deepseek_v2":
-        num_dense_layers = config.first_k_dense_replace
-        model.num_moe_layers = config.num_hidden_layers - num_dense_layers
+        model.num_dense_layers = config.first_k_dense_replace
+        model.num_moe_layers = config.num_hidden_layers - model.num_dense_layers
     else:
         raise NotImplementedError("EPLB is not supported.")
