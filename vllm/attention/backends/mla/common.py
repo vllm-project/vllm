@@ -822,7 +822,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
             and context_lens_tensor is not None \
             and context_lens_tensor[:self.num_prefills].max() > 0:
 
-            # NOTE: it is recommend you read the `Chunked Prefill` section in
+            # NOTE: it is recommended you read the `Chunked Prefill` section in
             # the comment at the top of the file before trying to understand
             # the following code
 
@@ -1052,7 +1052,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             return layer.weight
 
         # we currently do not have quantized bmm's which are needed for
-        # `W_UV` and `W_UK_T`, we we just store fp16/bf16 copies and perform
+        # `W_UV` and `W_UK_T`, we just store fp16/bf16 copies and perform
         # the bmm's in 16-bit, the extra memory overhead of this is fairly low
         kv_b_proj_weight = get_and_maybe_dequant_weights(self.kv_b_proj).T
         assert kv_b_proj_weight.shape == (

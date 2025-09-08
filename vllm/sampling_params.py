@@ -165,7 +165,8 @@ class SamplingParams(
     the sampled token, so there may be up to `logprobs+1` elements in the
     response. When set to -1, return all `vocab_size` log probabilities."""
     prompt_logprobs: Optional[int] = None
-    """Number of log probabilities to return per prompt token."""
+    """Number of log probabilities to return per prompt token.
+    When set to -1, return all `vocab_size` log probabilities."""
     # NOTE: This parameter is only exposed at the engine level for now.
     # It is not exposed in the OpenAI API server, as the OpenAI API does
     # not support returning only a list of token IDs.
@@ -409,9 +410,11 @@ class SamplingParams(
                 and self.logprobs < 0):
             raise ValueError(
                 f"logprobs must be non-negative or -1, got {self.logprobs}.")
-        if self.prompt_logprobs is not None and self.prompt_logprobs < 0:
-            raise ValueError(f"prompt_logprobs must be non-negative, got "
-                             f"{self.prompt_logprobs}.")
+        if (self.prompt_logprobs is not None and self.prompt_logprobs != -1
+                and self.prompt_logprobs < 0):
+            raise ValueError(
+                f"prompt_logprobs must be non-negative or -1, got "
+                f"{self.prompt_logprobs}.")
         if (self.truncate_prompt_tokens is not None
                 and (self.truncate_prompt_tokens == 0
                      or self.truncate_prompt_tokens < -1)):
