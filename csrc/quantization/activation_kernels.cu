@@ -229,7 +229,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   Idx_t e = pid / G;
   Idx_t g = pid % G;
 
-  const Idx_t n_tokens = counts[e * stride_counts_e];
+  const uint32_t n_tokens = counts[e * stride_counts_e];
 
   if (!n_tokens) {
     return;  // Exit ASAP.
@@ -237,7 +237,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 
   const Idx_t stride_i_t_128 = stride_i_t / 8u;
 
-  Idx_t n_tokens_lower, n_tokens_upper;
+  uint32_t n_tokens_lower, n_tokens_upper;
 
   if (n_tokens < NUM_PARALLEL_TOKENS && blockIdx.y < n_tokens) {
     // Specialize this, but can be likely fused.
@@ -249,7 +249,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   } else {
     auto chunk_size = n_tokens / NUM_PARALLEL_TOKENS;
     auto residual = n_tokens - chunk_size * NUM_PARALLEL_TOKENS;
-    auto calc_id = [&](Idx_t id) {
+    auto calc_id = [&](uint32_t id) {
       if (id < residual) {
         return min(n_tokens, id * (chunk_size + 1));
       } else {
@@ -270,7 +270,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   const Idx_t base_yq =
       e * stride_yq_e + NUM_WARPS * g * GROUP_SIZE * stride_yq_h;
 
-  Idx_t gate_off_128 = (base_i / 8u);
+  Idx_t gate_off_128 = (base_i / static_cast<Idx_t>(8u));
   auto input_128_ptr = reinterpret_cast<const __int128_t*>(_input);
   auto gate_128_ptr = input_128_ptr + gate_off_128 + (tid % HALF_THREAD_COUNT) +
                       stride_i_t_128 * n_tokens_lower;
@@ -282,7 +282,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   auto y_q_ptr = _y_q + base_yq + warp_id * GROUP_SIZE +
                  stride_yq_t * n_tokens_lower + 4 * lane_id;
 
-  Idx_t t_load = n_tokens_lower, load_stage_id = 0;
+  uint32_t t_load = n_tokens_lower, load_stage_id = 0;
   auto s_buff_gate_load_128 = s_buff_128 + (tid % HALF_THREAD_COUNT);
   auto s_buff_up_load_128 = s_buff_gate_load_128 + S_NUM_128 / 2u;
 
@@ -317,8 +317,8 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
                           lane_id;
   __int64_t* s_up_ptr = s_gate_ptr + S_NUM_64 / 2;
 
-  Idx_t stage_id{};
-  for (Idx_t t = n_tokens_lower; t < n_tokens_upper; ++t) {
+  uint32_t stage_id{};
+  for (uint32_t t = n_tokens_lower; t < n_tokens_upper; ++t) {
     __nv_bfloat16 y_max_bf16 = EPS;
     __nv_bfloat162 results_bf162[2];
 
@@ -327,7 +327,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 
     load_and_advance_y_pred();
 
-    const auto compute_pipeline_offset_64 =
+    const uint32_t compute_pipeline_offset_64 =
         (((stage_id++) % NUM_STAGES) * (GROUP_SIZE / 2u) * NUM_WARPS) / 2u;
     auto s_gate_compute_64 = s_gate_ptr + compute_pipeline_offset_64;
     auto s_up_compute_64 = s_up_ptr + compute_pipeline_offset_64;
@@ -365,7 +365,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     auto y_s2 = make_bfloat162(inv_y, inv_y);
 
 #pragma unroll
-    for (Idx_t i = 0; i < 2; ++i) {
+    for (uint32_t i = 0; i < 2; ++i) {
       results_bf162[i] =
           clip(__hmul2(results_bf162[i], y_s2), __bfloat162bfloat162(fp8_min),
                __bfloat162bfloat162(fp8_max));
@@ -430,7 +430,7 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
   TORCH_CHECK(y_s.dtype() == torch::kFloat32);
   TORCH_CHECK(input.size(-1) % 256 == 0);
 
-  using Idx_t = uint32_t;
+  using Idx_t = uint64_t;
 
   Idx_t E = input.size(0);
   Idx_t T = input.size(1);
