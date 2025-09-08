@@ -73,7 +73,6 @@ def create_and_prepopulate_kv_cache(
         kv_c_contexts: list[torch.Tensor],
         k_pe_contexts: list[torch.Tensor],
         block_size: int,
-        num_kv_heads: int,
         head_size: int,
         dtype: torch.dtype,
         device: torch.device,
@@ -87,7 +86,6 @@ def create_and_prepopulate_kv_cache(
         k_pe_contexts: List of key positional embedding context tensors
                        for each sequence
         block_size: Size of each block
-        num_kv_heads: Number of KV heads (should be 1 for MLA)
         head_size: Size of each head (latent dimension)
         dtype: Data type for the cache
         device: Device to create the cache on
@@ -285,8 +283,6 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
     query_lens = batch_spec.query_lens
     num_q_heads = vllm_config.model_config.get_num_attention_heads(
         vllm_config.parallel_config)
-    num_kv_heads = vllm_config.model_config.get_num_kv_heads(
-        vllm_config.parallel_config)
     head_size = vllm_config.model_config.get_head_size()
     dtype = _convert_dtype_to_torch(vllm_config.model_config.dtype)
     block_size = vllm_config.cache_config.block_size
@@ -476,7 +472,6 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
         kv_c_contexts=kv_c_contexts,
         k_pe_contexts=k_pe_contexts,
         block_size=block_size,
-        num_kv_heads=num_kv_heads,
         head_size=head_size,
         dtype=dtype,
         device=device,
