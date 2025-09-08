@@ -93,7 +93,7 @@ class MultiConnector(KVConnectorBase_V1):
             try:
                 c.shutdown()
             except Exception as e:
-                logger.exception(f"Exception during connector {c}: {e}")
+                logger.exception("Exception during connector %r: %s", c, e)
                 exceptions.append(e)
         if exceptions:
             raise exceptions[0]
