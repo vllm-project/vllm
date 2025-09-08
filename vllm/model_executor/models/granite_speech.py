@@ -26,7 +26,7 @@
 
 import math
 from collections.abc import Iterable, Mapping
-from typing import Annotated, Optional, Union, cast
+from typing import Annotated, Literal, Optional, Union, cast
 
 import numpy as np
 import torch
@@ -838,12 +838,22 @@ class GraniteSpeechForConditionalGeneration(
     def get_generation_prompt(cls, audio: np.ndarray,
                               model_config: ModelConfig,
                               stt_config: SpeechToTextConfig,
-                              language: Optional[str], task_type: str,
-                              request_prompt: str) -> PromptType:
+                              language: Optional[str],
+                              task_type: Literal["transcribe", "translate"],
+                              request_prompt: str,
+                              to_language: Optional[str]) -> PromptType:
         """Get the generation prompt to be used for transcription requests."""
         # Audio placeholders don't use an index, so value doesn't matter
         audio_tok = cls.get_placeholder_str("audio", 0)
-        user_prompt = f"{audio_tok}can you transcribe the speech into a written format?"  # noqa: E501
+
+        if task_type == "translate":
+            full_lang_name_to = cls.supported_languages.get(
+                to_language, to_language)
+            user_prompt = f"{audio_tok}translate the speech to {full_lang_name_to}"  # noqa: E501
+        elif task_type == "translate":
+            user_prompt = f"{audio_tok}can you transcribe the speech into a written format?"  # noqa: E501
+        else:
+            raise ValueError(f"Unsupported task type {user_prompt}")
 
         tokenizer = cached_get_tokenizer(model_config.model)
         chat = [dict(role="user", content=user_prompt)]
