@@ -852,9 +852,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
     def parse_image_pil(
         self, image_pil: Optional[Image.Image], uuid: Optional[str] = None
     ) -> None:
-        placeholder = (
-            self._tracker.add("image", image_pil, uuid) if image_pil else None
-        )
+        placeholder = self._tracker.add("image", image_pil, uuid)
         self._add_placeholder("image", placeholder)
 
     def parse_audio(
@@ -964,7 +962,11 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         if input_audio:
             audio_data = input_audio.get("data", "")
             audio_format = input_audio.get("format", "")
-            audio_url = f"data:audio/{audio_format};base64,{audio_data}"
+            if audio_data:
+                audio_url = f"data:audio/{audio_format};base64,{audio_data}"
+            else:
+                # If a UUID is provided, audio data may be empty.
+                audio_url = None
         else:
             audio_url = None
 
@@ -1218,6 +1220,20 @@ def _parse_chat_message_content_mm_part(
                 # with url as a dict of {"url": url}
                 image_url = image_url.get("url", "")
             return "image_url", image_url
+        if "image_pil" in part:
+            # "image_pil" could be None if UUID is provided.
+            image_params = cast(
+                CustomChatCompletionContentPILImageParam, part
+            )
+            image_pil = image_params.get("image_pil", None)
+            return "image_pil", image_pil
+        if "image_embeds" in part:
+            # "image_embeds" could be None if UUID is provided.
+            image_params = cast(
+                ChatCompletionContentPartImageEmbedsParam, part
+            )
+            image_embeds = image_params.get("image_embeds", None)
+            return "image_embeds", image_embeds
         if part.get("audio_url") is not None:
             audio_params = cast(
                 CustomChatCompletionContentSimpleAudioParam, part
@@ -1252,12 +1268,6 @@ def _parse_chat_message_content_mm_part(
 VALID_MESSAGE_CONTENT_MM_PART_TYPES = (
     "text",
     "refusal",
-    "image_url",
-    "image_embeds",
-    "image_pil",
-    "audio_url",
-    "input_audio",
-    "video_url",
 )
 
 
@@ -1342,7 +1352,10 @@ def _parse_chat_message_content_part(
 
     modality = None
     if part_type == "image_pil":
-        image_content = cast(Image.Image, content)
+        if content is not None:
+            image_content = cast(Image.Image, content)
+        else:
+            image_content = None
         mm_parser.parse_image_pil(image_content, uuid)
         modality = "image"
     elif part_type in ("image_url", "input_image"):
@@ -1350,7 +1363,10 @@ def _parse_chat_message_content_part(
         mm_parser.parse_image(str_content, uuid)
         modality = "image"
     elif part_type == "image_embeds":
-        content = cast(Union[str, dict[str, str]], content)
+        if content is not None:
+            content = cast(Union[str, dict[str, str]], content)
+        else:
+            content = None
         mm_parser.parse_image_embeds(content, uuid)
         modality = "image"
     elif part_type == "audio_url":
