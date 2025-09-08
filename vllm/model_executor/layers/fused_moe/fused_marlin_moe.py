@@ -152,9 +152,6 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
         gate_up_input, a_scales1 = per_token_quant_int8(hidden_states)
         if input_global_scale1 is not None:
             a_scales1 = a_scales1 * input_global_scale1
-        if quant_type == scalar_types.uint8b128:
-            quant_type = scalar_types.int8
-            quant_type_id = quant_type.id
     elif input_dtype == torch.float8_e4m3fn:
         gate_up_input, a_scales1 = ops.scaled_fp8_quant(
             hidden_states, use_per_token_if_dynamic=True)

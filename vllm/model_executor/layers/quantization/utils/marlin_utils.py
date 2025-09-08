@@ -470,10 +470,10 @@ def apply_gptq_marlin_linear(
 
     a_scales = None
     if input_dtype == torch.int8:
+        assert wtype == scalar_types.uint4b8, \
+            "W8A8-INT8 is not supported by marlin kernel."
         reshaped_x, a_scales = per_token_quant_int8(reshaped_x)
         a_scales = a_scales * input_global_scale
-        if wtype == scalar_types.uint8b128:
-            wtype = scalar_types.int8
     elif input_dtype == torch.float8_e4m3fn:
         assert wtype == scalar_types.uint4b8, \
             "INT8 weight + FP8 activation is not supported."

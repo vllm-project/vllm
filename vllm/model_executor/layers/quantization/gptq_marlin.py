@@ -412,6 +412,13 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         **extra_weight_attrs,
     ):
         layer.input_dtype = self.input_dtype
+        is_a_8bit = self.input_dtype is not None and \
+            self.input_dtype.itemsize == 1
+
+        if is_a_8bit:
+            assert self.quant_type == scalar_types.uint4b8, \
+                "W8A8-INT8 is not supported by marlin kernel."
+
         intermediate_size_full = extra_weight_attrs.pop(
             "intermediate_size_full")
 
@@ -559,9 +566,11 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         is_a_8bit = self.input_dtype is not None and \
             self.input_dtype.itemsize == 1
 
-        if self.input_dtype == torch.float8_e4m3fn:
+        if is_a_8bit:
             assert self.quant_type == scalar_types.uint4b8, \
-                "INT8 activation + FP8 weight is not supported."
+                "W8A8-INT8 is not supported by marlin kernel."
+
+        if self.input_dtype == torch.float8_e4m3fn:
             ops.marlin_int4_fp8_preprocess(layer.w13_qweight, inplace=True)
             ops.marlin_int4_fp8_preprocess(layer.w2_qweight, inplace=True)
             layer.w13_scales.data = layer.w13_scales.data * 512

@@ -143,13 +143,6 @@ def marlin_quantize(w: torch.Tensor,
                     input_dtype: Optional[torch.Tensor] = None):
 
     is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
-    if quant_type == scalar_types.uint8b128:
-        assert not is_a_8bit, "UINT8B128 is only supported when is_a_8bit = false"
-    if quant_type == scalar_types.int8:
-        assert is_a_8bit, "INT8 is only supported when is_a_8bit = true"
-        # we still use uint8b128 to quantize weight
-        # and then convert the weight to int8
-        quant_type = scalar_types.uint8b128
 
     size_k, size_n = w.shape
     num_bits = quant_type.size_bits

@@ -89,13 +89,6 @@ MOE_MARLIN_QUANT_TEST_CONFIGS = [
         "b_type": scalar_types.uint4b8,
         "group_blocks": [-1, 2, 4, 8]
     },
-    # GPTQ-INT8 with INT8 activation
-    # note that b_type is int8 here (not uint8b128)
-    {
-        "a_type": [scalar_types.int8],
-        "b_type": scalar_types.int8,
-        "group_blocks": [-1, 2, 4, 8]
-    },
     # GPTQ-INT4 with FP8 activation
     {
         "a_type": [scalar_types.float8_e4m3fn],

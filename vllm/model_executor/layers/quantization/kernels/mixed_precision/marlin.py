@@ -59,9 +59,11 @@ class MarlinLinearKernel(MPLinearKernel):
         is_a_8bit = c.act_type is not None and \
             c.act_type.itemsize == 1
 
-        if c.act_type == torch.float8_e4m3fn:
+        if is_a_8bit:
             assert c.weight_type == scalar_types.uint4b8, \
-                "INT8 weight + FP8 activation is not supported"
+                "W8A8 is not supported by marlin kernel."
+
+        if c.act_type == torch.float8_e4m3fn:
             ops.marlin_int4_fp8_preprocess(getattr(layer, self.w_q_name),
                                            inplace=True)
             getattr(layer, self.w_s_name).data = \
