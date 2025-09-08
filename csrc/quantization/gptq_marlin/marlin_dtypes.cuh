@@ -50,7 +50,7 @@ class MarlinScalarType<vllm::kFloat16.id()> {
     return __float2half(x);
   }
 
-  static __host__ __device__ float2 inline num22tofloat2(const half2 x) {
+  static __host__ __device__ float2 inline num22float2(const half2 x) {
     return __half22float2(x);
   }
 };
@@ -88,7 +88,7 @@ class MarlinScalarType<vllm::kBFloat16.id()>{
     return __float2bfloat16(x);
   }
 
-  static __host__ __device__ float2 inline num22tofloat2(const nv_bfloat162 x) {
+  static __host__ __device__ float2 inline num22float2(const nv_bfloat162 x) {
     return __bfloat1622float2(x);
   }
 #endif
@@ -107,7 +107,7 @@ class MarlinScalarType<vllm::kFE4M3fn.id()>{
   using FragC = Vec<float, 4>;
   using FragZP = Vec<__nv_fp8x2_e4m3, 4>;
 
-  static __host__ __device__ float2 inline num22tofloat2(const __nv_fp8x2_e4m3 x) {
+  static __host__ __device__ float2 inline num22float2(const __nv_fp8x2_e4m3 x) {
     return (float2) x;
   }
 };

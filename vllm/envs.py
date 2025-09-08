@@ -918,7 +918,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MXFP4_USE_MARLIN":
     lambda: maybe_convert_bool(os.environ.get("VLLM_MXFP4_USE_MARLIN", None)),
 
-    # Whether to use marlin kernel in mxfp4 quantization method
+    # The activation dtype for marlin kernel
     "VLLM_MARLIN_INPUT_DTYPE":
     lambda: os.environ.get("VLLM_MARLIN_INPUT_DTYPE", None),
 

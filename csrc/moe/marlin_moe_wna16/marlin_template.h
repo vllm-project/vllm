@@ -424,6 +424,12 @@ __global__ void Marlin(
   // ensures good utilization of all SMs for many kinds of shape and GPU
   // configurations, while requiring as few slow global cross-threadblock
   // reductions as possible.
+
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 890
+  // FP8 computation is only supported for Ada Lovelace or newer architectures.
+  if constexpr (a_type_id == vllm::kFE4M3fn.id()) return;
+#endif
+
   int num_tokens_past_padded = num_tokens_past_padded_ptr[0];
   constexpr int moe_block_size = m_block_size_8 ? 8 : (16 * thread_m_blocks);
 
@@ -508,6 +514,7 @@ __global__ void Marlin(
 
   if (global_mn_tiles > gridDim.x) {
     part2_mn_tiles = global_mn_tiles % gridDim.x;
+    if (part2_mn_tiles * 3 <= gridDim.x) part2_mn_tiles += gridDim.x;
     part1_mn_iters = (global_mn_tiles - part2_mn_tiles) / gridDim.x;
   }
 
@@ -992,8 +999,8 @@ __global__ void Marlin(
   int4* sh_s = sh_zp + (stages * zp_sh_stage);
   // shared memory reused by reduction should be smaller than
   // shared memory used by weight.
-  static_assert(thread_m_blocks * 16 * thread_n_blocks * 16 / 8 <=
-                stages * b_sh_stage);
+  // static_assert(thread_m_blocks * 16 * thread_n_blocks * 16 / 8 <=
+  //               stages * b_sh_stage);
   int4* sh_a = sh_s + sh_s_size;
 
   // Register storage for double buffer of shared memory reads.
@@ -1561,29 +1568,63 @@ __global__ void Marlin(
 
       if constexpr (group_blocks != -1) {
         if (group_blocks == 2 || k == 1) {
-          int2 aa[2];
-          aa[0] = {(int)reinterpret_cast<uint16_t*>(&frag_s[k2][j * 2][0])[0],
-                   (int)reinterpret_cast<uint16_t*>(&frag_s[k2][j * 2][0])[1]};
-          aa[1] = {
-              (int)reinterpret_cast<uint16_t*>(&frag_s[k2][j * 2 + 1][0])[0],
-              (int)reinterpret_cast<uint16_t*>(&frag_s[k2][j * 2 + 1][0])[1]};
+          if constexpr (a_type == vllm::kS8) {
+            int2 s_vals[2];
+            s_vals[0] = {(int)reinterpret_cast<uint16_t*>(&frag_s[k2][j * 2][0])[0],
+                    (int)reinterpret_cast<uint16_t*>(&frag_s[k2][j * 2][0])[1]};
+            s_vals[1] = {
+                (int)reinterpret_cast<uint16_t*>(&frag_s[k2][j * 2 + 1][0])[0],
+                (int)reinterpret_cast<uint16_t*>(&frag_s[k2][j * 2 + 1][0])[1]};
 
-  #pragma unroll
-          for (int i = 0; i < thread_m_blocks; i++) {
-  #pragma unroll
-            for (int g = 0; g < 4; g++) {
-              int scale = reinterpret_cast<int*>(&aa[0])[g % 2];
-              *reinterpret_cast<int32_t*>(&frag_c[i][j][0][g]) +=
-                  *reinterpret_cast<int32_t*>(&frag_c_tmp[i][j][0][g]) * scale;
-              frag_c_tmp[i][j][0][g] = 0.0f;
+    #pragma unroll
+            for (int i = 0; i < thread_m_blocks; i++) {
+    #pragma unroll
+              for (int g = 0; g < 4; g++) {
+                int scale = reinterpret_cast<int*>(&s_vals[0])[g % 2];
+                *reinterpret_cast<int32_t*>(&frag_c[i][j][0][g]) +=
+                    *reinterpret_cast<int32_t*>(&frag_c_tmp[i][j][0][g]) * scale;
+                frag_c_tmp[i][j][0][g] = 0.0f;
+              }
+
+    #pragma unroll
+              for (int g = 0; g < 4; g++) {
+                int scale = reinterpret_cast<int*>(&s_vals[1])[g % 2];
+                *reinterpret_cast<int32_t*>(&frag_c[i][j][1][g]) +=
+                    *reinterpret_cast<int32_t*>(&frag_c_tmp[i][j][1][g]) * scale;
+                frag_c_tmp[i][j][1][g] = 0.0f;
+              }
+            }
+          } else {
+            float2 s_vals[2];
+            if constexpr (s_type_id != vllm::kFE8M0fnu.id()) {
+              static_assert(a_type.size_bits() == 16 || s_type.size_bits() == 16);
+              s_vals[0] = Cdtype::num22float2(frag_s[k2][j * 2][0]);
+              s_vals[1] = Cdtype::num22float2(frag_s[k2][j * 2 + 1][0]);
+            } else {
+              int32_t* s_vals_int = reinterpret_cast<int32_t*>(&s_vals[0]);
+              int32_t s_vals_e8m0 = *reinterpret_cast<int32_t*>(&frag_s[k2][j][0]);
+
+              s_vals_int[0] = (s_vals_e8m0 & 0xFF) << 23;
+              s_vals_int[1] = (s_vals_e8m0 & 0xFF00) << 15;
+              s_vals_int[2] = (s_vals_e8m0 & 0xFF0000) << 7;
+              s_vals_int[3] = (s_vals_e8m0 & 0xFF000000) >> 1;
             }
 
-  #pragma unroll
-            for (int g = 0; g < 4; g++) {
-              int scale = reinterpret_cast<int*>(&aa[1])[g % 2];
-              *reinterpret_cast<int32_t*>(&frag_c[i][j][1][g]) +=
-                  *reinterpret_cast<int32_t*>(&frag_c_tmp[i][j][1][g]) * scale;
-              frag_c_tmp[i][j][1][g] = 0.0f;
+    #pragma unroll
+            for (int i = 0; i < thread_m_blocks; i++) {
+    #pragma unroll
+              for (int g = 0; g < 4; g++) {
+                float scale = reinterpret_cast<float*>(&s_vals[0])[g % 2];
+                frag_c[i][j][0][g] += frag_c_tmp[i][j][0][g] * scale;
+                frag_c_tmp[i][j][0][g] = 0.0f;
+              }
+
+    #pragma unroll
+              for (int g = 0; g < 4; g++) {
+                float scale = reinterpret_cast<float*>(&s_vals[1])[g % 2];
+                frag_c[i][j][1][g] += frag_c_tmp[i][j][1][g] * scale;
+                frag_c_tmp[i][j][1][g] = 0.0f;
+              }
             }
           }
         }
@@ -2075,15 +2116,21 @@ __global__ void Marlin(
           for (int i = 0; i < thread_m_blocks; i++) {
   #pragma unroll
             for (int g = 0; g < 4; g++) {
-              float c_val = __int2float_rn(
-                  *reinterpret_cast<int32_t*>(&frag_c[i][j][0][g]));
+              float c_val = frag_c[i][j][0][g];
+
+              if constexpr (a_type == vllm::kS8) {
+                c_val = __int2float_rn(*reinterpret_cast<int32_t*>(&c_val));
+              }
               float s_val = frag_a_s[i * 2 + g / 2];
               frag_c[i][j][0][g] = c_val * s_val;
             }
   #pragma unroll
             for (int g = 0; g < 4; g++) {
-              float c_val = __int2float_rn(
-                  *reinterpret_cast<int32_t*>(&frag_c[i][j][1][g]));
+              float c_val = frag_c[i][j][1][g];
+
+              if constexpr (a_type == vllm::kS8) {
+                c_val = __int2float_rn(*reinterpret_cast<int32_t*>(&c_val));
+              }
               float s_val = frag_a_s[i * 2 + g / 2];
               frag_c[i][j][1][g] = c_val * s_val;
             }
@@ -2149,11 +2196,8 @@ __global__ void Marlin(
   #pragma unroll
         for (int j = 0; j < 2; j++) {
           float2 aa[2];
-          aa[0] = {(float)reinterpret_cast<uint16_t*>(&frag_s[0][j * 2][0])[0],
-                   (float)reinterpret_cast<uint16_t*>(&frag_s[0][j * 2][0])[1]};
-          aa[1] = {
-              (float)reinterpret_cast<uint16_t*>(&frag_s[0][j * 2 + 1][0])[0],
-              (float)reinterpret_cast<uint16_t*>(&frag_s[0][j * 2 + 1][0])[1]};
+          aa[0] = Cdtype::num22float2(frag_s[0][j * 2][0]);
+          aa[1] = Cdtype::num22float2(frag_s[0][j * 2 + 1][0]);
 
   #pragma unroll
           for (int i = 0; i < thread_m_blocks; i++) {

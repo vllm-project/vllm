@@ -1065,6 +1065,13 @@ def awq_marlin_moe_repack(b_q_weight: torch.Tensor,
     return output
 
 
+def marlin_int4_fp8_preprocess(qweight: torch.Tensor,
+                               qzeros_or_none: Optional[torch.Tensor] = None,
+                               inplace: bool = False):
+    return torch.ops._C.marlin_int4_fp8_preprocess(qweight, qzeros_or_none,
+                                                   inplace)
+
+
 def gptq_marlin_gemm(a: torch.Tensor,
                      c: Optional[torch.Tensor],
                      b_q_weight: torch.Tensor,
@@ -1587,13 +1594,17 @@ def moe_wna16_marlin_gemm(input: torch.Tensor,
                           is_k_full: bool,
                           use_atomic_add: bool,
                           use_fp32_reduce: bool,
-                          is_zp_float: bool) -> torch.Tensor:
+                          is_zp_float: bool,
+                          thread_k: int = -1,
+                          thread_n: int = -1,
+                          blocks_per_sm: int = -1) -> torch.Tensor:
     return torch.ops._moe_C.moe_wna16_marlin_gemm(
         input, output, b_qweight, b_bias, b_scales, a_scales, global_scale,
         b_qzeros, g_idx, perm, workspace, sorted_token_ids, expert_ids,
         num_tokens_past_padded, topk_weights, moe_block_size, top_k,
         mul_topk_weights, is_ep, b_q_type.id, size_m, size_n, size_k,
-        is_k_full, use_atomic_add, use_fp32_reduce, is_zp_float)
+        is_k_full, use_atomic_add, use_fp32_reduce, is_zp_float,
+        thread_k, thread_n, blocks_per_sm)
 
 
 if supports_moe_ops and hasattr(torch.ops._moe_C, "marlin_gemm_moe"):

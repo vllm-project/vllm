@@ -155,6 +155,9 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
         if quant_type == scalar_types.uint8b128:
             quant_type = scalar_types.int8
             quant_type_id = quant_type.id
+    elif input_dtype == torch.float8_e4m3fn:
+        gate_up_input, a_scales1 = ops.scaled_fp8_quant(
+            hidden_states, use_per_token_if_dynamic=True)
 
     intermediate_cache1 = ops.moe_wna16_marlin_gemm(
         gate_up_input,
@@ -217,6 +220,9 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
             intermediate_cache2)
         if input_global_scale2 is not None:
             a_scales2 = a_scales2 * input_global_scale2
+    elif input_dtype == torch.float8_e4m3fn:
+        intermediate_cache2, a_scales2 = ops.scaled_fp8_quant(
+            intermediate_cache2, use_per_token_if_dynamic=True)
 
     intermediate_cache3 = ops.moe_wna16_marlin_gemm(
         intermediate_cache2,

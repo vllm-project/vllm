@@ -40,11 +40,12 @@ def marlin_permute_weights(q_w,
     assert size_k % tile == 0, f"size_k = {size_k}, tile = {tile}"
     assert size_n % tile == 0, f"size_k = {size_n}, tile = {tile}"
 
-    # Permute weights to 16x64 marlin tiles
     if is_a_8bit:
+        # Permute weights to 32x32 marlin tiles
         q_w = q_w.reshape(
             (size_k // (tile * 2), tile * 2, size_n // tile, tile))
     else:
+        # Permute weights to 16x64 marlin tiles
         q_w = q_w.reshape((size_k // tile, tile, size_n // tile, tile))
     q_w = q_w.permute((0, 2, 1, 3))
     q_w = q_w.reshape((size_k // tile, size_n * tile))
@@ -54,7 +55,7 @@ def marlin_permute_weights(q_w,
     return q_w
 
 
-def marlin_weights(q_w, size_k, size_n, num_bits, perm, is_a_8bit):
+def marlin_weights(q_w, size_k, size_n, num_bits, perm, is_a_8bit=False):
     # Permute
     q_w = marlin_permute_weights(q_w,
                                  size_k,
@@ -78,7 +79,7 @@ def marlin_weights(q_w, size_k, size_n, num_bits, perm, is_a_8bit):
     return q_packed
 
 
-def get_weight_perm(num_bits: int, is_a_8bit: bool):
+def get_weight_perm(num_bits: int, is_a_8bit: bool = False):
     perm_list: list[int] = []
     if is_a_8bit:
         perm_list: list[int] = []
@@ -139,8 +140,9 @@ def marlin_quantize(w: torch.Tensor,
                     group_size: int,
                     act_order: bool,
                     test_perm: Optional[torch.Tensor] = None,
-                    is_a_8bit: bool = False):
+                    input_dtype: Optional[torch.Tensor] = None):
 
+    is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
     if quant_type == scalar_types.uint8b128:
         assert not is_a_8bit, "UINT8B128 is only supported when is_a_8bit = false"
     if quant_type == scalar_types.int8:
@@ -181,12 +183,12 @@ def marlin_quantize(w: torch.Tensor,
                                      group_size,
                                      is_a_8bit=is_a_8bit)
 
-    if is_a_8bit and quant_type == scalar_types.uint8b128:
+    if input_dtype == torch.int8 and quant_type == scalar_types.uint8b128:
         # uint8b128 -> int8
         marlin_q_w = marlin_q_w.view(torch.int8) - 128
         marlin_q_w = marlin_q_w.view(torch.int32)
 
-    if is_a_8bit and quant_type == scalar_types.uint4b8:
+    if input_dtype == torch.int8 and quant_type == scalar_types.uint4b8:
         # to fit the dequantizition method of GPTQ-W4A8
         marlin_q_w0 = (marlin_q_w & 0x0F0F0F0F | 0x80808080) - 0x08080808
         marlin_q_w0 = marlin_q_w0 & 0x0F0F0F0F
@@ -195,6 +197,10 @@ def marlin_quantize(w: torch.Tensor,
         marlin_q_w1 = marlin_q_w1 & 0xF0F0F0F0
 
         marlin_q_w = marlin_q_w0 | marlin_q_w1
+
+    if input_dtype == torch.float8_e4m3fn and quant_type == scalar_types.uint4b8:
+        ops.marlin_int4_fp8_preprocess(marlin_q_w, inplace=True)
+        marlin_s = marlin_s * 512
 
     # Create result
     res_list = [w_ref, marlin_q_w, marlin_s, g_idx, sort_indices, rand_perm]
@@ -207,7 +213,9 @@ def marlin_quantize(w: torch.Tensor,
 def awq_marlin_quantize(w: torch.Tensor,
                         quant_type: ScalarType,
                         group_size: int,
-                        is_a_8bit: bool = False):
+                        input_dtype: Optional[torch.Tensor] = None):
+
+    is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
     size_k, size_n = w.shape
 
     # Normalize group_size
@@ -225,21 +233,17 @@ def awq_marlin_quantize(w: torch.Tensor,
                                          group_size,
                                          zero_points=True)
 
+    if input_dtype == torch.float8_e4m3fn and quant_type == scalar_types.uint4:
+        repeated_zp = zp.repeat_interleave(group_size, 0)
+        q_w_old = q_w
+        q_w = q_w_old - repeated_zp
+        q_w[q_w < 0] = (15 - q_w_old[q_w < 0])
+        s = s * 512
+
     # Reformat to marlin
     weight_perm = get_weight_perm(quant_type.size_bits, is_a_8bit)
-
-    num_bits = 4
-    q_w = q_w.T.contiguous()
-    if num_bits == 4:
-        q_w = q_w[:, ::2] + q_w[:, 1::2] * 16
-    q_w = q_w.to(torch.int8).view(torch.int32).T.contiguous()
-
-    marlin_q_w = ops.gptq_marlin_repack(
-        q_w, torch.empty(0, dtype=torch.int, device=w.device), size_k, size_n,
-        num_bits, is_a_8bit)
-
-    # marlin_q_w = marlin_weights(q_w, size_k, size_n, quant_type.size_bits,
-    #                             weight_perm, is_a_8bit=is_a_8bit)
+    marlin_q_w = marlin_weights(q_w, size_k, size_n, quant_type.size_bits,
+                                weight_perm, is_a_8bit=is_a_8bit)
     marlin_s = marlin_permute_scales(s,
                                      size_k,
                                      size_n,

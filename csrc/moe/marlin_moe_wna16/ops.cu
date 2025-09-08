@@ -37,39 +37,6 @@ __global__ void MarlinDefault(MARLIN_KERNEL_PARAMS){};
 
 using MarlinFuncPtr = void (*)(MARLIN_KERNEL_PARAMS);
 
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
-
-template <int moe_block_size>
-__global__ void permute_cols_kernel(
-    int4 const* __restrict__ a_int4_ptr, int const* __restrict__ perm_int_ptr,
-    int4* __restrict__ out_int4_ptr,
-    const int32_t* __restrict__ sorted_token_ids_ptr,
-    const int32_t* __restrict__ expert_ids_ptr,
-    const int32_t* __restrict__ num_tokens_past_padded_ptr, int size_m,
-    int size_k, int top_k) {};
-
-}  // namespace marlin
-
-torch::Tensor moe_wna16_marlin_gemm(
-    torch::Tensor& a, std::optional<torch::Tensor> c_or_none,
-    torch::Tensor& b_q_weight,
-    std::optional<torch::Tensor> const& b_bias_or_none, torch::Tensor& b_scales,
-    std::optional<torch::Tensor> const& b_zeros_or_none,
-    std::optional<torch::Tensor> const& g_idx_or_none,
-    std::optional<torch::Tensor> const& perm_or_none, torch::Tensor& workspace,
-    torch::Tensor& sorted_token_ids, torch::Tensor& expert_ids,
-    torch::Tensor& num_tokens_past_padded, torch::Tensor& topk_weights,
-    int64_t moe_block_size, int64_t top_k, bool mul_topk_weights, bool is_ep,
-    vllm::ScalarTypeId const& b_type_id, int64_t size_m, int64_t size_n,
-    int64_t size_k, bool is_k_full, bool use_atomic_add, bool use_fp32_reduce,
-    bool is_zp_float) {
-  TORCH_CHECK_NOT_IMPLEMENTED(false,
-                              "marlin_gemm(..) requires CUDA_ARCH >= 8.0");
-  return torch::empty({1, 1});
-}
-
-#else
-
 // For a given "a" of size [M,K] performs a permutation of the K columns based
 // on the given "perm" indices.
 template <int moe_block_size>
@@ -165,8 +132,8 @@ thread_config_t large_batch_thread_configs[] = {
     // Ordered by priority
 
     // thread_k, thread_n, num_threads
-    // {128, 128, 256},
     {64, 256, 256},
+    // {128, 128, 256},
     {64, 128, 128}};
 
 typedef struct {
@@ -381,8 +348,8 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
                bool has_act_order,
                bool is_k_full, bool has_zp, int num_groups, int group_size,
                int dev, cudaStream_t stream, int thread_k, int thread_n,
-               int sms, bool use_atomic_add, bool use_fp32_reduce,
-               bool is_zp_float) {
+               int sms, int blocks_per_sm, bool use_atomic_add,
+               bool use_fp32_reduce, bool is_zp_float) {
   int thread_m_blocks = div_ceil(moe_block_size, 16);
   bool m_block_size_8 = moe_block_size == 8;
   bool is_a_8bit = a_type.size_bits() == 8;
@@ -471,8 +438,9 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
   exec_config_t exec_cfg;
   thread_config_t thread_tfg;
   if (thread_k != -1 && thread_n != -1) {
-    thread_tfg = thread_config_t{thread_k, thread_n, default_threads};
-    exec_cfg = exec_config_t{1, thread_tfg};
+    thread_tfg = thread_config_t{thread_k, thread_n, thread_k * thread_n / 64};
+    if (blocks_per_sm == -1) blocks_per_sm = 1;
+    exec_cfg = exec_config_t{blocks_per_sm, thread_tfg};
     TORCH_CHECK(prob_n % thread_n == 0, "prob_n = ", prob_n,
                 " is not divisible by thread_n = ", thread_n);
     TORCH_CHECK(prob_k % thread_k == 0, "prob_k = ", prob_k,
@@ -554,10 +522,11 @@ torch::Tensor moe_wna16_marlin_gemm(
     int64_t moe_block_size, int64_t top_k, bool mul_topk_weights, bool is_ep,
     vllm::ScalarTypeId const& b_type_id, int64_t size_m, int64_t size_n,
     int64_t size_k, bool is_k_full, bool use_atomic_add, bool use_fp32_reduce,
-    bool is_zp_float) {
+    bool is_zp_float, int64_t thread_k, int64_t thread_n, int64_t blocks_per_sm) {
 
   vllm::ScalarTypeId a_type_id, c_type_id, s_type_id;
 
+  auto c_dtype = a.dtype();
   if (a.scalar_type() == at::ScalarType::Half) {
     a_type_id = vllm::kFloat16.id();
     c_type_id = vllm::kFloat16.id();
@@ -565,12 +534,25 @@ torch::Tensor moe_wna16_marlin_gemm(
     a_type_id = vllm::kBFloat16.id();
     c_type_id = vllm::kBFloat16.id();
   } else {
+    c_dtype = b_scales.dtype();
     if (b_scales.scalar_type() == at::ScalarType::Half) {
       c_type_id = vllm::kFloat16.id();
     } else if (b_scales.scalar_type() == at::ScalarType::BFloat16) {
       c_type_id = vllm::kBFloat16.id();
     } else {
-      TORCH_CHECK(false, "unsupported `b_scales` scalar_type when is_a_8bit = true");
+      c_type_id = vllm::kBFloat16.id();
+
+      TORCH_CHECK(c_or_none.has_value(), "c must be passed for W4A8-FP4");
+      torch::Tensor c = c_or_none.value();
+      c_dtype = c.dtype();
+
+      if (c.scalar_type() == at::ScalarType::Half) {
+        c_type_id = vllm::kFloat16.id();
+      } else if (c.scalar_type() == at::ScalarType::BFloat16) {
+        c_type_id = vllm::kBFloat16.id();
+      } else {
+        TORCH_CHECK(false, "unsupported c dtype");
+      }
     }
 
     if (a.scalar_type() == at::ScalarType::Float8_e4m3fn) {
@@ -643,10 +625,7 @@ torch::Tensor moe_wna16_marlin_gemm(
   TORCH_CHECK(b_scales.is_contiguous(), "b_scales is not contiguous");
 
   torch::Tensor a_scales;
-  auto options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
-  if (a_type.size_bits() == 8)
-    options = options.dtype(b_scales.dtype());
-
+  auto options = torch::TensorOptions().dtype(c_dtype).device(a.device());
   auto options_fp32 =
       torch::TensorOptions().dtype(at::kFloat).device(a.device());
 
@@ -660,12 +639,6 @@ torch::Tensor moe_wna16_marlin_gemm(
                 "the a_scales parameter must be passed for 8bit activation.");
   }
 
-  // thread_k: `k` size of a thread_tile in `weights` (can usually be left as
-  // auto -1)
-  int thread_k = -1;
-  // thread_n: `n` size of a thread_tile in `weights` (can usually be left as
-  // auto -1)
-  int thread_n = -1;
   // sms: number of SMs to use for the kernel
   int sms = -1;
   cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, a.get_device());
@@ -863,12 +836,10 @@ torch::Tensor moe_wna16_marlin_gemm(
     size_m, size_n, size_k,
     workspace.data_ptr(), a_type, b_type, c_type, s_type, has_bias, has_act_order, is_k_full, has_zp,
     num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
-    thread_k, thread_n, sms, use_atomic_add, use_fp32_reduce, is_zp_float);
+    thread_k, thread_n, sms, blocks_per_sm, use_atomic_add, use_fp32_reduce, is_zp_float);
 
   return c;
 }
-
-#endif
 
 TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
   m.impl("moe_wna16_marlin_gemm", &moe_wna16_marlin_gemm);

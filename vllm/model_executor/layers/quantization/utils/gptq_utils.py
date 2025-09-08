@@ -93,5 +93,5 @@ def get_linear_quant_method(
             # Dynamic per module/layer rules may override base config
             override_config(cloned_config, prefix=prefix)
 
-        return linear_method_cls(cloned_config, get_marlin_input_dtype(prefix))
+        return linear_method_cls(cloned_config)
     return None

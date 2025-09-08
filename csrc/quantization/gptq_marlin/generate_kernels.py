@@ -120,6 +120,32 @@ QUANT_CONFIGS = [
         "thread_configs": THREAD_CONFIGS,
         "thread_m_blocks": [1, 2, 3, 4],
         "group_blocks": [-1, 2, 4, 8]
+    },
+    # GPTQ-INT4 with FP8 activation
+    {
+        "a_type": ["kFE4M3fn"],
+        "b_type": "kU4B8",
+        "thread_configs": THREAD_CONFIGS,
+        "thread_m_blocks": [1, 2, 3, 4],
+        "group_blocks": [-1, 2, 4, 8]
+    },
+    # AWQ-INT4 with FP8 activation
+    {
+        "a_type": ["kFE4M3fn"],
+        "b_type": "kU4",
+        "thread_configs": THREAD_CONFIGS,
+        "thread_m_blocks": [1, 2, 3, 4],
+        "group_blocks": [-1, 2, 4, 8]
+    },
+    # MXFP4 with FP8 activation
+    {
+        "a_type": ["kFE4M3fn"],
+        "b_type": "kFE2M1f",
+        "c_type": ["kBFloat16"],
+        "s_type": "kFE8M0fnu",
+        "thread_configs": THREAD_CONFIGS,
+        "thread_m_blocks": [1, 2, 3, 4],
+        "group_blocks": [2]
     }
 ]
 

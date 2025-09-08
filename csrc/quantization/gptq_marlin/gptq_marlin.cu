@@ -531,6 +531,7 @@ torch::Tensor gptq_marlin_gemm(
 
   vllm::ScalarTypeId a_type_id, c_type_id, s_type_id;
 
+  auto c_dtype = a.dtype();
   if (a.scalar_type() == at::ScalarType::Half) {
     a_type_id = vllm::kFloat16.id();
     c_type_id = vllm::kFloat16.id();
@@ -538,16 +539,29 @@ torch::Tensor gptq_marlin_gemm(
     a_type_id = vllm::kBFloat16.id();
     c_type_id = vllm::kBFloat16.id();
   } else {
+    c_dtype = b_scales.dtype();
     if (b_scales.scalar_type() == at::ScalarType::Half) {
       c_type_id = vllm::kFloat16.id();
     } else if (b_scales.scalar_type() == at::ScalarType::BFloat16) {
       c_type_id = vllm::kBFloat16.id();
     } else {
-      TORCH_CHECK(false, "unsupported `b_scales` scalar_type when is_a_8bit = true");
+      c_type_id = vllm::kBFloat16.id();
+
+      TORCH_CHECK(c_or_none.has_value(), "c must be passed for W4A8-FP4");
+      torch::Tensor c = c_or_none.value();
+      c_dtype = c.dtype();
+
+      if (c.scalar_type() == at::ScalarType::Half) {
+        c_type_id = vllm::kFloat16.id();
+      } else if (c.scalar_type() == at::ScalarType::BFloat16) {
+        c_type_id = vllm::kBFloat16.id();
+      } else {
+        TORCH_CHECK(false, "unsupported c dtype");
+      }
     }
 
     if (a.scalar_type() == at::ScalarType::Float8_e4m3fn) {
-      a_type_id = vllm::kFE2M1f.id();
+      a_type_id = vllm::kFE4M3fn.id();
     } else if (a.scalar_type() == at::ScalarType::Char) {
       a_type_id = vllm::kS8.id();
     } else {
@@ -611,10 +625,7 @@ torch::Tensor gptq_marlin_gemm(
   TORCH_CHECK(b_scales.is_contiguous(), "b_scales is not contiguous");
 
   torch::Tensor a_scales;
-  auto options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
-  if (a_type.size_bits() == 8)
-    options = options.dtype(b_scales.dtype());
-
+  auto options = torch::TensorOptions().dtype(c_dtype).device(a.device());
   auto options_fp32 =
       torch::TensorOptions().dtype(at::kFloat).device(a.device());
 

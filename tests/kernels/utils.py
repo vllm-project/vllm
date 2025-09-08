@@ -1081,6 +1081,8 @@ def torch_experts(
             or (expert_map is not None
                 and global_num_experts == expert_map.shape[0]))
 
+    if quant_dtype in [torch.float16, torch.bfloat16]:
+        quant_dtype = None
     quant_input_only = quant_dtype is not None and \
         w1_scale is None and w2_scale is None
     if quant_input_only:
@@ -1104,7 +1106,7 @@ def torch_experts(
                                            per_act_token_quant, block_shape)
 
     if quant_input_only:
-        a = (a * a_scale.view(-1, 1)).to(w1.dtype)
+        a = (a.float() * a_scale.view(-1, 1)).to(w1.dtype)
 
     num_experts = w1.shape[0]
 
@@ -1131,7 +1133,7 @@ def torch_experts(
                 tmp2 = SiluAndMul()(tmp1)
                 tmp2, tmp2_scale = moe_kernel_quantize_input(
                     tmp2, None, quant_dtype, per_act_token_quant)
-                tmp2 = (tmp2 * tmp2_scale.view(-1, 1)).to(w2.dtype)
+                tmp2 = (tmp2.float() * tmp2_scale.view(-1, 1)).to(w2.dtype)
                 out[mask] = tmp2 @ w2[i].transpose(0, 1)
             elif block_shape is not None:
                 # block quantized

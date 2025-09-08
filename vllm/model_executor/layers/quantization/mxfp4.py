@@ -15,6 +15,8 @@ from vllm.model_executor.layers.linear import (LinearBase,
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    get_marlin_input_dtype)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_moe_fp4_layer_for_marlin)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
@@ -72,7 +74,9 @@ class Mxfp4Config(QuantizationConfig):
                 return UnquantizedLinearMethod()
             raise NotImplementedError("Mxfp4 linear layer is not implemented")
         elif isinstance(layer, FusedMoE):
-            return Mxfp4MoEMethod(layer.moe_config)
+            quant_method = Mxfp4MoEMethod(layer.moe_config)
+            quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
+            return quant_method
         elif isinstance(layer, Attention):
             raise NotImplementedError(
                 "Mxfp4 attention layer is not implemented")
@@ -86,6 +90,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.topk_indices_dtype = None
         self.moe = moe
         self.use_marlin = self._should_use_marlin()
+        self.marlin_input_dtype = None
 
     def _should_use_marlin(self):
         if envs.VLLM_MXFP4_USE_MARLIN is not None:
@@ -229,7 +234,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
     def process_weights_after_loading(self, layer):
         if self.use_marlin:
-            prepare_moe_fp4_layer_for_marlin(layer)
+            prepare_moe_fp4_layer_for_marlin(
+                layer, input_dtype=self.marlin_input_dtype)
         elif (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
               or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
             layer.gemm1_alpha = Parameter(torch.tensor(
@@ -468,7 +474,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
                 activation=activation,
-                expert_map=expert_map)
+                expert_map=expert_map,
+                input_dtype=self.marlin_input_dtype)
 
         assert _can_support_mxfp4(
             use_grouped_topk, topk_group, num_expert_group, expert_map,

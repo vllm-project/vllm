@@ -284,10 +284,7 @@ def marlin_permute_bias(s: torch.Tensor) -> torch.Tensor:
     return s.reshape(*origin_shape).contiguous()
 
 
-def marlin_a8_process_scales(s: torch.Tensor, b_type: ScalarType,
-                             a_dtype: torch.dtype):
-    assert a_dtype == torch.int8, "only int8 activation is supported now."
-
+def marlin_act_int8_process_scales(s: torch.Tensor, b_type: ScalarType):
     a_scales_scale_factor = 1 / 4096 * s.max().float()
     if b_type == scalar_types.uint4b8:
         a_scales_scale_factor = a_scales_scale_factor / 16
@@ -297,10 +294,7 @@ def marlin_a8_process_scales(s: torch.Tensor, b_type: ScalarType,
     return s, a_scales_scale_factor
 
 
-def marlin_a8_process_qweight(qweight: torch.Tensor, b_type: ScalarType,
-                              a_dtype: torch.dtype):
-    assert a_dtype == torch.int8, "only int8 activation is supported now."
-
+def marlin_act_int8_process_qweight(qweight: torch.Tensor, b_type: ScalarType):
     if b_type == scalar_types.uint8b128:
         # uint8b128 -> int8
         qweight = qweight.view(torch.int8) - 128
@@ -480,6 +474,12 @@ def apply_gptq_marlin_linear(
         a_scales = a_scales * input_global_scale
         if wtype == scalar_types.uint8b128:
             wtype = scalar_types.int8
+    elif input_dtype == torch.float8_e4m3fn:
+        assert wtype == scalar_types.uint4b8, \
+            "INT8 weight + FP8 activation is not supported."
+        reshaped_x, a_scales = ops.scaled_fp8_quant(
+            reshaped_x, use_per_token_if_dynamic=True)
+
     output = ops.gptq_marlin_gemm(reshaped_x,
                                   None,
                                   weight,
@@ -531,6 +531,9 @@ def apply_awq_marlin_linear(
     if input_dtype == torch.int8:
         reshaped_x, a_scales = per_token_quant_int8(reshaped_x)
         a_scales = a_scales * input_global_scale
+    elif input_dtype == torch.float8_e4m3fn:
+        reshaped_x, a_scales = ops.scaled_fp8_quant(
+            reshaped_x, use_per_token_if_dynamic=True)
 
     output = ops.gptq_marlin_gemm(reshaped_x,
                                   None,
