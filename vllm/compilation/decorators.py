@@ -182,7 +182,6 @@ def _support_torch_compile(
     """
     A decorator to add support for compiling the forward method of a class.
     """
-    ic(dynamic_arg_dims)
     if TorchCompileWrapperWithCustomDispatcher in cls.__bases__:
         # support decorating multiple times
         return cls
