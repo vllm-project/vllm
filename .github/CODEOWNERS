@@ -28,7 +28,7 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 # vLLM V1
 /vllm/v1 @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @comaniac @alexm-redhat
 /vllm/v1/structured_output @mgoin @russellb @aarnphm @benchislett
-/vllm/v1/spec_decode @benchislett
+/vllm/v1/spec_decode @benchislett @luccafong
 /vllm/v1/attention/backends/triton_attn.py @tdoublep
 
 # Test ownership
@@ -69,6 +69,9 @@ mkdocs.yaml @hmellor
 # Qwen-specific files
 /vllm/attention/backends/dual_chunk_flash_attn.py @sighingnow
 /vllm/model_executor/models/qwen* @sighingnow
+
+# MTP-specific files
+/vllm/model_executor/models/deepseek_mtp.py @luccafong
 
 # Mistral-specific files
 /vllm/model_executor/models/mistral*.py @patrickvonplaten
