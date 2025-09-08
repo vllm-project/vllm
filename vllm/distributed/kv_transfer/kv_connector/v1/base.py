@@ -62,6 +62,14 @@ CopyBlocksOp = Callable[[
 logger = init_logger(__name__)
 
 
+class ConnectorException(Exception):
+    """Raised when one or more connectors fail"""
+
+    def __init__(self, message: str, exceptions: list[Exception] = None):
+        super().__init__(message)
+        self.exceptions = exceptions or []
+
+
 class KVConnectorRole(enum.Enum):
     # Connector running in the scheduler process
     SCHEDULER = 0
