@@ -176,14 +176,8 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         # TODO: Extend this to support other DP models
 
         if ("Llama" in self.model_config.model
-                and "70B" in self.model_config.model
-                and self.device_config.device.get_num_devices() == 32
-                and not is_dp):
-            self.llama_tg = True
-        else:
-            self.llama_tg = False
-
-        if self.llama_tg or is_dp:
+                and "70B" in self.model_config.model and
+                self.device_config.device.get_num_devices() == 32) or is_dp:
             self.dp_kv_cache = True
         else:
             self.dp_kv_cache = False
@@ -496,8 +490,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                     next_token_ids, read_event = next_token_ids
                     self.cached_read_events.append(read_event)
                 self.cached_step_outputs.append(next_token_ids)
-                if (not self.llama_tg and i < num_steps - 1
-                        and not self.sample_on_device_mode):
+                if (i < num_steps - 1 and not self.sample_on_device_mode):
                     # Prepare the inputs for the next step
                     new_input_tokens = next_token_ids.unsqueeze(dim=1).int()
                     if new_input_tokens.shape[
@@ -696,7 +689,11 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                         )
                     }
             else:
-                tt_out = outputs  # [batch_size, seq_len, vocab_size]
+                # [ batch_size] if sampling on device
+                # [ batch_size, len, vocab_size] if not sampling on device
+                # the logits are not guaranteed to be for the whole sequence,
+                # usually only last token.
+                tt_out = outputs
         else:
             if self.model_config.is_encoder_decoder:
                 assert self.cached_req_data
@@ -806,15 +803,17 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                                  -1, :]  # unpadded batch, vocab of last token
             next_token_ids = self._sample_tokens(
                 next_logits, model_input.tt_sampling_params)
-        else:
-            if self.llama_tg:
+        else:  # sample on device
+            if self.async_torch_proc:
+                # do not slice as this may be mid-transfer to host
                 next_token_ids = tt_out
             else:
                 next_token_ids = tt_out[:model_input.unpadded_batch_size]
-        if not is_decode or not self.async_torch_proc:
-            return next_token_ids
-        else:
+        if is_decode and self.async_torch_proc:
+            # async torch proc only works in decode
             return tt_out, read_event
+        else:
+            return next_token_ids
 
     def _sample_tokens(self, logits, tt_sampling_params: TTSamplingParams):
         if tt_sampling_params.temperature == 0:  # greedy decoding
