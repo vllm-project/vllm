@@ -78,7 +78,7 @@ def init_aiter_topK_meta_data(n_routed_experts: int,
         for i in range(tp_rank, max_num_tokens, tp_size):
             s_topk_ids_list[i] = shared_expert_ids
     else:
-        s_topk_ids_list = [range(n_routed_experts, fake_expertid)
+        s_topk_ids_list = [list(range(n_routed_experts, fake_expertid))
                            ] * max_num_tokens
     s_topk_ids[:] = torch.tensor(s_topk_ids_list,
                                  dtype=torch.int32,
@@ -402,10 +402,7 @@ def rocm_aiter_fused_experts(
     topk_weights = topk_weights.to(torch.float32)
     topk_ids = topk_ids.to(torch.int32)
 
-    if expert_map is not None:
-        expert_mask = (expert_map > -1).to(torch.int32)
-    else:
-        expert_mask = None
+    expert_mask = expert_map if expert_map is not None else None
 
     # w8a8 per-channel quantization
     if per_channel_quant and apply_router_weight_on_input and use_fp8_w8a8:
