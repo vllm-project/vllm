@@ -360,8 +360,9 @@ class InputBatch:
                                              if sampling_params.logprobs == -1
                                              else sampling_params.logprobs)
             if sampling_params.prompt_logprobs is not None:
-                self.num_prompt_logprobs[
-                    req_id] = sampling_params.prompt_logprobs
+                self.num_prompt_logprobs[req_id] = (
+                    self.vocab_size if sampling_params.prompt_logprobs == -1
+                    else sampling_params.prompt_logprobs)
 
             if sampling_params.allowed_token_ids:
                 self.has_allowed_token_ids.add(req_id)
