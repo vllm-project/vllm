@@ -177,15 +177,15 @@ strategies = ["max_t", "uniform", "first_t"]
 
 
 def benchmark(
-    k,
-    E,
-    T,
-    H,
-    num_parallel_tokens=64,
-    G=128,
-    runs=100,
-    num_warmups=20,
-    gen_strategy="default",
+    k: int,
+    E: int,
+    T: int,
+    H: int,
+    num_parallel_tokens: int = 64,
+    G: int = 128,
+    runs: int = 100,
+    num_warmups: int = 20,
+    gen_strategy: str = "default",
 ):
     current_platform.seed_everything(42)
 
