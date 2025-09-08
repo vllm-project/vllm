@@ -929,7 +929,7 @@ class OpenAIServing:
             tokenizer,
             model_config=model_config,
         )
-        conversation, mm_data_future = parse_chat_messages_futures(
+        conversation, mm_data_future, mm_uuids = parse_chat_messages_futures(
             messages,
             model_config,
             tokenizer,
@@ -1006,6 +1006,10 @@ class OpenAIServing:
             prompt_token_ids=prompt_inputs["prompt_token_ids"])
         if mm_data is not None:
             engine_prompt["multi_modal_data"] = mm_data
+
+        if mm_uuids is not None:
+            engine_prompt["multi_modal_uuids"] = mm_uuids
+
         if request.mm_processor_kwargs is not None:
             engine_prompt["mm_processor_kwargs"] = request.mm_processor_kwargs
 
