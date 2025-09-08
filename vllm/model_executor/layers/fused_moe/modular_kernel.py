@@ -1183,9 +1183,10 @@ class FusedMoEModularKernel(torch.nn.Module):
         - apply_router_weight_on_input (bool): When true, the topk weights are
           applied directly on the inputs. This is only applicable when topk is
           1.
-        - expert_load_view (Optional[torch.Tensor]): Optional tensor for tracking
-          expert load statistics. If provided, the kernel will update it using
-          ExpertTokensMetadata.expert_num_tokens for better performance.
+        - expert_load_view (Optional[torch.Tensor]): Optional tensor for 
+          tracking expert load statistics. If provided, the kernel will
+          update it using ExpertTokensMetadata.expert_num_tokens for 
+          better performance.
 
         Returns:
         - torch.Tensor: The output tensor after applying the MoE layer.
@@ -1241,9 +1242,10 @@ class FusedMoEModularKernel(torch.nn.Module):
             (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
              _expert_topk_weights) = receiver()
 
-        # In EPLB(Expert Load Balance), update expert load from expert_num_tokens.
+        # In EPLB, update expert load from expert_num_tokens.
         if (expert_tokens_meta is not None and expert_load_view is not None and
-            expert_tokens_meta.expert_num_tokens is not None):
+            expert_tokens_meta.expert_num_tokens is not None and
+            expert_map is not None):
                 # Initialize the mapping of the local physical experts
                 # to global physical experts, after which it will not change.
                 # `expert_load_view`: (num_physical_experts,)
@@ -1251,12 +1253,14 @@ class FusedMoEModularKernel(torch.nn.Module):
                 if self.expert_map is None:
                     self.expert_map = expert_map.clone()
                     self.local_to_global_physical_experts = \
-                        (self.expert_map != -1).nonzero(as_tuple=True)[0]
+                        torch.nonzero(expert_map != -1,
+                                      as_tuple=False).squeeze()
                 else:
                     if not torch.equal(self.expert_map, expert_map):
                         self.expert_map = expert_map.clone()
                         self.local_to_global_physical_experts = \
-                            (self.expert_map != -1).nonzero(as_tuple=True)[0]
+                            torch.nonzero(expert_map != -1, 
+                                          as_tuple=False).squeeze()
 
                 # Use pre-computed expert token counts from metadata
                 expert_load_view.scatter_add_(dim=0,

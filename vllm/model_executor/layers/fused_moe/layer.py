@@ -2074,14 +2074,15 @@ class FusedMoE(CustomOp):
                 logger.debug("expert_load_view update from topk_ids.")
                 topk_ids_flatten = topk_ids.flatten()
 
-            # Performance optimization:
-            # `masked_fill` is significantly faster than `masked_select`
-            invalid_mask = topk_ids_flatten < 0
-            # Replace invalid expert ids with 0 (just a dummy position)
-            # to avoid out-of-bounds errors in scatter_add_
-            index = topk_ids_flatten.masked_fill_(invalid_mask, 0)
-            # `src` is the valid mask, which is 1 for valid and 0 for invalid
-            src = ~invalid_mask
+                # Performance optimization:
+                # `masked_fill` is significantly faster than `masked_select`
+                invalid_mask = topk_ids_flatten < 0
+                # Replace invalid expert ids with 0 (just a dummy position)
+                # to avoid out-of-bounds errors in scatter_add_
+                index = topk_ids_flatten.masked_fill_(invalid_mask, 0)
+                # `src` is the valid mask, 
+                # which is 1 for valid and 0 for invalid
+                src = ~invalid_mask
 
                 expert_load_view.scatter_add_(dim=0,
                                               index=index.long(),
