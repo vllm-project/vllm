@@ -21,12 +21,13 @@ from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
 from safetensors.torch import load_file, safe_open, save_file
 from tqdm.auto import tqdm
 
-from vllm import envs
 from vllm.config import LoadConfig, ModelConfig
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QuantizationConfig,
                                                      get_quantization_config)
+from vllm.model_executor.model_loader.utils import (
+    maybe_download_from_modelscope)
 from vllm.platforms import current_platform
 from vllm.utils import PlaceholderModule
 
@@ -226,35 +227,6 @@ def get_quant_config(model_config: ModelConfig,
                     f" found for {model_config.quantization} in {f}.")
 
     return quant_cls.from_config(config)
-
-
-def maybe_download_from_modelscope(
-    model: str,
-    revision: Optional[str] = None,
-    download_dir: Optional[str] = None,
-    allow_patterns: Optional[list[str]] = None,
-) -> Optional[str]:
-    if envs.VLLM_USE_MODELSCOPE:
-        # download model from ModelScope hub,
-        # lazy import so that modelscope is not required for normal use.
-        # pylint: disable=C.
-        from modelscope.hub.snapshot_download import snapshot_download
-
-        # Use file lock to prevent multiple processes from
-        # downloading the same model weights at the same time.
-        with get_lock(model, download_dir):
-            if not os.path.exists(model):
-                model_path = snapshot_download(
-                    model_id=model,
-                    cache_dir=download_dir,
-                    local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
-                    revision=revision,
-                    allow_patterns=allow_patterns,
-                )
-            else:
-                model_path = model
-        return model_path
-    return None
 
 
 def get_sparse_attention_config(

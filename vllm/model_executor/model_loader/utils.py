@@ -3,15 +3,18 @@
 """Utilities for selecting and loading models."""
 import contextlib
 import inspect
+import os
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Union
 
+import huggingface_hub
 import torch
 from torch import nn
 from typing_extensions import assert_never
 
+from vllm import envs
 from vllm.attention import Attention
 from vllm.config import (ModelConfig, ModelImpl, VllmConfig,
                          set_current_vllm_config)
@@ -19,6 +22,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import QKVCrossParallelLinear
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.model_loader.weight_utils import get_lock
 from vllm.model_executor.models.adapters import (as_embedding_model,
                                                  as_reward_model,
                                                  as_seq_cls_model)
@@ -26,6 +30,41 @@ from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.utils import is_pin_memory_available
 
 logger = init_logger(__name__)
+
+
+def maybe_download_from_modelscope(
+        model: str,
+        revision: Optional[str] = None,
+        download_dir: Optional[str] = None,
+        ignore_patterns: Optional[Union[str, list[str]]] = None,
+        allow_patterns: Optional[Union[list[str],
+                                       str]] = None) -> Optional[str]:
+    """Download model from ModelScope hub if VLLM_USE_MODELSCOPE is True.
+
+        Returns the path to the downloaded model, or None if the model is not
+        downloaded from ModelScope."""
+    if envs.VLLM_USE_MODELSCOPE:
+        # download model from ModelScope hub,
+        # lazy import so that modelscope is not required for normal use.
+        # pylint: disable=C.
+        from modelscope.hub.snapshot_download import snapshot_download
+
+        # Use file lock to prevent multiple processes from
+        # downloading the same model weights at the same time.
+        with get_lock(model, download_dir):
+            if not os.path.exists(model):
+                model_path = snapshot_download(
+                    model_id=model,
+                    cache_dir=download_dir,
+                    local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+                    revision=revision,
+                    ignore_file_pattern=ignore_patterns,
+                    allow_patterns=allow_patterns,
+                )
+            else:
+                model_path = model
+        return model_path
+    return None
 
 
 @contextlib.contextmanager
