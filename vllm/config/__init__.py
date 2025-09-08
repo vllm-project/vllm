@@ -1767,7 +1767,7 @@ class ModelConfig:
         if head_dtype not in current_platform.supported_dtypes:
             logger.warning_once(
                 "The current platform does not support [%s] head dtype, "
-                "falling back to model dtype [%s].", head_dtype, self.dtype)
+                "fallback to model dtype [%s].", head_dtype, self.dtype)
             return self.dtype
 
         logger.debug_once("head dtype: %s", head_dtype)
