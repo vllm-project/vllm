@@ -27,7 +27,8 @@ from openai.types.responses import (ResponseCreatedEvent,
                                     ResponseReasoningItem,
                                     ResponseReasoningTextDeltaEvent,
                                     ResponseReasoningTextDoneEvent,
-                                    response_text_delta_event,ToolChoiceFunction)
+                                    ToolChoiceFunction,
+                                    response_text_delta_event)
 from openai.types.responses.response_output_text import (Logprob,
                                                          LogprobTopLogprob)
 # yapf: enable
@@ -52,8 +53,7 @@ from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.entrypoints.openai.protocol import (DeltaMessage, ErrorResponse,
-                                              FunctionCall,
-                                              FunctionDefinition,
+                                              FunctionCall, FunctionDefinition,
                                               InputTokensDetails,
                                               OutputTokensDetails,
                                               RequestResponseMetadata,
