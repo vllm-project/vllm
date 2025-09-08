@@ -13,8 +13,7 @@ from vllm.utils import direct_register_custom_op
 
 
 def is_rocm_aiter_rmsnorm_enabled() -> bool:
-    return current_platform.is_rocm() \
-        and envs.VLLM_ROCM_USE_AITER_RMSNORM \
+    return envs.VLLM_ROCM_USE_AITER_RMSNORM \
         and envs.VLLM_ROCM_USE_AITER
 
 
@@ -220,11 +219,12 @@ class RMSNorm(CustomOp):
 
         add_residual = residual is not None
         if add_residual:
-            return self.rocm_norm_func_with_add(x, residual, self.weight.data,
-                                                self.variance_epsilon)
+            return self.rocm_aiter_norm_func_with_add(x, residual,
+                                                      self.weight.data,
+                                                      self.variance_epsilon)
         else:
-            return self.rocm_norm_func(x, self.weight.data,
-                                       self.variance_epsilon)
+            return self.rocm_aiter_norm_func(x, self.weight.data,
+                                             self.variance_epsilon)
 
     def forward_xpu(
         self,
