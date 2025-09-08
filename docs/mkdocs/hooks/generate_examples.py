@@ -106,7 +106,8 @@ class Example:
 
     def determine_title(self) -> str:
         if not self.is_code:
-            with open(self.main_file) as f:
+            # Specify encoding for building on Windows
+            with open(self.main_file, encoding="utf-8") as f:
                 first_line = f.readline().strip()
             match = re.match(r'^#\s+(?P<title>.+)$', first_line)
             if match:
@@ -174,6 +175,7 @@ def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool):
         doc_path = EXAMPLE_DOC_DIR / example.category / example_name
         if not doc_path.parent.exists():
             doc_path.parent.mkdir(parents=True)
-        with open(doc_path, "w+") as f:
+        # Specify encoding for building on Windows
+        with open(doc_path, "w+", encoding="utf-8") as f:
             f.write(example.generate())
         logger.debug("Example generated: %s", doc_path.relative_to(ROOT_DIR))
