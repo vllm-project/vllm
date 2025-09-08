@@ -12,8 +12,9 @@ from tests.models.language.pooling.mteb_utils import (MTEB_RERANK_LANGS,
                                                       RerankClientMtebEncoder,
                                                       ScoreClientMtebEncoder,
                                                       run_mteb_rerank)
+
 # yapf: enable
-from tests.utils import RemoteOpenAIServer
+from ....utils import RemoteOpenAIServer
 
 os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
 

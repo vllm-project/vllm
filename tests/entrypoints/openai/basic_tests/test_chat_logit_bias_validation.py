@@ -7,7 +7,7 @@ import pytest_asyncio
 
 from vllm.config import ModelConfig
 
-MODEL_NAME = "microsoft/DialoGPT-small"
+MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 
 
 def get_vocab_size(model_name):

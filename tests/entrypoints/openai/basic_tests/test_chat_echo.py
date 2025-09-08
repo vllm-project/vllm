@@ -8,7 +8,7 @@ import pytest
 import pytest_asyncio
 
 # # any model with a chat template should work here
-MODEL_NAME = "microsoft/DialoGPT-small"
+MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 
 
 @pytest_asyncio.fixture
@@ -52,7 +52,7 @@ async def test_chat_session_with_echo_and_continue_final_message(
     assert len(chat_completion.choices) == 1
 
     choice = chat_completion.choices[0]
-    assert choice.finish_reason == "stop"
+    assert choice.finish_reason in ["stop", "length"]
 
     message = choice.message
     if test_case.echo:

@@ -17,7 +17,7 @@ BASIC_SERVER_ARGS = [
 
 @pytest.fixture(scope="package")
 def server():
-    with RemoteOpenAIServer("microsoft/DialoGPT-small",
+    with RemoteOpenAIServer("hmellor/tiny-random-LlamaForCausalLM",
                             BASIC_SERVER_ARGS,
                             max_wait_seconds=120) as server:
         yield server
