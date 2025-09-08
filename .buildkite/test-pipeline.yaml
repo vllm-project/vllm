@@ -546,7 +546,31 @@ steps:
 
 #####  models test  #####
 
-- label: Basic Models Test # 57min
+# Test subset of models when vLLM source is modified.
+# Always run if test file is modified.
+- label: Basic Models Initialization Test (Subset)
+  timeout_in_minutes: 75
+  mirror_hardwares: [amdexperimental]
+  torch_nightly: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/test_initialization.py
+  commands:
+    - pytest -v -s models/test_initialization.py::test_can_initialize_subset
+
+# Test all other models when any model source is modified.
+# Always run if test file is modified.
+- label: Basic Models Initialization Test (Full)
+  timeout_in_minutes: 75
+  mirror_hardwares: [amdexperimental]
+  torch_nightly: true
+  source_file_dependencies:
+  - vllm/model_executor/models/
+  - tests/models/test_initialization.py
+  commands:
+    - pytest -v -s models/test_initialization.py::test_can_initialize_other
+
+- label: Basic Models Test
   timeout_in_minutes: 75
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
@@ -558,7 +582,6 @@ steps:
     - pytest -v -s models/test_registry.py
     - pytest -v -s models/test_utils.py
     - pytest -v -s models/test_vision.py
-    - pytest -v -s models/test_initialization.py
 
 - label: Language Models Test (Standard) # 35min
   timeout_in_minutes: 45
