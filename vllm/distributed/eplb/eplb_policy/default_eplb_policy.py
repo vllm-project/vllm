@@ -17,13 +17,6 @@ from typing import Optional
 from .abstract_policy import EplbPolicy
 
 
-class DynamicTable:
-
-    workload_table = None
-
-    placement_table = None
-
-
 class DefaultEplb(EplbPolicy):
 
     def balanced_packing(self, weight: torch.Tensor,
