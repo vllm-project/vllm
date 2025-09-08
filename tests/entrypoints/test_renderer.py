@@ -131,6 +131,23 @@ class TestRenderPrompt:
         assert call_args.kwargs["max_length"] == 50
 
     @pytest.mark.asyncio
+    async def test_truncation_negative(self, renderer, mock_async_tokenizer):
+        # Test that negative truncation uses model's max_model_len
+        mock_async_tokenizer.return_value = MockTokenizerResult(
+            [101, 7592, 2088])  # Truncated to max_model_len
+        renderer.async_tokenizer_pool[
+            renderer.tokenizer] = mock_async_tokenizer
+
+        results = await renderer.render_prompt(prompt_or_prompts="Hello world",
+                                               max_length=200,
+                                               truncate_prompt_tokens=-1)
+
+        assert len(results) == 1
+        call_args = mock_async_tokenizer.call_args
+        assert call_args.kwargs["truncation"] is True
+        assert call_args.kwargs["max_length"] == 100  # model's max_model_len
+
+    @pytest.mark.asyncio
     async def test_token_truncation_last_elements(self, renderer):
         # Test that token truncation keeps the last N elements
         long_tokens = [100, 101, 102, 103, 104, 105, 106, 107, 108,
