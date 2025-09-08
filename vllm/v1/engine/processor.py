@@ -442,37 +442,22 @@ class Processor:
 
             if peft_helper.alora_invocation_tokens is not None:
                 invocation_tokens = peft_helper.alora_invocation_tokens
-                delta = 0
-            elif peft_helper.invocation_string is not None:
-                # backwards compatibility
-                invocation_tokens = self.input_preprocessor._tokenize_prompt(
-                    peft_helper.invocation_string,
-                    lora_request=lora_request,
-                    tokenization_kwargs=tokenization_kwargs)
-                delta = 1
-            else:
-                invocation_tokens = None
-
-            if invocation_tokens is not None:
                 invocation_start = -1
                 n = len(invocation_tokens)
                 token_ids = decoder_inputs["prompt_token_ids"]
-
                 if n > 0 and len(token_ids) >= n:
                     # scan backward for the last match
                     # (faster than full forward scan+max)
                     for idx in range(len(token_ids) - n, -1, -1):
                         if token_ids[idx:idx + n] == invocation_tokens:
                             # weights activated after start
-                            invocation_start = idx + delta
+                            invocation_start = idx
                             break
-
                 if invocation_start == -1:
                     raise ValueError(
                         "Invocation sequence not found in prompt "
                         f"for request '{request_id}'. aLoRA models require the "
                         "invocation tokens to be present in the input.")
-
                 lora_request.invocation_start = invocation_start
 
         return decoder_inputs.get("prompt"), EngineCoreRequest(

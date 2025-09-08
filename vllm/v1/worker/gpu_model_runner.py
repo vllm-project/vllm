@@ -1031,8 +1031,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             alora_metadata = None
 
         return (attn_metadata, logits_indices, spec_decode_metadata,
-                num_scheduled_tokens, spec_decode_common_attn_metadata,
-                alora_metadata, max_num_scheduled_tokens)
+                alora_metadata, num_scheduled_tokens,
+                spec_decode_common_attn_metadata, max_num_scheduled_tokens)
 
     def _compute_cascade_attn_prefix_len(
         self,
