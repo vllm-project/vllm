@@ -1221,6 +1221,7 @@ class ActivatedLoRAMixin:
         mask2d = mask1d.unsqueeze(1).to(output.dtype)
 
         # Clone base layer output before running LoRA
+        # TODO(tdoublep): pass in mask1d and only operate on valid entries
         orig_out = output.clone()
 
         # Apply LoRA in‐place on `output`:
