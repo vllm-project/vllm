@@ -16,9 +16,9 @@ from openai.types.responses.response_function_web_search import (
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent)
 from openai.types.responses.tool import Tool
-from openai_harmony import (Author, ChannelConfig, Conversation,
-                            DeveloperContent, HarmonyEncodingName, Message,
-                            ReasoningEffort, Role, StreamableParser,
+from openai_harmony import (Author, ChannelConfig, DeveloperContent,
+                            HarmonyEncodingName, Message, ReasoningEffort,
+                            RenderOptions, Role, StreamableParser,
                             SystemContent, TextContent, ToolDescription,
                             load_harmony_encoding)
 
@@ -213,14 +213,18 @@ def parse_chat_input(chat_msg) -> list[Message]:
     tool_calls = chat_msg.get("tool_calls")
     if role == "assistant" and tool_calls:
         msgs: list[Message] = []
+        content = chat_msg.get("content") or ""
+        analysis_msg = Message.from_role_and_content(Role.ASSISTANT, content)
+        analysis_msg = analysis_msg.with_channel("analysis")
+        msgs.append(analysis_msg)
+
         for call in tool_calls:
             func = call.get("function", {})
             name = func.get("name", "")
             arguments = func.get("arguments", "") or ""
             msg = Message.from_role_and_content(Role.ASSISTANT, arguments)
-            msg = msg.with_channel("commentary")
-            msg = msg.with_recipient(f"functions.{name}")
-            msg = msg.with_content_type("json")
+            msg = msg.with_channel(f"commentary to=functions.{name}")
+            msg.with_content_type("json")
             msgs.append(msg)
         return msgs
 
@@ -230,7 +234,7 @@ def parse_chat_input(chat_msg) -> list[Message]:
         content = chat_msg.get("content", "") or ""
         msg = Message.from_author_and_content(
             Author.new(Role.TOOL, f"functions.{name}"),
-            content).with_channel("commentary")
+            content).with_channel("commentary").with_recipient("assistant")
         return [msg]
 
     # Default: user/assistant/system messages with content
@@ -245,9 +249,35 @@ def parse_chat_input(chat_msg) -> list[Message]:
 
 
 def render_for_completion(messages: list[Message]) -> list[int]:
-    conversation = Conversation.from_messages(messages)
-    token_ids = get_encoding().render_conversation_for_completion(
-        conversation, Role.ASSISTANT)
+    if not messages:
+        return []
+
+    token_ids = []
+    encoding = get_encoding()
+    end_token_ids = encoding.encode("<|end|>", allowed_special={"<|end|>"})
+    call_token_ids = encoding.encode("<|call|>", allowed_special={"<|call|>"})
+
+    has_function_tools = any(
+        msg.author.role == Role.DEVELOPER and msg.content[0] and hasattr(
+            msg.content[0], 'tools') and msg.content[0].tools is not None
+        and msg.content[0].tools["functions"] is not None for msg in messages)
+
+    for i, msg in enumerate(messages):
+        msg_tokens = encoding.render(
+            msg,
+            RenderOptions(conversation_has_function_tools=has_function_tools))
+        is_tool_call = (msg.author.role == Role.ASSISTANT and msg.channel
+                        and "functions." in msg.channel)
+        if (i < len(messages) - 1 and is_tool_call and end_token_ids
+                and call_token_ids and msg_tokens
+                and msg_tokens[-1] == end_token_ids[0]):
+            msg_tokens[-1] = call_token_ids[0]
+        token_ids.extend(msg_tokens)
+
+    start_assistant_tokens = encoding.encode("<|start|>assistant",
+                                             allowed_special={"<|start|>"})
+    token_ids.extend(start_assistant_tokens)
+
     return token_ids
 
 
