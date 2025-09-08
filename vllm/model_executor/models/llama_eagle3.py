@@ -316,7 +316,8 @@ class LlamaForCausalLMEagle3(Eagle3LlamaForCausalLM):
         Forward pass with potential GPT-OSS specific handling.
         """
         # Call parent forward method
-        return super().forward(input_ids, positions, hidden_states, inputs_embeds)
+        return super().forward(input_ids, positions, hidden_states,
+                               inputs_embeds)
     
     def compute_logits(
         self,

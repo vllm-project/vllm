@@ -2067,6 +2067,9 @@ class SpeculativeConfig:
         return hf_config
 
     def __post_init__(self):
+        # Handle empty quantization method string
+        if self.quantization == "":
+            self.quantization = None
 
         # Note: "method" is a new parameter that helps to extend the
         # configuration of non-model-based proposers, and the "model" parameter
