@@ -29,6 +29,7 @@ llm = LLM(
     enable_activated_lora=True,
     dtype=torch.bfloat16,
     max_lora_rank=64,
+    enforce_eager=True,
 )
 
 prompts = [
