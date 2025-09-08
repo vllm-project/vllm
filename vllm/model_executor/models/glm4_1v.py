@@ -51,14 +51,10 @@ from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.layernorm import RMSNorm
-# yapf: disable
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
-                                               MergedReplicatedLinear,
                                                QKVParallelLinear,
-                                               ReplicatedLinear,
                                                RowParallelLinear)
-# yapf: enable
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
@@ -174,20 +170,22 @@ class Glm4vVisionMLP(nn.Module):
         use_data_parallel: bool = False,
     ):
         super().__init__()
-        cls_gate_up = (MergedReplicatedLinear
-                       if use_data_parallel else MergedColumnParallelLinear)
-        self.gate_up_proj = cls_gate_up(input_size=in_features,
-                                        output_sizes=[hidden_features] * 2,
-                                        bias=bias,
-                                        quant_config=quant_config,
-                                        prefix=f"{prefix}.gate_up_proj")
-        cls_down = (ReplicatedLinear
-                    if use_data_parallel else RowParallelLinear)
-        self.down_proj = cls_down(hidden_features,
-                                  in_features,
-                                  bias=bias,
-                                  quant_config=quant_config,
-                                  prefix=f"{prefix}.down_proj")
+        self.gate_up_proj = MergedColumnParallelLinear(
+            input_size=in_features,
+            output_sizes=[hidden_features] * 2,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
+            disable_tp=use_data_parallel,
+        )
+        self.down_proj = RowParallelLinear(
+            hidden_features,
+            in_features,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
+            disable_tp=use_data_parallel,
+        )
         self.act_fn = SiluAndMul()
 
     def forward(self, x: torch.Tensor):
@@ -234,48 +232,32 @@ class Glm4vVisionAttention(nn.Module):
         # Per attention head and per partition values.
         self.tp_size = (1 if use_data_parallel else
                         get_tensor_model_parallel_world_size())
-        self.tp_rank = parallel_state.get_tensor_model_parallel_rank()
+        self.tp_rank = (0 if use_data_parallel else
+                        parallel_state.get_tensor_model_parallel_rank())
         self.hidden_size_per_attention_head = dist_utils.divide(
             projection_size, num_heads)
         self.num_attention_heads_per_partition = dist_utils.divide(
             num_heads, self.tp_size)
 
-        if use_data_parallel:
-            self.qkv = ReplicatedLinear(
-                input_size=embed_dim,
-                output_size=3 * projection_size,
-                bias=False,
-                quant_config=quant_config,
-                # Change qkv prefix to align with GLM-4.5V-FP8 quantization cfg
-                prefix=f"{prefix}.qkv_proj"
-                if quant_config else f"{prefix}.qkv",
-            )
-            self.proj = ReplicatedLinear(
-                input_size=projection_size,
-                output_size=embed_dim,
-                quant_config=quant_config,
-                prefix=f"{prefix}.proj",
-                bias=False,
-            )
-        else:
-            self.qkv = QKVParallelLinear(
-                hidden_size=embed_dim,
-                head_size=self.hidden_size_per_attention_head,
-                total_num_heads=num_heads,
-                total_num_kv_heads=num_heads,
-                bias=False,
-                quant_config=quant_config,
-                # Change qkv prefix to align with GLM-4.5V-FP8 quantization cfg
-                prefix=f"{prefix}.qkv_proj"
-                if quant_config else f"{prefix}.qkv",
-            )
-            self.proj = RowParallelLinear(
-                input_size=projection_size,
-                output_size=embed_dim,
-                quant_config=quant_config,
-                prefix=f"{prefix}.proj",
-                bias=False,
-            )
+        self.qkv = QKVParallelLinear(
+            hidden_size=embed_dim,
+            head_size=self.hidden_size_per_attention_head,
+            total_num_heads=num_heads,
+            total_num_kv_heads=num_heads,
+            bias=False,
+            quant_config=quant_config,
+            # Change qkv prefix to align with GLM-4.5V-FP8 quantization cfg
+            prefix=f"{prefix}.qkv_proj" if quant_config else f"{prefix}.qkv",
+            disable_tp=use_data_parallel,
+        )
+        self.proj = RowParallelLinear(
+            input_size=projection_size,
+            output_size=embed_dim,
+            quant_config=quant_config,
+            prefix=f"{prefix}.proj",
+            bias=False,
+            disable_tp=use_data_parallel,
+        )
 
         # Detect attention implementation.
         self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
@@ -494,41 +476,31 @@ class Glm4vPatchMerger(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = d_model
-        if use_data_parallel:
-            self.proj = ReplicatedLinear(
-                input_size=self.hidden_size,
-                output_size=self.hidden_size,
-                bias=bias,
-                quant_config=quant_config,
-                prefix=f"{prefix}.proj",
-            )
-        else:
-            self.proj = ColumnParallelLinear(
-                self.hidden_size,
-                self.hidden_size,
-                bias=bias,
-                gather_output=True,
-                quant_config=quant_config,
-                prefix=f"{prefix}.proj",
-            )
+        self.proj = ColumnParallelLinear(
+            self.hidden_size,
+            self.hidden_size,
+            bias=bias,
+            gather_output=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.proj",
+            disable_tp=use_data_parallel,
+        )
         self.post_projection_norm = nn.LayerNorm(self.hidden_size)
-        cls_gate_up = (MergedReplicatedLinear
-                       if use_data_parallel else MergedColumnParallelLinear)
-        self.gate_up_proj = cls_gate_up(
+        self.gate_up_proj = MergedColumnParallelLinear(
             input_size=self.hidden_size,
             output_sizes=[context_dim] * 2,
             bias=bias,
             quant_config=quant_config,
             prefix=f"{prefix}.gate_up_proj",
+            disable_tp=use_data_parallel,
         )
-        cls_down = (ReplicatedLinear
-                    if use_data_parallel else RowParallelLinear)
-        self.down_proj = cls_down(
+        self.down_proj = RowParallelLinear(
             context_dim,
             self.hidden_size,
             bias=bias,
             quant_config=quant_config,
             prefix=f"{prefix}.down_proj",
+            disable_tp=use_data_parallel,
         )
         self.act_fn = SiluAndMul()
         self.extra_activation_func = nn.GELU()
