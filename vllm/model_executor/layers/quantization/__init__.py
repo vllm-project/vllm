@@ -35,13 +35,8 @@ QuantizationMethods = Literal[
     "inc",
     "mxfp4",
     "petit_nvfp4",
-    "",
-    ".",
-    None,
 ]
-QUANTIZATION_METHODS: list[str] = [
-    q for q in get_args(QuantizationMethods) if q is not None
-]
+QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
 # The customized quantization methods which will be added to this dict.
 _CUSTOMIZED_METHOD_TO_QUANT_CONFIG = {}

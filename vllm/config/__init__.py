@@ -1179,6 +1179,9 @@ class ModelConfig:
 
             # Detect which checkpoint is it
             for name in quantization_methods:
+                # Skip empty quantization method names
+                if not name or name.strip() == "":
+                    continue
                 method = me_quant.get_quantization_config(name)
                 quantization_override = method.override_quantization_method(
                     quant_cfg, self.quantization)
