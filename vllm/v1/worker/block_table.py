@@ -22,12 +22,31 @@ class BlockTable:
         pin_memory: bool,
         device: torch.device,
     ):
-        self.block_size = block_size
         self.max_num_reqs = max_num_reqs
         self.max_num_blocks_per_req = max_num_blocks_per_req
         self.max_num_batched_tokens = max_num_batched_tokens
         self.pin_memory = pin_memory
         self.device = device
+        import os
+        physical_block_size = block_size
+        self.block_size =  int(os.environ.get('VLLM_KERNEL_BLOCK_SIZE', block_size))
+        # Hybrid block table support
+        if physical_block_size != block_size:
+            self.physical_block_size = physical_block_size
+            self.logical_block_size = block_size
+            self.blocks_per_phys_block = physical_block_size // block_size
+            if physical_block_size % block_size != 0:
+                raise ValueError(
+                    f"Physical block size {physical_block_size} must be divisible "
+                    f"by logical block size {block_size}")
+            self.use_hybrid_blocks = True
+            logger.info(f"Hybrid block table: physical={physical_block_size}, "
+                       f"logical={block_size}, split_ratio={self.blocks_per_phys_block}")
+        else:
+            self.physical_block_size = block_size
+            self.logical_block_size = block_size
+            self.blocks_per_phys_block = 1
+            self.use_hybrid_blocks = False
 
         self.block_table = torch.zeros(
             (max_num_reqs, max_num_blocks_per_req),
@@ -42,6 +61,26 @@ class BlockTable:
         )
         self.block_table_np = self.block_table_cpu.numpy()
         self.num_blocks_per_row = np.zeros(max_num_reqs, dtype=np.int32)
+        
+        # Physical block table (only used in hybrid mode)
+        if self.use_hybrid_blocks:
+            self.physical_block_table = torch.zeros(
+                (max_num_reqs, max_num_blocks_per_req),
+                device=self.device,
+                dtype=torch.int32,
+            )
+            self.physical_block_table_cpu = torch.zeros(
+                (max_num_reqs, max_num_blocks_per_req),
+                device="cpu",
+                dtype=torch.int32,
+                pin_memory=pin_memory,
+            )
+            self.physical_block_table_np = self.physical_block_table_cpu.numpy()
+        else:
+            # In non-hybrid mode, physical table points to logical table
+            self.physical_block_table = self.block_table
+            self.physical_block_table_cpu = self.block_table_cpu
+            self.physical_block_table_np = self.block_table_np
 
         self.slot_mapping_cpu = torch.zeros(self.max_num_batched_tokens,
                                             dtype=torch.int64,
@@ -69,7 +108,20 @@ class BlockTable:
         num_blocks = len(block_ids)
         start = self.num_blocks_per_row[row_idx]
         self.num_blocks_per_row[row_idx] += num_blocks
-        self.block_table_np[row_idx, start:start + num_blocks] = block_ids
+        
+        # In hybrid mode, store physical blocks and convert to logical
+        if self.use_hybrid_blocks:
+            # Store physical blocks in physical table
+            self.physical_block_table_np[row_idx, start:start + num_blocks] = block_ids
+            # Convert to logical blocks and store in logical table
+            logical_blocks = self._convert_physical_to_logical_blocks(np.array(block_ids))
+            # Store all logical blocks, but respect array bounds
+            logical_num = min(len(logical_blocks), self.max_num_blocks_per_req - start)
+            if logical_num > 0:
+                self.block_table_np[row_idx, start:start + logical_num] = logical_blocks[:logical_num]
+        else:
+            # Normal mode - just store the blocks directly in both tables
+            self.block_table_np[row_idx, start:start + num_blocks] = block_ids
 
     def add_row(self, block_ids: list[int], row_idx: int) -> None:
         self.num_blocks_per_row[row_idx] = 0
@@ -80,6 +132,11 @@ class BlockTable:
         self.block_table_np[tgt, :num_blocks] = self.block_table_np[
             src, :num_blocks]
         self.num_blocks_per_row[tgt] = num_blocks
+        
+        # Also move physical blocks if in hybrid mode
+        if self.use_hybrid_blocks:
+            self.physical_block_table_np[tgt, :num_blocks] = self.physical_block_table_np[
+                src, :num_blocks]
 
     def swap_row(self, src: int, tgt: int) -> None:
         num_blocks_src = self.num_blocks_per_row[src]
@@ -88,6 +145,10 @@ class BlockTable:
         self.num_blocks_per_row[tgt] = num_blocks_src
 
         self.block_table_np[[src, tgt]] = self.block_table_np[[tgt, src]]
+        
+        # Also swap physical blocks if in hybrid mode
+        if self.use_hybrid_blocks:
+            self.physical_block_table_np[[src, tgt]] = self.physical_block_table_np[[tgt, src]]
 
     def compute_slot_mapping(self, req_indices: np.ndarray,
                              positions: np.ndarray) -> None:
@@ -129,8 +190,17 @@ class BlockTable:
                    out=self.slot_mapping_np[:req_indices.shape[0]])
 
     def commit_block_table(self, num_reqs: int) -> None:
+        # If in hybrid mode, synchronize logical table with physical table first
+        if self.use_hybrid_blocks:
+            self.sync_physical_and_logical_tables(num_reqs)
+        
         self.block_table[:num_reqs].copy_(self.block_table_cpu[:num_reqs],
                                           non_blocking=True)
+        
+        # Also commit physical blocks if in hybrid mode
+        if self.use_hybrid_blocks:
+            self.physical_block_table[:num_reqs].copy_(self.physical_block_table_cpu[:num_reqs],
+                                                       non_blocking=True)
 
     def commit_slot_mapping(self, num_tokens: int) -> None:
         self.slot_mapping[:num_tokens].copy_(
@@ -139,7 +209,73 @@ class BlockTable:
     def clear(self) -> None:
         self.block_table.fill_(0)
         self.block_table_cpu.fill_(0)
+        
+        # Also clear physical blocks if in hybrid mode
+        if self.use_hybrid_blocks:
+            self.physical_block_table.fill_(0)
+            self.physical_block_table_cpu.fill_(0)
 
+    def _convert_physical_to_logical_blocks(self, physical_blocks: np.ndarray) -> np.ndarray:
+        """Convert physical block IDs to logical block IDs."""
+        if not self.use_hybrid_blocks or self.blocks_per_phys_block == 1:
+            return physical_blocks
+        
+        # Create logical block IDs by splitting each physical block
+        logical_blocks = []
+        for phys_block in physical_blocks:
+            if phys_block == 0:  # Handle empty blocks (block 0 is always empty)
+                logical_blocks.append(0)
+            else:
+                # Convert physical block to multiple logical blocks
+                # Physical block 1 becomes logical blocks [1*split_ratio, 1*split_ratio+1, ...]
+                # But we need to account for the fact that block 0 is special
+                base_logical = (phys_block - 1) * self.blocks_per_phys_block + 1
+                logical_blocks.extend(range(base_logical, base_logical + self.blocks_per_phys_block))
+        
+        return np.array(logical_blocks, dtype=np.int32)
+    
+    def _convert_logical_to_physical_blocks(self, logical_blocks: np.ndarray) -> np.ndarray:
+        """Convert logical block IDs back to physical block IDs."""
+        if not self.use_hybrid_blocks or self.blocks_per_phys_block == 1:
+            return logical_blocks
+        
+        # Convert logical blocks back to physical blocks (reverse mapping)
+        physical_blocks = []
+        seen_phys = set()
+        
+        for logic_block in logical_blocks:
+            if logic_block == 0:  # Handle empty blocks
+                phys_block = 0
+            else:
+                # Convert logical block back to physical block
+                # Logical block 1 becomes physical block 1
+                # Logical blocks [1, 2, ..., split_ratio] become physical block 1
+                phys_block = (logic_block - 1) // self.blocks_per_phys_block + 1
+            
+            # Only add unique physical blocks
+            if phys_block not in seen_phys:
+                physical_blocks.append(phys_block)
+                seen_phys.add(phys_block)
+        
+        return np.array(physical_blocks, dtype=np.int32)
+    
+    def sync_physical_and_logical_tables(self, num_reqs: int) -> None:
+        """Synchronize logical block table with physical block table."""
+        if not self.use_hybrid_blocks:
+            return
+        
+        # Convert physical blocks to logical blocks for each request
+        for req_idx in range(num_reqs):
+            num_blocks = self.num_blocks_per_row[req_idx]
+            if num_blocks > 0:
+                physical_blocks = self.physical_block_table_np[req_idx, :num_blocks]
+                logical_blocks = self._convert_physical_to_logical_blocks(physical_blocks)
+                
+                # Update logical block table with converted blocks
+                logical_num = min(len(logical_blocks), self.max_num_blocks_per_req)
+                self.block_table_np[req_idx, :logical_num] = logical_blocks[:logical_num]
+                # Note: num_blocks_per_row stays the same as physical blocks count
+    
     def get_device_tensor(self) -> torch.Tensor:
         """Returns the device tensor of the block table."""
         return self.block_table

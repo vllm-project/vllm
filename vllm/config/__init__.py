@@ -3675,6 +3675,7 @@ class VllmConfig:
                            "but the scheduler is configured to publish them."
                            "Modify KVEventsConfig.enable_kv_cache_events"
                            "to True to enable.")
+        # 选择block_size
         current_platform.check_and_update_config(self)
 
         # final check of cudagraph mode after platform-specific update
@@ -3867,6 +3868,7 @@ class VllmConfig:
             cls.verify_and_update_config(self)
 
         if self.model_config.is_hybrid:
+            # hybird padding pagesize
             HybridAttentionMambaModelConfig.verify_and_update_config(self)
 
         if self.model_config.convert_type == "classify":

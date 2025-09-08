@@ -386,6 +386,8 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         if (cache_config.block_size is None
                 or cache_config.block_size < attn_block_size):
             cache_config.block_size = attn_block_size
+            import os
+            os.environ['VLLM_PHYSICAL_BLOCK'] = str(attn_block_size)
             logger.info(
                 "Setting attention block size to %d tokens "
                 "to ensure that attention page size is >= mamba page size.",
