@@ -60,7 +60,6 @@ One solution is using [forked-pdb](https://github.com/Lightning-AI/forked-pdb). 
 __import__('fpdb').ForkedPdb().set_trace()
 ```
 
-
 ## Incorrect network setup
 
 The vLLM instance cannot get the correct IP address if you have a complicated network config. You can find a log such as `DEBUG 06-10 21:32:17 parallel_state.py:88] world_size=8 rank=0 local_rank=0 distributed_init_method=tcp://xxx.xxx.xxx.xxx:54641 backend=nccl` and the IP address should be the correct one.
