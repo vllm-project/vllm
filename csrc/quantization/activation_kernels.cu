@@ -206,11 +206,13 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     Idx_t stride_ys_g, Idx_t stride_counts_e) {
   static constexpr __nv_bfloat16 fp8_min = get_fp8_min<fp8_type>();
   static constexpr __nv_bfloat16 fp8_max = get_fp8_max<fp8_type>();
-
-  // Same for EPS = 1e-10
+  // We assign EPS with it's 16-bit unsigned counterpart to allow constexpr.
   static constexpr __nv_bfloat16 EPS = (__nv_bfloat16_raw{.x = 11996});
+
+  // We pack 8 16-bit bfloat16 values into a 128-bit __int128_t.
+  static constexpr uint32_t BFLOAT16_PER_GROUP = 8;
   static constexpr uint32_t S_NUM_128 =
-      2u * (GROUP_SIZE / 8u) * NUM_WARPS * NUM_STAGES;
+      2u * (GROUP_SIZE / BFLOAT16_PER_GROUP) * NUM_WARPS * NUM_STAGES;
   static constexpr auto THREAD_COUNT = NUM_WARPS * WARP_SIZE;
   static constexpr int HALF_THREAD_COUNT = THREAD_COUNT / 2;
   static constexpr uint32_t S_NUM_64 = S_NUM_128 * 2;
