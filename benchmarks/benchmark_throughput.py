@@ -3,8 +3,7 @@
 
 
 if __name__ == "__main__":
-    print("""
-DEPRECATED: This script has been moved to the vLLM CLI.
+    print("""DEPRECATED: This script has been moved to the vLLM CLI.
 
 Please use the following command instead:
     vllm bench throughput
