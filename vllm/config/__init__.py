@@ -1974,6 +1974,16 @@ class SpeculativeConfig:
     """Disable speculative decoding for new incoming requests when the number
     of enqueued requests is larger than this value, if provided."""
 
+    @field_validator("quantization", mode="before")
+    @classmethod
+    def validate_quantization_before(cls, value: Any) -> Any:
+        """Handle empty quantization method string."""
+        if isinstance(value, str) and value.strip() == "":
+            return None
+        if isinstance(value, str):
+            return value.lower()
+        return value
+
     # Ngram proposer configuration
     prompt_lookup_max: Optional[int] = None
     """Maximum size of ngram token window when using Ngram proposer, required
@@ -2386,7 +2396,7 @@ class SpeculativeConfig:
                              "speculative decoding is > 1, but got "
                              f"{self.disable_by_batch_size=}")
 
-        eagle3_target_supported = ["llama", "qwen"]
+        eagle3_target_supported = ["llama", "qwen", "gpt_oss"]
         if self.method == "eagle3" and self.target_model_config and not any(
                 supported_model in
                 self.target_model_config.hf_text_config.model_type
