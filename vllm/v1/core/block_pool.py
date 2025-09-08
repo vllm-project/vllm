@@ -271,7 +271,7 @@ class BlockPool:
                 blocks_len = len(blocks)
                 if col < blocks_len:
                     block = blocks[blocks_len - col - 1]
-                    block.decr_ref()
+                    block.ref_cnt -= 1
                     if block.ref_cnt == 0:
                         self.free_block_queue.append(block)
 
