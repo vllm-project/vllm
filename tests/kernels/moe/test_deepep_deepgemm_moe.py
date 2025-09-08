@@ -282,7 +282,7 @@ def triton_impl(a: torch.Tensor, topk_ids: torch.Tensor,
         a1_scale=a1_scale,
         block_shape=block_shape,
         # Make sure this is set to False so we
-        # dont end up comparing the same implementation.
+        # don't end up comparing the same implementation.
         allow_deep_gemm=False)
 
 
