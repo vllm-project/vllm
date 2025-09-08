@@ -2437,7 +2437,7 @@ class LoRAConfig:
     lora_dtype: Union[torch.dtype, LoRADType] = "auto"
     """Data type for LoRA. If auto, will default to base model dtype."""
     lora_extra_vocab_size: int = 256
-    """(Deprecated) Maximum size of extra vocabulary that can be present in a 
+    """(Deprecated) Maximum size of extra vocabulary that can be present in a
     LoRA adapter. Will be removed in v0.12.0."""
     lora_vocab_padding_size: ClassVar[int] = current_platform\
         .get_lora_vocab_padding_size()
@@ -2671,8 +2671,8 @@ class PoolerConfig:
     """
     Maximum input length allowed for embedding generation. When set, allows
     inputs longer than max_embed_len to be accepted for embedding models.
-    When an input exceeds max_embed_len, it will be handled according to 
-    the original max_model_len validation logic. 
+    When an input exceeds max_embed_len, it will be handled according to
+    the original max_model_len validation logic.
     Defaults to None (i.e. set to max_model_len).
     """
 
@@ -3211,7 +3211,7 @@ class ObservabilityConfig:
 
 KVProducer = Literal["kv_producer", "kv_both"]
 KVConsumer = Literal["kv_consumer", "kv_both"]
-KVRole = Literal[KVProducer, KVConsumer]
+KVRole = KVProducer | KVConsumer
 
 
 @config
