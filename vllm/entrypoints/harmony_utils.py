@@ -273,7 +273,7 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
                     call_id=f"call_{random_id}",
                     type="function_call",
                     name=function_name,
-                    id=f"ft_{random_id}",
+                    id=f"fc_{random_id}",
                 )
                 output_items.append(response_item)
         elif recipient is not None and (recipient.startswith("python")
