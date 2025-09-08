@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import multiprocessing
-import os
 import pickle
+import queue
 import signal
 import threading
 import time
@@ -33,7 +33,8 @@ from vllm.utils import (decorate_logs, get_distributed_init_method,
                         get_loopback_ip, get_mp_context, get_open_port,
                         set_process_title)
 from vllm.v1.executor.abstract import Executor, FailureCallback
-from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+from vllm.v1.outputs import (AsyncModelRunnerOutput, DraftTokenIds,
+                             ModelRunnerOutput)
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
@@ -253,7 +254,8 @@ class MultiprocExecutor(Executor):
                     if not non_block:
                         result = result.result()
                 elif not non_block:
-                    result = get_response(w, dequeue_timeout)
+                    result = get_response(w, dequeue_timeout,
+                                          self.shutdown_event)
                 else:
                     raise RuntimeError("non_block can only be used when"
                                        " max_concurrent_batches > 1")
@@ -295,12 +297,8 @@ class MultiprocExecutor(Executor):
         """Properly shut down the executor and its workers"""
         if not getattr(self, 'shutting_down', False):
             self.shutting_down = True
-            self.shutdown_event.set()
 
-            if self.io_thread_pool is not None:
-                self.io_thread_pool.shutdown(wait=False, cancel_futures=True)
-                self.io_thread_pool = None
-
+            # Make sure all the worker processes are terminated first.
             if workers := getattr(self, 'workers', None):
                 for w in workers:
                     # Close death_writer to signal child processes to exit
@@ -309,6 +307,11 @@ class MultiprocExecutor(Executor):
                         w.death_writer = None
                     w.worker_response_mq = None
                 self._ensure_worker_termination([w.proc for w in workers])
+
+            self.shutdown_event.set()
+            if self.io_thread_pool is not None:
+                self.io_thread_pool.shutdown(wait=False, cancel_futures=True)
+                del self.io_thread_pool
 
         self.rpc_broadcast_mq = None
 
@@ -412,6 +415,16 @@ class WorkerProc:
         # Initializes a message queue for sending the model output
         self.worker_response_mq = MessageQueue(1, 1)
 
+        scheduler_config = vllm_config.scheduler_config
+        self.use_async_scheduling = scheduler_config.async_scheduling
+        if self.use_async_scheduling:
+            self.async_output_queue: queue.Queue = queue.Queue()
+            self.async_output_copy_thread = Thread(
+                target=self.async_output_busy_loop,
+                daemon=True,
+                name="WorkerAsyncOutputCopy")
+            self.async_output_copy_thread.start()
+
         # Initialize device and loads weights
         self.worker.init_device()
         self.worker.load_model()
@@ -493,6 +506,7 @@ class WorkerProc:
         return cast(list[WorkerProcHandle], ready_proc_handles)
 
     def shutdown(self):
+        self.worker.shutdown()
         self.rpc_broadcast_mq = None
         self.worker_response_mq = None
         destroy_model_parallel()
@@ -522,7 +536,7 @@ class WorkerProc:
         # tuple[Connection, Connection]
         reader, ready_writer = kwargs.pop("ready_pipe")
         death_pipe = kwargs.pop("death_pipe", None)
-
+        shutdown_event = threading.Event()
         # Start death monitoring thread if death_pipe is provided
         if death_pipe is not None:
 
@@ -534,7 +548,7 @@ class WorkerProc:
                     # Parent process has exited, terminate this worker
                     logger.info("Parent process exited, terminating worker")
                     # Send signal to self to trigger clean shutdown
-                    os.kill(os.getpid(), signal.SIGTERM)
+                    shutdown_event.set()
                 except Exception as e:
                     logger.warning("Death monitoring error: %s", e)
 
@@ -562,7 +576,7 @@ class WorkerProc:
             ready_writer.close()
             ready_writer = None
 
-            worker.worker_busy_loop()
+            worker.worker_busy_loop(cancel=shutdown_event)
 
         except Exception:
             # NOTE: if an Exception arises in busy_loop, we send
@@ -572,6 +586,8 @@ class WorkerProc:
 
             if ready_writer is not None:
                 logger.exception("WorkerProc failed to start.")
+            elif shutdown_event.is_set():
+                logger.info("WorkerProc shutting down.")
             else:
                 logger.exception("WorkerProc failed.")
 
@@ -593,11 +609,41 @@ class WorkerProc:
         SUCCESS = auto()
         FAILURE = auto()
 
-    def worker_busy_loop(self):
+    def enqueue_output(self, output: Any):
+        """Prepares output from the worker and enqueues it to the
+        worker_response_mq. If the output is an Exception, it is
+        converted to a FAILURE response.
+        """
+        if isinstance(output, AsyncModelRunnerOutput):
+            output = output.get_output()
+
+        if isinstance(output, Exception):
+            result = (WorkerProc.ResponseStatus.FAILURE, str(output))
+        else:
+            result = (WorkerProc.ResponseStatus.SUCCESS, output)
+        self.worker_response_mq.enqueue(result)
+
+    def handle_output(self, output: Any):
+        """Handles output from the worker. If async scheduling is enabled,
+        it is passed to the async_output_busy_loop thread. Otherwise, it is
+        enqueued directly to the worker_response_mq.
+        """
+        if self.use_async_scheduling:
+            self.async_output_queue.put(output)
+        else:
+            self.enqueue_output(output)
+
+    def async_output_busy_loop(self):
+        """Entrypoint for the thread which handles outputs asynchronously."""
+        while True:
+            output = self.async_output_queue.get()
+            self.enqueue_output(output)
+
+    def worker_busy_loop(self, cancel: Optional[threading.Event] = None):
         """Main busy loop for Multiprocessing Workers"""
         while True:
-            method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue()
-
+            method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue(
+                cancel=cancel)
             try:
                 if isinstance(method, str):
                     func = getattr(self.worker, method)
@@ -612,10 +658,8 @@ class WorkerProc:
                 # exception might not be serializable, so we convert it to
                 # string, only for logging purpose.
                 if output_rank is None or self.rank == output_rank:
-                    self.worker_response_mq.enqueue(
-                        (WorkerProc.ResponseStatus.FAILURE, str(e)))
+                    self.handle_output(e)
                 continue
 
             if output_rank is None or self.rank == output_rank:
-                self.worker_response_mq.enqueue(
-                    (WorkerProc.ResponseStatus.SUCCESS, output))
+                self.handle_output(output)

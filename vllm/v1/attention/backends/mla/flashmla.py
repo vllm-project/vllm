@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import ClassVar, Optional
+from typing import ClassVar, Optional, Union
 
 import torch
 
@@ -85,11 +85,13 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
                 device=self.device,
                 dtype=torch.int32)
 
-    def _build_decode(self, block_table_tensor: torch.Tensor,
-                      seq_lens: torch.Tensor) -> FlashMLADecodeMetadata:
+    def _build_decode(
+            self, block_table_tensor: torch.Tensor, seq_lens_cpu: torch.Tensor,
+            seq_lens_device: torch.Tensor, query_start_loc_cpu: torch.Tensor,
+            query_start_loc_device: torch.Tensor) -> FlashMLADecodeMetadata:
         tile_scheduler_metadata, num_splits = \
             get_mla_metadata(
-            seq_lens,
+            seq_lens_device,
             self.num_q_heads,
             1, # MQA for the decode path
         )
@@ -123,13 +125,15 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
 
         return FlashMLADecodeMetadata(
             block_table=block_table_tensor,
-            seq_lens=seq_lens,
+            seq_lens=seq_lens_device,
             tile_scheduler_metadata=tile_scheduler_metadata,
             num_splits=num_splits,
         )
 
 
 class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
+
+    can_return_lse_for_decode: bool = True
 
     def __init__(
             self,
@@ -167,20 +171,20 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
 
     def _forward_decode(
         self,
-        q_nope: torch.Tensor,
-        q_pe: torch.Tensor,
+        q: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: FlashMLAMetadata,
         layer: AttentionLayer,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
 
-        q = torch.cat([q_nope, q_pe], dim=-1)\
-            .unsqueeze(1) # Add seqlen dim of 1 (decode)
+        if type(q) is tuple:
+            q = torch.cat(q, dim=-1)
 
-        o, _ = flash_mla_with_kvcache(
-            q=q,
+        assert isinstance(q, torch.Tensor)
+        o, lse = flash_mla_with_kvcache(
+            q=q.unsqueeze(1),  # Add seqlen dim of 1 (decode)
             k_cache=kv_c_and_k_pe_cache.unsqueeze(-2),  # Add head dim of 1
             block_table=attn_metadata.decode.block_table,
             cache_seqlens=attn_metadata.decode.seq_lens,
@@ -194,4 +198,4 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             descale_k=layer._k_scale.reshape(1),
         )
 
-        return self._v_up_proj(o)
+        return o, lse

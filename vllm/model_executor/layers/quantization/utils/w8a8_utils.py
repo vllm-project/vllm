@@ -355,12 +355,10 @@ class Fp8LinearOp:
     def __init__(self,
                  act_quant_static: bool,
                  act_quant_group_shape: GroupShape = GroupShape.PER_TENSOR,
-                 pad_output: Optional[bool] = None,
-                 force_fp8_e4m3fnuz: bool = False):
+                 pad_output: Optional[bool] = None):
         if current_platform.is_rocm():
             self.preferred_backend = "rocm"
-        elif current_platform.is_cuda(
-        ) and not force_fp8_e4m3fnuz and cutlass_fp8_supported():
+        elif current_platform.is_cuda() and cutlass_fp8_supported():
             if has_flashinfer() and current_platform.has_device_capability(
                     100):
                 self.preferred_backend = "flashinfer"
