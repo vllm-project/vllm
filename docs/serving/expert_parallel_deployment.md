@@ -123,7 +123,7 @@ When enabled, vLLM collects load statistics with every forward pass and periodic
 
 ### EPLB Parameters
 
-The new `--eplb-config` argument should be used, which accepts a JSON string. The available keys and their descriptions are:
+Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. The available keys and their descriptions are:
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
@@ -139,6 +139,17 @@ vllm serve Qwen/Qwen3-30B-A3B \
   --enable-eplb \
   --eplb-config '{"window_size":1000,"step_interval":3000,"num_redundant_experts":2,"log_balancedness":true}'
 ```
+
+??? tip "Prefer individual arguments instead of JSON?"
+
+    ```bash
+    vllm serve Qwen/Qwen3-30B-A3B \
+            --enable-eplb \
+            --eplb-config.window_size 1000 \
+            --eplb-config.step_interval 3000 \
+            --eplb-config.num_redundant_experts 2 \
+            --eplb-config.log_balancedness true
+    ```
 
 ### Expert Distribution Formula
 
