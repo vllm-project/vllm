@@ -24,7 +24,7 @@ import vllm.envs as envs
 from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          ConfigFormat, ConfigType, ConvertOption,
                          DecodingConfig, DetailedTraceModules, Device,
-                         DeviceConfig, DistributedExecutorBackend, EPLBConfig,
+                         DeviceConfig, DistributedExecutorBackend, ECTransferConfig, EPLBConfig,
                          GuidedDecodingBackend, HfOverrides, KVEventsConfig,
                          KVTransferConfig, LoadConfig, LogprobsMode,
                          LoRAConfig, MambaDType, MMEncoderTPMode, ModelConfig,
@@ -427,6 +427,8 @@ class EngineArgs:
 
     kv_transfer_config: Optional[KVTransferConfig] = None
     kv_events_config: Optional[KVEventsConfig] = None
+
+    ec_transfer_config: Optional[ECTransferConfig] = None
 
     generation_config: str = ModelConfig.generation_config
     enable_sleep_mode: bool = ModelConfig.enable_sleep_mode
@@ -886,9 +888,11 @@ class EngineArgs:
         vllm_group.add_argument("--speculative-config",
                                 **vllm_kwargs["speculative_config"])
         vllm_group.add_argument("--kv-transfer-config",
-                                **vllm_kwargs["kv_transfer_config"])
+                                **vllm_kwargs["kv_transfer_config"])                   
         vllm_group.add_argument('--kv-events-config',
                                 **vllm_kwargs["kv_events_config"])
+        vllm_group.add_argument("--ec-transfer-config",
+                                **vllm_kwargs["ec_transfer_config"])    
         vllm_group.add_argument("--compilation-config", "-O",
                                 **vllm_kwargs["compilation_config"])
         vllm_group.add_argument("--additional-config",
@@ -1378,7 +1382,7 @@ class EngineArgs:
             otlp_traces_endpoint=self.otlp_traces_endpoint,
             collect_detailed_traces=self.collect_detailed_traces,
         )
-
+        logger.info(f"At engine args the ec transfer config is {self.ec_transfer_config}")
         config = VllmConfig(
             model_config=model_config,
             cache_config=cache_config,
@@ -1393,6 +1397,7 @@ class EngineArgs:
             compilation_config=self.compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
+            ec_transfer_config=self.ec_transfer_config,
             additional_config=self.additional_config,
         )
 

@@ -285,15 +285,19 @@ class EngineCore:
 
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
+        logger.info("At beginning of step")
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule()
+        logger.info(f"At engine core scheduler output is {scheduler_output}")
         model_output = self.execute_model_with_error_logging(
             self.model_executor.execute_model,  # type: ignore
             scheduler_output)
+        logger.info(f"Model output after execute is {model_output}")
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output)  # type: ignore
 
+        logger.info(f"Return result is {engine_core_outputs} and {(scheduler_output.total_num_scheduled_tokens > 0)}")
         return (engine_core_outputs,
                 scheduler_output.total_num_scheduled_tokens > 0)
 
@@ -755,9 +759,11 @@ class EngineCoreProc(EngineCore):
 
         # Step the engine core.
         outputs, model_executed = self.step_fn()
+        logger.info(f"At process engine the output is {outputs}")
         # Put EngineCoreOutputs into the output queue.
         for output in (outputs.items() if outputs else ()):
             self.output_queue.put_nowait(output)
+            logger.info("Put into output queue")
         # Post-step hook.
         self.post_step(model_executed)
 

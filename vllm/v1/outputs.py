@@ -77,6 +77,12 @@ class KVConnectorOutput:
     finished_sending: Optional[set[str]] = None
     finished_recving: Optional[set[str]] = None
 
+@dataclass
+class ECConnectorOutput:
+    # [mm_hash]
+    finished_sending: Optional[set[str]] = None
+    finished_recving: Optional[set[str]] = None
+
 
 # ModelRunnerOutput is serialized and sent to the scheduler process.
 # This is expensive for torch.Tensor so prefer to use list instead.
@@ -109,6 +115,8 @@ class ModelRunnerOutput:
     pooler_output: list[Optional[torch.Tensor]]
 
     kv_connector_output: Optional[KVConnectorOutput] = None
+
+    ec_connector_output: Optional[ECConnectorOutput] = None
 
     # req_id -> num_nans_in_logits
     num_nans_in_logits: Optional[dict[str, int]] = None
