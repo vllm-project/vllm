@@ -196,9 +196,10 @@ def benchmark(
             int(T * 0.7), T, size=(E,), dtype=torch.int32, device="cuda"
         )
     elif gen_strategy == "max_t":
-        tokens_per_expert = torch.ones(size=(E,), dtype=torch.int32, device="cuda") * T
+        tokens_per_expert = torch.empty(size=(E,), dtype=torch.int32, device="cuda")
+        tokens_per_expert.fill_(T)
     elif gen_strategy == "first_t":
-        tokens_per_expert = torch.zeros(size=(E,), dtype=torch.int32, device="cuda") * 0
+        tokens_per_expert = torch.zeros(size=(E,), dtype=torch.int32, device="cuda")
         tokens_per_expert[0] = T
     elif gen_strategy == "sorted":
         tokens_per_expert = torch.randint(
