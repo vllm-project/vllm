@@ -232,7 +232,6 @@ class EagleProposer:
         logits = self.model.compute_logits(sample_hidden_states, None)
         positions = target_positions[last_token_indices]
         hidden_states = hidden_states[last_token_indices]
-        ic(logits.shape)
 
         if isinstance(attn_metadata, TreeAttentionMetadata):
             # Draft using tree attention.
@@ -252,10 +251,8 @@ class EagleProposer:
 
         draft_token_ids = logits.argmax(dim=-1)
 
-        ic(draft_token_ids)
         if self.vllm_config.speculative_config.draft_vocab_pruned is not None:
             draft_token_ids = self.hot_token_ids[draft_token_ids]
-            ic(draft_token_ids)
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1:
