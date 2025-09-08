@@ -4,7 +4,7 @@
 import asyncio
 import io
 from abc import ABC, abstractmethod
-from typing import Annotated, Optional, Union
+from typing import Annotated, Optional, Union, overload
 
 import pybase64
 import torch
@@ -45,6 +45,48 @@ class BaseRenderer(ABC):
         self.model_config = model_config
         self.tokenizer = tokenizer
 
+    @overload
+    @abstractmethod
+    async def render_prompt(
+        self,
+        prompt_or_prompts: Union[str, list[str], list[int], list[list[int]]],
+        prompt_embeds: None = None,
+        max_length: Optional[int] = None,
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
+        add_special_tokens: Optional[bool] = True,
+        cache_salt: Optional[str] = None,
+        needs_detokenization: Optional[bool] = False,
+    ) -> list[EngineTokensPrompt]:
+        ...
+
+    @overload
+    @abstractmethod
+    async def render_prompt(
+        self,
+        prompt_or_prompts: None = None,
+        prompt_embeds: Union[bytes, list[bytes]] = ...,
+        max_length: Optional[int] = None,
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
+        add_special_tokens: Optional[bool] = True,
+        cache_salt: Optional[str] = None,
+        needs_detokenization: Optional[bool] = False,
+    ) -> list[EngineEmbedsPrompt]:
+        ...
+
+    @overload
+    @abstractmethod
+    async def render_prompt(
+        self,
+        prompt_or_prompts: Union[str, list[str], list[int], list[list[int]]],
+        prompt_embeds: Union[bytes, list[bytes]],
+        max_length: Optional[int] = None,
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
+        add_special_tokens: Optional[bool] = True,
+        cache_salt: Optional[str] = None,
+        needs_detokenization: Optional[bool] = False,
+    ) -> list[Union[EngineTokensPrompt, EngineEmbedsPrompt]]:
+        ...
+
     @abstractmethod
     async def render_prompt(
         self,
@@ -56,7 +98,11 @@ class BaseRenderer(ABC):
         add_special_tokens: Optional[bool] = True,
         cache_salt: Optional[str] = None,
         needs_detokenization: Optional[bool] = False,
-    ) -> list[Union[EngineTokensPrompt, EngineEmbedsPrompt]]:
+    ) -> Union[
+            list[EngineTokensPrompt],
+            list[EngineEmbedsPrompt],
+            list[Union[EngineTokensPrompt, EngineEmbedsPrompt]],
+    ]:
         """
         Convert high-level inputs into engine-ready prompt objects.
 
@@ -84,8 +130,12 @@ class BaseRenderer(ABC):
                 input, detokenize IDs back to text for inclusion in outputs.
 
         Returns:
-            list[Union[EngineTokensPrompt, EngineEmbedsPrompt]]: Prompt objects
-            ready for engine consumption.
+            Union[
+                list[EngineTokensPrompt],
+                list[EngineEmbedsPrompt],
+                list[Union[EngineTokensPrompt, EngineEmbedsPrompt]],
+            ]:
+            Engine-ready prompt objects.
 
         Raises:
             ValueError: If input formats are invalid or length limits exceeded.
@@ -116,7 +166,11 @@ class CompletionRenderer(BaseRenderer):
         add_special_tokens: Optional[bool] = True,
         cache_salt: Optional[str] = None,
         needs_detokenization: Optional[bool] = False,
-    ) -> list[Union[EngineTokensPrompt, EngineEmbedsPrompt]]:
+    ) -> Union[
+            list[EngineTokensPrompt],
+            list[EngineEmbedsPrompt],
+            list[Union[EngineTokensPrompt, EngineEmbedsPrompt]],
+    ]:
         """Implementation of prompt rendering for completion-style requests.
         
         Uses async tokenizer pooling for improved performance. See base class
@@ -140,7 +194,7 @@ class CompletionRenderer(BaseRenderer):
                 self._load_prompt_embeds(prompt_embeds, truncate_prompt_tokens,
                                          cache_salt))
 
-        if prompt_or_prompts is None:
+        if prompt_or_prompts is None or prompt_or_prompts == "":
             return rendered_prompts
 
         # Parse and batch the input prompts
@@ -299,7 +353,7 @@ class CompletionRenderer(BaseRenderer):
                 assert tensor.dim() == 2
             if truncate_prompt_tokens is not None:
                 tensor = tensor[-truncate_prompt_tokens:]
-            embeds_prompt = EngineEmbedsPrompt(prompt_embeds=tensor, )
+            embeds_prompt = EngineEmbedsPrompt(prompt_embeds=tensor)
             if cache_salt is not None:
                 embeds_prompt["cache_salt"] = cache_salt
             return embeds_prompt

@@ -145,8 +145,7 @@ class RequestProcessingMixin(BaseModel):
     """
 
     request_prompts: Optional[Sequence[RequestPrompt]] = []
-    engine_prompts: Optional[Union[list[EngineTokensPrompt],
-                                   list[EngineEmbedsPrompt]]] = []
+    engine_prompts: Optional[list[EngineTokensPrompt]] = []
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
