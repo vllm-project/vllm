@@ -521,23 +521,21 @@ def safetensors_weights_iterator(
     eager_load: bool = False,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
+    desc = "Loading safetensors checkpoint shards"
     if eager_load:
-        for st_file in tqdm(
-                hf_weights_files,
-                desc="Loading safetensors checkpoint shards (eagerly)",
-                disable=not enable_tqdm(use_tqdm_on_load),
-                bar_format=_BAR_FORMAT,
-        ):
+        desc += " (eagerly)"
+
+    for st_file in tqdm(
+            hf_weights_files,
+            desc=desc,
+            disable=not enable_tqdm(use_tqdm_on_load),
+            bar_format=_BAR_FORMAT,
+    ):
+        if eager_load:
             with open(st_file, "rb") as f:
                 state_dict = load(f.read())
             yield from state_dict.items()
-    else:
-        for st_file in tqdm(
-                hf_weights_files,
-                desc="Loading safetensors checkpoint shards",
-                disable=not enable_tqdm(use_tqdm_on_load),
-                bar_format=_BAR_FORMAT,
-        ):
+        else:
             with safe_open(st_file, framework="pt") as f:
                 for name in f.keys():  # noqa: SIM118
                     param = f.get_tensor(name)
