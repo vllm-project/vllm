@@ -275,12 +275,13 @@ pull_request_rules:
 
 - name: assign reviewer for modelopt changes
   conditions:
-      - files~=^vllm/model_executor/layers/quantization/modelopt.py
-      - files~=^vllm/model_executor/layers/quantization/__init__.py
-      - files~=^tests/models/quantization/test_modelopt.py
-      - files~=^tests/quantization/test_modelopt.py
-      - files~=^tests/models/quantization/test_nvfp4.py
-      - files~=^docs/features/quantization/modelopt.md
+    - or:
+        - files~=^vllm/model_executor/layers/quantization/modelopt\.py$
+        - files~=^vllm/model_executor/layers/quantization/__init__\.py$
+        - files~=^tests/models/quantization/test_modelopt\.py$
+        - files~=^tests/quantization/test_modelopt\.py$
+        - files~=^tests/models/quantization/test_nvfp4\.py$
+        - files~=^docs/features/quantization/modelopt\.md$
   actions:
     assign:
       users:
