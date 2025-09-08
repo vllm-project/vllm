@@ -30,7 +30,7 @@ import threading
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Optional, Sequence, Iterable, Union
+from typing import Optional, Union
 
 import torch
 from torch.distributed import ProcessGroup, all_reduce
@@ -41,10 +41,11 @@ from vllm.distributed.parallel_state import (get_ep_group, get_node_count,
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
+
 from .rebalance_algo import rebalance_experts
 from .rebalance_execute import (move_from_buffer,
-                                transfer_layer, 
-                                rearrange_expert_weights_inplace)
+                                rearrange_expert_weights_inplace,
+                                transfer_layer)
 
 
 logger = init_logger(__name__)
@@ -53,7 +54,7 @@ logger = init_logger(__name__)
 @dataclass
 class EplbState:
     """EPLB metrics."""
-    
+
     physical_to_logical_map: torch.Tensor
     """
     Mapping from physical experts to logical experts.
@@ -174,7 +175,7 @@ class EplbState:
     """
     Interval for expert rearrangement steps.
     This is a constant and is taken from the config.
-    """ 
+    """
     layer_to_transfer: int = 0
     """
     The layer index to transfer in async mode.
@@ -187,11 +188,11 @@ class EplbState:
     """
     The lock to protect the expert buffer.
     """
-    expert_buffer:list[torch.Tensor] = field(default_factory=list)
+    expert_buffer: list[torch.Tensor] = field(default_factory=list)
     """
     The buffer to store the expert weights during transfer.
     """
-    rebalanced: bool = False  
+    rebalanced: bool = False
     """
     The flag indicates whether the experts rebalance have been computed.
     """
@@ -476,7 +477,9 @@ class EplbState:
         self.expert_rearrangement_step += 1
 
         if self.is_async and self.ep_buffer_ready:
-            self.move_to_workspace(model=model, ep_group=ep_group, is_profile=is_profile)
+            self.move_to_workspace(model=model,
+                                   ep_group=ep_group,
+                                   is_profile=is_profile)
         if (self.expert_rearrangement_step
                 >= self.expert_rearrangement_step_interval):
             self.expert_rearrangement_step = 0
@@ -606,7 +609,8 @@ class EplbState:
                 self.physical_to_logical_map = self.new_physical_to_logical_map.to(
                     self.physical_to_logical_map.device)
             else:
-                self.physical_to_logical_map.copy_(self.new_physical_to_logical_map)
+                self.physical_to_logical_map.copy_(
+                    self.new_physical_to_logical_map)
             max_physical_slots = self.new_logical_to_physical_map.shape[-1]
             assert max_physical_slots <= self.logical_to_physical_map.shape[-1]
             self.new_logical_to_physical_map = torch.nn.functional.pad(
