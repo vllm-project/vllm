@@ -546,9 +546,9 @@ class EngineArgs:
             default=EngineArgs.disable_async_output_proc,
             help="Disable async output processing. This may result in "
             "lower performance.")
-        model_group.add_argument("--config-format",
-                                 metavar=",".join(get_args(ConfigFormat)),
-                                 **model_kwargs["config_format"])
+        config_format_kwargs = model_kwargs["config_format"].copy()
+        config_format_kwargs["metavar"] = ",".join(get_args(ConfigFormat))
+        model_group.add_argument("--config-format", **config_format_kwargs)
         # This one is a special case because it can bool
         # or str. TODO: Handle this in get_kwargs
         model_group.add_argument("--hf-token",
