@@ -1,21 +1,23 @@
+from typing import Optional
 from unittest import mock
 
 import pytest
 
+from vllm.platforms import current_platform
+from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
+                         VllmConfig)
 from vllm.v1.spec_decode.eagle import EagleProposer
-from vllm.tests.v1.spec_decode.eagle import _create_proposer
 
 # NousResearch model is identical to meta-llama/Meta-Llama-3-8B-Instruct but doesn't need Meta to grant permission
 model_path: str = "NousResearch/Meta-Llama-3-8B-Instruct"
 draft_model_path: str = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
 draft_vocab_pruned: str = 'thunlp/LLaMA3-Instruct-8B-FR-Spec/freq_32768.pt'
 
-
 def _create_proposer(
     num_speculative_tokens: int,
     speculative_token_tree: Optional[list[tuple[int]]] = None,
-    speculative_decode: bool = False,
-    prune_vocab: bool = False,
+    do_prune_vocab: bool = False,
 ) -> EagleProposer:
     model_config = ModelConfig(model=model_path,
                                runner="generate",
@@ -30,16 +32,16 @@ def _create_proposer(
         target_model_config=model_config,
         target_parallel_config=ParallelConfig(),
         model=draft_model_path,
-        method=method,
+        method="eagle",
         num_speculative_tokens=num_speculative_tokens,
         speculative_token_tree=spec_token_tree_str,
-        draft_vocab_pruned=draft_vocab_pruned if prune_vocab else None,
+        draft_vocab_pruned=draft_vocab_pruned if do_prune_vocab else None,
     )
 
     vllm_config = VllmConfig(
         model_config=model_config,
         cache_config=CacheConfig(),
-        speculative_config=speculative_config if speculative_decode else None,
+        speculative_config=speculative_config,
         device_config=DeviceConfig(device=current_platform.device_type),
         parallel_config=ParallelConfig(),
         load_config=LoadConfig(),
@@ -51,4 +53,10 @@ def _create_proposer(
 
 def test_load_pruned_vocab():
     proposer = _create_proposer(2)
-    assert proposer.model.lm_head.data.shape
+    proposer.load_model(target_model)
+
+    proposer_pruned = _create_proposer(2, do_prune_vocab=True)
+    proposer_pruned.load_model(target_model)
+
+    assert proposer.model.lm_head.data.shape < proposer_pruned.model.lm_head.data.shape
+    assert proposer.model.embed_tokens.data.shape == proposer_pruned.model.embed_tokens.data.shape
