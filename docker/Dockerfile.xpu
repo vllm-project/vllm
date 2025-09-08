@@ -1,12 +1,10 @@
 FROM intel/deep-learning-essentials:2025.1.3-0-devel-ubuntu24.04 AS vllm-base
 
-RUN rm /etc/apt/sources.list.d/intel-graphics.list
+RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null && \
+    echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | tee /etc/apt/sources.list.d/oneAPI.list && \
+    add-apt-repository -y ppa:kobuk-team/intel-graphics
 
 RUN apt clean && apt-get update -y && \
-    apt-get install -y software-properties-common && \
-    add-apt-repository ppa:deadsnakes/ppa && \
-    apt-get install -y python3.10 python3.10-distutils && \
-    curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10 && \
     apt-get install -y --no-install-recommends --fix-missing \
     curl \
     ffmpeg \
@@ -17,16 +15,28 @@ RUN apt clean && apt-get update -y && \
     libgl1 \
     lsb-release \
     numactl \
-    python3.10-dev \
-    wget
+    wget \
+    vim \
+    python3.12 \
+    python3.12-dev \
+    python3-pip
 
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1
 
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1
-RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1
+RUN apt install -y libze1 libze-dev libze-intel-gpu1 intel-opencl-icd libze-intel-gpu-raytracing
+
+RUN wget https://github.com/uxlfoundation/oneCCL/releases/download/2021.15.4/intel-oneccl-2021.15.4.11_offline.sh
+RUN bash intel-oneccl-2021.15.4.11_offline.sh -a --silent --eula accept && echo "source /opt/intel/oneapi/setvars.sh --force" >> /root/.bashrc
+SHELL ["bash", "-c"]
+CMD ["bash", "-c", "source /root/.bashrc && exec bash"]
 
 WORKDIR /workspace/vllm
 COPY requirements/xpu.txt /workspace/vllm/requirements/xpu.txt
 COPY requirements/common.txt /workspace/vllm/requirements/common.txt
+
+# suppress the python externally managed environment error
+RUN python3 -m pip config set global.break-system-packages true
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --no-cache-dir \
@@ -54,8 +64,9 @@ FROM vllm-base AS vllm-openai
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install accelerate hf_transfer pytest pytest_asyncio lm_eval[api] modelscope
 
-ENV VLLM_USAGE_SOURCE production-docker-image \
-    TRITON_XPU_PROFILE 1
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip uninstall oneccl oneccl-devel -y
+
 # install development dependencies (for testing)
 RUN python3 -m pip install -e tests/vllm_test_utils
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
