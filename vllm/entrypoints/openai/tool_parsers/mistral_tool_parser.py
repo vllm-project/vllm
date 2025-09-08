@@ -143,7 +143,7 @@ class MistralToolParser(ToolParser):
             except json.JSONDecodeError:
                 # use a regex to find the part corresponding to the tool call.
                 # NOTE: This use case should not happen if the model is trained
-                # correctly. It's a easy possible fix so it's included, but
+                # correctly. It's an easy possible fix so it's included, but
                 # can be brittle for very complex / highly nested tool calls
                 raw_tool_call = self.tool_call_regex.findall(tool_content)[0]
                 function_call_arr = json.loads(raw_tool_call)
