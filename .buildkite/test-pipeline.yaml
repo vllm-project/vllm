@@ -44,6 +44,7 @@ steps:
 - label: Async Engine, Inputs, Utils, Worker Test # 36min
   timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental]
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/
   - tests/mq_llm_engine
@@ -56,13 +57,14 @@ steps:
   - tests/standalone_tests/lazy_imports.py
   commands:
   - python3 standalone_tests/lazy_imports.py
-  - pytest -v -s mq_llm_engine # MQLLMEngine
-  - pytest -v -s async_engine # AsyncLLMEngine
-  - pytest -v -s test_inputs.py
-  - pytest -v -s test_outputs.py
-  - pytest -v -s multimodal
-  - pytest -v -s utils_ # Utils
-  - pytest -v -s worker # Worker
+  - COVERAGE_FILE=.coverage.async_engine pytest -v -s --cov=vllm --cov-report= --cov-append mq_llm_engine || true # MQLLMEngine
+  - COVERAGE_FILE=.coverage.async_engine pytest -v -s --cov=vllm --cov-report= --cov-append async_engine || true # AsyncLLMEngine
+  - COVERAGE_FILE=.coverage.async_engine pytest -v -s --cov=vllm --cov-report= --cov-append test_inputs.py || true
+  - COVERAGE_FILE=.coverage.async_engine pytest -v -s --cov=vllm --cov-report= --cov-append test_outputs.py
+  - COVERAGE_FILE=.coverage.async_engine pytest -v -s --cov=vllm --cov-report= --cov-append multimodal
+  - COVERAGE_FILE=.coverage.async_engine pytest -v -s --cov=vllm --cov-report= --cov-append utils_ # Utils
+  - COVERAGE_FILE=.coverage.async_engine pytest -v -s --cov=vllm --cov-report= --cov-append worker # Worker
+  - buildkite-agent artifact upload .coverage.async_engine
 
 - label: Python-only Installation Test # 10min
   timeout_in_minutes: 20
@@ -75,9 +77,10 @@ steps:
 
 - label: Basic Correctness Test # 20min
   timeout_in_minutes: 30
-  mirror_hardwares: [amdexperimental]
+  # mirror_hardwares: [amdexperimental]
   fast_check: true
   torch_nightly: true
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/
   - tests/basic_correctness/test_basic_correctness
@@ -86,21 +89,24 @@ steps:
   - tests/basic_correctness/test_cumem.py
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s basic_correctness/test_cumem.py
-  - pytest -v -s basic_correctness/test_basic_correctness.py
-  - pytest -v -s basic_correctness/test_cpu_offload.py
-  - VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py
-
+  - COVERAGE_FILE=.coverage.basic pytest -v -s --cov=vllm --cov-report= --cov-append basic_correctness/test_cumem.py || true
+  - COVERAGE_FILE=.coverage.basic pytest -v -s --cov=vllm --cov-report= --cov-append basic_correctness/test_basic_correctness.py || true
+  - COVERAGE_FILE=.coverage.basic pytest -v -s --cov=vllm --cov-report= --cov-append basic_correctness/test_cpu_offload.py || true
+  - VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 COVERAGE_FILE=.coverage.basic pytest -v -s --cov=vllm --cov-report= --cov-append basic_correctness/test_preemption.py || true
+  - buildkite-agent artifact upload .coverage.basic
 - label: Core Test # 22min
+
   timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental]
   fast_check: true
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/core
   - vllm/distributed
   - tests/core
   commands:
-  - pytest -v -s core
+  - COVERAGE_FILE=.coverage.core pytest -v -s --cov=vllm --cov-report= --cov-append core
+  - buildkite-agent artifact upload .coverage.core
 
 - label: Entrypoints Test (LLM) # 30min
   timeout_in_minutes: 40
@@ -108,16 +114,18 @@ steps:
   working_dir: "/vllm-workspace/tests"
   fast_check: true
   torch_nightly: true
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/llm
   - tests/entrypoints/offline_mode
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
-  - pytest -v -s entrypoints/llm/test_lazy_outlines.py # it needs a clean process
-  - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
-  - VLLM_USE_V1=0 pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
+  - COVERAGE_FILE=.coverage.entrypoints_llm pytest -v -s --cov=vllm --cov-report= --cov-append entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
+  - COVERAGE_FILE=.coverage.entrypoints_llm pytest -v -s --cov=vllm --cov-report= --cov-append entrypoints/llm/test_lazy_outlines.py # it needs a clean process
+  - COVERAGE_FILE=.coverage.entrypoints_llm pytest -v -s --cov=vllm --cov-report= --cov-append entrypoints/llm/test_generate.py # it needs a clean process
+  - VLLM_USE_V1=0 COVERAGE_FILE=.coverage.entrypoints_llm pytest -v -s --cov=vllm --cov-report= --cov-append entrypoints/offline_mode # Needs to avoid interference with other tests
+  - buildkite-agent artifact upload .coverage.entrypoints_llm
 
 - label: Entrypoints Test (API Server) # 100min
   timeout_in_minutes: 130
@@ -125,21 +133,24 @@ steps:
   working_dir: "/vllm-workspace/tests"
   fast_check: true
   torch_nightly: true
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/openai
   - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/openai/test_collective_rpc.py # PYTHONPATH is needed to import custom Worker extension
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/test_oot_registration.py --ignore=entrypoints/openai/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/test_collective_rpc.py
-  - pytest -v -s entrypoints/test_chat_utils.py
+  - PYTHONPATH=/vllm-workspace COVERAGE_FILE=.coverage.entrypoints_api pytest -v -s --cov=vllm --cov-report= --cov-append entrypoints/openai/test_collective_rpc.py # PYTHONPATH is needed to import custom Worker extension
+  - COVERAGE_FILE=.coverage.entrypoints_api pytest -v -s --cov=vllm --cov-report= --cov-append entrypoints/openai --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/test_oot_registration.py --ignore=entrypoints/openai/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/test_collective_rpc.py
+  - COVERAGE_FILE=.coverage.entrypoints_api pytest -v -s --cov=vllm --cov-report= --cov-append entrypoints/test_chat_utils.py
+  - buildkite-agent artifact upload .coverage.entrypoints_api
 
 - label: Distributed Tests (4 GPUs) # 35min
   timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/distributed/
   - vllm/core/
@@ -163,57 +174,64 @@ steps:
   - PP_SIZE=2 torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
   # test with internal dp
   - python3 ../examples/offline_inference/data_parallel.py --enforce-eager
-  - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/test_async_llm_dp.py
-  - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/test_external_lb_dp.py
-  - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/test_internal_lb_dp.py
-  - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/test_hybrid_lb_dp.py
-  - pytest -v -s v1/engine/test_engine_core_client.py::test_kv_cache_events_dp
-  - pytest -v -s distributed/test_utils.py
-  - pytest -v -s compile/test_basic_correctness.py
-  - pytest -v -s distributed/test_pynccl.py
-  - pytest -v -s distributed/test_events.py
+  - TP_SIZE=2 DP_SIZE=2 COVERAGE_FILE=.coverage.distributed_4gpu pytest -v -s --cov=vllm --cov-report= --cov-append v1/test_async_llm_dp.py
+  - TP_SIZE=2 DP_SIZE=2 COVERAGE_FILE=.coverage.distributed_4gpu pytest -v -s --cov=vllm --cov-report= --cov-append v1/test_external_lb_dp.py
+  - TP_SIZE=1 DP_SIZE=4 COVERAGE_FILE=.coverage.distributed_4gpu pytest -v -s --cov=vllm --cov-report= --cov-append v1/test_internal_lb_dp.py
+  - TP_SIZE=1 DP_SIZE=4 COVERAGE_FILE=.coverage.distributed_4gpu pytest -v -s --cov=vllm --cov-report= --cov-append v1/test_hybrid_lb_dp.py
+  - COVERAGE_FILE=.coverage.distributed_4gpu pytest -v -s --cov=vllm --cov-report= --cov-append v1/engine/test_engine_core_client.py::test_kv_cache_events_dp
+  - COVERAGE_FILE=.coverage.distributed_4gpu pytest -v -s --cov=vllm --cov-report= --cov-append distributed/test_utils.py
+  - COVERAGE_FILE=.coverage.distributed_4gpu pytest -v -s --cov=vllm --cov-report= --cov-append compile/test_basic_correctness.py
+  - COVERAGE_FILE=.coverage.distributed_4gpu pytest -v -s --cov=vllm --cov-report= --cov-append distributed/test_pynccl.py
+  - COVERAGE_FILE=.coverage.distributed_4gpu pytest -v -s --cov=vllm --cov-report= --cov-append distributed/test_events.py
   # TODO: create a dedicated test section for multi-GPU example tests
   # when we have multiple distributed example tests
   - pushd ../examples/offline_inference
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 RAY_DEDUP_LOGS=0 python3 rlhf_colocate.py
   - popd
+  - buildkite-agent artifact upload .coverage.distributed_4gpu
 
 - label: EPLB Algorithm Test # 5min
   timeout_in_minutes: 15
   working_dir: "/vllm-workspace/tests"
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/distributed/eplb
   - tests/distributed/test_eplb_algo.py
   commands:
-  - pytest -v -s distributed/test_eplb_algo.py
+  - COVERAGE_FILE=.coverage.eplb_algo pytest -v -s --cov=vllm --cov-report= --cov-append distributed/test_eplb_algo.py
+  - buildkite-agent artifact upload .coverage.eplb_algo
 
 - label: EPLB Execution Test # 5min
   timeout_in_minutes: 15
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/distributed/eplb
   - tests/distributed/test_eplb_execute.py
   commands:
-  - pytest -v -s distributed/test_eplb_execute.py
+  - COVERAGE_FILE=.coverage.eplb_execute pytest -v -s --cov=vllm --cov-report= --cov-append distributed/test_eplb_execute.py
+  - buildkite-agent artifact upload .coverage.eplb_execute
 
 - label: Metrics, Tracing Test # 12min
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental]
   num_gpus: 2
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/
   - tests/metrics
   - tests/tracing
   commands:
-  - pytest -v -s metrics
+  - COVERAGE_FILE=.coverage.metrics pytest -v -s --cov=vllm --cov-report= --cov-append metrics
   - "pip install \
       'opentelemetry-sdk>=1.26.0' \
       'opentelemetry-api>=1.26.0' \
       'opentelemetry-exporter-otlp>=1.26.0' \
       'opentelemetry-semantic-conventions-ai>=0.4.1'"
-  - pytest -v -s tracing
+  - COVERAGE_FILE=.coverage.metrics pytest -v -s --cov=vllm --cov-report= --cov-append tracing
+  - buildkite-agent artifact upload .coverage.metrics
 
 ##### fast check tests  #####
 #####  1 GPU test  #####
@@ -221,17 +239,20 @@ steps:
 - label: Regression Test # 7min
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental]
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/
   - tests/test_regression
   commands:
   - pip install modelscope
-  - pytest -v -s test_regression.py
+  - COVERAGE_FILE=.coverage.regression pytest -v -s --cov=vllm --cov-report= --cov-append test_regression.py
+  - buildkite-agent artifact upload .coverage.regression
   working_dir: "/vllm-workspace/tests" # optional
 
 - label: Engine Test # 25min
   timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental]
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/
   - tests/engine
@@ -241,55 +262,62 @@ steps:
   - tests/test_logger
   - tests/test_vllm_port
   commands:
-  - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py
+  - COVERAGE_FILE=.coverage.engine pytest -v -s --cov=vllm --cov-report= --cov-append engine test_sequence.py test_config.py test_logger.py test_vllm_port.py
   # OOM in the CI unless we run this separately
-  - pytest -v -s tokenization
+  - COVERAGE_FILE=.coverage.engine pytest -v -s --cov=vllm --cov-report= --cov-append tokenization
+  - buildkite-agent artifact upload .coverage.engine
 
 - label: V1 Test e2e + engine # 30min
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
+  mount_buildkite_agent: true
   source_file_dependencies:
     - vllm/
     - tests/v1
   commands:
     # TODO: accuracy does not match, whether setting
     # VLLM_USE_FLASHINFER_SAMPLER or not on H100.
-    - pytest -v -s v1/e2e
-    - pytest -v -s v1/engine
+    - COVERAGE_FILE=.coverage.v1_e2e pytest -v -s --cov=vllm --cov-report= --cov-append v1/e2e
+    - COVERAGE_FILE=.coverage.v1_e2e pytest -v -s --cov=vllm --cov-report= --cov-append v1/engine
+    - buildkite-agent artifact upload .coverage.v1_e2e
 
 - label: V1 Test entrypoints # 35min
   timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental]
+  mount_buildkite_agent: true
   source_file_dependencies:
     - vllm/
     - tests/v1
   commands:
-    - pytest -v -s v1/entrypoints
+    - COVERAGE_FILE=.coverage.v1_entrypoints pytest -v -s --cov=vllm --cov-report= --cov-append v1/entrypoints
+    - buildkite-agent artifact upload .coverage.v1_entrypoints
 
 - label: V1 Test others # 42min
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental]
+  mount_buildkite_agent: true
   source_file_dependencies:
     - vllm/
     - tests/v1
   commands:
     # split the test to avoid interference
-    - pytest -v -s v1/core
-    - pytest -v -s v1/executor
-    - pytest -v -s v1/sample
-    - pytest -v -s v1/logits_processors
-    - pytest -v -s v1/worker
-    - pytest -v -s v1/structured_output
-    - pytest -v -s v1/spec_decode
-    - pytest -v -s v1/kv_connector/unit
-    - pytest -v -s v1/metrics
-    - pytest -v -s v1/test_serial_utils.py
-    - pytest -v -s v1/test_utils.py
-    - pytest -v -s v1/test_oracle.py
-    - pytest -v -s v1/test_metrics_reader.py
+    - COVERAGE_FILE=.coverage.v1_others pytest -v -s --cov=vllm --cov-report= --cov-append v1/core
+    - COVERAGE_FILE=.coverage.v1_others pytest -v -s --cov=vllm --cov-report= --cov-append v1/executor
+    - COVERAGE_FILE=.coverage.v1_others pytest -v -s --cov=vllm --cov-report= --cov-append v1/sample
+    - COVERAGE_FILE=.coverage.v1_others pytest -v -s --cov=vllm --cov-report= --cov-append v1/logits_processors
+    - COVERAGE_FILE=.coverage.v1_others pytest -v -s --cov=vllm --cov-report= --cov-append v1/worker
+    - COVERAGE_FILE=.coverage.v1_others pytest -v -s --cov=vllm --cov-report= --cov-append v1/structured_output
+    - COVERAGE_FILE=.coverage.v1_others pytest -v -s --cov=vllm --cov-report= --cov-append v1/spec_decode
+    - COVERAGE_FILE=.coverage.v1_others pytest -v -s --cov=vllm --cov-report= --cov-append v1/kv_connector/unit
+    - COVERAGE_FILE=.coverage.v1_others pytest -v -s --cov=vllm --cov-report= --cov-append v1/metrics
+    - COVERAGE_FILE=.coverage.v1_others pytest -v -s --cov=vllm --cov-report= --cov-append v1/test_serial_utils.py
+    - COVERAGE_FILE=.coverage.v1_others pytest -v -s --cov=vllm --cov-report= --cov-append v1/test_utils.py
+    - COVERAGE_FILE=.coverage.v1_others pytest -v -s --cov=vllm --cov-report= --cov-append v1/test_oracle.py
+    - COVERAGE_FILE=.coverage.v1_others pytest -v -s --cov=vllm --cov-report= --cov-append v1/test_metrics_reader.py
     # Integration test for streaming correctness (requires special branch).
     - pip install -U git+https://github.com/robertgshaw2-redhat/lm-evaluation-harness.git@streaming-api
-    - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
+    - COVERAGE_FILE=.coverage.v1_others pytest -v -s --cov=vllm --cov-report= --cov-append entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
+    - buildkite-agent artifact upload .coverage.v1_others
 
 - label: Examples Test # 30min
   timeout_in_minutes: 45
@@ -320,116 +348,134 @@ steps:
 - label: Platform Tests (CUDA) # 4min
   timeout_in_minutes: 15
   mirror_hardwares: [amdexperimental]
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/
   - tests/cuda
   commands:
-    - pytest -v -s cuda/test_cuda_context.py
+    - COVERAGE_FILE=.coverage.cuda pytest -v -s --cov=vllm --cov-report= --cov-append cuda/test_cuda_context.py
+    - buildkite-agent artifact upload .coverage.cuda
 
 - label: Samplers Test # 56min
   timeout_in_minutes: 75
   mirror_hardwares: [amdexperimental]
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/model_executor/layers
   - vllm/sampling_metadata.py
   - tests/samplers
   - tests/conftest.py
   commands:
-    - pytest -v -s samplers
-    - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers
+    - COVERAGE_FILE=.coverage.samplers pytest -v -s --cov=vllm --cov-report= --cov-append samplers
+    - VLLM_USE_FLASHINFER_SAMPLER=1 COVERAGE_FILE=.coverage.samplers pytest -v -s --cov=vllm --cov-report= --cov-append samplers
+    - buildkite-agent artifact upload .coverage.samplers
 
 - label: LoRA Test %N # 20min each
-  timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental]
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/lora
   - tests/lora
   commands:
-    - pytest -v -s lora \
+    - COVERAGE_FILE=.coverage.lora pytest -v -s --cov=vllm --cov-report= --cov-append lora \
       --shard-id=$$BUILDKITE_PARALLEL_JOB \
       --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT \
       --ignore=lora/test_chatglm3_tp.py \
       --ignore=lora/test_llama_tp.py \
       --ignore=lora/test_llm_with_multi_loras.py
+    - buildkite-agent artifact upload .coverage.lora
   parallelism: 4
 
 - label: PyTorch Compilation Unit Tests # 15min
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
+  mount_buildkite_agent: true
   source_file_dependencies:
     - vllm/
     - tests/compile
   commands:
-    - pytest -v -s compile/test_pass_manager.py
-    - pytest -v -s compile/test_fusion.py
-    - pytest -v -s compile/test_fusion_attn.py
-    - pytest -v -s compile/test_silu_mul_quant_fusion.py
-    - pytest -v -s compile/test_sequence_parallelism.py
-    - pytest -v -s compile/test_async_tp.py
-    - pytest -v -s compile/test_fusion_all_reduce.py
-    - pytest -v -s compile/test_decorator.py
+    - COVERAGE_FILE=.coverage.compile_unit pytest -v -s --cov=vllm --cov-report= --cov-append compile/test_pass_manager.py
+    - COVERAGE_FILE=.coverage.compile_unit pytest -v -s --cov=vllm --cov-report= --cov-append compile/test_fusion.py
+    - COVERAGE_FILE=.coverage.compile_unit pytest -v -s --cov=vllm --cov-report= --cov-append compile/test_fusion_attn.py
+    - COVERAGE_FILE=.coverage.compile_unit pytest -v -s --cov=vllm --cov-report= --cov-append compile/test_silu_mul_quant_fusion.py
+    - COVERAGE_FILE=.coverage.compile_unit pytest -v -s --cov=vllm --cov-report= --cov-append compile/test_sequence_parallelism.py
+    - COVERAGE_FILE=.coverage.compile_unit pytest -v -s --cov=vllm --cov-report= --cov-append compile/test_async_tp.py
+    - COVERAGE_FILE=.coverage.compile_unit pytest -v -s --cov=vllm --cov-report= --cov-append compile/test_fusion_all_reduce.py
+    - COVERAGE_FILE=.coverage.compile_unit pytest -v -s --cov=vllm --cov-report= --cov-append compile/test_decorator.py
+    - buildkite-agent artifact upload .coverage.compile_unit
 
 - label: PyTorch Fullgraph Smoke Test # 15min
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/
   - tests/compile
   commands:
-  - pytest -v -s compile/test_basic_correctness.py
+  - COVERAGE_FILE=.coverage.compile_smoke pytest -v -s --cov=vllm --cov-report= --cov-append compile/test_basic_correctness.py
   # these tests need to be separated, cannot combine
-  - pytest -v -s compile/piecewise/test_simple.py
-  - pytest -v -s compile/piecewise/test_toy_llama.py
-  - pytest -v -s compile/piecewise/test_full_cudagraph.py
-  - pytest -v -s compile/piecewise/test_multiple_graphs.py
+  - COVERAGE_FILE=.coverage.compile_smoke pytest -v -s --cov=vllm --cov-report= --cov-append compile/piecewise/test_simple.py
+  - COVERAGE_FILE=.coverage.compile_smoke pytest -v -s --cov=vllm --cov-report= --cov-append compile/piecewise/test_toy_llama.py
+  - COVERAGE_FILE=.coverage.compile_smoke pytest -v -s --cov=vllm --cov-report= --cov-append compile/piecewise/test_full_cudagraph.py
+  - COVERAGE_FILE=.coverage.compile_smoke pytest -v -s --cov=vllm --cov-report= --cov-append compile/piecewise/test_multiple_graphs.py
+  - buildkite-agent artifact upload .coverage.compile_smoke
 
 - label: PyTorch Fullgraph Test # 20min
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/
   - tests/compile
   commands:
-  - pytest -v -s compile/test_full_graph.py
+  - COVERAGE_FILE=.coverage.compile_full pytest -v -s --cov=vllm --cov-report= --cov-append compile/test_full_graph.py
+  - buildkite-agent artifact upload .coverage.compile_full
 
 - label: Kernels Core Operation Test # 48min
   timeout_in_minutes: 75
   mirror_hardwares: [amdexperimental]
+  mount_buildkite_agent: true
   source_file_dependencies:
   - csrc/
   - tests/kernels/core
   commands:
-    - pytest -v -s kernels/core
+    - COVERAGE_FILE=.coverage.kernels_core pytest -v -s --cov=vllm --cov-report= --cov-append kernels/core
+    - buildkite-agent artifact upload .coverage.kernels_core
 
 - label: Kernels Attention Test %N # 23min
   timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental]
+  mount_buildkite_agent: true
   source_file_dependencies:
   - csrc/attention/
   - vllm/attention
   - vllm/v1/attention
   - tests/kernels/attention
   commands:
-    - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+    - COVERAGE_FILE=.coverage.kernels_attn pytest -v -s --cov=vllm --cov-report= --cov-append kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+    - buildkite-agent artifact upload .coverage.kernels_attn
   parallelism: 2
 
 - label: Kernels Quantization Test %N # 64min
   timeout_in_minutes: 90
   mirror_hardwares: [amdexperimental]
+  mount_buildkite_agent: true
   source_file_dependencies:
   - csrc/quantization/
   - vllm/model_executor/layers/quantization
   - tests/kernels/quantization
   commands:
-    - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+    - COVERAGE_FILE=.coverage.kernels_quant pytest -v -s --cov=vllm --cov-report= --cov-append kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+    - buildkite-agent artifact upload .coverage.kernels_quant
   parallelism: 2
 
 - label: Kernels MoE Test %N # 40min
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental]
+  mount_buildkite_agent: true
   source_file_dependencies:
   - csrc/quantization/cutlass_w8a8/moe/
   - csrc/moe/
@@ -437,21 +483,25 @@ steps:
   - vllm/model_executor/layers/fused_moe/
   - vllm/distributed/device_communicators/
   commands:
-    - pytest -v -s kernels/moe --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+    - COVERAGE_FILE=.coverage.kernels_moe pytest -v -s --cov=vllm --cov-report= --cov-append kernels/moe --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+    - buildkite-agent artifact upload .coverage.kernels_moe
   parallelism: 2
 
 - label: Kernels Mamba Test # 31min
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
+  mount_buildkite_agent: true
   source_file_dependencies:
   - csrc/mamba/
   - tests/kernels/mamba
   commands:
-    - pytest -v -s kernels/mamba
+    - COVERAGE_FILE=.coverage.kernels_mamba pytest -v -s --cov=vllm --cov-report= --cov-append kernels/mamba
+    - buildkite-agent artifact upload .coverage.kernels_mamba
 
 - label: Tensorizer Test # 14min
   timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental]
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/model_executor/model_loader
   - tests/tensorizer_loader
@@ -459,24 +509,28 @@ steps:
   commands:
     - apt-get update && apt-get install -y curl libsodium23
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-    - pytest -v -s tensorizer_loader
-    - pytest -v -s entrypoints/openai/test_tensorizer_entrypoint.py
+    - COVERAGE_FILE=.coverage.tensorizer pytest -v -s --cov=vllm --cov-report= --cov-append tensorizer_loader
+    - COVERAGE_FILE=.coverage.tensorizer pytest -v -s --cov=vllm --cov-report= --cov-append entrypoints/openai/test_tensorizer_entrypoint.py
+    - buildkite-agent artifact upload .coverage.tensorizer
 
 - label: Model Executor Test # 7min
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental]
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/model_executor
   - tests/model_executor
   commands:
     - apt-get update && apt-get install -y curl libsodium23
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-    - pytest -v -s model_executor
+    - COVERAGE_FILE=.coverage.model_executor pytest -v -s --cov=vllm --cov-report= --cov-append model_executor
+    - buildkite-agent artifact upload .coverage.model_executor
 
 - label: Benchmarks # 11min
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/.buildkite"
+  mount_buildkite_agent: true
   source_file_dependencies:
   - benchmarks/
   commands:
@@ -494,6 +548,7 @@ steps:
 - label: Quantization Test # 70min
   timeout_in_minutes: 90
   mirror_hardwares: [amdexperimental]
+  mount_buildkite_agent: true
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
@@ -502,47 +557,56 @@ steps:
   # temporary install here since we need nightly, will move to requirements/test.in
   # after torchao 0.12 release, and pin a working version of torchao nightly here
   - pip install --pre torchao==0.13.0.dev20250814 --index-url https://download.pytorch.org/whl/nightly/cu128
-  - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization
+  - VLLM_TEST_FORCE_LOAD_FORMAT=auto COVERAGE_FILE=.coverage.quantization pytest -v -s --cov=vllm --cov-report= --cov-append quantization
+  - buildkite-agent artifact upload .coverage.quantization
 
 - label: LM Eval Small Models # 53min
   timeout_in_minutes: 75
   mirror_hardwares: [amdexperimental]
+  mount_buildkite_agent: true
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
   commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt --tp-size=1
+  - COVERAGE_FILE=.coverage.lm_eval pytest -s -v --cov=vllm --cov-report= --cov-append evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt --tp-size=1
+  - buildkite-agent artifact upload .coverage.lm_eval
 
 - label: OpenAI API correctness # 22min
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental]
+  mount_buildkite_agent: true
   source_file_dependencies:
   - csrc/
   - vllm/entrypoints/openai/
   - vllm/model_executor/models/whisper.py
   commands: # LMEval+Transcription WER check
-  - pytest -s entrypoints/openai/correctness/
+  - COVERAGE_FILE=.coverage.openai_correctness pytest -s --cov=vllm --cov-report= --cov-append entrypoints/openai/correctness/
+  - buildkite-agent artifact upload .coverage.openai_correctness
 
 - label: Encoder Decoder tests # 12min
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental]
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/
   - tests/encoder_decoder
   commands:
-    - pytest -v -s encoder_decoder
+    - COVERAGE_FILE=.coverage.encoder_decoder pytest -v -s --cov=vllm --cov-report= --cov-append encoder_decoder
+    - buildkite-agent artifact upload .coverage.encoder_decoder
 
 - label: OpenAI-Compatible Tool Use # 23 min
   timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental]
   fast_check: false
+  mount_buildkite_agent: true
   source_file_dependencies:
     - vllm/
     - tests/tool_use
     - tests/mistral_tool_use
   commands:
-    - pytest -v -s tool_use
-    - pytest -v -s mistral_tool_use
+    - COVERAGE_FILE=.coverage.tool_use pytest -v -s --cov=vllm --cov-report= --cov-append tool_use
+    - COVERAGE_FILE=.coverage.tool_use pytest -v -s --cov=vllm --cov-report= --cov-append mistral_tool_use
+    - buildkite-agent artifact upload .coverage.tool_use
 
 #####  models test  #####
 
@@ -550,31 +614,36 @@ steps:
   timeout_in_minutes: 75
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/
   - tests/models
   commands:
-    - pytest -v -s models/test_transformers.py
-    - pytest -v -s models/test_registry.py
-    - pytest -v -s models/test_utils.py
-    - pytest -v -s models/test_vision.py
-    - pytest -v -s models/test_initialization.py
+    - COVERAGE_FILE=.coverage.basic_models pytest -v -s --cov=vllm --cov-report= --cov-append models/test_transformers.py
+    - COVERAGE_FILE=.coverage.basic_models pytest -v -s --cov=vllm --cov-report= --cov-append models/test_registry.py
+    - COVERAGE_FILE=.coverage.basic_models pytest -v -s --cov=vllm --cov-report= --cov-append models/test_utils.py
+    - COVERAGE_FILE=.coverage.basic_models pytest -v -s --cov=vllm --cov-report= --cov-append models/test_vision.py
+    - COVERAGE_FILE=.coverage.basic_models pytest -v -s --cov=vllm --cov-report= --cov-append models/test_initialization.py
+    - buildkite-agent artifact upload .coverage.basic_models
 
 - label: Language Models Test (Standard) # 35min
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/
   - tests/models/language
   commands:
     - pip freeze | grep -E 'torch'
-    - pytest -v -s models/language -m core_model
+    - COVERAGE_FILE=.coverage.language_standard pytest -v -s --cov=vllm --cov-report= --cov-append models/language -m core_model
+    - buildkite-agent artifact upload .coverage.language_standard
 
 - label: Language Models Test (Hybrid) # 35 min
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/
   - tests/models/language/generation
@@ -583,90 +652,107 @@ steps:
     # Note: also needed to run plamo2 model in vLLM
     - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.2.5'
     - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
-    - pytest -v -s models/language/generation -m hybrid_model
+    - COVERAGE_FILE=.coverage.language_hybrid pytest -v -s --cov=vllm --cov-report= --cov-append models/language/generation -m hybrid_model
+    - buildkite-agent artifact upload .coverage.language_hybrid
 
 - label: Language Models Test (Extended Generation) # 80min
   timeout_in_minutes: 110
   mirror_hardwares: [amdexperimental]
   optional: true
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/
   - tests/models/language/generation
   commands:
     # Install causal-conv1d for plamo2 models here, as it is not compatible with pip-compile.
     - pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8'
-    - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
+    - COVERAGE_FILE=.coverage.language_extended pytest -v -s --cov=vllm --cov-report= --cov-append models/language/generation -m '(not core_model) and (not hybrid_model)'
+    - buildkite-agent artifact upload .coverage.language_extended
 
 - label: Language Models Test (Extended Pooling)  # 36min
   timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental]
   optional: true
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/
   - tests/models/language/pooling
   commands:
-    - pytest -v -s models/language/pooling -m 'not core_model'
+    - COVERAGE_FILE=.coverage.language_pooling pytest -v -s --cov=vllm --cov-report= --cov-append models/language/pooling -m 'not core_model'
+    - buildkite-agent artifact upload .coverage.language_pooling
 
 - label: Multi-Modal Processor Test # 44min
   timeout_in_minutes: 60
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-    - pytest -v -s models/multimodal/processing
+    - COVERAGE_FILE=.coverage.multimodal_processor pytest -v -s --cov=vllm --cov-report= --cov-append models/multimodal/processing
+    - buildkite-agent artifact upload .coverage.multimodal_processor
 
 - label: Multi-Modal Models Test (Standard) # 60min
   timeout_in_minutes: 80
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pip freeze | grep -E 'torch'
-    - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/processing
-    - cd .. && pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model  # Otherwise, mp_method="spawn" doesn't work
+    - COVERAGE_FILE=.coverage.multimodal_standard pytest -v -s --cov=vllm --cov-report= --cov-append models/multimodal -m core_model --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/processing
+    - cd .. && COVERAGE_FILE=.coverage.multimodal_standard pytest -v -s --cov=vllm --cov-report= --cov-append tests/models/multimodal/generation/test_whisper.py -m core_model  # Otherwise, mp_method="spawn" doesn't work
+    - buildkite-agent artifact upload .coverage.multimodal_standard
 
 - label: Multi-Modal Models Test (Extended) 1
   mirror_hardwares: [amdexperimental]
   optional: true
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-    - pytest -v -s models/multimodal -m 'not core_model' --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/processing
+    - COVERAGE_FILE=.coverage.multimodal_ext1 pytest -v -s --cov=vllm --cov-report= --cov-append models/multimodal -m 'not core_model' --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/processing
+    - buildkite-agent artifact upload .coverage.multimodal_ext1
 
 - label: Multi-Modal Models Test (Extended) 2
   mirror_hardwares: [amdexperimental]
   optional: true
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-    - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
+    - COVERAGE_FILE=.coverage.multimodal_ext2 pytest -v -s --cov=vllm --cov-report= --cov-append models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
+    - buildkite-agent artifact upload .coverage.multimodal_ext2
 
 - label: Multi-Modal Models Test (Extended) 3
   mirror_hardwares: [amdexperimental]
   optional: true
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-    - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
+    - COVERAGE_FILE=.coverage.multimodal_ext3 pytest -v -s --cov=vllm --cov-report= --cov-append models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
+    - buildkite-agent artifact upload .coverage.multimodal_ext3
 
 - label: Quantized Models Test # 45 min
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental]
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/model_executor/layers/quantization
   - tests/models/quantization
   commands:
-    - pytest -v -s models/quantization
+    - COVERAGE_FILE=.coverage.quantized_models pytest -v -s --cov=vllm --cov-report= --cov-append models/quantization
+    - buildkite-agent artifact upload .coverage.quantized_models
 
 # This test is used only in PR development phase to test individual models and should never run on main
 - label: Custom Models Test
@@ -681,14 +767,16 @@ steps:
 - label: Transformers Nightly Models Test
   working_dir: "/vllm-workspace/"
   optional: true
+  mount_buildkite_agent: true
   commands:
     - pip install --upgrade git+https://github.com/huggingface/transformers
-    - pytest -v -s tests/models/test_initialization.py
-    - pytest -v -s tests/models/multimodal/processing/
-    - pytest -v -s tests/models/multimodal/test_mapping.py
+    - COVERAGE_FILE=.coverage.transformers_nightly pytest -v -s --cov=vllm --cov-report= --cov-append tests/models/test_initialization.py
+    - COVERAGE_FILE=.coverage.transformers_nightly pytest -v -s --cov=vllm --cov-report= --cov-append tests/models/multimodal/processing/
+    - COVERAGE_FILE=.coverage.transformers_nightly pytest -v -s --cov=vllm --cov-report= --cov-append tests/models/multimodal/test_mapping.py
     - python3 examples/offline_inference/basic/chat.py
     - python3 examples/offline_inference/audio_language.py --model-type whisper
     - python3 examples/offline_inference/vision_language.py --model-type qwen2_5_vl
+    - buildkite-agent artifact upload .coverage.transformers_nightly
 
 - label: Blackwell Test # 38 min
   timeout_in_minutes: 60
@@ -711,23 +799,24 @@ steps:
     - python3 examples/offline_inference/basic/chat.py
     # Attention
     # num_heads2 broken by https://github.com/flashinfer-ai/flashinfer/issues/1353
-    - pytest -v -s tests/kernels/attention/test_flashinfer.py -k 'not num_heads2'
-    - pytest -v -s tests/kernels/attention/test_flashinfer_trtllm_attention.py
-    - pytest -v -s tests/kernels/test_cutlass_mla_decode.py
+    - COVERAGE_FILE=.coverage.blackwell pytest -v -s --cov=vllm --cov-report= --cov-append tests/kernels/attention/test_flashinfer.py -k 'not num_heads2'
+    - COVERAGE_FILE=.coverage.blackwell pytest -v -s --cov=vllm --cov-report= --cov-append tests/kernels/attention/test_flashinfer_trtllm_attention.py
+    - COVERAGE_FILE=.coverage.blackwell pytest -v -s --cov=vllm --cov-report= --cov-append tests/kernels/test_cutlass_mla_decode.py
     # Quantization
-    - pytest -v -s tests/kernels/quantization/test_cutlass_scaled_mm.py -k 'fp8'
-    - pytest -v -s tests/kernels/quantization/test_nvfp4_quant.py
-    - pytest -v -s tests/kernels/quantization/test_silu_nvfp4_quant_fusion.py
-    - pytest -v -s tests/kernels/quantization/test_nvfp4_scaled_mm.py
-    - pytest -v -s tests/kernels/quantization/test_flashinfer_scaled_mm.py
-    - pytest -v -s tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
-    - pytest -v -s tests/kernels/moe/test_nvfp4_moe.py
-    - pytest -v -s tests/kernels/moe/test_mxfp4_moe.py
+    - COVERAGE_FILE=.coverage.blackwell pytest -v -s --cov=vllm --cov-report= --cov-append tests/kernels/quantization/test_cutlass_scaled_mm.py -k 'fp8'
+    - COVERAGE_FILE=.coverage.blackwell pytest -v -s --cov=vllm --cov-report= --cov-append tests/kernels/quantization/test_nvfp4_quant.py
+    - COVERAGE_FILE=.coverage.blackwell pytest -v -s --cov=vllm --cov-report= --cov-append tests/kernels/quantization/test_silu_nvfp4_quant_fusion.py
+    - COVERAGE_FILE=.coverage.blackwell pytest -v -s --cov=vllm --cov-report= --cov-append tests/kernels/quantization/test_nvfp4_scaled_mm.py
+    - COVERAGE_FILE=.coverage.blackwell pytest -v -s --cov=vllm --cov-report= --cov-append tests/kernels/quantization/test_flashinfer_scaled_mm.py
+    - COVERAGE_FILE=.coverage.blackwell pytest -v -s --cov=vllm --cov-report= --cov-append tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
+    - COVERAGE_FILE=.coverage.blackwell pytest -v -s --cov=vllm --cov-report= --cov-append tests/kernels/moe/test_nvfp4_moe.py
+    - COVERAGE_FILE=.coverage.blackwell pytest -v -s --cov=vllm --cov-report= --cov-append tests/kernels/moe/test_mxfp4_moe.py
     # Fusion
-    - pytest -v -s tests/compile/test_fusion_all_reduce.py
-    - pytest -v -s tests/compile/test_fusion_attn.py::test_attention_quant_pattern
-    - pytest -v -s tests/kernels/moe/test_flashinfer.py
-    - pytest -v -s tests/compile/test_silu_mul_quant_fusion.py
+    - COVERAGE_FILE=.coverage.blackwell pytest -v -s --cov=vllm --cov-report= --cov-append tests/compile/test_fusion_all_reduce.py
+    - COVERAGE_FILE=.coverage.blackwell pytest -v -s --cov=vllm --cov-report= --cov-append tests/compile/test_fusion_attn.py::test_attention_quant_pattern
+    - COVERAGE_FILE=.coverage.blackwell pytest -v -s --cov=vllm --cov-report= --cov-append tests/kernels/moe/test_flashinfer.py
+    - COVERAGE_FILE=.coverage.blackwell pytest -v -s --cov=vllm --cov-report= --cov-append tests/compile/test_silu_mul_quant_fusion.py
+    - buildkite-agent artifact upload .coverage.blackwell
 
 #####  1 GPU test  #####
 #####  multi gpus test  #####
@@ -737,12 +826,14 @@ steps:
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/distributed
   - tests/distributed
   commands:
-  - pytest -v -s distributed/test_comm_ops.py
-  - pytest -v -s distributed/test_shm_broadcast.py
+  - COVERAGE_FILE=.coverage.distributed_comm pytest -v -s --cov=vllm --cov-report= --cov-append distributed/test_comm_ops.py
+  - COVERAGE_FILE=.coverage.distributed_comm pytest -v -s --cov=vllm --cov-report= --cov-append distributed/test_shm_broadcast.py
+  - buildkite-agent artifact upload .coverage.distributed_comm
 
 - label: 2 Node Tests (4 GPUs in total) # 16min
   timeout_in_minutes: 30
@@ -750,6 +841,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   num_nodes: 2
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/distributed/
   - vllm/engine/
@@ -762,8 +854,9 @@ steps:
     - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed'
     - NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed'
     - python3 ../examples/offline_inference/data_parallel.py --dp-size=2 --tp-size=1 --node-size=2 --node-rank=0 --master-addr=192.168.10.10 --master-port=12345 --enforce-eager --trust-remote-code
-    - VLLM_MULTI_NODE=1 pytest -v -s distributed/test_multi_node_assignment.py
-    - VLLM_MULTI_NODE=1 pytest -v -s distributed/test_pipeline_parallel.py
+    - VLLM_MULTI_NODE=1 COVERAGE_FILE=.coverage.2node pytest -v -s --cov=vllm --cov-report= --cov-append distributed/test_multi_node_assignment.py
+    - VLLM_MULTI_NODE=1 COVERAGE_FILE=.coverage.2node pytest -v -s --cov=vllm --cov-report= --cov-append distributed/test_pipeline_parallel.py
+    - buildkite-agent artifact upload .coverage.2node
   - # the following commands are for the second node, with ip 192.168.10.11 (ray environment already set up)
     - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed'
     - NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed'
@@ -774,6 +867,7 @@ steps:
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/distributed/
   - vllm/engine/
@@ -790,58 +884,62 @@ steps:
   - tests/v1/entrypoints/openai/test_multi_api_servers.py
   - vllm/v1/engine/
   commands:
-  - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/test_async_llm_dp.py
-  - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/test_external_lb_dp.py
-  - DP_SIZE=2 pytest -v -s v1/entrypoints/openai/test_multi_api_servers.py
-  - pytest -v -s entrypoints/llm/test_collective_rpc.py
-  - pytest -v -s ./compile/test_basic_correctness.py
-  - pytest -v -s ./compile/test_wrapper.py
+  - TP_SIZE=1 DP_SIZE=2 COVERAGE_FILE=.coverage.distributed_2gpu pytest -v -s --cov=vllm --cov-report= --cov-append v1/test_async_llm_dp.py
+  - TP_SIZE=1 DP_SIZE=2 COVERAGE_FILE=.coverage.distributed_2gpu pytest -v -s --cov=vllm --cov-report= --cov-append v1/test_external_lb_dp.py
+  - DP_SIZE=2 COVERAGE_FILE=.coverage.distributed_2gpu pytest -v -s --cov=vllm --cov-report= --cov-append v1/entrypoints/openai/test_multi_api_servers.py
+  - COVERAGE_FILE=.coverage.distributed_2gpu pytest -v -s --cov=vllm --cov-report= --cov-append entrypoints/llm/test_collective_rpc.py
+  - COVERAGE_FILE=.coverage.distributed_2gpu pytest -v -s --cov=vllm --cov-report= --cov-append ./compile/test_basic_correctness.py
+  - COVERAGE_FILE=.coverage.distributed_2gpu pytest -v -s --cov=vllm --cov-report= --cov-append ./compile/test_wrapper.py
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
-  - TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
+  - TARGET_TEST_SUITE=L4 COVERAGE_FILE=.coverage.distributed_2gpu pytest basic_correctness/ -v -s --cov=vllm --cov-report= --cov-append -m 'distributed(num_gpus=2)'
   # Avoid importing model tests that cause CUDA reinitialization error
-  - pytest models/test_transformers.py -v -s -m 'distributed(num_gpus=2)'
-  - pytest models/language -v -s -m 'distributed(num_gpus=2)'
-  - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)'
+  - COVERAGE_FILE=.coverage.distributed_2gpu pytest models/test_transformers.py -v -s --cov=vllm --cov-report= --cov-append -m 'distributed(num_gpus=2)'
+  - COVERAGE_FILE=.coverage.distributed_2gpu pytest models/language -v -s --cov=vllm --cov-report= --cov-append -m 'distributed(num_gpus=2)'
+  - COVERAGE_FILE=.coverage.distributed_2gpu pytest models/multimodal -v -s --cov=vllm --cov-report= --cov-append -m 'distributed(num_gpus=2)'
   # test sequence parallel
-  - pytest -v -s distributed/test_sequence_parallel.py
+  - COVERAGE_FILE=.coverage.distributed_2gpu pytest -v -s --cov=vllm --cov-report= --cov-append distributed/test_sequence_parallel.py
   # this test fails consistently.
   # TODO: investigate and fix
-  - VLLM_USE_V1=0 CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py
-  - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
-  - pytest -v -s models/multimodal/generation/test_maverick.py
+  - VLLM_USE_V1=0 CUDA_VISIBLE_DEVICES=0,1 COVERAGE_FILE=.coverage.distributed_2gpu pytest -v -s --cov=vllm --cov-report= --cov-append test_sharded_state_loader.py
+  - CUDA_VISIBLE_DEVICES=0,1 COVERAGE_FILE=.coverage.distributed_2gpu pytest -v -s --cov=vllm --cov-report= --cov-append v1/shutdown
+  - COVERAGE_FILE=.coverage.distributed_2gpu pytest -v -s --cov=vllm --cov-report= --cov-append models/multimodal/generation/test_maverick.py
+  - buildkite-agent artifact upload .coverage.distributed_2gpu
 
 - label: Plugin Tests (2 GPUs) # 40min
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/plugins/
   - tests/plugins/
   commands:
   # begin platform plugin and general plugin tests, all the code in-between runs on dummy platform
   - pip install -e ./plugins/vllm_add_dummy_platform
-  - pytest -v -s plugins_tests/test_platform_plugins.py
+  - COVERAGE_FILE=.coverage.plugins pytest -v -s --cov=vllm --cov-report= --cov-append plugins_tests/test_platform_plugins.py
   - pip uninstall vllm_add_dummy_platform -y
   # end platform plugin tests
   # begin io_processor plugins test, all the code in between uses the prithvi_io_processor plugin
   - pip install -e ./plugins/prithvi_io_processor_plugin
-  - pytest -v -s plugins_tests/test_io_processor_plugins.py
-  - pip uninstall prithvi_io_processor_plugin -y 
+  - COVERAGE_FILE=.coverage.plugins pytest -v -s --cov=vllm --cov-report= --cov-append plugins_tests/test_io_processor_plugins.py
+  - pip uninstall prithvi_io_processor_plugin -y
   # end io_processor plugins test
   # other tests continue here:
-  - pytest -v -s plugins_tests/test_scheduler_plugins.py
+  - COVERAGE_FILE=.coverage.plugins pytest -v -s --cov=vllm --cov-report= --cov-append plugins_tests/test_scheduler_plugins.py
   - pip install -e ./plugins/vllm_add_dummy_model
-  - pytest -v -s distributed/test_distributed_oot.py
-  - pytest -v -s entrypoints/openai/test_oot_registration.py # it needs a clean process
-  - pytest -v -s models/test_oot_registration.py # it needs a clean process
-  - pytest -v -s plugins/lora_resolvers # unit tests for in-tree lora resolver plugins
+  - COVERAGE_FILE=.coverage.plugins pytest -v -s --cov=vllm --cov-report= --cov-append distributed/test_distributed_oot.py
+  - COVERAGE_FILE=.coverage.plugins pytest -v -s --cov=vllm --cov-report= --cov-append entrypoints/openai/test_oot_registration.py # it needs a clean process
+  - COVERAGE_FILE=.coverage.plugins pytest -v -s --cov=vllm --cov-report= --cov-append models/test_oot_registration.py # it needs a clean process
+  - COVERAGE_FILE=.coverage.plugins pytest -v -s --cov=vllm --cov-report= --cov-append plugins/lora_resolvers # unit tests for in-tree lora resolver plugins
+  - buildkite-agent artifact upload .coverage.plugins
 
 - label: Pipeline + Context Parallelism Test # 45min
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/distributed/
   - vllm/engine/
@@ -849,14 +947,16 @@ steps:
   - vllm/model_executor/models/
   - tests/distributed/
   commands:
-  - pytest -v -s distributed/test_pp_cudagraph.py
-  - pytest -v -s distributed/test_pipeline_parallel.py
+  - COVERAGE_FILE=.coverage.pipeline pytest -v -s --cov=vllm --cov-report= --cov-append distributed/test_pp_cudagraph.py
+  - COVERAGE_FILE=.coverage.pipeline pytest -v -s --cov=vllm --cov-report= --cov-append distributed/test_pipeline_parallel.py
   # - pytest -v -s distributed/test_context_parallel.py # TODO: enable it on Hopper runners or add triton MLA support
+  - buildkite-agent artifact upload .coverage.pipeline
 
 - label: LoRA TP Test (Distributed) # 17 min
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental]
   num_gpus: 4
+  mount_buildkite_agent: true
   source_file_dependencies:
   - vllm/lora
   - tests/lora
@@ -866,16 +966,16 @@ steps:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     # There is some Tensor Parallelism related processing logic in LoRA that
     # requires multi-GPU testing for validation.
-    - pytest -v -s -x lora/test_chatglm3_tp.py
-    - pytest -v -s -x lora/test_llama_tp.py
-    - pytest -v -s -x lora/test_llm_with_multi_loras.py
-
+    - COVERAGE_FILE=.coverage.lora_tp pytest -v -s --cov=vllm --cov-report= --cov-append -x lora/test_chatglm3_tp.py
+    - COVERAGE_FILE=.coverage.lora_tp pytest -v -s --cov=vllm --cov-report= --cov-append -x lora/test_llama_tp.py
+    - COVERAGE_FILE=.coverage.lora_tp pytest -v -s --cov=vllm --cov-report= --cov-append -x lora/test_llm_with_multi_loras.py
+    - buildkite-agent artifact upload .coverage.lora_tp
 
 - label: Weight Loading Multiple GPU Test  # 33min
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
-  num_gpus: 2 
+  num_gpus: 2
   optional: true
   source_file_dependencies:
   - vllm/
