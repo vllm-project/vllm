@@ -174,8 +174,10 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor):
 
         mm_items = self._to_mm_items(mm_data)
         tokenization_kwargs = tokenization_kwargs or {}
-        mm_hashes = (mm_uuids if mm_uuids is not None else self._hash_mm_items(
-            mm_items, hf_processor_mm_kwargs, tokenization_kwargs))
+        mm_hashes = self._hash_mm_items(mm_items,
+                                        hf_processor_mm_kwargs,
+                                        tokenization_kwargs,
+                                        mm_uuids=mm_uuids)
         mm_placeholders = {"image": [PlaceholderRange(offset=0, length=0)]}
 
         mm_processed_data = BatchFeature(image_data)

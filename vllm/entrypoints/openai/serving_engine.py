@@ -368,23 +368,20 @@ class OpenAIServing:
             for i, engine_prompt in enumerate(ctx.engine_prompts):
                 request_id_item = f"{ctx.request_id}-{i}"
 
-                if ctx.request_prompts is None:
-                    return self.create_error_response(
-                        "Request prompts not available")
-
-                self._log_inputs(
-                    request_id_item,
-                    ctx.request_prompts[i],
-                    params=pooling_params,
-                    lora_request=ctx.lora_request,
-                )
-
                 # Mypy has an existing bug related to inferring the variance of
                 # TypedDicts with `builtins.enumerate`:
                 # https://github.com/python/mypy/issues/8586#issuecomment-2867698435
                 engine_prompt = cast(
                     Union[EngineTokensPrompt, EngineEmbedsPrompt],
                     engine_prompt)
+
+                self._log_inputs(
+                    request_id_item,
+                    engine_prompt,
+                    params=pooling_params,
+                    lora_request=ctx.lora_request,
+                )
+
                 generator = self.engine_client.encode(
                     engine_prompt,
                     pooling_params,
@@ -932,7 +929,7 @@ class OpenAIServing:
             tokenizer,
             model_config=model_config,
         )
-        conversation, mm_data_future = parse_chat_messages_futures(
+        conversation, mm_data_future, mm_uuids = parse_chat_messages_futures(
             messages,
             model_config,
             tokenizer,
@@ -1009,6 +1006,10 @@ class OpenAIServing:
             prompt_token_ids=prompt_inputs["prompt_token_ids"])
         if mm_data is not None:
             engine_prompt["multi_modal_data"] = mm_data
+
+        if mm_uuids is not None:
+            engine_prompt["multi_modal_uuids"] = mm_uuids
+
         if request.mm_processor_kwargs is not None:
             engine_prompt["mm_processor_kwargs"] = request.mm_processor_kwargs
 
