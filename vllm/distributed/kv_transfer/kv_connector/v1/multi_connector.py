@@ -88,8 +88,16 @@ class MultiConnector(KVConnectorBase_V1):
             c.clear_connector_metadata()
 
     def shutdown(self):
+        exceptions = []
         for c in self._connectors:
-            c.shutdown()
+            try:
+                c.shutdown()
+            except Exception as e:
+                logger.error(f"Error shutting down a connector: {e}",
+                             exc_info=True)
+                exceptions.append(e)
+        if exceptions:
+            raise exceptions[0]
 
     # ==============================
     # Worker-side methods
