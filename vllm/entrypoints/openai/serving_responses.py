@@ -39,7 +39,6 @@ from openai.types.responses.response_output_text import (Logprob,
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent)
 from openai_harmony import Message as OpenAIHarmonyMessage
-from openai_harmony import Role
 
 from vllm import envs
 from vllm.config import ModelConfig
