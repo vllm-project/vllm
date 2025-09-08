@@ -3727,15 +3727,18 @@ class VllmConfig:
                     "Compilation level should be CompilationLevel.PIECEWISE "\
                     "when cudagraph_mode piecewise cudagraphs is used, "\
                     f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
-        
+
         if self.parallel_config.enable_microbatching:
             a2a_backend = envs.VLLM_ALL2ALL_BACKEND
-            assert a2a_backend == "deepep_low_latency", \
-            "Microbatching currently only supports the deepep_low_latency "\
+
+            assert a2a_backend in ["deepep_low_latency", \
+            "deepep_high_throughput"], "Microbatching currently only supports "
+            "the deepep_low_latency and deepep_high_throughput "\
             f"all2all backend. {a2a_backend} is not supported. To fix set "\
             "the VLLM_ALL2ALL_BACKEND environment variable to "\
-            "deepep_low_latency and install the DeepEP kerenls."
- 
+            "deepep_low_latency or deepep_high_throughput "
+            "and install the DeepEP kerenls."
+
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
 
