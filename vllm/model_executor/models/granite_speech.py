@@ -850,10 +850,10 @@ class GraniteSpeechForConditionalGeneration(
             full_lang_name_to = cls.supported_languages.get(
                 to_language, to_language)
             user_prompt = f"{audio_tok}translate the speech to {full_lang_name_to}"  # noqa: E501
-        elif task_type == "translate":
+        elif task_type == "transcribe":
             user_prompt = f"{audio_tok}can you transcribe the speech into a written format?"  # noqa: E501
         else:
-            raise ValueError(f"Unsupported task type {user_prompt}")
+            raise ValueError(f"Unsupported task type {task_type}")
 
         tokenizer = cached_get_tokenizer(model_config.model)
         chat = [dict(role="user", content=user_prompt)]
