@@ -257,10 +257,11 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
             scheduler_metadata=attn_metadata.decode.scheduler_metadata,
             num_splits=attn_metadata.decode.max_num_splits,
         )
-        
+
         if self.need_to_return_lse_for_decode:
             o, lse = attn_out
-            return o, lse
+            # FA returns LSE in shape [ H, B ] but DCP wants [ B, H ]
+            return o, lse.transpose(0, 1)  # [ H, B ] -> [ B, H ]
         else:
             o = attn_out
             return o, None
