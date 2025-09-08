@@ -234,6 +234,8 @@ def load_image(
 
 class PrithviMultimodalDataProcessor(IOProcessor):
 
+    indices = [0, 1, 2, 3, 4, 5]
+
     def __init__(self, vllm_config: VllmConfig):
 
         super().__init__(vllm_config)
@@ -412,21 +414,3 @@ class PrithviMultimodalDataProcessor(IOProcessor):
                                   format="tiff",
                                   data=out_data,
                                   request_id=request_id)
-
-
-class PrithviMultimodalDataProcessorIndia(PrithviMultimodalDataProcessor):
-
-    def __init__(self, vllm_config: VllmConfig):
-
-        super().__init__(vllm_config)
-
-        self.indices = [1, 2, 3, 8, 11, 12]
-
-
-class PrithviMultimodalDataProcessorValencia(PrithviMultimodalDataProcessor):
-
-    def __init__(self, vllm_config: VllmConfig):
-
-        super().__init__(vllm_config)
-
-        self.indices = [0, 1, 2, 3, 4, 5]
