@@ -1199,7 +1199,9 @@ class ModelConfig:
 
             # Verify quantization configurations.
             if self.quantization is None:
-                self.quantization = quant_method
+                # Only set quantization if quant_method is not empty
+                if quant_method and quant_method != "":
+                    self.quantization = quant_method
             elif self.quantization != quant_method:
                 raise ValueError(
                     "Quantization method specified in the model config "
