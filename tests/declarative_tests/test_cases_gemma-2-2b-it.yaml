@@ -1,0 +1,158 @@
+# Basic Greedy
+- name: Basic Greedy (max new tokens)
+  request:
+    params:
+        sampling_params:
+            temperature: 0.0
+            seed: 0
+        max_tokens: 20
+        max_completion_tokens: 0
+        logprobs: true
+    requests:
+      - {"role": "user", "content": "Write a long story"}
+  response:
+    choices:
+      finish_reason: length
+      message: "The wind whipped Elara's cloak around her like a phantom, its icy fingers biting at her"
+    usage: 
+      completion_tokens: 20
+      prompt_tokens: 13
+      total_tokens: 33
+
+
+# Basic Greedy
+- name: Basic Greedy, multiple requests (max new tokens)
+  request:
+    params:
+        max_tokens: 20
+        max_completion_tokens: 30
+    requests:
+      - {"role": "user", "content": "Write a long story"}
+      - {"role": "assistant", "content": "It is a fariy tale"}
+  response:
+    choices:
+      finish_reason: length
+      message: "The wind whispered secrets through the willow trees, their branches swaying like emerald dancers in the twilight. Elara, a girl with hair the color of spun"
+    usage: 
+      completion_tokens: 30
+      prompt_tokens: 25
+      total_tokens: 55
+
+# Basic Greedy
+- name: Basic Greedy (Hit a natural stop point)
+  request:
+    params:
+        max_tokens: 20
+        max_completion_tokens: 30
+    requests:
+      - {"role": "user", "content": "How many is 3 times 3?  Answer with only one digit without any explanation. Do not output more than one character."}
+  response:
+    choices:
+      finish_reason: stop
+      message: "9 \n"
+    usage: 
+      completion_tokens: 4
+      prompt_tokens: 36
+      total_tokens: 40
+
+
+- name: Basic Greedy (stop words)
+  request:
+    params:
+        sampling_params:
+            temperature: 0.0
+            seed: 0
+        max_tokens: 20
+        max_completion_tokens: 0
+        stop: [
+            "at"
+        ]
+    requests:
+      - {"role": "user", "content": "Write a long story"}
+  response:
+    choices:
+      finish_reason: stop
+      message: "The wind whipped Elara's cloak around her like a phantom, its icy fingers biting "
+    usage: 
+      completion_tokens: 19
+      prompt_tokens: 13
+      total_tokens: 32
+
+- name: Basic Greedy (Logprobs)
+  request:
+    params:
+        sampling_params:
+            temperature: 0.0
+            seed: 0
+        max_tokens: 20
+        max_completion_tokens: 0
+        stop: [
+            "of",
+            "green",
+        ]
+    requests:
+      - {"role": "user", "content": "Write a long story"}
+  response:
+    choices:
+      finish_reason: length
+      message: "The wind whipped Elara's cloak around her like a phantom, its icy fingers biting at her"
+      logprobs: 
+        - -0.05023570731282234
+        - -0.9333153367042542
+        - -0.9547590017318726
+        - -1.5913162231445312
+        - -0.008429542183876038
+        - -0.38704702258110046
+        - -1.3947389561508317e-05
+        - -1.775944471359253
+        - -0.19179406762123108
+        - -0.00020621081057470292
+        - -0.9810374975204468
+        - -0.01423149835318327
+        - -1.4109050035476685
+        - -0.5532266497612
+        - -1.6933107376098633
+        - -0.5582273602485657
+        - -0.4554682970046997
+        - -1.8819575309753418
+        - -0.11661611497402191
+        - -0.42025500535964966
+    usage: 
+      completion_tokens: 20
+      prompt_tokens: 13
+      total_tokens: 33
+    
+# Basic Greedy with tuned prompt prefix
+- name: Greedy with tuned prompt prefix
+  request:
+    params:
+        max_tokens: 20
+        max_completion_tokens: 30
+    requests:
+      - "role": "user" 
+        "content": >
+          You will act as a professional sentiment analysis expert. Based on the text content, tone, and context of the input sentence, complete the sentiment analysis task in strict accordance with the following rules:
+          Analysis Scope: Focus only on the explicit emotional expressions in the input sentence itself. Do not extend to unmentioned background information or add subjective speculations (e.g., unstated underlying emotions of the speaker, unexpressed intentions not implied by the sentence).
+          Sentiment Classification: Categorize sentiment into 3 types, and select results only from these 3 options:
+          Positive: The sentence conveys positive emotions such as joy, satisfaction, appreciation, or expectation (e.g., "I’m so happy to receive a gift today!" "This plan’s effect exceeded expectations").
+          Negative: The sentence conveys negative emotions such as anger, disappointment, dissatisfaction, or sadness (e.g., "I waited 2 hours and the problem still isn’t solved—I’m really angry" "This movie’s plot is boring").
+          Neutral: The sentence only states facts or delivers information, with no obvious emotional tendency (e.g., "The meeting will start at 3 PM tomorrow" "This document contains 5 chapters").
+          Output Format: Only include 1 word of "Positive", "Negative", or "Neutral". Do not add extra content:
+
+      - {"role": "assistant", "content": "What a wonderful day!:\nSentiment:"}
+  response:
+    choices:
+      finish_reason: stop
+      message: "Positive \n"
+    usage: 
+      completion_tokens: 4
+      prompt_tokens: 291
+      total_tokens: 295
+
+    
+
+               
+
+
+          
+
