@@ -28,7 +28,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.utils import cdiv
 
-from .interfaces import SupportsPP
+from .interfaces import SupportsPP, SupportsEagle3
 from .utils import (AutoWeightsLoader, WeightsMapper, extract_layer_index,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
@@ -613,7 +613,7 @@ class GptOssModel(nn.Module):
                                             weights, stacked_params_mapping)
 
 
-class GptOssForCausalLM(nn.Module, SupportsPP):
+class GptOssForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     packed_modules_mapping = {"qkv": ["q_proj", "k_proj", "v_proj"]}
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -685,3 +685,29 @@ class GptOssForCausalLM(nn.Module, SupportsPP):
                            if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    # EAGLE3 support methods
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        """
+        Set which layers should output auxiliary hidden states for EAGLE3.
+        
+        Args:
+            layers: Tuple of layer indices that should output auxiliary
+              hidden states.
+        """
+        # For GPT-OSS models, we can set auxiliary hidden state layers
+        # This is a placeholder implementation - actual implementation
+        # would depend on the specific model architecture
+        pass
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        """
+        Get the layer indices that should output auxiliary hidden states
+        for EAGLE3.
+        
+        Returns:
+            Tuple of layer indices for auxiliary hidden state outputs.
+        """
+        # Return empty tuple for now - this can be customized based on
+        # the specific model requirements
+        return ()
