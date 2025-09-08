@@ -430,18 +430,22 @@ class Siglip2Encoder(nn.Module):
             for idx in range(config.num_hidden_layers)
         ])
 
-        self.rotary_pos_emb = VisionRotaryEmbedding(
-            config.hidden_size // config.num_attention_heads // 2)
-        self.patch_size = config.patch_size
-        self.hidden_stride = config.hidden_stride
-        self.window_size = config.window_size
-        self.spatial_merge_unit = config.hidden_stride * config.hidden_stride
-        if config.fullatt_block_indexes is None:
-            self.fullatt_block_indexes = None
-        else:
-            self.fullatt_block_indexes = [
-                int(i) for i in config.fullatt_block_indexes.split('|')
-            ]
+        model_type = getattr(config, "model_type", None)
+
+        if model_type == "siglip2_navit":
+            self.rotary_pos_emb = VisionRotaryEmbedding(
+                config.hidden_size // config.num_attention_heads // 2)
+            self.patch_size = config.patch_size
+            self.hidden_stride = config.hidden_stride
+            self.window_size = config.window_size
+            self.spatial_merge_unit = config.hidden_stride * \
+                config.hidden_stride
+            if config.fullatt_block_indexes is None:
+                self.fullatt_block_indexes = None
+            else:
+                self.fullatt_block_indexes = [
+                    int(i) for i in config.fullatt_block_indexes.split('|')
+                ]
 
     # copied from qwen2.5_vl
     def rot_pos_emb(self, grid_thw):
@@ -744,11 +748,10 @@ class Siglip2TextTransformer(nn.Module):
         self.final_layer_norm = nn.LayerNorm(embed_dim,
                                              eps=config.layer_norm_eps)
 
-    def forward(
-        self,
-        input_ids: Optional[torch.Tensor] = None,
-        positions: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    def forward(self,
+                input_ids: Optional[torch.Tensor] = None,
+                positions: Optional[torch.Tensor] = None,
+                **kwargs) -> torch.Tensor:
 
         if input_ids is None:
             raise ValueError("You have to specify input_ids")
@@ -783,8 +786,6 @@ class Siglip2TextModel(torch.nn.Module):
     ):
         super().__init__()
         config = vllm_config.model_config.hf_config.text_config
-        print(vllm_config.model_config.hf_config.vision_config)
-        print('A' * 30)
         self.text_model = Siglip2TextTransformer(config)
 
     def get_input_embeddings(
@@ -793,10 +794,12 @@ class Siglip2TextModel(torch.nn.Module):
     ) -> torch.Tensor:
         return self.text_model.embeddings(input_ids)
 
-    def forward(self, input_ids: torch.Tensor,
-                positions: torch.Tensor) -> torch.Tensor:
+    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
+                **kwargs) -> torch.Tensor:
 
-        return self.text_model(input_ids=input_ids, positions=positions)
+        return self.text_model(input_ids=input_ids,
+                               positions=positions,
+                               **kwargs)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
@@ -810,6 +813,9 @@ class Siglip2TextModel(torch.nn.Module):
         loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
+            if not name.startswith('text_model'):
+                continue
+
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -820,9 +826,12 @@ class Siglip2TextModel(torch.nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
+                if name not in params_dict:
+                    continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+
             loaded_params.add(name)
         return loaded_params

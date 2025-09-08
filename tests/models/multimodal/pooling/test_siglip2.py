@@ -3,6 +3,7 @@
 
 import pytest
 import torch.nn.functional as F
+from transformers import SiglipTextModel
 
 from ....conftest import HfRunner, PromptImageInput, VllmRunner
 from ...utils import check_embeddings_close
@@ -44,27 +45,23 @@ def _run_test(
                      dtype=dtype,
                      enforce_eager=True,
                      max_model_len=64,
+                     enable_prefix_caching=False,
                      hf_overrides={"architectures":
                                    ["Siglip2TextModel"]}) as vllm_model:
         vllm_outputs = vllm_model.embed(input_texts, images=input_images)
 
-    # use eager mode for hf runner, since phi3_v didn't work with flash_attn
-    hf_model_kwargs = {"_attn_implementation": "eager"}
-    with hf_runner(model, dtype=dtype,
-                   model_kwargs=hf_model_kwargs) as hf_model:
+    with hf_runner(model_name=model, dtype=dtype,
+                   auto_cls=SiglipTextModel) as hf_model:
         all_inputs = hf_model.get_inputs(input_texts, images=input_images)
 
         all_outputs = []
         for inputs in all_inputs:
-            # Based on: https://github.com/TIGER-AI-Lab/VLM2Vec/blob/db3b951bccabba220c1f53ab46a734e50dd2fc08/src/model.py
             outputs = hf_model.model(
                 **hf_model.wrap_device(inputs),
                 return_dict=True,
-                output_hidden_states=True,
             )
-            last_hidden_state = outputs.hidden_states[-1][0]
-            reps = last_hidden_state[inputs.attention_mask[0].sum() - 1]
-            pooled_output = F.normalize(reps, p=2, dim=-1)
+            pooled_output = F.normalize(outputs.pooler_output, p=2,
+                                        dim=-1)[0, :]
 
             all_outputs.append(pooled_output.tolist())
 
