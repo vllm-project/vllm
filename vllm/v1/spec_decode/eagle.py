@@ -628,15 +628,29 @@ class EagleProposer:
         else:
             target_language_model = target_model
         # share embed_tokens with the target model if needed
-        if get_pp_group().world_size == 1 \
-                and self.model.model.embed_tokens.weight.shape \
-            == target_language_model.model.embed_tokens.weight.shape:
+        # Handle different embedding attribute names (embed_tokens vs embedding)
+        draft_embed_attr = getattr(self.model.model, 'embed_tokens', None)
+        if draft_embed_attr is None:
+            draft_embed_attr = getattr(self.model.model, 'embedding', None)
+        
+        target_embed_attr = getattr(target_language_model.model, 'embed_tokens', None)
+        if target_embed_attr is None:
+            target_embed_attr = getattr(target_language_model.model, 'embedding', None)
+        
+        if (get_pp_group().world_size == 1 and 
+            draft_embed_attr is not None and 
+            target_embed_attr is not None and
+            draft_embed_attr.weight.shape == target_embed_attr.weight.shape):
             logger.info(
                 "Assuming the EAGLE head shares the same vocab embedding"
                 " with the target model.")
-            del self.model.model.embed_tokens
-            self.model.model.embed_tokens = (
-                target_language_model.model.embed_tokens)
+            # Get the attribute names for both models
+            draft_attr_name = 'embed_tokens' if hasattr(self.model.model, 'embed_tokens') else 'embedding'
+            target_attr_name = 'embed_tokens' if hasattr(target_language_model.model, 'embed_tokens') else 'embedding'
+            
+            # Delete and reassign the embedding
+            delattr(self.model.model, draft_attr_name)
+            setattr(self.model.model, draft_attr_name, target_embed_attr)
         else:
             logger.info(
                 "The EAGLE head's vocab embedding will be loaded separately"
