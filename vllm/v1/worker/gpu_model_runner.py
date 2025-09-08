@@ -626,7 +626,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         ubatch_slices = create_ubatch_slices(
             num_scheduled_tokens, num_tokens_per_ubatch)
         
-        print(f"Running Ubatched! uniform_decode: {uniform_decode} with ubatch_slices: {ubatch_slices}, num_pad_tokens: {num_pad_tokens}, num_tokens_after_padding: {num_tokens_after_padding}, num_tokens_per_ubatch {num_tokens_per_ubatch}, num_scheduled_tokens {num_scheduled_tokens}")
+        print(f"Running Ubatched! uniform_decode: {uniform_decode} with ubatch_slices: {ubatch_slices}, num_pad_tokens: {num_pad_tokens}, num_tokens_after_padding: {num_tokens_after_padding}, num_tokens_per_ubatch {num_tokens_per_ubatch}")
 
         return (ubatch_slices, num_pad_tokens, num_tokens_after_padding)
 

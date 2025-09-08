@@ -127,8 +127,8 @@ def _make_metadata_with_slice(
 
     if splits_first_request:
         tokens_skipped = first_tok - start_locs[first_req]
-        query_start_loc[0] += tokens_skipped
-        query_start_loc_cpu[0] += tokens_skipped
+        query_start_loc[1:] -= tokens_skipped
+        query_start_loc_cpu[1:] -= tokens_skipped
     seq_lens = attn_metadata.seq_lens[request_slice]
     seq_lens_cpu = attn_metadata.seq_lens_cpu[request_slice]
 
@@ -191,6 +191,18 @@ def split_attn_metadata(
     for ubatch_slice in ubatch_slices:
         results.append(
             _make_metadata_with_slice(ubatch_slice, common_attn_metadata))
+
+    # for i, result in enumerate(results):
+    #     print(f"CommmonAttentionMetadata for ubatch slice {i}:\n"
+    #           f" request slice {ubatch_slices[i].request_slice}\n"
+    #           f" token slice {ubatch_slices[i].token_slice}\n"
+    #           f" num_reqs: {result.num_reqs}\n"
+    #           f" num_actual_tokens: {result.num_actual_tokens}\n"
+    #           f" max_query_len: {result.max_query_len}\n"
+    #           f" max_seq_len: {result.max_seq_len}\n"
+    #           f" query_start_loc: {result.query_start_loc_cpu}\n"
+    #           f" seq_lens: {result.seq_lens_cpu}\n"
+    #           f" num_computed_tokens_cpu: {result.num_computed_tokens_cpu}\n")
     return results
 
 
@@ -709,7 +721,6 @@ def split_decodes_and_prefills(
         return num_reqs, 0, num_tokens, 0
 
     first_prefill = is_prefill.int().argmax(dim=-1).item()
-    print(f"First prefill at index {first_prefill} {query_lens}")
     #assert torch.all(query_lens[first_prefill:] > decode_threshold)
     assert torch.all(query_lens[:first_prefill] <= decode_threshold)
     num_decodes = first_prefill

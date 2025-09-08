@@ -174,7 +174,6 @@ dbo_switch_to_comm_sync = _register_ubatch_function(
 
 
 def dbo_register_recv_hook(recv_hook):
-    print("dbo_register_recv_hook ", len(_THREAD_ID_TO_CONTEXT))
     if len(_THREAD_ID_TO_CONTEXT) > 0:
         ctx_idx = _THREAD_ID_TO_CONTEXT[threading.get_ident()]
         next_ctx = _CURRENT_CONTEXTS[(ctx_idx + 1) % 2]
