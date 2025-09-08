@@ -58,8 +58,9 @@ class ShortConvAttentionMetadataBuilder(
         state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
-            split_decodes_and_prefills(common_attn_metadata,
-                                       decode_threshold=1))
+            split_decodes_and_prefills(
+                common_attn_metadata,
+                decode_threshold=self.reorder_batch_threshold))
         has_initial_states = None
         if num_prefills > 0:
             #[batch,]

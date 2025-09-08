@@ -9,8 +9,7 @@ setup(
     packages=["prithvi_io_processor"],
     entry_points={
         "vllm.io_processor_plugins": [
-            "prithvi_to_tiff_india = prithvi_io_processor:register_prithvi_india",  # noqa: E501
-            "prithvi_to_tiff_valencia = prithvi_io_processor:register_prithvi_valencia",  # noqa: E501
+            "prithvi_to_tiff = prithvi_io_processor:register_prithvi",  # noqa: E501
         ]
     },
 )

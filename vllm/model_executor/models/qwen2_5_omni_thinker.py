@@ -25,7 +25,7 @@
 from collections.abc import Iterable, Mapping, Sequence
 from copy import copy
 from functools import partial
-from typing import Any, Callable, Optional, Union
+from typing import Annotated, Any, Callable, Literal, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -47,8 +47,7 @@ from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VLProcessingInfo, Qwen2_5_VLVideoEmbeddingInputs,
     Qwen2_5_VLVideoInputs, Qwen2_5_VLVideoPixelInputs)
 from vllm.model_executor.models.qwen2_audio import (
-    Qwen2AudioFeatureInputs, Qwen2AudioProcessingInfo,
-    _get_feat_extract_output_lengths)
+    Qwen2AudioProcessingInfo, _get_feat_extract_output_lengths)
 from vllm.model_executor.models.qwen2_vl import Qwen2VLMultiModalDataParser
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -65,6 +64,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import decode_tokens, encode_tokens
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper,
@@ -77,6 +77,26 @@ except (ImportError, ModuleNotFoundError):
     flash_attn = None
 
 logger = init_logger(__name__)
+
+
+class Qwen2_5OmniAudioFeatureInputs(TensorSchema):
+    """
+    Dimensions:
+        - na: Number of audios
+        - nmb: Number of mel bins
+        - msl: Maximum sequence length
+        - tsl: Total sequence length
+    """
+    type: Literal["audio_features"]
+    input_features: Annotated[
+        Union[torch.Tensor, list[torch.Tensor]],
+        TensorShape("nmb", "tsl"),
+    ]
+
+    feature_attention_mask: Annotated[
+        torch.Tensor,
+        TensorShape("na", "msl"),
+    ]
 
 
 def create_qwen2_5_omni_thinker_field_factory(
@@ -534,7 +554,7 @@ class Qwen2_5OmniConditionalGenerationMixin:
             return torch.concat(mm_input, dim=dim)
 
     def _parse_and_validate_audio_input(
-            self, **kwargs: object) -> Optional[Qwen2AudioFeatureInputs]:
+            self, **kwargs: object) -> Optional[Qwen2_5OmniAudioFeatureInputs]:
         input_audio_features = kwargs.pop('input_audio_features', None)
         audio_feature_lengths = kwargs.pop('audio_feature_lengths', None)
         feature_attention_mask = kwargs.pop('feature_attention_mask', None)
@@ -548,7 +568,8 @@ class Qwen2_5OmniConditionalGenerationMixin:
         if not isinstance(input_audio_features, (torch.Tensor, list)):
             raise ValueError("Incorrect type of audio input features. "
                              f"Got type: {type(input_audio_features)}")
-        return Qwen2AudioFeatureInputs(
+        return Qwen2_5OmniAudioFeatureInputs(
+            type="audio_features",
             input_features=input_audio_features,
             audio_feature_lengths=audio_feature_lengths,
             feature_attention_mask=feature_attention_mask)
@@ -631,7 +652,7 @@ class Qwen2_5OmniConditionalGenerationMixin:
 
     def _process_audio_input(
         self,
-        audio_input: Qwen2AudioFeatureInputs,
+        audio_input: Qwen2_5OmniAudioFeatureInputs,
         audio_hashes: list[str] = None,
         cached_audio_features: torch.Tensor = None,
     ) -> torch.Tensor:
@@ -658,8 +679,8 @@ class Qwen2_5OmniConditionalGenerationMixin:
             feature_lens=audio_feature_lengths,
             aftercnn_lens=audio_feat_lengths,
         )
-        audio_features = audio_outputs.last_hidden_state
-        return audio_features.split(audio_output_lengths.tolist())
+        return audio_outputs.last_hidden_state.split(
+            audio_output_lengths.tolist())
 
     def _process_image_input(
             self,

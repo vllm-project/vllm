@@ -14,6 +14,7 @@ from .mteb_utils import mteb_test_embed_models, mteb_test_rerank_models
 
 EMBEDDING_MODELS = [
     CLSPoolingEmbedModelInfo("jinaai/jina-embeddings-v3",
+                             mteb_score=0.824413164,
                              architecture="XLMRobertaModel",
                              is_matryoshka=True)
 ]
@@ -21,6 +22,7 @@ EMBEDDING_MODELS = [
 RERANK_MODELS = [
     CLSPoolingRerankModelInfo(
         "jinaai/jina-reranker-v2-base-multilingual",
+        mteb_score=0.33643,
         architecture="XLMRobertaForSequenceClassification")
 ]
 

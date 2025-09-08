@@ -95,13 +95,6 @@ class SiluAndMul(CustomOp):
         self.op(out, x)
         return out
 
-    def forward_neuron(self, x: torch.Tensor) -> torch.Tensor:
-        d = x.shape[-1] // 2
-        x_reshaped = x.view(-1, x.shape[-1])
-        s = x_reshaped[:, :d] * F.sigmoid(x_reshaped[:, :d])
-        result = s * x_reshaped[:, d:]
-        return result.view(*x.shape[:-1], d)
-
 
 @CustomOp.register("mul_and_silu")
 class MulAndSilu(CustomOp):
@@ -362,7 +355,7 @@ class ReLUSquaredActivation(CustomOp):
         return torch.square(F.relu(x))
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
-        #TODO : implement cuda kenrels
+        #TODO : implement cuda kernels
         return self.forward_native(x)
 
 

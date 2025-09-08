@@ -32,7 +32,7 @@ def to_bytes(y, sr):
 
 async def transcribe_audio(client, tokenizer, y, sr):
     # Send loaded audio directly instead of loading from disk,
-    # dont account for that time though
+    # don't account for that time though
     with to_bytes(y, sr) as f:
         start_time = time.perf_counter()
         transcription = await client.audio.transcriptions.create(

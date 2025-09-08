@@ -19,11 +19,11 @@ vlm2vec_jinja_path = VLLM_PATH / "examples/template_vlm2vec.jinja"
 assert vlm2vec_jinja_path.exists()
 
 # Test different image extensions (JPG/PNG) and formats (gray/RGB/RGBA)
-TEST_IMAGE_URLS = [
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/f/fa/Grayscale_8bits_palette_sample_image.png",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/9/91/Venn_diagram_rgb.svg/1280px-Venn_diagram_rgb.svg.png",
-    "https://upload.wikimedia.org/wikipedia/commons/0/0b/RGBA_comp.png",
+TEST_IMAGE_ASSETS = [
+    "2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg",  # "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+    "Grayscale_8bits_palette_sample_image.png",  # "https://upload.wikimedia.org/wikipedia/commons/f/fa/Grayscale_8bits_palette_sample_image.png",
+    "1280px-Venn_diagram_rgb.svg.png",  # "https://upload.wikimedia.org/wikipedia/commons/thumb/9/91/Venn_diagram_rgb.svg/1280px-Venn_diagram_rgb.svg.png",
+    "RGBA_comp.png",  # "https://upload.wikimedia.org/wikipedia/commons/0/0b/RGBA_comp.png",
 ]
 
 
@@ -49,10 +49,11 @@ def server():
 
 
 @pytest.fixture(scope="session")
-def base64_encoded_image() -> dict[str, str]:
+def base64_encoded_image(local_asset_server) -> dict[str, str]:
     return {
-        image_url: encode_image_base64(fetch_image(image_url))
-        for image_url in TEST_IMAGE_URLS
+        image_url:
+        encode_image_base64(local_asset_server.get_image_asset(image_url))
+        for image_url in TEST_IMAGE_ASSETS
     }
 
 
@@ -70,7 +71,7 @@ def get_hf_prompt_tokens(model_name, content, image_url):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
+@pytest.mark.parametrize("image_url", TEST_IMAGE_ASSETS, indirect=True)
 async def test_image_embedding(server: RemoteOpenAIServer, model_name: str,
                                image_url: str):
     content_text = "Represent the given image."

@@ -20,6 +20,7 @@ qwen3_reranker_hf_overrides = {
 RERANK_MODELS = [
     LASTPoolingRerankModelInfo("Qwen/Qwen3-Reranker-0.6B",
                                architecture="Qwen3ForSequenceClassification",
+                               mteb_score=0.25736,
                                hf_overrides=qwen3_reranker_hf_overrides,
                                enable_test=True),
     LASTPoolingRerankModelInfo("Qwen/Qwen3-Reranker-4B",

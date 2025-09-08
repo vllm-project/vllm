@@ -5,13 +5,14 @@ import pytest
 
 from ...utils import (CLSPoolingEmbedModelInfo, CLSPoolingRerankModelInfo,
                       EmbedModelInfo, LASTPoolingEmbedModelInfo,
-                      RerankModelInfo, check_transformers_version)
+                      RerankModelInfo)
 from .embed_utils import correctness_test_embed_models
 from .mteb_utils import mteb_test_embed_models, mteb_test_rerank_models
 
 MODELS = [
     ########## BertModel
     CLSPoolingEmbedModelInfo("thenlper/gte-large",
+                             mteb_score=0.76807651,
                              architecture="BertModel",
                              enable_test=True),
     CLSPoolingEmbedModelInfo("thenlper/gte-base",
@@ -30,28 +31,37 @@ MODELS = [
                              architecture="BertModel",
                              enable_test=False),
     ########### NewModel
+    # These three architectures are almost the same, but not exactly the same.
+    # For example,
+    # - whether to use token_type_embeddings
+    # - whether to use context expansion
+    # So only test one (the most widely used) model
     CLSPoolingEmbedModelInfo("Alibaba-NLP/gte-multilingual-base",
                              architecture="GteNewModel",
+                             mteb_score=0.775074696,
                              hf_overrides={"architectures": ["GteNewModel"]},
                              enable_test=True),
     CLSPoolingEmbedModelInfo("Alibaba-NLP/gte-base-en-v1.5",
                              architecture="GteNewModel",
                              hf_overrides={"architectures": ["GteNewModel"]},
-                             enable_test=True),
+                             enable_test=False),
     CLSPoolingEmbedModelInfo("Alibaba-NLP/gte-large-en-v1.5",
                              architecture="GteNewModel",
                              hf_overrides={"architectures": ["GteNewModel"]},
-                             enable_test=True),
+                             enable_test=False),
     ########### Qwen2ForCausalLM
     LASTPoolingEmbedModelInfo("Alibaba-NLP/gte-Qwen2-1.5B-instruct",
+                              mteb_score=0.758473459018872,
                               architecture="Qwen2ForCausalLM",
                               enable_test=True),
     ########## ModernBertModel
     CLSPoolingEmbedModelInfo("Alibaba-NLP/gte-modernbert-base",
+                             mteb_score=0.748193353,
                              architecture="ModernBertModel",
                              enable_test=True),
     ########## Qwen3ForCausalLM
     LASTPoolingEmbedModelInfo("Qwen/Qwen3-Embedding-0.6B",
+                              mteb_score=0.771163695,
                               architecture="Qwen3ForCausalLM",
                               dtype="float32",
                               enable_test=True),
@@ -65,10 +75,12 @@ RERANK_MODELS = [
     CLSPoolingRerankModelInfo(
         # classifier_pooling: mean
         "Alibaba-NLP/gte-reranker-modernbert-base",
+        mteb_score=0.33386,
         architecture="ModernBertForSequenceClassification",
         enable_test=True),
     CLSPoolingRerankModelInfo(
         "Alibaba-NLP/gte-multilingual-reranker-base",
+        mteb_score=0.33062,
         architecture="GteNewForSequenceClassification",
         hf_overrides={"architectures": ["GteNewForSequenceClassification"]},
         enable_test=True),
@@ -78,10 +90,6 @@ RERANK_MODELS = [
 @pytest.mark.parametrize("model_info", MODELS)
 def test_embed_models_mteb(hf_runner, vllm_runner,
                            model_info: EmbedModelInfo) -> None:
-    if model_info.name == "Alibaba-NLP/gte-Qwen2-1.5B-instruct":
-        check_transformers_version(model_info.name,
-                                   max_transformers_version="4.53.2")
-
     mteb_test_embed_models(hf_runner, vllm_runner, model_info)
 
 
@@ -89,10 +97,6 @@ def test_embed_models_mteb(hf_runner, vllm_runner,
 def test_embed_models_correctness(hf_runner, vllm_runner,
                                   model_info: EmbedModelInfo,
                                   example_prompts) -> None:
-    if model_info.name == "Alibaba-NLP/gte-Qwen2-1.5B-instruct":
-        check_transformers_version(model_info.name,
-                                   max_transformers_version="4.53.2")
-
     correctness_test_embed_models(hf_runner, vllm_runner, model_info,
                                   example_prompts)
 
