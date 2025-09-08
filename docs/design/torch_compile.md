@@ -150,5 +150,5 @@ Then it will only capture cudagraph for the specified sizes. It can be useful to
 
 ### Full Cudagraph capture
 
-It is possible to include attention as part of the cudagraph if using an attention backend that is cudagraph compatible. This can improve performance in some cases such as decode speed for smaller models. See [CUDA Graphs v1](cuda_graphs_v1.md) for more details.
+It is possible to include attention as part of the cudagraph if using an attention backend that is cudagraph compatible. This can improve performance in some cases such as decode speed for smaller models. See [CUDA Graphs v1](cuda_graphs.md) for more details.
 
