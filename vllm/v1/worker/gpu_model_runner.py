@@ -2228,7 +2228,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             is_profile: If True, this is a profile run.
             remove_lora: If False, dummy LoRAs are not destroyed after the run
         """
-        ic(cudagraph_runtime_mode)
         assert cudagraph_runtime_mode in {
             CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
         }
