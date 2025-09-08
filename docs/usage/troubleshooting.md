@@ -43,6 +43,7 @@ If other strategies don't solve the problem, it's likely that the vLLM instance 
 ## Breakpoints
 
 Setting normal `pdb` breakpoints may not work in vLLM's codebase if they are executed in a subprocess. You will experience something like:
+
 ``` text
   File "/usr/local/uv/cpython-3.12.11-linux-x86_64-gnu/lib/python3.12/bdb.py", line 100, in trace_dispatch
     return self.dispatch_line(frame)
@@ -53,10 +54,12 @@ Setting normal `pdb` breakpoints may not work in vLLM's codebase if they are exe
 bdb.BdbQuit
 ```
 
-One solution is using [forked-pdb](https://github.com/Lightning-AI/forked-pdb): `pip install fpdb`
+One solution is using [forked-pdb](https://github.com/Lightning-AI/forked-pdb). Install with `pip install fpdb` and set a breakpoint with something like:
+
 ``` python
 __import__('fpdb').ForkedPdb().set_trace()
 ```
+
 
 ## Incorrect network setup
 
