@@ -303,7 +303,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.query_start_loc = self._make_buffer(self.max_num_reqs + 1,
                                                  dtype=torch.int32)
         self.seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
-
         # Because inputs_embeds may be bfloat16 and we don't need a numpy
         # version of this tensor, avoid a RuntimeError by not creating a
         # numpy buffer.
@@ -1008,27 +1007,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.set_active_loras(self.input_batch, num_scheduled_tokens)
 
         # Compute aLoRA metadata
+        alora_metadata = None
         if self.lora_config and self.lora_config.activated_lora_enabled:
-            invocation_start = np.empty(shape=(num_reqs, ), dtype=int)
-            for req_id in self.input_batch.req_ids:
-                req_index = self.input_batch.req_id_to_index[req_id]
-                cached_lora_request = self.requests[req_id].lora_request
-                if (cached_lora_request is not None
-                        and cached_lora_request.invocation_start is not None):
-                    invocation_start[
-                        req_index] = cached_lora_request.invocation_start
-                else:
-                    invocation_start[req_index] = len(
-                        self.requests[req_id].prompt_token_ids)
-            mask1d_cpu = torch.tensor(positions_np
-                                      < invocation_start[req_indices],
-                                      dtype=torch.bool,
-                                      device="cpu")
-            mask1d = self.mask1d[:total_num_scheduled_tokens]
-            mask1d.copy_(mask1d_cpu, non_blocking=True)
-            alora_metadata = ALoRAMetadata(mask1d=mask1d)
-        else:
-            alora_metadata = None
+            alora_metadata = self.build_alora_metadata(
+                num_reqs, positions_np, req_indices,
+                total_num_scheduled_tokens, self.input_batch, self.requests,
+                self.mask1d)
 
         return (attn_metadata, logits_indices, spec_decode_metadata,
                 alora_metadata, num_scheduled_tokens,
@@ -2648,10 +2632,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             alora_metadata = None
             if self.lora_config and self.lora_config.activated_lora_enabled:
-                mask1d = self.mask1d[:num_tokens]
-                alora_metadata = ALoRAMetadata(mask1d=mask1d)
-                # needed to avoid guard failures
-                torch._dynamo.mark_dynamic(alora_metadata.mask1d, 0)
+                alora_metadata = self.build_dummy_alora_metadata(
+                    num_tokens, self.mask1d)
 
             with self.maybe_randomize_inputs(input_ids), set_forward_context(
                     attn_metadata,
