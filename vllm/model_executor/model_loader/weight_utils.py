@@ -21,6 +21,7 @@ from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
 from safetensors.torch import load_file, safe_open, save_file
 from tqdm.auto import tqdm
 
+from vllm import envs
 from vllm.config import LoadConfig, ModelConfig
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
@@ -93,6 +94,41 @@ def get_lock(model_name_or_path: Union[str, Path],
     lock = filelock.FileLock(os.path.join(lock_dir, lock_file_name),
                              mode=0o666)
     return lock
+
+
+def maybe_download_from_modelscope(
+        model: str,
+        revision: Optional[str] = None,
+        download_dir: Optional[str] = None,
+        ignore_patterns: Optional[Union[str, list[str]]] = None,
+        allow_patterns: Optional[Union[list[str],
+                                       str]] = None) -> Optional[str]:
+    """Download model from ModelScope hub if VLLM_USE_MODELSCOPE is True.
+
+        Returns the path to the downloaded model, or None if the model is not
+        downloaded from ModelScope."""
+    if envs.VLLM_USE_MODELSCOPE:
+        # download model from ModelScope hub,
+        # lazy import so that modelscope is not required for normal use.
+        # pylint: disable=C.
+        from modelscope.hub.snapshot_download import snapshot_download
+
+        # Use file lock to prevent multiple processes from
+        # downloading the same model weights at the same time.
+        with get_lock(model, download_dir):
+            if not os.path.exists(model):
+                model_path = snapshot_download(
+                    model_id=model,
+                    cache_dir=download_dir,
+                    local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+                    revision=revision,
+                    ignore_file_pattern=ignore_patterns,
+                    allow_patterns=allow_patterns,
+                )
+            else:
+                model_path = model
+        return model_path
+    return None
 
 
 def _shared_pointers(tensors):
@@ -169,7 +205,13 @@ def get_quant_config(model_config: ModelConfig,
     # Inflight BNB quantization
     if model_config.quantization == "bitsandbytes":
         return quant_cls.from_config({})
-    is_local = os.path.isdir(model_config.model)
+    model_name_or_path = maybe_download_from_modelscope(
+        model_config.model,
+        revision=model_config.revision,
+        download_dir=load_config.download_dir,
+        allow_patterns=["*.json"],
+    ) or model_config.model
+    is_local = os.path.isdir(model_name_or_path)
     if not is_local:
         # Download the config files.
         with get_lock(model_config.model, load_config.download_dir):
@@ -182,7 +224,7 @@ def get_quant_config(model_config: ModelConfig,
                 tqdm_class=DisabledTqdm,
             )
     else:
-        hf_folder = model_config.model
+        hf_folder = model_name_or_path
 
     possible_config_filenames = quant_cls.get_config_filenames()
 
@@ -278,33 +320,48 @@ def download_weights_from_hf(
     Returns:
         str: The path to the downloaded model weights.
     """
+    assert len(allow_patterns) > 0
     local_only = huggingface_hub.constants.HF_HUB_OFFLINE
     if not local_only:
-        # Before we download we look at that is available:
-        fs = HfFileSystem()
-        file_list = fs.ls(model_name_or_path, detail=False, revision=revision)
+        # Attempt to reduce allow_patterns to a single pattern
+        # so we only have to call snapshot_download once.
+        try:
+            fs = HfFileSystem()
+            file_list = fs.ls(model_name_or_path,
+                              detail=False,
+                              revision=revision)
 
-        # depending on what is available we download different things
-        for pattern in allow_patterns:
-            matching = fnmatch.filter(file_list, pattern)
-            if len(matching) > 0:
-                allow_patterns = [pattern]
+            # Use the first pattern found in the HF repo's files.
+            for pattern in allow_patterns:
+                matching = fnmatch.filter(file_list, pattern)
+                if len(matching) > 0:
+                    allow_patterns = [pattern]
                 break
+        except Exception as e:
+            logger.warning(
+                "Failed to get file list for '%s'. Trying each pattern in "
+                "allow_patterns individually until weights have been "
+                "downloaded. Error: %s", model_name_or_path, e)
 
     logger.info("Using model weights format %s", allow_patterns)
     # Use file lock to prevent multiple processes from
     # downloading the same model weights at the same time.
     with get_lock(model_name_or_path, cache_dir):
         start_time = time.perf_counter()
-        hf_folder = snapshot_download(
-            model_name_or_path,
-            allow_patterns=allow_patterns,
-            ignore_patterns=ignore_patterns,
-            cache_dir=cache_dir,
-            tqdm_class=DisabledTqdm,
-            revision=revision,
-            local_files_only=local_only,
-        )
+        for allow_pattern in allow_patterns:
+            hf_folder = snapshot_download(
+                model_name_or_path,
+                allow_patterns=allow_pattern,
+                ignore_patterns=ignore_patterns,
+                cache_dir=cache_dir,
+                tqdm_class=DisabledTqdm,
+                revision=revision,
+                local_files_only=local_only,
+            )
+            # If we have downloaded weights for this allow_pattern,
+            # we don't need to check the rest.
+            if any(Path(hf_folder).glob(allow_pattern)):
+                break
         time_taken = time.perf_counter() - start_time
         if time_taken > 0.5:
             logger.info("Time spent downloading weights for %s: %.6f seconds",

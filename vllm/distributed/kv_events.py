@@ -14,7 +14,7 @@ from typing import Any, Callable, Optional, Union
 import msgspec
 import zmq
 
-from vllm.config import KVEventsConfig
+from vllm.config.kv_events import KVEventsConfig
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -40,16 +40,21 @@ class KVCacheEvent(
     """Base class for all KV cache-related events"""
 
 
+MEDIUM_GPU = "GPU"
+
+
 class BlockStored(KVCacheEvent):
     block_hashes: list[int]
     parent_block_hash: Optional[int]
     token_ids: list[int]
     block_size: int
     lora_id: Optional[int]
+    medium: Optional[str]
 
 
 class BlockRemoved(KVCacheEvent):
     block_hashes: list[int]
+    medium: Optional[str]
 
 
 class AllBlocksCleared(KVCacheEvent):
