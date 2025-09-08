@@ -102,12 +102,6 @@ become available.
       <td><code>philschmid/mt-bench</code></td>
     </tr>
     <tr>
-      <td><strong>HuggingFace-MTBench</strong></td>
-      <td style="text-align: center;">✅</td>
-      <td style="text-align: center;">✅</td>
-      <td><code>philschmid/mt-bench</code></td>
-    </tr>
-    <tr>
       <td><strong>HuggingFace-Blazedit</strong></td>
       <td style="text-align: center;">✅</td>
       <td style="text-align: center;">✅</td>
@@ -272,13 +266,14 @@ VLLM_USE_V1=1 vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
     "prompt_lookup_min": 2}'
 ```
 
-SpecBench dataset: https://github.com/hemingkx/Spec-Bench .
-
-Download the dataset using: 
-    wget https://raw.githubusercontent.com/hemingkx/Spec-Bench/refs/heads/main/data/spec_bench/question.jsonl
+[SpecBench dataset](https://github.com/hemingkx/Spec-Bench)
 
 Run all categories:
+
 ``` bash
+# Download the dataset using:
+# wget https://raw.githubusercontent.com/hemingkx/Spec-Bench/refs/heads/main/data/spec_bench/question.jsonl
+
 vllm bench serve \
     --model meta-llama/Meta-Llama-3-8B-Instruct \
     --dataset-name spec_bench \ 
