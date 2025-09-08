@@ -668,8 +668,19 @@ class GptOssForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
                 positions: torch.Tensor,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 inputs_embeds: Optional[torch.Tensor] = None) -> torch.Tensor:
-        return self.model(input_ids, positions, intermediate_tensors,
-                          inputs_embeds)
+        hidden_states = self.model(input_ids, positions, intermediate_tensors,
+                                   inputs_embeds)
+
+        # For EAGLE3 compatibility, return auxiliary hidden states if needed
+        # This is a placeholder implementation - in a real scenario, you would
+        # need to implement proper auxiliary hidden state extraction
+        if (hasattr(self, '_aux_hidden_state_layers')
+                and self._aux_hidden_state_layers):
+            # Return both main hidden states and auxiliary hidden states
+            # For now, we return the same hidden states as auxiliary
+            return hidden_states, hidden_states
+        else:
+            return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
@@ -695,10 +706,8 @@ class GptOssForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
             layers: Tuple of layer indices that should output auxiliary
               hidden states.
         """
-        # For GPT-OSS models, we can set auxiliary hidden state layers
-        # This is a placeholder implementation - actual implementation
-        # would depend on the specific model architecture
-        pass
+        # Store the auxiliary hidden state layers for use in forward method
+        self._aux_hidden_state_layers = layers
 
     def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
         """
@@ -708,6 +717,18 @@ class GptOssForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
         Returns:
             Tuple of layer indices for auxiliary hidden state outputs.
         """
-        # Return empty tuple for now - this can be customized based on
-        # the specific model requirements
-        return ()
+        # For GPT-OSS models, we typically want to extract auxiliary hidden
+        # states from the middle layers. This is a common pattern for EAGLE3.
+        # You can adjust these layer indices based on your specific model
+        # requirements.
+        num_layers = self.config.num_hidden_layers
+        if num_layers >= 4:
+            # Use middle layers for auxiliary hidden states
+            middle_layer = num_layers // 2
+            return (middle_layer - 1, middle_layer, middle_layer + 1)
+        elif num_layers >= 2:
+            # For smaller models, use the last few layers
+            return (num_layers - 2, num_layers - 1)
+        else:
+            # For very small models, use the last layer
+            return (num_layers - 1, )
