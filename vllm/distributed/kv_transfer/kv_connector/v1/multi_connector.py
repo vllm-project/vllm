@@ -87,6 +87,10 @@ class MultiConnector(KVConnectorBase_V1):
         for c in self._connectors:
             c.clear_connector_metadata()
 
+    def shutdown(self):
+        for c in self._connectors:
+            c.shutdown()
+
     # ==============================
     # Worker-side methods
     # ==============================
