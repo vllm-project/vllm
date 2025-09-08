@@ -14,13 +14,12 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 from vllm.config import LoadConfig, ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
-from vllm.model_executor.model_loader.utils import (
-    maybe_download_from_modelscope)
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
     fastsafetensors_weights_iterator, filter_duplicate_safetensors_files,
-    filter_files_not_needed_for_inference, np_cache_weights_iterator,
-    pt_weights_iterator, safetensors_weights_iterator)
+    filter_files_not_needed_for_inference, maybe_download_from_modelscope,
+    np_cache_weights_iterator, pt_weights_iterator,
+    safetensors_weights_iterator)
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
