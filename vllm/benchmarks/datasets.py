@@ -1036,6 +1036,12 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         help="Path to the sharegpt/sonnet dataset. "
         "Or the huggingface dataset ID if using HF dataset.",
     )
+    parser.add_argument(
+        "--no-oversample",
+        action="store_true",
+        help="Do not oversample if the dataset has " \
+        "fewer samples than num-prompts.",
+    )
 
     # group for dataset specific arguments
     custom_group = parser.add_argument_group("custom dataset options")
@@ -1318,6 +1324,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
             output_len=args.custom_output_len,
             skip_chat_template=args.custom_skip_chat_template,
             request_id_prefix=args.request_id_prefix,
+            no_oversample=args.no_oversample,
         )
 
     elif args.dataset_name == "sonnet":
@@ -1332,6 +1339,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 tokenizer=tokenizer,
                 return_prompt_formatted=False,
                 request_id_prefix=args.request_id_prefix,
+                no_oversample=args.no_oversample,
             )
         else:
             assert tokenizer.chat_template or tokenizer.default_chat_template, (
@@ -1344,6 +1352,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 tokenizer=tokenizer,
                 return_prompt_formatted=True,
                 request_id_prefix=args.request_id_prefix,
+                no_oversample=args.no_oversample,
             )
 
     elif args.dataset_name == "hf":
@@ -1439,6 +1448,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
             tokenizer=tokenizer,
             output_len=args.hf_output_len,
             request_id_prefix=args.request_id_prefix,
+            no_oversample=args.no_oversample,
             **hf_kwargs
         )
 
@@ -1452,6 +1462,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 tokenizer=tokenizer,
                 output_len=args.spec_bench_output_len,
                 request_id_prefix=args.request_id_prefix,
+                no_oversample=args.no_oversample,
             ),
             "sharegpt": lambda: ShareGPTDataset(
                 random_seed=args.seed, dataset_path=args.dataset_path
@@ -1460,6 +1471,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 num_requests=args.num_prompts,
                 output_len=args.sharegpt_output_len,
                 request_id_prefix=args.request_id_prefix,
+                no_oversample=args.no_oversample,
             ),
             "burstgpt": lambda: BurstGPTDataset(
                 random_seed=args.seed, dataset_path=args.dataset_path
@@ -1467,6 +1479,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 tokenizer=tokenizer,
                 num_requests=args.num_prompts,
                 request_id_prefix=args.request_id_prefix,
+                no_oversample=args.no_oversample,
             ),
             "random": lambda: RandomDataset(
                 random_seed=args.seed, dataset_path=args.dataset_path
@@ -1479,6 +1492,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 range_ratio=args.random_range_ratio,
                 request_id_prefix=args.request_id_prefix,
                 batchsize=args.random_batch_size,
+                no_oversample=args.no_oversample,
             ),
             "random-mm":
             lambda: RandomMultiModalDataset(
@@ -1495,6 +1509,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 num_mm_items_range_ratio=args.random_mm_num_mm_items_range_ratio,
                 bucket_config=args.random_mm_bucket_config,
                 request_id_prefix=args.request_id_prefix,
+                no_oversample=args.no_oversample,
             ),
             "prefix_repetition":
             lambda: PrefixRepetitionRandomDataset(
@@ -1507,6 +1522,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 num_prefixes=args.prefix_repetition_num_prefixes,
                 output_len=args.prefix_repetition_output_len,
                 request_id_prefix=args.request_id_prefix,
+                no_oversample=args.no_oversample,
             ),
         }
 
