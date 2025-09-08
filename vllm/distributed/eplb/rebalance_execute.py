@@ -8,16 +8,14 @@ This involves the exchange of expert weights between GPUs.
 
 from collections.abc import Iterable, MutableSequence, Sequence
 from functools import partial
-from typing import Optional, Sequence, Iterable
+from typing import Optional
+
 import torch
-import torch.distributed as dist
-from torch.distributed import (P2POp, ProcessGroup, all_gather, barrier,
+from torch.distributed import (P2POp, ProcessGroup, all_gather,
                                batch_isend_irecv, get_global_rank)
 
-from vllm.distributed.parallel_state import get_ep_group
 
-
-def idx_local_to_global(    
+def idx_local_to_global(
     local_idx: int,
     local_cnt: int,
     ep_rank: int,
@@ -276,7 +274,7 @@ async def transfer_layer(old_global_expert_indices: torch.Tensor,
                          is_profile: bool = False,
                          layer: int = 0,
                          cuda_stream: Optional[torch.cuda.Stream] = None,
-                         rank_mapping= None) -> None:
+                         rank_mapping=None) -> tuple[list[bool], list[bool], dict[int, int]]:
     """
     Rearranges the expert weights in place according to the new expert indices.
 
