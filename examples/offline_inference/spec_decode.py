@@ -53,7 +53,7 @@ def parse_args():
         "--method",
         type=str,
         default="eagle",
-        choices=["ngram", "eagle", "eagle3", "mtp"],
+        choices=["ngram", "eagle", "eagle3", "mtp", "None"],
     )
     parser.add_argument("--num-spec-tokens", type=int, default=2)
     parser.add_argument("--prompt-lookup-max", type=int, default=5)
@@ -174,6 +174,7 @@ def main():
     num_draft_tokens = 0
     num_accepted_tokens = 0
     num_prompt_tokens = 0
+    num_requests = 0
     acceptance_counts = [0] * args.num_spec_tokens
 
     for metric in metrics:
@@ -200,39 +201,51 @@ def main():
         elif metric.name == "vllm:request_decode_time_seconds":
             assert isinstance(metric, Histogram)
             total_decode_time += metric.sum
+        elif metric.name == "vllm:request_success":
+            assert isinstance(metric, Counter)
+            num_requests += metric.value
 
-    # speed stats
-    prefill_speed = num_prompt_tokens / total_prefill_time
-    decode_speed = total_num_output_tokens / total_decode_time
+    # Calculate metrics
     total_tokens = num_prompt_tokens + total_num_output_tokens
     total_time = total_prefill_time + total_decode_time
-    overall_speed = total_tokens / total_time
+    prefill_speed = num_prompt_tokens / total_prefill_time if total_prefill_time > 0 else 0
+    decode_speed = total_num_output_tokens / total_decode_time if total_decode_time > 0 else 0
+    overall_speed = total_tokens / total_time if total_time > 0 else 0
+    request_throughput = num_requests / total_time if total_time > 0 else 0
 
-    print("-" * 20, 'speed', '-'*20)
-    print(f"prefill speed: {prefill_speed:.2f} tokens/sec")
-    print(f"decode speed: {decode_speed:.2f} tokens/sec")
-    print(f"overall speed: {overall_speed:.2f} tokens/sec")
-    print(f"total processing time: {total_time:.2f} seconds")
-    print(f"total tokens processed: {total_tokens}")
-    print("-" * 50)
+    # Print formatted benchmark results
+    print("====== Offline Throughput Benchmark Result =======")
+    print(f"Backend:                                 {'vllm':<10}")
+    print(f"Successful requests:                     {num_requests:<10}")
+    print(f"Benchmark duration (s):                  {total_time:<10.2f}")
+    print(f"Total input tokens:                      {num_prompt_tokens:<10}")
+    print(f"Total generated tokens:                  {total_num_output_tokens:<10}")
+    print(f"Last generation throughput (tok/s):      {decode_speed:<10.2f}")
+    print(f"Request throughput (req/s):              {request_throughput:<10.2f}")
+    print(f"Input token throughput (tok/s):          {prefill_speed:<10.2f}")
+    print(f"Output token throughput (tok/s):         {decode_speed:<10.2f}")
+    print(f"Total token throughput (tok/s):          {overall_speed:<10.2f}")
+    print("==================================================")
     print()
 
-    # speculative decoding stats
+    # Speculative decoding stats
     acceptance_length = 1 + (num_accepted_tokens / num_drafts) if num_drafts > 0 else 1
 
-    print("-" * 20, 'speculative decoding', '-'*20)
-    print(f"total_num_output_tokens: {total_num_output_tokens}")
-    print(f"num_drafts: {num_drafts}")
-    print(f"num_draft_tokens: {num_draft_tokens}")
-    print(f"num_accepted_tokens: {num_accepted_tokens}")
-    print(f"mean acceptance length: {acceptance_length:.2f}")
-    print("-" * 50)
+    print("============ Speculative Decoding Stats ============")
+    print(f"Total output tokens:                     {total_num_output_tokens:<10}")
+    print(f"Number of drafts:                        {num_drafts:<10}")
+    print(f"Draft tokens generated:                  {num_draft_tokens:<10}")
+    print(f"Accepted tokens:                         {num_accepted_tokens:<10}")
+    print(f"Mean acceptance length:                  {acceptance_length:<10.2f}")
+    print(f"Draft utilization rate:                  {(num_accepted_tokens/num_draft_tokens*100 if num_draft_tokens > 0 else 0):<10.1f}%")
+    print()
 
-    # print acceptance at each token position
+    # Print acceptance at each token position
+    print("Acceptance rates by token position:")
     for i in range(len(acceptance_counts)):
         acceptance_rate = acceptance_counts[i] / num_drafts if num_drafts > 0 else 0
-        print(f"acceptance at token {i}: {acceptance_rate:.2f}")
-    print("-" * 50)
+        print(f"  Position {i}: {acceptance_rate:.2f}")
+    print("====================================================")
 
 if __name__ == "__main__":
     main()
