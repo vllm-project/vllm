@@ -294,17 +294,17 @@ class LlamaForCausalLMEagle3(Eagle3LlamaForCausalLM):
     This class extends Eagle3LlamaForCausalLM to provide additional support
     for GPT-OSS specific features and configurations.
     """
-    
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         # Add any GPT-OSS specific initialization here if needed
         self._setup_gpt_oss_specific_config()
-    
+
     def _setup_gpt_oss_specific_config(self):
         """Setup GPT-OSS specific configurations if needed."""
         # This method can be extended to handle GPT-OSS specific requirements
         pass
-    
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -318,7 +318,7 @@ class LlamaForCausalLMEagle3(Eagle3LlamaForCausalLM):
         # Call parent forward method
         return super().forward(input_ids, positions, hidden_states,
                                inputs_embeds)
-    
+
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
@@ -329,7 +329,7 @@ class LlamaForCausalLMEagle3(Eagle3LlamaForCausalLM):
         """
         # Call parent compute_logits method
         return super().compute_logits(hidden_states, sampling_metadata)
-    
+
     def combine_hidden_states(
         self,
         hidden_states: torch.Tensor,
@@ -339,7 +339,7 @@ class LlamaForCausalLMEagle3(Eagle3LlamaForCausalLM):
         """
         # Call parent combine_hidden_states method
         return super().combine_hidden_states(hidden_states)
-    
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         """
         Load weights with potential GPT-OSS specific handling.
