@@ -172,6 +172,7 @@ class FlashAttnMLAMetadataBuilder(
 
 
 class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
+    can_return_lse_for_decode: bool = True
 
     def __init__(
             self,
@@ -239,7 +240,7 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
         # to prevent invalid grid configuration during graph capture.
         max_seqlen_q = max(attn_metadata.decode.max_query_len, 1)
 
-        o = flash_attn_varlen_func(
+        attn_out = flash_attn_varlen_func(
             q=q_pe,
             k=k_pe_cache.unsqueeze(-2),  # Add head dim of 1
             v=kv_c_cache.unsqueeze(-2),  # Add head dim of 1
@@ -251,9 +252,15 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
             block_table=attn_metadata.decode.block_table,
             softmax_scale=self.scale,
             causal=True,
+            return_softmax_lse=self.need_to_return_lse_for_decode,
             fa_version=3,  # only version 3 is supported
             scheduler_metadata=attn_metadata.decode.scheduler_metadata,
             num_splits=attn_metadata.decode.max_num_splits,
         )
-
-        return self._v_up_proj(o)
+        
+        if self.need_to_return_lse_for_decode:
+            o, lse = attn_out
+            return o, lse
+        else:
+            o = attn_out
+            return o, None
