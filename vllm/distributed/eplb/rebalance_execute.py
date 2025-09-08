@@ -182,7 +182,6 @@ def move_to_buffer(
                     torch.distributed.isend,
                     weight[src],
                     dst_global,
-                    stream=cuda_stream if cuda_stream is not None else torch.cuda.default_stream()
                 ) for weight in expert_weights
             ]
 
@@ -221,7 +220,7 @@ def move_to_buffer(
             P2POp(
                 torch.distributed.irecv,
                 weight[dst],
-                src_global
+                src_global,
             ) for weight in expert_weights_buffer
         ]
 

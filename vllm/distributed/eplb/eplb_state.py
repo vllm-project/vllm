@@ -311,9 +311,6 @@ class EplbState:
             dtype=torch.int32,
             device=device,
         )
-        self.expert_buffer = [
-                        torch.empty_like(w) for w in model.expert_weights[0]
-                        ]
 
         # Set the initial progress of rearrangement to 3/4
         eplb_step_interval = parallel_config.eplb_config.step_interval
@@ -331,7 +328,7 @@ class EplbState:
             num_gpus = ep_group.size()
 
             if num_gpus % num_nodes != 0:
-                self.num_nodes = 1
+                num_nodes = 1
                 logger.warning_once(
                     f"num_gpus % num_nodes != 0, "
                     "not using hierarchical rearrangement algorithm.\n"
@@ -371,7 +368,9 @@ class EplbState:
             logical_to_physical_map,
             logical_replica_count,
         )
-
+        expert_buffer = [
+                        torch.empty_like(w) for w in model.expert_weights[0]
+                        ]
         return cls(
             physical_to_logical_map,
             logical_to_physical_map,
@@ -505,6 +504,9 @@ class EplbState:
             time_start = time.perf_counter()
             logger.info("Rearranging experts %s...",
                         "(profile)" if is_profile else "")
+        elif is_main_rank and self.is_async:
+            logger.info("Rearranging experts %s(async mode)...",
+                        "(profile) " if is_profile else "")
 
         if global_expert_load is None:
             # Map the physical expert load to global logical experts
@@ -569,7 +571,7 @@ class EplbState:
             num_gpus = ep_group.size()
 
         if num_gpus % num_nodes != 0:
-            self.num_nodes = 1
+            num_nodes = 1
             logger.warning_once(
                 f"num_gpus % num_nodes != 0, "
                 "not using hierarchical rearrangement algorithm.\n"
@@ -591,7 +593,7 @@ class EplbState:
         # Update expert weights
         rearrange_expert_weights_inplace(
             self.physical_to_logical_map,
-            new_physical_to_logical_map,
+            self.new_physical_to_logical_map,
             model.expert_weights,
             ep_group,
             is_profile,
@@ -600,23 +602,23 @@ class EplbState:
 
         if not is_profile:
             if self.physical_to_logical_map.shape[
-                    1] != new_physical_to_logical_map.shape[1]:
-                self.physical_to_logical_map = new_physical_to_logical_map.to(
+                    1] != self.new_physical_to_logical_map.shape[1]:
+                self.physical_to_logical_map = self.new_physical_to_logical_map.to(
                     self.physical_to_logical_map.device)
             else:
-                self.physical_to_logical_map.copy_(new_physical_to_logical_map)
-            max_physical_slots = new_logical_to_physical_map.shape[-1]
+                self.physical_to_logical_map.copy_(self.new_physical_to_logical_map)
+            max_physical_slots = self.new_logical_to_physical_map.shape[-1]
             assert max_physical_slots <= self.logical_to_physical_map.shape[-1]
-            new_logical_to_physical_map = torch.nn.functional.pad(
-                new_logical_to_physical_map,
+            self.new_logical_to_physical_map = torch.nn.functional.pad(
+                self.new_logical_to_physical_map,
                 (0,
                  self.logical_to_physical_map.shape[-1] - max_physical_slots),
                 value=-1,
             )
-            self.logical_to_physical_map.copy_(new_logical_to_physical_map)
-            self.logical_replica_count.copy_(new_logical_replica_count)
+            self.logical_to_physical_map.copy_(self.new_logical_to_physical_map)
+            self.logical_replica_count.copy_(self.new_logical_replica_count)
 
-        if is_main_rank:
+        if is_main_rank and not self.is_async:
             assert time_start is not None
             torch.cuda.synchronize()
             time_end = time.perf_counter()
@@ -625,9 +627,9 @@ class EplbState:
                 " (profile) " if is_profile else " ",
                 time_end - time_start,
             )
+        self.rebalanced = True
         return None
 
-        self.rebalanced = True
 
     def eplb_async_loop(self, 
                         model,
