@@ -43,7 +43,6 @@ from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
-                                               MergedReplicatedLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -435,12 +434,13 @@ class DeepseekV2MLAAttention(nn.Module):
         self.max_position_embeddings = max_position_embeddings
 
         if self.q_lora_rank is not None:
-            self.fused_qkv_a_proj = MergedReplicatedLinear(
+            self.fused_qkv_a_proj = MergedColumnParallelLinear(
                 self.hidden_size,
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
                 bias=False,
                 quant_config=quant_config,
-                prefix=f"{prefix}.fused_qkv_a_proj")
+                prefix=f"{prefix}.fused_qkv_a_proj",
+                disable_tp=True)
         else:
             self.kv_a_proj_with_mqa = ReplicatedLinear(
                 self.hidden_size,
