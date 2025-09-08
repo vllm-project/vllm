@@ -1756,9 +1756,10 @@ class ModelConfig:
         "head" refers to the last Linear layer(s) of an LLM,
         such as the lm_head in a generation model,
         or the score or classifier in a classification model.
-        The default head_dtype based on runner_type.
+
+        The default head_dtype based on runner_type.\n
         - The pooling model defaults to using fp32 head,
-        you can use --hf-overrides '{"head_dtype": "model"}' to disable it.
+        you can use --hf-overrides '{"head_dtype": "model"}' to disable it.\n
         - The generate model defaults to not using fp32 head,
         you can use --hf-overrides '{"head_dtype": "float32"}' to enable it.
         """
