@@ -16,7 +16,7 @@ import zmq
 
 from vllm.config import KVEventsConfig
 from vllm.logger import init_logger
-from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.v1.core.kv_cache_utils import ExternalBlockHash
 
 logger = init_logger(__name__)
 
@@ -45,8 +45,8 @@ MEDIUM_GPU = "GPU"
 
 
 class BlockStored(KVCacheEvent):
-    block_hashes: list[BlockHash]
-    parent_block_hash: Optional[BlockHash]
+    block_hashes: list[ExternalBlockHash]
+    parent_block_hash: Optional[ExternalBlockHash]
     token_ids: list[int]
     block_size: int
     lora_id: Optional[int]
@@ -54,7 +54,7 @@ class BlockStored(KVCacheEvent):
 
 
 class BlockRemoved(KVCacheEvent):
-    block_hashes: list[BlockHash]
+    block_hashes: list[ExternalBlockHash]
     medium: Optional[str]
 
 

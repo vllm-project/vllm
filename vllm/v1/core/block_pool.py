@@ -9,9 +9,11 @@ from vllm.distributed.kv_events import (MEDIUM_GPU, AllBlocksCleared,
                                         KVCacheEvent)
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import (BlockHash, BlockHashWithGroupId,
+                                         ExternalBlockHash,
                                          FreeKVCacheBlockQueue, KVCacheBlock,
                                          get_block_hash,
-                                         make_block_hash_with_group_id)
+                                         make_block_hash_with_group_id,
+                                         maybe_convert_block_hash)
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -128,7 +130,7 @@ class BlockPool:
         assert len(request.block_hashes) >= num_full_blocks
         new_block_hashes = request.block_hashes[num_cached_blocks:]
 
-        new_hashes: Optional[list[BlockHash]] = (
+        new_hashes: Optional[list[ExternalBlockHash]] = (
             [] if self.enable_kv_cache_events else None)
         for i, blk in enumerate(new_full_blocks):
             assert blk.block_hash is None
@@ -141,15 +143,16 @@ class BlockPool:
             self.cached_block_hash_to_block[block_hash_with_group_id][
                 blk.block_id] = blk
             if new_hashes is not None:
-                new_hashes.append(block_hash)
+                new_hashes.append(maybe_convert_block_hash(block_hash))
 
         if self.enable_kv_cache_events:
             if num_cached_blocks == 0:
-                parent_block_hash = None
+                parent_block_hash: Optional[ExternalBlockHash] = None
             else:
                 parent_block = blocks[num_cached_blocks - 1]
                 assert parent_block.block_hash is not None
-                parent_block_hash = get_block_hash(parent_block.block_hash)
+                parent_block_hash = maybe_convert_block_hash(
+                    get_block_hash(parent_block.block_hash))
 
             self.kv_event_queue.append(
                 BlockStored(
@@ -224,7 +227,9 @@ class BlockPool:
             # we disable hybrid kv cache manager when kv cache event is
             # enabled, so there is only one group.
             self.kv_event_queue.append(
-                BlockRemoved(block_hashes=[get_block_hash(block_hash)],
+                BlockRemoved(block_hashes=[
+                    maybe_convert_block_hash(get_block_hash(block_hash))
+                ],
                              medium=MEDIUM_GPU))
         return True
 

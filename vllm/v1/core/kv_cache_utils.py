@@ -6,8 +6,9 @@ import os
 from collections import defaultdict, deque
 from collections.abc import Iterable, Sequence
 from dataclasses import astuple, dataclass
-from typing import Any, Callable, NewType, Optional
+from typing import Any, Callable, NewType, Optional, Union
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import GiB_bytes, cdiv, sha256_cbor
@@ -27,6 +28,11 @@ BlockHash = NewType("BlockHash", bytes)
 # It is represented as raw bytes for compactness and efficiency. The helper
 # functions below pack/unpack the ``BlockHash`` and group id into/from the key.
 BlockHashWithGroupId = NewType("BlockHashWithGroupId", bytes)
+
+# ExternalBlockHash is used for reproducible prefix-cache block hashing.
+# It's a union of ``bytes`` and ``int`` to keep backward compatibility
+# after we default block hashing to use sha256 bytes.
+ExternalBlockHash = Union[bytes, int]
 
 
 def make_block_hash_with_group_id(block_hash: BlockHash,
@@ -49,6 +55,12 @@ def get_block_hash(key: BlockHashWithGroupId) -> BlockHash:
 def get_group_id(key: BlockHashWithGroupId) -> int:
     """Extract the group id from a ``BlockHashWithGroupId``."""
     return int.from_bytes(key[-4:], "big", signed=False)
+
+
+def maybe_convert_block_hash(hash_bytes: BlockHash) -> ExternalBlockHash:
+    if not envs.VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES:
+        return hash_bytes
+    return int.from_bytes(hash_bytes, byteorder="big") & ((1 << 64) - 1)
 
 
 logger = init_logger(__name__)
