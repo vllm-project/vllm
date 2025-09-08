@@ -235,7 +235,7 @@ class MQLLMEngineClient(EngineClient):
                         # therefore we have to inform that the current
                         # processed requests failed as well. Send back a dead
                         # engine error give this feedback and also give a
-                        # 'hint' to the server to shutdown next.
+                        # 'hint' to the server to shut down next.
                         exception = self.dead_error
 
                     if request_id is None:
