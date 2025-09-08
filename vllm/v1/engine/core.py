@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
 import os
 import queue
 import signal
@@ -438,7 +439,7 @@ class EngineCore:
         """
         # Note on thread safety: no race condition.
         # `mm_receiver_cache` is reset at the end of LLMEngine init,
-        # and will only accessed in the input processing thread afterwards.
+        # and will only be accessed in the input processing thread afterwards.
         if self.mm_receiver_cache is not None and request.mm_features:
             request.mm_features = (
                 self.mm_receiver_cache.get_and_update_features(
@@ -535,6 +536,11 @@ class EngineCoreProc(EngineCore):
 
         self.step_fn = (self.step if self.batch_queue is None else
                         self.step_with_batch_queue)
+
+        # Mark the startup heap as static so that it's ignored by GC.
+        # Reduces pause times of oldest generation collections.
+        gc.collect()
+        gc.freeze()
 
     @contextmanager
     def _perform_handshakes(
