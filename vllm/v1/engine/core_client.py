@@ -352,24 +352,23 @@ class BackgroundResources:
                 asyncio.get_running_loop()
             except RuntimeError:
                 # There is no running loop
-                
+
                 # This can happen if the finalizer is called from a thread
                 # without an event loop (e.g., the engine monitor).
                 # In this case, we can't schedule async cleanup.
                 # Do a best-effort synchronous cleanup of sockets.
                 logger.warning(
                     "Could not get event loop for async cleanup. "
-                    "Tasks may not be cancelled, sockets will be closed."
-                )
+                    "Tasks may not be cancelled, sockets will be closed.")
                 sockets = (self.output_socket, self.input_socket,
-                        self.first_req_send_socket, self.first_req_rcv_socket,
-                        self.stats_update_socket)
+                           self.first_req_send_socket,
+                           self.first_req_rcv_socket, self.stats_update_socket)
                 close_sockets(sockets)
             else:
                 # There is a running loop.
                 sockets = (self.output_socket, self.input_socket,
-                        self.first_req_send_socket, self.first_req_rcv_socket,
-                        self.stats_update_socket)
+                           self.first_req_send_socket,
+                           self.first_req_rcv_socket, self.stats_update_socket)
 
                 tasks = (self.output_queue_task, self.stats_update_task)
 
