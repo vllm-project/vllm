@@ -3,14 +3,13 @@
 """Attention layer with FlexAttention."""
 
 from dataclasses import dataclass
-from functools import partial
 from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 import torch._dynamo.decorators
 import torch.nn.functional as F
 from torch.nn.attention.flex_attention import (BlockMask, _mask_mod_signature,
-                                               _score_mod_signature,
+                                               _score_mod_signature, and_masks,
                                                create_block_mask,
                                                flex_attention)
 
@@ -254,12 +253,6 @@ def causal_mask_mod(b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor,
     return q_idx >= kv_idx
 
 
-def sliding_window_mask_mod(b, h, q_idx, kv_idx, sliding_window: int):
-    causal_mask = q_idx >= kv_idx
-    window_mask = q_idx - kv_idx <= sliding_window
-    return causal_mask & window_mask
-
-
 @dataclass
 class FlexAttentionMetadata:
     causal: bool
@@ -388,6 +381,48 @@ class FlexAttentionMetadata:
 
         return final_mask_mod
 
+    def get_sliding_window_mask_mod(self) -> _mask_mod_signature:
+        """Creates the sliding window mask_mod function for FlexAttention.
+
+        Note that the sliding window mask here is bidirectional, we need
+        to mask it with the bidirectional/causal mask for encoder/decoder.
+        """
+
+        if self.sliding_window is None:
+            raise ValueError(
+                "sliding_window must be set for sliding window attention")
+
+        def sliding_window_mask_mod(b: torch.Tensor, h: torch.Tensor,
+                                    q_idx: torch.Tensor, kv_idx: torch.Tensor):
+            return torch.abs(q_idx - kv_idx) <= self.sliding_window
+
+        def final_mask_mod(
+            b: torch.Tensor,
+            h: torch.Tensor,
+            q_idx: torch.Tensor,
+            physical_kv_idx: torch.Tensor,
+        ) -> torch.Tensor:
+            (is_valid, logical_q_idx,
+             logical_kv_idx) = self._convert_physical_to_logical(
+                 self.doc_ids, q_idx, physical_kv_idx)
+            return torch.where(
+                is_valid,
+                sliding_window_mask_mod(b, h, logical_q_idx, logical_kv_idx),
+                False,
+            )
+
+        return final_mask_mod if self.causal else sliding_window_mask_mod
+
+    def get_mask_mod(self):
+        if self.causal:
+            mask_mod = self.get_causal_mask_mod()
+        else:
+            mask_mod = self.get_bidirectional_mask_mod()
+        if self.sliding_window is not None:
+            sliding_window_mask_mod = self.get_sliding_window_mask_mod()
+            mask_mod = and_masks(mask_mod, sliding_window_mask_mod)
+        return mask_mod
+
     def get_transformed_score_mod(self) -> Optional[_score_mod_signature]:
         """Creates the transformed score_mod function for FlexAttention.
 
@@ -480,16 +515,9 @@ class FlexAttentionMetadata:
         return BlockMask.from_kv_blocks(**block_mask_kwargs)
 
     def build_block_mask(self) -> BlockMask:
-        if self.causal:
-            if self.sliding_window is not None:
-                self.logical_mask_mod = partial(
-                    sliding_window_mask_mod,
-                    sliding_window=self.sliding_window)
-            mask_mod = self.get_causal_mask_mod()
-            kv_len = self.total_cache_tokens
-        else:
-            mask_mod = self.get_bidirectional_mask_mod()
-            kv_len = self.num_actual_tokens
+        mask_mod = self.get_mask_mod()
+        kv_len = (self.total_cache_tokens
+                  if self.causal else self.num_actual_tokens)
         return create_block_mask_compiled(
             mask_mod,
             None,
@@ -721,13 +749,11 @@ class FlexAttentionImpl(AttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
 
-        if self.sliding_window and attn_metadata.sliding_window is None:
+        if attn_metadata.sliding_window != self.sliding_window:
             attn_metadata.sliding_window = self.sliding_window
             if attn_metadata.direct_build:
-                attn_metadata.logical_mask_mod = partial(
-                    sliding_window_mask_mod,
-                    sliding_window=self.sliding_window)
-                attn_metadata.mask_mod = attn_metadata.get_causal_mask_mod()
+                # update mask mod in attention metadata
+                attn_metadata.mask_mod = attn_metadata.get_mask_mod()
                 attn_metadata.block_mask = (
                     attn_metadata._build_block_mask_direct())
             else:
