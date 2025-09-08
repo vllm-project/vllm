@@ -102,7 +102,7 @@ def main():
 
     # vanilla inference
     if args.method == "None":
-        speculative_config = {}
+        speculative_config = None
     elif args.method == "eagle":
         eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B" if args.eagle_dir is None else args.eagle_dir
         speculative_config = {
