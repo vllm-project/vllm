@@ -30,6 +30,7 @@ https://docs.ray.io/en/latest/placement-groups.html
 
 import gc
 import os
+import uuid
 
 import ray
 import torch
@@ -95,9 +96,10 @@ class RayTrainingActor:
         return self.device_uuid
 
     def get_zmq_handles(self):
-        return {self.device_uuid: f"ipc:///tmp/rl-colocate-zmq-{self.device_uuid}.sock"}
+        return {self.device_uuid: f"ipc:///tmp/rl-colocate-zmq-{uuid.uuid4()}.sock"}
 
     def update_weights(self, zmq_handle: dict[str, str]):
+        # align size to avoid misaligned address
         align_size = 256
 
         def get_size(p: torch.Tensor) -> int:
@@ -123,6 +125,7 @@ class RayTrainingActor:
                 buckets.append((named_tensors, real_tensors))
                 named_tensors, real_tensors = [], []
                 offset = 0
+            # assume tensors are contiguous
             named_tensors.append(
                 {"name": name, "dtype": p.dtype, "shape": p.shape, "offset": offset}
             )
