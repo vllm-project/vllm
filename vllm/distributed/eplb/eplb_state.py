@@ -592,45 +592,26 @@ class EplbState:
             num_nodes,
             num_gpus,
         ))
-
-        # Update expert weights
-        rearrange_expert_weights_inplace(
-            self.physical_to_logical_map,
-            self.new_physical_to_logical_map,
-            model.expert_weights,
-            ep_group,
-            is_profile,
-            rank_mapping,
-        )
-
-        if not is_profile:
-            if self.physical_to_logical_map.shape[
-                    1] != self.new_physical_to_logical_map.shape[1]:
-                self.physical_to_logical_map = self.new_physical_to_logical_map.to(
-                    self.physical_to_logical_map.device)
-            else:
-                self.physical_to_logical_map.copy_(
-                    self.new_physical_to_logical_map)
-            max_physical_slots = self.new_logical_to_physical_map.shape[-1]
-            assert max_physical_slots <= self.logical_to_physical_map.shape[-1]
-            self.new_logical_to_physical_map = torch.nn.functional.pad(
-                self.new_logical_to_physical_map,
-                (0,
-                 self.logical_to_physical_map.shape[-1] - max_physical_slots),
-                value=-1,
+        if not self.is_async:
+            # Update expert weights
+            rearrange_expert_weights_inplace(
+                self.physical_to_logical_map,
+                self.new_physical_to_logical_map,
+                model.expert_weights,
+                ep_group,
+                is_profile,
+                rank_mapping,
             )
-            self.logical_to_physical_map.copy_(self.new_logical_to_physical_map)
-            self.logical_replica_count.copy_(self.new_logical_replica_count)
-
-        if is_main_rank and not self.is_async:
-            assert time_start is not None
-            torch.cuda.synchronize()
-            time_end = time.perf_counter()
-            logger.info(
-                "Rearranged experts%sin %.2f seconds.",
-                " (profile) " if is_profile else " ",
-                time_end - time_start,
-            )
+            self.post_eplb(model, is_profile)
+            if is_main_rank:
+                assert time_start is not None
+                torch.cuda.synchronize()
+                time_end = time.perf_counter()
+                logger.info(
+                    "Rearranged experts%sin %.2f seconds.",
+                    " (profile) " if is_profile else " ",
+                    time_end - time_start,
+                )
         self.rebalanced = True
         return None
 
