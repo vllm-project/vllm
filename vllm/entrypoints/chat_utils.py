@@ -845,7 +845,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
             placeholder = self._tracker.add("image_embeds", embedding, uuid)
 
         if image_embeds is None:
-            placeholder = self._tracker.add("image_embeds", None)
+            placeholder = self._tracker.add("image_embeds", None, uuid)
 
         self._add_placeholder("image", placeholder)
 
@@ -931,7 +931,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         if image_embeds is None:
             future.set_result(None)
 
-        placeholder = self._tracker.add("image_embeds", future)
+        placeholder = self._tracker.add("image_embeds", future, uuid)
         self._add_placeholder("image", placeholder)
 
     def parse_image_pil(
