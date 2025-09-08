@@ -1522,7 +1522,7 @@ def test_parse_chat_messages_multiple_modals_multiple_messages_interleave(
                      modality="image",
                      expected_uuids=[None, None])
     _assert_mm_uuids(mm_uuids, 1, modality="video", expected_uuids=[None])
-    _assert_mm_uuids(mm_uuids, 1, modality="audtio", expected_uuids=[None])
+    _assert_mm_uuids(mm_uuids, 1, modality="audio", expected_uuids=[None])
 
 
 def test_parse_chat_messages_multiple_modals_with_uuids_multiple_messages_interleave(  # noqa: E501

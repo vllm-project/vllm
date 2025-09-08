@@ -773,8 +773,7 @@ class BaseMultiModalContentParser(ABC):
 
     @abstractmethod
     def parse_image(
-        self, image_url: Optional[str], uuid: Optional[str] = None
-    ) -> None:
+        self, image_url: Optional[str], uuid: Optional[str] = None) -> None:
         raise NotImplementedError
 
     @abstractmethod
