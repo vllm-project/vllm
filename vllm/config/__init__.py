@@ -86,6 +86,21 @@ else:
 logger = init_logger(__name__)
 DataclassInstanceT = TypeVar("DataclassInstanceT", bound=DataclassInstance)
 
+
+def _validate_quantization_method(value: Any) -> Any:
+    """Shared validation logic for quantization method strings.
+    
+    Handles empty strings, dots, and converts to lowercase.
+    """
+    if isinstance(value, str) and value.strip() == "":
+        return None
+    if isinstance(value, str) and value.strip() == ".":
+        return None
+    if isinstance(value, str):
+        return value.lower()
+    return value
+
+
 TaskOption = Literal["auto", "generate", "embedding", "embed", "classify",
                      "score", "reward", "transcription", "draft"]
 
@@ -791,13 +806,7 @@ class ModelConfig:
     @classmethod
     def validate_quantization_before(cls, value: Any) -> Any:
         """Handle empty quantization method string."""
-        if isinstance(value, str) and value.strip() == "":
-            return None
-        if isinstance(value, str) and value.strip() == ".":
-            return None
-        if isinstance(value, str):
-            return value.lower()
-        return value
+        return _validate_quantization_method(value)
 
     @model_validator(mode="after")
     def validate_model_config_after(self: "ModelConfig") -> "ModelConfig":
@@ -2019,13 +2028,7 @@ class SpeculativeConfig:
     @classmethod
     def validate_quantization_before(cls, value: Any) -> Any:
         """Handle empty quantization method string."""
-        if isinstance(value, str) and value.strip() == "":
-            return None
-        if isinstance(value, str) and value.strip() == ".":
-            return None
-        if isinstance(value, str):
-            return value.lower()
-        return value
+        return _validate_quantization_method(value)
 
     def compute_hash(self) -> str:
         """
