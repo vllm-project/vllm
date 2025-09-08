@@ -237,7 +237,7 @@ class Siglip2Attention(nn.Module):
 
         # Detect attention implementation.
         self.attn_backend, self.use_upstream_fa = get_vit_attn_backend(
-            head_size=self.head_dim)
+            head_size=self.head_dim, dtype=torch.get_default_dtype())
         if self.attn_backend not in {
                 _Backend.FLASH_ATTN, _Backend.TORCH_SDPA,
                 _Backend.ROCM_AITER_FA

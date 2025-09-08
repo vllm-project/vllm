@@ -315,7 +315,8 @@ class Qwen2VisionAttention(nn.Module):
 
         # Detect attention implementation.
         self.attn_backend, self.use_upstream_fa = get_vit_attn_backend(
-            head_size=self.hidden_size_per_attention_head)
+            head_size=self.hidden_size_per_attention_head,
+            dtype=torch.get_default_dtype())
         if self.attn_backend not in {
                 _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS,
                 _Backend.ROCM_AITER_FA
@@ -632,7 +633,8 @@ class Qwen2VisionTransformer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.merger",
         )
-        self.attn_backend, _ = get_vit_attn_backend(head_size=head_dim)
+        self.attn_backend, _ = get_vit_attn_backend(
+            head_size=head_dim, dtype=torch.get_default_dtype())
 
     @property
     def dtype(self) -> torch.dtype:

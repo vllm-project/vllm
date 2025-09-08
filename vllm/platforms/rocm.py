@@ -175,7 +175,8 @@ class RocmPlatform(Platform):
     ]
 
     @classmethod
-    def get_vit_attn_backend(cls, head_size: int) -> tuple[_Backend, bool]:
+    def get_vit_attn_backend(cls, head_size: int,
+                             dtype: torch.dtype) -> tuple[_Backend, bool]:
         if (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA
                 and on_gfx9()):
             # Note: AITER FA is only supported for Qwen-VL models.

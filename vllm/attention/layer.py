@@ -350,10 +350,13 @@ class MultiHeadAttention(nn.Module):
             f"divisible by num_kv_heads ({self.num_kv_heads})"
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-        # dtype = torch.get_default_dtype()
+        # During model initialization, the default dtype is set as the model
+        # weight and activation dtype.
+        dtype = torch.get_default_dtype()
 
         # Determine the attention backend
-        backend, use_upstream_fa = get_vit_attn_backend(head_size=head_size)
+        backend, use_upstream_fa = get_vit_attn_backend(head_size=head_size,
+                                                        dtype=dtype)
 
         if current_platform.is_rocm():
             # currently, only torch_sdpa is supported on rocm

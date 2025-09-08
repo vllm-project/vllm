@@ -36,12 +36,18 @@ def test_mha_attn_platform(device: str):
     torch.set_default_dtype(torch.float16)
 
     if device == "cpu":
+<<<<<<< HEAD
         with patch("vllm.attention.selector.current_platform",
                    CpuPlatform()), \
              patch("vllm.platforms.current_platform", CpuPlatform()):
+=======
+        with patch("vllm.model_executor.models.vision.current_platform",
+                   CpuPlatform()):
+>>>>>>> add dtype checking and fix tests
             attn = MultiHeadAttention(16, 64, scale=1)
             assert attn.attn_backend == _Backend.TORCH_SDPA_VLLM_V1
     elif device == "hip":
+<<<<<<< HEAD
         with patch("vllm.attention.selector.current_platform",
                    RocmPlatform()), \
              patch("vllm.platforms.current_platform", RocmPlatform()), \
@@ -58,6 +64,35 @@ def test_mha_attn_platform(device: str):
         with patch("vllm.attention.selector.current_platform",
                    CudaPlatform()), \
              patch("vllm.platforms.current_platform", CudaPlatform()):
+=======
+        with patch("vllm.model_executor.models.vision.current_platform",
+                   RocmPlatform()):
+            attn = MultiHeadAttention(16, 64, scale=1)
+            assert attn.attn_backend == _Backend.TORCH_SDPA
+    else:
+        # Test CUDA with head_size=64 (divisible by 32)
+        # - should use vLLM FlashAttention
+        with patch("vllm.model_executor.models.vision.current_platform",
+                   CudaPlatform()):
+            attn = MultiHeadAttention(16, 64, scale=1)
+            assert attn.attn_backend == _Backend.FLASH_ATTN
+
+        # Test CUDA with head_size=72 (not divisible by 32)
+        # - upstream FA available
+        with patch("vllm.model_executor.models.vision.current_platform",
+                   CudaPlatform()), \
+             patch("transformers.utils.is_flash_attn_2_available",
+                   return_value=True):
+            attn = MultiHeadAttention(16, 72, scale=1)
+            assert attn.attn_backend == _Backend.FLASH_ATTN
+
+        # Test CUDA with head_size=72 (not divisible by 32)
+        # - upstream FA not available
+        with patch("vllm.model_executor.models.vision.current_platform",
+                   CudaPlatform()), \
+             patch("transformers.utils.is_flash_attn_2_available",
+                   return_value=False):
+>>>>>>> add dtype checking and fix tests
             attn = MultiHeadAttention(16, 72, scale=1)
             assert attn.attn_backend == _Backend.XFORMERS
 

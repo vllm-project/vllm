@@ -192,7 +192,8 @@ class Platform:
             return device_id
 
     @classmethod
-    def get_vit_attn_backend(cls, head_size: int) -> tuple[_Backend, bool]:
+    def get_vit_attn_backend(cls, head_size: int,
+                             dtype: torch.dtype) -> tuple[_Backend, bool]:
         return _Backend.TORCH_SDPA, False
 
     @classmethod

@@ -209,7 +209,11 @@ class CudaPlatformBase(Platform):
         return torch.cuda.max_memory_allocated(device)
 
     @classmethod
-    def get_vit_attn_backend(cls, head_size: int) -> tuple[_Backend, bool]:
+    def get_vit_attn_backend(cls, head_size: int,
+                             dtype: torch.dtype) -> tuple[_Backend, bool]:
+        if dtype not in (torch.float16, torch.bfloat16):
+            return _Backend.XFORMERS, False
+
         if cls.has_device_capability(80):
             if head_size % 32 == 0:
                 # Use vllm-flash-attn

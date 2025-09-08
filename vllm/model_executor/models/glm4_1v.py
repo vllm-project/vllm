@@ -261,7 +261,8 @@ class Glm4vVisionAttention(nn.Module):
 
         # Detect attention implementation.
         self.attn_backend, self.use_upstream_fa = get_vit_attn_backend(
-            head_size=self.hidden_size_per_attention_head)
+            head_size=self.hidden_size_per_attention_head,
+            dtype=torch.get_default_dtype())
         if self.attn_backend not in {
                 _Backend.FLASH_ATTN,
                 _Backend.TORCH_SDPA,
@@ -719,7 +720,8 @@ class Glm4vVisionTransformer(nn.Module):
         self.post_layernorm = RMSNorm(vision_config.hidden_size,
                                       eps=vision_config.rms_norm_eps)
 
-        self.attn_backend, _ = get_vit_attn_backend(head_size=head_dim)
+        self.attn_backend, _ = get_vit_attn_backend(
+            head_size=head_dim, dtype=torch.get_default_dtype())
 
     @property
     def dtype(self) -> torch.dtype:
