@@ -570,6 +570,7 @@ steps:
   commands:
     - pytest -v -s models/test_initialization.py::test_can_initialize_other
 
+# Other non-initialization models tests
 - label: Basic Models Test
   timeout_in_minutes: 75
   mirror_hardwares: [amdexperimental]
@@ -594,7 +595,8 @@ steps:
     - pip freeze | grep -E 'torch'
     - pytest -v -s models/language -m core_model
 
-- label: Language Models Test (Hybrid) # 35 min
+# Shard hybrid language model tests
+- label: Language Models Test Shard 0 (Hybrid)
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
@@ -606,7 +608,49 @@ steps:
     # Note: also needed to run plamo2 model in vLLM
     - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.2.5'
     - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
-    - pytest -v -s models/language/generation -m hybrid_model
+    - pytest -v -s --shard-count=4 --shard-index=0 models/language/generation -m hybrid_model
+
+- label: Language Models Test Shard 1 (Hybrid)
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental]
+  torch_nightly: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/language/generation
+  commands:
+    # Install fast path packages for testing against transformers
+    # Note: also needed to run plamo2 model in vLLM
+    - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.2.5'
+    - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
+    - pytest -v -s --shard-count=4 --shard-index=1 models/language/generation -m hybrid_model
+
+- label: Language Models Test Shard 2 (Hybrid)
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental]
+  torch_nightly: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/language/generation
+  commands:
+    # Install fast path packages for testing against transformers
+    # Note: also needed to run plamo2 model in vLLM
+    - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.2.5'
+    - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
+    - pytest -v -s --shard-count=4 --shard-index=2 models/language/generation -m hybrid_model
+
+- label: Language Models Test Shard 3 (Hybrid)
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental]
+  torch_nightly: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/language/generation
+  commands:
+    # Install fast path packages for testing against transformers
+    # Note: also needed to run plamo2 model in vLLM
+    - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.2.5'
+    - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
+    - pytest -v -s --shard-count=4 --shard-index=3 models/language/generation -m hybrid_model
 
 - label: Language Models Test (Extended Generation) # 80min
   timeout_in_minutes: 110
