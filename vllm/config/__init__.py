@@ -3743,7 +3743,7 @@ class VllmConfig:
             # warning message here and will log it later.
             if not (current_platform.is_cuda() or current_platform.is_rocm()):
                 # Hybrid KV cache manager is not supported on non-GPU platforms.
-                self.scheduler_config.disable_hybrid_kv_cache_manager = True
+                self.scheduler_config.disable_hybrid_kv_cache_manager = False
             if self.kv_transfer_config is not None:
                 # Hybrid KV cache manager is not compatible with KV transfer.
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True
