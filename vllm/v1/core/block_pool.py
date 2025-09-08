@@ -128,16 +128,7 @@ class BlockPool:
                                            else None)
         for i, blk in enumerate(new_full_blocks):
             if blk.is_null:
-                # We don't need to process for null block.
-                # This is necessary to avoid the assertion error
-                # down below. Because in hybrid allocator + connector
-                # case, the newly-allocated blocks might be null blocks
-                # (e.g. for those tokens that are 1. prefix cache hit
-                # from the connector but 2. outside sliding window).
-                # If we don't skip these null blocks, the block hash of
-                # null blocks will be changed, and trigger assertion error
-                # when it see the next null block (recall that null blocks
-                # are shared).
+                # May happen when both sparse attention (e.g., sliding window) and connector are enabled.
                 continue
             assert blk.block_hash is None
             block_hash = new_block_hashes[i]
