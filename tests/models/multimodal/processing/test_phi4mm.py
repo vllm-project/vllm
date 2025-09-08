@@ -32,7 +32,7 @@ def test_processor_override(
 ):
     """Ensure Phi4MMMultiModalProcessor handles dynamic_hd properly."""
     # Avoid initializing CUDA early
-    from vllm.model_executor.models.phi4mm import _IMAGE_PLACEHOLDER_TOKEN_ID
+    from vllm.model_executor.models.phi4_multimodal import _IMAGE_PLACEHOLDER_TOKEN_ID
 
     ctx = build_model_context(
         model_id,
@@ -43,7 +43,7 @@ def test_processor_override(
     hf_processor_mm_kwargs = {} if kwargs_on_init else mm_processor_kwargs
 
     # Build the image str / prompt based on the number of images we pass
-    img_str = "".join([f"<|image_{idx}|>\n" for idx in range(1, num_imgs + 1)])
+    img_str = "".join(["<|image|>\n" for idx in range(1, num_imgs + 1)])
     prompt = f"<|user|>\n{img_str}<|end|>\n<|assistant|>\n"
 
     image_size = ctx.get_hf_config(
