@@ -210,8 +210,10 @@ class JinaVLForSequenceClassificationConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         config = vllm_config.model_config.hf_config
-
         config.num_labels = 1
+        pooler_config = vllm_config.model_config.pooler_config
+        if pooler_config.logit_bias is None:
+            pooler_config.logit_bias = 2.65
 
 
 class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
@@ -254,7 +256,7 @@ class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         decoding_config = vllm_config.decoding_config
         if decoding_config.reasoning_backend == "":
-            decoding_config.reasoning_backend = "GptOss"
+            decoding_config.reasoning_backend = "openai_gptoss"
 
         # Increase the max capture size from 512 to 1024 for performance.
         # NOTE(woosuk): This will increase the number of CUDA graphs
@@ -292,12 +294,13 @@ class MambaModelConfig(VerifyAndUpdateConfig):
             return
 
         model_config = vllm_config.model_config
+        cache_config = vllm_config.cache_config
         compilation_config = vllm_config.compilation_config
 
-        model_cls, _ = ModelRegistry.resolve_model_cls(
-            model_config.architecture,
-            model_config=model_config,
-        )
+        # TODO(tdoublep): remove once prefix caching is enabled
+        cache_config.enable_prefix_caching = False
+        logger.info("Hybrid or mamba-based model detected: disabling prefix "
+                    "caching since it is not yet supported.")
 
         # TODO(tdoublep): remove as full cuda graph support is added
         FCG_NOT_SUPPORTED_MODELS = [
@@ -405,6 +408,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
+    "GteNewForSequenceClassification": GteNewModelConfig,
     "NomicBertModel": NomicBertModelConfig,
     "Qwen2ForProcessRewardModel": Qwen2ForProcessRewardModelConfig,
     "Qwen2ForRewardModel": Qwen2ForRewardModelConfig,
@@ -416,4 +420,5 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GptOssForCausalLM": GptOssForCausalLMConfig,
     "MambaForCausalLM": MambaModelConfig,
     "Mamba2ForCausalLM": MambaModelConfig,
+    "FalconMambaForCausalLM": MambaModelConfig,
 }

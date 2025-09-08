@@ -6,7 +6,7 @@ import copy
 import pickle
 from contextlib import contextmanager, suppress
 from typing import (Any, AsyncGenerator, Dict, Iterable, Iterator, List,
-                    Mapping, Optional, Union, cast)
+                    Mapping, Optional, Union)
 
 import cloudpickle
 import psutil
@@ -270,7 +270,7 @@ class MQLLMEngineClient(EngineClient):
             queue.put_nowait(request_output)
 
     async def setup(self):
-        """Setup the client before it starts sending server requests."""
+        """Set up the client before it starts sending server requests."""
 
         # Start output_loop
         if self.output_loop is None:
@@ -477,10 +477,8 @@ class MQLLMEngineClient(EngineClient):
                 Any priority other than 0 will lead to an error if the
                 scheduling policy is not "priority".
         """
-        return cast(
-            AsyncGenerator[RequestOutput, None],
-            self._process_request(prompt, sampling_params, request_id,
-                                  lora_request, trace_headers, priority))
+        return self._process_request(prompt, sampling_params, request_id,
+                                     lora_request, trace_headers, priority)
 
     def encode(
         self,
@@ -490,45 +488,20 @@ class MQLLMEngineClient(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
-        """Generate outputs for a request from a pooling model.
-
-        Generate outputs for a request. This method is a coroutine. It adds the
-        request into the waiting queue of the LLMEngine and streams the outputs
-        from the LLMEngine to the caller.
-
-        Args:
-            prompt: The prompt to the LLM. See
-                [`PromptType`][vllm.inputs.PromptType] for more details about
-                the format of each input.
-            pooling_params: The pooling parameters of the request.
-            request_id: The unique id of the request.
-            lora_request: LoRA request to use for generation, if any.
-            trace_headers: OpenTelemetry trace headers.
-
-        Yields:
-            The output `PoolingRequestOutput` objects from the LLMEngine
-            for the request.
-        """
-        return cast(
-            AsyncGenerator[PoolingRequestOutput, None],
-            self._process_request(prompt,
-                                  pooling_params,
-                                  request_id,
-                                  lora_request,
-                                  trace_headers,
-                                  priority=priority))
+        raise NotImplementedError(
+            "Pooling models are not supported in vLLM V0")
 
     async def _process_request(
         self,
         prompt: PromptType,
-        params: Union[SamplingParams, PoolingParams],
+        params: SamplingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
-    ) -> Union[AsyncGenerator[RequestOutput, None], AsyncGenerator[
-            PoolingRequestOutput, None]]:
+    ) -> AsyncGenerator[RequestOutput, None]:
         """Send an RPCGenerateRequest to the RPCServer and stream responses."""
 
         # If already dead, error out.
@@ -547,7 +520,7 @@ class MQLLMEngineClient(EngineClient):
         try:
             # 2) Detach logits processors so that they can be pickled
             # separately (may require cloudpickle which is slower)
-            if isinstance(params, SamplingParams) and params.logits_processors:
+            if params.logits_processors:
                 # Defensive shallow copy
                 params = copy.copy(params)
                 logits_processors = params.logits_processors
@@ -646,13 +619,14 @@ class MQLLMEngineClient(EngineClient):
             raise request_output
         return request_output.is_sleeping
 
-    async def add_lora(self, lora_request: LoRARequest) -> None:
+    async def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""
         # Uses the same I/O as generate requests
         request = RPCLoadAdapterRequest(lora_request)
 
         # Create output queue for this request.
-        queue: asyncio.Queue[Union[None, BaseException]] = asyncio.Queue()
+        queue: asyncio.Queue[Union[
+            BaseException, RPCAdapterLoadedResponse]] = asyncio.Queue()
         self.output_queues[request.request_id] = queue
 
         # Send the request
@@ -666,3 +640,4 @@ class MQLLMEngineClient(EngineClient):
         # Raise on error, otherwise happily return None
         if isinstance(request_output, BaseException):
             raise request_output
+        return request_output.lora_loaded
