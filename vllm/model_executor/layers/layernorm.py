@@ -104,7 +104,7 @@ if current_platform.is_rocm():
     )
 
 
-def dispatch_rmsnorm_func(with_fused_add: bool, dtype: torch.dtype):
+def dispatch_rocm_rmsnorm_func(with_fused_add: bool, dtype: torch.dtype):
     use_aiter = is_rocm_aiter_rmsnorm_enabled() and dtype in [
         torch.float16, torch.bfloat16
     ]
@@ -113,6 +113,8 @@ def dispatch_rmsnorm_func(with_fused_add: bool, dtype: torch.dtype):
         return torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add
     if use_aiter:
         return torch.ops.vllm.rocm_aiter_rms_norm
+
+    # fall back to CUDA implementation
     if with_fused_add:
         return fused_add_rms_norm
     return rms_norm
@@ -149,10 +151,11 @@ class RMSNorm(CustomOp):
             self.weight = nn.Parameter(self.weight)
         weight_dtype = self.weight.data.dtype
 
-        self.norm_func = dispatch_rmsnorm_func(with_fused_add=False,
-                                               dtype=weight_dtype)
-        self.norm_func_with_add = dispatch_rmsnorm_func(with_fused_add=True,
-                                                        dtype=weight_dtype)
+        if current_platform.is_rocm():
+            self.rocm_aiter_norm_func = dispatch_rocm_rmsnorm_func(
+                with_fused_add=False, dtype=weight_dtype)
+            self.rocm_aiter_norm_func_with_add = dispatch_rocm_rmsnorm_func(
+                with_fused_add=True, dtype=weight_dtype)
 
     def forward_native(
         self,
@@ -202,10 +205,26 @@ class RMSNorm(CustomOp):
 
         add_residual = residual is not None
         if add_residual:
-            return self.norm_func_with_add(x, residual, self.weight.data,
-                                           self.variance_epsilon)
+            return fused_add_rms_norm(x, residual, self.weight.data,
+                                      self.variance_epsilon)
         else:
-            return self.norm_func(x, self.weight.data, self.variance_epsilon)
+            return rms_norm(x, self.weight.data, self.variance_epsilon)
+
+    def forward_hip(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        if self.variance_size_override is not None:
+            return self.forward_native(x, residual)
+
+        add_residual = residual is not None
+        if add_residual:
+            return self.rocm_norm_func_with_add(x, residual, self.weight.data,
+                                                self.variance_epsilon)
+        else:
+            return self.rocm_norm_func(x, self.weight.data,
+                                       self.variance_epsilon)
 
     def forward_xpu(
         self,
