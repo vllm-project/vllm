@@ -1,4 +1,5 @@
 # CUDA Graphs
+
 This write-up introduces the new CUDA Graph modes in vLLM v1 beyond previous [torch.compile Integration](torch_compile.md). To summarize, we (a.) added flexible `cudagraph_mode` configuration, (b.) made full CUDA Graphs support orthogonal to compilation, and (c.) introduced a cudagraph dispatcher as a central controller that picks the desired runtime mode and cudagraphs per batch automatically.  
 
 Throughout the document, we will walk through the motivation, cudagraph modes, the detailed design, and the usage examples of the CUDA Graph modes.
@@ -8,7 +9,6 @@ Throughout the document, we will walk through the motivation, cudagraph modes, t
 
 !!! note
     The following contents are based on the last commit of <gh-pr:20059>.
-
 
 ## Motivation
 
@@ -22,7 +22,6 @@ So we seek a more fine-grained cudagraph solution that can:
 * Final and also minor, add cuda graph support to models that do not fit vllm's torch.compile integration system design in v1.
 
 Apart from the above concerns, we also found that when a batch cannot hit a full cudagraph, the host-side eager execution of the flattened compiled fx graph(previous behavior) can be slower than the piecewise compiled fx graph in Python (see [here](gh-pr:20059>)). So we favor maintaining the piecewise compilation when enabling full cudagraphs to reduce host-side overhead. We can safely do this as full cudagraph and compilation are actually orthogonal to each other.
-
 
 ## CudagraphModes
 
@@ -44,7 +43,6 @@ While `NONE` , `PIECEWISE`, and `FULL` are single-mode configurations and simply
 !!! note
     Not all the above modes are valid for every attention backend. We will discuss the compatibility later. But for users' experience, we alias `FULL` mode to `FULL_AND_PIECEWISE` (-O 3) or `FULL_DECODE_ONLY` (-O 0) for attention backends that support cudagraph for only pure decode or uniform decode.
 
-
 ## Detailed Design
 
 ### Overview
@@ -56,7 +54,6 @@ See the following figures for a quick comparison between the previous and curren
 ![previous_design](../assets/design/cuda_graphs_v1/previous_design.jpg)
 
 ![new_design](../assets/design/cuda_graphs_v1/current_design.jpg)
-
 
 ### [BatchDescriptor][vllm.forward_context.BatchDescriptor]
 
@@ -74,7 +71,6 @@ The goal of this structure is to uniquely identify a (padded) batch with minimal
 
 !!! note
     The prototype of `BatchDescriptor` may be extended for more general situations in the future, e.g., include more items, like `uniform_query_len` to support multiple different uniform decode lengths settings (<gh-pr:23679>), or other modifications needed to support cudagraphs for models whose inputs are not necessarily token length aware (for example, some multi-modal inputs).
-
 
 ### [CudagraphDispatcher][vllm.v1.cudagraph_dispatcher.CudagraphDispatcher]
 
@@ -99,7 +95,6 @@ Inside the `dispatch()` method, the dispatcher will search the proper cudagraph 
 Here is a simplified illustration of the workflow at runtime in the model executor:
 ![executor_runtime](../assets/design/cuda_graphs_v1/executor_runtime.jpg)
 
-
 ### [CUDAGraphWrapper][vllm.compilation.cuda_graph.CUDAGraphWrapper]
 
 A `CUDAGraphWrapper` instance wraps a runnable and simply mimics the runnable with appended cudagraph abilities. Each wrapper instance is bound to a specific `runtime_mode`, which is restricted to `PIECEWISE` and `FULL` mode, and takes responsibility for capturing/replaying and passing through (directly calling) the runnable.  At runtime, each wrapper would:
@@ -111,7 +106,6 @@ a new entry and cache it) or replay (if key exists in the cache).
 
 The above steps are based on the assumption that the cudagraph wrapper would directly trust what’s in the forward context (controlled by the dispatcher) without any fallback behavior. See the implementation [here](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/cuda_graph.py#L106).
 
-
 #### Nested Wrapper design
 
 The core mechanism of making a full cudagraph and piecewise cudagraph coexist and compatible is the nested cudagraph wrapper design, building on top of piecewise compilation with only a single piecewise fx graph.  We wrap a FULL mode wrapper outside the entire model for the full cudagraph functionality; meanwhile, each piecewise backend is wrapped via a `PIECEWISE` mode wrapper inside the compilation.
@@ -121,13 +115,11 @@ The flow chart below should clearly describe how it works.
 
 Therefore, for a `FULL` runtime mode, it is safe to capture/replay a full cudagraph since the piecewise wrapper is not activated. The situation is similar for `PIECEWISE` mode, as there are no conflicts between the `FULL` mode wrapper and `PIECEWISE` mode wrappers.  For the `NONE` runtime mode, both `FULL` and `PIECEWISE` wrappers would not be activated, so an eager execution is passed.
 
-
 ### Full cudagraph capturing & warm-up
 
 The cudagraph capturing happens on the first call runner's dummy_run in a non-`NONE` runtime mode. And for full cudagraph capture (pass `FULL` runtime mode), the core idea of explicitly capturing different cases (i.e., prefill/mixed batch or uniform_decode batch ) is to tell the underlying attention backend to launch the desired kernel routines (i.e., may launch different kernels or combos for different cases) via carefully crafting the attn_metadatas. To distinguish prefill/mixed batch or uniform_decode batch, the most important property is the `max_query_len` in attn_metadata (true for most attention backends). we set it to the desired uniform_query_len for uniform_decode otherwise we make it just the `num_tokens` for a non-uniform_decode batch.
 
 The cudagraph wrapper no longer manages the warm-up logic. The warm-up process is now controlled directly by the GPU model runner, where the `NONE` runtime mode is assigned to play an eager execution for warm-up. When warming up for a full cudagraph, it is also important to pass `force_attention=True` to the `dummy_run` function to explicitly warm up the attention backends.
-
 
 ## Cudagraph Compatibility of Attention Backends
 
@@ -169,7 +161,6 @@ The following table lists backends that support full cudagraph at the time of wr
 
 Unlisted backends are all declared as `NEVER`.
 
-
 ## Usage guide
 
 Now the CLI is directly using the uppercase string of cudagraph_mode for compilation_config: `--compilation-config '{"cudagraph_mode": "..."}'`, where `...` should be one of `NONE`, `PIECEWISE`, `FULL`, `FULL_DECODE_ONLY`, and `FULL_AND_PIECEWISE`. Note that all `PIECEWISE` related modes require piecewise compilation, and all `FULL` related modes need cudagraph support of attention backends. For example:
@@ -177,7 +168,6 @@ Now the CLI is directly using the uppercase string of cudagraph_mode for compila
 ```bash
 vllm serve --model meta-llama/Llama-3.1-8B-Instruct --compilation-config '{"cudagraph_mode": "FULL_AND_PIECEWISE"}'
 ```
-
 
 ### Python examples
 
@@ -204,7 +194,6 @@ outputs = model.generate(
 )
 ```
 
-
 ### Migration from legacy flags
 
 Legacy `use_cudagraph` and `full_cuda_graph` are unified by `cudagraph_mode`:
@@ -215,11 +204,9 @@ Legacy `use_cudagraph` and `full_cuda_graph` are unified by `cudagraph_mode`:
 
 As they are deprecated and will be removed in the next major or minor release, i.e., v0.11.0 or v1.0.0, we recommend using cudagraph_mode instead.
 
-
 ### NOTE for attention ops fusion
 
 Currently, the default behavior of cudagraph_mode != `NONE` would always keep the attention ops in the splitting_ops to get a piecewise fx graph, causing attention ops fusion to be incompatible with piecewise cudagraph. In case one needs attention ops fusion, one can just manually pass `splitting_ops=[]` to compilation_config to retain the flattened fx graph, and use cudagraph_mode = "FULL" or "FULL_DECODE_ONLY" (should just avoid the PIECEWISE in mode even though we are using -O3). Currently, this RFC <gh-issue:23261> is tracking the progress of making attention ops fusion compatible with piecewise cudagraph to allow `FULL_AND_PIECEWISE` mode.
-
 
 ## About the Performance
 
@@ -228,4 +215,3 @@ See the following links for examples:
 comment1: <https://github.com/vllm-project/vllm/pull/20059#issuecomment-3160858458>
 comment2: <https://github.com/vllm-project/vllm/pull/20059#issuecomment-3188735226>
 comment3: <https://github.com/vllm-project/vllm/pull/20059#issuecomment-3219888738>
-
