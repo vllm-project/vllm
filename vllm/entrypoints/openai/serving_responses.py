@@ -19,9 +19,10 @@ from openai.types.responses import (
     ResponseCodeInterpreterCallCodeDoneEvent,
     ResponseCodeInterpreterCallCompletedEvent,
     ResponseCodeInterpreterCallInProgressEvent,
-    ResponseFunctionCallArgumentsDoneEvent,
     ResponseCodeInterpreterCallInterpretingEvent,
     ResponseCodeInterpreterToolCallParam,
+    ResponseFunctionCallArgumentsDeltaEvent,
+    ResponseFunctionCallArgumentsDoneEvent,
     ResponseContentPartAddedEvent,
     ResponseContentPartDoneEvent,
     ResponseFunctionToolCall,
@@ -48,7 +49,6 @@ from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
 from openai_harmony import Message as OpenAIHarmonyMessage
-from openai_harmony import Role
 
 from vllm import envs
 from vllm.engine.protocol import EngineClient
@@ -1426,7 +1426,7 @@ class OpenAIServingResponses(OpenAIServing):
                         if previous_item.recipient.startswith("functions."):
                             function_name = \
                                 previous_item.recipient[len("functions."): ]
-                            yield _send_event(
+                            yield _increment_sequence_number_and_return(
                                 ResponseFunctionCallArgumentsDoneEvent(
                                     type=
                                     "response.function_call_arguments.done",
@@ -1446,7 +1446,7 @@ class OpenAIServingResponses(OpenAIServing):
                                 call_id=f"fc_{random_uuid()}",
                                 status="completed",
                             )
-                            yield _send_event(
+                            yield _increment_sequence_number_and_return(
                                 ResponseOutputItemDoneEvent(
                                     type="response.output_item.done",
                                     sequence_number=-1,
@@ -1807,38 +1807,38 @@ class OpenAIServingResponses(OpenAIServing):
                                 status="completed",
                             ),
                         ))
-            if ctx.parser.current_channel == "commentary":
-                if ctx.parser.current_recipient and \
-                    ctx.parser.current_recipient.startswith("functions."):
-                    function_name = ctx.parser.current_recipient[
-                        len("functions."):]
-                    tool_call_item = ResponseFunctionToolCall(
-                        name=function_name,
-                        type="function_call",
-                        id=current_item_id,
-                        call_id=f"fc_{random_uuid()}",
-                        arguments='',
-                        status="in_progress",
-                    )
-                    if sent_function_call_item_added is False:
-                        sent_function_call_item_added = True
-                        yield _send_event(
-                            openai_responses_types.
-                            ResponseOutputItemAddedEvent(
-                                type="response.output_item.added",
-                                sequence_number=-1,
-                                output_index=current_output_index,
-                                item=tool_call_item,
-                            ))
-                    else:
-                        yield _send_event(
-                            openai_responses_types.
-                            ResponseFunctionCallArgumentsDeltaEvent(
-                                item_id=current_item_id,
-                                delta=ctx.parser.last_content_delta,
-                                output_index=current_output_index,
-                                sequence_number=-1,
-                                type="response.function_call_arguments.delta"))
+            # developer tools will be triggered on the commentary channel
+            # and recipient starts with "functions.TOOL_NAME"
+            if ctx.parser.current_channel == "commentary" \
+               and ctx.parser.current_recipient and \
+               ctx.parser.current_recipient.startswith("functions."):
+                fc_name = ctx.parser.current_recipient[len("functions."):]
+                tool_call_item = ResponseFunctionToolCall(
+                    name=fc_name,
+                    type="function_call",
+                    id=current_item_id,
+                    call_id=f"call_{random_uuid()}",
+                    arguments='',
+                    status="in_progress",
+                )
+                if sent_function_call_item_added is False:
+                    sent_function_call_item_added = True
+                    current_item_id = f"fc_{random_uuid()}"
+                    yield _increment_sequence_number_and_return(
+                        ResponseOutputItemAddedEvent(
+                            type="response.output_item.added",
+                            sequence_number=-1,
+                            output_index=current_output_index,
+                            item=tool_call_item,
+                        ))
+                else:
+                    yield _increment_sequence_number_and_return(
+                        ResponseFunctionCallArgumentsDeltaEvent(
+                            item_id=current_item_id,
+                            delta=ctx.parser.last_content_delta,
+                            output_index=current_output_index,
+                            sequence_number=-1,
+                            type="response.function_call_arguments.delta"))
 
     async def responses_stream_generator(
         self,
