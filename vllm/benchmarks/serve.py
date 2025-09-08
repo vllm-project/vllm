@@ -438,7 +438,7 @@ async def benchmark(
             ramp_up_start_rps, ramp_up_end_rps):
         request_res = {}
         results_per_req.append(request_res)
-        request_res["time"] = time.time() - time_0
+        request_res["sample_time"] = time.time() - time_0
         request_res["prompt_len"] = request.prompt_len
         request_res["expected_output_len"] = request.expected_output_len
         
@@ -499,6 +499,7 @@ async def benchmark(
     benchmark_duration = time.perf_counter() - benchmark_start_time
     
     for request_res, output in zip(results_per_req, outputs):
+        output.request_time -= time_0
         request_res.update(asdict(output))
 
     metrics, actual_output_lens = calculate_metrics(

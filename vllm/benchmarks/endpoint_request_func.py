@@ -46,6 +46,7 @@ class RequestFuncOutput:
     tpot: float = 0.0  # avg next-token latencies
     prompt_len: int = 0
     error: str = ""
+    request_time: float = 0.0
 
 
 async def async_request_openai_completions(
@@ -90,6 +91,7 @@ async def async_request_openai_completions(
         }
 
         output = RequestFuncOutput()
+        output.request_time = time.time()
         output.prompt_len = request_func_input.prompt_len
 
         generated_text = ""
