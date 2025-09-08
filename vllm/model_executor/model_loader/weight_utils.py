@@ -21,6 +21,7 @@ from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
 from safetensors.torch import load_file, safe_open, save_file
 from tqdm.auto import tqdm
 
+from vllm import envs
 from vllm.config import LoadConfig, ModelConfig
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
@@ -93,6 +94,41 @@ def get_lock(model_name_or_path: Union[str, Path],
     lock = filelock.FileLock(os.path.join(lock_dir, lock_file_name),
                              mode=0o666)
     return lock
+
+
+def maybe_download_from_modelscope(
+        model: str,
+        revision: Optional[str] = None,
+        download_dir: Optional[str] = None,
+        ignore_patterns: Optional[Union[str, list[str]]] = None,
+        allow_patterns: Optional[Union[list[str],
+                                       str]] = None) -> Optional[str]:
+    """Download model from ModelScope hub if VLLM_USE_MODELSCOPE is True.
+
+        Returns the path to the downloaded model, or None if the model is not
+        downloaded from ModelScope."""
+    if envs.VLLM_USE_MODELSCOPE:
+        # download model from ModelScope hub,
+        # lazy import so that modelscope is not required for normal use.
+        # pylint: disable=C.
+        from modelscope.hub.snapshot_download import snapshot_download
+
+        # Use file lock to prevent multiple processes from
+        # downloading the same model weights at the same time.
+        with get_lock(model, download_dir):
+            if not os.path.exists(model):
+                model_path = snapshot_download(
+                    model_id=model,
+                    cache_dir=download_dir,
+                    local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+                    revision=revision,
+                    ignore_file_pattern=ignore_patterns,
+                    allow_patterns=allow_patterns,
+                )
+            else:
+                model_path = model
+        return model_path
+    return None
 
 
 def _shared_pointers(tensors):
@@ -169,7 +205,13 @@ def get_quant_config(model_config: ModelConfig,
     # Inflight BNB quantization
     if model_config.quantization == "bitsandbytes":
         return quant_cls.from_config({})
-    is_local = os.path.isdir(model_config.model)
+    model_name_or_path = maybe_download_from_modelscope(
+        model_config.model,
+        revision=model_config.revision,
+        download_dir=load_config.download_dir,
+        allow_patterns=["*.json"],
+    ) or model_config.model
+    is_local = os.path.isdir(model_name_or_path)
     if not is_local:
         # Download the config files.
         with get_lock(model_config.model, load_config.download_dir):
@@ -182,7 +224,7 @@ def get_quant_config(model_config: ModelConfig,
                 tqdm_class=DisabledTqdm,
             )
     else:
-        hf_folder = model_config.model
+        hf_folder = model_name_or_path
 
     possible_config_filenames = quant_cls.get_config_filenames()
 
