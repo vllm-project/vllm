@@ -1342,6 +1342,14 @@ class EmbeddingChatRequest(OpenAIBaseModel):
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
 
     # --8<-- [start:chat-embedding-extra-params]
+    add_generation_prompt: bool = Field(
+        default=False,
+        description=
+        ("If true, the generation prompt will be added to the chat template. "
+         "This is a parameter used by chat template in tokenizer config of the "
+         "model."),
+    )
+
     add_special_tokens: bool = Field(
         default=False,
         description=(
@@ -1833,7 +1841,8 @@ class InputTokensDetails(OpenAIBaseModel):
 
 
 class OutputTokensDetails(OpenAIBaseModel):
-    reasoning_tokens: int
+    reasoning_tokens: int = 0
+    tool_output_tokens: int = 0
 
 
 class ResponseUsage(OpenAIBaseModel):
