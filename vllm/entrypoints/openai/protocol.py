@@ -959,6 +959,32 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 raise ValueError("Parameter 'cache_salt' must be a "
                                  "non-empty string if provided.")
         return data
+    
+
+
+    @model_validator(mode="before")
+    def function_call_parsing(cls, data):
+        """Function call parsing to ensure ResponseFunctionToolCall objects 
+        are created."""
+        input_data = data.get("input")
+        if isinstance(input_data, list):
+            fixed_input = []
+            for item in input_data:
+                if isinstance(item,
+                              dict) and item.get('type') == 'function_call':
+                    # Convert dict to ResponseFunctionToolCall object
+                    try:
+                        from openai.types.responses.response_function_tool_call import (  # noqa: E501
+                            ResponseFunctionToolCall)
+                        function_call_obj = ResponseFunctionToolCall(**item)
+                        fixed_input.append(function_call_obj)
+                    except Exception:
+                        # If conversion fails, keep the original dict
+                        fixed_input.append(item)
+                else:
+                    fixed_input.append(item)
+            data["input"] = fixed_input
+        return data
 
 
 class CompletionRequest(OpenAIBaseModel):
