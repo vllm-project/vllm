@@ -137,7 +137,7 @@ def main():
         gpu_memory_utilization=0.8,
         speculative_config=speculative_config,
         disable_log_stats=False,
-        max_model_len=2048,
+        max_model_len=4096,
         limit_mm_per_prompt={"image": 5},
         disable_chunked_mm_input=True,
     )
@@ -229,6 +229,9 @@ def main():
     print()
 
     # Speculative decoding stats
+    if args.method == "None":
+        return
+
     acceptance_length = 1 + (num_accepted_tokens / num_drafts) if num_drafts > 0 else 1
 
     print("============ Speculative Decoding Stats ============")
@@ -244,7 +247,7 @@ def main():
     print("Acceptance rates by token position:")
     for i in range(len(acceptance_counts)):
         acceptance_rate = acceptance_counts[i] / num_drafts if num_drafts > 0 else 0
-        print(f"  Position {i}: {acceptance_rate:.2f}")
+        print(f"\tPosition {i}: {acceptance_rate:.2f}")
     print("====================================================")
 
 if __name__ == "__main__":
