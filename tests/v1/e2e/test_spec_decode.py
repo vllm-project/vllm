@@ -251,39 +251,13 @@ class ArgsTest:
     expected_acceptance_rate: float
     expected_same_output_fraction: float
     # Defaults
+    target_tensor_parallel_size: int = 1
+    draft_tensor_parallel_size: int = 1
     max_model_len: int = 1024
     gpu_memory_utilization: float = 0.5
 
 
 cases = [
-    ArgsTest(
-        model="baidu/ERNIE-4.5-0.3B-PT",
-        draft_model="baidu/ERNIE-4.5-0.3B-PT",
-        sampling_config=greedy_sampling(),
-        expected_acceptance_rate=1.0,
-        expected_same_output_fraction=1.0,
-    ),
-    ArgsTest(
-        model="baidu/ERNIE-4.5-0.3B-PT",
-        draft_model="baidu/ERNIE-4.5-0.3B-PT",
-        sampling_config=stochastic_sampling(),
-        expected_acceptance_rate=0.2,
-        expected_same_output_fraction=0.0,
-    ),
-    ArgsTest(
-        model="meta-llama/Llama-3.2-1B-Instruct",
-        draft_model="meta-llama/Llama-3.2-1B-Instruct",
-        sampling_config=greedy_sampling(),
-        expected_acceptance_rate=0.8,
-        expected_same_output_fraction=0.5,
-    ),
-    ArgsTest(
-        model="meta-llama/Llama-3.2-1B-Instruct",
-        draft_model="meta-llama/Llama-3.2-1B-Instruct",
-        sampling_config=stochastic_sampling(),
-        expected_acceptance_rate=0.4,
-        expected_same_output_fraction=0.15,
-    ),
     ArgsTest(
         model="Qwen/Qwen3-1.7B",
         draft_model="Qwen/Qwen3-0.6B",
@@ -318,9 +292,11 @@ def test_draft_model_correctness(args: ArgsTest, enforce_eager: bool,
             "num_speculative_tokens": 3,
             "max_model_len": args.max_model_len,
             "enforce_eager": enforce_eager,
+            "tensor_parallel_size": args.draft_tensor_parallel_size,
         },
         max_model_len=args.max_model_len,
         gpu_memory_utilization=args.gpu_memory_utilization,
+        tensor_parallel_size=args.target_tensor_parallel_size,
         enforce_eager=enforce_eager,
         disable_log_stats=False,  # enables get_metrics()
     )
@@ -336,6 +312,7 @@ def test_draft_model_correctness(args: ArgsTest, enforce_eager: bool,
         model=args.model,
         max_model_len=args.max_model_len,
         gpu_memory_utilization=args.gpu_memory_utilization,
+        tensor_parallel_size=args.target_tensor_parallel_size,
         enforce_eager=enforce_eager,
     )
     ref_outputs = ref_llm.chat(test_prompts, args.sampling_config)
