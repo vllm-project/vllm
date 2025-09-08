@@ -7,7 +7,7 @@ import requests
 
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
-from ...utils import RemoteOpenAIServer
+from ....utils import RemoteOpenAIServer
 
 # any model with a chat template should work here
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"

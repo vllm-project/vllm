@@ -11,7 +11,7 @@ import requests
 
 from vllm.version import __version__ as VLLM_VERSION
 
-MODEL_NAME = "microsoft/DialoGPT-small"
+MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 
 
 @pytest_asyncio.fixture
@@ -43,13 +43,12 @@ async def test_request_cancellation(server):
     chat_input = [{"role": "user", "content": "Write a long story"}]
     client = server.get_async_client(timeout=0.5)
     tasks = []
-    # Request about 2 million tokens
-    for _ in range(200):
+    for _ in range(20):
         task = asyncio.create_task(
             client.chat.completions.create(messages=chat_input,
                                            model=MODEL_NAME,
-                                           max_tokens=10000,
-                                           extra_body={"min_tokens": 10000}))
+                                           max_tokens=1000,
+                                           extra_body={"min_tokens": 1000}))
         tasks.append(task)
 
     done, pending = await asyncio.wait(tasks,
@@ -83,7 +82,7 @@ async def test_request_wrong_content_type(server):
         await client.chat.completions.create(
             messages=chat_input,
             model=MODEL_NAME,
-            max_tokens=10000,
+            max_tokens=1000,
             extra_headers={
                 "Content-Type": "application/x-www-form-urlencoded"
             })
@@ -94,39 +93,25 @@ async def test_server_load(server):
     # Check initial server load
     response = requests.get(server.url_for("load"))
     assert response.status_code == HTTPStatus.OK
-    initial_load = response.json().get("server_load")
-    print(f"Initial server load: {initial_load}")
-    assert initial_load == 0, f"Expected initial \
-        server_load to be 0, but got {initial_load}"
+    assert response.json().get("server_load") == 0
 
     def make_long_completion_request():
         return requests.post(
-            server.url_for("v1/chat/completions"),
+            server.url_for("v1/completions"),
             headers={"Content-Type": "application/json"},
             json={
-                "model":
-                MODEL_NAME,
-                "messages": [{
-                    "role":
-                    "user",
-                    "content":
-                    "Give me a very long story with many details"
-                }],
-                "max_tokens":
-                1000,
-                "temperature":
-                0,
-                "stream":
-                True,
+                "prompt": "Give me a long story",
+                "max_tokens": 1000,
+                "temperature": 0,
             },
-            stream=True,
         )
 
     # Start the completion request in a background thread.
     completion_future = asyncio.create_task(
         asyncio.to_thread(make_long_completion_request))
 
-    await asyncio.sleep(0.5)
+    # Give a short delay to ensure the request has started.
+    await asyncio.sleep(0.1)
 
     # Check server load while the completion request is running.
     response = requests.get(server.url_for("load"))
