@@ -61,7 +61,7 @@ These are documented under [Inferencing and Serving -> Production Metrics](../us
 
 ### Grafana Dashboard
 
-vLLM also provides [a reference example](../examples/online_serving/prometheus_grafana.md) for how to collect and store these metrics using Prometheus and visualize them using a Grafana dashboard.
+vLLM also provides [a reference example](../../examples/online_serving/prometheus_grafana/README.md) for how to collect and store these metrics using Prometheus and visualize them using a Grafana dashboard.
 
 The subset of metrics exposed in the Grafana dashboard gives us an indication of which metrics are especially important:
 
@@ -655,7 +655,7 @@ v0 has support for OpenTelemetry tracing:
 - Added by <gh-pr:4687>
 - Configured with `--oltp-traces-endpoint` and `--collect-detailed-traces`
 - [OpenTelemetry blog post](https://opentelemetry.io/blog/2024/llm-observability/)
-- [User-facing docs](../examples/online_serving/opentelemetry.md)
+- [User-facing docs](../../examples/online_serving/opentelemetry/README.md)
 - [Blog post](https://medium.com/@ronen.schaffer/follow-the-trail-supercharging-vllm-with-opentelemetry-distributed-tracing-aa655229b46f)
 - [IBM product docs](https://www.ibm.com/docs/en/instana-observability/current?topic=mgaa-monitoring-large-language-models-llms-vllm-public-preview)
   
