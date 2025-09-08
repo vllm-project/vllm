@@ -9,6 +9,7 @@ import torch.distributed as dist
 from torch import nn
 from transformers import GptOssConfig
 
+import vllm.envs as envs
 from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -47,7 +48,8 @@ if VLLM_USE_AITER_TRITON_FUSED_SPLIT_QKV_ROPE:
         fused_qkv_split_qk_rope)
 if VLLM_USE_AITER_TRITON_FUSED_ADD_RMSNORM_PAD:
     from aiter.ops.triton.fused_add_rmsnorm_pad import fused_add_rmsnorm_pad
-
+if current_platform.is_rocm():
+    VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE = envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE
 
 class OAIAttention(nn.Module):
 
@@ -133,6 +135,7 @@ class OAIAttention(nn.Module):
             attn_type=AttentionType.DECODER,
             prefix=f"{prefix}.attn",
             sinks=self.sinks,
+            rotary_emb=self.rotary_emb if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE else None,
         )
 
     def forward(self, hidden_states: torch.Tensor,
@@ -166,12 +169,16 @@ class OAIAttention(nn.Module):
             )
             q = q.view(-1, self.q_size)
             k = k.view(-1, self.kv_size)
+            attn_output = self.attn(q, k, v)
+        elif VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE:
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            attn_output = self.attn(q, k, v, positions=positions)
         else:
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size],
                                 dim=-1)
             q, k = self.rotary_emb(positions, q, k)
-        v = v.contiguous()
-        attn_output = self.attn(q, k, v)
+            attn_output = self.attn(q, k, v)
+        #v = v.contiguous()
         output, _ = self.o_proj(attn_output)
         if current_platform.is_rocm(
         ) and VLLM_USE_AITER_TRITON_FUSED_ADD_RMSNORM_PAD:
