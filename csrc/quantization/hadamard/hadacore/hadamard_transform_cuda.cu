@@ -36,6 +36,7 @@ namespace hadacore {
 
 typedef uint32_t b32;
 typedef uint16_t b16;
+typedef uint64_t u64;
 
 constexpr int launch_configs_big[7][3] = {
     // default
@@ -108,7 +109,7 @@ __device__ __forceinline__ void matrix_transpose_m8_n8_b16_inplace(b32& a0) {
 #define n_p(i) ((val_1n[i] & 0x0000FFFF) | val_1p[i] << 16)
 #define n_n(i) ((val_1n[i] & 0x0000FFFF) | val_1n[i] << 16)
 
-template<int num_chunks, int warps_per_block, int log_had_size, int blocks_per_sm, bool enable_mask, torch::ScalarType dtype>
+template<u64 num_chunks, u64 warps_per_block, u64 log_had_size, u64 blocks_per_sm, bool enable_mask, torch::ScalarType dtype>
 __global__ void __launch_bounds__(32 * warps_per_block, blocks_per_sm)
 // a is column major, b is row major
 hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
@@ -116,11 +117,11 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
 
     b32 b_frag_all[num_chunks][4]; // for all chunks, holds matrix fragment (which takes 4 regs of b16x2 * 32 threads)
 
-    int blockid = blockIdx.x * warps_per_block + threadIdx.x / 32;
-    int threadid = threadIdx.x % 32;
+    u64 blockid = blockIdx.x * warps_per_block + threadIdx.x / 32;
+    u64 threadid = threadIdx.x % 32;
     extern __shared__ b32 bfrag_arr[]; // num_chunks * warps_per_block * 128
-    int real_num_chunks = ((blockid + 1) * num_chunks) > total_num_chunks ? (total_num_chunks - (blockid * num_chunks)) : num_chunks;
-    int diff_num_chunks = real_num_chunks - num_chunks;
+    u64 real_num_chunks = ((blockid + 1) * num_chunks) > total_num_chunks ? (total_num_chunks - (blockid * num_chunks)) : num_chunks;
+    u64 diff_num_chunks = real_num_chunks - num_chunks;
 
     b32* a_start_ptr = (b32*) (a + blockid * num_chunks * 256); // offset a to where this warp starts
     b32* out_start_ptr = (b32*) (out + blockid * num_chunks * 256);
@@ -136,7 +137,7 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
     #endif
 
     #pragma unroll
-    for (int k = 0; k < num_chunks; k++) {
+    for (u64 k = 0; k < num_chunks; k++) {
         size_t shared_ptr = __cvta_generic_to_shared(b_frag_ptr);
         #if (__CUDA_ARCH__ >= 900) // SM90
             asm volatile(
@@ -245,10 +246,10 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
     };
     b32 had_frag[8];
     #pragma unroll
-    for (int i = 0; i < 2; i++) {
-        int c_log_h = (i == 0) ? MIN(4, log_had_size) : log_had_size % 4;
+    for (u64 i = 0; i < 2; i++) {
+        u64 c_log_h = (i == 0) ? MIN(4, log_had_size) : log_had_size % 4;
         #pragma unroll
-        for (int j = 0; j < 4; j++) {
+        for (u64 j = 0; j < 4; j++) {
             if (c_log_h < 4) {
                 bool mask = had_16_mask[c_log_h - 1][j] & (1 << (31 - threadid));
                 if (!mask) {
@@ -265,13 +266,13 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
     }
 
     // log had size above 8, only used for above 2^8 = 256 size
-    constexpr int part8_log_had_size = log_had_size - 8;
+    constexpr u64 part8_log_had_size = log_had_size - 8;
 
     b32* a_chunk_ptr = a_start_ptr; // first chunk starts at this warp's data starts
     b32* out_chunk_ptr = out_start_ptr;
 
     #pragma unroll
-    for (int l = 0; l < 2; l++) {
+    for (u64 l = 0; l < 2; l++) {
         if constexpr(log_had_size <= 8) { // l == 0 guaranteed, redundant simplified version of else body, to help compiler warnings
             b_frag_ptr = bfrag_arr + (blockid % warps_per_block) * num_chunks * 128;
         } else {
@@ -290,49 +291,49 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
                     b32* store = bfrag_arr + (128 >> part8_log_had_size) * (num_chunks * (blockid % warps_per_block));
 
                     #pragma unroll
-                    for (int j = 0; j < 4; j++) {
+                    for (u64 j = 0; j < 4; j++) {
                         #pragma unroll
-                        for (int k = 0; k < num_chunks; k++) {
+                        for (u64 k = 0; k < num_chunks; k++) {
                             // here, j represents register, and k represents 8-offset/chunk
-                            int real_chunk_num = (num_chunks - (threadid % num_chunks) + k) % num_chunks; // chunk at which you have target thread #'s data
+                            u64 real_chunk_num = (num_chunks - (threadid % num_chunks) + k) % num_chunks; // chunk at which you have target thread #'s data
                             
-                            int real_thread_id = (threadid / num_chunks) * num_chunks + k; // target thread #
-                            int chunk_idx = 128 * real_chunk_num; // index due to fetching from another chunk (chunk in which this thread has the target thread's original data)
-                            int thread_group_idx = (real_thread_id / 4) * 16; // index due to fetching from another group of num_chunk threads (since shuffle is between num_chunk threads)
-                            int thread_idx = (real_thread_id % 4) * 2; // index due to original thread's position within the group of num_chunk threads
-                            int reg_idx = (j / 2) * 8 + (j % 2); // index due to target register
-                            int idx = chunk_idx + thread_group_idx + thread_idx + reg_idx; // final index
+                            u64 real_thread_id = (threadid / num_chunks) * num_chunks + k; // target thread #
+                            u64 chunk_idx = 128 * real_chunk_num; // index due to fetching from another chunk (chunk in which this thread has the target thread's original data)
+                            u64 thread_group_idx = (real_thread_id / 4) * 16; // index due to fetching from another group of num_chunk threads (since shuffle is between num_chunk threads)
+                            u64 thread_idx = (real_thread_id % 4) * 2; // index due to original thread's position within the group of num_chunk threads
+                            u64 reg_idx = (j / 2) * 8 + (j % 2); // index due to target register
+                            u64 idx = chunk_idx + thread_group_idx + thread_idx + reg_idx; // final index
 
                             // fix idx for majorness
-                            int rowidx = idx % (1 << part8_log_had_size);
-                            int colidx = idx >> part8_log_had_size;
+                            u64 rowidx = idx % (1 << part8_log_had_size);
+                            u64 colidx = idx >> part8_log_had_size;
 
                             // store[rowidx * 128 + colidx] = data;
                             b32 data = store[rowidx * 128 + colidx];
 
                             // compiler generates excessive instructions, so we manually do the if statement
                             #pragma unroll
-                            for (int i = 0; i < num_chunks; i++) {
+                            for (u64 i = 0; i < num_chunks; i++) {
                                 asm volatile (
                                     "{\n\t"
                                     "  .reg .pred p0;\n\t"
-                                    "  setp.eq.u32 p0, %1, %2;\n\t"
+                                    "  setp.eq.u64 p0, %1, %2;\n\t"
                                     "  @p0 mov.b32 %0, %3;\n\t"
                                     "}\n\t"
                                     : "+r"(b_frag_all[i][j]) // Output operand %0
-                                    : "r"(real_chunk_num), "r"(i), "r"(data) // Input operands %1, %2, %3
+                                    : "l"(real_chunk_num), "l"(i), "r"(data) // Input operands %1, %2, %3
                                 );
                             }
                         }
                     }
 
                     #pragma unroll
-                    for (int j = 0; j < 4; j++) {
+                    for (u64 j = 0; j < 4; j++) {
                         #pragma unroll
-                        for (int k = 1; k < num_chunks; k++) {
-                            int threadid_contig = threadid % num_chunks;
-                            int threadid_mul = threadid / num_chunks;
-                            int threadid2 = (threadid_contig + num_chunks - k) % num_chunks + threadid_mul * num_chunks; // thread to give your data to
+                        for (u64 k = 1; k < num_chunks; k++) {
+                            u64 threadid_contig = threadid % num_chunks;
+                            u64 threadid_mul = threadid / num_chunks;
+                            u64 threadid2 = (threadid_contig + num_chunks - k) % num_chunks + threadid_mul * num_chunks; // thread to give your data to
                             b_frag_all[k][j] = __shfl_sync(0xFFFFFFFF, b_frag_all[k][j], threadid2);
                         }
                     }
@@ -341,7 +342,7 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
         }
 
         #pragma unroll
-        for (int k = 0; k < num_chunks; k++) {
+        for (u64 k = 0; k < num_chunks; k++) {
             if constexpr(enable_mask) {
                 if (k >= real_num_chunks)
                     break;
@@ -430,11 +431,11 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
                 // thread 16 loads [t0r1, t16r0, t0r3, t16r2]
                 // allows full coalescing, same for t1/t17, t2/t18, etc.
                 #pragma unroll
-                for (int j = 0; j < 4; j++) {
-                    int reg = ((threadid & 16) == 0) ? j : (j / 2 * 2 + (1 - j % 2));
-                    int real_thread_id = (reg == 0 || reg == 2) ? threadid : (threadid ^ 16);
-                    int real_row = real_thread_id % 4;
-                    int real_col = real_thread_id / 4;
+                for (u64 j = 0; j < 4; j++) {
+                    u64 reg = ((threadid & 16) == 0) ? j : (j / 2 * 2 + (1 - j % 2));
+                    u64 real_thread_id = (reg == 0 || reg == 2) ? threadid : (threadid ^ 16);
+                    u64 real_row = real_thread_id % 4;
+                    u64 real_col = real_thread_id / 4;
                     b_frag_all[k][j] = b_frag_ptr[(real_row + (reg % 2) * 4) + (real_col + (j / 2) * 8) * 8];
                 }
 
@@ -453,7 +454,7 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
                 // t0 and t16 swap r1 and r3 to have their own data,
                 // same for t1/t17, t2/18, etc.
                 #pragma unroll
-                for (int j = 1; j < 4; j += 2) {
+                for (u64 j = 1; j < 4; j += 2) {
                     b_frag_all[k][j] = __shfl_xor_sync(0xFFFFFFFF, b_frag_all[k][j], 16);
                 }
             } else if constexpr(log_had_size > 8) { // condition is redundant to help compiler warnings
@@ -469,15 +470,15 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
                     //     thread 1 loads [t0r2, t0r3, t1r0, t1r1]
                     //     same for t2/t3, t4/t5, etc.
                     // allows full coalescing for 512 and 1k, 16x coalescing for 2k
-                    constexpr int xor_val = log_had_size == 9 ? 16 : 1;
+                    constexpr u64 xor_val = log_had_size == 9 ? 16 : 1;
 
                     #pragma unroll
-                    for (int j = 0; j < 4; j++) {
-                        int reg = ((threadid & xor_val) == 0) ? j : (j + 2) % 4;
-                        int real_thread_id = reg < 2 ? threadid : (threadid ^ xor_val);
-                        int idx = (real_thread_id / 4 * 16) + (real_thread_id % 4 * 2) + (reg / 2 * 8) + (reg % 2);
-                        int rowidx = idx % (1 << part8_log_had_size);
-                        int colidx = idx >> part8_log_had_size;
+                    for (u64 j = 0; j < 4; j++) {
+                        u64 reg = ((threadid & xor_val) == 0) ? j : (j + 2) % 4;
+                        u64 real_thread_id = reg < 2 ? threadid : (threadid ^ xor_val);
+                        u64 idx = (real_thread_id / 4 * 16) + (real_thread_id % 4 * 2) + (reg / 2 * 8) + (reg % 2);
+                        u64 rowidx = idx % (1 << part8_log_had_size);
+                        u64 colidx = idx >> part8_log_had_size;
                         b_frag_all[k][j] = b_frag_ptr[rowidx * 128 + colidx];
                     }
 
@@ -492,7 +493,7 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
                     }
 
                     #pragma unroll
-                    for (int j = 2; j < 4; j++) {
+                    for (u64 j = 2; j < 4; j++) {
                         b_frag_all[k][j] = __shfl_xor_sync(0xFFFFFFFF, b_frag_all[k][j], xor_val);
                     }
                 }
@@ -513,8 +514,8 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
             }
 
             #pragma unroll
-            for(int i = 0, remaining_log_had_size = log_had_size - l * 8; i < 2 && remaining_log_had_size > 0; i++) {
-                int had_off = ((remaining_log_had_size < 4) && !(log_had_size <= 4 || log_had_size % 4 == 0)) ? 4 : 0;
+            for(u64 i = 0, remaining_log_had_size = log_had_size - l * 8; i < 2 && remaining_log_had_size > 0; i++) {
+                u64 had_off = ((remaining_log_had_size < 4) && !(log_had_size <= 4 || log_had_size % 4 == 0)) ? 4 : 0;
                 mma_m16_n16_k16_b16_b16_b16_noacc<dtype>(had_frag[had_off + 0], had_frag[had_off + 1], had_frag[had_off + 2], had_frag[had_off + 3], b_frag_all[k][0], b_frag_all[k][1], b_frag_all[k][2], b_frag_all[k][3], b_frag_all[k][0], b_frag_all[k][1], b_frag_all[k][2], b_frag_all[k][3]);
 
                 remaining_log_had_size -= 4;
@@ -547,7 +548,7 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
             if (l == 0) {
                 // inverse of coalesced load for first iteration to store result
                 #pragma unroll
-                for (int j = 1; j < 4; j += 2) {
+                for (u64 j = 1; j < 4; j += 2) {
                     b_frag_all[k][j] = __shfl_xor_sync(0xFFFFFFFF, b_frag_all[k][j], 16);
                 }
 
@@ -566,11 +567,11 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
                 b32* store = (log_had_size <= 8) ? out_chunk_ptr : b_frag_ptr;
 
                 #pragma unroll
-                for (int j = 0; j < 4; j++) {
-                    int reg = ((threadid & 16) == 0) ? j : (j / 2 * 2 + (1 - j % 2));
-                    int real_thread_id = (reg == 0 || reg == 2) ? threadid : (threadid ^ 16);
-                    int real_row = real_thread_id % 4;
-                    int real_col = real_thread_id / 4;
+                for (u64 j = 0; j < 4; j++) {
+                    u64 reg = ((threadid & 16) == 0) ? j : (j / 2 * 2 + (1 - j % 2));
+                    u64 real_thread_id = (reg == 0 || reg == 2) ? threadid : (threadid ^ 16);
+                    u64 real_row = real_thread_id % 4;
+                    u64 real_col = real_thread_id / 4;
                     store[(real_row + (reg % 2) * 4) + (real_col + (reg / 2) * 8) * 8] = b_frag_all[k][j];
                 }
             } else if constexpr(log_had_size > 8) { // condition is redundant to help compiler warnings
@@ -578,7 +579,7 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
                     // inverse of coalesced load for sizes 512, 1k and 2k to store result
                     constexpr int xor_val = log_had_size == 9 ? 16 : 1;
                     #pragma unroll
-                    for (int j = 2; j < 4; j++) {
+                    for (u64 j = 2; j < 4; j++) {
                         b_frag_all[k][j] = __shfl_xor_sync(0xFFFFFFFF, b_frag_all[k][j], xor_val);
                     }
 
@@ -594,13 +595,13 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
 
                     b32* store = (b32*)(out + (blockid / warps_per_block) * (num_chunks * warps_per_block) * 256 + (256 >> part8_log_had_size) * (num_chunks * (blockid % warps_per_block) + k));
                     #pragma unroll
-                    for (int j = 0; j < 4; j++) {
-                        int reg = ((threadid & xor_val) == 0) ? j : (j + 2) % 4;
+                    for (u64 j = 0; j < 4; j++) {
+                        u64 reg = ((threadid & xor_val) == 0) ? j : (j + 2) % 4;
                         b32 data = b_frag_all[k][j];
-                        int real_thread_id = reg < 2 ? threadid : (threadid ^ xor_val);
-                        int idx = (real_thread_id / 4 * 16) + (real_thread_id % 4 * 2) + (reg / 2 * 8) + (reg % 2);
-                        int rowidx = idx % (1 << part8_log_had_size);
-                        int colidx = idx >> part8_log_had_size;
+                        u64 real_thread_id = reg < 2 ? threadid : (threadid ^ xor_val);
+                        u64 idx = (real_thread_id / 4 * 16) + (real_thread_id % 4 * 2) + (reg / 2 * 8) + (reg % 2);
+                        u64 rowidx = idx % (1 << part8_log_had_size);
+                        u64 colidx = idx >> part8_log_had_size;
                         store[rowidx * 128 + colidx] = data;
                     }
                 }
@@ -622,12 +623,12 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
     if constexpr(log_had_size >= 12) {
         // for sizes 4k and above, perform final coalesced store after processing all chunks
         #pragma unroll
-        for (int j = 0; j < 4; j++) {
+        for (u64 j = 0; j < 4; j++) {
             #pragma unroll
-            for (int k = 1; k < num_chunks; k++) {
-                int threadid_contig = threadid % num_chunks;
-                int threadid_mul = threadid / num_chunks;
-                int threadid2 = (threadid_contig + k) % num_chunks + threadid_mul * num_chunks; // thread to give your data to
+            for (u64 k = 1; k < num_chunks; k++) {
+                u64 threadid_contig = threadid % num_chunks;
+                u64 threadid_mul = threadid / num_chunks;
+                u64 threadid2 = (threadid_contig + k) % num_chunks + threadid_mul * num_chunks; // thread to give your data to
                 b_frag_all[k][j] = __shfl_sync(0xFFFFFFFF, b_frag_all[k][j], threadid2);
             }
         }
@@ -637,29 +638,29 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
         b32* store = bfrag_arr + (128 >> part8_log_had_size) * (num_chunks * (blockid % warps_per_block));
 
         #pragma unroll
-        for (int j = 0; j < 4; j++) {
+        for (u64 j = 0; j < 4; j++) {
             #pragma unroll
-            for (int k = 0; k < num_chunks; k++) {
+            for (u64 k = 0; k < num_chunks; k++) {
                 // here, j represents register, and k represents 8-offset/chunk
-                int real_chunk_num = (num_chunks - (threadid % num_chunks) + k) % num_chunks; // chunk at which you have target thread #'s data
+                u64 real_chunk_num = (num_chunks - (threadid % num_chunks) + k) % num_chunks; // chunk at which you have target thread #'s data
 
                 // b32 data = b_frag_all[real_chunk_num][j]; // target thread data
                 b32 data;
                 #pragma unroll
-                for (int i = 0; i < num_chunks; i++) {
+                for (u64 i = 0; i < num_chunks; i++) {
                     if (real_chunk_num == i) data = b_frag_all[i][j];
                 }
                 
-                int real_thread_id = (threadid / num_chunks) * num_chunks + k; // target thread #
-                int chunk_idx = 128 * real_chunk_num; // index due to fetching from another chunk (chunk in which this thread has the target thread's original data)
-                int thread_group_idx = (real_thread_id / 4) * 16; // index due to fetching from another group of num_chunk threads (since shuffle is between num_chunk threads)
-                int thread_idx = (real_thread_id % 4) * 2; // index due to original thread's position within the group of num_chunk threads
-                int reg_idx = (j / 2) * 8 + (j % 2); // index due to target register
-                int idx = chunk_idx + thread_group_idx + thread_idx + reg_idx; // final index
+                u64 real_thread_id = (threadid / num_chunks) * num_chunks + k; // target thread #
+                u64 chunk_idx = 128 * real_chunk_num; // index due to fetching from another chunk (chunk in which this thread has the target thread's original data)
+                u64 thread_group_idx = (real_thread_id / 4) * 16; // index due to fetching from another group of num_chunk threads (since shuffle is between num_chunk threads)
+                u64 thread_idx = (real_thread_id % 4) * 2; // index due to original thread's position within the group of num_chunk threads
+                u64 reg_idx = (j / 2) * 8 + (j % 2); // index due to target register
+                u64 idx = chunk_idx + thread_group_idx + thread_idx + reg_idx; // final index
 
                 // fix idx for majorness
-                int rowidx = idx % (1 << part8_log_had_size);
-                int colidx = idx >> part8_log_had_size;
+                u64 rowidx = idx % (1 << part8_log_had_size);
+                u64 colidx = idx >> part8_log_had_size;
 
                 store[rowidx * 128 + colidx] = data;
             }
@@ -672,21 +673,21 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
         // flush smem, simply linearly write to store
         // always divisible by 128*32b, so (32*4)*32b is ok
         #pragma unroll
-        for (int warp_off = 0; warp_off < (num_chunks * warps_per_block * 128 / 4); warp_off += 32 * warps_per_block) {
-            int total_off = warp_off + threadid + (blockid % warps_per_block) * 32;
+        for (u64 warp_off = 0; warp_off < (num_chunks * warps_per_block * 128 / 4); warp_off += 32 * warps_per_block) {
+            u64 total_off = warp_off + threadid + (blockid % warps_per_block) * 32;
             store4[total_off] = bfrag_arr4[total_off];
         }
     }
 
 }
 
-constexpr int ceil_div(int a, int b) {
+constexpr u64 ceil_div(u64 a, u64 b) {
     return (a + b - 1) / b;
 }
 
-template <torch::ScalarType dtype, int chunks_per_warp, int warps_per_block, int log_had_size, int blocks_per_sm, bool check_masking = false>
-void __forceinline__ run_kernel(b16* a_mat, b16* out, int num_chunks, cudaStream_t stream) {
-    int shared_size = chunks_per_warp * warps_per_block * 128 * 4;
+template <torch::ScalarType dtype, u64 chunks_per_warp, u64 warps_per_block, u64 log_had_size, u64 blocks_per_sm, bool check_masking = false>
+void __forceinline__ run_kernel(b16* a_mat, b16* out, u64 num_chunks, cudaStream_t stream) {
+    u64 shared_size = chunks_per_warp * warps_per_block * 128 * 4;
     dim3 block_size = 32 * warps_per_block;
 
     #define CHECK_SHARED_LIM() {                                                                              \
@@ -718,16 +719,16 @@ void __forceinline__ run_kernel(b16* a_mat, b16* out, int num_chunks, cudaStream
 }
 
 template <torch::ScalarType dtype>
-void run_fht(void* a_mat_ptr, void* out_ptr, int numel, int had_size, cudaStream_t stream) {
-    int num_chunks = numel / 256; // caller required to ensure divisible by 256
+void run_fht(void* a_mat_ptr, void* out_ptr, u64 numel, u64 had_size, cudaStream_t stream) {
+    u64 num_chunks = numel / 256; // caller required to ensure divisible by 256
     // for size 256, use (2, 1)
     // for size 32k use (8, 16)
-    constexpr int chunks_per_warp_small = 1;// 8;
-    constexpr int warps_per_block_small = 1;//2;//16;
-    constexpr int blocks_per_sm_small = 24;
-    constexpr int chunks_per_warp_large = 2;
-    constexpr int warps_per_block_large = 1;
-    constexpr int blocks_per_sm_large = 24;
+    constexpr u64 chunks_per_warp_small = 1;// 8;
+    constexpr u64 warps_per_block_small = 1;//2;//16;
+    constexpr u64 blocks_per_sm_small = 24;
+    constexpr u64 chunks_per_warp_large = 2;
+    constexpr u64 warps_per_block_large = 1;
+    constexpr u64 blocks_per_sm_large = 24;
 
     // constexpr torch::ScalarType dtype = torch::ScalarType::Half;
 
@@ -766,15 +767,15 @@ void run_fht(void* a_mat_ptr, void* out_ptr, int numel, int had_size, cudaStream
     }
 }
 
-template void run_fht<torch::ScalarType::Half>(void* a_mat_ptr, void* out_ptr, int numel, int had_size, cudaStream_t stream);
-template void run_fht<torch::ScalarType::BFloat16>(void* a_mat_ptr, void* out_ptr, int numel, int had_size, cudaStream_t stream);
+template void run_fht<torch::ScalarType::Half>(void* a_mat_ptr, void* out_ptr, u64 numel, u64 had_size, cudaStream_t stream);
+template void run_fht<torch::ScalarType::BFloat16>(void* a_mat_ptr, void* out_ptr, u64 numel, u64 had_size, cudaStream_t stream);
 
 }  // namespace hadacore
 
 constexpr bool is_power_of_two(int x) { return x && !(x & (x - 1)); }
 
 void hadacore_transform(torch::Tensor& x) {
-    const int had_size = x.size(-1);
+    const unsigned int had_size = x.size(-1);
     TORCH_CHECK(is_power_of_two(had_size) && (had_size <= (1U << 15)) && (had_size >= (1U << 8)),
               "Only power of two Hadamard sizes between 2^8 and 2^15 are supported, got ", had_size);
 
