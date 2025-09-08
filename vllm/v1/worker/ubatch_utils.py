@@ -30,14 +30,12 @@ def create_ubatch_slices(num_scheduled_tokens: np.ndarray, split_point: int) -> 
 
     # Determine request slices using exclusive stop semantics
     # First ubatch includes requests whose tokens overlap [0, split_point)
-    print(np.searchsorted(cu_num_tokens, split_point, side="left"))
     first_ubatch_req_stop = int(
         np.searchsorted(cu_num_tokens, split_point, side="left"))
     first_ubatch_req_slice = slice(0, first_ubatch_req_stop)
 
     # Second ubatch starts at the request that contains the split_point
     # or the request starting exactly at split_point (if on boundary)
-    print(np.searchsorted(cu_num_tokens, split_point, side="right") - 1)
     second_ubatch_req_start = int(
         np.searchsorted(cu_num_tokens, split_point, side="right") - 1)
     second_ubatch_req_slice = slice(second_ubatch_req_start,
