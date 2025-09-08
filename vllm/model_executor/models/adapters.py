@@ -131,6 +131,26 @@ def _get_pooling_model_name(orig_model_name: str, pooling_suffix: str) -> str:
     return model_name + pooling_suffix
 
 
+def create_mm_pooling_model_cls(orig_cls: _T) -> _T:
+
+    class ModelForPooling(orig_cls, VllmModelForPooling):
+
+        is_pooling_model = True
+
+        def __init__(
+            self,
+            *,
+            vllm_config: "VllmConfig",
+            prefix: str = "",
+            **kwargs: Any,
+        ) -> None:
+            super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
+
+            self.pooler = self.get_language_model().pooler
+
+    return ModelForPooling  # type: ignore
+
+
 def _create_pooling_model_cls(orig_cls: _T) -> _T:
     # Lazy import
     from .utils import AutoWeightsLoader, WeightsMapper

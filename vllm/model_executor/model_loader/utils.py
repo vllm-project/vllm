@@ -21,8 +21,10 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.models.adapters import (as_embedding_model,
                                                  as_reward_model,
-                                                 as_seq_cls_model)
-from vllm.model_executor.models.interfaces import SupportsQuant
+                                                 as_seq_cls_model,
+                                                 create_mm_pooling_model_cls)
+from vllm.model_executor.models.interfaces import (SupportsQuant,
+                                                   supports_multimodal)
 from vllm.utils import is_pin_memory_available
 
 logger = init_logger(__name__)
@@ -199,6 +201,11 @@ def get_model_architecture(
                 "performance may not be optimal.", arch)
 
     convert_type = model_config.convert_type
+    if convert_type != "none" and supports_multimodal(model_cls):
+        logger.info("Detected conversion of Multi Modal model."
+                    "Creating wrapper class to forward pooler.")
+        return create_mm_pooling_model_cls(model_cls), arch
+
     if convert_type == "none":
         pass
     elif convert_type == "embed":
