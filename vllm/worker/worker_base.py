@@ -129,6 +129,10 @@ class WorkerBase:
         """Get vocabulary size from model configuration."""
         return self.model_config.get_vocab_size()
 
+    def shutdown(self) -> None:
+        """Clean up resources held by the worker."""
+        return
+
 
 class DelegateWorkerBase(WorkerBase):
     """
@@ -518,6 +522,10 @@ class WorkerWrapperBase:
                 # note: lazy import to avoid importing torch before initializing
                 from vllm.utils import init_cached_hf_modules
                 init_cached_hf_modules()
+
+    def shutdown(self) -> None:
+        if self.worker is not None:
+            self.worker.shutdown()
 
     def adjust_rank(self, rank_mapping: Dict[int, int]) -> None:
         """

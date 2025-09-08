@@ -231,7 +231,7 @@ class ExecutorBase(ABC):
 
     def shutdown(self) -> None:
         """Shutdown the executor."""
-        return
+        self.collective_rpc("shutdown")
 
     def __del__(self):
         self.shutdown()

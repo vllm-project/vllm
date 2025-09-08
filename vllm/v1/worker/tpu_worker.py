@@ -330,6 +330,9 @@ class TPUWorker:
 
         ensure_kv_transfer_initialized(vllm_config)
 
+    def shutdown(self) -> None:
+        self.model_runner.ensure_kv_transfer_shutdown()
+
 
 if USE_TPU_COMMONS:
     from tpu_commons.worker import TPUWorker as TPUCommonsWorker
