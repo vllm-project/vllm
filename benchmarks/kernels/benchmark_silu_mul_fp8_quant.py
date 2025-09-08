@@ -247,7 +247,13 @@ def benchmark(
     total_bytes = input_bytes + output_bytes + scale_bytes
     memory_bw = total_bytes / avg_time_s / 1e9
 
-    return avg_time_ms, gflops, memory_bw, (memory_bw / (3.35 * 1024)) * 100
+    HOPPER_BANDWIDTH_TBPS = 3.35
+    return (
+        avg_time_ms,
+        gflops,
+        memory_bw,
+        (memory_bw / (HOPPER_BANDWIDTH_TBPS * 1024)) * 100,
+    )
 
 
 def create_comparison_plot(
