@@ -272,11 +272,12 @@ VLLM_USE_V1=1 vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
     "prompt_lookup_min": 2}'
 ```
 
-SpecBench dataset: https://github.com/hemingkx/Spec-Bench
+SpecBench dataset: https://github.com/hemingkx/Spec-Bench .
+
 Download the dataset using: 
     wget https://raw.githubusercontent.com/hemingkx/Spec-Bench/refs/heads/main/data/spec_bench/question.jsonl
 
-Run all categories
+Run all categories:
 ``` bash
 vllm bench serve \
     --model meta-llama/Meta-Llama-3-8B-Instruct \
@@ -285,8 +286,9 @@ vllm bench serve \
     --num-prompts -1
 ```
 
-Available categories include [writing, roleplay, reasoning, math, coding, extraction, stem, humanities, translation, summarization, qa, math_reasoning, rag].
-Run only a specific category like "summarization". 
+Available categories include `[writing, roleplay, reasoning, math, coding, extraction, stem, humanities, translation, summarization, qa, math_reasoning, rag]`.
+
+Run only a specific category like "summarization":
 
 ``` bash
 vllm bench serve \
