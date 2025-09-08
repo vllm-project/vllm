@@ -3,13 +3,16 @@
 vLLM initially supports basic model inference and serving on Intel GPU platform.
 
 !!! warning
-    There are no pre-built wheels or images for this device, so you must build vLLM from source.
+    There are no pre-built wheels for this device, so you need build vLLM from source. Or you can use pre-built images which are based on vLLM released versions.
 
 # --8<-- [end:installation]
 # --8<-- [start:requirements]
 
 - Supported Hardware: Intel Data Center GPU, Intel ARC GPU
-- OneAPI requirements: oneAPI 2025.0
+- OneAPI requirements: oneAPI 2025.1
+- Python: 3.12
+!!! warning
+    The provided IPEX whl is Python3.12 specific so this version is a MUST.
 
 # --8<-- [end:requirements]
 # --8<-- [start:set-up-using-python]
@@ -24,7 +27,7 @@ Currently, there are no pre-built XPU wheels.
 # --8<-- [end:pre-built-wheels]
 # --8<-- [start:build-wheel-from-source]
 
-- First, install required [driver](https://dgpu-docs.intel.com/driver/installation.html#installing-gpu-drivers) and [Intel OneAPI](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit.html) 2025.0 or later.
+- First, install required [driver](https://dgpu-docs.intel.com/driver/installation.html#installing-gpu-drivers) and [Intel OneAPI](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit.html) 2025.1 or later.
 - Second, install Python packages for vLLM XPU backend building:
 
 ```bash
@@ -40,14 +43,10 @@ pip install -v -r requirements/xpu.txt
 VLLM_TARGET_DEVICE=xpu python setup.py install
 ```
 
-!!! note
-    - FP16 is the default data type in the current XPU backend. The BF16 data
-      type is supported on Intel Data Center GPU, not supported on Intel Arc GPU yet.
-
 # --8<-- [end:build-wheel-from-source]
 # --8<-- [start:pre-built-images]
 
-Currently, there are no pre-built XPU images.
+Currently, we release prebuilt XPU images at docker [hub](https://hub.docker.com/r/intel/vllm/tags) based on vLLM released version. For more information, please refer release [note](https://github.com/intel/ai-containers/blob/main/vllm).
 
 # --8<-- [end:pre-built-images]
 # --8<-- [start:build-image-from-source]
@@ -65,14 +64,14 @@ docker run -it \
 # --8<-- [end:build-image-from-source]
 # --8<-- [start:supported-features]
 
-XPU platform supports **tensor parallel** inference/serving and also supports **pipeline parallel** as a beta feature for online serving. We require Ray as the distributed runtime backend. For example, a reference execution like following:
+XPU platform supports **tensor parallel** inference/serving and also supports **pipeline parallel** as a beta feature for online serving. For **pipeline parallel**, we support it on single node with mp as the backend. For example, a reference execution like following:
 
 ```bash
 python -m vllm.entrypoints.openai.api_server \
      --model=facebook/opt-13b \
      --dtype=bfloat16 \
      --max_model_len=1024 \
-     --distributed-executor-backend=ray \
+     --distributed-executor-backend=mp \
      --pipeline-parallel-size=2 \
      -tp=8
 ```
