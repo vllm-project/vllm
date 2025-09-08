@@ -862,20 +862,51 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                            0,
                            token_indices_tensor,
                            out=self.input_ids.cpu[:total_num_scheduled_tokens])
-        prompt_embeds_cpu_tensor = \
-            self.input_batch.prompt_embeds_cpu_tensor.view(
-            -1, self.input_batch.prompt_embeds_cpu_tensor.shape[-1])
         is_token_ids = self.input_batch.is_token_ids.flatten()
-        torch.index_select(
-            prompt_embeds_cpu_tensor,
-            0,
-            token_indices_tensor,
-            out=self.inputs_embeds.cpu[:total_num_scheduled_tokens])
         torch.index_select(
             is_token_ids,
             0,
             token_indices_tensor,
             out=self.is_token_ids.cpu[:total_num_scheduled_tokens])
+
+        # Because we did not pre-allocate a massive prompt_embeds CPU tensor on
+        # the InputBatch, we need to fill in the prompt embeds into the expected
+        # spots in the GpuModelRunner's pre-allocated prompt_embeds tensor.
+        if self.input_batch.req_prompt_embeds:
+            output_idx = 0
+            for req_idx in range(num_reqs):
+                num_sched = num_scheduled_tokens[req_idx]
+
+                # Skip if this request doesn't have embeddings
+                if req_idx not in self.input_batch.req_prompt_embeds:
+                    output_idx += num_sched
+                    continue
+
+                # Skip if no tokens scheduled
+                if num_sched <= 0:
+                    output_idx += num_sched
+                    continue
+
+                req_embeds = self.input_batch.req_prompt_embeds[req_idx]
+                start_pos = self.input_batch.num_computed_tokens_cpu[req_idx]
+
+                # Skip if trying to read beyond available embeddings
+                if start_pos >= req_embeds.shape[0]:
+                    output_idx += num_sched
+                    continue
+
+                # Copy available embeddings
+                end_pos = start_pos + num_sched
+                actual_end = min(end_pos, req_embeds.shape[0])
+                actual_num_sched = actual_end - start_pos
+
+                if actual_num_sched > 0:
+                    self.inputs_embeds.cpu[output_idx:output_idx +
+                                           actual_num_sched].copy_(
+                                               req_embeds[start_pos:actual_end]
+                                           )
+
+                output_idx += num_sched
 
         self.input_batch.block_table.compute_slot_mapping(
             req_indices, positions_np)

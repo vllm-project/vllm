@@ -117,18 +117,14 @@ class InputBatch:
             pin_memory=False,
         )
         self.token_ids_cpu = self.token_ids_cpu_tensor.numpy()
-        # Since this is a buffer, its initial values do not matter. Initializing
-        # with zeros is sufficiently slow that it can cause NCCL failures when
-        # starting up tensor parallel.
-        self.prompt_embeds_cpu_tensor = torch.empty(
-            (max_num_reqs, max_model_len, hidden_size),
-            device="cpu",
-            dtype=dtype,
-            pin_memory=False)
         self.is_token_ids = torch.zeros((max_num_reqs, max_model_len),
                                         device="cpu",
                                         dtype=bool,
                                         pin_memory=False)
+        # Store prompt embeddings per request to avoid OOM from large upfront
+        # allocation if max_model_len is big.
+        # Maps req_index -> tensor of shape (num_prompt_tokens, hidden_size)
+        self.req_prompt_embeds: dict[int, torch.Tensor] = {}
         self.num_tokens = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_tokens_no_spec = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_prompt_tokens = np.zeros(max_num_reqs, dtype=np.int32)
@@ -333,8 +329,7 @@ class InputBatch:
         else:
             self.is_token_ids[req_index, :num_prompt_tokens] = False
         if request.prompt_embeds is not None:
-            self.prompt_embeds_cpu_tensor[req_index, :num_prompt_tokens].copy_(
-                request.prompt_embeds)
+            self.req_prompt_embeds[req_index] = request.prompt_embeds
         self.token_ids_cpu[req_index,
                            start_idx:end_idx] = request.output_token_ids
         self.is_token_ids[req_index, start_idx:end_idx] = True
@@ -524,10 +519,17 @@ class InputBatch:
         self.is_token_ids[i1, ...] = self.is_token_ids[i2, ...]
         self.is_token_ids[i2, ...] = tmp_is_token_ids
 
-        tmp_prompt_embeds = self.prompt_embeds_cpu_tensor[i1, ...].clone()
-        self.prompt_embeds_cpu_tensor[i1, ...] = \
-            self.prompt_embeds_cpu_tensor[i2, ...]
-        self.prompt_embeds_cpu_tensor[i2, ...] = tmp_prompt_embeds
+        # Swap prompt embeddings if they exist
+        embeds_i1 = self.req_prompt_embeds.get(i1)
+        embeds_i2 = self.req_prompt_embeds.get(i2)
+        if embeds_i1 is not None:
+            self.req_prompt_embeds[i2] = embeds_i1
+        else:
+            self.req_prompt_embeds.pop(i2, None)
+        if embeds_i2 is not None:
+            self.req_prompt_embeds[i1] = embeds_i2
+        else:
+            self.req_prompt_embeds.pop(i1, None)
 
         self.block_table.swap_row(i1, i2)
 
@@ -618,9 +620,9 @@ class InputBatch:
                 last_req_index, :num_tokens]
             self.is_token_ids[empty_index, :num_tokens] = self.is_token_ids[
                 last_req_index, :num_tokens]
-            self.prompt_embeds_cpu_tensor[
-                empty_index, :num_tokens] = self.prompt_embeds_cpu_tensor[
-                    last_req_index, :num_tokens]
+            if last_req_index in self.req_prompt_embeds:
+                self.req_prompt_embeds[
+                    empty_index] = self.req_prompt_embeds.pop(last_req_index)
             self.num_tokens[empty_index] = num_tokens
             self.num_tokens_no_spec[empty_index] = self.num_tokens_no_spec[
                 last_req_index]
