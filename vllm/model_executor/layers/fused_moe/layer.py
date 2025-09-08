@@ -1599,6 +1599,19 @@ class FusedMoE(CustomOp):
                                   (0, self.hidden_size - og_hidden_states),
                                   mode='constant',
                                   value=0.0)
+        do_naive_dispatch_combine: bool = (
+            self.dp_size > 1
+            and not self.moe_parallel_config.use_deepep_ht_kernels
+            and not self.moe_config.use_flashinfer_cutlass_kernels)
+
+        def reduce_output(states: torch.Tensor) -> torch.Tensor:
+            if do_naive_dispatch_combine:
+                states = get_ep_group().combine(states)
+
+            if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
+                states = self.maybe_all_reduce_tensor_model_parallel(states)
+
+            return states
 
         if self.shared_experts is None:
             if current_platform.is_tpu():
@@ -1609,7 +1622,7 @@ class FusedMoE(CustomOp):
             else:
                 fused_output = torch.ops.vllm.moe_forward(
                     hidden_states, router_logits, self.layer_name)
-            return fused_output[..., :og_hidden_states]
+            return reduce_output(fused_output[..., :og_hidden_states])
         else:
             if current_platform.is_tpu():
                 # TODO: Once the OOM issue for the TPU backend is resolved, we
@@ -1619,8 +1632,8 @@ class FusedMoE(CustomOp):
             else:
                 shared_output, fused_output = torch.ops.vllm.moe_forward_shared(
                     hidden_states, router_logits, self.layer_name)
-            return (shared_output[..., :og_hidden_states],
-                    fused_output[..., :og_hidden_states])
+            return (reduce_output(shared_output[..., :og_hidden_states]),
+                    reduce_output(fused_output[..., :og_hidden_states]))
 
     def forward_impl_chunked(
         self,
@@ -1786,23 +1799,7 @@ class FusedMoE(CustomOp):
                 shared_output,
                 final_hidden_states,
             )
-
-        def reduce_output(states: torch.Tensor) -> torch.Tensor:
-            if do_naive_dispatch_combine:
-                states = get_ep_group().combine(states)
-
-            if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
-                states = self.maybe_all_reduce_tensor_model_parallel(states)
-
-            return states
-
-        if self.shared_experts is None:
-            return reduce_output(final_hidden_states)
-        else:
-            return (
-                reduce_output(final_hidden_states[0]),
-                reduce_output(final_hidden_states[1]),
-            )
+        return final_hidden_states
 
     @classmethod
     def make_expert_params_mapping(
