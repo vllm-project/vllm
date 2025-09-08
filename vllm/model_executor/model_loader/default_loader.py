@@ -7,20 +7,19 @@ import time
 from collections.abc import Generator, Iterable
 from typing import Optional, cast
 
-import huggingface_hub
 import torch
 from torch import nn
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
-from vllm import envs
 from vllm.config import LoadConfig, ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
     fastsafetensors_weights_iterator, filter_duplicate_safetensors_files,
-    filter_files_not_needed_for_inference, get_lock, np_cache_weights_iterator,
-    pt_weights_iterator, safetensors_weights_iterator)
+    filter_files_not_needed_for_inference, maybe_download_from_modelscope,
+    np_cache_weights_iterator, pt_weights_iterator,
+    safetensors_weights_iterator)
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -57,35 +56,6 @@ class DefaultModelLoader(BaseModelLoader):
             raise ValueError(f"Model loader extra config is not supported for "
                              f"load format {load_config.load_format}")
 
-    def _maybe_download_from_modelscope(
-            self, model: str, revision: Optional[str]) -> Optional[str]:
-        """Download model from ModelScope hub if VLLM_USE_MODELSCOPE is True.
-
-        Returns the path to the downloaded model, or None if the model is not
-        downloaded from ModelScope."""
-        if envs.VLLM_USE_MODELSCOPE:
-            # download model from ModelScope hub,
-            # lazy import so that modelscope is not required for normal use.
-            # pylint: disable=C.
-            from modelscope.hub.snapshot_download import snapshot_download
-
-            # Use file lock to prevent multiple processes from
-            # downloading the same model weights at the same time.
-            with get_lock(model, self.load_config.download_dir):
-                if not os.path.exists(model):
-                    model_path = snapshot_download(
-                        model_id=model,
-                        cache_dir=self.load_config.download_dir,
-                        local_files_only=huggingface_hub.constants.
-                        HF_HUB_OFFLINE,
-                        revision=revision,
-                        ignore_file_pattern=self.load_config.ignore_patterns,
-                    )
-                else:
-                    model_path = model
-            return model_path
-        return None
-
     def _prepare_weights(
         self,
         model_name_or_path: str,
@@ -96,7 +66,7 @@ class DefaultModelLoader(BaseModelLoader):
         """Prepare weights for the model.
 
         If the model is not local, it will be downloaded."""
-        model_name_or_path = (self._maybe_download_from_modelscope(
+        model_name_or_path = (maybe_download_from_modelscope(
             model_name_or_path, revision) or model_name_or_path)
 
         is_local = os.path.isdir(model_name_or_path)

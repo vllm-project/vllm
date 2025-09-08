@@ -73,7 +73,6 @@ class PlatformEnum(enum.Enum):
     TPU = enum.auto()
     XPU = enum.auto()
     CPU = enum.auto()
-    NEURON = enum.auto()
     OOT = enum.auto()
     UNSPECIFIED = enum.auto()
 
@@ -163,9 +162,6 @@ class Platform:
 
     def is_cpu(self) -> bool:
         return self._enum == PlatformEnum.CPU
-
-    def is_neuron(self) -> bool:
-        return self._enum == PlatformEnum.NEURON
 
     def is_out_of_tree(self) -> bool:
         return self._enum == PlatformEnum.OOT

@@ -368,23 +368,20 @@ class OpenAIServing:
             for i, engine_prompt in enumerate(ctx.engine_prompts):
                 request_id_item = f"{ctx.request_id}-{i}"
 
-                if ctx.request_prompts is None:
-                    return self.create_error_response(
-                        "Request prompts not available")
-
-                self._log_inputs(
-                    request_id_item,
-                    ctx.request_prompts[i],
-                    params=pooling_params,
-                    lora_request=ctx.lora_request,
-                )
-
                 # Mypy has an existing bug related to inferring the variance of
                 # TypedDicts with `builtins.enumerate`:
                 # https://github.com/python/mypy/issues/8586#issuecomment-2867698435
                 engine_prompt = cast(
                     Union[EngineTokensPrompt, EngineEmbedsPrompt],
                     engine_prompt)
+
+                self._log_inputs(
+                    request_id_item,
+                    engine_prompt,
+                    params=pooling_params,
+                    lora_request=ctx.lora_request,
+                )
+
                 generator = self.engine_client.encode(
                     engine_prompt,
                     pooling_params,
