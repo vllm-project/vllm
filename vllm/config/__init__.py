@@ -2171,8 +2171,7 @@ class SpeculativeConfig:
                 # AngelSlim/Qwen3-8B_eagle3
                 elif "eagle-" in self.draft_model_config.model.lower():
                     self.method = "eagle"
-                elif "eagle3-" in self.draft_model_config.model.lower() or \
-                            self.draft_model_config.model.endswith("_eagle3"):
+                elif "eagle3" in self.draft_model_config.model.lower():
                     self.method = "eagle3"
                 elif self.draft_model_config.hf_config.model_type == "medusa":
                     self.method = "medusa"
