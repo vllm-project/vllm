@@ -15,6 +15,7 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
+from vllm.v1.engine.hidden_states import HiddenStatesProcessor
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.stats import (IterationStats, LoRARequestStates,
@@ -93,6 +94,7 @@ class RequestState:
         arrival_time: float,
         queue: Optional[RequestOutputCollector],
         log_stats: bool,
+        hidden_states_processor: Optional[HiddenStatesProcessor],
     ):
         self.request_id = request_id
         self.parent_req = parent_req
@@ -111,6 +113,7 @@ class RequestState:
 
         self.stats = RequestStateStats(
             arrival_time=arrival_time) if log_stats else None
+        self.hidden_states_processor = hidden_states_processor
 
     @classmethod
     def from_new_request(
@@ -137,10 +140,12 @@ class RequestState:
                 request=request,
             )
             max_tokens_param = sampling_params.max_tokens
+            hidden_states_processor = HiddenStatesProcessor.from_new_request()
         else:
             logprobs_processor = None
             detokenizer = None
             max_tokens_param = None
+            hidden_states_processor = None
             assert request.pooling_params is not None
             output_kind = request.pooling_params.output_kind
 
@@ -159,6 +164,7 @@ class RequestState:
             arrival_time=request.arrival_time,
             queue=queue,
             log_stats=log_stats,
+            hidden_states_processor=hidden_states_processor,
         )
 
     def make_request_output(
@@ -204,7 +210,7 @@ class RequestState:
         finished: bool,
         kv_transfer_params: Optional[dict[str, Any]] = None,
     ) -> Union[RequestOutput, PoolingRequestOutput]:
-
+        # Seeems here to process outputs
         first_output = outputs[0]
         if isinstance(first_output, PoolingOutput):
             assert len(outputs) == 1
@@ -215,17 +221,23 @@ class RequestState:
                 finished=finished,
             )
         assert self.logprobs_processor is not None
+        assert self.hidden_states_processor is not None
         if self.output_kind == RequestOutputKind.DELTA:
             # Side effect: logprobs processor forgets prompt logprobs
             prompt_logprobs = self.logprobs_processor.pop_prompt_logprobs()
+            prompt_hidden_states = self.hidden_states_processor.pop_prompt_hidden_states(
+            )
         else:
             prompt_logprobs = self.logprobs_processor.prompt_logprobs
+            prompt_hidden_states = self.hidden_states_processor.prompt_hidden_states
 
+        # prompt logprobs is added here
         return RequestOutput(
             request_id=request_id,
             prompt=self.prompt,
             prompt_token_ids=self.prompt_token_ids,
             prompt_logprobs=prompt_logprobs,
+            prompt_hidden_states=prompt_hidden_states,
             outputs=cast(list[CompletionOutput], outputs),
             finished=finished,
             kv_transfer_params=kv_transfer_params,
@@ -399,6 +411,7 @@ class OutputProcessor:
             kv_transfer_params = engine_core_output.kv_transfer_params
             req_state.num_cached_tokens = engine_core_output.num_cached_tokens
             req_state.is_prefilling = False
+            prompt_hidden_states = engine_core_output.prompt_hidden_states
 
             if pooling_output is None:
                 assert req_state.detokenizer is not None
@@ -414,8 +427,12 @@ class OutputProcessor:
                 # if required.
                 req_state.logprobs_processor.update_from_output(
                     engine_core_output)
+                assert req_state.hidden_states_processor is not None
+                req_state.hidden_states_processor.update_from_output(
+                    engine_core_output)
 
             # 4) Create and handle RequestOutput objects.
+            print("lxy here make_request_output", prompt_hidden_states is None)
             if request_output := req_state.make_request_output(
                     new_token_ids, pooling_output, finish_reason, stop_reason,
                     kv_transfer_params):

@@ -1583,6 +1583,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             sampled_token_ids=[],
             logprobs=None,
             prompt_logprobs_dict={},
+            prompt_hidden_states_dict={},
             pooler_output=pooler_output,
             kv_connector_output=kv_connector_output,
         )
@@ -1761,6 +1762,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Compute prompt logprobs if needed.
         prompt_logprobs_dict = self._get_prompt_logprobs_dict(
+            hidden_states[:num_scheduled_tokens],
+            scheduler_output.num_scheduled_tokens,
+        )
+        prompt_hidden_states_dict = self._get_prompt_hidden_states_dict(
             hidden_states[:num_scheduled_tokens],
             scheduler_output.num_scheduled_tokens,
         )
@@ -1993,6 +1998,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             sampled_token_ids=valid_sampled_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
+            prompt_hidden_states_dict=prompt_hidden_states_dict,
             pooler_output=[],
             kv_connector_output=kv_connector_output,
             num_nans_in_logits=num_nans_in_logits,
@@ -2379,6 +2385,90 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self._sync_device()
 
         return prompt_logprobs_dict
+
+    def _get_prompt_hidden_states_dict(
+        self,
+        hidden_states: torch.Tensor,
+        num_scheduled_tokens: dict[str, int],
+    ) -> dict[str, Optional[torch.Tensor]]:
+        """
+        This function is similar to _get_prompt_logprobs_dict but for prompt hidden states
+        """
+
+        return_prompt_hidden_states_reqs = self.input_batch.return_prompt_hidden_states_reqs
+        if not return_prompt_hidden_states_reqs:
+            return {}
+
+        in_progress_dict = self.input_batch.in_progress_prompt_hidden_states_cpu
+        prompt_hidden_states_dict: dict[str, Optional[torch.Tensor]] = {}
+
+        # Since prompt hidden states are a rare feature, prioritize simple,
+        # maintainable loop over optimal performance.
+        completed_prefill_reqs = []
+        for req_id in return_prompt_hidden_states_reqs:
+            num_tokens = num_scheduled_tokens[req_id]
+
+            # Get metadata for this request.
+            request = self.requests[req_id]
+            num_prompt_tokens = len(request.prompt_token_ids)
+
+            # Set up target hidden_states_tensors object.
+            hidden_states_tensors = in_progress_dict.get(req_id)
+            if not hidden_states_tensors:
+                # Create empty hidden_states_tensors CPU tensors for the entire prompt.
+                # If chunked, we'll copy in slice by slice.
+                hidden_states_tensors = torch.empty(
+                    (num_prompt_tokens - 1, self.hidden_size),
+                    dtype=torch.int32,
+                    device="cpu")
+                in_progress_dict[req_id] = hidden_states_tensors
+
+            # Determine number of hidden states to retrieve.
+            start_idx = request.num_computed_tokens
+            start_tok = start_idx + 1
+            num_remaining_tokens = num_prompt_tokens - start_tok
+            if num_tokens <= num_remaining_tokens:
+                # This is a chunk, more tokens remain.
+                # In the == case, there are no more prompt logprobs to produce
+                # but we want to defer returning them to the next step where we
+                # have new generated tokens to return.
+                num_logits = num_tokens
+            else:
+                # This is the last chunk of prompt tokens to return.
+                num_logits = num_remaining_tokens
+                completed_prefill_reqs.append(req_id)
+                prompt_hidden_states_dict[req_id] = hidden_states_tensors
+
+            if num_logits <= 0:
+                # This can happen for the final chunk if we prefilled exactly
+                # (num_prompt_tokens - 1) tokens for this request in the prior
+                # step. There are no more prompt hidden states to produce.
+                continue
+
+            # Get the hidden states corresponding to this req's prompt tokens.
+            # If this is a partial request (i.e. chunked prefill),
+            # then there is prompt hidden states generated for each index.
+            req_idx = self.input_batch.req_id_to_index[req_id]
+            offset = self.query_start_loc.np[req_idx].item()
+            prompt_hidden_states = hidden_states[offset:offset + num_logits]
+
+            # Transfer GPU->CPU async.
+            chunk_slice = slice(start_idx, start_idx + num_logits)
+            hidden_states_tensors[chunk_slice].copy_(prompt_hidden_states,
+                                                     non_blocking=True)
+
+        # Remove requests that have completed prefill from the batch
+        # num_prompt_logprobs_dict.
+        for req_id in completed_prefill_reqs:
+            return_prompt_hidden_states_reqs.remove(req_id)
+            del in_progress_dict[req_id]
+
+        # Must synchronize the non-blocking GPU->CPU transfers.
+        if prompt_hidden_states_dict:
+            self._sync_device()
+
+        # the return would be empty for prior steps
+        return prompt_hidden_states_dict
 
     def _get_nans_in_logits(
         self,
