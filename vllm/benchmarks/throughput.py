@@ -31,17 +31,14 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
 from vllm.utils import merge_async_iterators
-from vllm.v1.metrics.reader import Metric
-from vllm.v1.spec_decode.metrics import compute_acceptance_rate
 
 
 def run_vllm(
     requests: list[SampleRequest],
     n: int,
     engine_args: EngineArgs,
-    do_profile: bool,
     disable_detokenize: bool = False,
-) -> "Results":
+) -> tuple[float, Optional[list[RequestOutput]]]:
     from vllm import LLM, SamplingParams
     llm = LLM(**dataclasses.asdict(engine_args))
     assert all(
@@ -77,16 +74,12 @@ def run_vllm(
 
     outputs = None
     if not use_beam_search:
-        if do_profile:
-            llm.start_profile()
         start = time.perf_counter()
         outputs = llm.generate(prompts,
                                sampling_params,
                                lora_request=lora_requests,
                                use_tqdm=True)
         end = time.perf_counter()
-        if do_profile:
-            llm.stop_profile()
     else:
         assert lora_requests is None, "BeamSearch API does not support LoRA"
         prompts = [request.prompt for request in requests]
@@ -103,8 +96,7 @@ def run_vllm(
                 ignore_eos=True,
             ))
         end = time.perf_counter()
-    runtime = end - start
-    return Results(runtime=runtime, metrics=llm.get_metrics(), outputs=outputs)
+    return end - start, outputs
 
 
 def run_vllm_chat(
@@ -144,13 +136,6 @@ def run_vllm_chat(
     outputs = llm.chat(prompts, sampling_params, use_tqdm=True)
     end = time.perf_counter()
     return end - start, outputs
-
-
-@dataclasses.dataclass
-class Results:
-    runtime: float
-    metrics: list[Metric]
-    outputs: list
 
 
 async def run_vllm_async(
@@ -511,12 +496,6 @@ def add_cli_args(parser: argparse.ArgumentParser):
         type=str,
         default=None,
         help='Path to save the throughput results in JSON format.')
-    parser.add_argument(
-        "--print-acceptance-rate",
-        action="store_true",
-        default=False,
-        help="Print the acceptance rate of the speculative decoding model.",
-    )
     parser.add_argument("--async-engine",
                         action='store_true',
                         default=False,
@@ -564,10 +543,6 @@ def add_cli_args(parser: argparse.ArgumentParser):
                         type=str,
                         default=None,
                         help="Split of the HF dataset.")
-    parser.add_argument("--profile",
-                        action="store_true",
-                        default=False,
-                        help="Profile the model.")
 
     # prefix repetition dataset
     prefix_repetition_group = parser.add_argument_group(
@@ -629,12 +604,9 @@ def main(args: argparse.Namespace):
                     args.disable_detokenize,
                 ))
         else:
-            bresults = run_vllm(
+            elapsed_time, request_outputs = run_vllm(
                 requests, args.n, EngineArgs.from_cli_args(args),
-                do_profile=args.profile,
-                disable_detokenize=args.disable_detokenize)
-            elapsed_time = bresults.runtime
-            request_outputs = bresults.outputs
+                args.disable_detokenize)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
@@ -679,9 +651,6 @@ def main(args: argparse.Namespace):
           f"{total_output_tokens / elapsed_time:.2f} output tokens/s")
     print(f"Total num prompt tokens:  {total_prompt_tokens}")
     print(f"Total num output tokens:  {total_output_tokens}")
-    if args.print_acceptance_rate:
-        rate = compute_acceptance_rate(bresults.metrics)
-        print(f"Acceptance rate: {rate:.2f}")
 
     # Output JSON results if specified
     if args.output_json:
