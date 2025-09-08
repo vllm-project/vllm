@@ -1042,7 +1042,7 @@ tensorboardx==2.6.4
     # via lightning
 tensorizer==2.10.1
     # via -r requirements/test.in
-terratorch==1.1rc3
+terratorch @ git+https://github.com/IBM/terratorch.git@07184fcf91a1324f831ff521dd238d97fe350e3e
     # via -r requirements/test.in
 threadpoolctl==3.5.0
     # via scikit-learn
