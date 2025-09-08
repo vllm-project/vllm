@@ -37,11 +37,12 @@ try:
 except ImportError:
     librosa = PlaceholderModule("librosa")  # type: ignore[assignment]
 
-SpeechToTextResponse = Union[TranscriptionResponse, TranslationResponse,
-                             TranscriptionResponseVerbose,
-                             TranslationResponseVerbose]
+SpeechToTextResponse = Union[TranscriptionResponse, TranslationResponse]
+SpeechToTextResponseVerbose = Union[TranscriptionResponseVerbose, 
+                                    TranslationResponseVerbose]
 SpeechToTextSegment = Union[TranscriptionSegment, TranslationSegment]
 T = TypeVar("T", bound=SpeechToTextResponse)
+V = TypeVar("V", bound=SpeechToTextResponseVerbose)
 S = TypeVar("S", bound=SpeechToTextSegment)
 logger = init_logger(__name__)
 
@@ -125,8 +126,15 @@ class OpenAISpeechToText(OpenAIServing):
                 to_language=to_language,
             )
             if request.response_format == "verbose_json":
-                prompt["decoder_prompt"] = (prompt["decoder_prompt"].replace(
-                    '<|notimestamps|>', '<|0.00|>'))
+                if not isinstance(prompt, dict):
+                    raise ValueError("Expected prompt to be a dict,"
+                                      f"got {type(prompt)}")
+                decoder_prompt = prompt.get("decoder_prompt")
+                if not isinstance(decoder_prompt, str):
+                    raise ValueError("Expected decoder_prompt to be"
+                                     f"str, got {type(decoder_prompt)}")
+                prompt["decoder_prompt"] = decoder_prompt.replace(
+                    '<|notimestamps|>', '<|0.00|>')
             prompts.append(prompt)
         return prompts, duration
 
@@ -135,9 +143,8 @@ class OpenAISpeechToText(OpenAIServing):
                               segment_class: type[T],
                               start_time: float = 0) -> list[S]:
 
-        init_token = self.tokenizer.convert_tokens_to_ids('<|0.00|>')
-        if (tokens[-1] == self.tokenizer.convert_tokens_to_ids(
-                self.tokenizer.eos_token)):
+        init_token = self.tokenizer.encode('<|0.00|>')[0]
+        if (tokens[-1] ==  self.tokenizer.eos_token_id):
             tokens = tokens[:-1]
 
         tokens_with_start = (init_token, ) + tokens
@@ -164,8 +171,8 @@ class OpenAISpeechToText(OpenAIServing):
                 end_timestamp = sliced_tokens[-1] - init_token
                 start = tokenIdx
                 casting_segment = cast(
-                    T,
-                    segment_class(id=idx,
+                    S,
+                    segment_class(id=len(segments),
                                   avg_logprob=-1.0,
                                   compression_ratio=-1.0,
                                   end=start_time + 0.02 * end_timestamp,
@@ -174,7 +181,7 @@ class OpenAISpeechToText(OpenAIServing):
                                   start=start_time + 0.02 * start_timestamp,
                                   temperature=-1.0,
                                   text=self.tokenizer.decode(
-                                      sliced_tokens[1:-1]),
+                                  sliced_tokens[1:-1]),
                                   tokens=sliced_tokens[1:-1]))
                 segments.append(casting_segment)
         else:
@@ -185,8 +192,8 @@ class OpenAISpeechToText(OpenAIServing):
             end_timestamp = sliced_tokens[-1] - init_token
 
             casting_segment = cast(
-                T,
-                segment_class(id=idx,
+                S,
+                segment_class(id=len(segments),
                               avg_logprob=-1.0,
                               compression_ratio=-1.0,
                               end=start_time + 0.02 * end_timestamp,
@@ -195,7 +202,7 @@ class OpenAISpeechToText(OpenAIServing):
                               start=start_time,
                               temperature=-1.0,
                               text=self.tokenizer.decode(
-                                  tokens_with_start[1:sliced_tokens[-1]]),
+                              tokens_with_start[1:sliced_tokens[-1]]),
                               tokens=tokens_with_start[1:sliced_tokens[-1]]))
             segments.append(casting_segment)
         return segments
@@ -288,8 +295,17 @@ class OpenAISpeechToText(OpenAIServing):
             for idx, result_generator in enumerate(list_result_generator):
                 async for op in result_generator:
                     if request.response_format == 'verbose_json':
+                        segment_class = (
+                            TranscriptionSegment
+                            if self.task_type == "transcribe" else
+                            TranslationSegment
+                        )
+
                         segments = self._get_verbose_segments(
-                            op.outputs[0].token_ids, idx * 30)
+                            op.outputs[0].token_ids,
+                            segment_class=segment_class, 
+                            start_time=idx * 30)
+                        
                         total_segments.extend(segments)
                         text += "".join(map(lambda x: x.text, segments))
                     else:
@@ -307,7 +323,7 @@ class OpenAISpeechToText(OpenAIServing):
                         T, response_class(text=text, usage=usage))
                 else:
                     final_response = cast(
-                        T,
+                        V,
                         response_class(text=text,
                                        language=request.language,
                                        duration=str(duration_s),
@@ -319,7 +335,7 @@ class OpenAISpeechToText(OpenAIServing):
                         T, response_class(text=text))  # type: ignore[call-arg]
                 else:
                     final_response = cast(
-                        T,
+                        V,
                         response_class(text=text,
                                        language=request.language,
                                        duration=str(duration_s),

@@ -117,8 +117,9 @@ class OpenAIServingTranslation(OpenAISpeechToText):
             audio_data=audio_data,
             request=request,
             raw_request=raw_request,
-            response_class=(TranslationResponse if request.response_format
-                            == "verbose_json" else TranslationResponseVerbose),
+            response_class=(TranslationResponseVerbose 
+                            if request.response_format == "verbose_json" else 
+                            TranslationResponse),
             stream_generator_method=self.translation_stream_generator,
         )
 
