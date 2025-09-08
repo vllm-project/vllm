@@ -11,7 +11,7 @@ from vllm.utils import set_default_torch_num_threads
 @pytest.mark.parametrize(
     "model",
     [
-        "mgazz/Prithvi-EO-2.0-300M-TL-Sen1Floods11",
+        "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11",
         "mgazz/Prithvi_v2_eo_300_tl_unet_agb"
     ],
 )
