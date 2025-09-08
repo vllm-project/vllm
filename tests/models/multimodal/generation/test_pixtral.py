@@ -187,27 +187,19 @@ def test_chat(vllm_runner, max_model_len: int, model: str, dtype: str,
                          name_1="output")
 
 
-@pytest.fixture
-def prompt(request, local_asset_server) -> TextPrompt:
-    names = request.param
-    urls = [local_asset_server.url_for(n) for n in names]
-    return _create_engine_inputs_hf(urls)
-
-
 @pytest.mark.parametrize(
-    "prompt,expected_ranges",
-    [
-        pytest.param(IMG_URLS[:1], [PlaceholderRange(offset=11, length=494)]),
-        pytest.param(IMG_URLS[1:4], [
-            PlaceholderRange(offset=11, length=266),
-            PlaceholderRange(offset=277, length=1056),
-            PlaceholderRange(offset=1333, length=418)
-        ])
-    ],
-)
-def test_multi_modal_placeholders(vllm_runner, prompt: TextPrompt,
+    "image_urls,expected_ranges",
+    [(IMG_URLS[:1], [PlaceholderRange(offset=11, length=494)]),
+     (IMG_URLS[1:4], [
+         PlaceholderRange(offset=11, length=266),
+         PlaceholderRange(offset=277, length=1056),
+         PlaceholderRange(offset=1333, length=418)
+     ])])
+def test_multi_modal_placeholders(vllm_runner, image_urls: list[str],
                                   expected_ranges: list[PlaceholderRange],
-                                  monkeypatch) -> None:
+                                  local_asset_server, monkeypatch) -> None:
+    local_image_urls = [local_asset_server.url_for(u) for u in image_urls]
+    prompt = _create_engine_inputs_hf(local_image_urls)
 
     # This placeholder checking test only works with V0 engine
     # where `multi_modal_placeholders` is returned with `RequestOutput`
