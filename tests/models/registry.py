@@ -382,7 +382,7 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "Phi3VForCausalLM": _HfExamplesInfo("TIGER-Lab/VLM2Vec-Full",
                                          trust_remote_code=True),
     "Qwen2VLForConditionalGeneration": _HfExamplesInfo("MrLight/dse-qwen2-2b-mrl-v1"), # noqa: E501
-    "PrithviGeoSpatialMAE": _HfExamplesInfo("mgazz/Prithvi-EO-2.0-300M-TL-Sen1Floods11", # noqa: E501
+    "PrithviGeoSpatialMAE": _HfExamplesInfo("ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11", # noqa: E501
                                             dtype=torch.float16,
                                             enforce_eager=True,
                                             skip_tokenizer_init=True,
@@ -390,7 +390,7 @@ _EMBEDDING_EXAMPLE_MODELS = {
                                             # going OOM in CI
                                             max_num_seqs=32,
                                             ),
-    "Terratorch": _HfExamplesInfo("mgazz/Prithvi-EO-2.0-300M-TL-Sen1Floods11",
+    "Terratorch": _HfExamplesInfo("ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11", # noqa: E501
                                   dtype=torch.float16,
                                   enforce_eager=True,
                                   skip_tokenizer_init=True,
