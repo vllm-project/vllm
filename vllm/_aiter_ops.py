@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from functools import cache, wraps
+from functools import wraps
 from typing import Callable, Optional
 
 import torch
@@ -10,7 +10,6 @@ from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op, is_torch_equal_or_newer
 
 
-@cache
 def is_aiter_supported(func: Callable) -> Callable:
     """Decorator that only executes the function if 
     ROCm AITER package is supported on gfx9 archs.
