@@ -12,8 +12,6 @@ from ....utils import large_gpu_mark
 from ...registry import HF_EXAMPLE_MODELS
 from ...utils import check_logprobs_close
 
-pytestmark = pytest.mark.common_model
-
 # These have unsupported head_dim for FA. We do not
 # have a clean way to fall back, so we fail with
 # a clear msg when it happens.
@@ -41,7 +39,7 @@ AITER_MODEL_LIST = [
     [
         pytest.param(
             "bigscience/bloom-560m",  # bloom - testing alibi slopes
-            marks=[pytest.mark.core_model],
+            marks=[pytest.mark.core_model, pytest.mark.slow_test],
         ),
         pytest.param(
             "openai-community/gpt2",  # gpt2
@@ -52,7 +50,10 @@ AITER_MODEL_LIST = [
         pytest.param("EleutherAI/pythia-70m"),  # gpt_neox
         pytest.param(
             "google/gemma-1.1-2b-it",  # gemma
-            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+            marks=[
+                pytest.mark.core_model, pytest.mark.cpu_model,
+                pytest.mark.slow_test
+            ],
         ),
         pytest.param(
             "zai-org/chatglm3-6b",  # chatglm (text-only)
@@ -73,14 +74,17 @@ AITER_MODEL_LIST = [
         ),
         pytest.param(
             "microsoft/phi-2",  # phi
-            marks=[pytest.mark.core_model],
+            marks=[pytest.mark.core_model, pytest.mark.slow_test],
         ),
         pytest.param(
             "Qwen/Qwen-7B-Chat",  # qwen (text-only)
         ),
         pytest.param(
             "Qwen/Qwen2.5-0.5B-Instruct",  # qwen2
-            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+            marks=[
+                pytest.mark.core_model, pytest.mark.cpu_model,
+                pytest.mark.slow_test
+            ],
         ),
         pytest.param(
             "Qwen/Qwen3-8B",  # qwen (text-only)

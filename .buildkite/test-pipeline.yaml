@@ -584,7 +584,7 @@ steps:
     - pytest -v -s models/test_utils.py
     - pytest -v -s models/test_vision.py
 
-- label: Language Models Test (Standard) # 35min
+- label: Standard Language Models Test (Subset)
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
@@ -593,7 +593,20 @@ steps:
   - tests/models/language
   commands:
     - pip freeze | grep -E 'torch'
-    - pytest -v -s models/language -m core_model
+    - pytest -v -s models/language -m "core_model and not slow_test"
+
+- label: Standard Language Models Test (Other)
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental]
+  torch_nightly: true
+  source_file_dependencies:
+  - vllm/model_executor/models/
+  - tests/models/language/pooling/test_embedding.py
+  - tests/models/language/generation/test_common.py
+  - tests/models/language/pooling/test_classification.py
+  commands:
+    - pip freeze | grep -E 'torch'
+    - pytest -v -s models/language -m "core_model and slow_test"
 
 # Shard hybrid language model tests
 - label: Language Models Test Shard 0 (Hybrid)

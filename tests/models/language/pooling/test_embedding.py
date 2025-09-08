@@ -9,8 +9,6 @@ from vllm.platforms import current_platform
 
 from ...utils import check_embeddings_close
 
-pytestmark = pytest.mark.embedding_model
-
 
 @pytest.mark.parametrize(
     "model",
@@ -21,7 +19,7 @@ pytestmark = pytest.mark.embedding_model
         # model code with bidirectional attention.
         # [Decoder-only]
         pytest.param("BAAI/bge-multilingual-gemma2",
-                     marks=[pytest.mark.core_model]),
+                     marks=[pytest.mark.core_model, pytest.mark.slow_test]),
         pytest.param(
             "intfloat/e5-mistral-7b-instruct",
             # CPU v1 doesn't support sliding window
@@ -29,7 +27,8 @@ pytestmark = pytest.mark.embedding_model
         pytest.param("ssmits/Qwen2-7B-Instruct-embed-base",
                      marks=[pytest.mark.cpu_model]),
         # [Encoder-only]
-        pytest.param("BAAI/bge-base-en-v1.5", marks=[pytest.mark.core_model]),
+        pytest.param("BAAI/bge-base-en-v1.5",
+                     marks=[pytest.mark.core_model, pytest.mark.slow_test]),
         pytest.param("sentence-transformers/all-MiniLM-L12-v2"),
         pytest.param("intfloat/multilingual-e5-small"),
         # [Cross-Encoder]
