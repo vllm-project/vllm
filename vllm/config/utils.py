@@ -50,6 +50,11 @@ def normalize_value(x):
         enum_type = f"{x.__class__.__module__}.{x.__class__.__qualname__}"
         return (enum_type, normalize_value(x.value))
 
+    # Classes (types) are accepted and canonicalized by their fully-qualified
+    # name (module.qualname) for a stable identifier.
+    # Instances are only accepted if they expose uuid(); otherwise they are
+    # rejected to avoid under-hashing object state.
+
     # Callables: allow classes (types) only; reject functions/lambdas/methods
     if isinstance(x, type):
         module = getattr(x, "__module__", "")
