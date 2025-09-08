@@ -2,6 +2,8 @@
 
 import pickle
 import signal
+import threading
+import time
 from contextlib import contextmanager
 from typing import Iterator, List, Optional, Union
 
@@ -27,6 +29,7 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCStartupResponse,
                                          RPCUProfileRequest, RPCWakeUpRequest)
 # yapf: enable
+from vllm.envs import VLLM_RPC_TIMEOUT
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.transformers_utils.config import (
@@ -107,6 +110,20 @@ class MQLLMEngine:
         # Error state.
         self._errored_with: Optional[BaseException] = None
 
+        # Heartbeat thread
+        self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop,
+                                                 daemon=True)
+        self._heartbeat_stop_event = threading.Event()
+        # The heartbeat needs to be faster than what the client will wait for
+        # The VLLM_RPC_TIMEOUT duration is in ms, and we need one in seconds
+        self.heartbeat_interval_seconds = VLLM_RPC_TIMEOUT / 5000.0
+
+        self._last_alive_time = time.time()
+        # The heartbeats can tolerate a long period of the engine chugging
+        # away at a generation request.
+        # The VLLM_RPC_TIMEOUT duration is in ms, and we need one in seconds
+        self.last_alive_threshold = VLLM_RPC_TIMEOUT * 3.0 / 1000.0
+
     @property
     def dead_error(self) -> BaseException:
         if self._errored_with is not None:
@@ -157,6 +174,8 @@ class MQLLMEngine:
             try:
                 logger.debug("Starting Startup Loop.")
                 self.run_startup_loop()
+                logger.debug("Starting heartbeat thread")
+                self.heartbeat_thread.start()
                 logger.debug("Starting Engine Loop.")
                 self.run_engine_loop()
             except Exception as e:
@@ -170,6 +189,7 @@ class MQLLMEngine:
     def cleanup(self):
         """Cleanup zeromq state on shutdown."""
         # Closes all sockets and destroys context.
+        self._heartbeat_stop_event.set()
         self.ctx.destroy(linger=0)
         del self.engine
 
@@ -208,12 +228,11 @@ class MQLLMEngine:
         """Core busy loop of the LLMEngine."""
 
         while True:
+            self._alive()
             if not self.engine.has_unfinished_requests():
                 # Poll until there is work to do.
                 while self.input_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
-                    # When there's no work, check on engine health and send
-                    # health status back to client
-                    self._health_check()
+                    self._alive()
                     self.engine.do_log_stats()
                     logger.debug("Waiting for new requests in engine loop.")
 
@@ -352,16 +371,37 @@ class MQLLMEngine:
             RPCIsSleepingResponse(request_id=request.request_id,
                                   is_sleeping=is_sleeping))
 
-    def _health_check(self):
+    def _heartbeat_loop(self):
+        while not self._heartbeat_stop_event.wait(
+                timeout=self.heartbeat_interval_seconds):
+            # Loops until the stop event is set
+            self._heartbeat()
+
+        logger.debug("Exiting MQLLMEngine heartbeat thread")
+
+    def _heartbeat(self):
         # Send unhealthy if engine has already errored
         if self._errored_with is not None:
             self._send_unhealthy(self._errored_with)
-        try:
-            self.engine.check_health()
-            self._send_healthy()
-        except Exception as e:
-            self._set_errored(e)
-            self._send_unhealthy(e)
+
+        # Check for life of the main loop
+        elif time.time() - self._last_alive_time > self.last_alive_threshold:
+            err = ("Engine loop has not given an alive signal for the last "
+                   f"{self.last_alive_threshold} seconds "
+                   f"({self.last_alive_threshold/VLLM_RPC_TIMEOUT*1000:.2f} x "
+                   "VLLM_RPC_TIMEOUT). It is either hung or "
+                   f"VLLM_RPC_TIMEOUT={VLLM_RPC_TIMEOUT}ms is set too low.")
+            self._send_unhealthy(RuntimeError(err))
+
+        else:
+            # Otherwise- check health of the engine
+            # self.engine.check_health() raises on unhealthy
+            try:
+                self.engine.check_health()
+                self._send_healthy()
+            except Exception as e:
+                self._set_errored(e)
+                self._send_unhealthy(e)
 
     def _send_outputs(self, outputs: REQUEST_OUTPUTS_T):
         """Send outputs back to the engine client. These can be:
@@ -405,6 +445,9 @@ class MQLLMEngine:
         """Log and set errored status if this is the first issue."""
         if self._errored_with is None:
             self._errored_with = e
+
+    def _alive(self):
+        self._last_alive_time = time.time()
 
     def start_profile(self) -> None:
         self.engine.start_profile()
