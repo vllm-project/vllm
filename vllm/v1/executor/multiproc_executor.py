@@ -460,7 +460,6 @@ class WorkerProc:
             process_name = f"{process_name} {suffix}"
         decorate_logs(process_name)
 
-
         scheduler_config = vllm_config.scheduler_config
         self.use_async_scheduling = scheduler_config.async_scheduling
         if self.use_async_scheduling:
