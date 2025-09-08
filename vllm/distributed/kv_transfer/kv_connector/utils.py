@@ -125,6 +125,7 @@ class KVOutputAggregator:
         # [req_id -> n_remaining_workers]
         self._recv_remaining_count = defaultdict[str, int](lambda: world_size)
         self._send_remaining_count = defaultdict[str, int](lambda: world_size)
+        self._fail_remaining_count = defaultdict[str, int](lambda: world_size)
 
     def aggregate(self,
                   outputs: list[ModelRunnerOutput],
@@ -142,6 +143,7 @@ class KVOutputAggregator:
 
         finished_sending = set[str]()
         finished_recving = set[str]()
+        failure_request = set[str]()
         for output in outputs:
             output = output.kv_connector_output
             if not output:
@@ -150,6 +152,8 @@ class KVOutputAggregator:
                                 self._send_remaining_count, finished_sending)
             update_finished_set(output.finished_recving,
                                 self._recv_remaining_count, finished_recving)
+            update_finished_set(output.failure_request,
+                                self._fail_remaining_count, failure_request)
 
         # select output of the worker specified by output_rank
         output = outputs[output_rank]
@@ -157,6 +161,7 @@ class KVOutputAggregator:
         output.kv_connector_output = KVConnectorOutput(
             finished_sending=finished_sending or None,
             finished_recving=finished_recving or None,
+            failure_request=failure_request or None,
         )
 
         return output
