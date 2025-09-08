@@ -14,7 +14,7 @@ from typing import Any, Callable, Optional, Union
 import msgspec
 import zmq
 
-from vllm.config import KVEventsConfig
+from vllm.config.kv_events import KVEventsConfig
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
