@@ -69,7 +69,7 @@ def parse_args():
     parser.add_argument("--model-dir", type=str, default=None)
     parser.add_argument("--eagle-dir", type=str, default=None)
     parser.add_argument("--custom-mm-prompts", action="store_true")
-    parser.add_argument("--draft_vocab_pruned", type=str, default=None)
+    parser.add_argument("--draft-vocab-pruned", type=str, default=None)
     return parser.parse_args()
 
 
@@ -102,15 +102,19 @@ def main():
 
     if args.method == "eagle" or args.method == "eagle3":
         eagle_dir = args.eagle_dir
+        draft_vocab_pruned = None
         if args.method == "eagle" and eagle_dir is None:
             eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
+            draft_vocab_pruned = args.draft_vocab_pruned
 
         elif args.method == "eagle3" and eagle_dir is None:
             eagle_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
+
         speculative_config = {
             "method": args.method,
             "model": eagle_dir,
             "num_speculative_tokens": args.num_spec_tokens,
+            "draft_vocab_pruned": draft_vocab_pruned,
         }
     elif args.method == "ngram":
         speculative_config = {
@@ -131,7 +135,6 @@ def main():
         gpu_memory_utilization=0.8,
         speculative_config=speculative_config,
         disable_log_stats=False,
-        max_model_len=16384,
         limit_mm_per_prompt={"image": 5},
         disable_chunked_mm_input=True,
     )
