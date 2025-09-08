@@ -464,6 +464,17 @@ class CompilationConfig:
                                  "since full_cuda_graph is deprecated.")
             self.cudagraph_mode = CUDAGraphMode.FULL
 
+        fi_allreduce_fusion_max_size_mb = {
+            2: 64,
+            4: 1,
+            6: 0.5,
+            8: 0.5,
+        }
+        fi_allreduce_fusion_max_size_mb.update(
+            self.pass_config.fi_allreduce_fusion_max_size_mb)
+        self.pass_config.fi_allreduce_fusion_max_size_mb = \
+            fi_allreduce_fusion_max_size_mb
+
     def init_backend(self, vllm_config: "VllmConfig") -> Union[str, Callable]:
         if self.level == CompilationLevel.NO_COMPILATION:
             raise ValueError("No compilation level is set.")

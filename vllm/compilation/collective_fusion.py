@@ -400,16 +400,10 @@ if flashinfer_comm is not None:
         """
         MiB = 1024 * 1024
         max_sizes = {
-            2: 64 * MiB,  # 64MB
-            4: MiB,  # 1MB
-            6: MiB // 2,  # 512KB
-            8: MiB // 2,  # 512KB
-        }
-        max_sizes.update({
             k: int(v * MiB)
             for k, v in config.compilation_config.pass_config.
             fi_allreduce_fusion_max_size_mb.items()
-        })
+        }
 
         return max_sizes.get(world_size, MiB // 2)
 
