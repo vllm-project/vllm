@@ -903,11 +903,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Copy the tensors to the GPU.
         self._prepare_input_ids(total_num_scheduled_tokens, cu_num_tokens)
 
-        # TODO: adapt _prepare_input_ids to also consider inputs_embeds and
-        # is_token_ids
-        self.inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
-        self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
-
         if self.uses_mrope:
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             self.mrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
