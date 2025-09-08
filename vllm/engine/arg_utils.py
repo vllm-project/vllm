@@ -1483,11 +1483,6 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
-        # V1 supports N-gram, Medusa, and Eagle speculative decoding.
-        if (self.speculative_config is not None
-                and self.speculative_config.get("method") == "draft_model"):
-            return True
-
         V1_BACKENDS = [
             "FLASH_ATTN_VLLM_V1",
             "FLASH_ATTN",
