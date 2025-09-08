@@ -327,6 +327,10 @@ class MistralTokenizer(TokenizerBase):
     def max_token_id(self) -> int:
         return self._max_token_id
 
+    @property
+    def truncation_side(self) -> str:
+        raise NotImplementedError()
+
     def __len__(self) -> int:
         return self.vocab_size
 
