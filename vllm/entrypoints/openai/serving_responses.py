@@ -1648,7 +1648,7 @@ class OpenAIServingResponses(OpenAIServing):
                         name=function_name,
                         type="function_call",
                         id=current_item_id,
-                        call_id=f"fc_{random_uuid()}",
+                        call_id=f"call_{random_uuid()}",
                         arguments='',
                         status="in_progress",
                     )
