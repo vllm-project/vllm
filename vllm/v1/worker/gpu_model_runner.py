@@ -1820,7 +1820,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             start_idx = self.input_batch.num_tokens_no_spec[req_idx]
             end_idx = start_idx + len(sampled_ids)
             assert end_idx <= self.max_model_len + 1, (
-                "Sampled token IDs exceed the max model length. "
+                "Sampled token IDs exceed the max model length + 1. "
                 f"Total number of tokens: {end_idx} > max_model_len + 1: "
                 f"{self.max_model_len + 1}")
 
