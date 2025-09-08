@@ -725,7 +725,7 @@ def get_moe_configs(
     triton_version_name = f"triton_{triton_version.replace('.', '_')}"
     cur_triton_file_path = os.path.join(
         os.path.dirname(os.path.realpath(__file__)),
-        "configs",
+        "triton_configs",
         triton_version_name,
         json_file_name,
     )
@@ -735,7 +735,7 @@ def get_moe_configs(
     # P3 Legacy configuration
     default_config_file_path = os.path.join(
         os.path.dirname(os.path.realpath(__file__)),
-        "configs",
+        "triton_configs",
         "legacy_configs",
         json_file_name,
     )
@@ -750,7 +750,7 @@ def get_moe_configs(
     # If no optimized configuration is available, we will use the default
     # configuration
     cur_triton_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)),
-                                  "configs", triton_version_name)
+                                  "triton_configs", triton_version_name)
     logger.warning(
         ("Using default MoE config. Performance might be sub-optimal! "
          "Config file not found at %s"), cur_triton_dir)
