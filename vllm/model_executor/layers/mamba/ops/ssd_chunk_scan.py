@@ -289,6 +289,9 @@ def _chunk_scan_fwd_kernel(
 
             # get the cs at the offset boundary
             # - c_off == 0 is a passthrough
+            # - We need dA_cs at the boundary, defined by c_off - no need
+            #   to increase pointer by pid_m (it is a constant offset,
+            #   i.e. the same for all blocks)
             dA_cs_m_boundary = tl.load(
                 dA_cumsum_ptr + (c_off - 1) * stride_dA_cs_csize,
                 mask=(((c_off - 1) > -1) and ((c_off) < chunk_size)),
