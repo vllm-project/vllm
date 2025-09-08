@@ -959,8 +959,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 raise ValueError("Parameter 'cache_salt' must be a "
                                  "non-empty string if provided.")
         return data
-    
-
 
     @model_validator(mode="before")
     def function_call_parsing(cls, data):
