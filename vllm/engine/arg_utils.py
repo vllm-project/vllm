@@ -398,7 +398,6 @@ class EngineArgs:
     fully_sharded_loras: bool = LoRAConfig.fully_sharded_loras
     max_cpu_loras: Optional[int] = LoRAConfig.max_cpu_loras
     lora_dtype: Optional[Union[str, torch.dtype]] = LoRAConfig.lora_dtype
-    lora_extra_vocab_size: int = LoRAConfig.lora_extra_vocab_size
 
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: Optional[
@@ -831,8 +830,6 @@ class EngineArgs:
         lora_group.add_argument("--max-loras", **lora_kwargs["max_loras"])
         lora_group.add_argument("--max-lora-rank",
                                 **lora_kwargs["max_lora_rank"])
-        lora_group.add_argument("--lora-extra-vocab-size",
-                                **lora_kwargs["lora_extra_vocab_size"])
         lora_group.add_argument(
             "--lora-dtype",
             **lora_kwargs["lora_dtype"],
@@ -1411,7 +1408,6 @@ class EngineArgs:
             max_loras=self.max_loras,
             default_mm_loras=self.default_mm_loras,
             fully_sharded_loras=self.fully_sharded_loras,
-            lora_extra_vocab_size=self.lora_extra_vocab_size,
             lora_dtype=self.lora_dtype,
             max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras
             and self.max_cpu_loras > 0 else None) if self.enable_lora else None

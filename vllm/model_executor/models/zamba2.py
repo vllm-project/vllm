@@ -679,9 +679,8 @@ class Zamba2Model(nn.Module):
         assert not is_lora_enabled
 
         self.config = config
-        lora_vocab = ((lora_config.lora_extra_vocab_size *
-                       (lora_config.max_loras or 1)) if lora_config else 0)
-        self.vocab_size = config.vocab_size + lora_vocab
+        # No additional vocabulary support for LoRA
+        self.vocab_size = config.vocab_size
         self.org_vocab_size = config.vocab_size
 
         # Initialize token embeddings
@@ -925,8 +924,6 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
         self.scheduler_config = scheduler_config
         self.model_config = vllm_config.model_config
         self.unpadded_vocab_size = config.vocab_size
-        if lora_config:
-            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
 
         # Initialize core model
         self.model = Zamba2Model(vllm_config=vllm_config,

@@ -379,8 +379,6 @@ class Step3TextForCausalLM(nn.Module, SupportsPP):
 
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = config.vocab_size
-            if lora_config:
-                self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
             self.lm_head = ParallelLMHead(
                 self.unpadded_vocab_size,
                 config.hidden_size,

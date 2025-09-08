@@ -46,7 +46,6 @@ def convert_mapping(
     lora_index_to_id: list[Optional[int]],
     max_loras: int,
     vocab_size: int,
-    extra_vocab_size: int,
     device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, list[int]]:
     """Converts LoRAMapping to index tensors.
@@ -56,7 +55,6 @@ def convert_mapping(
         lora_index_to_id: List mapping LoRA ids to LoRA indices.
         max_loras: Maximum number of LoRAs.
         vocab_size: Model vocab size.
-        extra_vocab_size: Extra vocab size each LoRA can have.
 
     Returns:
         A tuple of tensors:
@@ -71,9 +69,8 @@ def convert_mapping(
                 Same as sampler_indices, but -1 is replaced with
                 max_loras.
             embeddings_indices: Tensor of shape [2, batch_size] mapping
-                requests to embedding indices. First row is for embeddings
-                added by the LoRAs, second row is for the LoRA.lora_a
-                embeddings.
+                requests to embedding indices. First row is always zeros,
+                second row is for the LoRA.lora_a embeddings.
             indices_len: List of lengths of the above tensors. It contains
                 (base_indices, sampler_indices, sampler_indices_padded,
                 embeddings_indices).
@@ -105,8 +102,8 @@ def convert_mapping(
                                          dtype=torch.long,
                                          device=device)
     embeddings_indices = torch.stack([
-        indices[2] * extra_vocab_size,
-        indices[2] * (vocab_size + extra_vocab_size),
+        torch.zeros_like(indices[2]),
+        indices[2] * vocab_size,
     ])
     embeddings_indices = torch.where(embeddings_indices == -1, max_loras - 1,
                                      embeddings_indices)
