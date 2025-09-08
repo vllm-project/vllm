@@ -7,8 +7,7 @@ import traceback
 from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
-from typing import (Any, Callable, ClassVar, Generic, Optional, TypeVar, Union,
-                    cast)
+from typing import Any, Callable, ClassVar, Generic, Optional, TypeVar, Union
 
 import torch
 from fastapi import Request
@@ -61,7 +60,6 @@ from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser
 from vllm.entrypoints.renderer import BaseRenderer, CompletionRenderer
 # yapf: enable
-from vllm.inputs.data import EmbedsPrompt as EngineEmbedsPrompt
 from vllm.inputs.data import PromptType
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
