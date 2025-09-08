@@ -60,7 +60,7 @@ class CustomAllreduce:
             group: the process group to work on. If None, it will use the
                 default process group.
             device: the device to bind the CustomAllreduce to. If None,
-                it will be bind to f"cuda:{local_rank}".
+                it will be bound to f"cuda:{local_rank}".
         It is the caller's responsibility to make sure each communicator
         is bind to a unique device, and all communicators in this group
         are in the same node.
@@ -158,7 +158,7 @@ class CustomAllreduce:
 
         self.disabled = False
         # Buffers memory are owned by this Python class and passed to C++.
-        # Meta data composes of two parts: meta data for synchronization and a
+        # Metadata composes of two parts: metadata for synchronization and a
         # temporary buffer for storing intermediate allreduce results.
         self.meta_ptrs = self.create_shared_buffer(ops.meta_size() + max_size,
                                                    group=group,
