@@ -1974,16 +1974,6 @@ class SpeculativeConfig:
     """Disable speculative decoding for new incoming requests when the number
     of enqueued requests is larger than this value, if provided."""
 
-    @field_validator("quantization", mode="before")
-    @classmethod
-    def validate_quantization_before(cls, value: Any) -> Any:
-        """Handle empty quantization method string."""
-        if isinstance(value, str) and value.strip() == "":
-            return None
-        if isinstance(value, str):
-            return value.lower()
-        return value
-
     # Ngram proposer configuration
     prompt_lookup_max: Optional[int] = None
     """Maximum size of ngram token window when using Ngram proposer, required
@@ -2014,6 +2004,16 @@ class SpeculativeConfig:
     draft_parallel_config: SkipValidation[
         ParallelConfig] = None  # type: ignore
     """The parallel configuration for the draft model initialized internal."""
+
+    @field_validator("quantization", mode="before")
+    @classmethod
+    def validate_quantization_before(cls, value: Any) -> Any:
+        """Handle empty quantization method string."""
+        if isinstance(value, str) and value.strip() == "":
+            return None
+        if isinstance(value, str):
+            return value.lower()
+        return value
 
     def compute_hash(self) -> str:
         """
