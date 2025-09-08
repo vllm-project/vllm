@@ -1195,6 +1195,13 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
 
 class ActivatedLoRAMixin:
 
+    base_layer: LinearBase
+    punica_wrapper: PunicaWrapperBase
+    lora_a_stacked: torch.tensor
+    lora_b_stacked: torch.tensor
+    lora_bias_stacked: Optional[tuple[torch.Tensor, ...]]
+    output_slices: tuple[int, ...]
+
     def apply(self,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
