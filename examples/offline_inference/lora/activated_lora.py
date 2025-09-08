@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 import time
 
 import torch
@@ -13,8 +12,6 @@ BASE_NAME = "ibm-granite/granite-3.2-8b-instruct"
 
 ALORA_NAME = "ibm-granite/granite-3.2-8b-alora-uncertainty"
 invocation_string = "<|start_of_role|>certainty<|end_of_role|>"
-
-os.environ["VLLM_USE_V1"] = "1"
 
 # download your LoRA adapter to ~/.cache/huggingface/…
 alora_path = snapshot_download(repo_id=ALORA_NAME)
@@ -29,7 +26,6 @@ llm = LLM(
     enable_activated_lora=True,
     dtype=torch.bfloat16,
     max_lora_rank=64,
-    enforce_eager=True,
 )
 
 prompts = [
