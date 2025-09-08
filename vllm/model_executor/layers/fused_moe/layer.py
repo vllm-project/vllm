@@ -2061,7 +2061,7 @@ class FusedMoE(CustomOp):
             # ExpertTokensMetadata.expert_num_tokens for better performance.
             # For other implementations or when metadata is not available,
             # we fall back to here.
-            
+
             # There is no expert_num_tokens in
             # expert_tokens_meta of DeepEPHTPrepareAndFinalize
             # so it is not supported DeepEPHTPrepareAndFinalize for now.

@@ -1257,10 +1257,10 @@ class FusedMoEModularKernel(torch.nn.Module):
                                   as_tuple=False).squeeze()
             else:
                 if not torch.equal(self.expert_map, expert_map):
-                     self.expert_map = expert_map.clone()
-                     self.local_to_global_physical_experts = \
-                         torch.nonzero(expert_map != -1,
-                                       as_tuple=False).squeeze()
+                    self.expert_map = expert_map.clone()
+                    self.local_to_global_physical_experts = \
+                        torch.nonzero(expert_map != -1,
+                                      as_tuple=False).squeeze()
             # Use pre-computed expert token counts from metadata
             expert_load_view.scatter_add_(
                 dim=0,
