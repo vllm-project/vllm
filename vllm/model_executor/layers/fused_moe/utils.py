@@ -144,6 +144,84 @@ def _fp8_quantize(A: torch.Tensor,
 
     return A, A_scale
 
+def blockwise_moe_fp8_quantize_and_permute(
+    A: torch.Tensor,
+    A_scale: Optional[torch.Tensor],
+    topk_ids: torch.Tensor,
+    n_expert: int,
+    block_size: int = 128,
+    n_local_expert: int = -1,
+    transpose_scales: bool = False,
+    expert_map: Optional[torch.Tensor] = None,
+    permuted_A: Optional[torch.Tensor] = None,
+):
+    # TODO:
+    # 1. compute expert_first_token_offset
+    # 2. compute permuted_idx
+    # 3. run quantization and save to positions on permuted_idx
+
+    quant_dtype = torch.float8_e4m3fn
+    finfo = torch.finfo(quant_dtype)
+    min_8bit = finfo.min
+    max_8bit = finfo.max
+
+    n_token, n_hidden = A.size()
+    topk = topk_ids.size(1)
+    assert (n_hidden * A.element_size()
+            ) % 16 == 0, "permue kernel need hidden dim align to 16B"
+    permuted_row_size = n_token * topk
+    if n_local_expert == -1:
+        n_local_expert = n_expert
+    if permuted_A is None:
+        permuted_A = torch.empty(
+            (permuted_row_size, n_hidden),
+            dtype=quant_dtype,
+            device=A.device,
+        )
+    assert permuted_A.size() == (permuted_row_size, n_hidden), (
+        f"Expected permuted hidden states to be {(permuted_row_size, n_hidden)}"
+        f" but got {permuted_A.size()}")
+
+    if transpose_scales:
+        permuted_A_scale = torch.full(
+            (permuted_row_size * (n_hidden // block_size)),
+            fill_value=99.0,
+            dtype=torch.float32,
+            device=A.device)
+    else:
+        permuted_A_scale = torch.full(
+            (permuted_row_size, n_hidden // block_size),
+            fill_value=99.0,
+            dtype=torch.float32,
+            device=A.device)
+
+    token_expert_indices = torch.arange(0,
+                                        n_token * topk,
+                                        dtype=torch.int32,
+                                        device=A.device).reshape(
+                                            (n_token, topk))
+
+    # print("token_expert_indices:", token_expert_indices)
+
+    expert_first_token_offset = torch.empty(n_local_expert + 1,
+                                            dtype=torch.int64,
+                                            device=A.device)
+    permuted_idx = torch.full((permuted_row_size, ),
+                              n_token * topk,
+                              dtype=torch.int32,
+                              device=A.device)
+    inv_permuted_idx = torch.empty((n_token * topk),
+                                   dtype=torch.int32,
+                                   device=A.device)
+    topk_ids = topk_ids.to(torch.int32)
+
+    torch.ops._moe_C.blockwise_moe_fp8_quantize_and_permute(
+        A, A_scale, topk_ids, token_expert_indices, expert_map, n_expert,
+        n_local_expert, topk, permuted_A, permuted_A_scale, block_size,
+        expert_first_token_offset, inv_permuted_idx,
+        permuted_idx, min_8bit, max_8bit, transpose_scales)
+    return (permuted_A, permuted_A_scale, expert_first_token_offset,
+            inv_permuted_idx.flatten())
 
 def _int8_quantize(
     A: torch.Tensor,

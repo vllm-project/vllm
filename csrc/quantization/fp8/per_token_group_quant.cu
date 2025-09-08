@@ -218,10 +218,17 @@ __global__ void per_token_group_quant_8bit_kernel_fused(
       auto num_tokens =
           (next_expert_offset - current_expert_offset) / scale_num_rows;
       int32_t local_id = scale_id - current_expert_offset;
+      ////// here is the transpose
       auto t = local_id / scale_num_rows;  // Untransposed row.
+      // printf("baseline %f to scale by %d (%d) (%d + %d * %d + %d)\n", 
+      //   y_s, expert_idx, num_experts, current_expert_offset, col_id, num_tokens, t);
       static_cast<float*>(
           output_s)[current_expert_offset + col_id * num_tokens + t] = y_s;
+      //////
     }
+    // else {
+    //   printf("baseline skip write to scale by %d (%d)\n", expert_idx, num_experts);
+    // }
   };
   auto col_id = scale_id % scale_num_rows;
 
@@ -381,6 +388,9 @@ void per_token_group_quant_8bit_fused(
     size_t smem_bytes =                                                        \
         (static_cast<size_t>(groups_per_block) * group_size) * sizeof(T) +     \
         num_experts * sizeof(int32_t);                                         \
+    printf("baseline: %d %d %d %ld %ld %ld\n", num_blocks, num_threads, scale_num_rows, num_experts, smem_bytes, output_q.size(1)); \
+    std::cout << "baseline c_map: " << c_map << std::endl; \
+    std::cout << "baseline expert_offsets: " << expert_offsets << std::endl; \
     if (reorder) {                                                             \
       if (scale_ue8m0) {                                                       \
         per_token_group_quant_8bit_kernel_fused<num_threads, groups_per_block, \
@@ -428,7 +438,7 @@ void per_token_group_quant_8bit_fused(
     }                                                                          \
   } while (0)
 
-  if (num_groups % 16 == 0) {
+  if (false && num_groups % 16 == 0) {
     static constexpr int groups_per_block = 16;
     VLLM_DISPATCH_FLOATING_TYPES(
         input.scalar_type(), "per_token_group_quant_8bit", ([&] {
@@ -438,7 +448,7 @@ void per_token_group_quant_8bit_fused(
             LAUNCH_KERNEL(scalar_t, int8_t);
           }
         }));
-  } else if (num_groups % 8 == 0) {
+  } else if (false && num_groups % 8 == 0) {
     static constexpr int groups_per_block = 8;
     VLLM_DISPATCH_FLOATING_TYPES(
         input.scalar_type(), "per_token_group_quant_8bit", ([&] {
@@ -448,7 +458,7 @@ void per_token_group_quant_8bit_fused(
             LAUNCH_KERNEL(scalar_t, int8_t);
           }
         }));
-  } else if (num_groups % 4 == 0) {
+  } else if (false && num_groups % 4 == 0) {
     static constexpr int groups_per_block = 4;
     VLLM_DISPATCH_FLOATING_TYPES(
         input.scalar_type(), "per_token_group_quant_8bit", ([&] {
@@ -458,7 +468,7 @@ void per_token_group_quant_8bit_fused(
             LAUNCH_KERNEL(scalar_t, int8_t);
           }
         }));
-  } else if (num_groups % 2 == 0) {
+  } else if (false && num_groups % 2 == 0) {
     static constexpr int groups_per_block = 2;
     VLLM_DISPATCH_FLOATING_TYPES(
         input.scalar_type(), "per_token_group_quant_8bit", ([&] {

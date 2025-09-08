@@ -5,6 +5,9 @@
 #include "permute_unpermute_kernels/dispatch.h"
 #include "core/registration.h"
 
+// #include "../../dispatch_utils.h"
+#include "quantization/vectorization_utils.cuh"
+
 // moe_permute kernels require at least CUDA 12.0
 #if defined(CUDA_VERSION) && (CUDA_VERSION >= 12000)
 
@@ -92,6 +95,334 @@ void moe_permute(
                 get_ptr<int>(m_indices), n_local_expert, align_block_size_value,
                 stream);
     expert_first_token_offset.copy_(align_expert_first_token_offset);
+  }
+}
+
+__device__ __forceinline__ float GroupReduceMax2(float val, const int tid) {
+  unsigned mask = 0xffff;
+
+  val = fmaxf(val, __shfl_xor_sync(mask, val, 8));
+  val = fmaxf(val, __shfl_xor_sync(mask, val, 4));
+  val = fmaxf(val, __shfl_xor_sync(mask, val, 2));
+  val = fmaxf(val, __shfl_xor_sync(mask, val, 1));
+  return val;
+}
+
+// TODO get this from per_token_group_quant_8bit_kernel_fused
+// SUGGESTION: To include the last row in the write to output_s, you could modify
+// the parallel_search lambda (in the kernel implementation) to handle the final
+// expert's range explicitly. 
+// For example, after the main loop, check if the current scale_id is equal to
+// or greater than the last expert's starting offset
+// (expert_offsets[num_experts - 1] * k_scaled) 
+// and less than expert_offsets[num_experts] * k_scaled (the exclusive end).
+// If so, perform the write for the last row. 
+// This would ensure that the last row of output_s is written, covering the full
+// range of expert offsets.
+//
+// The kernel definition itself:
+template <int num_threads, int groups_per_block, bool REORDER, typename T,
+          typename DST_DTYPE, bool SCALE_UE8M0 = false,
+          typename scale_packed_t = float>
+__global__ void per_token_group_quant_8bit_kernel_fused_test(
+    int32_t num_experts, const T* __restrict__ input,
+    void* __restrict__ output_q, scale_packed_t* __restrict__ output_s,
+    const int group_size, const float eps, const float min_8bit,
+    const float max_8bit, int32_t* expert_offsets, int32_t* c_map,
+    int scale_num_rows, int topk, int a_cols) {
+  static constexpr int threads_per_group = 16;
+  const int32_t local_group_id = threadIdx.x / threads_per_group;
+  const int half_lane_id = threadIdx.x % threads_per_group;
+
+  const int32_t block_group_id = blockIdx.x * groups_per_block;
+  const int32_t global_group_id = block_group_id + local_group_id;
+  int32_t scale_id = blockIdx.x * (num_threads / threads_per_group) +
+                     (threadIdx.x / threads_per_group);
+  const int32_t block_group_offset = global_group_id * group_size;
+
+  float local_absmax = eps;
+
+  using scale_element_t = float;
+  static_assert(sizeof(scale_packed_t) % sizeof(scale_element_t) == 0);
+
+  const T* group_input = input + block_group_offset;
+
+  // shared memory to cache each group's data to avoid double DRAM reads.
+  extern __shared__ __align__(16) char smem_raw[];
+  T* smem = reinterpret_cast<T*>(smem_raw);
+  T* smem_group = smem + local_group_id * group_size;
+
+  int32_t* s_expert_offsets_scaled = reinterpret_cast<int32_t*>(
+      smem + (static_cast<size_t>(groups_per_block) * group_size));
+
+  auto k_scaled = scale_num_rows;
+
+  for (int i = threadIdx.x; i < num_experts + 1; i += num_threads) {
+    s_expert_offsets_scaled[i] = expert_offsets[i] * k_scaled;
+  }
+
+  constexpr int vec_size = 16 / sizeof(T);
+
+  // copy global -> shared & compute absmax
+  auto scalar_op_cache = [&] __device__(T & dst, const T& src) {
+    float abs_v = fabsf(static_cast<float>(src));
+    local_absmax = fmaxf(local_absmax, abs_v);
+    dst = src;
+  };
+
+  vllm::vectorize_with_alignment<vec_size>(
+      group_input,        // in
+      smem_group,         // out (shared)
+      group_size,         // elements per group
+      half_lane_id,       // thread id
+      threads_per_group,  // stride in group
+      scalar_op_cache);   // scalar handler
+
+  __syncthreads();
+
+  local_absmax = GroupReduceMax2(local_absmax, half_lane_id);
+
+  float y_s = local_absmax / max_8bit;
+  if constexpr (SCALE_UE8M0) {
+    y_s = exp2f(ceilf(log2f(fmaxf(fabsf(y_s), 1e-10f))));
+  }
+
+  printf("make %d -> %d compute %f\n", block_group_offset, c_map[block_group_offset/128], y_s);
+
+  // quantize shared -> global 8-bit
+  auto scalar_op_quant = [&] __device__(DST_DTYPE & dst, const T& src) {
+    float q = fminf(fmaxf(static_cast<float>(src) / y_s, min_8bit), max_8bit);
+    dst = DST_DTYPE(q);
+  };
+
+  // Here we find the expert matching elem_id.
+  static_assert(threads_per_group == 16);
+
+  auto parallel_search = [&](int32_t scale_id, int32_t col_id) {
+    int32_t _expert_idx = half_lane_id;
+    int32_t next_expert_offset{};
+
+    printf("show relationship between %d, %d and %d, %d\n", block_group_offset,
+      c_map[block_group_offset/128], half_lane_id, scale_id);
+
+    // Let's not touch any memory if we don't need to.
+    for (; _expert_idx < num_experts &&
+           (next_expert_offset = s_expert_offsets_scaled[_expert_idx + 1]) <=
+               scale_id;
+         _expert_idx += threads_per_group) {
+    }
+
+    int32_t current_expert_offset = (_expert_idx < num_experts) * s_expert_offsets_scaled[_expert_idx];
+
+    // printf("%d %d: for %d, %d -> %d %d %d\n", blockIdx.x, threadIdx.x, scale_id, col_id, _expert_idx, next_expert_offset, current_expert_offset);
+
+    bool pred =
+        (_expert_idx < num_experts) && current_expert_offset <= scale_id;
+    // bool pred =
+    //     (_expert_idx < num_experts - 1) && current_expert_offset <= scale_id;
+
+    auto predicate_mask = __ballot_sync(0xffffffffu, pred);
+
+    predicate_mask =
+        (predicate_mask >> ((local_group_id & 0b1u) * 16u)) & 0xffffu;
+    auto expert_idx = __ffs(predicate_mask) - 1;
+    if (half_lane_id == expert_idx && predicate_mask) {
+      _expert_idx =
+          (_expert_idx / threads_per_group) * threads_per_group + expert_idx;
+      auto num_tokens =
+          (next_expert_offset - current_expert_offset) / scale_num_rows;
+      int32_t local_id = scale_id - current_expert_offset;
+      ////// here is the transpose
+      auto t = local_id / scale_num_rows;  // Untransposed row.
+      printf("write %f to scale by %d (%d) (%d + %d * %d + %d)\n", 
+        y_s, expert_idx, num_experts, current_expert_offset, col_id, num_tokens, t);
+      static_cast<float*>(
+          output_s)[current_expert_offset + col_id * num_tokens + t] = y_s;
+      //////
+    }
+    else {
+      printf("skip write %f to scale by %d (%d)\n", y_s,expert_idx, num_experts);
+    }
+  };
+  auto col_id = scale_id % scale_num_rows;
+  // printf("col_id %d = %d mod %d\n", col_id, scale_id, scale_num_rows);
+
+  if constexpr (REORDER) {
+    auto _row_id = block_group_offset / a_cols;
+    auto c_map_ptr = c_map + topk * _row_id;
+
+    for (int i = 0; i < topk; i++) {
+      auto row_id = c_map_ptr[i];
+
+      DST_DTYPE* group_output =
+          static_cast<DST_DTYPE*>(output_q) +
+          (row_id * a_cols + (block_group_offset % a_cols));
+      vllm::vectorize_with_alignment<vec_size>(
+          smem_group,         // in (shared)
+          group_output,       // out (global quant tensor)
+          group_size,         // elements
+          half_lane_id,       // tid
+          threads_per_group,  // stride
+          scalar_op_quant);   // scalar handler
+
+      scale_id = row_id * scale_num_rows + col_id;
+      // printf("call parallel_search for (%d, %d)\n", scale_id, col_id);
+      parallel_search(scale_id, col_id);
+    }
+  } else {
+    DST_DTYPE* group_output =
+        static_cast<DST_DTYPE*>(output_q) + block_group_offset;
+    vllm::vectorize_with_alignment<vec_size>(
+        smem_group,         // in (shared)
+        group_output,       // out (global quant tensor)
+        group_size,         // elements
+        half_lane_id,       // tid
+        threads_per_group,  // stride
+        scalar_op_quant);   // scalar handler
+    parallel_search(scale_id, col_id);
+  }
+}
+
+void blockwise_moe_fp8_quantize_and_permute(
+  const torch::Tensor& input,                      // [n_token, hidden]
+  const torch::Tensor& input_scale,                // [n_token, hidden // block_size] or [n_token * hidden // block_size]
+  const torch::Tensor& topk_ids,                   // [n_token, topk]
+  const torch::Tensor& token_expert_indices,       // [n_token, topk]
+  const std::optional<torch::Tensor>& expert_map,  // [n_expert]
+  int64_t n_expert,
+  int64_t n_local_expert,
+  int64_t topk,
+  torch::Tensor& permuted_input,             // [permuted_size, hidden]
+  torch::Tensor& permuted_input_scale,       // [permuted_size, hidden // block_size] or [permuted_size * hidden // block_size]]
+  int64_t group_size,
+  torch::Tensor& expert_first_token_offset,  // [n_local_expert + 1]
+  torch::Tensor& inv_permuted_idx,           // [n_token, topk]
+  torch::Tensor& permuted_idx,               // [permute_size]
+  double fp8_min,
+  double fp8_max,
+  bool transpose_scales
+) {
+  TORCH_CHECK(expert_first_token_offset.scalar_type() == at::ScalarType::Long,
+              "expert_first_token_offset must be int64");
+  TORCH_CHECK(topk_ids.scalar_type() == at::ScalarType::Int,
+              "topk_ids must be int32");
+  TORCH_CHECK(token_expert_indices.scalar_type() == at::ScalarType::Int,
+              "token_expert_indices must be int32");
+  TORCH_CHECK(inv_permuted_idx.scalar_type() == at::ScalarType::Int,
+              "inv_permuted_idx must be int32");
+  TORCH_CHECK(expert_first_token_offset.size(0) == n_local_expert + 1,
+              "expert_first_token_offset shape != n_local_expert+1")
+  // TORCH_CHECK(inv_permuted_idx.sizes() == token_expert_indices.sizes(),
+  //             "token_expert_indices shape must be same as inv_permuted_idx");
+  auto n_token = input.sizes()[0];
+  auto n_hidden = input.sizes()[1];
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+  const long sorter_size =
+      CubKeyValueSorter::getWorkspaceSize(n_token * topk, n_expert);
+  auto sort_workspace = torch::empty(
+      {sorter_size},
+      torch::dtype(torch::kInt8).device(torch::kCUDA).requires_grad(false));
+  auto copy_topk_ids = topk_ids.clone();  // copy topk_ids for preprocess
+  auto permuted_experts_id = torch::empty_like(topk_ids);
+  auto sorted_row_idx = torch::empty_like(inv_permuted_idx);
+
+  CubKeyValueSorter sorter{};
+  int64_t* valid_num_ptr = nullptr;
+  // pre-process kernel for expert-parallelism:
+  // no local expert id plus "n_expert" offset for priority to local expert
+  // map local expert id [n, .., n+n_local_expert-1] to [0, n_local_expert -1]
+  // For example, 4 expert with ep_size=2. ep_rank=1 owns global expert id
+  // [2,3] with expert_map[-1, -1, 0, 1], preprocess_topk_id  process topk_ids
+  // and map global expert id [2, 3] to local_expert id [0, 1] and map global
+  // expert id [0, 1] ( not in ep rank=1)  to [4, 5] by plus n_expert. This map
+  // operation is to make local expert high priority in following sort topk_ids
+  // and scan local expert_first_token_offset for each ep rank for next group
+  // gemm.
+  if (expert_map.has_value()) {
+    const int* expert_map_ptr = get_ptr<int>(expert_map.value());
+    valid_num_ptr =
+        get_ptr<int64_t>(expert_first_token_offset) + n_local_expert;
+    preprocessTopkIdLauncher(get_ptr<int>(copy_topk_ids), n_token * topk,
+                            expert_map_ptr, n_expert, stream);
+  }
+  // expert sort topk expert id and scan expert id get expert_first_token_offset
+  sortAndScanExpert(
+      get_ptr<int>(copy_topk_ids), get_ptr<int>(token_expert_indices),
+      get_ptr<int>(permuted_experts_id), get_ptr<int>(sorted_row_idx),
+      get_ptr<int64_t>(expert_first_token_offset), n_token, n_expert,
+      n_local_expert, topk, sorter, get_ptr<int>(sort_workspace), stream);
+
+  // (sorted_row_idx is a_map)
+  // (expert_first_token_offset is expert_offsets)
+
+  // TODO this should be done inside a kernel
+  inv_permuted_idx.copy_((
+    torch::argsort(sorted_row_idx)).contiguous());
+
+  // std::cout << "topk:" << topk << std::endl;
+  // std::cout << "permuted_experts_id:" << permuted_experts_id << std::endl;
+  // std::cout << "sorted_row_idx:" << sorted_row_idx << std::endl;
+  // std::cout << "inv_permuted_idx:" << inv_permuted_idx << std::endl;
+  // std::cout << "expert_first_token_offset:" << expert_first_token_offset << std::endl;
+
+  // expert_first_token_offset[4] = 0;
+  expert_first_token_offset = expert_first_token_offset.to(torch::kInt32).contiguous();
+  const int num_groups = input.numel() / group_size;
+
+  // TODO this should be done the same way as per_token_group_quant_8bit_fused
+  static constexpr int groups_per_block = 1;
+  constexpr int THREADS_PER_GROUP = 16;
+
+  const int num_blocks = num_groups / groups_per_block;
+  static constexpr int num_threads = groups_per_block * THREADS_PER_GROUP;
+
+  const int scale_num_rows = permuted_input.size(1) / group_size;
+  dim3 grid(num_blocks);
+  dim3 block(num_threads);
+
+  // can use c10::Half, because c10::BFloat16 has the same size
+  size_t smem_bytes = (static_cast<size_t>(
+    groups_per_block) * group_size) * sizeof(c10::Half) + (n_expert + 1) * sizeof(int32_t);
+
+  // TODO make arguments
+  float eps = 1e-10;
+
+  int topk32 = topk;
+
+  printf("tested: %d %d %d %ld %ld %ld\n", num_blocks, num_threads, scale_num_rows, n_expert, smem_bytes, permuted_input.size(1));
+  std::cout << "tested c_map: " << inv_permuted_idx << std::endl;
+  std::cout << "tested expert_first_token_offset: " << expert_first_token_offset << std::endl;
+  std::cout << "expert_first_token_offset (except last): " 
+            << expert_first_token_offset.index({torch::indexing::Slice(0, expert_first_token_offset.size(0) - 1)}) 
+            << std::endl;
+  // std::cout << "tested input: " << input << std::endl;
+  // std::cout << "tested input_scale: " << input_scale << std::endl;
+
+  // auto efto_truncated = expert_first_token_offset.index({torch::indexing::Slice(0, expert_first_token_offset.size(0) - 1)});
+
+  if (input.scalar_type() == at::ScalarType::BFloat16) {
+    per_token_group_quant_8bit_kernel_fused_test<num_threads, groups_per_block,
+                              true, c10::BFloat16, c10::Float8_e4m3fn, false>
+        <<<grid, block, smem_bytes, stream>>>(
+            n_expert, static_cast<c10::BFloat16*>(input.data_ptr()),
+            permuted_input.data_ptr(),
+            static_cast<float*>(permuted_input_scale.data_ptr()),
+            group_size, (float)eps, (float)fp8_min, (float)fp8_max,
+            (int32_t*)expert_first_token_offset.data_ptr(),
+            (int32_t*)inv_permuted_idx.data_ptr(),
+            scale_num_rows, topk32, (int32_t)permuted_input.size(1));
+  }
+  else {
+    per_token_group_quant_8bit_kernel_fused_test<num_threads, groups_per_block,
+                              true, c10::Half, c10::Float8_e4m3fn, false>
+        <<<grid, block, smem_bytes, stream>>>(
+            n_expert, static_cast<c10::Half*>(input.data_ptr()),
+            permuted_input.data_ptr(),
+            static_cast<float*>(permuted_input_scale.data_ptr()),
+            group_size, (float)eps, (float)fp8_min, (float)fp8_max,
+            (int32_t*)expert_first_token_offset.data_ptr(),
+            (int32_t*)inv_permuted_idx.data_ptr(),
+            scale_num_rows, topk32, (int32_t)permuted_input.size(1));
   }
 }
 
@@ -206,6 +537,28 @@ void moe_unpermute(
   TORCH_CHECK(false, "moe_unpermute is not supported on CUDA < 12.0");
 }
 
+void blockwise_moe_fp8_quantize_and_permute(
+  const torch::Tensor& input,                      // [n_token, hidden]
+  const torch::Tensor& input_scale,                // [n_token, hidden // block_size] or [n_token * hidden // block_size]
+  const torch::Tensor& topk_ids,                   // [n_token, topk]
+  const torch::Tensor& token_expert_indices,       // [n_token, topk]
+  const std::optional<torch::Tensor>& expert_map,  // [n_expert]
+  int64_t n_expert,
+  int64_t n_local_expert,
+  int64_t topk,
+  torch::Tensor& permuted_input,             // [permuted_size, hidden]
+  torch::Tensor& permuted_input_scale,       // [permuted_size, hidden // block_size] or [permuted_size * hidden // block_size]]
+  int64_t group_size,
+  torch::Tensor& expert_first_token_offset,  // [n_local_expert + 1]
+  torch::Tensor& inv_permuted_idx,           // [n_token, topk]
+  torch::Tensor& permuted_idx,               // [permute_size]
+  double fp8_min,
+  double fp8_max,
+  bool transpose_scales
+) {
+  TORCH_CHECK(false, "blockwise_moe_fp8_quantize_and_permute is not supported on CUDA < 12.0");
+}
+
 #endif
 
 bool moe_permute_unpermute_supported() {
@@ -219,4 +572,5 @@ bool moe_permute_unpermute_supported() {
 TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
   m.impl("moe_permute", &moe_permute);
   m.impl("moe_unpermute", &moe_unpermute);
+  m.impl("blockwise_moe_fp8_quantize_and_permute", &blockwise_moe_fp8_quantize_and_permute);
 }

@@ -67,6 +67,7 @@ __global__ void expandInputRowsKernel(
     // Duplicate and permute rows
     int64_t const source_row = expanded_source_row / k;
 
+    // TODO quantize here also?
     auto const* source_row_ptr =
         reinterpret_cast<DataElem const*>(unpermuted_input + source_row * cols);
     auto* dest_row_ptr =
@@ -85,6 +86,39 @@ __global__ void expandInputRowsKernel(
 
 template <typename T>
 void expandInputRowsKernelLauncher(
+    T const* unpermuted_input, T* permuted_output, int* sorted_experts,
+    int const* expanded_dest_row_to_expanded_source_row,
+    int* expanded_source_row_to_expanded_dest_row, int* permuted_idx,
+    int64_t* expert_first_token_offset, int64_t const num_rows,
+    int64_t const* num_valid_tokens_ptr, int64_t const cols, int const k,
+    int num_local_experts, const int& align_block_size, cudaStream_t stream) {
+  int64_t const blocks = num_rows * k;
+  int64_t const threads = 256;
+  using FuncPtr = decltype(&expandInputRowsKernel<T, true, true>);
+  FuncPtr func_map[2][2] = {
+      {&expandInputRowsKernel<T, false, false>,
+       &expandInputRowsKernel<T, false, true>},
+      {&expandInputRowsKernel<T, true, false>,
+       &expandInputRowsKernel<T, true, true>},
+  };
+  bool is_check_skip = num_valid_tokens_ptr != nullptr;
+  bool is_align_block_size = align_block_size != -1;
+  auto func = func_map[is_check_skip][is_align_block_size];
+
+  int64_t smem_size = sizeof(int64_t) * (num_local_experts + 1);
+
+  func<<<blocks, threads, smem_size, stream>>>(
+      unpermuted_input, permuted_output, sorted_experts,
+      expanded_dest_row_to_expanded_source_row,
+      expanded_source_row_to_expanded_dest_row, permuted_idx,
+      expert_first_token_offset, num_rows, num_valid_tokens_ptr, cols, k,
+      num_local_experts, align_block_size);
+}
+
+// quantize to fp8
+// TODO: check how much of the current quantize-permute function we can reuse
+template <typename T>
+void fp8QuantizeExpandInputRowsKernelLauncher(
     T const* unpermuted_input, T* permuted_output, int* sorted_experts,
     int const* expanded_dest_row_to_expanded_source_row,
     int* expanded_source_row_to_expanded_dest_row, int* permuted_idx,

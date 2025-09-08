@@ -419,6 +419,8 @@ def per_token_group_quant_fp8(
             shape = idx_map.shape[:1] + (x.shape[-1] // group_size, )
         x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
 
+    print("quant:", x.shape, x_q.shape, x_s.shape)
+
     # prefer CUDA kernel if available
     if current_platform.is_cuda() and x.is_contiguous():
         # TODO make transpose more explicit,

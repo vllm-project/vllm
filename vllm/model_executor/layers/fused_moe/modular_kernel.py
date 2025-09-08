@@ -494,6 +494,11 @@ class FusedMoEModularKernel(torch.nn.Module):
              a1, a1q, M, N, K, top_k, global_num_experts, local_num_experts,
              expert_tokens_meta)
 
+        print("workspace13_shape:", workspace13_shape)
+        print("workspace2_shape:", workspace2_shape)
+        print("fused_out_shape:", fused_out_shape)
+        print("workspace_dtype:", workspace_dtype)
+
         # We can reuse the memory between cache1 and cache3 because by the
         # time we need cache3, we're done with cache1.
         workspace13 = torch.empty(prod(workspace13_shape),
@@ -502,6 +507,8 @@ class FusedMoEModularKernel(torch.nn.Module):
         workspace2 = torch.empty(prod(workspace2_shape),
                                  device=a1.device,
                                  dtype=workspace_dtype)
+
+        print("fused out provided:", fused_out)
 
         assert fused_out is None or fused_out.shape == fused_out_shape, (
             f"fused_out {fused_out.shape} but expected {fused_out_shape}")

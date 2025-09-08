@@ -65,6 +65,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "permuted_idx, Tensor! m_indices)->()");
 
   m.def(
+    "blockwise_moe_fp8_quantize_and_permute(Tensor input, Tensor input_scale, "
+    "Tensor topk_ids, Tensor token_expert_indices, Tensor? expert_map, "
+    "int n_expert, int n_local_expert, int topk, Tensor! permuted_input, "
+    "Tensor! permuted_input_scale, int group_size, "
+    "Tensor! expert_first_token_offset, Tensor! inv_permuted_idx, "
+    "Tensor! permuted_idx, float fp8_min, float fp8_max, "
+    "bool transpose_scales) -> ()");
+
+  m.def(
       "moe_unpermute(Tensor permuted_hidden_states, Tensor topk_weights,"
       "Tensor inv_permuted_idx, Tensor? expert_first_token_offset, "
       "int topk, Tensor! hidden_states)->()");

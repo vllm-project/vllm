@@ -15,7 +15,12 @@ from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_map
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     moe_permute, moe_permute_unpermute_supported, moe_unpermute)
+from vllm.model_executor.layers.fused_moe.utils import (
+        blockwise_moe_fp8_quantize_and_permute)
 from vllm.platforms import current_platform
+
+from vllm.model_executor.layers.fused_moe.utils import _fp8_quantize, _fp8_perm
+from vllm import _custom_ops as ops
 
 NUM_EXPERTS = [16, 64, 256]
 TOP_KS = [2, 6, 8]
@@ -260,3 +265,116 @@ def test_moe_permute_unpermute(n_token: int, n_hidden: int, topk: int,
                             valid_row_idx, topk, n_local_expert)
     # check unpermuted hidden
     torch.testing.assert_close(result4, gold4, atol=2e-2, rtol=0)
+
+# @pytest.mark.parametrize("m", [1, 33, 1024, 5000])
+# @pytest.mark.parametrize("k", [2048, 7168])
+# @pytest.mark.parametrize("e", NUM_EXPERTS)
+# @pytest.mark.parametrize("topk", TOP_KS)
+# @pytest.mark.parametrize("dtype", [torch.bfloat16])
+# @pytest.mark.parametrize("ep_size", [1]) #EP_SIZE) # TODO provide tests for ep_size > 1
+@pytest.mark.parametrize("m", [3])
+@pytest.mark.parametrize("k", [256])
+@pytest.mark.parametrize("e", [4])
+@pytest.mark.parametrize("topk", [2])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("ep_size", [1])
+def test_blockwise_moe_fp8_quantize_and_permute(
+    m: int,
+    k: int,
+    e: int,
+    topk: int,
+    dtype: torch.dtype,
+    ep_size: int,
+):
+    torch.manual_seed(42)
+
+    group_size = 128
+
+    # Create input tensors
+    a = torch.randn((m, k), dtype=dtype, device="cuda")
+    a_scale = torch.randn((m, k // group_size),
+                              dtype=torch.float32, device="cuda")
+
+    ground_a = a.clone()
+    ground_a_scale = a_scale.clone()
+
+    print("a_scale first:", a_scale)
+    
+    score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
+    _, topk_ids, _ = fused_topk(a,
+                                               score,
+                                               topk,
+                                               renormalize=False)
+
+    # permuted_a = torch.empty(m * topk, k, dtype=torch.float8_e4m3fn, device="cuda")
+
+    # Call the function
+    (permuted_a, permuted_a_scale, expert_offsets,
+     permuted_idx) = blockwise_moe_fp8_quantize_and_permute(
+        a,
+        None,
+        topk_ids,
+        e,
+        group_size,
+        transpose_scales=False,
+        # permuted_a=permuted_a,
+    )
+
+    print("a_scale second:", a_scale)
+
+    ground_a, ground_a_scale = _fp8_quantize(
+            ground_a,
+            A_scale=None,
+            per_act_token=False,
+            block_shape=[group_size, group_size],
+        )
+    a_map = torch.argsort(permuted_idx) // topk
+    problem_sizes = torch.empty((e, 3), dtype=torch.int32, device="cuda")
+
+    for expert in range(e):
+        problem_sizes[expert][0] = expert_offsets[expert + 1] - expert_offsets[expert]
+        problem_sizes[expert][1] = 128
+        problem_sizes[expert][2] = k
+
+    print("topk ids:", topk_ids)
+    ground_a = _fp8_perm(ground_a, a_map)
+    print("a_map:", a_map)
+    print("ground scale:", ground_a_scale)
+    ground_a_scale = ground_a_scale[a_map]
+    print("mapped ground scale:", ground_a_scale)
+    # ground_a_scale = ops.transpose_cutlass_moe_a_scales(
+    #             ground_a_scale, expert_offsets[:-1], problem_sizes)
+
+    _, permquant_scale = _fp8_quantize(
+            a,
+            A_scale=None,
+            per_act_token=False,
+            block_shape=[group_size, group_size],
+            expert_offsets=expert_offsets[:-1],
+            problem_sizes=problem_sizes,
+            idx_map=permuted_idx,
+        )
+    print("permquant_scale:", permquant_scale)
+
+    # Optionally, check that the output is not all zeros
+    # print("a:", a)
+    # print("a_scale:", a_scale)
+    # print("topk_ids:", topk_ids)
+    # print("expert_offsets:", expert_offsets)
+    # print("permuted_idx:", permuted_idx)
+    print("permuted_a:", permuted_a)
+    print("permuted_a_scale:", permuted_a_scale)
+    print("ground_a:", ground_a)
+    print("ground_a_scale:", ground_a_scale)
+
+    # print("permuted_a shape:", permuted_a.shape)
+    # print("ground_a shape:", ground_a.shape)
+    # print("permuted_a_scale shape:", permuted_a_scale.shape)
+    # print("ground_a_scale shape:", ground_a_scale.shape)
+    # retrieved_a = permuted_a.float() * permuted_a_scale
+    # retrieved_ground_a = ground_a.float() * ground_a_scale
+    # print((retrieved_a - retrieved_ground_a).abs())
+    # print((retrieved_a - retrieved_ground_a).abs().max())
+
+    torch.testing.assert_close(ground_a, permuted_a, atol=0, rtol=0)
+    torch.testing.assert_close(ground_a_scale, permuted_a_scale, atol=0, rtol=0)

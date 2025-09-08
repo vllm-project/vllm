@@ -169,7 +169,6 @@ def moe_permute(
     return (permuted_hidden_states, a1q_scale, expert_first_token_offset,
             inv_permuted_idx.flatten(), m_indices)
 
-
 def moe_unpermute(
     out: torch.Tensor,
     permuted_hidden_states: torch.Tensor,
