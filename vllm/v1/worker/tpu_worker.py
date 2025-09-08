@@ -298,6 +298,10 @@ class TPUWorker:
         """Allocate GPU KV cache with the specified kv_cache_config."""
         self.model_runner.initialize_kv_cache(kv_cache_config)
 
+        # The worker connector needs to know `kv_cache_config` to know
+        # how to map the layer to its corresponding KV cache group.
+        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
+
     def check_health(self) -> None:
         # worker will always be healthy as long as it's running.
         return
@@ -327,8 +331,6 @@ class TPUWorker:
         ensure_model_parallel_initialized(
             parallel_config.tensor_parallel_size,
             parallel_config.pipeline_parallel_size)
-
-        ensure_kv_transfer_initialized(vllm_config)
 
 
 if USE_TPU_COMMONS:

@@ -50,7 +50,7 @@ def is_v1_kv_transfer_group(
 
 def ensure_kv_transfer_initialized(
     vllm_config: "VllmConfig",
-    kv_cache_config: KVCacheConfig,
+    kv_cache_config: Optional[KVCacheConfig],
 ) -> None:
     """
     Initialize KV cache transfer parallel group.
@@ -64,6 +64,9 @@ def ensure_kv_transfer_initialized(
     if (vllm_config.kv_transfer_config.is_kv_transfer_instance
             and _KV_CONNECTOR_AGENT is None):
         if envs.VLLM_USE_V1:
+            assert kv_cache_config is not None, ("kv_cache_config is required "
+                                                 "when initializing the v1 "
+                                                 "connector.")
             _KV_CONNECTOR_AGENT = KVConnectorFactory.create_connector(
                 config=vllm_config,
                 kv_cache_config=kv_cache_config,
