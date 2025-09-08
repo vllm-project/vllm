@@ -302,7 +302,7 @@ class FusedMoEPrepareAndFinalize(ABC):
     def max_num_tokens_per_rank(self) -> Optional[int]:
         """
         Some PrepareFinalize All2All implementations are batched. Meaning,
-        they can processes only as set of tokens at a time. This
+        they can process only as set of tokens at a time. This
         function returns the batch size i.e the maximum number of tokens
         the implementation can process at a time.
         Return None if there are no such restrictions.
