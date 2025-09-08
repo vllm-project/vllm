@@ -1752,14 +1752,16 @@ class ModelConfig:
 
     @property
     def head_dtype(self) -> torch.dtype:
-        # "head" refers to the last Linear layer(s) of an LLM,
-        # such as the lm_head in a generation model,
-        # or the score or classifier in a classification model.
-        # The default head_dtype based on runner_type.
-        # - The pooling model defaults to using fp32 head,
-        # you can use --hf-overrides '{"head_dtype": "model"}' to disable it.
-        # - The generate model defaults to not using fp32 head,
-        # you can use --hf-overrides '{"head_dtype": "float32"}' to enable it.
+        """
+        "head" refers to the last Linear layer(s) of an LLM,
+        such as the lm_head in a generation model,
+        or the score or classifier in a classification model.
+        The default head_dtype based on runner_type.
+        - The pooling model defaults to using fp32 head,
+        you can use --hf-overrides '{"head_dtype": "model"}' to disable it.
+        - The generate model defaults to not using fp32 head,
+        you can use --hf-overrides '{"head_dtype": "float32"}' to enable it.
+        """
         head_dtype = _get_head_dtype(config=self.hf_config,
                                      dtype=self.dtype,
                                      runner_type=self.runner_type)
