@@ -1111,6 +1111,8 @@ def main(args: argparse.Namespace):
         
         # save arguments
         args_dict = vars(args)
+        if "dispatch_function" in args_dict:  # Not JSON serializable
+            del args_dict["dispatch_function"]
         args_filename = os.path.join(sub_result_dir, "args.json")
         with open(args_filename, "w", encoding="utf-8") as outfile:
             json.dump(args_dict, outfile, indent=2)
