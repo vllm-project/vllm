@@ -1,4 +1,6 @@
-# Compatibility Matrix
+# Features
+
+## Compatibility Matrix
 
 The tables below show mutually exclusive features and the support on some hardware.
 
@@ -12,7 +14,7 @@ The symbols used have the following meanings:
 !!! note
     Check the ❌ or 🟠 with links to see tracking issue for unsupported feature/hardware combination.
 
-## Feature x Feature
+### Feature x Feature
 
 <style>
 td:not(:first-child) {
@@ -56,7 +58,7 @@ th:not(:first-child) {
 
 [](){ #feature-x-hardware }
 
-## Feature x Hardware
+### Feature x Hardware
 
 | Feature                                                   | Volta               | Turing    | Ampere    | Ada    | Hopper     | CPU                | AMD    | TPU |
 |-----------------------------------------------------------|---------------------|-----------|-----------|--------|------------|--------------------|--------|-----|
