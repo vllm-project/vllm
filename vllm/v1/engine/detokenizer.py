@@ -121,6 +121,10 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
                     self.output_token_ids) <= self.min_tokens:
                 stop_check_offset = len(self.output_text)
 
+        if skipped_stop_token_id is not None:
+            # Cleanup after skipping detokenization.
+            self.token_ids.append(skipped_stop_token_id)
+
         # 2) Evaluate stop strings.
         stop_string = None
         if self.stop and len(self.output_token_ids) > self.min_tokens:
@@ -134,13 +138,6 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
                 stop_string, truncate_to = stop
                 if truncate_to != -1:
                     self.output_text = self.output_text[:truncate_to]
-
-        if stop_terminated:
-            if skipped_stop_token_id is not None:
-                # Cleanup after skipping detokenization.
-                self.token_ids.append(skipped_stop_token_id)
-            # Stop token triggered; do not override finish reason here.
-            return None
 
         return stop_string
 

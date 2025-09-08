@@ -32,9 +32,7 @@ def _make_request(stop, include_stop_str_in_output: bool, min_tokens: int = 0):
     req = EngineCoreRequest(
         request_id="test",
         prompt_token_ids=[],
-        mm_kwargs=None,
-        mm_hashes=None,
-        mm_placeholders=None,
+        mm_features=None,
         sampling_params=params,
         pooling_params=None,
         eos_token_id=None,
@@ -88,8 +86,7 @@ def test_stop_string_while_stop_token_terminates(
     result = detok.update(new_token_ids=token_ids, stop_terminated=True)
 
     # The update should not report a stop string
-    # (engine will mark stop via token).
-    assert result is None
+    assert result == stop_string
 
     # Output text should reflect stop-string handling:
     # - include_stop_str_in_output=False => exclude "cd" => "ab"
