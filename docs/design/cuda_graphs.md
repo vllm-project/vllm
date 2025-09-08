@@ -1,5 +1,4 @@
-# CUDA Graphs in vLLM v1
-
+# CUDA Graphs
 This write-up introduces the new CUDA Graph modes in vLLM v1 beyond previous [torch.compile Integration](torch_compile.md). To summarize, we (a.) added flexible `cudagraph_mode` configuration, (b.) made full CUDA Graphs support orthogonal to compilation, and (c.) introduced a cudagraph dispatcher as a central controller that picks the desired runtime mode and cudagraphs per batch automatically.  
 
 Throughout the document, we will walk through the motivation, cudagraph modes, the detailed design, and the usage examples of the CUDA Graph modes.
