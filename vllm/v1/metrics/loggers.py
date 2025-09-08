@@ -659,13 +659,14 @@ class StatLoggerManager:
         factories: list[StatLoggerFactory] = []
         if custom_stat_loggers is not None:
             factories.extend(custom_stat_loggers)
-        if client_count > 1:
-            logger.warning(
-                "AsyncLLM created with api_server_count more than 1; "
-                "disabling stats logging to avoid incomplete stats.")
-            enable_default_loggers = False
+
         if enable_default_loggers and logger.isEnabledFor(logging.INFO):
-            factories.append(LoggingStatLogger)
+            if client_count > 1:
+                logger.warning(
+                    "AsyncLLM created with api_server_count more than 1; "
+                    "disabling stats logging to avoid incomplete stats.")
+            else:
+                factories.append(LoggingStatLogger)
 
         # engine_idx: StatLogger
         self.per_engine_logger_dict: dict[int, list[StatLoggerBase]] = {}
