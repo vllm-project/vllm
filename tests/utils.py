@@ -5,6 +5,7 @@ import asyncio
 import copy
 import functools
 import importlib
+import json
 import os
 import signal
 import subprocess
@@ -16,6 +17,7 @@ from contextlib import contextmanager, suppress
 from multiprocessing import Process
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional, Union
+from unittest.mock import patch
 
 import cloudpickle
 import httpx
@@ -101,7 +103,8 @@ class RemoteOpenAIServer:
                  env_dict: Optional[dict[str, str]] = None,
                  seed: Optional[int] = 0,
                  auto_port: bool = True,
-                 max_wait_seconds: Optional[float] = None) -> None:
+                 max_wait_seconds: Optional[float] = None,
+                 override_hf_configs: Optional[dict[str, Any]] = None) -> None:
         if auto_port:
             if "-p" in vllm_serve_args or "--port" in vllm_serve_args:
                 raise ValueError("You have manually specified the port "
@@ -119,6 +122,12 @@ class RemoteOpenAIServer:
                                  f"when `seed={seed}`.")
 
             vllm_serve_args = vllm_serve_args + ["--seed", str(seed)]
+
+        if override_hf_configs is not None:
+            vllm_serve_args = vllm_serve_args + [
+                "--hf-overrides",
+                json.dumps(override_hf_configs)
+            ]
 
         parser = FlexibleArgumentParser(
             description="vLLM's remote OpenAI server.")
@@ -688,9 +697,12 @@ def multi_process_parallel(
     os.environ["RAY_RUNTIME_ENV_IGNORE_GITIGNORE"] = "1"
     ray.init(
         runtime_env={
-            "working_dir": VLLM_PATH,
-            "excludes":
-            ["build", ".git", "cmake-build-*", "shellcheck", "dist"]
+            "working_dir":
+            VLLM_PATH,
+            "excludes": [
+                "build", ".git", "cmake-build-*", "shellcheck", "dist",
+                "ep_kernels_workspace"
+            ]
         })
 
     distributed_init_port = get_open_port()
@@ -1066,3 +1078,11 @@ def get_attn_backend_list_based_on_platform() -> list[str]:
         return attn_backend_list
     else:
         raise ValueError("Unsupported platform")
+
+
+@contextmanager
+def override_cutlass_fp8_supported(value: bool):
+    with patch(
+            "vllm.model_executor.layers.quantization.utils.w8a8_utils.cutlass_fp8_supported",
+            return_value=value):
+        yield

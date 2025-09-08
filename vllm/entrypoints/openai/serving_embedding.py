@@ -24,7 +24,6 @@ from vllm.entrypoints.openai.protocol import (EmbeddingChatRequest,
                                               ErrorResponse, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (EmbeddingServeContext,
                                                     OpenAIServing,
-                                                    RequestPrompt,
                                                     ServeContext,
                                                     TextTokensPrompt)
 # yapf: enable
@@ -79,11 +78,12 @@ class EmbeddingMixin(OpenAIServing):
 
             tokenizer = await self.engine_client.get_tokenizer(ctx.lora_request
                                                                )
+            renderer = self._get_renderer(tokenizer)
 
             if isinstance(ctx.request, EmbeddingChatRequest):
                 (
                     _,
-                    ctx.request_prompts,
+                    _,
                     ctx.engine_prompts,
                 ) = await self._preprocess_chat(
                     ctx.request,
@@ -93,22 +93,23 @@ class EmbeddingMixin(OpenAIServing):
                     or ctx.chat_template,
                     chat_template_content_format=ctx.
                     chat_template_content_format,
-                    # In embedding requests, we are not generating tokens,
-                    # so there is no need to append extra tokens to the input
-                    add_generation_prompt=False,
+                    add_generation_prompt=ctx.request.add_generation_prompt,
                     continue_final_message=False,
-                    truncate_prompt_tokens=ctx.truncate_prompt_tokens,
                     add_special_tokens=ctx.request.add_special_tokens,
                 )
             else:
-                (ctx.request_prompts,
-                 ctx.engine_prompts) = await self._preprocess_completion(
-                     ctx.request,
-                     tokenizer,
-                     ctx.request.input,
-                     truncate_prompt_tokens=ctx.truncate_prompt_tokens,
-                     add_special_tokens=ctx.request.add_special_tokens,
-                 )
+                # Set max_length based on chunked processing capability
+                if self._should_use_chunked_processing(ctx.request):
+                    max_length = None
+                else:
+                    max_length = self.max_embed_len or self.max_model_len
+
+                ctx.engine_prompts = await renderer.render_prompt(
+                    prompt_or_prompts=ctx.request.input,
+                    max_length=max_length,
+                    truncate_prompt_tokens=ctx.request.truncate_prompt_tokens,
+                    add_special_tokens=ctx.request.add_special_tokens,
+                )
             return None
         except (ValueError, TypeError) as e:
             logger.exception("Error in preprocessing prompt inputs")
@@ -290,7 +291,6 @@ class EmbeddingMixin(OpenAIServing):
         self,
         ctx: EmbeddingServeContext,
         engine_prompt: Union[EngineTokensPrompt, EngineEmbedsPrompt],
-        request_prompt: RequestPrompt,
         pooling_params: PoolingParams,
         trace_headers: Optional[Mapping[str, str]],
         prompt_index: int,
@@ -299,7 +299,7 @@ class EmbeddingMixin(OpenAIServing):
         request_id_item = f"{ctx.request_id}-{prompt_index}"
 
         self._log_inputs(request_id_item,
-                         request_prompt,
+                         engine_prompt,
                          params=pooling_params,
                          lora_request=ctx.lora_request)
 
@@ -357,20 +357,14 @@ class EmbeddingMixin(OpenAIServing):
                 return self.create_error_response(
                     "Engine prompts not available")
 
-            if ctx.request_prompts is None:
-                return self.create_error_response(
-                    "Request prompts not available")
-
             max_pos_embeddings = self._get_max_position_embeddings()
 
             for i, engine_prompt in enumerate(ctx.engine_prompts):
-                request_prompt = ctx.request_prompts[i]
-
                 # Check if this specific prompt needs chunked processing
-                if self._is_text_tokens_prompt(request_prompt):
+                if self._is_text_tokens_prompt(engine_prompt):
                     # Cast to TextTokensPrompt since we've verified
                     # prompt_token_ids
-                    text_tokens_prompt = cast(TextTokensPrompt, request_prompt)
+                    text_tokens_prompt = cast(TextTokensPrompt, engine_prompt)
                     if (len(text_tokens_prompt["prompt_token_ids"])
                             > max_pos_embeddings):
                         # Use chunked processing for this prompt
@@ -386,8 +380,7 @@ class EmbeddingMixin(OpenAIServing):
                     Union[EngineTokensPrompt, EngineEmbedsPrompt],
                     engine_prompt)
                 generator = await self._create_single_prompt_generator(
-                    ctx, engine_prompt_typed, request_prompt, pooling_params,
-                    trace_headers, i)
+                    ctx, engine_prompt_typed, pooling_params, trace_headers, i)
                 generators.append(generator)
 
             from vllm.utils import merge_async_iterators
@@ -422,10 +415,6 @@ class EmbeddingMixin(OpenAIServing):
 
             if not use_chunked:
                 return await super()._collect_batch(ctx=ctx)
-
-            if ctx.request_prompts is None:
-                return self.create_error_response(
-                    "Request prompts not available")
 
             if ctx.result_generator is None:
                 return self.create_error_response(
@@ -542,7 +531,7 @@ class EmbeddingMixin(OpenAIServing):
                             data=final_embedding)
 
                         # Get original prompt token IDs for this prompt
-                        original_prompt = ctx.request_prompts[prompt_idx]
+                        original_prompt = ctx.engine_prompts[prompt_idx]
                         if not self._is_text_tokens_prompt(original_prompt):
                             return self.create_error_response(
                                 f"Chunked prompt {prompt_idx} is not a "
@@ -593,11 +582,13 @@ class OpenAIServingEmbedding(EmbeddingMixin):
         request_logger: Optional[RequestLogger],
         chat_template: Optional[str],
         chat_template_content_format: ChatTemplateContentFormatOption,
+        log_error_stack: bool = False,
     ) -> None:
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
                          models=models,
-                         request_logger=request_logger)
+                         request_logger=request_logger,
+                         log_error_stack=log_error_stack)
 
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
@@ -628,18 +619,6 @@ class OpenAIServingEmbedding(EmbeddingMixin):
         )
 
         return await super().handle(ctx)  # type: ignore
-
-    @override
-    def _validate_request(
-        self,
-        ctx: ServeContext[EmbeddingRequest],
-    ) -> Optional[ErrorResponse]:
-        if error := super()._validate_request(ctx):
-            return error
-
-        ctx.truncate_prompt_tokens = ctx.request.truncate_prompt_tokens
-
-        return None
 
     @override
     def _create_pooling_params(

@@ -130,6 +130,13 @@ void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
 void silu_and_mul_quant(torch::Tensor& out, torch::Tensor& input,
                         torch::Tensor& scale);
 
+#ifndef USE_ROCM
+void silu_and_mul_nvfp4_quant(torch::Tensor& out,
+                              torch::Tensor& output_block_scale,
+                              torch::Tensor& input,
+                              torch::Tensor& input_global_scale);
+#endif
+
 void mul_and_silu(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_and_mul(torch::Tensor& out, torch::Tensor& input);
@@ -228,6 +235,11 @@ void get_cutlass_moe_mm_data(
     torch::Tensor& input_permutation, torch::Tensor& output_permutation,
     const int64_t num_experts, const int64_t n, const int64_t k,
     const std::optional<torch::Tensor>& blockscale_offsets);
+
+void get_cutlass_moe_mm_problem_sizes(
+    const torch::Tensor& topk_ids, torch::Tensor& problem_sizes1,
+    torch::Tensor& problem_sizes2, const int64_t num_experts, const int64_t n,
+    const int64_t k, const std::optional<torch::Tensor>& blockscale_offsets);
 
 void get_cutlass_pplx_moe_mm_data(torch::Tensor& expert_offsets,
                                   torch::Tensor& problem_sizes1,

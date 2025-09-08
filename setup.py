@@ -413,17 +413,12 @@ def _no_device() -> bool:
 
 def _is_cuda() -> bool:
     has_cuda = torch.version.cuda is not None
-    return (VLLM_TARGET_DEVICE == "cuda" and has_cuda
-            and not (_is_neuron() or _is_tpu()))
+    return (VLLM_TARGET_DEVICE == "cuda" and has_cuda and not _is_tpu())
 
 
 def _is_hip() -> bool:
     return (VLLM_TARGET_DEVICE == "cuda"
             or VLLM_TARGET_DEVICE == "rocm") and torch.version.hip is not None
-
-
-def _is_neuron() -> bool:
-    return VLLM_TARGET_DEVICE == "neuron"
 
 
 def _is_tpu() -> bool:
@@ -468,25 +463,6 @@ def get_rocm_version():
         return None
     except Exception:
         return None
-
-
-def get_neuronxcc_version():
-    import sysconfig
-    site_dir = sysconfig.get_paths()["purelib"]
-    version_file = os.path.join(site_dir, "neuronxcc", "version",
-                                "__init__.py")
-
-    # Check if the command was executed successfully
-    with open(version_file) as fp:
-        content = fp.read()
-
-    # Extract the version using a regular expression
-    match = re.search(r"__version__ = '(\S+)'", content)
-    if match:
-        # Return the version string
-        return match.group(1)
-    else:
-        raise RuntimeError("Could not find Neuron version in the output")
 
 
 def get_nvcc_cuda_version() -> Version:
@@ -541,12 +517,6 @@ def get_vllm_version() -> str:
         rocm_version = get_rocm_version() or torch.version.hip
         if rocm_version and rocm_version != MAIN_CUDA_VERSION:
             version += f"{sep}rocm{rocm_version.replace('.', '')[:3]}"
-    elif _is_neuron():
-        # Get the Neuron version
-        neuron_version = str(get_neuronxcc_version())
-        if neuron_version != MAIN_CUDA_VERSION:
-            neuron_version_str = neuron_version.replace(".", "")[:3]
-            version += f"{sep}neuron{neuron_version_str}"
     elif _is_tpu():
         version += f"{sep}tpu"
     elif _is_cpu():
@@ -591,8 +561,6 @@ def get_requirements() -> list[str]:
         requirements = modified_requirements
     elif _is_hip():
         requirements = _read_requirements("rocm.txt")
-    elif _is_neuron():
-        requirements = _read_requirements("neuron.txt")
     elif _is_tpu():
         requirements = _read_requirements("tpu.txt")
     elif _is_cpu():
@@ -601,7 +569,7 @@ def get_requirements() -> list[str]:
         requirements = _read_requirements("xpu.txt")
     else:
         raise ValueError(
-            "Unsupported platform, please use CUDA, ROCm, Neuron, or CPU.")
+            "Unsupported platform, please use CUDA, ROCm, or CPU.")
     return requirements
 
 
@@ -643,16 +611,25 @@ if envs.VLLM_USE_PRECOMPILED:
     if wheel_location is not None:
         wheel_url = wheel_location
     else:
+        import platform
+        arch = platform.machine()
+        if arch == "x86_64":
+            wheel_tag = "manylinux1_x86_64"
+        elif arch == "aarch64":
+            wheel_tag = "manylinux2014_aarch64"
+        else:
+            raise ValueError(f"Unsupported architecture: {arch}")
         base_commit = precompiled_wheel_utils.get_base_commit_in_main_branch()
-        wheel_url = f"https://wheels.vllm.ai/{base_commit}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
+        wheel_url = f"https://wheels.vllm.ai/{base_commit}/vllm-1.0.0.dev-cp38-abi3-{wheel_tag}.whl"
+        nightly_wheel_url = f"https://wheels.vllm.ai/nightly/vllm-1.0.0.dev-cp38-abi3-{wheel_tag}.whl"
         from urllib.request import urlopen
         try:
             with urlopen(wheel_url) as resp:
                 if resp.status != 200:
-                    wheel_url = "https://wheels.vllm.ai/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
+                    wheel_url = nightly_wheel_url
         except Exception as e:
             print(f"[warn] Falling back to nightly wheel: {e}")
-            wheel_url = "https://wheels.vllm.ai/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
+            wheel_url = nightly_wheel_url
 
     patch = precompiled_wheel_utils.extract_precompiled_and_patch_package(
         wheel_url)
@@ -685,7 +662,9 @@ setup(
                   "mistral_common[audio]"],  # Required for audio processing
         "video": [],  # Kept for backwards compatibility
         # FlashInfer should be updated together with the Dockerfile
-        "flashinfer": ["flashinfer-python==0.2.11"],
+        "flashinfer": ["flashinfer-python==0.3.0"],
+        # Optional deps for AMD FP4 quantization support
+        "petit-kernel": ["petit-kernel"],
     },
     cmdclass=cmdclass,
     package_data=package_data,

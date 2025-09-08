@@ -217,7 +217,7 @@ class FreeKVCacheBlockQueue:
         # Create a fake head and a tail block for the doubly linked list to
         # reduce branching in the code
         #
-        # The implementation garenteed that the fake head and tail
+        # The implementation guaranteed that the fake head and tail
         # are NEVER got popped, so we could safely assume each real blocks
         # in the queue has prev and next blocks.
         self.fake_free_list_head = KVCacheBlock(block_id=-1)
@@ -527,6 +527,7 @@ def hash_block_tokens(
     hash values for the same block contents.
 
     Args:
+        hash_function: The hash function used to compute block hash.
         parent_block_hash: The hash of the parent block. None
             if this is the first block.
         curr_block_token_ids: A list of token ids in the current
@@ -845,6 +846,12 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
     )
 
     num_tokens = num_blocks * vllm_config.cache_config.block_size
+    if vllm_config.parallel_config.decode_context_parallel_size > 1:
+        num_tokens *= vllm_config.parallel_config.decode_context_parallel_size
+        logger.info(
+            "Multiplying the GPU KV cache size by the dcp_world_size %d.",
+            vllm_config.parallel_config.decode_context_parallel_size)
+
     num_tokens_str = f"{num_tokens:,}"
     logger.info("GPU KV cache size: %s tokens", num_tokens_str)
     max_model_len_str = f"{vllm_config.model_config.max_model_len:,}"
