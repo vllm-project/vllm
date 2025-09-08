@@ -965,16 +965,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # in the same group share the same metadata.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
                 self.kv_cache_config.kv_cache_groups):
-            query_start_loc_arg = query_start_loc
-            query_start_loc_cpu_arg = query_start_loc_cpu
             seq_lens_arg = seq_lens
             seq_lens_cpu_arg = seq_lens_cpu
-            num_computed_tokens_cpu_arg = num_computed_tokens_cpu
-            num_reqs_arg = num_reqs
-            total_num_scheduled_tokens_arg = total_num_scheduled_tokens
-            max_num_scheduled_tokens_arg = max_num_scheduled_tokens
             max_seq_len_arg = max_seq_len
-            causal_arg = True
 
             if isinstance(kv_cache_group_spec.kv_cache_spec,
                           EncoderOnlyAttentionSpec):
@@ -983,10 +976,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 blk_table_tensor, slot_mapping = (
                     _dummy_blk_table_and_slot_mapping())
                 num_common_prefix_blocks = 0
-                causal_arg = False
             elif isinstance(kv_cache_group_spec.kv_cache_spec,
                             CrossAttentionSpec):
-                causal_arg = False
                 num_common_prefix_blocks = 0
                 blk_table = self.input_batch.block_table[kv_cache_group_id]
                 blk_table_tensor = blk_table.get_device_tensor()[:num_reqs]
@@ -1033,20 +1024,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     num_common_prefix_blocks[kv_cache_group_id])
 
             common_attn_metadata = CommonAttentionMetadata(
-                query_start_loc=query_start_loc_arg,
-                query_start_loc_cpu=query_start_loc_cpu_arg,
+                query_start_loc=query_start_loc,
+                query_start_loc_cpu=query_start_loc_cpu,
                 seq_lens=seq_lens_arg,
                 seq_lens_cpu=seq_lens_cpu_arg,
-                num_computed_tokens_cpu=num_computed_tokens_cpu_arg,
-                num_reqs=num_reqs_arg,
-                num_actual_tokens=total_num_scheduled_tokens_arg,
-                max_query_len=max_num_scheduled_tokens_arg,
+                num_computed_tokens_cpu=num_computed_tokens_cpu,
+                num_reqs=num_reqs,
+                num_actual_tokens=total_num_scheduled_tokens,
+                max_query_len=max_num_scheduled_tokens,
                 max_seq_len=max_seq_len_arg,
                 block_table_tensor=blk_table_tensor,
                 slot_mapping=slot_mapping,
                 logits_indices_padded=logits_indices_padded,
                 num_logits_indices=logits_indices.size(0),
-                causal=causal_arg,
+                causal=True,
             )
 
             if self.speculative_config and \
@@ -1097,8 +1088,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 cross_attn_group_idx = i
                 break
 
-        if (cross_attn_group_idx is None
-                or cross_attn_group_idx >= len(req_state.block_ids)):
+        if cross_attn_group_idx is None:
             return [PAD_SLOT_ID] * encoder_seq_len
 
         # Get cross attention block IDs and calculate slot mapping
