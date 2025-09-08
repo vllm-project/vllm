@@ -314,27 +314,27 @@ class TestAttentionNvfp4QuantPatternModel(AttentionQuantPatternModel):
                                      out_dtype=attn_output.dtype)
 
 
-CUDA_MODELS = [("nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
-                TestAttentionFp8StaticQuantPatternModel),
-               ("nvidia/Llama-4-Scout-17B-16E-Instruct-FP4",
-                TestAttentionNvfp4QuantPatternModel)]
-ROCM_MODELS = [("amd/Llama-3.1-8B-Instruct-FP8-KV",
-                TestAttentionFp8StaticQuantPatternModel)]
+if current_platform.is_cuda():
+    MODELS = [("nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
+               TestAttentionFp8StaticQuantPatternModel),
+              ("nvidia/Llama-4-Scout-17B-16E-Instruct-FP4",
+               TestAttentionNvfp4QuantPatternModel)]
+    HEADS = [(64, 8), (40, 8)]
+elif current_platform.is_rocm():
+    MODELS = [("amd/Llama-3.1-8B-Instruct-FP8-KV",
+               TestAttentionFp8StaticQuantPatternModel)]
+    HEADS = [(32, 8), (40, 8)]
+else:
+    MODELS = []
+    HEADS = []
 
-CUDA_HEADS = [(64, 8), (40, 8)]
-ROCM_HEADS = [(32, 8), (40, 8)]
 
-
-@pytest.mark.parametrize(
-    "num_qo_heads, num_kv_heads",
-    CUDA_HEADS if current_platform.is_cuda() else ROCM_HEADS)
+@pytest.mark.parametrize("num_qo_heads, num_kv_heads", HEADS)
 @pytest.mark.parametrize("head_size", [128])
 @pytest.mark.parametrize("batch_size",
                          [7, 256, 533] if current_platform.is_cuda() else [8])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-@pytest.mark.parametrize(
-    "model_name, model_class",
-    CUDA_MODELS if current_platform.is_cuda() else ROCM_MODELS)
+@pytest.mark.parametrize("model_name, model_class", MODELS)
 @pytest.mark.parametrize("backend", [_Backend.FLASHINFER] if
                          current_platform.is_cuda() else [_Backend.ROCM_FLASH])
 @pytest.mark.parametrize(
