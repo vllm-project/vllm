@@ -24,8 +24,6 @@ async def client(server):
 @pytest.fixture
 def server_fixture(request):
     model_name = request.node.get_closest_marker("model").args[0]
-    shards = int(request.node.get_closest_marker("shards").args[0])
-    extensions = request.node.get_closest_marker("extensions").args[0]
     ost = request.node.get_closest_marker("output_special_tokens")
     ost = ost is not None and ost.args[0]
     args = [
@@ -43,12 +41,10 @@ def server_fixture(request):
 def test_cases(request):
     filename = request.node.get_closest_marker("test_case_file").args[0]
     with open(os.path.join(TESTS_DIR, filename)) as f:
-        return yaml.load(f, Loader=yaml.Loader)
+        return yaml.load(f, Loader=yaml.SafeLoader)
         
 
 @pytest.mark.model("google/gemma-2-2b-it")
-@pytest.mark.extensions(".safetensors,.json")
-@pytest.mark.shards(1)
 @pytest.mark.test_case_file("test_cases_gemma-2-2b-it.yaml")
 @pytest.mark.asyncio
 async def test_gemma_2_2b_it(server_fixture, test_cases):
@@ -56,8 +52,6 @@ async def test_gemma_2_2b_it(server_fixture, test_cases):
 
 
 @pytest.mark.model("HuggingFaceH4/zephyr-7b-beta")
-@pytest.mark.extensions(".safetensors,.json,.model")
-@pytest.mark.shards(1)
 @pytest.mark.test_case_file("test_cases_zephyr-7b-beta.yaml")
 @pytest.mark.asyncio
 async def test_zephyr(server_fixture, test_cases):
@@ -92,7 +86,6 @@ async def run_unary_test_case(server_fixture, case):
     logprobs = False
     if "logprobs" in expected["choices"]:
         logprobs = True
-    # chat_template = """{% for message in messages %}{% if message.role == 'user' %}User: {{ message.content }}{% elif message.role == 'assistant' %}Assistant: {{ message.content }}{% endif %}{% endfor %}{% if add_generation_prompt %}Assistant: {% endif %}"""
     if request["params"].get("stop") is not None:
         stop = request["params"].get("stop")
 
@@ -110,7 +103,6 @@ async def run_unary_test_case(server_fixture, case):
     print(response)
     dic_value = filter_response_by_expected(response.to_dict(), expected)
     assert dic_value["choices"][0]["message"]["content"] == expected["choices"]["message"]
-    # print(dic_value["usage"])
     assert dic_value["usage"] == expected["usage"]
     assert dic_value["choices"][0]["finish_reason"] == expected["choices"]["finish_reason"]
     if logprobs:
@@ -177,5 +169,4 @@ def event_loop():
         loop = asyncio.new_event_loop()
     yield loop
     loop.close()
-
 

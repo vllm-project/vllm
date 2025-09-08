@@ -1,5 +1,5 @@
-from typing import List
-
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 from collections.abc import Mapping, Sized
 from _pytest.python_api import ApproxMapping, ApproxSequenceLike
@@ -30,11 +30,11 @@ class ApproxNestedMapping(ApproxMapping):
             return [(self.expected, actual)]
         return _yield_comparisons(self, super(), actual)
 
-    def _repr_compare(self, other_side) -> List[str]:
+    def _repr_compare(self, other_side) -> list[str]:
         #TODO impl more useful explanation here
         try:
             return super()._repr_compare(other_side)
-        except:
+        except Exception:
             return ["Mismatch"]
 
 
@@ -55,11 +55,11 @@ class ApproxNestedSequenceLike(ApproxSequenceLike):
             return [(self.expected, actual)]
         return _yield_comparisons(self, super(), actual)
 
-    def _repr_compare(self, other_side) -> List[str]:
+    def _repr_compare(self, other_side) -> list[str]:
         #TODO impl more useful explanation here
         try:
             return super()._repr_compare(other_side)
-        except:
+        except Exception:
             return ["Mismatch"]
 
 
@@ -67,16 +67,15 @@ def _yield_nested(actual, expected, **kwargs):
     if isinstance(expected, Mapping):
         return ApproxNestedMapping(expected, **kwargs)._yield_comparisons(actual)
     if is_seq_like(expected):
-        return ApproxNestedSequenceLike(expected, **kwargs)._yield_comparisons(actual)
+        return ApproxNestedSequenceLike(
+            expected, **kwargs)._yield_comparisons(actual)
     return [(actual, expected)]
 
 
 def _yield_comparisons(self, supr, actual):
-    for actual, expected in supr._yield_comparisons(actual):
-        for a, e in _yield_nested(
-                actual, expected, rel=self.rel, abs=self.abs, nan_ok=self.nan_ok
-        ):
-            yield a, e
+    for actualItem, expected in supr._yield_comparisons(actual):
+        yield from _yield_nested(
+            actualItem, expected, rel=self.rel, abs=self.abs, nan_ok=self.nan_ok)
 
 
 def is_seq_like(obj):
