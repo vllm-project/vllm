@@ -276,13 +276,23 @@ class InputPreprocessor:
         if mm_processor_kwargs is None:
             mm_processor_kwargs = {}
 
-        return mm_processor.apply(
+        mm_input = mm_processor.apply(
             prompt,
             mm_data,
             hf_processor_mm_kwargs=mm_processor_kwargs,
             tokenization_kwargs=tokenization_kwargs,
             mm_hash_overrides=mm_hash_overrides,
         )
+        mm_hashes = mm_input["mm_hashes"]
+
+        # Validate that all mm items have a string as their hash
+        if not contains_only_strings(mm_hashes):
+            raise ValueError(
+                f"mm_hashes must contain only strings, got: {mm_hashes}. "
+                "This is likely due to an incorrect custom implementation of "
+                "MultiModalProcessor.apply method.")
+
+        return mm_input
 
     async def _process_multimodal_async(
         self,
@@ -310,13 +320,23 @@ class InputPreprocessor:
         if mm_processor_kwargs is None:
             mm_processor_kwargs = {}
 
-        return mm_processor.apply(
+        mm_input = mm_processor.apply(
             prompt,
             mm_data,
             hf_processor_mm_kwargs=mm_processor_kwargs,
             tokenization_kwargs=tokenization_kwargs,
             mm_hash_overrides=mm_hash_overrides,
         )
+        mm_hashes = mm_input["mm_hashes"]
+
+        # Validate that all mm items have a string as their hash
+        if not contains_only_strings(mm_hashes):
+            raise ValueError(
+                f"mm_hashes must contain only strings, got: {mm_hashes}. "
+                "This is likely due to an incorrect custom implementation of "
+                "MultiModalProcessor.apply method.")
+
+        return mm_input
 
     def _process_embeds(
         self,
@@ -953,3 +973,15 @@ class InputPreprocessor:
     def clear_cache(self) -> None:
         if self.mm_processor_cache is not None:
             self.mm_processor_cache.clear_cache()
+
+
+# Helper function to validate that a nested dictionary contains
+# only strings or list of strings as the leaf values.
+def contains_only_strings(obj: object):
+    if isinstance(obj, str):
+        return True
+    if isinstance(obj, list):
+        return all(isinstance(x, str) for x in obj)
+    if isinstance(obj, dict):
+        return all(contains_only_strings(v) for v in obj.values())
+    return False
