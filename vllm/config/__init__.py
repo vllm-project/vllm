@@ -1804,6 +1804,9 @@ class LoadConfig:
     download_dir: Optional[str] = None
     """Directory to download and load the weights, default to the default
     cache directory of Hugging Face."""
+    eager_load: bool = False
+    """Load the entire safetensors file into memory at once. This can speed up
+    loading on certain file systems, such as Lustre."""
     model_loader_extra_config: Union[dict, TensorizerConfig] = field(
         default_factory=dict)
     """Extra config for model loader. This will be passed to the model loader

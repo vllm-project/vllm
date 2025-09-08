@@ -289,6 +289,7 @@ class EngineArgs:
     trust_remote_code: bool = ModelConfig.trust_remote_code
     allowed_local_media_path: str = ModelConfig.allowed_local_media_path
     download_dir: Optional[str] = LoadConfig.download_dir
+    eager_load: bool = LoadConfig.eager_load
     load_format: Union[str, LoadFormats] = LoadConfig.load_format
     config_format: str = ModelConfig.config_format
     dtype: ModelDType = ModelConfig.dtype
@@ -588,6 +589,8 @@ class EngineArgs:
         load_group.add_argument("--load-format", **load_kwargs["load_format"])
         load_group.add_argument("--download-dir",
                                 **load_kwargs["download_dir"])
+        load_group.add_argument("--eager-load",
+                                **load_kwargs["eager_load"])
         load_group.add_argument("--model-loader-extra-config",
                                 **load_kwargs["model_loader_extra_config"])
         load_group.add_argument("--ignore-patterns",
@@ -1024,6 +1027,7 @@ class EngineArgs:
         return LoadConfig(
             load_format=self.load_format,
             download_dir=self.download_dir,
+            eager_load=self.eager_load,
             device="cpu"
             if is_online_quantization(self.quantization) else None,
             model_loader_extra_config=self.model_loader_extra_config,

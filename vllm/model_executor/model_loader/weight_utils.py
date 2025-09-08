@@ -19,7 +19,7 @@ import huggingface_hub.constants
 import numpy as np
 import torch
 from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
-from safetensors.torch import load_file, safe_open, save_file
+from safetensors.torch import load, load_file, safe_open, save_file
 from tqdm.auto import tqdm
 
 from vllm import envs
@@ -518,18 +518,30 @@ def np_cache_weights_iterator(
 def safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
+    eager_load: bool = False,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
-    for st_file in tqdm(
-            hf_weights_files,
-            desc="Loading safetensors checkpoint shards",
-            disable=not enable_tqdm(use_tqdm_on_load),
-            bar_format=_BAR_FORMAT,
-    ):
-        with safe_open(st_file, framework="pt") as f:
-            for name in f.keys():  # noqa: SIM118
-                param = f.get_tensor(name)
-                yield name, param
+    if eager_load:
+        for st_file in tqdm(
+                hf_weights_files,
+                desc="Loading safetensors checkpoint shards (eagerly)",
+                disable=not enable_tqdm(use_tqdm_on_load),
+                bar_format=_BAR_FORMAT,
+        ):
+            with open(st_file, "rb") as f:
+                state_dict = load(f.read())
+            yield from state_dict.items()
+    else:
+        for st_file in tqdm(
+                hf_weights_files,
+                desc="Loading safetensors checkpoint shards",
+                disable=not enable_tqdm(use_tqdm_on_load),
+                bar_format=_BAR_FORMAT,
+        ):
+            with safe_open(st_file, framework="pt") as f:
+                for name in f.keys():  # noqa: SIM118
+                    param = f.get_tensor(name)
+                    yield name, param
 
 
 def multi_thread_safetensors_weights_iterator(
