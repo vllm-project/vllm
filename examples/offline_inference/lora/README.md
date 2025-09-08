@@ -19,6 +19,3 @@ This example how to use [activated LoRA](https://arxiv.org/abs/2504.12397):
 ```
 python examples/offline_inference/lora/activated_lora.py
 ```
-
-
-
