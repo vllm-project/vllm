@@ -239,7 +239,8 @@ class BenchmarkDataset(ABC):
 
         """
         if no_oversample:
-            logger.info("Skipping oversampling. Total samples: %d.", len(requests))
+            logger.info("Skipping oversampling. " \
+            "Total samples: %d.", len(requests))
             return
 
         if len(requests) < num_requests:
@@ -1011,7 +1012,10 @@ class ShareGPTDataset(BenchmarkDataset):
                     request_id=request_id_prefix + str(ind),
                 ))
             ind += 1
-        self.maybe_oversample_requests(samples, num_requests, request_id_prefix, no_oversample)
+        self.maybe_oversample_requests(samples, 
+                                       num_requests, 
+                                       request_id_prefix, 
+                                       no_oversample)
         return samples
 
 
@@ -2378,7 +2382,10 @@ class NextEditPredictionDataset(HuggingFaceDataset):
                 ))
             if len(samples) >= num_requests:
                 break
-        self.maybe_oversample_requests(samples, num_requests, request_id_prefix, no_oversample)
+        self.maybe_oversample_requests(samples, 
+                                       num_requests, 
+                                       request_id_prefix, 
+                                       no_oversample)
         return samples
 
 
