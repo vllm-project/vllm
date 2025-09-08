@@ -230,7 +230,7 @@ def get_quant_config(model_config: ModelConfig,
 
 def maybe_download_from_modelscope(
     model: str,
-    revision: Optional[str],
+    revision: Optional[str] = None,
     download_dir: Optional[str] = None,
     allow_patterns: Optional[list[str]] = None,
 ) -> Optional[str]:
