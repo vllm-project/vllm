@@ -100,21 +100,23 @@ def main():
     else:
         prompts = get_custom_mm_prompts(args.num_prompts)
 
-    if args.method == "eagle" or args.method == "eagle3":
-        eagle_dir = args.eagle_dir
-        draft_vocab_pruned = None
-        if args.method == "eagle" and eagle_dir is None:
-            eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
-            draft_vocab_pruned = args.draft_vocab_pruned
-
-        elif args.method == "eagle3" and eagle_dir is None:
-            eagle_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
-
+    # vanilla inference
+    if args.method == "None":
+        speculative_config = {}
+    elif args.method == "eagle":
+        eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B" if args.eagle_dir is None else args.eagle_dir
         speculative_config = {
             "method": args.method,
             "model": eagle_dir,
             "num_speculative_tokens": args.num_spec_tokens,
-            "draft_vocab_pruned": draft_vocab_pruned,
+            "draft_vocab_pruned": args.draft_vocab_pruned,
+        }
+    elif args.method == "eagle3":
+        eagle_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B" if args.eagle_dir is None else args.eagle_dir
+        speculative_config = {
+            "method": args.method,
+            "model": eagle_dir,
+            "num_speculative_tokens": args.num_spec_tokens,
         }
     elif args.method == "ngram":
         speculative_config = {
