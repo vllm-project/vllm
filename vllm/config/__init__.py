@@ -2011,6 +2011,8 @@ class SpeculativeConfig:
         """Handle empty quantization method string."""
         if isinstance(value, str) and value.strip() == "":
             return None
+        if isinstance(value, str) and value.strip() == ".":
+            return None
         if isinstance(value, str):
             return value.lower()
         return value

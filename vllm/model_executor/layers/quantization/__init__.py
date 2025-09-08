@@ -35,6 +35,7 @@ QuantizationMethods = Literal[
     "inc",
     "mxfp4",
     "petit_nvfp4",
+    None,
 ]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
