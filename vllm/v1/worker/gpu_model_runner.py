@@ -2060,7 +2060,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             # Apply structured output bitmasks if present
             if scheduler_output.grammar_bitmask is not None:
-                self.apply_grammar_bitmask(scheduler_output, logits)
+                apply_grammar_bitmask(scheduler_output, self.input_batch,
+                                      logits, self.device)
 
         with record_function_or_nullcontext("Sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
