@@ -77,6 +77,7 @@ class NixlAgentMetadata(
     block_len: int
     attn_backend_name: str
     kv_cache_layout: str
+    device_id: int
 
 
 @dataclass
@@ -659,8 +660,7 @@ class NixlConnectorWorker:
             remote_agent_name = self.add_remote_agent(metadata,
                                                       p_remote_tp_rank,
                                                       remote_tp_size,
-                                                      p_remote_pp_rank,
-                                                      remote_pp_size)
+                                                      p_remote_pp_rank)
             setup_agent_time = time.perf_counter()
             logger.debug("NIXL handshake: add agent took: %s",
                          setup_agent_time - got_metadata_time)
@@ -873,7 +873,8 @@ class NixlConnectorWorker:
             num_blocks=self.num_blocks,
             block_len=self.block_len,
             attn_backend_name=self.backend_name,
-            kv_cache_layout=self.kv_cache_layout)
+            kv_cache_layout=self.kv_cache_layout,
+            device_id=self.device_id)
         ready_event = threading.Event()
         self._nixl_handshake_listener_t = threading.Thread(
             target=self._nixl_handshake_listener,
@@ -888,8 +889,7 @@ class NixlConnectorWorker:
                          nixl_agent_meta: NixlAgentMetadata,
                          remote_tp_rank: int = 0,
                          remote_tp_size: int = 1,
-                         remote_pp_rank: int = 0,
-                         remote_pp_size: int = 1) -> str:
+                         remote_pp_rank: int = 0) -> str:
         """
         Add the remote NIXL agent and prepare the descriptors for reading cache
         blocks from remote.
@@ -1006,8 +1006,7 @@ class NixlConnectorWorker:
                 addr = base_addr + block_offset + rank_offset
                 # (addr, len, device id)
                 blocks_data.append(
-                    (addr, kv_block_len,
-                     remote_pp_rank * remote_tp_size + remote_tp_rank))
+                    (addr, kv_block_len, nixl_agent_meta.device_id))
             if self._use_flashinfer:
                 # With FlashInfer index V separately to allow head splitting.
                 for block_id in range(nixl_agent_meta.num_blocks):
@@ -1015,13 +1014,11 @@ class NixlConnectorWorker:
                     addr = base_addr + block_offset + rank_offset
                     v_addr = addr + nixl_agent_meta.block_len // 2
                     blocks_data.append(
-                        (v_addr, kv_block_len,
-                         remote_pp_rank * remote_tp_size + remote_tp_rank))
+                        (v_addr, kv_block_len, nixl_agent_meta.device_id))
         logger.debug(
             "Created %s blocks for dst engine %s with remote rank %s and "
             "tp local rank %s, device id %s", len(blocks_data), engine_id,
-            remote_tp_rank, self.tp_rank,
-            remote_pp_rank * remote_tp_size + remote_tp_rank)
+            remote_tp_rank, self.tp_rank, nixl_agent_meta.device_id)
 
         # Register with NIXL.
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data,
