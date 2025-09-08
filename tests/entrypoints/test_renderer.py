@@ -220,8 +220,8 @@ class TestRenderEmbedPrompt:
         test_tensor = torch.randn(10, 768, dtype=torch.float32)
         embed_bytes = self._create_test_embed_bytes(test_tensor)
 
-        results = await renderer.render_prompt(prompt_embeds=embed_bytes,
-                                               cache_salt="test_salt")
+        results = await renderer.render_prompt_and_embeds(
+            prompt_embeds=embed_bytes, cache_salt="test_salt")
 
         assert len(results) == 1
         assert is_embeds_prompt(results[0])
@@ -239,7 +239,8 @@ class TestRenderEmbedPrompt:
             self._create_test_embed_bytes(t) for t in test_tensors
         ]
 
-        results = await renderer.render_prompt(prompt_embeds=embed_bytes_list)
+        results = await renderer.render_prompt_and_embeds(
+            prompt_embeds=embed_bytes_list)
 
         assert len(results) == 2
         for i, result in enumerate(results):
@@ -252,8 +253,8 @@ class TestRenderEmbedPrompt:
         test_tensor = torch.randn(20, 768, dtype=torch.float32)
         embed_bytes = self._create_test_embed_bytes(test_tensor)
 
-        results = await renderer.render_prompt(prompt_embeds=embed_bytes,
-                                               truncate_prompt_tokens=10)
+        results = await renderer.render_prompt_and_embeds(
+            prompt_embeds=embed_bytes, truncate_prompt_tokens=10)
 
         assert len(results) == 1
         # Should keep last 10 tokens
@@ -269,7 +270,8 @@ class TestRenderEmbedPrompt:
             test_tensor = torch.randn(5, 256, dtype=dtype)
             embed_bytes = self._create_test_embed_bytes(test_tensor)
 
-            results = await renderer.render_prompt(prompt_embeds=embed_bytes)
+            results = await renderer.render_prompt_and_embeds(
+                prompt_embeds=embed_bytes)
 
             assert len(results) == 1
             assert results[0]["prompt_embeds"].dtype == dtype
@@ -280,7 +282,8 @@ class TestRenderEmbedPrompt:
         test_tensor = torch.randn(1, 10, 768, dtype=torch.float32)
         embed_bytes = self._create_test_embed_bytes(test_tensor)
 
-        results = await renderer.render_prompt(prompt_embeds=embed_bytes)
+        results = await renderer.render_prompt_and_embeds(
+            prompt_embeds=embed_bytes)
 
         assert len(results) == 1
         # Should be squeezed to 2D
@@ -299,8 +302,8 @@ class TestRenderEmbedPrompt:
         test_tensor = torch.randn(5, 256, dtype=torch.float32)
         embed_bytes = self._create_test_embed_bytes(test_tensor)
 
-        results = await renderer.render_prompt(prompt_or_prompts="Hello world",
-                                               prompt_embeds=embed_bytes)
+        results = await renderer.render_prompt_and_embeds(
+            prompt_or_prompts="Hello world", prompt_embeds=embed_bytes)
 
         assert len(results) == 2
         # First should be embed prompt

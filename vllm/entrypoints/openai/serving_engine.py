@@ -363,13 +363,6 @@ class OpenAIServing:
             for i, engine_prompt in enumerate(ctx.engine_prompts):
                 request_id_item = f"{ctx.request_id}-{i}"
 
-                # Mypy has an existing bug related to inferring the variance of
-                # TypedDicts with `builtins.enumerate`:
-                # https://github.com/python/mypy/issues/8586#issuecomment-2867698435
-                engine_prompt = cast(
-                    Union[EngineTokensPrompt, EngineEmbedsPrompt],
-                    engine_prompt)
-
                 self._log_inputs(
                     request_id_item,
                     engine_prompt,

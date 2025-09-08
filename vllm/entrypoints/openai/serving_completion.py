@@ -131,7 +131,7 @@ class OpenAIServingCompletion(OpenAIServing):
             renderer = self._get_renderer(tokenizer)
             max_input_tokens_len = self.max_model_len - (request.max_tokens
                                                          or 0)
-            engine_prompts = await renderer.render_prompt(
+            engine_prompts = await renderer.render_prompt_and_embeds(
                 prompt_or_prompts=request.prompt,
                 prompt_embeds=request.prompt_embeds,
                 max_length=max_input_tokens_len,
