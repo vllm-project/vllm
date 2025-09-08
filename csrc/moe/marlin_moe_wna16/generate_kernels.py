@@ -103,14 +103,6 @@ QUANT_CONFIGS = [
         "thread_m_blocks": [1, 2, 3, 4],
         "group_blocks": [-1, 2, 4, 8]
     },
-    # GPTQ-INT8 with INT8 activation
-    {
-        "a_type": ["kS8"],
-        "b_type": "kS8",
-        "thread_configs": THREAD_CONFIGS,
-        "thread_m_blocks": [1, 2, 3, 4],
-        "group_blocks": [-1, 2, 4, 8]
-    },
     # GPTQ-INT4 with FP8 activation
     {
         "a_type": ["kFE4M3fn"],
