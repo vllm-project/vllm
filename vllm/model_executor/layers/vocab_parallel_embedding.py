@@ -399,7 +399,7 @@ class VocabParallelEmbedding(CustomOp):
         param[:loaded_weight.shape[0]].data.copy_(loaded_weight)
         param[loaded_weight.shape[0]:].data.fill_(0)
 
-    def forward(self, input_):
+    def forward_native(self, input_):
         if self.tp_size > 1:
             # Build the mask.
             masked_input, input_mask = get_masked_input_and_mask(

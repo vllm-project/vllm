@@ -93,7 +93,7 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
         cache = torch.cat((cos, sin), dim=-1)
         return cache
 
-    def forward(
+    def forward_native(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
@@ -127,3 +127,12 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
         key = torch.cat((key_rot, key_pass), dim=-1)
 
         return query.flatten(-2), key.flatten(-2)
+
+    def forward_cuda(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: Optional[torch.Tensor] = None,
+        offsets: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        return self.forward_native(positions, query, key)
