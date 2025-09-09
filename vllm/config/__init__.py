@@ -2921,8 +2921,9 @@ def _get_and_verify_dtype(
 
 def _get_head_dtype(config: PretrainedConfig, dtype: torch.dtype,
                     runner_type: str) -> torch.dtype:
-    head_dtype: Optional[Union[str, torch.dtype]] = (
-        envs.VLLM_HEAD_DTYPE or getattr(config, "head_dtype", None))
+    head_dtype: Optional[Union[str,
+                               torch.dtype]] = getattr(config, "head_dtype",
+                                                       None)
 
     if head_dtype == "model":
         return dtype
