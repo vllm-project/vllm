@@ -43,6 +43,7 @@ async def send_harmony_request(server, data: dict) -> dict:
             f"{server.url_root}/v1/responses",
             json=data,
             headers={"Authorization": f"Bearer {server.DUMMY_API_KEY}"})
+
         response.raise_for_status()
         return response.json()
 
@@ -376,3 +377,342 @@ async def test_harmony_message_chain_conversation(client: OpenAI,
         response2.input_harmony_messages)
     assert len(response2.input_harmony_messages) > len(
         response1.input_harmony_messages)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_harmony_message_with_python_tool(client: OpenAI,
+                                                model_name: str, server):
+    """Test harmony messages with Python tool usage and context preservation."""
+    # First request that should trigger Python tool usage using proper tool spec
+    response1_json = await send_harmony_request(
+        server, {
+            "model": model_name,
+            "input": "Calculate the square root of 144 using Python code.",
+            "tools": [{
+                "type": "code_interpreter",
+                "container": {
+                    "type": "auto"
+                }
+            }]
+        })
+
+    response1 = HarmonyResponse(response1_json)
+    assert response1.status == "completed"
+
+    # Verify we have harmony messages from the first response
+    assert len(response1.input_harmony_messages) > 0
+    assert len(response1.output_harmony_messages) > 0
+
+    # Look for tool usage in the messages
+    all_messages_1 = (response1.input_harmony_messages +
+                      response1.output_harmony_messages)
+
+    # Check if any message contains tool calls or tool results
+    has_tool_content = False
+    for msg in all_messages_1:
+        if "content" in msg and isinstance(msg["content"], list):
+            for content_item in msg["content"]:
+                if (content_item.get("type")
+                        in ["tool_call", "tool_result", "code_interpreter"]
+                        or ("text" in content_item and
+                            ("python" in content_item["text"].lower()
+                             or "calculate" in content_item["text"].lower()))):
+                    has_tool_content = True
+                    break
+        if has_tool_content:
+            break
+
+    # Continue conversation with tool context
+    response2_json = await send_harmony_request(
+        server, {
+            "model": model_name,
+            "input": "Now calculate the square of that result.",
+            "instructions": "Use the result from the previous calculation.",
+            "previous_response_harmony_messages": all_messages_1,
+            "tools": [{
+                "type": "code_interpreter",
+                "container": {
+                    "type": "auto"
+                }
+            }]
+        })
+
+    response2 = HarmonyResponse(response2_json)
+    assert response2.status == "completed"
+
+    # Verify second response has more messages than first (accumulated context)
+    assert len(response2.input_harmony_messages) > len(
+        response1.input_harmony_messages)
+
+    # Verify all messages maintain proper structure
+    all_messages_2 = (response2.input_harmony_messages +
+                      response2.output_harmony_messages)
+
+    for msg in all_messages_2:
+        assert "role" in msg
+        assert "content" in msg
+        assert isinstance(msg["content"], list)
+
+        for content_item in msg["content"]:
+            assert isinstance(content_item, dict)
+            assert len(content_item) > 0  # Should not be empty
+
+    # Verify we have more total messages in the second response
+    assert len(all_messages_2) > len(all_messages_1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_harmony_tools_serialization_chaining(client: OpenAI,
+                                                    model_name: str, server):
+    """Test that tools in system/developer content are properly serialized
+    and deserialized when chaining requests."""
+    # Create harmony messages with system content containing tools
+    system_content_with_tools = {
+        "role":
+        "system",
+        "content": [{
+            "type": "system_content",
+            "model_identity":
+            "You are a helpful AI assistant with access to tools.",
+            "reasoning_effort": "Medium",
+            "knowledge_cutoff": "2024-06",
+            "tools": {
+                "python": {
+                    "name":
+                    "python",
+                    "description":
+                    "Execute Python code",
+                    "tools": [{
+                        "name": "execute_python",
+                        "description": "Execute Python code in a sandbox",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "code": {
+                                    "type": "string",
+                                    "description": "Python code to execute"
+                                }
+                            },
+                            "required": ["code"]
+                        }
+                    }]
+                },
+                "browser": {
+                    "name":
+                    "browser",
+                    "description":
+                    "Browse the web",
+                    "tools": [{
+                        "name": "search_web",
+                        "description": "Search the web for information",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "query": {
+                                    "type": "string",
+                                    "description": "Search query"
+                                }
+                            },
+                            "required": ["query"]
+                        }
+                    }]
+                }
+            }
+        }]
+    }
+
+    # Developer content with tools
+    developer_content_with_tools = {
+        "role":
+        "developer",
+        "content": [{
+            "type": "developer_content",
+            "instructions": "Use the available tools to help the user.",
+            "tools": {
+                "functions": {
+                    "name":
+                    "functions",
+                    "description":
+                    "Custom functions available to the assistant",
+                    "tools": [{
+                        "name": "calculate_area",
+                        "description": "Calculate area of geometric shapes",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "shape": {
+                                    "type": "string",
+                                    "enum":
+                                    ["circle", "rectangle", "triangle"]
+                                },
+                                "dimensions": {
+                                    "type": "object",
+                                    "description": "Shape-specific dimensions"
+                                }
+                            },
+                            "required": ["shape", "dimensions"]
+                        }
+                    }]
+                }
+            }
+        }]
+    }
+
+    # First request with harmony messages containing tools
+    initial_harmony_messages = [
+        system_content_with_tools, developer_content_with_tools, {
+            "role":
+            "user",
+            "content": [{
+                "type":
+                "text",
+                "text":
+                "I need to calculate the area of a circle with radius 5."
+            }]
+        }
+    ]
+
+    response1_json = await send_harmony_request(
+        server, {
+            "model": model_name,
+            "input": "Please help me with this calculation.",
+            "instructions": "Use the available tools as needed.",
+            "previous_response_harmony_messages": initial_harmony_messages
+        })
+
+    response1 = HarmonyResponse(response1_json)
+    assert response1.status == "completed"
+
+    # Extract harmony messages from first response
+    all_messages_1 = (response1.input_harmony_messages +
+                      response1.output_harmony_messages)
+
+    # Verify tools are preserved in system content
+    system_tools_found = False
+    developer_tools_found = False
+
+    for msg in all_messages_1:
+        if msg.get("role") == "system" and "content" in msg:
+            for content_item in msg["content"]:
+                if (content_item.get("type") == "system_content"
+                        and "tools" in content_item):
+                    tools = content_item["tools"]
+                    assert isinstance(tools, dict)
+                    # Verify python and browser tools are present
+                    if "python" in tools and "browser" in tools:
+                        system_tools_found = True
+                        # Verify structure is intact
+                        python_tool = tools["python"]
+                        assert isinstance(python_tool, dict)
+                        assert python_tool.get("name") == "python"
+                        assert "tools" in python_tool
+                        assert len(python_tool["tools"]) > 0
+
+        if msg.get("role") == "developer" and "content" in msg:
+            for content_item in msg["content"]:
+                if (content_item.get("type") == "developer_content"
+                        and "tools" in content_item):
+                    tools = content_item["tools"]
+                    assert isinstance(tools, dict)
+                    # Verify functions tool is present
+                    if "functions" in tools:
+                        developer_tools_found = True
+                        functions_tool = tools["functions"]
+                        assert isinstance(functions_tool, dict)
+                        assert functions_tool.get("name") == "functions"
+                        assert "tools" in functions_tool
+                        assert len(functions_tool["tools"]) > 0
+
+    # At least one should be found (tools are preserved)
+    assert system_tools_found or developer_tools_found, (
+        "Tools should be preserved in serialized harmony messages")
+
+    # Second request using messages from first response (should maintain tools)
+    response2_json = await send_harmony_request(
+        server, {
+            "model": model_name,
+            "input":
+            "Now calculate the area of a rectangle with width 3 and height 4.",
+            "instructions": "Continue using the available tools.",
+            "previous_response_harmony_messages": all_messages_1
+        })
+
+    response2 = HarmonyResponse(response2_json)
+    assert response2.status == "completed"
+
+    # Extract harmony messages from second response
+    all_messages_2 = (response2.input_harmony_messages +
+                      response2.output_harmony_messages)
+
+    # Verify tools are still preserved after second round-trip
+    system_tools_found_2 = False
+    developer_tools_found_2 = False
+
+    for msg in all_messages_2:
+        if msg.get("role") == "system" and "content" in msg:
+            for content_item in msg["content"]:
+                if (content_item.get("type") == "system_content"
+                        and "tools" in content_item):
+                    tools = content_item["tools"]
+                    if isinstance(tools, dict) and "python" in tools:
+                        system_tools_found_2 = True
+
+        if msg.get("role") == "developer" and "content" in msg:
+            for content_item in msg["content"]:
+                if (content_item.get("type") == "developer_content"
+                        and "tools" in content_item):
+                    tools = content_item["tools"]
+                    if isinstance(tools, dict) and "functions" in tools:
+                        developer_tools_found_2 = True
+
+    # Tools should still be preserved after chaining
+    assert system_tools_found_2 or developer_tools_found_2, (
+        "Tools should be preserved after chaining requests")
+
+    # Third request - test longer chain to ensure robustness
+    response3_json = await send_harmony_request(
+        server, {
+            "model":
+            model_name,
+            "input": ("Finally, calculate the area of a triangle with "
+                      "base 6 and height 8."),
+            "instructions":
+            "Use the calculation tools for this final request.",
+            "previous_response_harmony_messages":
+            all_messages_2
+        })
+
+    response3 = HarmonyResponse(response3_json)
+    assert response3.status == "completed"
+
+    # Verify conversation has grown and tools are maintained
+    all_messages_3 = (response3.input_harmony_messages +
+                      response3.output_harmony_messages)
+
+    assert len(all_messages_3) > len(all_messages_2) > len(all_messages_1)
+
+    # Final verification that tools are still intact
+    final_tools_found = False
+    for msg in all_messages_3:
+        if "content" in msg and isinstance(msg["content"], list):
+            for content_item in msg["content"]:
+                if (content_item.get("type")
+                        in ["system_content", "developer_content"]
+                        and "tools" in content_item):
+                    tools = content_item["tools"]
+                    if isinstance(tools, dict) and len(tools) > 0:
+                        final_tools_found = True
+                        # Verify at least one tool has proper structure
+                        for tool_name, tool_config in tools.items():
+                            assert isinstance(tool_config, dict)
+                            assert "name" in tool_config
+                            assert tool_config["name"] == tool_name
+                            break
+                        break
+        if final_tools_found:
+            break
+
+    assert final_tools_found, (
+        "Tools should be preserved through the entire chain")

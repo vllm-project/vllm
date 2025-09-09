@@ -33,7 +33,7 @@ except ImportError:  # For newer openai versions (>= 1.100.0)
 from openai.types.responses.response import ToolChoice
 from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
-from openai_harmony import Message
+from openai_harmony import Message, ToolNamespaceConfig
 from pydantic import (BaseModel, ConfigDict, Field, TypeAdapter,
                       ValidationInfo, field_validator, model_validator)
 from typing_extensions import TypeAlias
@@ -53,6 +53,54 @@ from vllm.utils import random_uuid, resolve_obj_by_qualname
 logger = init_logger(__name__)
 
 _LONG_INFO = torch.iinfo(torch.long)
+
+
+def _serialize_tools_to_dict(
+    tools: Optional[dict[str,
+                         ToolNamespaceConfig]]) -> Optional[dict[str, dict]]:
+    """Helper function to serialize tools for harmony messages."""
+    if tools is None:
+        return None
+    return {
+        name: config.model_dump(exclude_none=True)
+        for name, config in tools.items()
+    }
+
+
+def _deserialize_tools_from_dict(
+    tools_data: Optional[dict[str, dict]]
+) -> Optional[dict[str, ToolNamespaceConfig]]:
+    """Helper function to deserialize tools for harmony messages."""
+    if tools_data is None:
+        return None
+    return {
+        name:
+        ToolNamespaceConfig(
+            **config_dict) if isinstance(config_dict, dict) else config_dict
+        for name, config_dict in tools_data.items()
+    }
+
+
+def _serialize_harmony_message_with_tools(msg: Message) -> dict[str, Any]:
+    """Helper function to serialize a harmony message with proper tools
+    handling."""
+    result = msg.to_dict()
+
+    # Handle tools in content items
+    if "content" in result and isinstance(result["content"], list):
+        for content_item in result["content"]:
+            if (isinstance(content_item, dict) and "tools" in content_item
+                    and hasattr(msg, 'content')):
+                # Check if this content item has tools that need serialization
+                for original_content in msg.content:
+                    if (hasattr(original_content, 'tools')
+                            and original_content.tools is not None):
+                        # Serialize the tools properly
+                        content_item["tools"] = _serialize_tools_to_dict(
+                            original_content.tools)
+                        break
+
+    return result
 
 
 class OpenAIBaseModel(BaseModel):
@@ -388,8 +436,42 @@ class ResponsesRequest(OpenAIBaseModel):
             result = []
             for item in v:
                 if isinstance(item, dict):
-                    # Convert dictionary to Message object using from_dict
-                    result.append(Message.from_dict(item))
+                    # Check if we need to handle tools deserialization
+                    needs_tools_handling = False
+                    if "content" in item:
+                        content_list = item["content"]
+                        if isinstance(content_list, list):
+                            for content_item in content_list:
+                                if (isinstance(content_item, dict)
+                                        and content_item.get("type") in [
+                                            "system_content",
+                                            "developer_content"
+                                        ] and "tools" in content_item):
+                                    needs_tools_handling = True
+                                    break
+
+                    # Only make a copy if we need to handle tools
+                    if needs_tools_handling:
+                        item_copy = item.copy()
+                        # Handle tools in content items
+                        content_list = item_copy["content"]
+                        for content_item in content_list:
+                            if (isinstance(content_item, dict)
+                                    and content_item.get("type")
+                                    in ["system_content", "developer_content"]
+                                    and "tools" in content_item):
+                                # Deserialize tools in system/developer content
+                                tools_data = content_item.get("tools")
+                                if tools_data is not None:
+                                    content_item["tools"] = \
+                                        _deserialize_tools_from_dict(tools_data)
+
+                        # Convert dictionary to Message object using from_dict
+                        result.append(Message.from_dict(item_copy))
+                    else:
+                        # Convert dictionary to Message object
+                        # using from_dict (no copy needed)
+                        result.append(Message.from_dict(item))
                 elif isinstance(item, Message):
                     # Already a Message object
                     result.append(item)
@@ -1929,10 +2011,12 @@ class ResponsesResponse(OpenAIBaseModel):
             created_at=created_time,
             instructions=request.instructions,
             input_harmony_messages=[
-                msg.to_dict() for msg in input_harmony_messages
+                _serialize_harmony_message_with_tools(msg)
+                for msg in input_harmony_messages
             ] if input_harmony_messages else None,
             output_harmony_messages=[
-                msg.to_dict() for msg in output_harmony_messages
+                _serialize_harmony_message_with_tools(msg)
+                for msg in output_harmony_messages
             ] if output_harmony_messages else None,
             metadata=request.metadata,
             model=model_name,
