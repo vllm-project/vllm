@@ -342,6 +342,19 @@ class TritonAttentionImpl(AttentionImpl):
                     layer._k_scale,
                     layer._v_scale,
                 )
+            elif self.kv_cache_dtype.startswith("fp8") and current_platform.is_rocm():
+                # TODO: the triton kernel has low precision if casting from
+                #   fp16 to fp8 on rocm
+                ops.reshape_and_cache_flash(
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    attn_metadata.slot_mapping,
+                    self.kv_cache_dtype,
+                    layer._k_scale,
+                    layer._v_scale,
+                )
             else:
                 triton_reshape_and_cache_flash(
                     key,
