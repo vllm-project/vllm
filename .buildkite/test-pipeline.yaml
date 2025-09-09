@@ -316,6 +316,7 @@ steps:
     - python3 offline_inference/basic/embed.py
     - python3 offline_inference/basic/score.py
     - VLLM_USE_V1=0 python3 offline_inference/profiling.py --model facebook/opt-125m run_num_steps --num-steps 2
+    - python3 offline_inference/spec_decode.py --test --method eagle --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill
 
 - label: Platform Tests (CUDA) # 4min
   timeout_in_minutes: 15
