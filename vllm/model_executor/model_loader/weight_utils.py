@@ -108,8 +108,8 @@ def support_quantized_model_reload(func):
                 # put the value of the newly created tensor to the original tensor 
                 for name, p in self.named_parameters():
                     
-                    if name in updated_params 
-                            or (name.endswith('_scale') and name[:-6] in updated_params):
+                    if name in updated_params \
+                            or (name.endswith('weight_scale') and name[:-6] in updated_params):
                         trided_data = torch.as_strided(
                             p.data, 
                             original_param_dict[name].shape, 

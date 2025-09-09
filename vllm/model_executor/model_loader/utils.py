@@ -133,14 +133,14 @@ def process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
     recorded_loader = {k: dict() for k in recorded_loader_keys}
     for name, p in model.named_parameters():
         for key in recorded_loader_keys:
-            if hasattr(p, k):
-                attr = getattr(p, k)
+            if hasattr(p, key):
+                attr = getattr(p, key)
                 if not callable(attr):
-                    recorded_loader[k][name] = attr 
+                    recorded_loader[key][name] = attr 
                 elif p is attr.__self__:
-                    recorded_loader[k][name] = attr.__func__ 
+                    recorded_loader[key][name] = attr.__func__ 
                 else:
-                    recorded_loader[k][name] = attr 
+                    recorded_loader[key][name] = attr 
     model.recorded_loader = recorded_loader
     
     for _, module in model.named_modules():
