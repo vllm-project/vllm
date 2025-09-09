@@ -325,6 +325,7 @@ class AiterFlashAttentionMetadataBuilder(
             dtype=torch.uint8,
             device=self.device,
         )
+        if max_query_len > 1:
             # We pre-compute cumulative seq len needed for prefill attention
             # here to avoid recomputing it for every layer
             cu_seq_lens = torch.zeros(seq_lens.shape[0] + 1,

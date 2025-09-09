@@ -784,7 +784,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                             attn_masks[0][None]
                             if attn_masks is not None else None,
                             full_scales,
-                            layer._out_scale,
+                            output_scale,
                         )
                     else:
                         output[:num_prefill_tokens] = self.triton_attn_func(

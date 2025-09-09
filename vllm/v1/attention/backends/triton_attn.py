@@ -30,7 +30,9 @@ logger = init_logger(__name__)
 if current_platform.is_rocm():
     VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE = envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE
     if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE:
-        from aiter.ops.triton.fused_kv_cache import fused_qk_rope_reshape_and_cache
+        from aiter.ops.triton.fused_kv_cache import (
+            fused_qk_rope_reshape_and_cache)
+
 
 @dataclass
 class TritonAttentionMetadata:
@@ -250,23 +252,24 @@ class TritonAttentionImpl(AttentionImpl):
                                       "TritonAttentionImpl")
 
         self.fp8_dtype = current_platform.fp8_dtype()
-        self.force_prefill_decode_attn = \
-            envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION
 
         # If not using prefill decode attention, we use the Triton
         # unified attention implementation.
         if use_aiter_unified_attention():
             logger.info_once(
                 "Using aiter unified attention for TritonAttentionImpl")
-            from aiter.ops.triton.unified_attention import (
-                unified_attention)
+            from aiter.ops.triton.unified_attention import unified_attention
             self.unified_attention = unified_attention
-        elif not self.force_prefill_decode_attn:
+        elif not envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION:
             logger.info_once(
                 "Using vllm unified attention for TritonAttentionImpl")
             from vllm.attention.ops.triton_unified_attention import (
                 unified_attention)
             self.unified_attention = unified_attention
+        else:
+            logger.info_once(
+                "Using vllm split prefill decode attention for TritonAttentionImpl"
+            )
 
         self.sinks = sinks
         if sinks is not None:
@@ -324,7 +327,8 @@ class TritonAttentionImpl(AttentionImpl):
         # Whenever making a change in this method, please benchmark the
         # performance to make sure it does not introduce any overhead.
 
-        use_prefill_decode_attn = self.force_prefill_decode_attn
+        use_prefill_decode_attn = envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION \
+            and not use_aiter_unified_attention()
         num_actual_tokens = attn_metadata.num_actual_tokens
 
         if use_prefill_decode_attn:
@@ -332,10 +336,10 @@ class TritonAttentionImpl(AttentionImpl):
                 kv_cache, self.num_kv_heads, self.head_size)
         else:
             key_cache, value_cache = kv_cache.unbind(0)
-        
+
         if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE:
-            assert self.kv_sharing_target_layer_name is None, "self.kv_sharing_target_layer_name error"      
-            cos, sin = cos_sin_cache.chunk(2, dim = -1)
+            assert self.kv_sharing_target_layer_name is None, "self.kv_sharing_target_layer_name error"
+            cos, sin = cos_sin_cache.chunk(2, dim=-1)
             is_fp8_kv_cache = self.kv_cache_dtype.startswith("fp8")
             if is_fp8_kv_cache:
                 key_cache_og_dtype = key_cache.dtype
@@ -343,11 +347,25 @@ class TritonAttentionImpl(AttentionImpl):
                 key_cache = key_cache.view(self.fp8_dtype)
                 value_cache = value_cache.view(self.fp8_dtype)
             query, key, key_cache, value_cache, output = fused_qk_rope_reshape_and_cache(
-                query, key, value, key_cache, value_cache, attn_metadata.slot_mapping, 
-                positions, cos, sin, 
-                layer._k_scale, layer._v_scale,
-                is_neox, 
-                flash_layout=(not use_prefill_decode_attn), apply_scale=is_fp8_kv_cache, offs=None, q_out=query, k_out=key, output_zeros=True, zeros_out=output)
+                query,
+                key,
+                value,
+                key_cache,
+                value_cache,
+                attn_metadata.slot_mapping,
+                positions,
+                cos,
+                sin,
+                layer._k_scale,
+                layer._v_scale,
+                is_neox,
+                flash_layout=(not use_prefill_decode_attn),
+                apply_scale=is_fp8_kv_cache,
+                offs=None,
+                q_out=query,
+                k_out=key,
+                output_zeros=True,
+                zeros_out=output)
             if is_fp8_kv_cache:
                 key_cache = key_cache.view(key_cache_og_dtype)
                 value_cache = value_cache.view(value_cache_og_dtype)
