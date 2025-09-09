@@ -546,7 +546,7 @@ steps:
 
 #####  models test  #####
 
-# When any vLLM source is modified, then test intialization of a small subset
+# When any vLLM source is modified, then test initialization of a small subset
 # of supported models. Also run if model initialization test file is modified
 - label: Models Initialization Test (Fast)
   timeout_in_minutes: 45
@@ -585,9 +585,9 @@ steps:
     - pytest -v -s models/test_utils.py
     - pytest -v -s models/test_vision.py
 
-# Test language models, excluding hand-picked slow tests
+# Test standard language models, excluding a subset of slow tests
 - label: Language Models Tests (Standard,Fast)
-  timeout_in_minutes: 45
+  timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
@@ -597,8 +597,8 @@ steps:
     - pip freeze | grep -E 'torch'
     - pytest -v -s models/language -m "core_model and not slow_test"
 
-# Hand-picked set of slow language models tests. Only run when model source is
-# modelified, or when specified test files are modified
+# Hand-picked set of slow standard language models tests. Only run when model
+# source is modified, or when specified test files are modified
 - label: Language Models Tests (Standard,Slow)
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
