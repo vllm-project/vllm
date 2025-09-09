@@ -589,7 +589,8 @@ class EngineArgs:
         load_group.add_argument("--load-format", **load_kwargs["load_format"])
         load_group.add_argument("--download-dir",
                                 **load_kwargs["download_dir"])
-        load_group.add_argument("--map-location", **load_kwargs["map_location"])
+        load_group.add_argument("--map-location",
+                                **load_kwargs["map_location"])
         load_group.add_argument("--model-loader-extra-config",
                                 **load_kwargs["model_loader_extra_config"])
         load_group.add_argument("--ignore-patterns",
