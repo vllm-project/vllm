@@ -85,7 +85,7 @@ class DPMetadata:
         # This environment variable exists to quickly disable this optimization
         # if we run into this case.
         if envs.VLLM_DISABLE_NCCL_DP_PADDING:
-            logger.info("Using CPU all reduce to syncronize DP padding between ranks.")
+            logger.info_once("Using CPU all reduce to syncronize DP padding between ranks.")
             device = "cpu"
             group = get_dp_group().cpu_group
         num_tokens_across_dp = [0] * dp_size
