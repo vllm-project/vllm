@@ -90,9 +90,9 @@ class PassConfig:
     fi_allreduce_fusion_max_size_mb: dict[int,
                                           float] = field(default_factory=dict)
     """The thresholds of the communicated tensor sizes under which
-    vllm should use flashinfer fused allreduce. Specified as a
-    dictionary mapping each world size to the threshold in MB
-        { <world size>: <max size in mb> }
+    vLLM should use flashinfer fused allreduce. Specified as a
+    dictionary mapping each world size to the threshold in MiB
+        { <world size>: <max size in MiB> }
     Unspecified world sizes will fallback to
         { 2: 64, 4: 1, <everything else>: 0.5 }"""
 
