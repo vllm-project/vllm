@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import ast
+import inspect
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Optional, TypeVar, cast
 
 import torch
 import torch.nn as nn
 
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.models.config import VerifyAndUpdateConfig
@@ -131,7 +134,22 @@ def _get_pooling_model_name(orig_model_name: str, pooling_suffix: str) -> str:
     return model_name + pooling_suffix
 
 
-def create_mm_pooling_model_cls(orig_cls: _T) -> _T:
+def try_create_mm_pooling_model_cls(orig_cls: _T) -> _T:
+
+    class CallVisitor(ast.NodeVisitor):
+
+        def __init__(self):
+            self.calls = []
+
+        def visit_Call(self, node):
+            if isinstance(node.func, ast.Name):
+                self.calls.append(node.func.id)
+            self.generic_visit(node)
+
+    visitor = CallVisitor()
+    visitor.visit(ast.parse(inspect.getsource(orig_cls)))
+    if "init_vllm_registered_model" not in visitor.calls:
+        return None
 
     class ModelForPooling(orig_cls, VllmModelForPooling):
 
@@ -277,7 +295,7 @@ def as_seq_cls_model(cls: _T) -> _T:
     from vllm.model_executor.models.interfaces import SupportsCrossEncoding
     from vllm.sequence import IntermediateTensors
 
-    from .utils import maybe_prefix
+    from .utils import get_model_hidden_size, maybe_prefix
 
     class ModelForSequenceClassification(_create_pooling_model_cls(cls),
                                          SupportsCrossEncoding):
@@ -285,9 +303,10 @@ def as_seq_cls_model(cls: _T) -> _T:
         def _init_pooler(self, vllm_config: "VllmConfig", prefix: str = ""):
             config = vllm_config.model_config.hf_config
             quant_config = vllm_config.quant_config
+            hidden_size = get_model_hidden_size(config)
 
             self.score = ReplicatedLinear(
-                config.hidden_size,
+                hidden_size,
                 config.num_labels,
                 bias=False,
                 params_dtype=torch.float32,
