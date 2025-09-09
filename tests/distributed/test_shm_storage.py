@@ -4,6 +4,7 @@
 import multiprocessing
 import random
 import time
+import traceback
 import unittest
 from multiprocessing import Lock
 
@@ -313,8 +314,6 @@ def run_multiprocess_example():
 
     except Exception as e:
         print(f"Error in minimal example: {e}")
-        import traceback
-
         traceback.print_exc()
 
 

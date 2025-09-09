@@ -12,7 +12,6 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import partial
-from multiprocessing import Lock
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from multiprocessing.synchronize import Lock as LockType
@@ -86,7 +85,8 @@ class MultiprocExecutor(Executor):
         scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
 
         # Create workers
-        shared_worker_lock = Lock()
+        context = get_mp_context()
+        shared_worker_lock = context.Lock()
         unready_workers: list[UnreadyWorkerProcHandle] = []
         success = False
         try:
@@ -423,7 +423,7 @@ class WorkerProc:
                 daemon=True,
                 name="WorkerAsyncOutputCopy")
             self.async_output_copy_thread.start()
-        
+
         # Initialize multimodal receiver cache if needed
         self.mm_receiver_cache = worker_receiver_cache_from_config(
             vllm_config, MULTIMODAL_REGISTRY, shared_worker_lock)

@@ -273,12 +273,12 @@ llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
 
 Based on the configuration, the content of the multi-modal caches on `P0` and `P1` are as follows:
 
-| Cache Type | `P0` Cache | `P1` Cache | Shm Cache | Max. Memory | mm_processor_cache_type |
+| mm_processor_cache_type | Cache Type | `P0` Cache | `P1` Engine Cache | `P1` Worker Cache | Max. Memory |
 |-------------------|-------------|------------|------------|-------------|-------------|
-| Processor Caching | K + V | N/A | N/A | `mm_processor_cache_gb * data_parallel_size` | lru |
-| Key-Replicated Caching | K | K + V | N/A | `mm_processor_cache_gb * api_server_count` | lru |
-| Shared Memory Caching | K | N/A | V | `mm_processor_cache_gb * api_server_count` | shm |
-| Disabled | N/A | N/A | N/A | `0` | N/A |
+| lru | Processor Caching | K + V | N/A | N/A | `mm_processor_cache_gb * data_parallel_size` |
+| lru | Key-Replicated Caching | K | K + V | N/A | `mm_processor_cache_gb * api_server_count` |
+| shm | Shared Memory Caching | K | N/A | V | `mm_processor_cache_gb * api_server_count` |
+| N/A | Disabled | N/A | N/A | N/A | `0` |
 
 K: Stores the hashes of multi-modal items  
 V: Stores the processed tensor data of multi-modal items

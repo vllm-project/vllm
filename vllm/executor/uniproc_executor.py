@@ -136,6 +136,8 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
             distributed_init_method=distributed_init_method,
             is_driver_worker=is_driver_worker,
         )
+        self.mm_receiver_cache = worker_receiver_cache_from_config(
+            self.vllm_config, MULTIMODAL_REGISTRY, Lock())
         self.collective_rpc("init_worker", args=([kwargs], ))
         self.collective_rpc("init_device")
         self.collective_rpc("load_model")

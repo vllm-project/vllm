@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import traceback
 import unittest
 
 from vllm.distributed.device_communicators.shm_object_storage import (
@@ -26,15 +27,11 @@ class TestSingleWriterShmRingBuffer(unittest.TestCase):
         self.ring_buffer = SingleWriterShmRingBuffer(
             data_buffer_size=self.buffer_size, create=True)
 
-        try:
-            # Then open it with another instance
-            reader_buffer = SingleWriterShmRingBuffer(
-                *self.ring_buffer.handle())
-            self.assertFalse(reader_buffer.is_writer)
-            self.assertEqual(reader_buffer.shared_memory.name,
-                             self.ring_buffer.shared_memory.name)
-        finally:
-            del reader_buffer
+        # Then open it with another instance
+        reader_buffer = SingleWriterShmRingBuffer(*self.ring_buffer.handle())
+        self.assertFalse(reader_buffer.is_writer)
+        self.assertEqual(reader_buffer.shared_memory.name,
+                         self.ring_buffer.shared_memory.name)
 
     def test_buffer_access(self):
         """Test accessing allocated buffers"""
@@ -166,8 +163,6 @@ def main():
 
     except Exception as e:
         print(f"Demo error: {e}")
-        import traceback
-
         traceback.print_exc()
 
     print("\n=== Demo Complete ===")

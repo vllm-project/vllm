@@ -622,12 +622,10 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
     def __init__(
         self,
         vllm_config: "VllmConfig",
-        shared_worker_lock: Optional[LockType],
+        shared_worker_lock: LockType,
     ) -> None:
         super().__init__()
 
-        assert shared_worker_lock is not None, \
-            "shared_worker_lock must be provided for shm receiver cache"
         self.world_size = vllm_config.parallel_config.world_size
         mm_config = vllm_config.model_config.get_multimodal_config()
 
@@ -690,7 +688,7 @@ def engine_receiver_cache_from_config(
 def worker_receiver_cache_from_config(
     vllm_config: "VllmConfig",
     mm_registry: "MultiModalRegistry",
-    shared_worker_lock: Optional[LockType] = None,
+    shared_worker_lock: LockType,
 ) -> Optional[BaseMultiModalReceiverCache]:
     """
     This is used in the worker process.
