@@ -47,7 +47,7 @@ from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
 from types import MappingProxyType
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
-                    Optional, TextIO, Tuple, TypeVar, Union, cast, overload)
+                    Optional, TextIO, TypeVar, Union, cast, overload)
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -173,6 +173,7 @@ CYAN = '\033[1;36m'
 RESET = '\033[0;0m'
 
 STR_DTYPE_TO_TORCH_DTYPE = {
+    "float32": torch.float32,
     "half": torch.half,
     "bfloat16": torch.bfloat16,
     "float": torch.float,
@@ -515,8 +516,8 @@ def random_uuid() -> str:
 class AsyncMicrobatchTokenizer:
     """Asynchronous tokenizer with micro-batching.
 
-    Pulls pending encode/decode requests from a queue and batches them 
-    up to reduce overhead. A single-thread ThreadPoolExecutor is used 
+    Pulls pending encode/decode requests from a queue and batches them
+    up to reduce overhead. A single-thread ThreadPoolExecutor is used
     so the event loop stays responsive.
     """
 
@@ -663,18 +664,18 @@ class AsyncMicrobatchTokenizer:
     def _queue_key(self, op: str, kwargs: dict) -> tuple:
         """
         Return a normalized key describing operation + kwargs.
-        
+
         - `add_special_tokens`: {True/False}
         - `truncation`: {True/False}
-          - If `truncation` is False (`max_length` is None), 
+          - If `truncation` is False (`max_length` is None),
             returns a key for a can_batch queue.
           - If `truncation` is True and `max_length` is None or equals
             `tokenizer.model_max_length`, returns a key for a can_batch queue.
           - Otherwise, returns a key for a cannot_batch queue.
-        
+
         Examples:
           - Decode: ("decode",)
-          - Encode typical: 
+          - Encode typical:
             ("encode", add_special_tokens, bool_truncation, max_length_label)
           - Fallback: ("encode", "other")
         """
@@ -687,19 +688,50 @@ class AsyncMicrobatchTokenizer:
         max_length = kwargs.get("max_length")
 
         if not truncation:
-            return ("encode", add_special_tokens, False, None)
+            return "encode", add_special_tokens, False, None
 
         model_max = getattr(self.tokenizer, "model_max_length", None)
         if max_length is None or (model_max is not None
                                   and max_length == model_max):
-            return ("encode", add_special_tokens, True, "model_max")
+            return "encode", add_special_tokens, True, "model_max"
 
-        return ("encode", "other")
+        return "encode", "other"
 
     def __del__(self):
-        for task in self._batcher_tasks:
-            if not task.done():
-                task.cancel()
+        if ((tasks := getattr(self, "_batcher_tasks", None))
+                and (loop := getattr(self, "_loop", None))
+                and not loop.is_closed()):
+
+            def cancel_tasks():
+                for task in tasks:
+                    task.cancel()
+
+            loop.call_soon_threadsafe(cancel_tasks)
+
+
+def cancel_task_threadsafe(task: Task):
+    if task and not task.done():
+        run_in_loop(task.get_loop(), task.cancel)
+
+
+def close_sockets(sockets: Sequence[Union[zmq.Socket, zmq.asyncio.Socket]]):
+    for sock in sockets:
+        if sock is not None:
+            sock.close(linger=0)
+
+
+def run_in_loop(loop: AbstractEventLoop, function: Callable, *args):
+    if in_loop(loop):
+        function(*args)
+    elif not loop.is_closed():
+        loop.call_soon_threadsafe(function, *args)
+
+
+def in_loop(event_loop: AbstractEventLoop) -> bool:
+    try:
+        return asyncio.get_running_loop() == event_loop
+    except RuntimeError:
+        return False
 
 
 def make_async(
@@ -850,7 +882,7 @@ def is_valid_ipv6_address(address: str) -> bool:
         return False
 
 
-def split_host_port(host_port: str) -> Tuple[str, int]:
+def split_host_port(host_port: str) -> tuple[str, int]:
     # ipv6
     if host_port.startswith('['):
         host, port = host_port.rsplit(']', 1)
@@ -906,6 +938,14 @@ def get_open_port() -> int:
             if candidate_port not in reserved_port_range:
                 return candidate_port
     return _get_open_port()
+
+
+def get_open_ports_list(count: int = 5) -> list[int]:
+    """Get a list of open ports."""
+    ports = set()
+    while len(ports) < count:
+        ports.add(get_open_port())
+    return list(ports)
 
 
 def _get_open_port() -> int:
@@ -1283,6 +1323,17 @@ def common_broadcastable_dtype(dtypes: Collection[torch.dtype]):
     )
 
 
+def as_list(maybe_list: Iterable[T]) -> list[T]:
+    """Convert iterable to list, unless it's already a list."""
+    return maybe_list if isinstance(maybe_list, list) else list(maybe_list)
+
+
+def as_iter(obj: Union[T, Iterable[T]]) -> Iterable[T]:
+    if isinstance(obj, str) or not isinstance(obj, Iterable):
+        obj = [obj]
+    return obj
+
+
 # `collections` helpers
 def is_list_of(
     value: object,
@@ -1395,6 +1446,12 @@ def _patched_set_stream(stream: torch.cuda.Stream) -> None:
 torch.cuda.set_stream = _patched_set_stream
 
 
+class _StreamPlaceholder:
+
+    def __init__(self):
+        self.synchronize = lambda: None
+
+
 def current_stream() -> torch.cuda.Stream:
     """
     replace `torch.cuda.current_stream()` with `vllm.utils.current_stream()`.
@@ -1414,8 +1471,18 @@ def current_stream() -> torch.cuda.Stream:
         # On ROCm using the default 0 stream in combination with RCCL
         # is hurting performance. Therefore creating a dedicated stream
         # per process
-        _current_stream_tls.value = torch.cuda.Stream(
-        ) if current_platform.is_rocm() else torch.cuda.current_stream()
+        if current_platform.is_rocm():
+            _current_stream_tls.value = torch.cuda.Stream()
+        elif current_platform.is_cpu():
+            _current_stream_tls.value = _StreamPlaceholder()
+        else:
+            current_stream = current_platform.current_stream
+            if current_stream is not None:
+                _current_stream_tls.value = current_stream()
+            else:
+                raise ValueError(
+                    "Fail to set current stream, current platform "
+                    "may not support current_stream with torch API")
     return _current_stream_tls.value
 
 
@@ -1608,15 +1675,19 @@ def weak_bind(bound_method: Callable[..., Any], ) -> Callable[..., None]:
     return weak_bound
 
 
-# From: https://stackoverflow.com/a/4104188/2749989
 def run_once(f: Callable[P, None]) -> Callable[P, None]:
 
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> None:
-        if not wrapper.has_run:  # type: ignore[attr-defined]
-            wrapper.has_run = True  # type: ignore[attr-defined]
-            return f(*args, **kwargs)
+        if wrapper.has_run:  # type: ignore[attr-defined]
+            return
+
+        with wrapper.lock:  # type: ignore[attr-defined]
+            if not wrapper.has_run:  # type: ignore[attr-defined]
+                wrapper.has_run = True  # type: ignore[attr-defined]
+                return f(*args, **kwargs)
 
     wrapper.has_run = False  # type: ignore[attr-defined]
+    wrapper.lock = threading.Lock()  # type: ignore[attr-defined]
     return wrapper
 
 
@@ -1658,11 +1729,21 @@ class FlexibleArgumentParser(ArgumentParser):
     """ArgumentParser that allows both underscore and dash in names."""
 
     _deprecated: set[Action] = set()
+    _json_tip: str = (
+        "When passing JSON CLI arguments, the following sets of arguments "
+        "are equivalent:\n"
+        '   --json-arg \'{"key1": "value1", "key2": {"key3": "value2"}}\'\n'
+        "   --json-arg.key1 value1 --json-arg.key2.key3 value2\n\n"
+        "Additionally, list elements can be passed individually using +:\n"
+        '   --json-arg \'{"key4": ["value3", "value4", "value5"]}\'\n'
+        "   --json-arg.key4+ value3 --json-arg.key4+=\'value4,value5\'\n\n")
 
     def __init__(self, *args, **kwargs):
-        # Set the default 'formatter_class' to SortedHelpFormatter
-        if 'formatter_class' not in kwargs:
-            kwargs['formatter_class'] = SortedHelpFormatter
+        # Set the default "formatter_class" to SortedHelpFormatter
+        if "formatter_class" not in kwargs:
+            kwargs["formatter_class"] = SortedHelpFormatter
+        # Pop kwarg "add_json_tip" to control whether to add the JSON tip
+        self.add_json_tip = kwargs.pop("add_json_tip", True)
         super().__init__(*args, **kwargs)
 
     if sys.version_info < (3, 13):
@@ -1703,6 +1784,14 @@ class FlexibleArgumentParser(ArgumentParser):
             group = self._FlexibleArgumentGroup(self, *args, **kwargs)
             self._action_groups.append(group)
             return group
+
+    def format_help(self) -> str:
+        # Add tip about JSON arguments to the epilog
+        epilog = self.epilog or ""
+        if (self.add_json_tip
+                and not epilog.startswith(FlexibleArgumentParser._json_tip)):
+            self.epilog = FlexibleArgumentParser._json_tip + epilog
+        return super().format_help()
 
     def parse_args(  # type: ignore[override]
         self,
@@ -1891,15 +1980,18 @@ class FlexibleArgumentParser(ArgumentParser):
 
         file_path = args[index + 1]
 
-        config_args = self._load_config_file(file_path)
+        config_args = self.load_config_file(file_path)
 
-        # 0th index is for {serve,chat,complete}
+        # 0th index might be the sub command {serve,chat,complete,...}
         # optionally followed by model_tag (only for serve)
         # followed by config args
         # followed by rest of cli args.
         # maintaining this order will enforce the precedence
         # of cli > config > defaults
-        if args[0] == "serve":
+        if args[0].startswith('-'):
+            # No sub command (e.g., api_server entry point)
+            args = config_args + args[0:index] + args[index + 2:]
+        elif args[0] == "serve":
             model_in_cli = len(args) > 1 and not args[1].startswith('-')
             model_in_config = any(arg == '--model' for arg in config_args)
 
@@ -1922,7 +2014,7 @@ class FlexibleArgumentParser(ArgumentParser):
 
         return args
 
-    def _load_config_file(self, file_path: str) -> list[str]:
+    def load_config_file(self, file_path: str) -> list[str]:
         """Loads a yaml file and returns the key value pairs as a
         flattened list with argparse like pattern
         ```yaml
@@ -1963,6 +2055,11 @@ class FlexibleArgumentParser(ArgumentParser):
             if isinstance(value, bool) and key not in store_boolean_arguments:
                 if value:
                     processed_args.append('--' + key)
+            elif isinstance(value, list):
+                if value:
+                    processed_args.append('--' + key)
+                    for item in value:
+                        processed_args.append(str(item))
             else:
                 processed_args.append('--' + key)
                 processed_args.append(str(value))
@@ -2399,7 +2496,7 @@ class PlaceholderModule(_PlaceholderBase):
     A placeholder object to use when a module does not exist.
 
     This enables more informative errors when trying to access attributes
-    of a module that does not exists.
+    of a module that does not exist.
     """
 
     def __init__(self, name: str) -> None:
@@ -2503,7 +2600,7 @@ def direct_register_custom_op(
 
 def resolve_obj_by_qualname(qualname: str) -> Any:
     """
-    Resolve an object by its fully qualified name.
+    Resolve an object by its fully-qualified class name.
     """
     module_name, obj_name = qualname.rsplit(".", 1)
     module = importlib.import_module(module_name)
@@ -3026,7 +3123,7 @@ class LazyLoader(types.ModuleType):
     """
     LazyLoader module borrowed from Tensorflow
     https://github.com/tensorflow/tensorflow/blob/main/tensorflow/python/util/lazy_loader.py
-    with a addition of "module caching".
+    with an addition of "module caching".
 
     Lazily import a module, mainly to avoid pulling in large dependencies.
     Modules such as `xgrammar` might do additional side effects, so we
@@ -3193,6 +3290,24 @@ def sha256_cbor_64bit(input) -> int:
     return full_hash & ((1 << 64) - 1)
 
 
+def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], int]:
+    """Get a hash function by name, or raise an error if
+    the function is not found.
+    Args:
+        hash_fn_name: Name of the hash function.
+    Returns:
+        A hash function.
+    """
+    if hash_fn_name == "sha256":
+        return sha256
+    if hash_fn_name == "sha256_cbor_64bit":
+        return sha256_cbor_64bit
+    if hash_fn_name == "builtin":
+        return hash
+
+    raise ValueError(f"Unsupported hash function: {hash_fn_name}")
+
+
 def is_torch_equal_or_newer(target: str) -> bool:
     """Check if the installed torch version is >= the target version.
 
@@ -3241,6 +3356,12 @@ def has_deep_gemm() -> bool:
     """Whether the optional `deep_gemm` package is available."""
 
     return _has_module("deep_gemm")
+
+
+def has_triton_kernels() -> bool:
+    """Whether the optional `triton_kernels` package is available."""
+
+    return _has_module("triton_kernels")
 
 
 def set_process_title(name: str,

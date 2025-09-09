@@ -189,23 +189,21 @@ VLM_TEST_SETTINGS = {
         },
         marks=[pytest.mark.core_model],
     ),
-    # FIXME(Isotr0py): Enable this test after
-    # https://github.com/huggingface/transformers/pull/39470 released
-    # "idefics3-transformers": VLMTestInfo(
-    #     models=["HuggingFaceTB/SmolVLM-256M-Instruct"],
-    #     test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-    #     prompt_formatter=lambda img_prompt:f"<|begin_of_text|>User:{img_prompt}<end_of_utterance>\nAssistant:",  # noqa: E501
-    #     img_idx_to_prompt=lambda idx: "<image>",
-    #     max_model_len=8192,
-    #     max_num_seqs=2,
-    #     auto_cls=AutoModelForImageTextToText,
-    #     hf_output_post_proc=model_utils.idefics3_trunc_hf_output,
-    #     image_size_factors=[(0.25, 0.5, 1.0)],
-    #     vllm_runner_kwargs={
-    #         "model_impl": "transformers",
-    #     },
-    #     marks=[pytest.mark.core_model],
-    # ),
+    "idefics3-transformers": VLMTestInfo(
+        models=["HuggingFaceTB/SmolVLM-256M-Instruct"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt:f"<|begin_of_text|>User:{img_prompt}<end_of_utterance>\nAssistant:",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "<image>",
+        max_model_len=8192,
+        max_num_seqs=2,
+        auto_cls=AutoModelForImageTextToText,
+        hf_output_post_proc=model_utils.idefics3_trunc_hf_output,
+        image_size_factors=[(0.25, 0.5, 1.0)],
+        vllm_runner_kwargs={
+            "model_impl": "transformers",
+        },
+        marks=[pytest.mark.core_model],
+    ),
     # Pixel values from processor are not 4D or 5D arrays
     "qwen2_5_vl-transformers": VLMTestInfo(
         models=["Qwen/Qwen2.5-VL-3B-Instruct"],
@@ -221,21 +219,6 @@ VLM_TEST_SETTINGS = {
             "model_impl": "transformers",
         },
         marks=[large_gpu_mark(min_gb=32)],
-    ),
-    # Check "auto" with fallback to transformers
-    "internvl-transformers": VLMTestInfo(
-        models=["OpenGVLab/InternVL3-1B-hf"],
-        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n", # noqa: E501
-        img_idx_to_prompt=lambda idx: "<IMG_CONTEXT>",
-        max_model_len=4096,
-        use_tokenizer_eos=True,
-        image_size_factors=[(0.25, 0.5, 1.0)],
-        vllm_runner_kwargs={
-            "model_impl": "auto",
-        },
-        auto_cls=AutoModelForImageTextToText,
-        marks=[pytest.mark.core_model],
     ),
     #### Extended model tests
     "aria": VLMTestInfo(
@@ -457,6 +440,20 @@ VLM_TEST_SETTINGS = {
         use_tokenizer_eos=True,
         patch_hf_runner=model_utils.internvl_patch_hf_runner,
     ),
+    "intern_vl-hf": VLMTestInfo(
+        models=["OpenGVLab/InternVL3-1B-hf"],
+        test_type=(
+            VLMTestType.IMAGE,
+            VLMTestType.MULTI_IMAGE,
+            VLMTestType.VIDEO,
+        ),
+        prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n", # noqa: E501
+        img_idx_to_prompt=lambda idx: "<IMG_CONTEXT>",
+        video_idx_to_prompt=lambda idx: "<video>",
+        max_model_len=8192,
+        use_tokenizer_eos=True,
+        auto_cls=AutoModelForImageTextToText,
+    ),
     "kimi_vl": VLMTestInfo(
         models=["moonshotai/Kimi-VL-A3B-Instruct"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
@@ -557,7 +554,7 @@ VLM_TEST_SETTINGS = {
         get_stop_token_ids=lambda tok: tok.convert_tokens_to_ids(['<|im_end|>', '<|endoftext|>']),  # noqa: E501
         hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
         patch_hf_runner=model_utils.minicpmo_26_patch_hf_runner,
-        # FIXME: https://huggingface.co/openbmb/MiniCPM-V-2_6/discussions/55
+        # FIXME: https://huggingface.co/openbmb/MiniCPM-o-2_6/discussions/49
         marks=[pytest.mark.skip("HF import fails")],
     ),
     "minicpmv_26": VLMTestInfo(
@@ -570,8 +567,6 @@ VLM_TEST_SETTINGS = {
         get_stop_token_ids=lambda tok: tok.convert_tokens_to_ids(['<|im_end|>', '<|endoftext|>']),  # noqa: E501
         hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
         patch_hf_runner=model_utils.minicpmv_26_patch_hf_runner,
-        # FIXME: https://huggingface.co/openbmb/MiniCPM-V-2_6/discussions/55
-        marks=[pytest.mark.skip("HF import fails")],
     ),
     "minimax_vl_01": VLMTestInfo(
         models=["MiniMaxAI/MiniMax-VL-01"],
@@ -607,18 +602,6 @@ VLM_TEST_SETTINGS = {
         patch_hf_runner=model_utils.ovis_patch_hf_runner,
         marks=[large_gpu_mark(min_gb=32)],
     ),
-    "ovis1_6": VLMTestInfo(
-        models=["AIDC-AI/Ovis1.6-Llama3.2-3B"],
-        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nYou are a helpful and honest multimodal assistant.<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n{img_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n", # noqa: E501
-        img_idx_to_prompt=lambda idx: "<image>\n", # noqa: E501
-        max_model_len=4096,
-        max_num_seqs=2,
-        dtype="half",
-        # use sdpa mode for hf runner since ovis2 didn't work with flash_attn
-        hf_model_kwargs={"llm_attn_implementation": "sdpa"},
-        patch_hf_runner=model_utils.ovis_patch_hf_runner,
-    ),
     "ovis2": VLMTestInfo(
         models=["AIDC-AI/Ovis2-1B"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
@@ -630,6 +613,23 @@ VLM_TEST_SETTINGS = {
         # use sdpa mode for hf runner since ovis2 didn't work with flash_attn
         hf_model_kwargs={"llm_attn_implementation": "sdpa"},
         patch_hf_runner=model_utils.ovis_patch_hf_runner,
+    ),
+    "ovis2_5": VLMTestInfo(
+        models=["AIDC-AI/Ovis2.5-2B"],
+        test_type=(
+            VLMTestType.IMAGE,
+            VLMTestType.MULTI_IMAGE,
+            VLMTestType.VIDEO
+        ),
+        prompt_formatter=lambda img_prompt: f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n", # noqa: E501
+        img_idx_to_prompt=lambda idx: "<image>\n", # noqa: E501
+        video_idx_to_prompt=lambda idx: "<video>\n",
+        max_model_len=4096,
+        max_num_seqs=2,
+        dtype="half",
+        num_logprobs=10,
+        patch_hf_runner=model_utils.ovis2_5_patch_hf_runner,
+        hf_model_kwargs={"revision": "refs/pr/5"},
     ),
     "phi3v": VLMTestInfo(
         models=["microsoft/Phi-3.5-vision-instruct"],

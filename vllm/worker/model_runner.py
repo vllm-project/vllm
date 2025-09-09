@@ -86,7 +86,6 @@ class ModelInputForGPU(ModelRunnerInputBase):
     input_tokens: Optional[torch.Tensor] = None
     inputs_embeds: Optional[torch.Tensor] = None
     input_positions: Optional[torch.Tensor] = None
-    token_types: Optional[torch.Tensor] = None
     seq_lens: Optional[List[int]] = None
     query_lens: Optional[List[int]] = None
     lora_mapping: Optional["LoRAMapping"] = None
@@ -192,7 +191,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             self.input_tokens[0].clear()  # type: ignore
             self.inputs_embeds = None  # type: ignore
             self.input_positions[0].clear()  # type: ignore
-            self.token_types[0].clear()  # type: ignore
             self.mrope_input_positions = None  # type: ignore
             self.seq_lens[0] = 0  # type: ignore
             self.orig_seq_lens[0] = 0  # type: ignore
@@ -219,7 +217,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             input_tokens: Optional[List[List[int]]] = None,
             inputs_embeds: Optional[torch.Tensor] = None,
             input_positions: Optional[List[List[int]]] = None,
-            token_types: Optional[List[List[int]]] = None,
             mrope_input_positions: Optional[List[List[List[int]]]] = None,
 
             # The sequence length (may be capped to the sliding window).
@@ -284,12 +281,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                         for seq_id in range(len(self.seq_ids)):
                             self.input_positions[seq_id].clear()
 
-                    if token_types:
-                        self.token_types = token_types
-                    else:
-                        for seq_id in range(len(self.seq_ids)):
-                            self.token_types[seq_id].clear()
-
                     self.mrope_input_positions = None
 
                     if seq_lens:
@@ -348,7 +339,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 self.input_tokens = input_tokens or []
                 self.inputs_embeds = inputs_embeds
                 self.input_positions = input_positions or []
-                self.token_types = token_types or []
                 self.mrope_input_positions = mrope_input_positions or None
                 self.seq_lens = seq_lens or []
                 self.orig_seq_lens = orig_seq_lens or []
@@ -376,7 +366,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
             self.input_tokens = [[] for _ in range(self.n_seqs)]
             self.input_positions = [[] for _ in range(self.n_seqs)]
-            self.token_types = [[] for _ in range(self.n_seqs)]
             self.mrope_input_positions = None
             self.seq_lens = [0] * self.n_seqs
             self.orig_seq_lens = [0] * self.n_seqs
@@ -400,7 +389,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                     f"inputs_embeds.shape="
                     f"{getattr(self.inputs_embeds, 'shape', None)}, "
                     f"input_positions={self.input_positions}, "
-                    f"token_types={self.token_types}, "
                     f"mrope_input_positions={self.mrope_input_positions}, "
                     f"seq_lens={self.seq_lens}, "
                     f"orig_seq_lens={self.orig_seq_lens}, "
@@ -508,8 +496,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         if inter_data.is_prompt:
             context_len = seq_data.get_num_computed_tokens()
             seq_len = min(seq_len, context_len + token_chunk_size)
-        elif self.runner.scheduler_config.is_multi_step or \
-            self.runner.model_config.is_encoder_decoder:
+        elif self.runner.model_config.is_encoder_decoder:
             context_len = seq_len - 1
         else:
             context_len = seq_data.get_num_computed_tokens()
@@ -523,8 +510,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             prompt_embeds = seq_data.get_token_embeddings(
             )[context_len:seq_len]
 
-        token_types = seq_group_metadata.token_type_ids
-
         inter_data.seq_lens[seq_idx] = seq_len
         inter_data.orig_seq_lens[seq_idx] = seq_len
         inter_data.prompt_lens[seq_idx] = seq_data.get_prompt_len()
@@ -532,8 +517,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         inter_data.input_tokens[seq_idx].extend(tokens)
         inter_data.inputs_embeds = prompt_embeds
         inter_data.input_positions[seq_idx].extend(range(context_len, seq_len))
-        inter_data.token_types[seq_idx].extend(
-            token_types if token_types else [])
         inter_data.query_lens[seq_idx] = seq_len - context_len
 
         if seq_data.mrope_position_delta is not None:
@@ -591,8 +574,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 seq_idx][uncomputed_start:]
             inter_data.input_positions[seq_idx] = inter_data.input_positions[
                 seq_idx][uncomputed_start:]
-            inter_data.token_types[seq_idx] = inter_data.token_types[seq_idx][
-                uncomputed_start:]
             context_len = prefix_cache_len
 
             inter_data.context_lens[seq_idx] = context_len
@@ -607,8 +588,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 seq_idx][-1:]
             inter_data.input_positions[seq_idx] = inter_data.input_positions[
                 seq_idx][-1:]
-            inter_data.token_types[seq_idx] = inter_data.token_types[seq_idx][
-                -1:]
             inter_data.query_lens[seq_idx] = 1
             inter_data.context_lens[seq_idx] = inter_data.seq_lens[seq_idx] - 1
 
@@ -763,8 +742,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         has Prefills (if any). The rest of the steps are guaranteed to be all
         decodes. In this case, we set up the padding as if all the sequences
         are decodes so we may run all steps except the first step in CUDA graph
-        mode. The padding is accounted for in the multi-step `advance_step`
-        family of functions.
+        mode.
 
         Args:
             num_seqs (int): Number of sequences scheduled to run.
@@ -778,9 +756,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             int: Returns the determined number of padding sequences. If
                 CUDA graphs is not viable, returns -1.
         """
-        is_mscp: bool = self.runner.scheduler_config.is_multi_step and \
-                    self.runner.scheduler_config.chunked_prefill_enabled
-        decode_only = self.decode_only or is_mscp
+        decode_only = self.decode_only
         if not decode_only:
             # Early exit so we can treat num_seqs as the batch_size below.
             return -1
@@ -806,12 +782,9 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         # Combine and flatten intermediate data.
         input_tokens = list[int]()
         inputs_embeds_list = list[torch.Tensor]()
-        token_types = list[int]()
         for inter_data in self.inter_data_list:
             for cur_input_tokens in inter_data.input_tokens:
                 input_tokens.extend(cur_input_tokens)
-            for cur_token_types in inter_data.token_types:
-                token_types.extend(cur_token_types)
             if inter_data.inputs_embeds is not None:
                 inputs_embeds_list.append(
                     inter_data.inputs_embeds.to(
@@ -894,11 +867,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                                                self.runner.device,
                                                self.runner.pin_memory)
 
-        token_types_tensor = async_tensor_h2d(token_types, torch.long,
-                                               self.runner.device,
-                                               self.runner.pin_memory) \
-                                                if token_types else None
-
         if mrope_input_positions is not None:
             for idx in range(3):
                 mrope_input_positions[idx].extend(
@@ -955,7 +923,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             input_tokens=input_tokens_tensor,
             inputs_embeds=inputs_embeds,
             input_positions=input_positions_tensor,
-            token_types=token_types_tensor,
             attn_metadata=attn_metadata,
             seq_lens=seq_lens,
             query_lens=query_lens,

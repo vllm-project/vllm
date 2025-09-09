@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 import torch.nn as nn
@@ -10,6 +10,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.attention.backends.cpu_attn import TorchSDPAMetadataBuilderV1
+from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 if TYPE_CHECKING:
@@ -21,7 +22,8 @@ logger = init_logger(__name__)
 class CPUModelRunner(GPUModelRunner):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
-        super().__init__(vllm_config, device)
+        with _torch_cuda_wrapper():
+            super().__init__(vllm_config, device)
 
         assert device == torch.device("cpu")
         assert self.speculative_config is None, "spec decode is not supported."
@@ -29,7 +31,7 @@ class CPUModelRunner(GPUModelRunner):
         self.use_cuda_graph = False
         self.cascade_attn_enabled = False
 
-        self._postprocess_tenosrs()
+        self._postprocess_tensors()
 
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         """
@@ -41,7 +43,7 @@ class CPUModelRunner(GPUModelRunner):
         Args:
             scheduler_output: The scheduler output.
         """
-        # Attention free models have zero kv_cache_goups, however models
+        # Attention free models have zero kv_cache_groups, however models
         # like Mamba are also attention free but use the kv_cache for
         # keeping its internal state. This is why we check the number
         # of kv_cache groups instead of solely checking
@@ -53,13 +55,13 @@ class CPUModelRunner(GPUModelRunner):
             raise ValueError("Multiple KVCacheGroups is not"
                              "currently supported with CPU model runner.")
 
-        assert type(
-            self.attn_metadata_builders[0]) is TorchSDPAMetadataBuilderV1
+        assert type(self.attn_groups[0]
+                    [0].metadata_builder) is TorchSDPAMetadataBuilderV1
 
-        self.attn_metadata_builders[0].reorder_batch(self.input_batch,
-                                                     scheduler_output)
+        self.attn_groups[0][0].metadata_builder.reorder_batch(
+            self.input_batch, scheduler_output)
 
-    def _postprocess_tenosrs(self) -> None:
+    def _postprocess_tensors(self) -> None:
         # Note: replace device tensors with cpu tensors
         def replace_tensor(obj: Any, cpu_attr_name: str,
                            device_attr_name) -> None:
@@ -71,8 +73,8 @@ class CPUModelRunner(GPUModelRunner):
                 setattr(obj, device_attr_name, cpu_tensor)
 
         for k, v in vars(self).items():
-            if k.endswith("_cpu") and isinstance(v, torch.Tensor):
-                replace_tensor(self, k, k[:-4])
+            if isinstance(v, CpuGpuBuffer):
+                v.gpu = v.cpu
 
         for k, v in vars(self.input_batch).items():
             if k.endswith("_cpu_tensor") and isinstance(v, torch.Tensor):
@@ -108,17 +110,42 @@ class CPUModelRunner(GPUModelRunner):
     def _sync_device(self) -> None:
         pass
 
+    def _to_list(self, sampled_token_ids: torch.Tensor) -> list[list[int]]:
+        return sampled_token_ids.tolist()
+
+    def get_dp_padding(self,
+                       num_tokens: int) -> tuple[int, Optional[torch.Tensor]]:
+        # Note: For CPU backend, dp padding is not required for now.
+        return 0, None
+
+
+@contextmanager
+def _torch_cuda_wrapper():
+
+    class _EventPlaceholder:
+
+        def __init__(self, *args, **kwargs) -> None:
+            self.record = lambda: None
+            self.synchronize = lambda: None
+
+    cuda_event = torch.cuda.Event
+    try:
+        torch.cuda.Event = _EventPlaceholder
+        yield
+    finally:
+        torch.cuda.Event = cuda_event
+
 
 @contextmanager
 def _set_global_compilation_settings(config: VllmConfig):
-    import torch._inductor.config
+    import torch._inductor.config as torch_inductor_config
 
     inductor_config = config.compilation_config.inductor_compile_config
+    # Note: The MKLDNN and CPPGEMM backend requires freezing parameters.
+    freezing_value = torch_inductor_config.freezing
     try:
-        # Note: The MKLDNN and CPPGEMM backend requires freezing parameters.
-        freezing_value = torch._inductor.config.freezing
         if inductor_config.get("max_autotune", False):
-            torch._inductor.config.freezing = True
+            torch_inductor_config.freezing = True
         yield
     finally:
-        torch._inductor.config.freezing = freezing_value
+        torch_inductor_config.freezing = freezing_value

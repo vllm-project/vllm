@@ -25,6 +25,7 @@ from torch import nn
 from transformers import Llama4TextConfig
 
 from vllm.attention import Attention
+from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -35,6 +36,7 @@ from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.shared_fused_moe import SharedFusedMoE
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 
@@ -72,7 +74,18 @@ class Llama4MoE(nn.Module):
                                        quant_config=None,
                                        prefix=f"{prefix}.router")
 
-        self.experts = FusedMoE(
+        self.shared_expert = LlamaMLP(
+            hidden_size=config.hidden_size,
+            intermediate_size=intermediate_size_moe,
+            hidden_act="silu",
+            quant_config=quant_config,
+            bias=False,
+            prefix=f"{prefix}.shared_expert",
+            reduce_results=False,
+        )
+
+        self.experts = SharedFusedMoE(
+            shared_experts=self.shared_expert,
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
@@ -82,22 +95,13 @@ class Llama4MoE(nn.Module):
             reduce_results=False,
             renormalize=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.experts")
-
-        self.shared_expert = LlamaMLP(
-            hidden_size=config.hidden_size,
-            intermediate_size=intermediate_size_moe,
-            hidden_act="silu",
-            quant_config=quant_config,
-            bias=False,
-            prefix=f"{prefix}.shared_expert",
-            reduce_results=self.experts.must_reduce_shared_expert_outputs(),
+            prefix=f"{prefix}.experts",
         )
 
     def forward(self, hidden_states):
         router_logits, _ = self.router(hidden_states)
-        shared_out = self.shared_expert(hidden_states)
-        routed_out = self.experts(
+
+        shared_out, routed_out = self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
         )
@@ -194,17 +198,20 @@ class Llama4Attention(nn.Module):
             is_neox_style=is_neox_style,
         ) if not self.nope else None
 
-        self.attn = Attention(
+        use_chunked_local_attn = not self.nope and config.attention_chunk_size
+        attn_cls = (ChunkedLocalAttention
+                    if use_chunked_local_attn else Attention)
+        self.attn = attn_cls(
             self.num_heads,
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
             quant_config=quant_config,
-            per_layer_sliding_window=None,
-            use_irope=not self.nope,
             prefix=f"{prefix}.attn",
-        )
+            **({
+                "attention_chunk_size": config.attention_chunk_size
+            } if use_chunked_local_attn else {}))
 
     def _get_attn_scale(self, positions: torch.Tensor) -> torch.Tensor:
         floor = torch.floor((positions + 1.0) / self.floor_scale)
@@ -222,10 +229,14 @@ class Llama4Attention(nn.Module):
 
         if self.rotary_emb is not None:
             q, k = self.rotary_emb(positions, q, k)
+
         if self.qk_norm is not None:
-            q = q.reshape(-1, self.num_heads, self.head_dim)
+            # Normalization is applied on the head_dim dimension. The rest of
+            # the dimensions are collapsed into a single dimension to support
+            # custom rms_norm cuda kernel.
+            q = q.reshape(-1, self.head_dim)
             q = self.qk_norm(q.float()).reshape(-1, self.q_size).to(q.dtype)
-            k = k.reshape(-1, self.num_kv_heads, self.head_dim)
+            k = k.reshape(-1, self.head_dim)
             k = self.qk_norm(k.float()).reshape(-1, self.kv_size).to(k.dtype)
 
         # We are applying temperature tuning (https://arxiv.org/abs/2501.19399)

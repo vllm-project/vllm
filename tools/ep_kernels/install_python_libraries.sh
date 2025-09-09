@@ -29,6 +29,12 @@ if [ -z "$CUDA_HOME" ]; then
     exit 1
 fi
 
+# assume TORCH_CUDA_ARCH_LIST is set correctly
+if [ -z "$TORCH_CUDA_ARCH_LIST" ]; then
+    echo "TORCH_CUDA_ARCH_LIST is not set, please set it to your desired architecture."
+    exit 1
+fi
+
 # disable all features except IBGDA
 export NVSHMEM_IBGDA_SUPPORT=1
 
@@ -71,6 +77,7 @@ clone_repo() {
     local repo_url=$1
     local dir_name=$2
     local key_file=$3
+    local commit_hash=$4
 
     if [ -d "$dir_name" ]; then
         # Check if directory has uncommitted changes (dirty)
@@ -81,26 +88,36 @@ clone_repo() {
             echo "$dir_name directory exists but clone appears incomplete, cleaning up and re-cloning"
             rm -rf "$dir_name"
             git clone "$repo_url"
+            if [ -n "$commit_hash" ]; then
+                cd "$dir_name"
+                git checkout "$commit_hash"
+                cd ..
+            fi
         else
             echo "$dir_name directory exists and appears complete; manually update if needed"
         fi
     else
         git clone "$repo_url"
+        if [ -n "$commit_hash" ]; then
+            cd "$dir_name"
+            git checkout "$commit_hash"
+            cd ..
+        fi
     fi
 }
 
 # build and install pplx, require pytorch installed
 pushd $WORKSPACE
-clone_repo "https://github.com/ppl-ai/pplx-kernels" "pplx-kernels" "setup.py"
+clone_repo "https://github.com/ppl-ai/pplx-kernels" "pplx-kernels" "setup.py" "c336faf"
 cd pplx-kernels
 # see https://github.com/pypa/pip/issues/9955#issuecomment-838065925
 # PIP_NO_BUILD_ISOLATION=0 disables build isolation
-PIP_NO_BUILD_ISOLATION=0 TORCH_CUDA_ARCH_LIST=9.0a+PTX pip install -vvv -e  .
+PIP_NO_BUILD_ISOLATION=0 pip install -vvv -e  .
 popd
 
 # build and install deepep, require pytorch installed
 pushd $WORKSPACE
-clone_repo "https://github.com/deepseek-ai/DeepEP" "DeepEP" "setup.py"
+clone_repo "https://github.com/deepseek-ai/DeepEP" "DeepEP" "setup.py" "e3908bf"
 cd DeepEP
 export NVSHMEM_DIR=$WORKSPACE/nvshmem_install
 PIP_NO_BUILD_ISOLATION=0 pip install -vvv -e  .

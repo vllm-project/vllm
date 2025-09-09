@@ -96,9 +96,28 @@ def run_voxtral(question: str, audio_count: int) -> ModelRequestData:
     )
 
 
+# Gemma3N
+def run_gemma3n(question: str, audio_count: int) -> ModelRequestData:
+    model_name = "google/gemma-3n-E2B-it"
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=2048,
+        max_num_batched_tokens=2048,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"audio": audio_count},
+        enforce_eager=True,
+    )
+    prompt = f"<start_of_turn>user\n<audio_soft_token>{question}"
+    "<end_of_turn>\n<start_of_turn>model\n"
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+    )
+
+
 # Granite Speech
 def run_granite_speech(question: str, audio_count: int) -> ModelRequestData:
-    # NOTE - the setting in this example are somehat different than what is
+    # NOTE - the setting in this example are somewhat different from what is
     # optimal for granite speech, and it is generally recommended to use beam
     # search. Check the model README for suggested settings.
     # https://huggingface.co/ibm-granite/granite-speech-3.3-8b
@@ -124,6 +143,36 @@ def run_granite_speech(question: str, audio_count: int) -> ModelRequestData:
         engine_args=engine_args,
         prompt=prompts,
         lora_requests=[LoRARequest("speech", 1, speech_lora_path)],
+    )
+
+
+# MiDashengLM
+def run_midashenglm(question: str, audio_count: int):
+    model_name = "mispeech/midashenglm-7b"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=4096,
+        max_num_seqs=5,
+        limit_mm_per_prompt={"audio": audio_count},
+    )
+
+    audio_in_prompt = "".join(
+        ["<|audio_bos|><|AUDIO|><|audio_eos|>" for idx in range(audio_count)]
+    )
+
+    default_system = "You are a helpful language and speech assistant."
+
+    prompt = (
+        f"<|im_start|>system\n{default_system}<|im_end|>\n"
+        "<|im_start|>user\n"
+        f"{audio_in_prompt}{question}<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
     )
 
 
@@ -331,7 +380,9 @@ def run_whisper(question: str, audio_count: int) -> ModelRequestData:
 
 model_example_map = {
     "voxtral": run_voxtral,
+    "gemma3n": run_gemma3n,
     "granite_speech": run_granite_speech,
+    "midashenglm": run_midashenglm,
     "minicpmo": run_minicpmo,
     "phi4_mm": run_phi4mm,
     "phi4_multimodal": run_phi4_multimodal,
