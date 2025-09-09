@@ -12,8 +12,15 @@ from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.layer import Attention
 from vllm.attention.selector import get_attn_backend
+from vllm.config import VllmConfig
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
                                               subclass_attention_backend)
+
+
+def _get_max_seq_len(vllm_config: VllmConfig) -> int:
+    return MULTIMODAL_REGISTRY.get_encdec_max_encoder_len(
+        vllm_config.model_config)
 
 
 @functools.lru_cache
@@ -28,10 +35,10 @@ def create_cross_attention_backend(
                   common_prefix_len: int,
                   common_attn_metadata: CommonAttentionMetadata,
                   fast_build: bool = False) -> AttentionMetadata:
-            # Cross-attention metadata is built in GPU model runner
-            # We just ensure it's non-causal and pass through
             new_common_attn_metadata = copy(common_attn_metadata)
             new_common_attn_metadata.causal = False
+            new_common_attn_metadata.max_seq_len = _get_max_seq_len(
+                self.vllm_config)
             return super().build(common_prefix_len, new_common_attn_metadata,
                                  fast_build)
 

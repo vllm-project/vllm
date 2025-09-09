@@ -970,7 +970,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.kv_cache_config.kv_cache_groups):
             seq_lens_arg = seq_lens
             seq_lens_cpu_arg = seq_lens_cpu
-            max_seq_len_arg = max_seq_len
 
             if isinstance(kv_cache_group_spec.kv_cache_spec,
                           EncoderOnlyAttentionSpec):
@@ -1000,9 +999,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     slot_mapping = torch.empty(0,
                                                dtype=torch.int64,
                                                device=self.device)
-
-                # NOTE - using max_encoder_len is whisper specific
-                max_seq_len_arg = self.max_encoder_len
 
                 seq_lens_arg = torch.full(
                     (num_reqs, ),
@@ -1038,7 +1034,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_reqs=num_reqs,
                 num_actual_tokens=total_num_scheduled_tokens,
                 max_query_len=max_num_scheduled_tokens,
-                max_seq_len=max_seq_len_arg,
+                max_seq_len=max_seq_len,
                 block_table_tensor=blk_table_tensor,
                 slot_mapping=slot_mapping,
                 logits_indices_padded=logits_indices_padded,
