@@ -12,8 +12,8 @@ from vllm.entrypoints.openai.protocol import (
     ErrorResponse, RequestResponseMetadata, TranscriptionRequest,
     TranscriptionResponse, TranscriptionResponseStreamChoice,
     TranscriptionResponseVerbose, TranscriptionStreamResponse,
-    TranslationRequest, TranslationResponse, TranslationResponseVerbose,
-    TranslationResponseStreamChoice, TranslationStreamResponse)
+    TranslationRequest, TranslationResponse, TranslationResponseStreamChoice,
+    TranslationResponseVerbose, TranslationStreamResponse)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.speech_to_text import OpenAISpeechToText
 from vllm.logger import init_logger
@@ -46,10 +46,8 @@ class OpenAIServingTranscription(OpenAISpeechToText):
     async def create_transcription(
         self, audio_data: bytes, request: TranscriptionRequest,
         raw_request: Request
-    ) -> Union[
-            TranscriptionResponse, TranscriptionResponseVerbose,
-            TranslationResponse, TranslationResponseVerbose,
-            AsyncGenerator[str, None], ErrorResponse]:
+    ) -> Union[TranscriptionResponse, TranscriptionResponseVerbose,
+               AsyncGenerator[str, None], ErrorResponse]:
         """Transcription API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/audio/createTranscription
@@ -108,10 +106,8 @@ class OpenAIServingTranslation(OpenAISpeechToText):
     async def create_translation(
         self, audio_data: bytes, request: TranslationRequest,
         raw_request: Request
-    ) -> Union[
-            TranscriptionResponse, TranscriptionResponseVerbose,
-            TranslationResponse, TranslationResponseVerbose,
-            AsyncGenerator[str, None], ErrorResponse]:
+    ) -> Union[TranslationResponse, TranslationResponseVerbose, AsyncGenerator[
+            str, None], ErrorResponse]:
         """Translation API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/audio/createTranslation

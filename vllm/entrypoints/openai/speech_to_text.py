@@ -302,10 +302,10 @@ class OpenAISpeechToText(OpenAIServing):
                 async for op in result_generator:
                     if request.response_format == 'verbose_json':
                         segment_class: Union[type[TranscriptionSegment], 
-                                             type[TranslationSegment]] = (
-                            TranscriptionSegment
-                            if self.task_type == "transcribe" else
-                            TranslationSegment)
+                                        type[TranslationSegment]] = (
+                                        TranscriptionSegment
+                                        if self.task_type == "transcribe" else
+                                        TranslationSegment)
 
                         segments: list[Union[
                             TranslationSegment,
@@ -328,24 +328,26 @@ class OpenAISpeechToText(OpenAIServing):
                     "seconds": int(math.ceil(duration_s)),
                 }
                 if request.response_format != 'verbose_json':
-                    final_response = cast(T, TranscriptionResponse(text=text,
-                                                           usage=usage))
+                    final_response = cast(
+                        T, TranscriptionResponse(text=text, usage=usage))
                 else:
-                    final_response = cast(V, TranscriptionResponseVerbose(
-                        text=text,
-                        language=request.language,
-                        duration=str(duration_s),
-                        segments=total_segments))
+                    final_response = cast(
+                        V,
+                        TranscriptionResponseVerbose(text=text,
+                                                     language=request.language,
+                                                     duration=str(duration_s),
+                                                     segments=total_segments))
             else:
                 # no usage in response for translation task
                 if request.response_format != 'verbose_json':
                     final_response = cast(T, TranslationResponse(text=text))
                 else:
-                    final_response = cast(V, TranslationResponseVerbose(
-                        text=text,
-                        language=request.language,
-                        duration=str(duration_s),
-                        segments=total_segments))
+                    final_response = cast(
+                        V, 
+                        TranslationResponseVerbose(text=text,
+                                                   language=request.language,
+                                                   duration=str(duration_s),
+                                                   segments=total_segments))
                 # final_response = cast(response_class, final_response)
             return final_response
         except asyncio.CancelledError:
