@@ -546,10 +546,10 @@ steps:
 
 #####  models test  #####
 
-# Test subset of models when vLLM source is modified.
-# Always run if test file is modified.
-- label: Basic Models Initialization Test (Subset)
-  timeout_in_minutes: 75
+# When any vLLM source is modified, then test intialization of a small subset
+# of supported models. Also run if model initialization test file is modified
+- label: Models Initialization Test (Fast)
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
@@ -558,9 +558,10 @@ steps:
   commands:
     - pytest -v -s models/test_initialization.py::test_can_initialize_subset
 
-# Test all other models when any model source is modified.
-# Always run if test file is modified.
-- label: Basic Models Initialization Test (Full)
+# Only when vLLM model source is modified - test initialization of a large
+# subset of supported models (the complement of the small subset in the above
+# test.) Also run if model initialization test file is modified
+- label: Basic Models Initialization Test (Slow)
   timeout_in_minutes: 75
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
@@ -570,9 +571,9 @@ steps:
   commands:
     - pytest -v -s models/test_initialization.py::test_can_initialize_other
 
-# Other non-initialization models tests
-- label: Basic Models Test
-  timeout_in_minutes: 75
+# Other, non-initialization-related models tests
+- label: Other Basic Models Tests
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
@@ -584,7 +585,8 @@ steps:
     - pytest -v -s models/test_utils.py
     - pytest -v -s models/test_vision.py
 
-- label: Standard Language Models Test (Subset)
+# Test language models, excluding hand-picked slow tests
+- label: Language Models Tests (Standard,Fast)
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
@@ -595,7 +597,9 @@ steps:
     - pip freeze | grep -E 'torch'
     - pytest -v -s models/language -m "core_model and not slow_test"
 
-- label: Standard Language Models Test (Other)
+# Hand-picked set of slow language models tests. Only run when model source is
+# modelified, or when specified test files are modified
+- label: Language Models Tests (Standard,Slow)
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
@@ -609,8 +613,8 @@ steps:
     - pytest -v -s models/language -m "core_model and slow_test"
 
 # Shard hybrid language model tests
-- label: Hybrid Language Models Test Shard 0
-  timeout_in_minutes: 45
+- label: Language Models Tests (Hybrid,Shard 0)
+  timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
@@ -623,44 +627,38 @@ steps:
     - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
     - pytest -v -s --shard-count=4 --shard-index=0 models/language/generation -m hybrid_model
 
-- label: Hybrid Language Models Test Shard 1
-  timeout_in_minutes: 45
+- label: Language Models Tests (Hybrid,Shard 1)
+  timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/language/generation
   commands:
-    # Install fast path packages for testing against transformers
-    # Note: also needed to run plamo2 model in vLLM
     - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.2.5'
     - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
     - pytest -v -s --shard-count=4 --shard-index=1 models/language/generation -m hybrid_model
 
-- label: Hybrid Language Models Test Shard 2
-  timeout_in_minutes: 45
+- label: Language Models Tests (Hybrid,Shard 2)
+  timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/language/generation
   commands:
-    # Install fast path packages for testing against transformers
-    # Note: also needed to run plamo2 model in vLLM
     - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.2.5'
     - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
     - pytest -v -s --shard-count=4 --shard-index=2 models/language/generation -m hybrid_model
 
-- label: Hybrid Language Models Test Shard 3
-  timeout_in_minutes: 45
+- label: Language Models Tests (Hybrid,Shard 3)
+  timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/language/generation
   commands:
-    # Install fast path packages for testing against transformers
-    # Note: also needed to run plamo2 model in vLLM
     - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.2.5'
     - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
     - pytest -v -s --shard-count=4 --shard-index=3 models/language/generation -m hybrid_model
