@@ -255,7 +255,7 @@ def as_seq_cls_model(cls: _T) -> _T:
     from vllm.model_executor.models.interfaces import SupportsCrossEncoding
     from vllm.sequence import IntermediateTensors
 
-    from .utils import maybe_prefix
+    from .utils import get_model_hidden_size, maybe_prefix
 
     class ModelForSequenceClassification(_create_pooling_model_cls(cls),
                                          SupportsCrossEncoding):
@@ -263,9 +263,10 @@ def as_seq_cls_model(cls: _T) -> _T:
         def _init_pooler(self, vllm_config: "VllmConfig", prefix: str = ""):
             config = vllm_config.model_config.hf_config
             quant_config = vllm_config.quant_config
+            hidden_size = get_model_hidden_size(config)
 
             self.score = ReplicatedLinear(
-                config.hidden_size,
+                hidden_size,
                 config.num_labels,
                 bias=False,
                 params_dtype=torch.float32,
