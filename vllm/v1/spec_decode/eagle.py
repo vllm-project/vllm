@@ -93,14 +93,13 @@ class EagleProposer:
             dtype=self.dtype,
             device=device)
 
+        # We need +1 here because the arange is used to set query_start_loc,
+        # which has one more element than batch_size.
         max_batch_size = vllm_config.scheduler_config.max_num_seqs
-        self.arange = torch.arange(
-            # We need +1 here because the arange is used to set query_start_loc,
-            # which has one more element than batch_size.
-            max_batch_size + 1,
-            device=device,
-            dtype=torch.int32,
-        )
+        max_num_slots_for_arange = max(max_batch_size + 1, self.max_num_tokens)
+        self.arange = torch.arange(max_num_slots_for_arange,
+                                   device=device,
+                                   dtype=torch.int32)
 
         self.inputs_embeds = torch.zeros(
             (self.max_num_tokens, self.hidden_size),
@@ -155,13 +154,16 @@ class EagleProposer:
         target_hidden_states: torch.Tensor,
         # [batch_size]
         next_token_ids: torch.Tensor,
+        last_token_indices: torch.Tensor | None,
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
         mm_embeds: Optional[list[torch.Tensor]] = None,
     ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
-        last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
+
+        if last_token_indices is None:
+            last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
 
         if self.method == "eagle3":
             assert isinstance(self.model, Eagle3LlamaForCausalLM)
@@ -225,6 +227,12 @@ class EagleProposer:
                 last_hidden_states, hidden_states = ret_hidden_states
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
+
+        # Early exit if there is only one draft token to be generated.
+        if self.num_speculative_tokens == 1:
+            draft_token_ids = logits.argmax(dim=-1)
+            return draft_token_ids.view(-1, 1)
+
         positions = target_positions[last_token_indices]
         hidden_states = hidden_states[last_token_indices]
 
@@ -242,15 +250,12 @@ class EagleProposer:
 
         draft_token_ids = logits.argmax(dim=-1)
 
-        # Early exit if there is only one draft token to be generated.
-        if self.num_speculative_tokens == 1:
-            # [batch_size, 1]
-            return draft_token_ids.view(-1, 1)
-
-        # TODO: Currently, MTP module released by deepseek only has
-        # one layer. Adapt this code to support multiple layers once
-        # there's a multi-layer MTP module.
-        assert isinstance(attn_metadata, self.allowed_attn_types)
+        if not isinstance(attn_metadata, self.allowed_attn_types):
+            raise ValueError(
+                f"Unsupported attention metadata type for speculative "
+                "decoding with num_speculative_tokens > 1: "
+                f"{type(attn_metadata)}. Supported types are: "
+                f"{self.allowed_attn_types}")
 
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
@@ -260,10 +265,13 @@ class EagleProposer:
             input_batch_size = self.vllm_config.pad_for_cudagraph(batch_size)
         else:
             input_batch_size = batch_size
-        attn_metadata.num_actual_tokens = batch_size
-        attn_metadata.max_query_len = 1
-        attn_metadata.query_start_loc = self.arange[:batch_size + 1]
-        for _ in range(self.num_speculative_tokens - 1):
+
+        common_attn_metadata.num_actual_tokens = batch_size
+        common_attn_metadata.max_query_len = 1
+        common_attn_metadata.query_start_loc = self.arange[:batch_size + 1]
+        common_attn_metadata.query_start_loc_cpu = torch.from_numpy(
+            self.token_arange_np[:batch_size + 1]).clone()
+        for token_index in range(self.num_speculative_tokens - 1):
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.
@@ -283,27 +291,35 @@ class EagleProposer:
                                             positions)
 
             # Increment the sequence lengths.
-            attn_metadata.max_seq_len += 1
-            attn_metadata.seq_lens += 1
-            # Consider max model length.
-            attn_metadata.max_seq_len = min(attn_metadata.max_seq_len,
-                                            self.max_model_len)
+            common_attn_metadata.seq_lens += 1
+            common_attn_metadata.seq_lens_cpu += 1
             # For the requests that exceed the max model length, we set the
             # sequence length to 1 to minimize their overheads in attention.
-            attn_metadata.seq_lens.masked_fill_(exceeds_max_model_len, 1)
+            common_attn_metadata.seq_lens.masked_fill_(exceeds_max_model_len,
+                                                       1)
+
+            common_attn_metadata.num_computed_tokens_cpu = \
+                common_attn_metadata.seq_lens_cpu - 1
 
             # Compute the slot mapping.
-            block_numbers = clamped_positions // self.block_size
-            block_ids = attn_metadata.block_table.gather(
+            block_numbers = positions // self.block_size
+            block_ids = common_attn_metadata.block_table_tensor.gather(
                 dim=1, index=block_numbers.view(-1, 1))
             block_ids = block_ids.view(-1)
-            attn_metadata.slot_mapping = (block_ids * self.block_size +
-                                          clamped_positions % self.block_size)
+            common_attn_metadata.slot_mapping = (block_ids * self.block_size +
+                                                 positions % self.block_size)
             # Mask out the slot mappings that exceed the max model length.
             # Otherwise, the KV cache will be inadvertently updated with the
             # padding tokens.
-            attn_metadata.slot_mapping.masked_fill_(exceeds_max_model_len,
-                                                    PADDING_SLOT_ID)
+            common_attn_metadata.slot_mapping.masked_fill_(
+                exceeds_max_model_len, PADDING_SLOT_ID)
+
+            # Rebuild attention metadata
+            attn_metadata = self.runner.attn_groups[0][0].metadata_builder\
+                .build_for_drafting(common_attn_metadata=common_attn_metadata,
+                                draft_index=token_index + 1)
+            for layer_name in self.attn_layer_names:
+                per_layer_attn_metadata[layer_name] = attn_metadata
 
             # copy inputs to buffer for cudagraph
             self.input_ids[:batch_size] = input_ids
@@ -322,12 +338,17 @@ class EagleProposer:
             with set_forward_context(per_layer_attn_metadata,
                                      self.vllm_config,
                                      num_tokens=input_batch_size):
-                last_hidden_states, hidden_states = self.model(
+                ret_hidden_states = self.model(
                     input_ids=input_ids,
                     positions=self.positions[:input_batch_size],
                     hidden_states=self.hidden_states[:input_batch_size],
                     inputs_embeds=inputs_embeds,
                 )
+                if self.method in ("deepseek_mtp", "ernie_mtp"):
+                    last_hidden_states = ret_hidden_states
+                    hidden_states = last_hidden_states
+                else:
+                    last_hidden_states, hidden_states = ret_hidden_states
             hidden_states = hidden_states[:batch_size]
             logits = self.model.compute_logits(last_hidden_states[:batch_size],
                                                None)
@@ -337,6 +358,41 @@ class EagleProposer:
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
         return draft_token_ids
+
+    def prepare_inputs_deferred(self,
+                                common_attn_metadata: CommonAttentionMetadata):
+        """
+        This function is used to prepare the inputs for the spec decode.
+        It updates the common_attn_metadata for speculative decoding,
+        but does not consider the rejected tokens. Instead, all tokens
+        are included as inputs to the speculator, with the rejected tokens
+        used as padding and filtered out later by `last_token_indices`.
+        """
+        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+
+        new_query_len_per_req = (query_start_loc_cpu[1:] -
+                                 query_start_loc_cpu[:-1])
+
+        total_num_tokens = query_start_loc_cpu[-1].item()
+        token_indices = self.arange[:total_num_tokens]
+
+        spec_common_attn_metadata = CommonAttentionMetadata(
+            query_start_loc=common_attn_metadata.query_start_loc,
+            seq_lens=common_attn_metadata.seq_lens,
+            query_start_loc_cpu=query_start_loc_cpu,
+            seq_lens_cpu=common_attn_metadata.seq_lens_cpu,
+            num_computed_tokens_cpu=common_attn_metadata.
+            num_computed_tokens_cpu,
+            num_reqs=common_attn_metadata.num_reqs,
+            num_actual_tokens=total_num_tokens,
+            max_query_len=new_query_len_per_req.max().item(),
+            max_seq_len=common_attn_metadata.seq_lens_cpu.max().item(),
+            block_table_tensor=common_attn_metadata.block_table_tensor,
+            slot_mapping=common_attn_metadata.slot_mapping[token_indices],
+            causal=True,
+        )
+
+        return spec_common_attn_metadata, token_indices
 
     def propose_tree(
         self,
@@ -537,6 +593,9 @@ class EagleProposer:
 
         device = common_attn_metadata.query_start_loc.device
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+
+        # num_rejected_tokens = num_rejected_tokens * 0
+
         new_seq_lens_cpu = common_attn_metadata.seq_lens_cpu \
             - num_rejected_tokens
 
