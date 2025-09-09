@@ -243,9 +243,6 @@ class EagleProposer:
                 common_attn_metadata=common_attn_metadata,
             )
 
-            if self.vllm_config.speculative_config.draft_vocab_pruned is not None:
-                draft_token_ids_list = self.pruned_token_ids[draft_token_ids_list]
-
             # [batch_size, num_tree_tokens]
             return torch.cat(draft_token_ids_list, dim=1)
 
@@ -375,6 +372,10 @@ class EagleProposer:
         else:
             draft_token_ids = torch.topk(logits, num_children,
                                          dim=-1).indices.view(batch_size, -1)
+
+        if self.vllm_config.speculative_config.draft_vocab_pruned is not None:
+                draft_token_ids_list = self.pruned_token_ids[draft_token_ids_list]
+
         draft_token_ids_list = [draft_token_ids]
         draft_hidden_states = hidden_states.view(batch_size, 1, -1)
 
@@ -511,6 +512,9 @@ class EagleProposer:
                 draft_token_ids = torch.topk(logits, num_children,
                                              dim=-1).indices.view(
                                                  batch_size, -1)
+
+            if self.vllm_config.speculative_config.draft_vocab_pruned is not None:
+                draft_token_ids_list = self.pruned_token_ids[draft_token_ids_list]
             draft_token_ids_list.append(draft_token_ids)
 
             # Update the # drafts counters for the next tree level.
@@ -662,8 +666,7 @@ class EagleProposer:
             logger.info("Loading EAGLE LM head weights from the target model.")
 
             if self.vllm_config.speculative_config.draft_vocab_pruned is not None:
-                self.model.lm_head.load_state_dict(target_language_model.lm_head.state_dict())
-                # self.model.lm_head = copy.deepcopy(target_language_model.lm_head)
+                self.model.lm_head = copy.deepcopy(target_language_model.lm_head)
             else:
                 self.model.lm_head = target_language_model.lm_head
 

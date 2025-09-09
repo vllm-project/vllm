@@ -56,6 +56,7 @@ def parse_args():
         choices=["ngram", "eagle", "eagle3", "mtp", "None"],
     )
     parser.add_argument("--num-spec-tokens", type=int, default=2)
+    parser.add_argument("--spec-token-tree", type=list[tuple[int]], default=None)
     parser.add_argument("--prompt-lookup-max", type=int, default=5)
     parser.add_argument("--prompt-lookup-min", type=int, default=2)
     parser.add_argument("--tp", type=int, default=1)
@@ -100,6 +101,10 @@ def main():
     else:
         prompts = get_custom_mm_prompts(args.num_prompts)
 
+    spec_token_tree_str = None
+    if args.spec_token_tree is not None:
+        spec_token_tree_str = args.spec_token_tree
+
     # vanilla inference
     if args.method == "None":
         speculative_config = None
@@ -110,6 +115,7 @@ def main():
             "model": eagle_dir,
             "num_speculative_tokens": args.num_spec_tokens,
             "draft_vocab_pruned": args.draft_vocab_pruned,
+            "spec_token_tree": spec_token_tree_str,
         }
     elif args.method == "eagle3":
         eagle_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B" if args.eagle_dir is None else args.eagle_dir
@@ -117,6 +123,7 @@ def main():
             "method": args.method,
             "model": eagle_dir,
             "num_speculative_tokens": args.num_spec_tokens,
+            "spec_token_tree": spec_token_tree_str,
         }
     elif args.method == "ngram":
         speculative_config = {
