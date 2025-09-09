@@ -940,6 +940,7 @@ steps:
   commands:
     - pytest -v -s tests/distributed/test_context_parallel.py
 
+##### B200 test #####
 - label: Blackwell Decode Context Parallelism Test # optional
   gpu: b200
   optional: true
