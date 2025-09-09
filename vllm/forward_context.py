@@ -13,7 +13,7 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
-from vllm.v1.worker.ubatch_utils import (UbatchSlice, UBatchSlices)
+from vllm.v1.worker.ubatch_utils import (UBatchSlices, is_second_ubatch_empty)
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -106,9 +106,9 @@ class DPMetadata:
         orig_num_tokens_tensor = tensor[0, :]
         padded_num_tokens_tensor = tensor[1, :]
 
-        orig_min_num_tokens = orig_num_tokens_tensor.min().item()
-        padded_max_num_tokens = padded_num_tokens_tensor.max().item()
-        if padded_max_num_tokens >= 2 * orig_min_num_tokens:
+        orig_min_num_tokens = int(orig_num_tokens_tensor.min().item())
+        padded_max_num_tokens = int(padded_num_tokens_tensor.max().item())
+        if is_second_ubatch_empty(orig_min_num_tokens, padded_max_num_tokens):
             logger.debug(f"Aborting ubatching {orig_min_num_tokens} {padded_max_num_tokens}")
             return False, None
         return result, padded_num_tokens_tensor
@@ -196,7 +196,9 @@ class ForwardContext:
     Type AttentionMetadata for v0, 
     Type Dict[str, AttentionMetadata] for v1, map from layer_name of each 
     attention layer to its attention metadata
-    set dynamically for each forward pass
+    Type List[Dict[str, AttentionMetadata]] for DBO. List of size two, one
+    for each microbatch.
+    Set dynamically for each forward pass
     """
     attn_metadata: Union["AttentionMetadata", dict[str, "AttentionMetadata"], list[dict[str, "AttentionMetadata"]]]
     # TODO: remove after making all virtual_engines share the same kv cache

@@ -10,7 +10,7 @@ from vllm.forward_context import DPMetadata
 from vllm.logger import init_logger
 from vllm.utils import round_up
 
-from vllm.v1.worker.ubatch_utils import UBatchSlices, UbatchSlice
+from vllm.v1.worker.ubatch_utils import UBatchSlices, UbatchSlice, is_second_ubatch_empty
 
 logger = init_logger(__name__)
 
@@ -50,11 +50,11 @@ def get_dp_padding_ubatch(
     num_tokens_padded = round_up(num_tokens_padded, 2)
     num_tokens_per_ubatch = num_tokens_padded // 2
     should_ubatch = True
-    # num_pad_tokens = num_tokens_padded - num_tokens_unpadded
 
     # Sanity Check that the existing padding isn't giving us an empty second
     # ubatch. Abort if so
-    if num_tokens_unpadded <= num_tokens_padded // 2:
+    if is_second_ubatch_empty(num_tokens_unpadded, num_tokens_padded):
+        logger.debug(f"Aborting ubatching {num_tokens_unpadded} {num_tokens_padded}")
         should_ubatch = False
 
     # Note that we compute the number of padded tokens per ubatch
