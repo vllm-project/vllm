@@ -6,10 +6,11 @@ import math
 import time
 from collections.abc import AsyncGenerator
 from functools import cached_property
-from typing import Callable, Literal, Optional, TypeVar, Union, Any, cast
+from typing import Any, Callable, Literal, Optional, TypeVar, Union, cast
 
 import numpy as np
 from fastapi import Request
+from transformers import PreTrainedTokenizerBase
 
 import vllm.envs as envs
 from vllm.config import ModelConfig
@@ -20,17 +21,16 @@ from vllm.entrypoints.openai.protocol import (
     TranscriptionResponse, TranscriptionResponseStreamChoice,
     TranscriptionResponseVerbose, TranscriptionSegment,
     TranscriptionStreamResponse, TranslationResponse,
-    TranslationResponseVerbose, TranslationSegment,
-    TranslationResponseStreamChoice, TranslationStreamResponse, UsageInfo)
+    TranslationResponseStreamChoice, TranslationResponseVerbose,
+    TranslationSegment, TranslationStreamResponse, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
                                                     SpeechToTextRequest)
-from transformers import PreTrainedTokenizerBase
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.models import SupportsTranscription
 from vllm.outputs import RequestOutput
+from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import PlaceholderModule
 
 try:
@@ -39,19 +39,15 @@ except ImportError:
     librosa = PlaceholderModule("librosa")  # type: ignore[assignment]
 
 SpeechToTextResponse = Union[TranscriptionResponse, TranslationResponse]
-SpeechToTextResponseVerbose = Union[TranscriptionResponseVerbose, 
+SpeechToTextResponseVerbose = Union[TranscriptionResponseVerbose,
                                     TranslationResponseVerbose]
 SpeechToTextSegment = Union[TranscriptionSegment, TranslationSegment]
 T = TypeVar("T", bound=SpeechToTextResponse)
 V = TypeVar("V", bound=SpeechToTextResponseVerbose)
 S = TypeVar("S", bound=SpeechToTextSegment)
 
-ResponseType = Union[
-    TranscriptionResponse,
-    TranslationResponse,
-    TranscriptionResponseVerbose,
-    TranslationResponseVerbose
-]
+ResponseType = Union[TranscriptionResponse, TranslationResponse,
+                     TranscriptionResponseVerbose, TranslationResponseVerbose]
 logger = init_logger(__name__)
 
 
@@ -85,8 +81,8 @@ class OpenAISpeechToText(OpenAIServing):
             model_config, task_type)
 
         self.max_audio_filesize_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
-        self.tokenizer = cast(
-            PreTrainedTokenizerBase, get_tokenizer(model_config.tokenizer))
+        self.tokenizer = cast(PreTrainedTokenizerBase,
+                              get_tokenizer(model_config.tokenizer))
         if self.default_sampling_params:
             logger.info(
                 "Overwriting default completion sampling param with: %s",
@@ -137,7 +133,7 @@ class OpenAISpeechToText(OpenAIServing):
             if request.response_format == "verbose_json":
                 if not isinstance(prompt, dict):
                     raise ValueError("Expected prompt to be a dict,"
-                                      f"got {type(prompt)}")
+                                     f"got {type(prompt)}")
                 prompt_dict = cast(dict[str, Any], prompt)
                 decoder_prompt = prompt.get("decoder_prompt")
                 if not isinstance(decoder_prompt, str):
@@ -154,7 +150,7 @@ class OpenAISpeechToText(OpenAIServing):
                               start_time: float = 0) -> list[S]:
 
         init_token = self.tokenizer.encode('<|0.00|>')[0]
-        if (tokens[-1] ==  self.tokenizer.eos_token_id):
+        if (tokens[-1] == self.tokenizer.eos_token_id):
             tokens = tokens[:-1]
 
         tokens_with_start = (init_token, ) + tokens
@@ -164,7 +160,7 @@ class OpenAISpeechToText(OpenAIServing):
         end_right = tokens_is_timestamps[-2:] == [False, True]
 
         tokens_consecutive = []
-        segments : list[S]= []
+        segments: list[S] = []
         for idx, token in enumerate(tokens_is_timestamps):
             if (token and idx != len(tokens_is_timestamps) - 1
                     and tokens_is_timestamps[idx + 1]):
@@ -191,7 +187,7 @@ class OpenAISpeechToText(OpenAIServing):
                                   start=start_time + 0.02 * start_timestamp,
                                   temperature=-1.0,
                                   text=self.tokenizer.decode(
-                                  sliced_timestamp_tokens[1:-1]),
+                                      sliced_timestamp_tokens[1:-1]),
                                   tokens=sliced_timestamp_tokens[1:-1]))
                 segments.append(casting_segment)
         else:
@@ -202,17 +198,18 @@ class OpenAISpeechToText(OpenAIServing):
 
             casting_segment = cast(
                 S,
-                segment_class(id=len(segments),
-                              avg_logprob=-1.0,
-                              compression_ratio=-1.0,
-                              end=start_time + 0.02 * end_timestamp,
-                              no_speech_prob=-1.0,
-                              seek=start_time,
-                              start=start_time,
-                              temperature=-1.0,
-                              text=self.tokenizer.decode(
-                              tokens_with_start[1:all_timestamp_tokens[-1]]),
-                              tokens=tokens_with_start[1:all_timestamp_tokens[-1]]))
+                segment_class(
+                    id=len(segments),
+                    avg_logprob=-1.0,
+                    compression_ratio=-1.0,
+                    end=start_time + 0.02 * end_timestamp,
+                    no_speech_prob=-1.0,
+                    seek=start_time,
+                    start=start_time,
+                    temperature=-1.0,
+                    text=self.tokenizer.decode(
+                        tokens_with_start[1:all_timestamp_tokens[-1]]),
+                    tokens=tokens_with_start[1:all_timestamp_tokens[-1]]))
             segments.append(casting_segment)
         return segments
 
@@ -223,7 +220,7 @@ class OpenAISpeechToText(OpenAIServing):
         raw_request: Request,
         response_class: Union[type[T], type[V]],
         stream_generator_method: Callable[..., AsyncGenerator[str, None]],
-    ) -> Union[ResponseType, AsyncGenerator[str, None], ErrorResponse]:
+    ) -> Union[T, V, AsyncGenerator[str, None], ErrorResponse]:
         """Base method for speech-to-text operations like transcription and 
         translation."""
         error_check_ret = await self._check_model(request)
@@ -304,18 +301,19 @@ class OpenAISpeechToText(OpenAIServing):
             for idx, result_generator in enumerate(list_result_generator):
                 async for op in result_generator:
                     if request.response_format == 'verbose_json':
-                        segment_class = (
+                        segment_class: Union[type[TranscriptionSegment], 
+                                             type[TranslationSegment]] = (
                             TranscriptionSegment
                             if self.task_type == "transcribe" else
-                            TranslationSegment
-                        )
+                            TranslationSegment)
 
-                        segments : list[Union[TranslationSegment,
+                        segments: list[Union[
+                            TranslationSegment,
                             TranscriptionSegment]] = self._get_verbose_segments(
-                        cast(tuple, op.outputs[0].token_ids),
-                        segment_class=segment_class, 
-                        start_time=idx * 30)
-                        
+                                cast(tuple, op.outputs[0].token_ids),
+                                segment_class=segment_class,
+                                start_time=idx * 30)
+
                         total_segments.extend(segments)
                         text += "".join(map(lambda x: x.text, segments))
                     else:
@@ -330,26 +328,25 @@ class OpenAISpeechToText(OpenAIServing):
                     "seconds": int(math.ceil(duration_s)),
                 }
                 if request.response_format != 'verbose_json':
-                    final_response = TranscriptionResponse(
-                        text=text, usage=usage)
+                    final_response = cast(T, TranscriptionResponse(text=text,
+                                                           usage=usage))
                 else:
-                    final_response= (
-                        TranscriptionResponseVerbose(text=text,
-                                       language=request.language,
-                                       duration=str(duration_s),
-                                       segments=total_segments))
+                    final_response = cast(V, TranscriptionResponseVerbose(
+                        text=text,
+                        language=request.language,
+                        duration=str(duration_s),
+                        segments=total_segments))
             else:
                 # no usage in response for translation task
                 if request.response_format != 'verbose_json':
-                    final_response = (
-                        TranslationResponse(text=text))
+                    final_response = cast(T, TranslationResponse(text=text))
                 else:
-                    final_response = (
-                        TranslationResponseVerbose(text=text,
-                                       language=request.language,
-                                       duration=str(duration_s),
-                                       segments=total_segments))
-
+                    final_response = cast(V, TranslationResponseVerbose(
+                        text=text,
+                        language=request.language,
+                        duration=str(duration_s),
+                        segments=total_segments))
+                # final_response = cast(response_class, final_response)
             return final_response
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
