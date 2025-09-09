@@ -52,11 +52,11 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
+from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         GiB_bytes, LazyLoader, cdiv, check_use_alibi,
                         get_dtype_size, is_pin_memory_available, round_up,
                         supports_dynamo)
-from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
     create_fast_prefill_custom_backend,
@@ -217,8 +217,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 trust_remote_code=model_config.trust_remote_code,
             )
             if tokenizer is not None and self.vocab_size > len(tokenizer):
-                logger.warning(
-                    "Model vocab size > Tokenizer vocab size!")
+                logger.warning("Model vocab size > Tokenizer vocab size!")
                 self.vocab_size = len(tokenizer)
 
         # Sampler
@@ -1490,8 +1489,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Apply masking only if the actual vocab size exceeds allowed size
         if logits_vocab_size > vocab_size:
             # Create mask: True for indices >= self.vocab_size
-            mask = torch.arange(
-                logits_vocab_size, device=logits.device) >= vocab_size
+            mask = torch.arange(logits_vocab_size,
+                                device=logits.device) >= vocab_size
             # Apply mask to logits (replace invalid positions with -inf)
             logits.masked_fill_(mask, float("-inf"))
         return logits
@@ -2448,11 +2447,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             @functools.cache
             def rand_input_ids() -> torch.Tensor:
-                return torch.randint_like(
-                    self.input_ids.gpu,
-                    low=0,
-                    high=self.vocab_size,
-                    dtype=input_ids.dtype)
+                return torch.randint_like(self.input_ids.gpu,
+                                          low=0,
+                                          high=self.vocab_size,
+                                          dtype=input_ids.dtype)
 
             logger.debug_once("Randomizing dummy data for DP Rank")
             input_ids.copy_(rand_input_ids()[:input_ids.size(0)],
