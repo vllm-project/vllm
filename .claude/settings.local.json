@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(grep:*)"
-    ],
-    "deny": [],
-    "ask": []
-  }
-}
