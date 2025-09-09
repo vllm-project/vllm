@@ -165,6 +165,7 @@ if TYPE_CHECKING:
     VLLM_HAS_FLASHINFER_CUBIN: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
+    VLLM_ROCM_FP8_MFMA_PAGE_ATTN: bool = False
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = False
     VLLM_TUNED_CONFIG_FOLDER: Optional[str] = None
     VLLM_DISABLE_PAD_FOR_CUDAGRAPH: bool = False
@@ -1291,6 +1292,7 @@ def compute_hash() -> str:
         "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION",
         "VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16",
         "VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB",
+        "VLLM_ROCM_FP8_MFMA_PAGE_ATTN",
     ]
     for key in environment_variables_to_hash:
         # if this goes out of sync with environment_variables,
