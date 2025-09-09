@@ -4122,11 +4122,6 @@ class IntermediateLoggingConfig:
     output_dir: str = "/tmp/vllm_intermediates"
     """Directory where to save the intermediate tensors."""
 
-    reload_input_dir: Optional[str] = None
-    """Directory where to load the inputs for the steps/modules.
-    This is used when we want to check per module numerical gaps instead
-    of accumulated gap to further dive into the actual numerical issues."""
-
     module_call_match: Optional[list[str]] = None
     """Match modules by name regex and call index (
     a module can be called multiple times in a step)

@@ -30,22 +30,6 @@ Dump first layers module, all devices for step 0
 python3 ./examples/offline_inference/llm_engine_example.py --model "meta-llama/Llama-3.1-8B-Instruct"  --enforce-eager  --intermediate-log-config '{"enabled": true, "module_call_match": "layers\\.0\\."}'
 ```
 
-Dump customized layers, devices, steps through a config file
-
-The configuration file should be a JSON file with the following structure:
-
-```json
-{
-  "output_dir": "/tmp/vllm_intermediates",
-  "module_call_match": ["layers\\.0\\.(?!.*rotary_emb).*", "rotary_emb:0", "embed_tokens", "model\\.norm"],
-  "log_step_ids": [0, 1],
-  "device_names": ["cuda:0"]
-}
-```
-
-```bash
-python3 ./examples/offline_inference/llm_engine_example.py --model "meta-llama/Llama-3.1-8B-Instruct"  --enforce-eager  --intermediate-log-config-path $HOME/intermediate_logging_config.json
-```
 
 #### Configuration Parameters
 

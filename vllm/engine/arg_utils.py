@@ -25,8 +25,7 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          ConfigFormat, ConfigType, ConvertOption,
                          DecodingConfig, DetailedTraceModules, Device,
                          DeviceConfig, DistributedExecutorBackend,
-                         GuidedDecodingBackend, HfOverrides,
-                         IntermediateLoggingConfig, KVEventsConfig,
+                         GuidedDecodingBackend, HfOverrides, KVEventsConfig,
                          KVTransferConfig, LoadConfig, LogprobsMode,
                          LoRAConfig, ModelConfig, ModelDType, ModelImpl,
                          MultiModalConfig, ObservabilityConfig, ParallelConfig,
@@ -449,9 +448,8 @@ class EngineArgs:
     async_scheduling: bool = SchedulerConfig.async_scheduling
     # DEPRECATED
     enable_prompt_adapter: bool = False
-    intermediate_log_config_path: Optional[str] = None
 
-    intermediate_log_config: Optional[IntermediateLoggingConfig] = None
+    intermediate_log_config: Optional[dict[str, Any]] = None
 
     kv_sharing_fast_prefill: bool = \
         CacheConfig.kv_sharing_fast_prefill
@@ -853,11 +851,6 @@ class EngineArgs:
 
         vllm_group.add_argument("--intermediate-log-config",
                                 **vllm_kwargs["intermediate_log_config"])
-        vllm_group.add_argument(
-            "--intermediate-log-config-path",
-            type=str,
-            help="The path to the configurations for intermediate loggings. "
-            "Should be a string.")
         vllm_group.add_argument("--kv-transfer-config",
                                 **vllm_kwargs["kv_transfer_config"])
         vllm_group.add_argument('--kv-events-config',
@@ -978,18 +971,6 @@ class EngineArgs:
             use_tqdm_on_load=self.use_tqdm_on_load,
             pt_load_map_location=self.pt_load_map_location,
         )
-
-    def create_intermediate_log_config_from_path(self, ) -> None:
-        """set intermediate_log_config from intermediate_log_config_path
-        """
-        if self.intermediate_log_config_path is not None:
-            if self.intermediate_log_config is not None:
-                logger.warning("The `intermediate_log_config` is set,"
-                               "`intermediate_log_config_path` "
-                               "will be ignored.")
-            with open(self.intermediate_log_config_path) as f:
-                self.intermediate_log_config = \
-                    IntermediateLoggingConfig.from_dict(json.load(f))
 
     def create_speculative_config(
         self,
@@ -1273,8 +1254,6 @@ class EngineArgs:
             enable_chunked_prefill=self.enable_chunked_prefill,
             disable_log_stats=self.disable_log_stats,
         )
-
-        self.create_intermediate_log_config_from_path()
 
         # Reminder: Please update docs/features/compatibility_matrix.md
         # If the feature combo become valid
