@@ -50,8 +50,8 @@ class EAGLEConfig(PretrainedConfig):
             assert self.model is not None, \
                 "model should not be None when method is eagle"
             kwargs["architectures"] = [
-                f"Eagle{arch}" if not arch.startswith("Eagle") \
-                    else arch for arch in self.model.architectures
+                arch if arch.startswith("Eagle") or arch.endswith("Eagle") else
+                f"Eagle{arch}" for arch in self.model.architectures
             ]
         elif method == "eagle3":
             assert self.model is not None, \
