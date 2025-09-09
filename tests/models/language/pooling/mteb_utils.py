@@ -199,7 +199,7 @@ def mteb_test_embed_models(hf_runner,
     if model_info.mteb_score is None:
         with hf_runner(model_info.name,
                        is_sentence_transformer=True,
-                       dtype="float32") as hf_model:
+                       dtype=model_info.hf_dtype) as hf_model:
 
             if hf_model_callback is not None:
                 hf_model_callback(hf_model)
@@ -263,9 +263,12 @@ def run_mteb_rerank(cross_encoder, tasks, languages):
     return main_score
 
 
-def mteb_test_rerank_models_hf(hf_runner, model_name, hf_model_callback=None):
+def mteb_test_rerank_models_hf(hf_runner,
+                               model_name,
+                               hf_dtype="float32",
+                               hf_model_callback=None):
     with hf_runner(model_name, is_cross_encoder=True,
-                   dtype="float32") as hf_model:
+                   dtype=hf_dtype) as hf_model:
 
         original_predict = hf_model.predict
 
@@ -332,7 +335,7 @@ def mteb_test_rerank_models(hf_runner,
 
     if model_info.mteb_score is None:
         st_main_score, st_dtype = mteb_test_rerank_models_hf(
-            hf_runner, model_info.name, hf_model_callback)
+            hf_runner, model_info.name, model_info.hf_dtype, hf_model_callback)
     else:
         st_main_score = model_info.mteb_score
         st_dtype = "Constant"
