@@ -1982,7 +1982,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if not self.is_pooling_model:
                 logits = self.apply_vocab_size(self.vocab_size, logits)
 
-
         with record_function_or_nullcontext("Sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
