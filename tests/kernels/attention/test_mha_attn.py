@@ -40,13 +40,13 @@ def test_mha_attn_platform(device: str):
                    CpuPlatform()), \
              patch("vllm.platforms.current_platform", CpuPlatform()):
             attn = MultiHeadAttention(16, 64, scale=1)
-            assert attn.attn_backend == _Backend.TORCH_SDPA
+            assert attn.attn_backend == _Backend.TORCH_SDPA_VLLM_V1
     elif device == "hip":
         with patch("vllm.attention.selector.current_platform",
                    RocmPlatform()), \
              patch("vllm.platforms.current_platform", RocmPlatform()):
             attn = MultiHeadAttention(16, 64, scale=1)
-            assert attn.attn_backend == _Backend.TORCH_SDPA
+            assert attn.attn_backend == _Backend.TORCH_SDPA_VLLM_V1
     else:
         with patch("vllm.attention.selector.current_platform",
                    CudaPlatform()), \
