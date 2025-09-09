@@ -1310,6 +1310,10 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
 
 
 def get_samples(args, tokenizer) -> list[SampleRequest]:
+
+    if not hasattr(args, "request_id_prefix"):
+        args.request_id_prefix = ""
+
     if args.dataset_name == "custom":
         dataset = CustomDataset(dataset_path=args.dataset_path)
         input_requests = dataset.sample(
