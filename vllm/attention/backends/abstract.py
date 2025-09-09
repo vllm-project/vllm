@@ -257,6 +257,32 @@ class AttentionLayer(Protocol):
 
 class AttentionImpl(ABC, Generic[T]):
 
+    # Whether the attention impl can return the softmax lse for decode.
+    # Some features like decode context parallelism require the softmax lse.
+    can_return_lse_for_decode: bool = False
+
+    # some attention backends might not always want to return lse
+    # even if they can return lse (for efficiency reasons)
+    need_to_return_lse_for_decode: bool = False
+
+    dcp_world_size: int
+    dcp_rank: int
+
+    def __new__(cls, *args, **kwargs):
+        # use __new__ so that all subclasses will call this
+        self = super().__new__(cls)
+        try:
+            from vllm.distributed.parallel_state import get_dcp_group
+            self.dcp_world_size = get_dcp_group().world_size
+            self.dcp_rank = get_dcp_group().rank_in_group
+        except AssertionError:
+            # DCP might not be initialized in testing
+            self.dcp_world_size = 1
+            self.dcp_rank = 0
+        self.need_to_return_lse_for_decode = self.dcp_world_size > 1 \
+            and self.can_return_lse_for_decode
+        return self
+
     @abstractmethod
     def __init__(
         self,
