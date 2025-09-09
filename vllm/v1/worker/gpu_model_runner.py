@@ -1975,16 +1975,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.speculative_config:
             assert spec_decode_common_attn_metadata is not None
             with record_function_or_nullcontext("Draft"):
-              self._draft_token_ids, draft_probs = self.propose_draft_token_ids(
-                  scheduler_output,
-                  valid_sampled_token_ids,
-                  sampling_metadata,
-                  hidden_states,
-                  sample_hidden_states,
-                  aux_hidden_states,
-                  spec_decode_metadata,
-                  spec_decode_common_attn_metadata,
-              )
+                self._draft_token_ids, draft_probs = self.propose_draft_token_ids(
+                    scheduler_output,
+                    valid_sampled_token_ids,
+                    sampling_metadata,
+                    hidden_states,
+                    sample_hidden_states,
+                    aux_hidden_states,
+                    spec_decode_metadata,
+                    spec_decode_common_attn_metadata,
+                )
             self._store_draft_probs(draft_probs)
 
         with record_function_or_nullcontext("EPLB"):
