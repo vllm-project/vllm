@@ -154,7 +154,7 @@ class EagleProposer:
         target_hidden_states: torch.Tensor,
         # [batch_size]
         next_token_ids: torch.Tensor,
-        last_token_indices: torch.Tensor | None,
+        last_token_indices: Optional[torch.Tensor],
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
         mm_embeds: Optional[list[torch.Tensor]] = None,
