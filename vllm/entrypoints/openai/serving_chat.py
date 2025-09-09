@@ -1088,7 +1088,9 @@ class OpenAIServingChat(OpenAIServing):
                 final_usage = UsageInfo(prompt_tokens=num_prompt_tokens,
                                         completion_tokens=completion_tokens,
                                         total_tokens=num_prompt_tokens +
-                                        completion_tokens)
+                                        completion_tokens,
+                                        accepted_prediction_tokens=res.accepted_prediction_tokens,
+                                        rejected_prediction_tokens=res.rejected_prediction_tokens)
                 if self.enable_prompt_tokens_details and num_cached_tokens:
                     final_usage.prompt_tokens_details = PromptTokenUsageInfo(
                         cached_tokens=num_cached_tokens)
@@ -1399,7 +1401,11 @@ class OpenAIServingChat(OpenAIServing):
         usage = UsageInfo(prompt_tokens=num_prompt_tokens,
                           completion_tokens=num_generated_tokens,
                           total_tokens=num_prompt_tokens +
-                          num_generated_tokens)
+                          num_generated_tokens,
+                          accepted_prediction_tokens=
+                          final_res.accepted_prediction_tokens,
+                          rejected_prediction_tokens=
+                          final_res.rejected_prediction_tokens)
         if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
             usage.prompt_tokens_details = PromptTokenUsageInfo(
                 cached_tokens=final_res.num_cached_tokens)

@@ -88,6 +88,8 @@ class RequestFuncOutput:
     tpot: float = 0.0  # avg next-token latencies
     prompt_len: int = 0
     error: str = ""
+    accepted_prediction_tokens: int = 0 
+    rejected_prediction_tokens: int = 0
 
 
 async def async_request_openai_completions(
@@ -304,10 +306,14 @@ async def async_request_openai_chat_completions(
                                     output.itl.append(timestamp -
                                                     most_recent_timestamp)
 
-                                generated_text += content or ""
-                            elif usage := data.get("usage"):
-                                output.output_tokens = usage.get(
-                                    "completion_tokens")
+                            generated_text += content or ""
+                        elif usage := data.get("usage"):
+                            output.output_tokens = usage.get(
+                                "completion_tokens")
+                            output.accepted_prediction_tokens = usage.get(
+                                "accepted_prediction_tokens", 0)
+                            output.rejected_prediction_tokens = usage.get(
+                                "rejected_prediction_tokens", 0)
 
                             most_recent_timestamp = timestamp
 

@@ -80,6 +80,8 @@ class BenchmarkMetrics:
     median_e2el_ms: float
     std_e2el_ms: float
     percentiles_e2el_ms: list[tuple[float, float]]
+    total_accepted_tokens: int
+    total_rejected_tokens: int
 
 @dataclass
 class EmbedBenchmarkMetrics:
@@ -280,6 +282,8 @@ def calculate_metrics(
     all_tpots: list[float] = []
     ttfts: list[float] = []
     e2els: list[float] = []
+    total_accepted_tokens: list[int] = []
+    total_rejected_tokens: list[int] = []
     for i in range(len(outputs)):
         if outputs[i].success:
             output_len = outputs[i].output_tokens
@@ -306,6 +310,8 @@ def calculate_metrics(
             ttfts.append(outputs[i].ttft)
             e2els.append(outputs[i].latency)
             completed += 1
+            total_accepted_tokens.append(outputs[i].accepted_prediction_tokens)
+            total_rejected_tokens.append(outputs[i].rejected_prediction_tokens)
         else:
             actual_output_lens.append(0)
 
@@ -365,6 +371,8 @@ def calculate_metrics(
         median_e2el_ms=np.median(e2els or 0) * 1000,
         percentiles_e2el_ms=[(p, np.percentile(e2els or 0, p) * 1000)
                              for p in selected_percentiles],
+        total_accepted_tokens=sum(total_accepted_tokens),
+        total_rejected_tokens=sum(total_rejected_tokens),
     )
 
     return metrics, actual_output_lens
@@ -626,6 +634,10 @@ async def benchmark(
         )
     print("{:<40} {:<10.2f}".format("Total Token throughput (tok/s):",
                                     metrics.total_token_throughput))
+    print("{:<40} {:<10.2f}".format("Total Accepted tokens:",
+                                    metrics.total_accepted_tokens))
+    print("{:<40} {:<10.2f}".format("Total rejected tokens:",
+                                    metrics.total_rejected_tokens))
 
     if isinstance(metrics, BenchmarkMetrics):
         result = {
