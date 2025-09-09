@@ -837,20 +837,27 @@ class FusedMoE(CustomOp):
 
             # Round robin expert placement is only supported for models with
             # multiple expert groups and no redundant experts.
-            enable_round_robin = (
+            # TODO(Bruce): will support round robin expert placement with
+            # EPLB enabled in the future.
+            round_robin_requested = vllm_config.parallel_config.\
+                enable_round_robin_expert_placement
+            self.enable_round_robin = (
                 self.ep_size > 1 and num_redundant_experts == 0 and \
-                num_expert_group is not None and num_expert_group > 1)
+                num_expert_group is not None and num_expert_group > 1 and \
+                not self.enable_eplb) if round_robin_requested else False
+
             self.local_num_experts, self.expert_map = determine_expert_map(
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
                 global_num_experts=self.global_num_experts,
-                round_robin_expert_placement=enable_round_robin,
+                round_robin_expert_placement=self.enable_round_robin,
             )
             logger.info_once(
-                "[EP Rank %s/%s] Expert parallelism is enabled. Local/global"
+                "[EP Rank %s/%s] Expert parallelism is enabled."
+                " Round-robin expert placement: %s. Local/global"
                 " number of experts: %s/%s. Experts local to global index map:"
-                " %s.", self.ep_rank, self.ep_size, self.local_num_experts,
-                self.global_num_experts,
+                " %s.", self.ep_rank, self.ep_size, self.enable_round_robin,
+                self.local_num_experts, self.global_num_experts,
                 get_compressed_expert_map(self.expert_map))
         else:
             self.local_num_experts, self.expert_map = (self.global_num_experts,
