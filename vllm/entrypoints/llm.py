@@ -204,7 +204,7 @@ class LLM:
 
         if "kv_transfer_config" in kwargs and isinstance(
                 kwargs["kv_transfer_config"], dict):
-            from vllm.config import KVTransferConfig
+            from vllm.config.kv_transfer import KVTransferConfig
             raw_config_dict = kwargs["kv_transfer_config"]
             try:
                 kwargs["kv_transfer_config"] = KVTransferConfig(
