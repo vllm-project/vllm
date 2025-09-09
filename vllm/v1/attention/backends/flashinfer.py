@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import ClassVar, Optional, Union
 
+import numpy as np
 import torch
 from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
                         BatchPrefillWithPagedKVCacheWrapper,
@@ -22,6 +23,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey, kFp8StaticTensorSym, kNvfp4Quant)
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv, is_pin_memory_available
 from vllm.utils.flashinfer import (supports_trtllm_attention,
                                    use_trtllm_attention)
@@ -192,19 +194,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         FlashInferBackend.validate_head_size(self.head_dim)
         self.page_size = self.kv_cache_spec.block_size
 
-        self.enable_fusion = (
-            self.compilation_config.pass_config.enable_attn_fusion)
-        self.q_data_type = self.model_config.dtype
         self.cache_dtype = self.cache_config.cache_dtype
         if self.cache_dtype.startswith("fp8"):
             self.kv_cache_dtype = (
                 FlashInferBackend.get_fp8_dtype_for_flashinfer(
                     self.cache_dtype))
-            # Insert FP8 quant for query if FP8 kv cache and attn fusion enabled
-            if self.enable_fusion:
-                self.q_data_type = self.kv_cache_dtype
         else:
+            assert self.kv_cache_spec.dtype == self.model_config.dtype
             self.kv_cache_dtype = self.kv_cache_spec.dtype
+        self.q_data_type = self.kv_cache_dtype
 
         self._cascade_wrapper = None  # Wrapper for cascade attention
 
@@ -212,6 +210,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # TODO: discard this for trtllm-gen backend
         self.global_hyperparameters = infer_global_hyperparameters(
             get_per_layer_parameters(vllm_config, layer_names, FlashInferImpl))
+        self.sm_scale = self.global_hyperparameters.sm_scale
+        self.window_left = self.global_hyperparameters.window_left
+        self.logits_soft_cap = self.global_hyperparameters.logits_soft_cap
+        self.has_sinks = self.global_hyperparameters.has_sinks
 
         # Preparing persistent buffers (device-side)
         self.paged_kv_indptr = torch.zeros(max_num_reqs + 1,
@@ -230,6 +232,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                                                dtype=torch.int32,
                                                device="cpu",
                                                pin_memory=pin_memory)
+        self.paged_kv_indptr_np = self.paged_kv_indptr_cpu.numpy()
+        self.paged_kv_indptr_buffer = torch.zeros_like(
+            self.paged_kv_indptr_cpu, pin_memory=pin_memory)
         self.paged_kv_indices_cpu = torch.zeros(max_num_pages,
                                                 dtype=torch.int32,
                                                 device="cpu",
@@ -238,10 +243,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                                                       dtype=torch.int32,
                                                       device="cpu",
                                                       pin_memory=pin_memory)
-
-        self.block_table_arange = torch.arange(max_num_pages_per_req,
-                                               dtype=torch.int32,
-                                               device=self.device)
+        self.paged_kv_last_page_len_np = (
+            self.paged_kv_last_page_len_cpu.numpy())
 
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
@@ -284,7 +287,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 paged_kv_indices_buffer=paged_kv_indices,
                 paged_kv_last_page_len_buffer=paged_kv_last_page_len,
                 # Tensor cores are enabled by default because the perf would be
-                # atleast as good as cuda cores for all attention ops in latest
+                # at least as good as cuda cores for all attention ops in latest
                 # gpus.
                 use_tensor_cores=True,
             )
@@ -310,16 +313,18 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens =\
-            split_decodes_and_prefills(common_attn_metadata)
+            split_decodes_and_prefills(common_attn_metadata,
+                                       decode_threshold=self.reorder_batch_threshold)
 
         page_size = self.page_size
         max_q_len = common_attn_metadata.max_query_len
         max_seq_len = common_attn_metadata.max_seq_len
         seq_lens = common_attn_metadata.seq_lens
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+        seq_lens_np = seq_lens_cpu.numpy()
         block_table_tensor = common_attn_metadata.block_table_tensor
 
-        block_table_bounds_cpu = (seq_lens_cpu + page_size - 1) // page_size
+        num_blocks_np = (seq_lens_np + (page_size - 1)) // page_size
 
         use_cascade = common_prefix_len > 0
         if use_cascade:
@@ -342,41 +347,49 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
             # Remove the blocks of the shared prefix from all requests.
             block_table_tensor = block_table_tensor[:, num_common_kv_blocks:]
-            block_table_bounds_cpu -= num_common_kv_blocks
+            num_blocks_np -= num_common_kv_blocks
         else:
             shared_qo_indptr_cpu = None
             shared_kv_page_indptr_cpu = None
             shared_kv_page_indices_cpu = None
             shared_kv_last_page_len_cpu = None
 
-        max_num_blocks = block_table_bounds_cpu.max().item()
-        block_table_bounds = block_table_bounds_cpu.to(self.device,
-                                                       non_blocking=True)
-        mask = (self.block_table_arange[:max_num_blocks].unsqueeze(0)
-                < block_table_bounds.unsqueeze(1))
-        # write self.paged_kv_indices inplace
-        num_actual_pages = torch.sum(mask)
-        paged_kv_indices = self.paged_kv_indices[:num_actual_pages]
-        torch.masked_select(block_table_tensor[:, :max_num_blocks],
-                            mask,
-                            out=paged_kv_indices)
-
         # write self.paged_kv_indptr_cpu inplace (0-index is always 0)
-        torch.cumsum(block_table_bounds_cpu,
-                     dim=0,
-                     dtype=torch.int32,
-                     out=self.paged_kv_indptr_cpu[1:1 + num_reqs])
+        np.cumsum(
+            num_blocks_np,
+            dtype=np.int32,
+            out=self.paged_kv_indptr_np[1:num_reqs + 1],
+        )
+        # NOTE(woosuk): Because self.paged_kv_indptr_cpu can be modified
+        # after this line (e.g., for cuda graphs), we need to copy the data to
+        # self.paged_kv_indptr_buffer to avoid race condition.
+        self.paged_kv_indptr_buffer[:num_reqs +
+                                    1] = (self.paged_kv_indptr_cpu[:num_reqs +
+                                                                   1])
+        paged_kv_indptr = self.paged_kv_indptr[:num_reqs + 1]
+        paged_kv_indptr.copy_(self.paged_kv_indptr_buffer[:num_reqs + 1],
+                              non_blocking=True)
 
-        paged_kv_last_page_len_cpu = seq_lens_cpu % page_size
+        # write self.paged_kv_indices inplace
+        num_actual_pages = self.paged_kv_indptr_np[num_reqs]
+        paged_kv_indices = self.paged_kv_indices[:num_actual_pages]
+        _copy_page_indices_kernel[(num_reqs, )](
+            paged_kv_indices,
+            block_table_tensor,
+            block_table_tensor.stride(0),
+            paged_kv_indptr,
+            BLOCK_SIZE=1024,
+        )
+
         # write self.paged_kv_last_page_len_cpu inplace
-        torch.where(paged_kv_last_page_len_cpu == 0,
-                    torch.tensor(page_size),
-                    paged_kv_last_page_len_cpu,
-                    out=self.paged_kv_last_page_len_cpu[:num_reqs])
+        paged_kv_last_page_len_np = seq_lens_np % page_size
+        self.paged_kv_last_page_len_np[:num_reqs] = np.where(
+            paged_kv_last_page_len_np == 0,
+            page_size,
+            paged_kv_last_page_len_np,
+        )
 
         # Check if any layer uses sinks (requires TRTLLM attention)
-        has_sinks = self.global_hyperparameters.has_sinks
-
         prefill_use_trtllm = use_trtllm_attention(self.num_qo_heads,
                                                   self.num_kv_heads,
                                                   num_prefill_tokens,
@@ -384,7 +397,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                                                   self.cache_dtype,
                                                   self.q_data_type,
                                                   is_prefill=True,
-                                                  has_sinks=has_sinks)
+                                                  has_sinks=self.has_sinks)
         decode_use_trtllm = use_trtllm_attention(self.num_qo_heads,
                                                  self.num_kv_heads,
                                                  num_decode_tokens,
@@ -392,7 +405,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                                                  self.cache_dtype,
                                                  self.q_data_type,
                                                  is_prefill=False,
-                                                 has_sinks=has_sinks)
+                                                 has_sinks=self.has_sinks)
 
         attn_metadata = FlashInferMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -427,9 +440,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 self.head_dim,
                 self.page_size,
                 causal=True,
-                sm_scale=self.global_hyperparameters.sm_scale,
-                window_left=self.global_hyperparameters.window_left,
-                logits_soft_cap=self.global_hyperparameters.logits_soft_cap,
+                sm_scale=self.sm_scale,
+                window_left=self.window_left,
+                logits_soft_cap=self.logits_soft_cap,
                 q_data_type=self.q_data_type,
                 kv_data_type=self.kv_cache_dtype,
             )
@@ -466,10 +479,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         self.head_dim,
                         self.page_size,
                         causal=True,
-                        sm_scale=self.global_hyperparameters.sm_scale,
-                        window_left=self.global_hyperparameters.window_left,
-                        logits_soft_cap=self.global_hyperparameters.
-                        logits_soft_cap,
+                        sm_scale=self.sm_scale,
+                        window_left=self.window_left,
+                        logits_soft_cap=self.logits_soft_cap,
                         q_data_type=self.q_data_type,
                         kv_data_type=self.kv_cache_dtype,
                     )
@@ -519,10 +531,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         self.page_size,
                         # Disable flashinfer's pos encoding and use vllm's rope.
                         pos_encoding_mode="NONE",
-                        sm_scale=self.global_hyperparameters.sm_scale,
-                        window_left=self.global_hyperparameters.window_left,
-                        logits_soft_cap=self.global_hyperparameters.
-                        logits_soft_cap,
+                        sm_scale=self.sm_scale,
+                        window_left=self.window_left,
+                        logits_soft_cap=self.logits_soft_cap,
                         q_data_type=self.q_data_type,
                         kv_data_type=self.kv_cache_dtype,
                     )
@@ -631,11 +642,9 @@ class FlashInferImpl(AttentionImpl):
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
-            kv_cache: shape -
-            # NHD: [num_blocks, 2, block_size, num_kv_heads, head_size]
-            # HND: [num_blocks, 2,  num_kv_heads, block_size, head_size]
-
-
+            kv_cache: KV cache tensor with different possible shapes:
+                - NHD: [num_blocks, 2, block_size, num_kv_heads, head_size]
+                - HND: [num_blocks, 2, num_kv_heads, block_size, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -655,8 +664,6 @@ class FlashInferImpl(AttentionImpl):
 
         # The attn+quant fusion happens when output_scale is provided.
         if output_scale is None:
-            assert attn_metadata.q_data_type != FP8_DTYPE, \
-                "Query can only be FP8 if output fusion happened."
             assert output_block_scale is None, "output_block_scale "\
                 "is not supported when fusion has not happened"
         else:
@@ -674,7 +681,7 @@ class FlashInferImpl(AttentionImpl):
             else:
                 raise ValueError(f"Unsupported output dtype: {output.dtype}")
 
-            # TRTLLM attn kernel requires o scale to pass as a host scalar,
+            # TRTLLM attn kernel requires to scale to pass as a host scalar,
             # store the o scale as a host scalar in warmup run with cuda graph
             # not enabled
             if layer._o_scale_float is None:
@@ -684,7 +691,8 @@ class FlashInferImpl(AttentionImpl):
                 elif output.dtype == FP4_DTYPE:
                     self.o_sf_scale = layer._o_scale_float
 
-            # Insert FP8 quant for query
+        # Insert FP8 quant for query
+        if attn_metadata.q_data_type == FP8_DTYPE:
             num_tokens, num_heads, head_size = query.shape
             query, _ = ops.scaled_fp8_quant(
                 query.reshape(
@@ -1002,3 +1010,25 @@ def fast_plan_decode(
     self._sm_scale = sm_scale
     self._rope_scale = rope_scale
     self._rope_theta = rope_theta
+
+
+@triton.jit
+def _copy_page_indices_kernel(
+    page_indices,
+    block_table,
+    block_table_stride,
+    cu_num_blocks,
+    BLOCK_SIZE: tl.constexpr,
+):
+    req_idx = tl.program_id(0)
+    row_ptr = block_table + req_idx * block_table_stride
+    start_idx = tl.load(cu_num_blocks + req_idx)
+    end_idx = tl.load(cu_num_blocks + req_idx + 1)
+    num_blocks = end_idx - start_idx
+
+    offset = tl.arange(0, BLOCK_SIZE)
+    for i in tl.range(0, num_blocks, BLOCK_SIZE):
+        block_ids = tl.load(row_ptr + i + offset, mask=i + offset < num_blocks)
+        tl.store(page_indices + start_idx + i + offset,
+                 block_ids,
+                 mask=i + offset < num_blocks)

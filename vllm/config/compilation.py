@@ -234,7 +234,7 @@ class CompilationConfig:
     - FULL_AND_PIECEWISE.
 
     PIECEWISE mode build piecewise cudagraph only, keeping the cudagraph
-    incompatiable ops (i.e. some attention ops) outside the cudagraph
+    incompatible ops (i.e. some attention ops) outside the cudagraph
     for general flexibility.
     This is the default mode.
 
@@ -339,6 +339,8 @@ class CompilationConfig:
         "vllm.mamba_mixer2",
         "vllm.mamba_mixer",
         "vllm.short_conv",
+        "vllm.linear_attention",
+        "vllm.plamo2_mamba_mixer",
     ]
 
     def compute_hash(self) -> str:
