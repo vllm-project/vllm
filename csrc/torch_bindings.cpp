@@ -115,8 +115,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "silu_and_mul_quant(Tensor! result, Tensor input, Tensor scale) -> ()");
   ops.impl("silu_and_mul_quant", torch::kCUDA, &silu_and_mul_quant);
 
-#if (defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100) || \
-    (defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120)
+#ifndef USE_ROCM
   ops.def(
       "silu_and_mul_nvfp4_quant(Tensor! result, Tensor! result_block_scale, "
       "Tensor input, Tensor input_global_scale) -> ()");
@@ -517,10 +516,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // SM100 CUTLASS MLA decode
   ops.def(
-      "sm100_cutlass_mla_decode(Tensor! out, Tensor q_nope, Tensor q_pe,"
-      "                         Tensor kv_c_and_k_pe_cache, Tensor seq_lens,"
-      "                         Tensor page_table, Tensor workspace, float "
-      "scale,"
+      "sm100_cutlass_mla_decode(Tensor! out, Tensor! lse, Tensor q_nope,"
+      "                         Tensor q_pe, Tensor kv_c_and_k_pe_cache,"
+      "                         Tensor seq_lens, Tensor page_table,"
+      "                         Tensor workspace, float scale,"
       "                         int num_kv_splits) -> ()");
   // conditionally compiled so impl in source file
 
@@ -693,16 +692,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "                     str kv_cache_dtype,"
       "                     Tensor scale) -> ()");
   cache_ops.impl("concat_and_cache_mla", torch::kCUDA, &concat_and_cache_mla);
-
-  cache_ops.def(
-      "cp_fused_concat_and_cache_mla(Tensor kv_c, Tensor k_pe,"
-      "                              Tensor cp_local_token_select_indices,"
-      "                              Tensor! kv_cache,"
-      "                              Tensor slot_mapping,"
-      "                              str kv_cache_dtype,"
-      "                              Tensor scale) -> ()");
-  cache_ops.impl("cp_fused_concat_and_cache_mla", torch::kCUDA,
-                 &cp_fused_concat_and_cache_mla);
 
   // Convert the key and value cache to fp8 data type.
   cache_ops.def(
