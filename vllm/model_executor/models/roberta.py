@@ -8,7 +8,7 @@ import torch
 from torch import nn
 from transformers import RobertaConfig
 
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.model_executor.layers.pooler import (ClassifierPooler, CLSPool,
                                                DispatchPooler, Pooler)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -73,10 +73,16 @@ class RobertaEmbedding(nn.Module):
 class RobertaClassificationHead(nn.Module):
     """Head for sentence-level classification tasks."""
 
-    def __init__(self, config: RobertaConfig):
+    def __init__(self, model_config: "ModelConfig"):
         super().__init__()
-        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
-        self.out_proj = nn.Linear(config.hidden_size, config.num_labels)
+        config = model_config.hf_config
+        head_dtype = model_config.head_dtype
+        self.dense = nn.Linear(config.hidden_size,
+                               config.hidden_size,
+                               dtype=head_dtype)
+        self.out_proj = nn.Linear(config.hidden_size,
+                                  config.num_labels,
+                                  dtype=head_dtype)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # CLSPool has already been applied in `pooling`
@@ -184,7 +190,7 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
         self.roberta = BertModel(vllm_config=vllm_config,
                                  prefix=maybe_prefix(prefix, "bert"),
                                  embedding_class=RobertaEmbedding)
-        self.classifier = RobertaClassificationHead(config)
+        self.classifier = RobertaClassificationHead(vllm_config.model_config)
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None

@@ -5,7 +5,7 @@ from collections.abc import Mapping, Set
 from dataclasses import dataclass
 from enum import IntEnum
 from itertools import groupby
-from typing import Callable, Optional, TypeVar, Union, cast
+from typing import Callable, Optional, TypeVar, Union
 
 import torch
 import torch.nn as nn
@@ -362,14 +362,13 @@ class PoolerIdentity(PoolerActivation):
 class PoolerNormalize(PoolerActivation):
 
     def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
-        x = F.normalize(pooled_data.float(), p=2, dim=-1)
-        return x.to(pooled_data.dtype)
+        return F.normalize(pooled_data, p=2, dim=-1)
 
 
 class PoolerMultiLabelClassify(PoolerActivation):
 
     def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
-        return F.sigmoid(pooled_data.float()).to(pooled_data.dtype)
+        return F.sigmoid(pooled_data)
 
 
 class PoolerClassify(PoolerActivation):
@@ -394,9 +393,9 @@ class PoolerClassify(PoolerActivation):
                       pooled_data.shape[-1])
 
         if num_labels < 2:
-            return F.sigmoid(pooled_data.float()).to(pooled_data.dtype)
+            return F.sigmoid(pooled_data)
 
-        return F.softmax(pooled_data.float(), dim=-1).to(pooled_data.dtype)
+        return F.softmax(pooled_data, dim=-1)
 
 
 class LambdaPoolerActivation(PoolerActivation):
@@ -432,8 +431,9 @@ class EmbeddingPoolerHead(PoolerHead):
         from vllm.model_executor.models.adapters import _load_st_projector
 
         vllm_config = get_current_vllm_config()
-        self.projector = _load_st_projector(
+        self.projector: Optional[nn.Module] = _load_st_projector(
             vllm_config.model_config) if vllm_config else None
+        self.head_dtype = vllm_config.model_config.head_dtype
 
     def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
                 pooling_metadata: PoolingMetadata):
@@ -442,16 +442,11 @@ class EmbeddingPoolerHead(PoolerHead):
             pooled_data = torch.stack(pooled_data)
         # pooled_data shape: [batchsize, hidden_dimension]
 
+        pooled_data = pooled_data.to(self.head_dtype)
+
         # Apply ST projector
         if self.projector is not None:
-            projector = cast(nn.Module, self.projector)
-
-            def _proj(x: torch.Tensor) -> torch.Tensor:
-                orig_dtype = x.dtype
-                y = projector(x.to(torch.float32))
-                return y.to(orig_dtype)
-
-            pooled_data = _proj(pooled_data)
+            pooled_data = self.projector(pooled_data)
         # pooled_data shape: [batchsize, embedding_dimension]
 
         pooling_params = get_pooling_params(pooling_metadata)
@@ -494,8 +489,18 @@ class RewardPoolerHead(PoolerHead):
     def __init__(self) -> None:
         super().__init__(activation=PoolerClassify(static_num_labels=False))
 
+        from vllm.config import get_current_vllm_config
+        vllm_config = get_current_vllm_config()
+        self.head_dtype = vllm_config.model_config.head_dtype
+
     def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
                 pooling_metadata: PoolingMetadata):
+
+        if isinstance(pooled_data, list):
+            pooled_data = [p.to(self.head_dtype) for p in pooled_data]
+        else:
+            pooled_data = pooled_data.to(self.head_dtype)
+
         pooling_params = get_pooling_params(pooling_metadata)
 
         # for softmax
@@ -641,6 +646,7 @@ class ClassifierPooler(Pooler):
         self.act_fn = act_fn or PoolerClassify()
         self.logit_bias: Optional[
             float] = vllm_config.model_config.pooler_config.logit_bias
+        self.head_dtype = vllm_config.model_config.head_dtype
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"classify", "score"}
@@ -654,6 +660,8 @@ class ClassifierPooler(Pooler):
         if isinstance(pooled_data, list):
             pooled_data = torch.stack(pooled_data)
         # pooled_data shape: [batchsize, hidden_size]
+
+        pooled_data = pooled_data.to(self.head_dtype)
 
         if self.classifier is not None:
             pooled_data = self.classifier(pooled_data)
