@@ -25,8 +25,7 @@ import prometheus_client
 import pydantic
 import regex as re
 import uvloop
-from fastapi import (APIRouter, Depends, FastAPI, Form, HTTPException, Query,
-                     Request)
+from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -102,14 +101,13 @@ from vllm.entrypoints.utils import (cli_env_setup, load_aware_call,
                                     log_non_default_args, with_cancellation)
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
-from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.transformers_utils.tokenizer import MistralTokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (Device, FlexibleArgumentParser, decorate_logs,
                         get_open_zmq_ipc_path, is_valid_ipv6_address,
-                        random_uuid, set_ulimit)
+                        set_ulimit)
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -447,20 +445,16 @@ def engine_client(request: Request) -> EngineClient:
 
 
 @router.get("/health", response_class=Response)
-async def health(
-    raw_request: Request, generate: Optional[bool] = Query(False)) -> Response:
+async def health(raw_request: Request) -> Response:
     """Health check."""
     client = engine_client(raw_request)
-    await client.check_health()
+    generate_str = raw_request.query_params.get("generate")
     try:
-        if generate:
-            prompt = "Hi"
-            sampling_params = SamplingParams(temperature=0, max_tokens=2)
-            request_id = random_uuid()
-            async for _ in client.generate(prompt, sampling_params,
-                                           request_id):
-                pass
-    except Exception:
+        await client.check_health()
+        if generate_str == "true":
+            await client.minimal_generation()
+    except Exception as e:
+        logger.exception(e)
         return Response(status_code=500)
     return Response(status_code=200)
 
