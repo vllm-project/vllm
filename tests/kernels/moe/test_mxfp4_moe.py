@@ -317,7 +317,7 @@ def tg_mxfp4_moe(
                 num_elts_per_sf=16,
             )
             gemm2_scales_shuffled.append(
-               nvfp4_block_scale_interleave(w2_weight_scale[i].view(
+                nvfp4_block_scale_interleave(w2_weight_scale[i].view(
                     torch.uint8)[permute_sf_indices.to(
                         w2_weight_scale.device)].contiguous()))
             # w2 bias shuffling
