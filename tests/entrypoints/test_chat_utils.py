@@ -80,6 +80,28 @@ def phi3v_tokenizer():
 
 
 @pytest.fixture(scope="function")
+def qwen2_audio_model_config():
+    return ModelConfig(
+        QWEN2AUDIO_MODEL_ID,
+        runner="generate",
+        trust_remote_code=True,
+        limit_mm_per_prompt={
+            "audio": 1,
+        },
+    )
+
+
+@pytest.fixture(scope="module")
+def qwen2_audio_tokenizer():
+    return TokenizerGroup(
+        tokenizer_id=QWEN2AUDIO_MODEL_ID,
+        enable_lora=False,
+        max_num_seqs=5,
+        max_input_length=None,
+    )
+
+
+@pytest.fixture(scope="function")
 def qwen25omni_model_config_mm_interleaved():
     return ModelConfig(
         QWEN25OMNI_MODEL_ID,
@@ -2798,3 +2820,82 @@ def test_apply_mistral_chat_template_thinking_chunk():
         r"[INST]Thanks, what is 3+3?[/INST]")
 
     assert string_tokens == expected_tokens
+
+
+def test_parse_chat_messages_single_empty_audio_with_uuid(
+    qwen2_audio_model_config,
+    qwen2_audio_tokenizer,
+):
+    audio_uuid = "abcd"
+    conversation, mm_data, mm_uuids = parse_chat_messages(
+        [{
+            "role":
+            "user",
+            "content": [
+                {
+                    "type": "input_audio",
+                    "input_audio": {},
+                    "uuid": audio_uuid,
+                },
+                {
+                    "type": "text",
+                    "text": "What does the audio say?"
+                },
+            ],
+        }],
+        qwen2_audio_model_config,
+        qwen2_audio_tokenizer,
+        content_format="string",
+    )
+
+    assert conversation == [{
+        "role":
+        "user",
+        "content":
+        "Audio 1: <|audio_bos|><|AUDIO|><|audio_eos|>\nWhat does the audio say?"
+    }]
+    _assert_mm_data_inputs(mm_data, {"audio": 1})
+    _assert_mm_uuids(mm_uuids,
+                     1,
+                     modality="audio",
+                     expected_uuids=[audio_uuid])
+
+
+@pytest.mark.asyncio
+async def test_parse_chat_messages_single_empty_audio_with_uuid_async(
+    qwen2_audio_model_config,
+    qwen2_audio_tokenizer,
+):
+    audio_uuid = "abcd"
+    conversation, mm_future, mm_uuids = parse_chat_messages_futures(
+        [{
+            "role":
+            "user",
+            "content": [
+                {
+                    "type": "input_audio",
+                    "input_audio": {},
+                    "uuid": audio_uuid,
+                },
+                {
+                    "type": "text",
+                    "text": "What does the audio say?"
+                },
+            ],
+        }],
+        qwen2_audio_model_config,
+        qwen2_audio_tokenizer,
+        content_format="string",
+    )
+
+    assert conversation == [{
+        "role":
+        "user",
+        "content":
+        "Audio 1: <|audio_bos|><|AUDIO|><|audio_eos|>\nWhat does the audio say?"
+    }]
+    _assert_mm_data_inputs(await mm_future, {"audio": 1})
+    _assert_mm_uuids(mm_uuids,
+                     1,
+                     modality="audio",
+                     expected_uuids=[audio_uuid])

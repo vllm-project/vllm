@@ -869,7 +869,11 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         if input_audio:
             audio_data = input_audio.get("data", "")
             audio_format = input_audio.get("format", "")
-            audio_url = f"data:audio/{audio_format};base64,{audio_data}"
+            if audio_data:
+                audio_url = f"data:audio/{audio_format};base64,{audio_data}"
+            else:
+                # If a UUID is provided, audio data may be empty.
+                audio_url = None
         else:
             audio_url = None
 
