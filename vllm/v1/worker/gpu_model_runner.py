@@ -390,6 +390,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # KVCacheConfig of the scheduler.
         self.runner_only_attn_layers: set[str] = set()
 
+        # Cache for cross-attention group index
+        self._cross_attn_group_idx: Optional[int] = None
+
         # Cached outputs.
         self._draft_token_ids: Optional[Union[list[list[int]],
                                               torch.Tensor]] = None
@@ -983,17 +986,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 blk_table_tensor = blk_table.get_device_tensor()[:num_reqs]
                 # TODO - look into slot_mapping for cross-attention
                 # directly from the block table like other attention types
-                cross_slot_mapping = []
+                cross_slot_tensors = []
                 for req_id in scheduler_output.scheduled_encoder_inputs:
-                    cross_slot_mapping.extend(
+                    cross_slot_tensors.append(
                         self._get_cross_slot_mapping(req_id,
                                                      self.max_encoder_len))
 
                 # Create cross-attention metadata using decoder queries and
                 # encoder keys/values
-                slot_mapping = torch.tensor(cross_slot_mapping,
-                                            dtype=torch.int64,
-                                            device=self.device)
+                if cross_slot_tensors:
+                    slot_mapping = torch.cat(cross_slot_tensors)
+                else:
+                    slot_mapping = torch.empty(0,
+                                               dtype=torch.int64,
+                                               device=self.device)
 
                 # NOTE - using max_encoder_len is whisper specific
                 max_seq_len_arg = self.max_encoder_len
@@ -1072,36 +1078,49 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_scheduled_tokens, spec_decode_common_attn_metadata,
                 max_num_scheduled_tokens)
 
+    def _get_cross_attn_group_idx(self) -> Optional[int]:
+        """Get and cache the cross-attention group index."""
+        if self._cross_attn_group_idx is not None:
+            return self._cross_attn_group_idx
+
+        for i, kv_cache_group in enumerate(
+                self.kv_cache_config.kv_cache_groups):
+            if isinstance(kv_cache_group.kv_cache_spec, CrossAttentionSpec):
+                self._cross_attn_group_idx = i
+                return i
+        return None
+
     def _get_cross_slot_mapping(self, req_id: str,
-                                encoder_seq_len: int) -> list[int]:
+                                encoder_seq_len: int) -> torch.Tensor:
         """Get cross-attention slot mapping for a request."""
         req_state = self.requests.get(req_id)
         if req_state is None:
             # During memory profiling or if request not found
-            return [PAD_SLOT_ID] * encoder_seq_len
+            return torch.full((encoder_seq_len, ),
+                              PAD_SLOT_ID,
+                              dtype=torch.int64,
+                              device=self.device)
 
-        # Find the KV cache group that uses CrossAttentionSpec
-        cross_attn_group_idx = None
-        for i, kv_cache_group in enumerate(
-                self.kv_cache_config.kv_cache_groups):
-            if isinstance(kv_cache_group.kv_cache_spec, CrossAttentionSpec):
-                cross_attn_group_idx = i
-                break
-
+        cross_attn_group_idx = self._get_cross_attn_group_idx()
         if cross_attn_group_idx is None:
-            return [PAD_SLOT_ID] * encoder_seq_len
+            return torch.full((encoder_seq_len, ),
+                              PAD_SLOT_ID,
+                              dtype=torch.int64,
+                              device=self.device)
 
-        # Get cross attention block IDs and calculate slot mapping
-        cross_block_ids = req_state.block_ids[cross_attn_group_idx]
+        cross_block_ids = torch.tensor(
+            req_state.block_ids[cross_attn_group_idx],
+            dtype=torch.int64,
+            device=self.device)
         block_size = self.kv_cache_config.kv_cache_groups[
             cross_attn_group_idx].kv_cache_spec.block_size
 
-        slot_mapping = []
-        for i in range(encoder_seq_len):
-            block_number = cross_block_ids[i // block_size]
-            block_offset = i % block_size
-            slot = block_number * block_size + block_offset
-            slot_mapping.append(slot)
+        i_values = torch.arange(encoder_seq_len,
+                                dtype=torch.int64,
+                                device=self.device)
+        block_numbers = cross_block_ids[i_values // block_size]
+        block_offsets = i_values % block_size
+        slot_mapping = block_numbers * block_size + block_offsets
 
         return slot_mapping
 
@@ -3554,6 +3573,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         """
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
+        # Invalidate cached cross-attention group index
+        self._cross_attn_group_idx = None
         self.may_reinitialize_input_batch(kv_cache_config)
         self.may_add_encoder_only_layers_to_kv_cache_config()
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
