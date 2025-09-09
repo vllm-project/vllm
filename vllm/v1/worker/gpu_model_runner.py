@@ -28,6 +28,8 @@ from vllm.config import (CompilationLevel, CUDAGraphMode, ECProducer, VllmConfig
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
+from vllm.distributed.ec_transfer import (get_ec_transfer,
+                                          has_ec_transfer)
 from vllm.distributed.parallel_state import (
     get_pp_group, get_tp_group, graph_capture, is_global_first_rank,
     prepare_communication_buffer_for_model)
@@ -1464,13 +1466,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin,
 
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
-            if self.vllm_config.ec_transfer_config.ec_role == "ec_producer":
-                with self.maybe_get_ec_connector_output(
-                        scheduler_output,
-                        encoder_cache=self.encoder_cache,      
-                ) as ec_connector_output:
-                    self._execute_mm_encoder(scheduler_output)
-                    return EMPTY_MODEL_RUNNER_OUTPUT
+            if has_ec_transfer():
+                if self.vllm_config.ec_transfer_config.ec_role == "ec_producer":
+                    with self.maybe_get_ec_connector_output(
+                            scheduler_output,
+                            encoder_cache=self.encoder_cache,      
+                    ) as ec_connector_output:
+                        self._execute_mm_encoder(scheduler_output)
+                        return EMPTY_MODEL_RUNNER_OUTPUT
                     
 
             if not has_kv_transfer_group():
@@ -1520,8 +1523,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin,
             ) as ec_connector_output:
                 # Run the multimodal encoder if any.
                 self._execute_mm_encoder(scheduler_output)
-                if self.vllm_config.ec_transfer_config.ec_role == ECProducer:
-                    return EMPTY_MODEL_RUNNER_OUTPUT
+                if has_ec_transfer():
+                    if self.vllm_config.ec_transfer_config.ec_role == ECProducer:
+                        return EMPTY_MODEL_RUNNER_OUTPUT
                 mm_embeds = self._gather_mm_embeddings(scheduler_output)
         else:
             mm_embeds = []
