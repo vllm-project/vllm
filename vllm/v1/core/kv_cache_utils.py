@@ -6,7 +6,7 @@ import os
 from collections import defaultdict, deque
 from collections.abc import Iterable, Sequence
 from dataclasses import astuple, dataclass
-from typing import Any, Callable, NamedTuple, NewType, Optional, cast, Union
+from typing import Any, Callable, NewType, Optional, Union, cast
 
 from vllm import envs
 from vllm.config import VllmConfig
