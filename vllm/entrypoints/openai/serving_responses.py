@@ -661,7 +661,7 @@ class OpenAIServingResponses(OpenAIServing):
     ) -> list[ResponseOutputItem]:
         output_items = []
         num_init_messages = context.num_init_messages
-        for msg in context.all_messages[num_init_messages:]:
+        for msg in context.messages[num_init_messages:]:
             output_items.extend(parse_output_message(msg))
         # Handle the generation stopped in the middle (if any).
         last_items = parse_remaining_state(context.parser)
@@ -1257,7 +1257,6 @@ class OpenAIServingResponses(OpenAIServing):
 
             assert isinstance(ctx, StreamingHarmonyContext)
 
-            #
             if ctx.is_expecting_start():
                 current_output_index += 1
                 sent_output_item_added = False
