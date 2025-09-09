@@ -1853,11 +1853,15 @@ class ResponseUsage(OpenAIBaseModel):
     total_tokens: int
 
 
+class IncompleteDetails(OpenAIBaseModel):
+    reason: str
+
+
 class ResponsesResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"resp_{random_uuid()}")
     created_at: int = Field(default_factory=lambda: int(time.time()))
     # error: Optional[ResponseError] = None
-    # incomplete_details: Optional[IncompleteDetails] = None
+    incomplete_details: Optional[IncompleteDetails] = None
     instructions: Optional[str] = None
     metadata: Optional[Metadata] = None
     model: str
@@ -2098,7 +2102,7 @@ class DetokenizeResponse(OpenAIBaseModel):
 
 class TokenizerInfoResponse(OpenAIBaseModel):
     """
-    Response containing tokenizer configuration 
+    Response containing tokenizer configuration
     equivalent to tokenizer_config.json
     """
 
@@ -2188,7 +2192,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     to_language: Optional[str] = None
     """The language of the output audio we transcribe to.
 
-    Please note that this is not currently used by supported models at this 
+    Please note that this is not currently used by supported models at this
     time, but it is a placeholder for future use, matching translation api.
     """
 

@@ -1029,6 +1029,11 @@ class OpenAIServing:
         priority: int = 0,
         **kwargs,
     ):
+        # logger.info(f'prompt {request_prompt}')
+        # logger.info(f'engine_prompt {engine_prompt}')
+        # logger.info(
+        #     f'sampling_params {sampling_params}')  # this contains max_tokens
+
         orig_priority = priority
         while True:
             self._log_inputs(
