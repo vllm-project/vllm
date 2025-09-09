@@ -116,12 +116,9 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
             self.token_ids.append(new_token_id)
             self.output_text += self.decode_next(new_token_id)
 
-        if stop_terminated:
-            if skipped_stop_token_id is not None:
-                # Cleanup after skipping detokenization.
-                self.token_ids.append(skipped_stop_token_id)
-            # Stop token triggered; skip stop string check.
-            return None
+        if skipped_stop_token_id is not None:
+            # Cleanup after skipping detokenization.
+            self.token_ids.append(skipped_stop_token_id)
 
         # 2) Evaluate stop strings.
         stop_string = None
