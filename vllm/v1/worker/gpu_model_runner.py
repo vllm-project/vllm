@@ -2149,35 +2149,22 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 else:
                     target_hidden_states = hidden_states[:num_scheduled_tokens]
             else:
-                if True:  # TODO
-                    _num_draft_tokens_gpu = torch.cat([
-                        spec_decode_metadata.cu_num_draft_tokens[0:1],
-                        spec_decode_metadata.cu_num_draft_tokens[1:] -
-                        spec_decode_metadata.cu_num_draft_tokens[:-1]
-                    ])
+                _num_draft_tokens_gpu = torch.cat([
+                    spec_decode_metadata.cu_num_draft_tokens[0:1],
+                    spec_decode_metadata.cu_num_draft_tokens[1:] -
+                    spec_decode_metadata.cu_num_draft_tokens[:-1]
+                ])
 
-                    _num_rejected_tokens_gpu = torch.where(
-                        _num_draft_tokens_gpu > 0,
-                        _num_draft_tokens_gpu + 1 - _valid_sampled_count,
-                        torch.zeros_like(_num_draft_tokens_gpu))
+                _num_rejected_tokens_gpu = torch.where(
+                    _num_draft_tokens_gpu > 0,
+                    _num_draft_tokens_gpu + 1 - _valid_sampled_count,
+                    torch.zeros_like(_num_draft_tokens_gpu))
 
-                    common_attn_metadata, token_indices =\
-                        self.drafter.prepare_inputs_deferred(common_attn_metadata)
-                    token_indices_to_sample = \
-                        common_attn_metadata.query_start_loc[1:] - 1 \
-                            - _num_rejected_tokens_gpu
-                else:
-                    # TODO(woosuk): Refactor this.
-                    num_draft_tokens = spec_decode_metadata.num_draft_tokens
-                    num_rejected_tokens = [
-                        n + 1 - len(sampled_token_ids[i]) if n > 0 else 0
-                        for i, n in enumerate(num_draft_tokens)
-                    ]
-                    num_rejected_tokens_cpu = torch.tensor(num_rejected_tokens,
-                                                           dtype=torch.int32)
-                    common_attn_metadata, token_indices =\
-                        self.drafter.prepare_inputs(
-                        common_attn_metadata, num_rejected_tokens_cpu)
+                common_attn_metadata, token_indices =\
+                    self.drafter.prepare_inputs_deferred(common_attn_metadata)
+                token_indices_to_sample = \
+                    common_attn_metadata.query_start_loc[1:] - 1 \
+                        - _num_rejected_tokens_gpu
 
                 target_token_ids = self.input_ids.gpu[token_indices]
                 # TODO(woosuk): Support M-RoPE.
