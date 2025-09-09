@@ -1071,7 +1071,8 @@ class OpenAIServing:
             sampling_params.max_tokens = self.max_model_len - len(
                 prompt_token_ids)
             # OPTIMIZATION
-            priority = orig_priority - 1
+            if orig_priority != 0:
+                priority = orig_priority - 1
 
     @staticmethod
     def _load_prompt_embeds(
