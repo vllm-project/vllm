@@ -15,47 +15,48 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils import LazyDict
-from vllm.utils import direct_register_custom_op
+# from vllm.utils import direct_register_custom_op
 
 if current_platform.is_rocm():
-    VLLM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT = envs.VLLM_ROCM_USE_AITER and envs.VLLM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT
-    if VLLM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT:
-        from aiter.ops.triton.activation import act_mul_and_fp8_group_quant
-        import aiter as rocm_aiter
-        aiter_rocm_fp8_dtype = rocm_aiter.dtypes.fp8
+    # VLLM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT = envs.VLLM_ROCM_USE_AITER and envs.VLLM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT
+    # if VLLM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT:
+    #     from aiter.ops.triton.activation import act_mul_and_fp8_group_quant
+    #     import aiter as rocm_aiter
+    #     aiter_rocm_fp8_dtype = rocm_aiter.dtypes.fp8
         
-        def act_mul_and_fp8_group_quant_impl(
-            x: torch.Tensor,
-            group_size: int = 128,                
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            return act_mul_and_fp8_group_quant(x, "silu", group_size, dtype_quant=aiter_rocm_fp8_dtype)
+    #     def act_mul_and_fp8_group_quant_impl(
+    #         x: torch.Tensor,
+    #         group_size: int = 128,                
+    #     ) -> tuple[torch.Tensor, torch.Tensor]:
+    #         return act_mul_and_fp8_group_quant(x, "silu", group_size, dtype_quant=aiter_rocm_fp8_dtype)
         
-        def act_mul_and_fp8_group_quant_fake(
-            x: torch.Tensor,
-            group_size: int = 128,                
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            M, N = x.shape
-            assert N % 2 == 0
-            N_half = N // 2
-            x_fp8 = torch.empty((M, N_half), dtype=aiter_rocm_fp8_dtype, device=x.device)
-            out_bs = torch.empty((M, (N_half + group_size - 1) // group_size), dtype=torch.float32, device=x.device)
-            return x_fp8, out_bs
+    #     def act_mul_and_fp8_group_quant_fake(
+    #         x: torch.Tensor,
+    #         group_size: int = 128,                
+    #     ) -> tuple[torch.Tensor, torch.Tensor]:
+    #         M, N = x.shape
+    #         assert N % 2 == 0
+    #         N_half = N // 2
+    #         x_fp8 = torch.empty((M, N_half), dtype=aiter_rocm_fp8_dtype, device=x.device)
+    #         out_bs = torch.empty((M, (N_half + group_size - 1) // group_size), dtype=torch.float32, device=x.device)
+    #         return x_fp8, out_bs
         
-        direct_register_custom_op(
-            op_name="act_mul_and_fp8_group_quant",
-            op_func=act_mul_and_fp8_group_quant_impl,
-            mutates_args=[],
-            fake_impl=act_mul_and_fp8_group_quant_fake,
-            dispatch_key=current_platform.dispatch_key,
-        )
+    #     direct_register_custom_op(
+    #         op_name="act_mul_and_fp8_group_quant",
+    #         op_func=act_mul_and_fp8_group_quant_impl,
+    #         mutates_args=[],
+    #         fake_impl=act_mul_and_fp8_group_quant_fake,
+    #         dispatch_key=current_platform.dispatch_key,
+    #     )
 
-    VLLM_USE_AITER_TRITON_SILU_MUL = envs.VLLM_ROCM_USE_AITER and envs.VLLM_USE_AITER_TRITON_SILU_MUL
+    VLLM_ROCM_USE_AITER_TRITON_SILU_MUL_FP4_QUANT = envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_TRITON_SILU_MUL_FP4_QUANT
     VLLM_TRITON_FP4_GEMM_USE_ASM = envs.VLLM_ROCM_USE_AITER and envs.VLLM_TRITON_FP4_GEMM_USE_ASM
     
-    if VLLM_USE_AITER_TRITON_SILU_MUL:
+    if VLLM_ROCM_USE_AITER_TRITON_SILU_MUL_FP4_QUANT:
         from aiter.ops.triton.activation import act_mul_and_mxfp4_quant
     
-    assert (VLLM_USE_AITER_TRITON_SILU_MUL and VLLM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT) == False, "VLLM_USE_AITER_TRITON_SILU_MUL and VLLM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT cannot be True simultaneously, please set one of them to False"
+    # assert (VLLM_ROCM_USE_AITER_TRITON_SILU_MUL_FP4_QUANT and VLLM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT) == False, \
+    # "VLLM_USE_AITER_TRITON_SILU_MUL and VLLM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT cannot be True simultaneously, please set one of them to False"
 
 @CustomOp.register("fatrelu_and_mul")
 class FatreluAndMul(CustomOp):
@@ -107,10 +108,10 @@ class SiluAndMul(CustomOp):
     def __init__(self):
         super().__init__()
 
-        if VLLM_USE_AITER_TRITON_SILU_MUL:
+        if VLLM_ROCM_USE_AITER_TRITON_SILU_MUL_FP4_QUANT:
             self.op = lambda x, shuffle: act_mul_and_mxfp4_quant(x, "silu", shuffle=shuffle)
-        elif VLLM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT:
-            self.op = torch.ops.vllm.act_mul_and_fp8_group_quant
+        # elif VLLM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT:
+        #     self.op = torch.ops.vllm.act_mul_and_fp8_group_quant
         elif current_platform.is_cuda_alike():
             self.op = torch.ops._C.silu_and_mul
         elif current_platform.is_xpu():
@@ -127,13 +128,13 @@ class SiluAndMul(CustomOp):
     def forward_cuda(self,
                      x: torch.Tensor,
                      scale: Optional[torch.Tensor] = None) -> torch.Tensor:
-        if VLLM_USE_AITER_TRITON_SILU_MUL:
+        if VLLM_ROCM_USE_AITER_TRITON_SILU_MUL_FP4_QUANT:
             shuffle = VLLM_TRITON_FP4_GEMM_USE_ASM and x.shape[0] >= 32
             out, out_scales = self.op(x, shuffle)
             return out, out_scales
-        elif VLLM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT:
-            out, out_scales = self.op(x, group_size=128)
-            return out, out_scales
+        # elif VLLM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT:
+        #     out, out_scales = self.op(x, group_size=128)
+        #     return out, out_scales
         else:
             d = x.shape[-1] // 2
             output_shape = (x.shape[:-1] + (d, ))

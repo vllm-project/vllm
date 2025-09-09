@@ -222,10 +222,10 @@ if current_platform.is_rocm():
     if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE:
         from aiter.ops.triton.fused_kv_cache import fused_qk_rope_cat_and_cache_mla
         
-    VLLM_AITER_TRITON_FP8_BMM = envs.VLLM_ROCM_USE_AITER and envs.VLLM_AITER_TRITON_FP8_BMM
-    VLLM_AITER_TRITON_FP8_BMM_MAX_BATCH_SIZE = envs.VLLM_AITER_TRITON_FP8_BMM_MAX_BATCH_SIZE
-    assert VLLM_AITER_TRITON_FP8_BMM_MAX_BATCH_SIZE > 0, "VLLM_AITER_TRITON_FP8_BMM_MAX_BATCH_SIZE must be positive integer"
-    if VLLM_AITER_TRITON_FP8_BMM:
+    VLLM_ROCM_USE_AITER_TRITON_FP8_BMM = envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_TRITON_FP8_BMM
+    VLLM_ROCM_USE_AITER_TRITON_FP8_BMM_MAX_BATCH_SIZE = envs.VLLM_ROCM_USE_AITER_TRITON_FP8_BMM_MAX_BATCH_SIZE
+    assert VLLM_ROCM_USE_AITER_TRITON_FP8_BMM_MAX_BATCH_SIZE > 0, "VLLM_ROCM_USE_AITER_TRITON_FP8_BMM_MAX_BATCH_SIZE must be positive integer"
+    if VLLM_ROCM_USE_AITER_TRITON_FP8_BMM:
         from aiter.ops.triton.quant import dynamic_per_tensor_quant_fp8_i8
 
         def dynamic_per_batched_tensor_quant(
@@ -976,7 +976,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         )
 
     def _v_up_proj(self, x, output=None):
-        if VLLM_AITER_TRITON_FP8_BMM and output is not None:
+        if VLLM_ROCM_USE_AITER_TRITON_FP8_BMM and output is not None:
             x = x.view(-1, self.num_heads, self.kv_lora_rank)
             output = output.view(-1, self.num_heads, self.v_head_dim)
             batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant(x, self.W_V, self.W_V_scale, group_size = 128, YQ = output, transpose_bm = True, transpose_bm_in = True)
@@ -1036,14 +1036,14 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         W_UK, W_UV = kv_b_proj_weight.split(
             [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
-        if VLLM_AITER_TRITON_FP8_BMM:
+        if VLLM_ROCM_USE_AITER_TRITON_FP8_BMM:
             W_K = W_UK.transpose(0, 1)
             W_V = W_UV.permute(1, 2, 0)
             self.W_K, self.W_K_scale = dynamic_per_batched_tensor_quant(W_K, dtype=self.fp8_dtype)
             self.W_V, self.W_V_scale = dynamic_per_batched_tensor_quant(W_V, dtype=self.fp8_dtype)
-            logger.info(f"[Triton] Compiling FP8 BMM with shape = {self.W_K.shape[0]} [1~{VLLM_AITER_TRITON_FP8_BMM_MAX_BATCH_SIZE}] {self.W_K.shape[1]} {self.W_K.shape[2]}")
-            logger.info(f"[Triton] Compiling FP8 BMM with shape = {self.W_V.shape[0]} [1~{VLLM_AITER_TRITON_FP8_BMM_MAX_BATCH_SIZE}] {self.W_V.shape[1]} {self.W_V.shape[2]}")
-            for m in range(1, VLLM_AITER_TRITON_FP8_BMM_MAX_BATCH_SIZE + 1):
+            logger.info(f"[Triton] Compiling FP8 BMM with shape = {self.W_K.shape[0]} [1~{VLLM_ROCM_USE_AITER_TRITON_FP8_BMM_MAX_BATCH_SIZE}] {self.W_K.shape[1]} {self.W_K.shape[2]}")
+            logger.info(f"[Triton] Compiling FP8 BMM with shape = {self.W_V.shape[0]} [1~{VLLM_ROCM_USE_AITER_TRITON_FP8_BMM_MAX_BATCH_SIZE}] {self.W_V.shape[1]} {self.W_V.shape[2]}")
+            for m in range(1, VLLM_ROCM_USE_AITER_TRITON_FP8_BMM_MAX_BATCH_SIZE + 1):
                 x = torch.empty((m, self.W_K.shape[0], self.W_K.shape[2]), dtype=torch.bfloat16, device=self.W_K.device)
                 x_out = torch.empty((m, self.W_K.shape[0], self.W_K.shape[1] + self.qk_rope_head_dim), dtype=torch.bfloat16, device=self.W_K.device)[... , :self.W_K.shape[1]]
                 batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant(x, self.W_K, self.W_K_scale, group_size = 128, YQ = x_out, transpose_bm = True, transpose_bm_in = True)
@@ -1237,7 +1237,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE:
                 cos, sin = cos_sin_cache.chunk(2, dim = -1)
                 q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-                if VLLM_AITER_TRITON_FP8_BMM:
+                if VLLM_ROCM_USE_AITER_TRITON_FP8_BMM:
                     decode_q_out = torch.empty((num_decode_tokens, self.num_heads, self.W_K.shape[1] + self.qk_rope_head_dim), dtype = q.dtype, device=q.device)
                 if self.is_fp8_kv_cache:
                     kv_cache_og_dtype = kv_cache.dtype
@@ -1257,7 +1257,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                     num_decode_toks_for_zeros=num_decode_tokens,
                     apply_scale=(k_pe.dtype != kv_cache.dtype),
                     q_out=None,
-                    decode_q_pe_out = decode_q_out[... , -self.qk_rope_head_dim:] if VLLM_AITER_TRITON_FP8_BMM else None,
+                    decode_q_pe_out = decode_q_out[... , -self.qk_rope_head_dim:] if VLLM_ROCM_USE_AITER_TRITON_FP8_BMM else None,
                     k_pe_out=k_pe,
                 )
                 if num_decode_tokens > 0:
@@ -1286,7 +1286,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             decode_q_nope, decode_q_pe = decode_q.split(
                 [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
             
-            if VLLM_AITER_TRITON_FP8_BMM:
+            if VLLM_ROCM_USE_AITER_TRITON_FP8_BMM:
                 decode_ql_nope = decode_q_out[... , :self.W_K.shape[1]] if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE else None
                 decode_ql_nope = batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant(decode_q_nope, self.W_K, self.W_K_scale, group_size = 128, YQ = decode_ql_nope, transpose_bm = True, transpose_bm_in = True)
                 self._forward_decode(

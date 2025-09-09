@@ -66,16 +66,21 @@ if current_platform.is_rocm():
     VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_QUANT = envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_QUANT
     if VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_QUANT:
         from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
+    
+    VLLM_ROCM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT = envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT
+    if VLLM_ROCM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT:
+        from aiter.ops.triton.activation import act_mul_and_fp8_group_quant
+
+    if VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_QUANT or VLLM_ROCM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT:    
         import aiter as rocm_aiter
         rocm_aiter_fp8_dtype = rocm_aiter.dtypes.fp8
         rocm_aiter_fp8_quant_group_size = 128
-        
+
     VLLM_ROCM_USE_AITER_TRITON_FUSED_MUL_ADD = envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_TRITON_FUSED_MUL_ADD
     if VLLM_ROCM_USE_AITER_TRITON_FUSED_MUL_ADD:
         from aiter.ops.triton.fused_mul_add import fused_mul_add
 
     VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE = envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE
-    VLLM_AITER_TRITON_FP8_BMM = envs.VLLM_ROCM_USE_AITER and envs.VLLM_AITER_TRITON_FP8_BMM
 
 class DeepseekV2MLP(nn.Module):
 
@@ -110,7 +115,13 @@ class DeepseekV2MLP(nn.Module):
         if isinstance(x, tuple):
             x, x_quant_scales = x
         gate_up, _ = self.gate_up_proj(x, x_quant_scales=x_quant_scales)
-        x = self.act_fn(gate_up)
+        if VLLM_ROCM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT:
+            x = act_mul_and_fp8_group_quant(gate_up, 
+                                            activation="silu", 
+                                            group_size=rocm_aiter_fp8_quant_group_size, 
+                                            dtype_quant=rocm_aiter_fp8_dtype)
+        else:
+            x = self.act_fn(gate_up)
         x_quant_scales = None
         if isinstance(x, tuple):
             x, x_quant_scales = x
@@ -554,7 +565,7 @@ class DeepseekV2MLAAttention(nn.Module):
                                         dim=-1)
                 (q_c, q_c_scale), _, kv_c_normed, _ = fused_rms_fp8_group_quant(q_c, weight, eps, 
                                                         kv_c, weight2, eps2, 
-                                                        group_size = rocm_aiter_fp8_quant_group_size,
+                                                        group_size=rocm_aiter_fp8_quant_group_size,
                                                         dtype_quant=rocm_aiter_fp8_dtype, 
                                                         res1=None)
                 q = self.q_b_proj(q_c, x_quant_scales = q_c_scale)[0]
