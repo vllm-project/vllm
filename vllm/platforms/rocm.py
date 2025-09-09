@@ -322,11 +322,13 @@ class RocmPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        from vllm.config.compilation import CUDAGraphMode
+
         cache_config = vllm_config.cache_config
         compilation_config = vllm_config.compilation_config
         parallel_config = vllm_config.parallel_config
-        model_config = vllm_config.model_config
-        enforce_eager = True if not model_config else model_config.enforce_eager
+        is_eager_execution = compilation_config == CUDAGraphMode.NONE
+
         use_v1 = envs.VLLM_USE_V1
         use_aiter_rms_norm = envs.VLLM_ROCM_USE_AITER and \
              envs.VLLM_ROCM_USE_AITER_RMSNORM
@@ -347,7 +349,7 @@ class RocmPlatform(Platform):
                 else:
                     parallel_config.worker_cls = "vllm.worker.worker.Worker"
 
-        if use_v1 and use_aiter_rms_norm and not enforce_eager:
+        if use_v1 and use_aiter_rms_norm and not is_eager_execution:
             compilation_config.custom_ops.append("+rms_norm")
 
     @classmethod

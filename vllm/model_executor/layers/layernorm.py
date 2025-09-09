@@ -151,9 +151,9 @@ class RMSNorm(CustomOp):
         weight_dtype = self.weight.data.dtype
 
         if current_platform.is_rocm():
-            self.rocm_aiter_norm_func = dispatch_rocm_rmsnorm_func(
+            self.rocm_norm_func = dispatch_rocm_rmsnorm_func(
                 with_fused_add=False, dtype=weight_dtype)
-            self.rocm_aiter_norm_func_with_add = dispatch_rocm_rmsnorm_func(
+            self.rocm_norm_func_with_add = dispatch_rocm_rmsnorm_func(
                 with_fused_add=True, dtype=weight_dtype)
 
     def forward_native(
@@ -219,12 +219,11 @@ class RMSNorm(CustomOp):
 
         add_residual = residual is not None
         if add_residual:
-            return self.rocm_aiter_norm_func_with_add(x, residual,
-                                                      self.weight.data,
-                                                      self.variance_epsilon)
+            return self.rocm_norm_func_with_add(x, residual, self.weight.data,
+                                                self.variance_epsilon)
         else:
-            return self.rocm_aiter_norm_func(x, self.weight.data,
-                                             self.variance_epsilon)
+            return self.rocm_norm_func(x, self.weight.data,
+                                       self.variance_epsilon)
 
     def forward_xpu(
         self,
