@@ -181,6 +181,10 @@ cython_debug/
 CLAUDE.md
 .claude/
 
+# Codex
+AGENTS.md
+.codex/
+
 # DS Store
 .DS_Store
 
