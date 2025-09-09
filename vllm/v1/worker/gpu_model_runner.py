@@ -84,7 +84,6 @@ from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
-from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.kv_connector_model_runner_mixin import (
     KVConnectorModelRunnerMixin, KVConnectorOutput)
@@ -955,6 +954,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # in the same group share the same metadata.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
                 self.kv_cache_config.kv_cache_groups):
+            encoder_seq_lens: Optional[np.ndarray] = None
 
             if isinstance(kv_cache_group_spec.kv_cache_spec,
                           EncoderOnlyAttentionSpec):
@@ -971,26 +971,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     device=self.device,
                 )
                 num_common_prefix_blocks = 0
-            elif isinstance(kv_cache_group_spec.kv_cache_spec,
-                            CrossAttentionSpec):
-                num_common_prefix_blocks = 0
-                blk_table = self.input_batch.block_table[kv_cache_group_id]
-                blk_table_tensor = blk_table.get_device_tensor()[:num_reqs]
-                cross_slot_tensors = []
-                for req_id in scheduler_output.scheduled_encoder_inputs:
-                    cross_slot_tensors.append(
-                        self._get_cross_slot_mapping(
-                            req_id, self.max_encoder_len, blk_table,
-                            kv_cache_group_spec.kv_cache_spec))
-
-                # Create cross-attention metadata using decoder queries and
-                # encoder keys/values
-                if cross_slot_tensors:
-                    slot_mapping = torch.cat(cross_slot_tensors)
-                else:
-                    slot_mapping = torch.empty(0,
-                                               dtype=torch.int64,
-                                               device=self.device)
             else:
                 blk_table = self.input_batch.block_table[kv_cache_group_id]
                 blk_table_tensor = blk_table.get_device_tensor()[:num_reqs]
@@ -1003,6 +983,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_common_prefix_blocks = (
                     scheduler_output.
                     num_common_prefix_blocks[kv_cache_group_id])
+
+                if isinstance(kv_cache_group_spec.kv_cache_spec,
+                              CrossAttentionSpec):
+                    # Build encoder_seq_lens array mapping request indices to
+                    # encoder lengths for inputs scheduled in this batch
+                    encoder_seq_lens = np.zeros(num_reqs, dtype=np.int32)
+                    for req_id in scheduler_output.scheduled_encoder_inputs:
+                        req_index = self.input_batch.req_id_to_index[req_id]
+                        encoder_seq_lens[req_index] = self.max_encoder_len
 
             common_attn_metadata = CommonAttentionMetadata(
                 query_start_loc=query_start_loc,
@@ -1019,6 +1008,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 logits_indices_padded=logits_indices_padded,
                 num_logits_indices=logits_indices.size(0),
                 causal=True,
+                encoder_seq_lens=encoder_seq_lens,
             )
 
             if self.speculative_config and \
@@ -1052,27 +1042,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return (attn_metadata, logits_indices, spec_decode_metadata,
                 num_scheduled_tokens, spec_decode_common_attn_metadata,
                 max_num_scheduled_tokens)
-
-    def _get_cross_slot_mapping(
-            self, req_id: str, encoder_seq_len: int, block_table: BlockTable,
-            kv_cache_spec: CrossAttentionSpec) -> torch.Tensor:
-        """Get cross-attention slot mapping for a request."""
-        req_index = self.input_batch.req_id_to_index[req_id]
-        num_blocks = block_table.num_blocks_per_row[req_index]
-        cross_block_ids = torch.tensor(
-            block_table.block_table_np[req_index, :num_blocks],
-            dtype=torch.int64,
-            device=self.device)
-        block_size = kv_cache_spec.block_size
-
-        i_values = torch.arange(encoder_seq_len,
-                                dtype=torch.int64,
-                                device=self.device)
-        block_numbers = cross_block_ids[i_values // block_size]
-        block_offsets = i_values % block_size
-        slot_mapping = block_numbers * block_size + block_offsets
-
-        return slot_mapping
 
     def _compute_cascade_attn_prefix_len(
         self,

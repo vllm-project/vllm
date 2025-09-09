@@ -72,6 +72,9 @@ class CommonAttentionMetadata:
     logits_indices_padded: Optional[torch.Tensor] = None
     num_logits_indices: Optional[int] = None
 
+    # Needed by CrossAttentionBuilder
+    encoder_seq_lens: Optional[np.ndarray] = None
+
 
 @dataclass
 class UbatchSlice:

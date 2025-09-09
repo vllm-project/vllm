@@ -4,23 +4,72 @@ import functools
 from copy import copy
 from typing import Optional
 
+import numpy as np
 import torch
 from transformers import CacheConfig
 
 from vllm import envs
 from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata, AttentionType)
+from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.attention.layer import Attention
 from vllm.attention.selector import get_attn_backend
 from vllm.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
                                               subclass_attention_backend)
+from vllm.v1.kv_cache_interface import CrossAttentionSpec
 
 
 def _get_max_encoder_len(vllm_config: VllmConfig) -> int:
     return MULTIMODAL_REGISTRY.get_encdec_max_encoder_len(
         vllm_config.model_config)
+
+
+def _get_cross_slot_mapping(encoder_seq_lens: np.ndarray,
+                            block_table_tensor: torch.Tensor,
+                            kv_cache_spec: CrossAttentionSpec,
+                            device: torch.device) -> torch.Tensor:
+    """Get cross-attention slot mappings."""
+
+    block_size = kv_cache_spec.block_size
+    slot_mappings = []
+
+    for req_index, encoder_seq_len in enumerate(encoder_seq_lens):
+        if encoder_seq_len == 0:
+            # No encoder input for this request
+            continue
+
+        # Get the block IDs for this request from the tensor
+        req_block_ids = block_table_tensor[req_index]
+
+        # Find the number of valid (non-zero) blocks for this request
+        # Assumes unused blocks are padded with zeros
+        non_zero_mask = req_block_ids != 0
+        if not non_zero_mask.any():
+            # No blocks allocated for this request, use PAD_SLOT_ID
+            slot_mapping = torch.full((encoder_seq_len, ),
+                                      PAD_SLOT_ID,
+                                      dtype=torch.int64,
+                                      device=device)
+        else:
+            # Get only the valid (non-zero) block IDs
+            valid_block_ids = req_block_ids[non_zero_mask]
+
+            i_values = torch.arange(encoder_seq_len,
+                                    dtype=torch.int64,
+                                    device=device)
+            block_indices = i_values // block_size
+            block_offsets = i_values % block_size
+            block_numbers = valid_block_ids[block_indices]
+            slot_mapping = block_numbers * block_size + block_offsets
+
+        slot_mappings.append(slot_mapping)
+
+    if slot_mappings:
+        return torch.cat(slot_mappings)
+    else:
+        return torch.empty(0, dtype=torch.int64, device=device)
 
 
 @functools.lru_cache
@@ -52,6 +101,9 @@ def create_cross_attention_backend(
                 dtype=torch.int32,
                 device="cpu",
             )
+            new_metadata.slot_mapping = _get_cross_slot_mapping(
+                new_metadata.encoder_seq_lens, new_metadata.block_table_tensor,
+                self.kv_cache_spec, self.device)
             return super().build(common_prefix_len, new_metadata, fast_build)
 
     attn_backend = subclass_attention_backend(
