@@ -441,61 +441,6 @@ class MultiHeadAttention(nn.Module):
         return out
 
 
-class TorchAttention(nn.Module):
-
-    def __init__(self, num_heads: int, head_dim: int, scaling: float,
-                 num_kv_heads: int):
-        super().__init__()
-        self.num_heads = num_heads
-        self.head_dim = head_dim
-        self.scaling = scaling
-        self.num_kv_heads = num_kv_heads
-
-    def forward(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-    ) -> torch.Tensor:
-        """Input shape: batch_size x seq_len x hidden_size"""
-        # Normalize to 3D by adding batch dimension if needed
-        is_2d = query.dim() == 2
-        if is_2d:
-            query = query.unsqueeze(0)
-            key = key.unsqueeze(0)
-            value = value.unsqueeze(0)
-
-        bsz, q_len, _ = query.size()
-        kv_len = key.size(1)
-
-        # Reshape to [batch_size, seq_len, num_heads, head_dim]
-        query = query.view(bsz, q_len, self.num_heads, self.head_dim)
-        key = key.view(bsz, kv_len, self.num_kv_heads, self.head_dim)
-        value = value.view(bsz, kv_len, self.num_kv_heads, self.head_dim)
-
-        # Handle MQA/GQA if needed
-        if (num_repeat := self.num_heads // self.num_kv_heads) > 1:
-            key = torch.repeat_interleave(key, num_repeat, dim=2)
-            value = torch.repeat_interleave(value, num_repeat, dim=2)
-
-        # Transpose for SDPA: [batch_size, num_heads, seq_len, head_dim]
-        query, key, value = (x.transpose(1, 2) for x in (query, key, value))
-
-        out = F.scaled_dot_product_attention(query,
-                                             key,
-                                             value,
-                                             scale=self.scaling)
-
-        # Transpose back and reshape to original format
-        out = out.transpose(1, 2).reshape(bsz, q_len, -1)
-
-        # Remove batch dimension if input was 2D
-        if is_2d:
-            out = out.squeeze(0)
-
-        return out
-
-
 def wait_for_kv_layer_from_connector(layer_name: str):
     if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
         return
