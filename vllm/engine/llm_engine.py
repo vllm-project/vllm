@@ -443,6 +443,11 @@ class LLMEngine:
                 "multiprocessing distributed executor backend does not "
                 "support VLLM_USE_RAY_SPMD_WORKER=1")
             executor_class = MultiprocessingDistributedExecutor
+        elif distributed_executor_backend == "mp_distributed":
+            print("using mp_distributed")
+            from vllm.executor.mp_distributed_executor import (
+                MultiprocessingDistributedExecutor)
+            executor_class = MultiprocessingDistributedExecutor
         elif distributed_executor_backend == "uni":
             # JAX-style, single-process, multi-device executor.
             from vllm.executor.uniproc_executor import UniProcExecutor
