@@ -34,6 +34,7 @@ class RequestFuncInput:
     multi_modal_content: Optional[dict | list[dict]] = None
     ignore_eos: bool = False
     language: Optional[str] = None
+    request_id: Optional[str] = None
 
 
 @dataclass
@@ -71,6 +72,9 @@ async def async_request_tgi(
             "inputs": request_func_input.prompt,
             "parameters": params,
         }
+        headers = None
+        if request_func_input.request_id:
+            headers = {"x-request-id": request_func_input.request_id}
         output = RequestFuncOutput()
         output.prompt_len = request_func_input.prompt_len
         if request_func_input.ignore_eos:
@@ -82,7 +86,9 @@ async def async_request_tgi(
         st = time.perf_counter()
         most_recent_timestamp = st
         try:
-            async with session.post(url=api_url, json=payload) as response:
+            async with session.post(
+                url=api_url, json=payload, headers=headers
+            ) as response:
                 if response.status == 200:
                     async for chunk_bytes in response.content:
                         chunk_bytes = chunk_bytes.strip()
@@ -145,6 +151,9 @@ async def async_request_trt_llm(
         }
         if request_func_input.ignore_eos:
             payload["min_length"] = request_func_input.output_len
+        headers = None
+        if request_func_input.request_id:
+            headers = {"x-request-id": request_func_input.request_id}
         output = RequestFuncOutput()
         output.prompt_len = request_func_input.prompt_len
 
@@ -152,7 +161,9 @@ async def async_request_trt_llm(
         st = time.perf_counter()
         most_recent_timestamp = st
         try:
-            async with session.post(url=api_url, json=payload) as response:
+            async with session.post(
+                url=api_url, json=payload, headers=headers
+            ) as response:
                 if response.status == 200:
                     async for chunk_bytes in response.content:
                         chunk_bytes = chunk_bytes.strip()
@@ -211,6 +222,8 @@ async def async_request_deepspeed_mii(
             "top_p": 1.0,
         }
         headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
+        if request_func_input.request_id:
+            headers["x-request-id"] = request_func_input.request_id
 
         output = RequestFuncOutput()
         output.prompt_len = request_func_input.prompt_len
@@ -283,6 +296,8 @@ async def async_request_openai_completions(
         if request_func_input.extra_body:
             payload.update(request_func_input.extra_body)
         headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
+        if request_func_input.request_id:
+            headers["x-request-id"] = request_func_input.request_id
 
         output = RequestFuncOutput()
         output.prompt_len = request_func_input.prompt_len
@@ -395,6 +410,8 @@ async def async_request_openai_chat_completions(
             "Content-Type": "application/json",
             "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
         }
+        if request_func_input.request_id:
+            headers["x-request-id"] = request_func_input.request_id
 
         output = RequestFuncOutput()
         output.prompt_len = request_func_input.prompt_len
@@ -491,6 +508,8 @@ async def async_request_openai_audio(
         headers = {
             "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
         }
+        if request_func_input.request_id:
+            headers["x-request-id"] = request_func_input.request_id
 
         # Send audio file
         def to_bytes(y, sr):

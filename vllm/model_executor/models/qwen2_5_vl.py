@@ -27,7 +27,7 @@
 """Inference-only Qwen2.5-VL model compatible with HuggingFace weights."""
 from collections.abc import Iterable, Mapping
 from functools import lru_cache, partial
-from typing import Callable, Literal, Optional, TypedDict, Union
+from typing import Annotated, Callable, Literal, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -45,10 +45,13 @@ from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
+# yapf: disable
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
+                                               ReplicatedLinear,
                                                RowParallelLinear)
+# yapf: enable
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.gptq import GPTQConfig
 from vllm.model_executor.layers.quantization.gptq_marlin import (
@@ -57,9 +60,11 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig
+from vllm.multimodal.utils import run_dp_sharded_mrope_vision_model
 from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP, SupportsQuant)
@@ -76,84 +81,125 @@ logger = init_logger(__name__)
 # === Vision Inputs === #
 
 
-class Qwen2_5_VLImagePixelInputs(TypedDict):
+class Qwen2_5_VLImagePixelInputs(TensorSchema):
+    """
+    Dimensions:
+        - np: Number of patches
+        - ni: Number of images
+        - cps: Number of channels * patch_size * patch_size
+    
+    Historical context:
+        - pixel_values shape: (num_patches, num_channels * patch_size * 
+          patch_size)
+        - image_grid_thw shape: (num_images, 3) in (grid_t, grid_h, grid_w)
+          formatnum_channels * patch_size * patch_size
+    """
     type: Literal["pixel_values"]
-    pixel_values: torch.Tensor
-    """Shape:
-    `(num_patches, num_channels * patch_size * patch_size)`
+
+    pixel_values: Annotated[
+        torch.Tensor,
+        TensorShape("np", "cps"),
+    ]
+
+    image_grid_thw: Annotated[
+        torch.Tensor,
+        TensorShape("ni", 3),
+    ]
+
+
+class Qwen2_5_VLImageEmbeddingInputs(TensorSchema):
     """
-
-    image_grid_thw: torch.Tensor
-    """Shape: `(num_images, 3)`
-    This should be in `(grid_t, grid_h, grid_w)` format.
+    Dimensions:
+        - nf: Number of image features
+        - hs: Hidden size
+        - ni: Number of images
+    
+    Historical context:
+        - image_embeds shape: (num_image_features, hidden_size)
+        - num_image_features varies based on the number and resolution of the
+          images.
+        - hidden_size must match the hidden size of language model backbone.
+        - image_grid_thw shape: (num_images, 3) in (grid_t, grid_h, grid_w)
+          format
     """
-
-
-class Qwen2_5_VLImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
-    image_embeds: torch.Tensor
-    """Supported types:
-    - list[`torch.Tensor`]: A list of tensors holding all images' features.
-        Each tensor holds an image's features.
-    - `torch.Tensor`: A tensor holding all images' features
-        (concatenation of all images' feature tensors).
 
-    Tensor shape: `(num_image_features, hidden_size)`
-    - `num_image_features` varies based on
-        the number and resolution of the images.
-    - `hidden_size` must match the hidden size of language model backbone.
-    """
+    image_embeds: Annotated[
+        torch.Tensor,
+        TensorShape("nf", "hs"),
+    ]
 
-    image_grid_thw: torch.Tensor
-    """Shape: `(num_images, 3)`
-    This should be in `(grid_t, grid_h, grid_w)` format.
-    """
+    image_grid_thw: Annotated[
+        torch.Tensor,
+        TensorShape("ni", 3),
+    ]
 
 
 Qwen2_5_VLImageInputs = Union[Qwen2_5_VLImagePixelInputs,
                               Qwen2_5_VLImageEmbeddingInputs]
 
 
-class Qwen2_5_VLVideoPixelInputs(TypedDict):
+class Qwen2_5_VLVideoPixelInputs(TensorSchema):
+    """
+    Dimensions:
+        - np: Number of patches
+        - nv: Number of videos
+        - ctps: Number of channels * temporal_patch_size * patch_size * 
+          patch_size
+    
+    Historical context:
+        - pixel_values_videos shape: (num_patches, num_channels * 
+          temporal_patch_size * patch_size * patch_size)
+        - video_grid_thw shape: (num_videos, 3) in (grid_t, grid_h, grid_w)
+          format
+        - second_per_grid_ts: The video time interval (in seconds) for each
+          grid along the temporal dimension in the 3D position IDs. Returned
+          when `videos` is not `None`.
+    """
     type: Literal["pixel_values_videos"]
-    pixel_values_videos: torch.Tensor
-    """Shape:
-    `(num_patches,
-      num_channels * temporal_patch_size * patch_size * patch_size)`
+
+    pixel_values_videos: Annotated[
+        torch.Tensor,
+        TensorShape("np", "ctps"),
+    ]
+
+    video_grid_thw: Annotated[
+        torch.Tensor,
+        TensorShape("nv", 3),
+    ]
+
+    second_per_grid_ts: Annotated[
+        Optional[torch.Tensor],
+        TensorShape("nv"),
+    ]
+
+
+class Qwen2_5_VLVideoEmbeddingInputs(TensorSchema):
     """
-
-    video_grid_thw: torch.Tensor
-    """Shape: `(num_videos, 3)`
-
-    This should be in `(grid_t, grid_h, grid_w)` format.
+    Dimensions:
+        - nf: Number of video features
+        - hs: Hidden size
+        - nv: Number of videos
+    
+    Historical context:
+        - video_embeds shape: (num_video_features, hidden_size)
+        - num_video_features varies based on the number and resolution of the
+          videos.
+        - hidden_size must match the hidden size of language model backbone.
+        - video_grid_thw shape: (num_videos, 3) in (grid_t, grid_h, grid_w)
+          format
     """
-
-    second_per_grid_ts: torch.Tensor
-    """
-    The video time interval (in seconds) for each grid along the temporal 
-    dimension in the 3D position IDs. Returned when `videos` is not `None`.
-    """
-
-
-class Qwen2_5_VLVideoEmbeddingInputs(TypedDict):
     type: Literal["video_embeds"]
-    video_embeds: torch.Tensor
-    """Supported types:
-    - list[`torch.Tensor`]: A list of tensors holding all videos' features.
-        Each tensor holds an video's features.
-    - `torch.Tensor`: A tensor holding all videos' features
-      (concatenation of all videos' feature tensors).
 
-    Tensor shape: `(num_image_features, hidden_size)`
-    - `num_image_features` varies based on
-        the number and resolution of the videos.
-    - `hidden_size` must match the hidden size of language model backbone.
-    """
+    video_embeds: Annotated[
+        torch.Tensor,
+        TensorShape("nf", "hs"),
+    ]
 
-    video_grid_thw: torch.Tensor
-    """Shape: `(num_videos, 3)`
-    This should be in `(grid_t, grid_h, grid_w)` format.
-    """
+    video_grid_thw: Annotated[
+        torch.Tensor,
+        TensorShape("nv", 3),
+    ]
 
 
 Qwen2_5_VLVideoInputs = Union[Qwen2_5_VLVideoPixelInputs,
@@ -170,19 +216,23 @@ class Qwen2_5_VisionMLP(nn.Module):
                  bias: bool = False,
                  act_fn: Callable[[torch.Tensor], torch.Tensor] = F.silu,
                  quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
+                 prefix: str = "",
+                 use_data_parallel: bool = False):
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
             input_size=in_features,
             output_sizes=[hidden_features] * 2,  # [gate_proj, up_proj]
             bias=bias,
             quant_config=quant_config,
-            prefix=f"{prefix}.gate_up_proj")
+            prefix=f"{prefix}.gate_up_proj",
+            disable_tp=use_data_parallel)
+
         self.down_proj = RowParallelLinear(hidden_features,
                                            in_features,
                                            bias=bias,
                                            quant_config=quant_config,
-                                           prefix=f"{prefix}.down_proj")
+                                           prefix=f"{prefix}.down_proj",
+                                           disable_tp=use_data_parallel)
         self.act_fn = act_fn
 
     def forward(self, x: torch.Tensor):
@@ -220,10 +270,12 @@ class Qwen2_5_VisionAttention(nn.Module):
         projection_size: int,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
         # Per attention head and per partition values.
-        self.tp_size = parallel_state.get_tensor_model_parallel_world_size()
+        self.tp_size = (1 if use_data_parallel else
+                        parallel_state.get_tensor_model_parallel_world_size())
         self.tp_rank = parallel_state.get_tensor_model_parallel_rank()
         self.hidden_size_per_attention_head = dist_utils.divide(
             projection_size, num_heads)
@@ -237,11 +289,14 @@ class Qwen2_5_VisionAttention(nn.Module):
             total_num_kv_heads=num_heads,
             bias=True,
             quant_config=quant_config,
-            prefix=f"{prefix}.qkv")
+            prefix=f"{prefix}.qkv",
+            disable_tp=use_data_parallel)
+
         self.proj = RowParallelLinear(input_size=projection_size,
                                       output_size=embed_dim,
                                       quant_config=quant_config,
-                                      prefix=f"{prefix}.proj")
+                                      prefix=f"{prefix}.proj",
+                                      disable_tp=use_data_parallel)
 
         # Detect attention implementation.
         self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
@@ -302,8 +357,6 @@ class Qwen2_5_VisionAttention(nn.Module):
             k = apply_rotary_pos_emb_vision(k, rotary_pos_emb)
 
         if self.is_flash_attn_backend:
-            # from vllm_flash_attn.flash_attn_interface import (
-            #   flash_attn_varlen_func)
             if self.attn_backend == _Backend.ROCM_AITER_FA:
                 from aiter import flash_attn_varlen_func
             else:
@@ -370,23 +423,27 @@ class Qwen2_5_VisionBlock(nn.Module):
         norm_layer: Optional[Callable[[int], nn.Module]] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
         if norm_layer is None:
             norm_layer = partial(nn.LayerNorm, eps=1e-6)
         self.norm1 = norm_layer(dim)
         self.norm2 = norm_layer(dim)
-        self.attn = Qwen2_5_VisionAttention(embed_dim=dim,
-                                            num_heads=num_heads,
-                                            projection_size=dim,
-                                            quant_config=quant_config,
-                                            prefix=f"{prefix}.attn")
+        self.attn = Qwen2_5_VisionAttention(
+            embed_dim=dim,
+            num_heads=num_heads,
+            projection_size=dim,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+            use_data_parallel=use_data_parallel)
         self.mlp = Qwen2_5_VisionMLP(dim,
                                      mlp_hidden_dim,
                                      act_fn=act_fn,
                                      bias=True,
                                      quant_config=quant_config,
-                                     prefix=f"{prefix}.mlp")
+                                     prefix=f"{prefix}.mlp",
+                                     use_data_parallel=use_data_parallel)
 
     def forward(
             self,
@@ -445,24 +502,30 @@ class Qwen2_5_VisionPatchMerger(nn.Module):
         spatial_merge_size: int = 2,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = context_dim * (spatial_merge_size**2)
         if norm_layer is None:
             norm_layer = partial(nn.LayerNorm, eps=1e-6)
         self.ln_q = norm_layer(context_dim)
+
+        cls_fc1 = (ReplicatedLinear
+                   if use_data_parallel else ColumnParallelLinear)
+        cls_fc2 = (ReplicatedLinear
+                   if use_data_parallel else RowParallelLinear)
         self.mlp = nn.ModuleList([
-            ColumnParallelLinear(self.hidden_size,
-                                 self.hidden_size,
-                                 bias=True,
-                                 quant_config=quant_config,
-                                 prefix=f"{prefix}.mlp.0"),
+            cls_fc1(self.hidden_size,
+                    self.hidden_size,
+                    bias=True,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.mlp.0"),
             nn.GELU(),
-            RowParallelLinear(self.hidden_size,
-                              d_model,
-                              bias=True,
-                              quant_config=quant_config,
-                              prefix=f"{prefix}.mlp.2"),
+            cls_fc2(self.hidden_size,
+                    d_model,
+                    bias=True,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.mlp.2"),
         ])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -514,6 +577,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         norm_eps: float = 1e-6,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
 
@@ -523,6 +587,8 @@ class Qwen2_5_VisionTransformer(nn.Module):
         depth = vision_config.depth
         self.hidden_size = vision_config.hidden_size
         self.num_heads = vision_config.num_heads
+        self.use_data_parallel = use_data_parallel
+        self.out_hidden_size = vision_config.out_hidden_size
 
         # args for get_window_index_thw
         self.window_size = vision_config.window_size
@@ -550,7 +616,8 @@ class Qwen2_5_VisionTransformer(nn.Module):
                                     vision_config.hidden_act),
                                 norm_layer=norm_layer,
                                 quant_config=quant_config,
-                                prefix=f"{prefix}.blocks.{layer_idx}")
+                                prefix=f"{prefix}.blocks.{layer_idx}",
+                                use_data_parallel=use_data_parallel)
             for layer_idx in range(depth)
         ])
         self.merger = Qwen2_5_VisionPatchMerger(
@@ -560,6 +627,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
             spatial_merge_size=self.spatial_merge_size,
             quant_config=quant_config,
             prefix=f"{prefix}.merger",
+            use_data_parallel=use_data_parallel,
         )
         self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
 
@@ -767,7 +835,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
-
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -815,6 +882,11 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                                          SupportsLoRA, SupportsPP,
                                          SupportsQuant):
 
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
+
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
@@ -825,6 +897,8 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             "lm_head.": "language_model.lm_head.",
             "model.": "language_model.model.",
         })
+
+    supports_encoder_tp_data = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
@@ -840,6 +914,7 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         config: Qwen2_5_VLConfig = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
+        self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         self.config = config
         self.multimodal_config = multimodal_config
 
@@ -851,6 +926,7 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                 quant_config=self._maybe_ignore_quant_config(
                     self.quant_config),
                 prefix=maybe_prefix(prefix, "visual"),
+                use_data_parallel=self.use_data_parallel,
             )
         else:
             self.visual = None
@@ -902,10 +978,6 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             image_grid_thw = self._validate_and_reshape_mm_tensor(
                 image_grid_thw, "image grid_thw")
 
-            if not isinstance(pixel_values, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of image pixel values. "
-                                 f"Got type: {type(pixel_values)}")
-
             return Qwen2_5_VLImagePixelInputs(type="pixel_values",
                                               pixel_values=pixel_values,
                                               image_grid_thw=image_grid_thw)
@@ -916,9 +988,6 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             image_grid_thw = self._validate_and_reshape_mm_tensor(
                 image_grid_thw, "image grid_thw")
 
-            if not isinstance(image_embeds, torch.Tensor):
-                raise ValueError("Incorrect type of image embeddings. "
-                                 f"Got type: {type(image_embeds)}")
             return Qwen2_5_VLImageEmbeddingInputs(
                 type="image_embeds",
                 image_embeds=image_embeds,
@@ -939,7 +1008,8 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                 pixel_values_videos, "video pixel values")
             video_grid_thw = self._validate_and_reshape_mm_tensor(
                 video_grid_thw, "video grid_thw")
-
+            if second_per_grid_ts is not None and second_per_grid_ts.ndim == 2:
+                second_per_grid_ts = second_per_grid_ts.squeeze(-1)
             return Qwen2_5_VLVideoPixelInputs(
                 type="pixel_values_videos",
                 pixel_values_videos=pixel_values_videos,
@@ -953,9 +1023,6 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             video_grid_thw = self._validate_and_reshape_mm_tensor(
                 video_grid_thw, "video grid_thw")
 
-            if not isinstance(video_embeds, torch.Tensor):
-                raise ValueError("Incorrect type of video embeddings. "
-                                 f"Got type: {type(video_embeds)}")
             return Qwen2_5_VLVideoEmbeddingInputs(
                 type="video_embeds",
                 video_embeds=video_embeds,
@@ -973,7 +1040,15 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"]
-            image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
+
+            if self.use_data_parallel:
+                return run_dp_sharded_mrope_vision_model(self.visual,
+                                                         pixel_values,
+                                                         grid_thw_list,
+                                                         rope_type="rope_3d")
+            else:
+                image_embeds = self.visual(pixel_values,
+                                           grid_thw=grid_thw_list)
 
         # Split concatenated embeddings for each image item.
         # Using prod on grid_thw_list instead of grid_thw.prod avoids CUDA sync
@@ -995,8 +1070,14 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
             pixel_values_videos = video_input["pixel_values_videos"]
-            video_embeds = self.visual(pixel_values_videos,
-                                       grid_thw=grid_thw_list)
+            if self.use_data_parallel:
+                return run_dp_sharded_mrope_vision_model(self.visual,
+                                                         pixel_values_videos,
+                                                         grid_thw_list,
+                                                         rope_type="rope_3d")
+            else:
+                video_embeds = self.visual(pixel_values_videos,
+                                           grid_thw=grid_thw_list)
 
         # Split concatenated embeddings for each video item.
         merge_size = self.visual.spatial_merge_size

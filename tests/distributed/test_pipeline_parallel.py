@@ -118,6 +118,8 @@ class PPTestSettings:
         multi_node_only: bool = False,
         load_format: Optional[str] = None,
     ):
+        vllm_major_versions = ["1"] if runner == "pooling" else ["0"]
+
         return PPTestSettings(
             parallel_setups=[
                 ParallelSetup(tp_size=tp_base,
@@ -126,7 +128,7 @@ class PPTestSettings:
                               chunked_prefill=False),
             ],
             distributed_backends=["mp"],
-            vllm_major_versions=["0"],
+            vllm_major_versions=vllm_major_versions,
             runner=runner,
             test_options=PPTestOptions(multi_node_only=multi_node_only,
                                        load_format=load_format),
@@ -213,7 +215,9 @@ TEXT_GENERATION_MODELS = {
 EMBEDDING_MODELS = {  # type: ignore[var-annotated]
     # [Text-only]
     "intfloat/e5-mistral-7b-instruct": PPTestSettings.fast(runner="pooling"),
-    "BAAI/bge-multilingual-gemma2": PPTestSettings.fast(runner="pooling"),
+    # TODO: re-enable when https://github.com/vllm-project/vllm/issues/23883
+    # is fixed
+    #"BAAI/bge-multilingual-gemma2": PPTestSettings.fast(runner="pooling"),
     "Qwen/Qwen2.5-Math-RM-72B": PPTestSettings.fast(
         load_format="dummy", runner="pooling"
     ),
@@ -233,6 +237,7 @@ MULTIMODAL_MODELS = {
     "openbmb/MiniCPM-Llama3-V-2_5": PPTestSettings.fast(),
     "allenai/Molmo-7B-D-0924": PPTestSettings.fast(),
     "AIDC-AI/Ovis2-1B": PPTestSettings.fast(),
+    "AIDC-AI/Ovis2.5-2B": PPTestSettings.fast(),
     "microsoft/Phi-3.5-vision-instruct": PPTestSettings.fast(),
     "mistralai/Pixtral-12B-2409": PPTestSettings.fast(load_format="dummy"),
     "Qwen/Qwen-VL-Chat": PPTestSettings.fast(),
@@ -293,6 +298,8 @@ def _compare_tp(
     tokenizer_mode = model_info.tokenizer_mode
     hf_overrides = model_info.hf_overrides
     hf_config = get_config(model_id, trust_remote_code)
+    skip_tokenizer_init = model_info.skip_tokenizer_init
+    max_num_seqs = model_info.max_num_seqs
 
     dtype = "float16"
     if hf_config.model_type in _FLOAT16_NOT_SUPPORTED_MODELS:
@@ -346,6 +353,10 @@ def _compare_tp(
         common_args.extend(["--load-format", load_format])
     if hf_overrides:
         common_args.extend(["--hf-overrides", json.dumps(hf_overrides)])
+    if skip_tokenizer_init:
+        common_args.append("--skip-tokenizer-init")
+    if max_num_seqs:
+        common_args.extend(["--max-num-seqs", f"{max_num_seqs}"])
 
     specific_case = tp_size == 2 and pp_size == 2 and chunked_prefill
     testing_ray_compiled_graph = False

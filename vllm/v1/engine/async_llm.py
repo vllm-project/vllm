@@ -1,17 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import os
+import socket
 import time
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
 from typing import Any, Optional, Union
 
 import numpy as np
+import torch
 
 import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.envs import VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
 from vllm.inputs import PromptType
 from vllm.inputs.preprocess import InputPreprocessor
@@ -94,7 +98,12 @@ class AsyncLLM(EngineClient):
         self.model_config = vllm_config.model_config
         self.vllm_config = vllm_config
         self.log_requests = log_requests
-        self.log_stats = log_stats
+
+        self.log_stats = log_stats or (stat_loggers is not None)
+        if not log_stats and stat_loggers is not None:
+            logger.info(
+                "AsyncLLM created with log_stats=False and non-empty custom "
+                "logger list; enabling logging without default stat loggers")
 
         if self.model_config.skip_tokenizer_init:
             self.tokenizer = None
@@ -133,6 +142,7 @@ class AsyncLLM(EngineClient):
                 vllm_config=vllm_config,
                 engine_idxs=self.engine_core.engine_ranks_managed,
                 custom_stat_loggers=stat_loggers,
+                enable_default_loggers=log_stats,
             )
             self.logger_manager.log_engine_initialized()
 
@@ -143,6 +153,26 @@ class AsyncLLM(EngineClient):
             self._run_output_handler()
         except RuntimeError:
             pass
+
+        if envs.VLLM_TORCH_PROFILER_DIR:
+            logger.info(
+                "Torch profiler enabled. AsyncLLM CPU traces will be collected under %s",  # noqa: E501
+                envs.VLLM_TORCH_PROFILER_DIR)
+            worker_name = f"{socket.gethostname()}_{os.getpid()}.async_llm"
+            self.profiler = torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                ],
+                with_stack=envs.VLLM_TORCH_PROFILER_WITH_STACK,
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(
+                    envs.VLLM_TORCH_PROFILER_DIR,
+                    worker_name=worker_name,
+                    use_gzip=True))
+        else:
+            logger.info(
+                "Torch profiler disabled. AsyncLLM CPU traces will not be collected."  # noqa: E501
+            )
+            self.profiler = None
 
     @classmethod
     @deprecate_kwargs(
@@ -312,11 +342,27 @@ class AsyncLLM(EngineClient):
         returning the RequestOutput back to the caller.
         """
 
+        if (self.vllm_config.cache_config.kv_sharing_fast_prefill
+                and sampling_params.prompt_logprobs):
+            raise ValueError(
+                "--kv-sharing-fast-prefill produces incorrect logprobs for "
+                "prompt tokens, please disable it when the requests need "
+                "prompt logprobs")
+
         try:
             # We start the output_handler on the first call to generate() so
             # we can call __init__ before the event loop, which enables us
             # to handle startup failure gracefully in the OpenAI server.
             self._run_output_handler()
+
+            tokenization_kwargs: dict[str, Any] = {}
+            truncate_prompt_tokens = sampling_params.truncate_prompt_tokens
+
+            _validate_truncation_size(
+                self.model_config.max_model_len,
+                truncate_prompt_tokens,
+                tokenization_kwargs,
+            )
 
             q = await self.add_request(
                 request_id,
@@ -325,6 +371,7 @@ class AsyncLLM(EngineClient):
                 lora_request=lora_request,
                 trace_headers=trace_headers,
                 priority=priority,
+                tokenization_kwargs=tokenization_kwargs,
                 data_parallel_rank=data_parallel_rank,
             )
 
@@ -451,6 +498,7 @@ class AsyncLLM(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
+        truncate_prompt_tokens: Optional[int] = None,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """
@@ -472,6 +520,14 @@ class AsyncLLM(EngineClient):
             # we can call __init__ before the event loop, which enables us
             # to handle startup failure gracefully in the OpenAI server.
             self._run_output_handler()
+
+            if tokenization_kwargs is None:
+                tokenization_kwargs = dict[str, Any]()
+            _validate_truncation_size(
+                self.model_config.max_model_len,
+                truncate_prompt_tokens,
+                tokenization_kwargs,
+            )
 
             q = await self.add_request(
                 request_id,
@@ -562,14 +618,19 @@ class AsyncLLM(EngineClient):
             raise self.dead_error
 
     async def start_profile(self) -> None:
-        await self.engine_core.profile_async(True)
+        coros = [self.engine_core.profile_async(True)]
+        if self.profiler is not None:
+            coros.append(asyncio.to_thread(self.profiler.start))
+        await asyncio.gather(*coros)
 
     async def stop_profile(self) -> None:
-        await self.engine_core.profile_async(False)
+        coros = [self.engine_core.profile_async(False)]
+        if self.profiler is not None:
+            coros.append(asyncio.to_thread(self.profiler.stop))
+        await asyncio.gather(*coros)
 
     async def reset_mm_cache(self) -> None:
-        self.processor.mm_registry.reset_processor_cache(self.model_config)
-        self.processor.mm_input_cache_client.reset()
+        self.processor.clear_cache()
         await self.engine_core.reset_mm_cache_async()
 
     async def reset_prefix_cache(self,
