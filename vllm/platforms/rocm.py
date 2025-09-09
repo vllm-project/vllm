@@ -348,7 +348,7 @@ class RocmPlatform(Platform):
                         "vllm.v1.worker.gpu_worker.Worker"
                 else:
                     parallel_config.worker_cls = "vllm.worker.worker.Worker"
-
+        #  Aiter rms norm perform best when CUDA Graph capture is enabled.
         if use_v1 and use_aiter_rms_norm and not is_eager_execution:
             compilation_config.custom_ops.append("+rms_norm")
 
