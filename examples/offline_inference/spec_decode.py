@@ -206,6 +206,7 @@ if __name__ == "__main__":
         assert args.method == "eagle"
         assert args.tp == 1
         assert args.num_spec_tokens == 3
+        assert args.dataset_name == "hf"
         assert args.dataset_path == "philschmid/mt-bench"
         assert args.num_prompts == 80
         assert args.temp == 0
@@ -220,8 +221,8 @@ if __name__ == "__main__":
             acceptance_length <= (1 + rtol) * expected_acceptance_length
             and acceptance_length >= (1 - rtol) * expected_acceptance_length
         ), (
-            f"acceptance_length {acceptance_length} is not \
-            within {rtol * 100}% of {expected_acceptance_length}"
+            f"acceptance_length {acceptance_length} is not "
+            f"within {rtol * 100}% of {expected_acceptance_length}"
         )
 
         print("Test passed!")
