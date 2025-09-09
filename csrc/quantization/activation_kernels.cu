@@ -95,7 +95,7 @@ __global__ void act_and_mul_quant_kernel(
 }
 
 __device__ __forceinline__ float silu(float x) {
-  return x * (1.f / (1.f + expf(-x)));
+  return (__fdividef(x, (1.f + expf(-x))));
 }
 
 __device__ __forceinline__ float2 silu2(float2 x) {
@@ -198,7 +198,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     float* __restrict__ _y_s, const uint32_t* __restrict__ counts,
 
     // sizes
-    Idx_t H, Idx_t G,
+    int H, int G,
 
     // strides (in elements)
     Idx_t stride_i_e, Idx_t stride_i_t, Idx_t stride_i_h, Idx_t stride_yq_e,
@@ -218,16 +218,16 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   static constexpr uint32_t S_NUM_64 = S_NUM_128 * 2;
   __shared__ __int128_t __align__(16) s_buff_128[S_NUM_128];
 
-  const Idx_t tid = threadIdx.x;
-  const Idx_t warp_id = tid / WARP_SIZE;
-  const Idx_t lane_id = tid % WARP_SIZE;
+  const uint32_t tid = threadIdx.x;
+  const uint32_t warp_id = tid / WARP_SIZE;
+  const uint32_t lane_id = tid % WARP_SIZE;
 
   auto s_buff_compute_32 = reinterpret_cast<__nv_bfloat162*>(s_buff_128);
 
   // block handles one (expert e, group g)
-  Idx_t pid = blockIdx.x;
-  Idx_t e = pid / G;
-  Idx_t g = pid % G;
+  uint32_t pid = blockIdx.x;
+  uint32_t e = pid / G;
+  uint32_t g = pid % G;
 
   const uint32_t n_tokens = counts[e * stride_counts_e];
 
@@ -286,13 +286,17 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   auto s_buff_gate_load_128 = s_buff_128 + (tid % HALF_THREAD_COUNT);
   auto s_buff_up_load_128 = s_buff_gate_load_128 + S_NUM_128 / 2u;
 
+  uint32_t stage_offset{};
+  static constexpr uint32_t LOAD_STAGE_SIZE = (NUM_WARPS * WARP_SIZE / 2);
+  static constexpr uint32_t LOAD_STAGE_MOD =
+      NUM_STAGES * (NUM_WARPS * WARP_SIZE / 2);
   auto load_and_advance_y_pred = [&] {
     if (t_load < n_tokens_upper) {
-      auto stage_offset =
-          (load_stage_id % NUM_STAGES) * (NUM_WARPS * WARP_SIZE / 2);
-
       auto s_gate_stage_128_staged_ptr = s_buff_gate_load_128 + stage_offset;
       auto s_up_stage_128_staged_ptr = s_buff_up_load_128 + stage_offset;
+
+      stage_offset += LOAD_STAGE_SIZE;
+      stage_offset %= LOAD_STAGE_MOD;
 
       if (tid < HALF_THREAD_COUNT) {
         cp_async4(s_gate_stage_128_staged_ptr, gate_128_ptr);
@@ -317,7 +321,11 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
                           lane_id;
   __int64_t* s_up_ptr = s_gate_ptr + S_NUM_64 / 2;
 
-  uint32_t stage_id{};
+  static constexpr uint32_t STAGE_SIZE = (GROUP_SIZE * NUM_WARPS) / 4u;
+  static constexpr uint32_t STAGE_MOD = STAGE_SIZE * NUM_STAGES;
+
+  uint32_t compute_pipeline_offset_64 = 0;
+
   for (uint32_t t = n_tokens_lower; t < n_tokens_upper; ++t) {
     __nv_bfloat16 y_max_bf16 = EPS;
     __nv_bfloat162 results_bf162[2];
@@ -327,10 +335,10 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 
     load_and_advance_y_pred();
 
-    const uint32_t compute_pipeline_offset_64 =
-        (((stage_id++) % NUM_STAGES) * (GROUP_SIZE / 2u) * NUM_WARPS) / 2u;
     auto s_gate_compute_64 = s_gate_ptr + compute_pipeline_offset_64;
     auto s_up_compute_64 = s_up_ptr + compute_pipeline_offset_64;
+    compute_pipeline_offset_64 += STAGE_SIZE;
+    compute_pipeline_offset_64 %= STAGE_MOD;
     __int64_t gate64 = *s_gate_compute_64;
     __nv_bfloat162* s_gate_compute_32 =
         reinterpret_cast<__nv_bfloat162*>(&gate64);
