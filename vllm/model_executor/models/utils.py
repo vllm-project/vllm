@@ -769,6 +769,7 @@ def get_model_hidden_size(hf_config: PretrainedConfig) -> int:
     text_config = hf_config.get_text_config()
     return text_config.hidden_size
 
+
 def normalize_eagle_architecture(arch: str) -> str:
     """Normalize EAGLE architecture names to consistent format.
 
