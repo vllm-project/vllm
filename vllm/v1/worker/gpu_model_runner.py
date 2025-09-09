@@ -2095,48 +2095,48 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         elif self.speculative_config.use_eagle():
             assert isinstance(sampled_token_ids, torch.Tensor)
             assert isinstance(self.drafter, EagleProposer)
+
+            # TODO(Ben): Combine this bookkeeping into a custom fused kernel
+
+            # Mask out the sampled tokens indices that should not be sampled.
             discard_sampled_tokens_req_indices =  \
                 self.discard_request_indices\
                     .gpu[:self.num_discarded_requests]
 
-            _max_gen_len = sampled_token_ids.shape[-1]
-            # Get all sampled tokens from valid requests
-            _valid_sampled_token_ids_gpu = sampled_token_ids.clone()
-            _valid_sampled_token_ids_gpu.index_fill_(
+            valid_sampled_token_ids_gpu = sampled_token_ids.clone()
+            valid_sampled_token_ids_gpu.index_fill_(
                 0, discard_sampled_tokens_req_indices, -1)
-            # _valid_sampled_token_ids_gpu[
-            #     discard_sampled_tokens_req_indices, :] = -1
 
             # Generate a mask for all valid tokens within those requests
-            if _max_gen_len == 1:
-                _valid_mask = torch.ones_like(_valid_sampled_token_ids_gpu,
-                                              dtype=torch.bool)
+            max_gen_len = sampled_token_ids.shape[-1]
+            if max_gen_len == 1:
+                valid_mask = torch.ones_like(valid_sampled_token_ids_gpu,
+                                             dtype=torch.bool)
             else:
-                _valid_mask = ((_valid_sampled_token_ids_gpu != -1) &
-                               (_valid_sampled_token_ids_gpu
-                                < self.input_batch.vocab_size))
+                valid_mask = ((valid_sampled_token_ids_gpu != -1) &
+                              (valid_sampled_token_ids_gpu
+                               < self.input_batch.vocab_size))
 
-            # Count valid tokens in each request
-            _valid_sampled_count = _valid_mask.sum(dim=1)
-
-            _batch = _valid_sampled_token_ids_gpu.shape[0]
+            # Count the number of valid tokens in each request
+            valid_sampled_tokens_count = valid_mask.sum(dim=1)
 
             # Get the rightmost valid index per row
-            _last_valid_indices = _valid_sampled_count - 1
+            last_valid_indices = valid_sampled_tokens_count - 1
 
-            _last_valid_indices_safe = torch.max(
-                _last_valid_indices, torch.zeros_like(_last_valid_indices))
+            last_valid_indices_safe = torch.max(
+                last_valid_indices, torch.zeros_like(last_valid_indices))
 
             # Get last valid token from each row
             # (assume undefined state where there is no valid token)
-            _selected_tokens = torch.gather(
-                _valid_sampled_token_ids_gpu, 1,
-                _last_valid_indices_safe.unsqueeze(1)).squeeze(1)
+            selected_tokens = torch.gather(
+                valid_sampled_token_ids_gpu, 1,
+                last_valid_indices_safe.unsqueeze(1)).squeeze(1)
 
             # Use last token if valid, pre-computed backup if not
-            next_token_ids_gpu_2 = torch.where(
-                _last_valid_indices != -1, _selected_tokens,
-                self.backup_next_token_ids.gpu[:_batch])
+            batch_size = valid_sampled_token_ids_gpu.shape[0]
+            next_token_ids = torch.where(
+                last_valid_indices != -1, selected_tokens,
+                self.backup_next_token_ids.gpu[:batch_size])
 
             token_indices_to_sample = None
 
@@ -2152,22 +2152,22 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 else:
                     target_hidden_states = hidden_states[:num_scheduled_tokens]
             else:
-                _num_draft_tokens_gpu = torch.cat([
+                num_draft_tokens_gpu = torch.cat([
                     spec_decode_metadata.cu_num_draft_tokens[0:1],
                     spec_decode_metadata.cu_num_draft_tokens[1:] -
                     spec_decode_metadata.cu_num_draft_tokens[:-1]
                 ])
 
-                _num_rejected_tokens_gpu = torch.where(
-                    _num_draft_tokens_gpu > 0,
-                    _num_draft_tokens_gpu + 1 - _valid_sampled_count,
-                    torch.zeros_like(_num_draft_tokens_gpu))
+                num_rejected_tokens_gpu = torch.where(
+                    num_draft_tokens_gpu > 0,
+                    num_draft_tokens_gpu + 1 - valid_sampled_tokens_count,
+                    torch.zeros_like(num_draft_tokens_gpu))
 
                 common_attn_metadata, token_indices =\
                     self.drafter.prepare_inputs_deferred(common_attn_metadata)
                 token_indices_to_sample = \
                     common_attn_metadata.query_start_loc[1:] - 1 \
-                        - _num_rejected_tokens_gpu
+                        - num_rejected_tokens_gpu
 
                 target_token_ids = self.input_ids.gpu[token_indices]
                 # TODO(woosuk): Support M-RoPE.
@@ -2186,7 +2186,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
                 target_hidden_states=target_hidden_states,
-                next_token_ids=next_token_ids_gpu_2,
+                next_token_ids=next_token_ids,
                 last_token_indices=token_indices_to_sample,
                 sampling_metadata=sampling_metadata,
                 common_attn_metadata=common_attn_metadata,
