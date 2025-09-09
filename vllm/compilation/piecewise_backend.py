@@ -117,12 +117,13 @@ class PiecewiseBackend:
 
         runtime_shape = args[self.sym_shape_indices[0]]
 
-        range_entry = None
+        range_found = False
         for range in self.compile_ranges:
             if self.is_in_range(runtime_shape, range):
                 range_entry = self.range_entries[range]
+                range_found = True
                 break
-        assert range_entry is not None, \
+        assert range_found, \
         f"Shape out of considered range: {runtime_shape} " \
         "[1, max_num_batched_tokens]"
 
