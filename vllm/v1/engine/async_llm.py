@@ -365,7 +365,6 @@ class AsyncLLM(EngineClient):
             # to handle startup failure gracefully in the OpenAI server.
             self._run_output_handler()
 
-            #TODO: remove _validate_truncation_size out of this function
             if tokenization_kwargs is None:
                 tokenization_kwargs = {}
                 truncate_prompt_tokens = sampling_params.truncate_prompt_tokens

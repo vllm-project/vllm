@@ -43,6 +43,7 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import as_list, merge_async_iterators
+from vllm.v1.engine.async_llm import AsyncLLM
 
 logger = init_logger(__name__)
 
@@ -219,14 +220,38 @@ class OpenAIServingCompletion(OpenAIServing):
                         lora_request=lora_request,
                     )
                 else:
-                    generator = self.engine_client.generate(
-                        engine_prompt,
-                        sampling_params,
-                        request_id_item,
-                        lora_request=lora_request,
-                        trace_headers=trace_headers,
-                        priority=request.priority,
-                    )
+                    if isinstance(self.engine_client, AsyncLLM):
+                        await self._initialize_processor()
+                        prompt_str, engine_request, tokenization_kwargs = (
+                            self._process_inputs(
+                                request_id_item,
+                                engine_prompt,
+                                sampling_params,
+                                lora_request=lora_request,
+                                trace_headers=trace_headers,
+                                priority=request.priority,
+                            ))
+
+                        generator = self.engine_client.generate(
+                            engine_prompt,
+                            sampling_params,
+                            request_id_item,
+                            engine_request=engine_request,
+                            lora_request=lora_request,
+                            trace_headers=trace_headers,
+                            priority=request.priority,
+                            prompt_str=prompt_str,
+                            tokenization_kwargs=tokenization_kwargs,
+                        )
+                    else:
+                        generator = self.engine_client.generate(
+                            engine_prompt,
+                            sampling_params,
+                            request_id_item,
+                            lora_request=lora_request,
+                            trace_headers=trace_headers,
+                            priority=request.priority,
+                        )
 
                 generators.append(generator)
         except ValueError as e:
