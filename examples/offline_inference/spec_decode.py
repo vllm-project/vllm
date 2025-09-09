@@ -178,7 +178,6 @@ def main():
     acceptance_counts = [0] * args.num_spec_tokens
 
     for metric in metrics:
-        print(metric)
         if metric.name == "vllm:spec_decode_num_drafts":
             assert isinstance(metric, Counter)
             num_drafts += metric.value
@@ -214,7 +213,7 @@ def main():
     request_throughput = num_requests / total_time if total_time > 0 else 0
 
     # Print formatted benchmark results
-    print("====== Offline Throughput Benchmark Result =======")
+    print("=========== Offline Inference Stats ============")
     print(f"Backend:                                 {'vllm':<10}")
     print(f"Successful requests:                     {num_requests:<10}")
     print(f"Benchmark duration (s):                  {total_time:<10.2f}")
@@ -233,6 +232,7 @@ def main():
         return
 
     acceptance_length = 1 + (num_accepted_tokens / num_drafts) if num_drafts > 0 else 1
+    draft_utilization_rate = num_accepted_tokens / num_draft_tokens * 100 if num_draft_tokens > 0 else 0
 
     print("============ Speculative Decoding Stats ============")
     print(f"Total output tokens:                     {total_num_output_tokens:<10}")
@@ -240,14 +240,7 @@ def main():
     print(f"Draft tokens generated:                  {num_draft_tokens:<10}")
     print(f"Accepted tokens:                         {num_accepted_tokens:<10}")
     print(f"Mean acceptance length:                  {acceptance_length:<10.2f}")
-    print(f"Draft utilization rate:                  {(num_accepted_tokens/num_draft_tokens*100 if num_draft_tokens > 0 else 0):<10.1f}%")
-    print()
-
-    # Print acceptance at each token position
-    print("Acceptance rates by token position:")
-    for i in range(len(acceptance_counts)):
-        acceptance_rate = acceptance_counts[i] / num_drafts if num_drafts > 0 else 0
-        print(f"\tPosition {i}: {acceptance_rate:.2f}")
+    print(f"Draft utilization rate:                  {draft_utilization_rate:<10.1f}")
     print("====================================================")
 
 if __name__ == "__main__":
