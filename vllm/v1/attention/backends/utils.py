@@ -645,35 +645,40 @@ def subclass_attention_backend(
 def split_decodes_and_prefills(
     common_attn_metadata: CommonAttentionMetadata,
     decode_threshold: int = 1,
+    require_uniform: bool = False,
 ) -> tuple[int, int, int, int]:
     """
     Assuming a reordered batch, finds the boundary between prefill and decode
     requests.
-
     Args:
         common_attn_metadata: CommonAttentionMetadata object containing the
             batch metadata.
         decode_threshold: The maximum query length to be considered a decode.
-
+        require_uniform: If True, only selects decode requests with the same 
+            query length for uniform batching (needed for MTP, CUDA Graph, etc.).
+            If False, selects all decode requests regardless of length variation.
+    
     Returns:
         num_decodes: The number of decode requests.
         num_prefills: The number of prefill requests.
         num_decode_tokens: The number of tokens in the decode requests.
         num_prefill_tokens: The number of tokens in the prefill requests.
     """
+
+    if require_uniform:
+        return split_decodes_and_prefills_uniform(common_attn_metadata,
+                                                  decode_threshold)
+
     max_query_len = common_attn_metadata.max_query_len
     num_reqs = common_attn_metadata.num_reqs
     num_tokens = common_attn_metadata.num_actual_tokens
     query_start_loc = common_attn_metadata.query_start_loc_cpu
-
     if max_query_len <= decode_threshold:
         return num_reqs, 0, num_tokens, 0
-
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
     is_prefill = query_lens > decode_threshold
     if not torch.any(is_prefill):
         return num_reqs, 0, num_tokens, 0
-
     first_prefill = is_prefill.int().argmax(dim=-1).item()
     assert torch.all(query_lens[first_prefill:] > decode_threshold)
     assert torch.all(query_lens[:first_prefill] <= decode_threshold)
@@ -681,6 +686,53 @@ def split_decodes_and_prefills(
     num_prefills = num_reqs - num_decodes
     num_decode_tokens = query_start_loc[first_prefill].item()
     num_prefill_tokens = num_tokens - num_decode_tokens
+    return (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens)
+
+
+def split_decodes_and_prefills_uniform(
+    common_attn_metadata: CommonAttentionMetadata,
+    decode_threshold: int = 1,
+) -> tuple[int, int, int, int]:
+    """
+    Similar to split_decodes_and_prefills but ensures decode batch is uniform.
+    Only selects decode requests with the same query length.
+    """
+    num_reqs = common_attn_metadata.num_reqs
+    num_tokens = common_attn_metadata.num_actual_tokens
+    query_start_loc = common_attn_metadata.query_start_loc_cpu
+    query_lens = query_start_loc[1:] - query_start_loc[:-1]
+    # find all candidates that satisfy the threshold
+    decode_candidates = query_lens <= decode_threshold
+
+    if not torch.any(decode_candidates):
+        return 0, num_reqs, 0, num_tokens
+
+    first_len = None
+    first_prefill = 0
+
+    # find the longest continuous uniform sequence from the front
+    for i in range(num_reqs):
+        current_len = query_lens[i].item()
+        if current_len > decode_threshold:
+            # prefill request，stop
+            break
+        if first_len is None:
+            # the first decode request
+            first_len = current_len
+            first_prefill = 1
+        elif current_len == first_len:
+            # same length, continue
+            first_prefill = i + 1
+        else:
+            # different length, stop
+            break
+
+    num_decodes = first_prefill
+    num_prefills = num_reqs - num_decodes
+    num_decode_tokens = query_start_loc[first_prefill].item(
+    ) if first_prefill < len(query_start_loc) else num_tokens
+    num_prefill_tokens = num_tokens - num_decode_tokens
+
     return (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens)
 
 
