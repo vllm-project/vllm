@@ -174,6 +174,7 @@ if TYPE_CHECKING:
     VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
     VLLM_HEAD_DTYPE: Optional[str] = None
 
+
 def get_default_cache_root():
     return os.getenv(
         "XDG_CACHE_HOME",
