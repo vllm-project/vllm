@@ -440,7 +440,7 @@ endmacro()
 #
 # Note: optimization level/debug info is set via cmake build type.
 #
-function (define_gpu_extension_target GPU_MOD_NAME)
+function (define_extension_target GPU_MOD_NAME)
   cmake_parse_arguments(PARSE_ARGV 1
     GPU
     "WITH_SOABI"
