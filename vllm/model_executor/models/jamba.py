@@ -613,7 +613,7 @@ class JambaForSequenceClassification(JambaForCausalLM):
             config.hidden_size,
             num_labels,
             bias=score_bias,
-            dtype=torch.float32,
+            dtype=vllm_config.model_config.head_dtype,
         )
 
         pooler_config = vllm_config.model_config.pooler_config

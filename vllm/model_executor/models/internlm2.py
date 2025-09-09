@@ -423,13 +423,15 @@ class InternLM2ForRewardModel(InternLM2ForCausalLM):
             delattr(self, attr)
 
         config = vllm_config.model_config.hf_config
-        self.v_head = RowParallelLinear(
-            config.hidden_size,
-            1,
-            bias=False,
-            input_is_parallel=False,
-            prefix=maybe_prefix(prefix, "v_head"),
-        )
+        self.head_dtype = vllm_config.model_config.head_dtype
+
+        self.v_head = RowParallelLinear(config.hidden_size,
+                                        1,
+                                        bias=False,
+                                        input_is_parallel=False,
+                                        params_dtype=self.head_dtype,
+                                        prefix=maybe_prefix(prefix, "v_head"),
+                                        return_bias=False)
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
@@ -446,5 +448,6 @@ class InternLM2ForRewardModel(InternLM2ForCausalLM):
     ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.model(input_ids, positions, intermediate_tensors,
                                    inputs_embeds)
-        logits, _ = self.v_head(hidden_states)
+        hidden_states = hidden_states.to(self.head_dtype)
+        logits = self.v_head(hidden_states)
         return logits
