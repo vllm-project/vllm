@@ -336,15 +336,18 @@ def test_human_readable_model_len():
 
 def test_load_format():
     args = EngineArgs(model="s3://model/Qwen/Qwen3-0.6B")
+    args.create_model_config()
     assert args.load_format == "runai_streamer"
 
     args = EngineArgs(model="s3://model/Qwen/Qwen3-0.6B",
                       load_format="runai_streamer")
+    args.create_model_config()
     assert args.load_format == "runai_streamer"
 
     try:
         args = EngineArgs(model="s3://model/Qwen/Qwen3-0.6B",
                           load_format="gguf")
+        args.create_model_config()
     except Exception as e:
         assert isinstance(e, ValueError)
         assert str(e) == ("To load a model from S3, "
