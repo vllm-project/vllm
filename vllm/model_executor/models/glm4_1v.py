@@ -1159,10 +1159,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             for item in mm_data.pop("videos", []):
                 video_array, metadata = item
 
-                if metadata["backend"] == "opencv_dynamic":
-                    assert metadata["total_num_frames"] == len(video_array), (
-                        f"Total frames {metadata['total_num_frames']} does not "
-                        f"match the length of video array {len(video_array)}.")
+                if metadata["video_backend"] == "opencv_dynamic":
                     mm_kwargs["do_sample_frames"] = False
 
                 elif metadata["total_num_frames"] != len(video_array):
