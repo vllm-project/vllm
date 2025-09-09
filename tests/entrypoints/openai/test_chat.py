@@ -58,18 +58,10 @@ def server(default_server_args, request, monkeypatch_module):
     if marker := request.node.get_closest_marker("extra_server_args"):
         default_server_args.append(marker.args[0])
 
-    use_v1 = request.param
-    monkeypatch_module.setenv('VLLM_USE_V1', '1' if use_v1 else '0')
+    monkeypatch_module.setenv('VLLM_USE_V1', '1')
 
     with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
         yield remote_server
-
-
-@pytest.fixture
-def is_v1_server(server):
-    import os
-    assert os.environ['VLLM_USE_V1'] in ['0', '1']
-    return os.environ['VLLM_USE_V1'] == '1'
 
 
 @pytest_asyncio.fixture
@@ -529,9 +521,7 @@ async def test_chat_with_enable_force_include_usage(client: openai.AsyncOpenAI,
 
 @pytest.mark.asyncio
 async def test_guided_choice_chat(client: openai.AsyncOpenAI,
-                                  sample_guided_choice, is_v1_server: bool):
-    if not is_v1_server:
-        pytest.skip("Guided decoding is only supported in v1 engine")
+                                  sample_guided_choice):
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -567,11 +557,8 @@ async def test_guided_choice_chat(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-async def test_guided_json_chat(client: openai.AsyncOpenAI, sample_json_schema,
-                                is_v1_server: bool):
-    if not is_v1_server:
-        pytest.skip("Guided decoding is only supported in v1 engine")
-
+async def test_guided_json_chat(client: openai.AsyncOpenAI,
+                                sample_json_schema):
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -613,11 +600,7 @@ async def test_guided_json_chat(client: openai.AsyncOpenAI, sample_json_schema,
 
 
 @pytest.mark.asyncio
-async def test_guided_regex_chat(client: openai.AsyncOpenAI, sample_regex,
-                                 is_v1_server: bool):
-    if not is_v1_server:
-        pytest.skip("Guided decoding is only supported in v1 engine")
-
+async def test_guided_regex_chat(client: openai.AsyncOpenAI, sample_regex):
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -701,10 +684,7 @@ async def test_guided_choice_chat_logprobs(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-async def test_named_tool_use(client: openai.AsyncOpenAI, sample_json_schema,
-                              is_v1_server: bool):
-    if not is_v1_server:
-        pytest.skip("Tool use is only supported in v1 engine")
+async def test_named_tool_use(client: openai.AsyncOpenAI, sample_json_schema):
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -874,11 +854,7 @@ async def test_response_format_json_object(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
-async def test_response_format_json_schema(client: openai.AsyncOpenAI,
-                                           is_v1_server: bool):
-    if not is_v1_server:
-        pytest.skip(
-            "JSON schema response format is only supported in v1 engine")
+async def test_response_format_json_schema(client: openai.AsyncOpenAI):
     prompt = 'what is 1+1? The format is "result": 2'
     # Check that this prompt cannot lead to a valid JSON without json_schema
     for _ in range(2):
