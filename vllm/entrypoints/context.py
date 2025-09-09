@@ -101,6 +101,7 @@ class HarmonyContext(ConversationContext):
         available_tools: list[str],
     ):
         self._messages = messages
+        self.input_messages = messages.copy()
         self.available_tools = available_tools
         self._tool_sessions: dict[str, Union[ClientSession, Tool]] = {}
 
