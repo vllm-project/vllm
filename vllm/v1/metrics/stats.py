@@ -217,6 +217,7 @@ class IterationStats:
         return sum(self.prefill_comp_speed_history) / len(
             self.prefill_comp_speed_history)
 
+
 class LoRARequestStates:
     """Per-LoRA request state stats."""
 
