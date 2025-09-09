@@ -7,6 +7,7 @@
 #     LICENSE is in root directory.
 # --------------------------------------------------------
 
+import copy
 import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
@@ -30,6 +31,7 @@ from vllm.model_executor.models.interfaces import (HasInnerState, IsHybrid,
 from vllm.model_executor.models.internvl import (calculate_internvl_targets,
                                                  get_internvl_target_ratios)
 from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.nemotron_h import NemotronHForCausalLM
 from vllm.model_executor.models.utils import (flatten_bn,
                                               init_vllm_registered_model,
                                               maybe_prefix,
@@ -1378,10 +1380,7 @@ class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid,
 
     @classmethod
     def get_mamba_state_shape_from_config(cls, vllm_config: "VllmConfig"):
-        from vllm.model_executor.models.nemotron_h import NemotronHForCausalLM
-
         text_config = vllm_config.model_config.hf_config.text_config
-        import copy
         temp_vllm_config = copy.deepcopy(vllm_config)
         temp_vllm_config.model_config.hf_config = text_config
         return NemotronHForCausalLM.get_mamba_state_shape_from_config(
@@ -1389,11 +1388,7 @@ class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid,
 
     @classmethod
     def get_mamba_state_dtype_from_config(cls, vllm_config: "VllmConfig"):
-        from vllm.model_executor.models.nemotron_h import NemotronHForCausalLM
-
         text_config = vllm_config.model_config.hf_config.text_config
-
-        import copy
         temp_vllm_config = copy.deepcopy(vllm_config)
         temp_vllm_config.model_config.hf_config = text_config
         return NemotronHForCausalLM.get_mamba_state_dtype_from_config(
