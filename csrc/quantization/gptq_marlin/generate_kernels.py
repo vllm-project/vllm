@@ -6,6 +6,15 @@ import os
 import subprocess
 
 import jinja2
+import sys
+
+ARCHS = []
+SUPPORT_FP8 = False
+for arch in sys.argv[1].split(";"):
+    arch = arch[:arch.index(".") + 2].replace(".", "")
+    arch = int(arch)
+    if arch >= 89:
+        SUPPORT_FP8 = True
 
 
 FILE_HEAD_COMMENT = """
@@ -143,7 +152,7 @@ QUANT_CONFIGS = [
 
 
 def remove_old_kernels():
-    for filename in glob.glob(os.path.dirname(__file__) + "/kernel_*.cu"):
+    for filename in glob.glob(os.path.dirname(__file__) + "/*kernel_*.cu"):
         subprocess.call(["rm", "-f", filename])
 
     filename = os.path.dirname(__file__) + "/kernel_selector.h"
@@ -163,6 +172,8 @@ def generate_new_kernels():
         all_thread_configs = quant_config["thread_configs"]
 
         for a_type, c_type in itertools.product(a_types, c_types):
+            if not SUPPORT_FP8 and a_type == "kFE4M3fn":
+                continue
             if "16" in a_type and "16" in c_type and a_type != c_type:
                 continue
             s_type = quant_config.get("s_type", c_type)
@@ -227,7 +238,10 @@ def generate_new_kernels():
             ]
             conditions = " && ".join(conditions)
 
-            kernel_selector_str += f"if ({conditions})\n  kernel = "
+            if kernel_selector_str == FILE_HEAD_COMMENT:
+                kernel_selector_str += f"if ({conditions})\n  kernel = "
+            else:
+                kernel_selector_str += f"else if ({conditions})\n  kernel = "
 
             kernel_template2 = (
                 "Marlin<{{a_type_id}}, {{b_type_id}}, {{c_type_id}}, {{s_type_id}}, {{threads}}, "
@@ -244,10 +258,21 @@ def generate_new_kernels():
 
         file_content = FILE_HEAD + "\n\n"
         file_content += "\n\n".join(all_template_str_list) + "\n\n}\n"
-        filename = f"kernel_{a_type[1:]}_{b_type[1:]}_{c_type[1:]}.cu".lower()
+        if a_type == "kFE4M3fn":
+            filename = f"sm89_kernel_{a_type[1:]}_{b_type[1:]}_{c_type[1:]}.cu"
+        else:
+            filename = f"sm80_kernel_{a_type[1:]}_{b_type[1:]}_{c_type[1:]}.cu"
+
+        filename = filename.lower()
 
         with open(os.path.join(os.path.dirname(__file__), filename), "w") as f:
             f.write(file_content)
+
+    if not SUPPORT_FP8 and kernel_selector_str != FILE_HEAD_COMMENT:
+        kernel_selector_str += (
+            f"else if (a_type == vllm::{a_type})\n"
+            "  TORCH_CHECK(false, "
+            "\"marlin kernel with fp8 activation is not built.\");")
 
     with open(os.path.join(os.path.dirname(__file__), "kernel_selector.h"), "w") as f:
         f.write(kernel_selector_str)

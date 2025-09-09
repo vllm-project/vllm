@@ -364,6 +364,9 @@ def marlin_generate_valid_test_cases():
             quant_test_config["group_blocks"])
 
         for sub_case in inner_combinations:
+            if sub_case[0] == scalar_types.float8_e4m3fn and \
+                    not current_platform.has_device_capability(89):
+                continue
             args = sub_case + (size_m, size_n, size_k) + case[4:]
             if is_invalid(*args):
                 cases.append(args)

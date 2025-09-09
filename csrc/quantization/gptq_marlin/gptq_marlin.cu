@@ -396,6 +396,14 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
                          cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
   TORCH_CHECK(max_shared_mem > 0);
 
+  int major_capability, minor_capability;
+  cudaDeviceGetAttribute(&major_capability, cudaDevAttrComputeCapabilityMajor, dev);
+  cudaDeviceGetAttribute(&minor_capability, cudaDevAttrComputeCapabilityMinor, dev);
+  TORCH_CHECK(major_capability * 10 + minor_capability >= 80, "marlin kernel only support Ampere or newer GPUs.");
+  if (a_type == vllm::kFE4M3fn) {
+    TORCH_CHECK(major_capability * 10 + minor_capability >= 80, "FP8 only support Ada Lovelace or newer GPUs.");
+  }
+
   int max_par = 16;
   if (prob_n <= 4096) max_par = 16 * 8;
   int max_shared_mem_new = max_shared_mem;

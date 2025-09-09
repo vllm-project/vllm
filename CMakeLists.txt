@@ -308,6 +308,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # are not supported by Machete yet.
   # 9.0 for latest bf16 atomicAdd PTX
   cuda_archs_loose_intersection(MARLIN_ARCHS "8.0;8.7;9.0+PTX" "${CUDA_ARCHS}")
+  cuda_archs_loose_intersection(MARLIN_FP8_ARCHS "8.9;9.0+PTX" "${CUDA_ARCHS}")
   if (MARLIN_ARCHS)
 
     #
@@ -317,16 +318,17 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     set(MARLIN_GEN_SCRIPT
       ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/gptq_marlin/generate_kernels.py)
     file(MD5 ${MARLIN_GEN_SCRIPT} MARLIN_GEN_SCRIPT_HASH)
+    set(MARLIN_GEN_SCRIPT_HASH_AND_ARCH "${MARLIN_GEN_SCRIPT_HASH}(ARCH:${CUDA_ARCHS})")
 
-    message(STATUS "Marlin generation script hash: ${MARLIN_GEN_SCRIPT_HASH}")
-    message(STATUS "Last run Marlin generate script hash: $CACHE{MARLIN_GEN_SCRIPT_HASH}")
+    message(STATUS "Marlin generation script hash: ${MARLIN_GEN_SCRIPT_HASH_AND_ARCH}")
+    message(STATUS "Last run Marlin generate script hash: $CACHE{MARLIN_GEN_SCRIPT_HASH_AND_ARCH}")
 
-    if (NOT DEFINED CACHE{MARLIN_GEN_SCRIPT_HASH}
-        OR NOT $CACHE{MARLIN_GEN_SCRIPT_HASH} STREQUAL ${MARLIN_GEN_SCRIPT_HASH})
+    if (NOT DEFINED CACHE{MARLIN_GEN_SCRIPT_HASH_AND_ARCH}
+        OR NOT $CACHE{MARLIN_GEN_SCRIPT_HASH_AND_ARCH} STREQUAL ${MARLIN_GEN_SCRIPT_HASH_AND_ARCH})
       execute_process(
         COMMAND ${CMAKE_COMMAND} -E env
         PYTHONPATH=$PYTHONPATH
-          ${Python_EXECUTABLE} ${MARLIN_GEN_SCRIPT}
+          ${Python_EXECUTABLE} ${MARLIN_GEN_SCRIPT} ${CUDA_ARCHS}
         RESULT_VARIABLE marlin_generation_result
         OUTPUT_VARIABLE marlin_generation_result
         OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/marlin_generation.log
@@ -339,28 +341,38 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
                             "\nCheck the log for details: "
                             "${CMAKE_CURRENT_BINARY_DIR}/marlin_generation.log")
       else()
-        set(MARLIN_GEN_SCRIPT_HASH ${MARLIN_GEN_SCRIPT_HASH}
-            CACHE STRING "Last run Marlin generate script hash" FORCE)
+        set(MARLIN_GEN_SCRIPT_HASH_AND_ARCH ${MARLIN_GEN_SCRIPT_HASH_AND_ARCH}
+            CACHE STRING "Last run Marlin generate script hash and arch" FORCE)
         message(STATUS "Marlin generation completed successfully.")
       endif()
     else()
       message(STATUS "Marlin generation script has not changed, skipping generation.")
     endif()
 
-    file(GLOB MARLIN_TEMPLATE_KERNEL_SRC "csrc/quantization/gptq_marlin/kernel_*.cu")
+    file(GLOB MARLIN_TEMPLATE_KERNEL_SRC "csrc/quantization/gptq_marlin/sm80_kernel_*.cu")
     set_gencode_flags_for_srcs(
       SRCS "${MARLIN_TEMPLATE_KERNEL_SRC}"
       CUDA_ARCHS "${MARLIN_ARCHS}")
     set_source_files_properties(${MARLIN_TEMPLATE_KERNEL_SRC}
       PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
-
     list(APPEND VLLM_EXT_SRC ${MARLIN_TEMPLATE_KERNEL_SRC})
+
+    if (MARLIN_FP8_ARCHS) 
+      file(GLOB MARLIN_TEMPLATE_FP8_KERNEL_SRC "csrc/quantization/gptq_marlin/sm89_kernel_*.cu")
+      set_gencode_flags_for_srcs(
+        SRCS "${MARLIN_TEMPLATE_FP8_KERNEL_SRC}"
+        CUDA_ARCHS "${MARLIN_FP8_ARCHS}")
+      set_source_files_properties(${MARLIN_TEMPLATE_FP8_KERNEL_SRC}
+        PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
+      list(APPEND VLLM_EXT_SRC ${MARLIN_TEMPLATE_FP8_KERNEL_SRC})
+    endif()
 
     set(MARLIN_SRCS
        "csrc/quantization/marlin/dense/marlin_cuda_kernel.cu"
        "csrc/quantization/marlin/sparse/marlin_24_cuda_kernel.cu"
        "csrc/quantization/marlin/qqq/marlin_qqq_gemm_kernel.cu"
        "csrc/quantization/gptq_marlin/gptq_marlin.cu"
+       "csrc/quantization/gptq_marlin/marlin_int4_fp8_preprocess.cu"
        "csrc/quantization/gptq_marlin/gptq_marlin_repack.cu"
        "csrc/quantization/gptq_marlin/awq_marlin_repack.cu")
     set_gencode_flags_for_srcs(
@@ -815,7 +827,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
   list(APPEND VLLM_MOE_EXT_SRC "${VLLM_MOE_WNA16_SRC}")
   # 9.0 for latest bf16 atomicAdd PTX
-  cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0;8.7;9.0+PTX" "${CUDA_ARCHS}")
+  cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0+PTX" "${CUDA_ARCHS}")
+  cuda_archs_loose_intersection(MARLIN_MOE_FP8_ARCHS "8.9+PTX" "${CUDA_ARCHS}")
   if (MARLIN_MOE_ARCHS)
 
     #
@@ -825,16 +838,17 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     set(MOE_MARLIN_GEN_SCRIPT
       ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/marlin_moe_wna16/generate_kernels.py)
     file(MD5 ${MOE_MARLIN_GEN_SCRIPT} MOE_MARLIN_GEN_SCRIPT_HASH)
+    set(MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH "${MOE_MARLIN_GEN_SCRIPT_HASH}(ARCH:${CUDA_ARCHS})")
 
-    message(STATUS "Marlin MOE generation script hash: ${MOE_MARLIN_GEN_SCRIPT_HASH}")
-    message(STATUS "Last run Marlin MOE generate script hash: $CACHE{MOE_MARLIN_GEN_SCRIPT_HASH}")
+    message(STATUS "Marlin MOE generation script hash with arch: ${MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH}")
+    message(STATUS "Last run Marlin MOE generate script hash with arch: $CACHE{MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH}")
 
-    if (NOT DEFINED CACHE{MOE_MARLIN_GEN_SCRIPT_HASH}
-        OR NOT $CACHE{MOE_MARLIN_GEN_SCRIPT_HASH} STREQUAL ${MOE_MARLIN_GEN_SCRIPT_HASH})
+    if (NOT DEFINED CACHE{MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH}
+        OR NOT $CACHE{MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH} STREQUAL ${MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH})
       execute_process(
         COMMAND ${CMAKE_COMMAND} -E env
         PYTHONPATH=$PYTHONPATH
-          ${Python_EXECUTABLE} ${MOE_MARLIN_GEN_SCRIPT}
+          ${Python_EXECUTABLE} ${MOE_MARLIN_GEN_SCRIPT} ${CUDA_ARCHS}
         RESULT_VARIABLE moe_marlin_generation_result
         OUTPUT_VARIABLE moe_marlin_generation_output
         OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/moe_marlin_generation.log
@@ -847,7 +861,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
                             "\nCheck the log for details: "
                             "${CMAKE_CURRENT_BINARY_DIR}/moe_marlin_generation.log")
       else()
-        set(MOE_MARLIN_GEN_SCRIPT_HASH ${MOE_MARLIN_GEN_SCRIPT_HASH}
+        set(MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH ${MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH}
             CACHE STRING "Last run Marlin MOE generate script hash" FORCE)
         message(STATUS "Marlin MOE generation completed successfully.")
       endif()
@@ -855,14 +869,24 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       message(STATUS "Marlin MOE generation script has not changed, skipping generation.")
     endif()
 
-    file(GLOB MOE_WNAA16_MARLIN_SRC "csrc/moe/marlin_moe_wna16/*.cu")
+    file(GLOB MARLIN_MOE_SRC "csrc/moe/marlin_moe_wna16/sm80_kernel_*.cu")
+    list(APPEND MARLIN_MOE_SRC "csrc/moe/marlin_moe_wna16/ops.cu")
     set_gencode_flags_for_srcs(
-      SRCS "${MOE_WNAA16_MARLIN_SRC}"
+      SRCS "${MARLIN_MOE_SRC}"
       CUDA_ARCHS "${MARLIN_MOE_ARCHS}")
-    set_source_files_properties(${MOE_WNAA16_MARLIN_SRC}
+    set_source_files_properties(${MARLIN_MOE_SRC}
       PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
+    list(APPEND VLLM_MOE_EXT_SRC ${MARLIN_MOE_SRC})
 
-    list(APPEND VLLM_MOE_EXT_SRC ${MOE_WNAA16_MARLIN_SRC})
+    if (MARLIN_MOE_FP8_ARCHS)
+      file(GLOB MARLIN_MOE_FP8_SRC "csrc/moe/marlin_moe_wna16/sm89_kernel_*.cu")
+      set_gencode_flags_for_srcs(
+        SRCS "${MARLIN_MOE_FP8_SRC}"
+        CUDA_ARCHS "${MARLIN_MOE_FP8_ARCHS}")
+      set_source_files_properties(${MARLIN_MOE_FP8_SRC}
+        PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
+      list(APPEND VLLM_MOE_EXT_SRC ${MARLIN_MOE_FP8_SRC})
+    endif()
 
     message(STATUS "Building Marlin MOE kernels for archs: ${MARLIN_MOE_ARCHS}")
   else()

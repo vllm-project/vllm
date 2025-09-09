@@ -724,7 +724,6 @@ __global__ void Marlin(
 
   b_gl_rd += b_sh_stride * slice_col;
   b_gl_rd += b_gl_rd_delta_o * slice_row;
-  auto b_sh_wr = threadIdx.x * b_thread_vecs;
   auto b_sh_rd = threadIdx.x * b_thread_vecs;
   b_sh_rd += b_sh_rd / b_sh_stride * (b_sh_stride * (b_sh_wr_iters - 1));
 

@@ -12,7 +12,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_quant_int8)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    marlin_make_workspace_new, maybe_warn_marlin_atomic_add)
+    marlin_make_workspace_new)
 from vllm.scalar_type import ScalarType, scalar_types
 from vllm.utils import direct_register_custom_op
 
@@ -141,10 +141,6 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
     intermediate_cache3 = intermediate_cache13[:M * topk_ids.shape[1] * K]
     intermediate_cache3 = intermediate_cache3.view(-1, K)
 
-    maybe_warn_marlin_atomic_add(hidden_states.device, hidden_states.dtype)
-    use_atomic_add = hidden_states.dtype == torch.half or \
-        torch.cuda.get_device_capability(hidden_states.device)[0] >= 9
-
     a_scales1 = None
     gate_up_input = hidden_states
     if input_dtype == torch.int8:
@@ -180,7 +176,7 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
         size_n=2 * N,
         size_k=K,
         is_k_full=is_k_full,
-        use_atomic_add=use_atomic_add,
+        use_atomic_add=False,
         use_fp32_reduce=True,
         is_zp_float=False)
 
@@ -245,7 +241,7 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
         size_n=K,
         size_k=N,
         is_k_full=is_k_full,
-        use_atomic_add=use_atomic_add,
+        use_atomic_add=False,
         use_fp32_reduce=True,
         is_zp_float=False).view(-1, topk, K)
 

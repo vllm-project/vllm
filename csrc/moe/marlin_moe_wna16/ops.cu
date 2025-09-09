@@ -133,7 +133,6 @@ thread_config_t large_batch_thread_configs[] = {
 
     // thread_k, thread_n, num_threads
     {64, 256, 256},
-    // {128, 128, 256},
     {64, 128, 128}};
 
 typedef struct {
@@ -433,6 +432,14 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
   cudaDeviceGetAttribute(&max_shared_mem,
                          cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
   TORCH_CHECK(max_shared_mem > 0);
+
+  int major_capability, minor_capability;
+  cudaDeviceGetAttribute(&major_capability, cudaDevAttrComputeCapabilityMajor, dev);
+  cudaDeviceGetAttribute(&minor_capability, cudaDevAttrComputeCapabilityMinor, dev);
+  TORCH_CHECK(major_capability * 10 + minor_capability >= 80, "marlin kernel only support Ampere or newer GPUs.");
+  if (a_type == vllm::kFE4M3fn) {
+    TORCH_CHECK(major_capability * 10 + minor_capability >= 80, "FP8 only support Ada Lovelace or newer GPUs.");
+  }
 
   // Set thread config
   exec_config_t exec_cfg;
