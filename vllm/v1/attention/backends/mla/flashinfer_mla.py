@@ -85,7 +85,7 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
 
-        if type(q) is tuple:
+        if isinstance(q, tuple):
             q_nope, q_pe = q
             q = torch.cat([q_nope, q_pe], dim=-1)
 
