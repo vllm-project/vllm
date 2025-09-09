@@ -363,6 +363,7 @@ class MultiHeadAttention(nn.Module):
             self.attn_backend = backend if backend in {
                 _Backend.TORCH_SDPA,
                 _Backend.TORCH_SDPA_VLLM_V1,
+                _Backend.TRITON_MLA_VLLM_V1,
                 _Backend.XFORMERS,
                 _Backend.PALLAS_VLLM_V1,
                 _Backend.ROCM_AITER_FA,
