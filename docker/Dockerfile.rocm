@@ -104,6 +104,7 @@ COPY --from=export_vllm /examples ${COMMON_WORKDIR}/vllm/examples
 COPY --from=export_vllm /docker ${COMMON_WORKDIR}/vllm/docker
 
 ENV RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
+ENV RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES=1
 ENV TOKENIZERS_PARALLELISM=false
 
 # ENV that can improve safe tensor loading, and end-to-end time
