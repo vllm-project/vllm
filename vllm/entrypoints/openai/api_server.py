@@ -109,6 +109,9 @@ from vllm.entrypoints.utils import (
 )
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
+from vllm.sampling_params import SamplingParams
+from vllm.transformers_utils.config import (
+    maybe_register_config_serialize_by_value)
 from vllm.transformers_utils.tokenizer import MistralTokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (
@@ -358,10 +361,18 @@ def engine_client(request: Request) -> EngineClient:
 
 
 @router.get("/health", response_class=Response)
-async def health(raw_request: Request) -> Response:
+async def health(
+    raw_request: Request, generate: Optional[bool] = Query(False)) -> Response:
     """Health check."""
     try:
         await engine_client(raw_request).check_health()
+        if generate:
+            prompt = "Hi"
+            sampling_params = SamplingParams(temperature=0, max_tokens=2)
+            request_id = random_uuid()
+            async for _ in engine_client(raw_request).generate(prompt, sampling_params,
+                                           request_id):
+                pass
         return Response(status_code=200)
     except EngineDeadError:
         return Response(status_code=503)
