@@ -3359,7 +3359,7 @@ def has_triton_kernels() -> bool:
 
 def set_process_title(name: str,
                       suffix: str = "",
-                      append: bool = False) -> None:
+                      prefix: str = envs.VLLM_PROCESS_NAME_PREFIX) -> None:
     """
     Set the current process title to a specific name with an
     optional suffix.
@@ -3367,15 +3367,11 @@ def set_process_title(name: str,
     Args:
         name: The title to assign to the current process.
         suffix: An optional suffix to append to the base name.
-        append: Whether to append to the existing process title.
+        prefix: A prefix to prepend to the front separated by `::`.
     """
     if suffix:
         name = f"{name}_{suffix}"
-    if append:
-        name = f"{setproctitle.getproctitle()}_{name}"
-    else:
-        name = f"{envs.VLLM_PROCESS_NAME_PREFIX}::{name}"
-    setproctitle.setproctitle(name)
+    setproctitle.setproctitle(f"{prefix}::{name}")
 
 
 def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
