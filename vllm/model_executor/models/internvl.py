@@ -7,6 +7,7 @@
 # Copyright (c) 2023 OpenGVLab
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Any, Literal, Optional, TypeVar, Union
@@ -272,7 +273,8 @@ def image_to_pixel_values_internvl(
     # noticeable when deploying multiple vLLM instances on a single machine.
     # Therefore, it is necessary to limit the number of threads allocated to
     # image transformation tasks.
-    with set_default_torch_num_threads(num_threads=1):
+    num_threads = int(os.environ.get("OMP_NUM_THREADS", "1"))
+    with set_default_torch_num_threads(num_threads):
         pixel_values = torch.stack([transform(image) for image in images])
     return pixel_values
 
@@ -306,7 +308,8 @@ def video_to_pixel_values_internvl(
     # noticeable when deploying multiple vLLM instances on a single machine.
     # Therefore, it is necessary to limit the number of threads allocated to
     # image transformation tasks.
-    with set_default_torch_num_threads(num_threads=1):
+    num_threads = int(os.environ.get("OMP_NUM_THREADS", "1"))
+    with set_default_torch_num_threads(num_threads):
         pixel_values = torch.stack([transform(image) for image in frames_list])
     return pixel_values
 
