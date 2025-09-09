@@ -843,6 +843,7 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
         kv_cache_tensors=kv_cache_tensors,
         kv_cache_groups=create_kv_cache_group_specs(kv_cache_spec,
                                                     grouped_layer_names),
+        kv_bytes_per_block=len(kv_cache_tensors) * page_size,
     )
 
     num_tokens = num_blocks * vllm_config.cache_config.block_size
@@ -1003,6 +1004,7 @@ def _get_kv_cache_config_uniform_page_size(
         num_blocks=num_blocks,
         kv_cache_tensors=kv_cache_tensors,
         kv_cache_groups=kv_cache_groups,
+        kv_bytes_per_block=len(kv_cache_tensors) * page_size,
     )
 
     min_block_size = min(
@@ -1021,7 +1023,10 @@ def _get_kv_cache_config_uniform_page_size(
 
 
 def _get_kv_cache_config_attention_free() -> KVCacheConfig:
-    return KVCacheConfig(num_blocks=1, kv_cache_tensors=[], kv_cache_groups=[])
+    return KVCacheConfig(num_blocks=1,
+                         kv_cache_tensors=[],
+                         kv_cache_groups=[],
+                         kv_bytes_per_block=0)
 
 
 def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
@@ -1149,7 +1154,12 @@ def unify_kv_cache_configs(kv_cache_configs: list[KVCacheConfig]):
     # first `num_blocks` blocks of the tensor.
     min_num_blocks = min(kv_cache_config.num_blocks
                          for kv_cache_config in kv_cache_configs)
+    kv_bytes_per_block = sum([
+        kv_cache_config.kv_bytes_per_block
+        for kv_cache_config in kv_cache_configs
+    ])
     for kv_cache_config in kv_cache_configs:
         kv_cache_config.num_blocks = min_num_blocks
+        kv_cache_config.kv_bytes_per_block = kv_bytes_per_block
 
     return kv_cache_configs
