@@ -51,9 +51,9 @@ The new CUDA Graph logic is built on top of piecewise compilation and supports d
 
 See the following figures for a quick comparison between the previous and current design patterns of cudagraph with inductor compilation. We can see that previously the cudagraph logic and compilation logic were tightly coupled into the vllm `PiecewiseBackend`, and cudagraph was implicitly dispatched by `batch_size` idly. Now the cudagraph logic is separated into the `CUDAGraphWrapper` class, responsible for both full and piecewise cudagraphs abilities, and dispatching is **explicitly** done via **runtime mode** plus the `BatchDescriptor` as the **dispatch key** via `CudagraphDispatcher`.
 
-![previous_design](../assets/design/cuda_graphs_v1/previous_design.jpg)
+![previous_design](../assets/design/cuda_graphs_v1/previous_design.png)
 
-![new_design](../assets/design/cuda_graphs_v1/current_design.jpg)
+![new_design](../assets/design/cuda_graphs_v1/current_design.png)
 
 ### [BatchDescriptor][vllm.forward_context.BatchDescriptor]
 
