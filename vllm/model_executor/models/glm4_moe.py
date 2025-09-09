@@ -157,45 +157,30 @@ class Glm4MoE(nn.Module):
                 reduce_results=False,
                 prefix=f"{prefix}.shared_experts",
             )
-            self.experts = SharedFusedMoE(
-                shared_experts=self.shared_experts,
-                num_experts=config.n_routed_experts,
-                top_k=config.num_experts_per_tok,
-                hidden_size=config.hidden_size,
-                intermediate_size=config.moe_intermediate_size,
-                reduce_results=False,
-                renormalize=config.norm_topk_prob,
-                quant_config=quant_config,
-                use_grouped_topk=True,
-                num_expert_group=config.n_group,
-                topk_group=config.topk_group,
-                prefix=f"{prefix}.experts",
-                scoring_func="sigmoid",
-                # we do scaling outside, set factor to 1.0 to avoid double mul
-                routed_scaling_factor=1.0,
-                e_score_correction_bias=self.gate.e_score_correction_bias,
-                enable_eplb=self.enable_eplb,
-                num_redundant_experts=self.n_redundant_experts,
-            )
         else:
-            self.experts = FusedMoE(
-                num_experts=config.n_routed_experts,
-                top_k=config.num_experts_per_tok,
-                hidden_size=config.hidden_size,
-                intermediate_size=config.moe_intermediate_size,
-                reduce_results=False,
-                renormalize=config.norm_topk_prob,
-                quant_config=quant_config,
-                use_grouped_topk=True,
-                num_expert_group=config.n_group,
-                topk_group=config.topk_group,
-                prefix=f"{prefix}.experts",
-                scoring_func="sigmoid",
-                # we do scaling outside, set factor to 1.0 to avoid double mul
-                routed_scaling_factor=1.0,
-                e_score_correction_bias=self.gate.e_score_correction_bias,
-                enable_eplb=self.enable_eplb,
-                num_redundant_experts=self.n_redundant_experts)
+            self.shared_experts = None
+
+        self.experts = SharedFusedMoE(
+            shared_experts=self.shared_experts,
+            fused_output_scaling_factor=self.routed_scaling_factor,
+            shared_output_scaling_factor=1.0,
+            num_experts=config.n_routed_experts,
+            top_k=config.num_experts_per_tok,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.moe_intermediate_size,
+            renormalize=config.norm_topk_prob,
+            quant_config=quant_config,
+            use_grouped_topk=True,
+            num_expert_group=config.n_group,
+            topk_group=config.topk_group,
+            prefix=f"{prefix}.experts",
+            scoring_func="sigmoid",
+            # we do scaling outside, set factor to 1.0 to avoid double mul
+            routed_scaling_factor=1.0,
+            e_score_correction_bias=self.gate.e_score_correction_bias,
+            enable_eplb=self.enable_eplb,
+            num_redundant_experts=self.n_redundant_experts,
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
@@ -204,22 +189,9 @@ class Glm4MoE(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits = self.gate(hidden_states.to(dtype=torch.float32))
 
-        fused_moe_out = self.experts(hidden_states=hidden_states,
-                                     router_logits=router_logits)
+        final_hidden_states = self.experts(hidden_states=hidden_states,
+                                           router_logits=router_logits)
 
-        if self.shared_experts is not None:
-            shared_output, final_hidden_states = fused_moe_out
-            assert shared_output is not None
-            final_hidden_states = \
-                final_hidden_states * self.routed_scaling_factor\
-                    + shared_output
-        else:
-            final_hidden_states = fused_moe_out * self.routed_scaling_factor
-
-        if self.tp_size > 1:
-            final_hidden_states = (
-                self.experts.maybe_all_reduce_tensor_model_parallel(
-                    final_hidden_states))
         return final_hidden_states.view(num_tokens, hidden_dim)
 
 
