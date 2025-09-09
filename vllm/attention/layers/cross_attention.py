@@ -37,10 +37,13 @@ def _get_cross_slot_mapping(encoder_seq_lens: np.ndarray,
     block_size = kv_cache_spec.block_size
     slot_mappings = []
 
-    for req_index, encoder_seq_len in enumerate(encoder_seq_lens):
-        if encoder_seq_len == 0:
-            # No encoder input for this request
-            continue
+    # Find indices with non-zero encoder sequence lengths
+    # The majority of parallel requests will be running the
+    # decoder, so this list should be relatively small.
+    active_indices = np.nonzero(encoder_seq_lens)[0]
+
+    for req_index in active_indices:
+        encoder_seq_len = encoder_seq_lens[req_index]
 
         # Calculate the number of blocks needed for this request
         num_blocks_needed = (encoder_seq_len + block_size -
