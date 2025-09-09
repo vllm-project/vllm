@@ -9,9 +9,7 @@
 
 import os
 
-import triton
-import triton.language as tl
-import triton.language.extra.libdevice as tldevice
+from vllm.triton_utils import tl, tldevice, triton
 
 if os.environ.get('FLA_USE_FAST_OPS', '0') == '1':
     div = tldevice.fast_dividef
@@ -19,9 +17,11 @@ if os.environ.get('FLA_USE_FAST_OPS', '0') == '1':
     log = tldevice.fast_logf
     log2 = tldevice.fast_log2f
 else:
+
     @triton.jit
     def div_normal(x, y):
         return x / y
+
     div = div_normal
     exp = tl.exp
     log = tl.log
@@ -34,6 +34,7 @@ def safe_exp(x):
 
 
 if not hasattr(tl, 'gather'):
+
     @triton.jit
     def gather(src, index, axis, _builder=None):
         # This is a fallback implementation when tl.gather is not supported
