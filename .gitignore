@@ -7,7 +7,7 @@ scripts/
 # vllm-flash-attn built from source
 vllm/vllm_flash_attn/*
 
-# triton jit 
+# triton jit
 .triton
 
 # Byte-compiled / optimized / DLL files
@@ -179,6 +179,14 @@ cython_debug/
 
 # VSCode
 .vscode/
+
+# Claude
+CLAUDE.md
+.claude/
+
+# Codex
+AGENTS.md
+.codex/
 
 # DS Store
 .DS_Store
