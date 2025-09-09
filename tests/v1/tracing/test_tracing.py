@@ -131,8 +131,7 @@ def test_traces(
         assert attributes.get(
             SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS) == completion_tokens
 
-        assert attributes.get(SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE
-                              ) > 0
+        assert attributes.get(SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE) > 0
         assert attributes.get(
             SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN) > 0
         assert attributes.get(SpanAttributes.GEN_AI_LATENCY_E2E) > 0
