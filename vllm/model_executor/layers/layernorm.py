@@ -170,13 +170,10 @@ class RMSNorm(CustomOp):
         self.variance_size_override = (
             None if var_hidden_size == hidden_size else var_hidden_size
         )
-        self.has_weight = has_weight
-        if dtype is not None:
-            self.weight = torch.ones(hidden_size, dtype=dtype)
-        else:
-            self.weight = torch.ones(hidden_size)
-        if self.has_weight:
-            self.weight = nn.Parameter(self.weight)
+        self.weight = None
+        if has_weight:
+            dtype = dtype or torch.get_default_dtype()
+            self.weight = nn.Parameter(torch.ones(hidden_size, dtype=dtype))
         weight_dtype = self.weight.data.dtype
 
         if current_platform.is_rocm():
@@ -187,9 +184,13 @@ class RMSNorm(CustomOp):
                 with_fused_add=True, dtype=weight_dtype
             )
 
-    def forward_native(
-        self,
+    @staticmethod
+    def forward_static(
         x: torch.Tensor,
+        variance_epsilon: float,
+        hidden_size: int,
+        variance_size_override: Optional[int],
+        weight: Optional[torch.Tensor] = None,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """PyTorch-native implementation equivalent to forward()."""
@@ -199,34 +200,47 @@ class RMSNorm(CustomOp):
             x = x + residual.to(torch.float32)
             residual = x.to(orig_dtype)
 
-        hidden_size = x.shape[-1]
-        if hidden_size != self.hidden_size:
+        if x.shape[-1] != hidden_size:
             raise ValueError(
-                "Expected hidden_size to be "
-                f"{self.hidden_size}, but found: {hidden_size}"
+                f"Expected hidden_size to be {hidden_size}, but found: {x.shape[-1]}"
             )
 
-        if self.variance_size_override is None:
+        if variance_size_override is None:
             x_var = x
         else:
-            if hidden_size < self.variance_size_override:
+            if hidden_size < variance_size_override:
                 raise ValueError(
                     "Expected hidden_size to be at least "
-                    f"{self.variance_size_override}, but found: {hidden_size}"
+                    f"{variance_size_override}, but found: {hidden_size}"
                 )
 
-            x_var = x[:, :, : self.variance_size_override]
+            x_var = x[:, :, :variance_size_override]
 
         variance = x_var.pow(2).mean(dim=-1, keepdim=True)
 
-        x = x * torch.rsqrt(variance + self.variance_epsilon)
+        x = x * torch.rsqrt(variance + variance_epsilon)
         x = x.to(orig_dtype)
-        if self.has_weight:
-            x = x * self.weight
+        if weight is not None:
+            x = x * weight
         if residual is None:
             return x
         else:
             return x, residual
+
+    def forward_native(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        """PyTorch-native implementation equivalent to forward()."""
+        return self.forward_static(
+            x,
+            self.variance_epsilon,
+            self.hidden_size,
+            self.variance_size_override,
+            self.weight.data,
+            residual,
+        )
 
     def forward_cuda(
         self,
