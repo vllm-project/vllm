@@ -86,7 +86,8 @@ class ToolServer(ABC):
         pass
 
     @abstractmethod
-    def new_session(self, tool_name: str) -> AbstractAsyncContextManager[Any]:
+    def new_session(self, tool_name: str,
+                    session_id: str) -> AbstractAsyncContextManager[Any]:
         """
         Create a session for the tool.
         """
@@ -124,7 +125,8 @@ class MCPToolServer(ToolServer):
                                         description=tool.description,
                                         parameters=tool.inputSchema)
                     for tool in list_tools_response.tools
-                ])
+                ],
+            )
             self.harmony_tool_descriptions[tool_from_mcp.name] = tool_from_mcp
             if tool_from_mcp.name not in self.urls:
                 self.urls[tool_from_mcp.name] = url
@@ -142,14 +144,16 @@ class MCPToolServer(ToolServer):
         return self.harmony_tool_descriptions.get(tool_name)
 
     @asynccontextmanager
-    async def new_session(self, tool_name: str):
+    async def new_session(self, tool_name: str, session_id: str):
         from mcp import ClientSession
         from mcp.client.sse import sse_client
         url = self.urls.get(tool_name)
+        headers = {"x-session-id": session_id}
         if not url:
             raise KeyError(f"Tool '{tool_name}' is not supported")
-        async with sse_client(url=url) as streams, ClientSession(
-                *streams) as session:
+        async with sse_client(url=url,
+                              headers=headers) as streams, ClientSession(
+                                  *streams) as session:
             await session.initialize()
             yield session
 
@@ -158,10 +162,13 @@ class DemoToolServer(ToolServer):
 
     def __init__(self):
         self.tools: dict[str, Tool] = {}
+
+    async def init_and_validate(self):
         browser_tool = HarmonyBrowserTool()
+        python_tool = HarmonyPythonTool()
+        await python_tool.validate()
         if browser_tool.enabled:
             self.tools["browser"] = browser_tool
-        python_tool = HarmonyPythonTool()
         if python_tool.enabled:
             self.tools["python"] = python_tool
         logger.info("DemoToolServer initialized with tools: %s",
@@ -182,7 +189,7 @@ class DemoToolServer(ToolServer):
             raise ValueError(f"Unknown tool {tool_name}")
 
     @asynccontextmanager
-    async def new_session(self, tool_name: str):
+    async def new_session(self, tool_name: str, session_id: str):
         if tool_name not in self.tools:
             raise KeyError(f"Tool '{tool_name}' is not supported")
         yield self.tools[tool_name]

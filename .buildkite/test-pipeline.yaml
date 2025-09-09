@@ -379,11 +379,7 @@ steps:
   - tests/compile
   commands:
   - pytest -v -s compile/test_basic_correctness.py
-  # these tests need to be separated, cannot combine
-  - pytest -v -s compile/piecewise/test_simple.py
-  - pytest -v -s compile/piecewise/test_toy_llama.py
-  - pytest -v -s compile/piecewise/test_full_cudagraph.py
-  - pytest -v -s compile/piecewise/test_multiple_graphs.py
+  - pytest -v -s compile/piecewise/
 
 - label: PyTorch Fullgraph Test # 20min
   timeout_in_minutes: 30
