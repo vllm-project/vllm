@@ -148,7 +148,6 @@ class ECSharedStorageConnector(ECConnectorBase):
                 num_encoder_token = request.get_num_encoder_tokens(index)
                 # Insert mm_hash only if this block has not been recorded yet.
                 loads_for_request.setdefault(index, MMMeta.make_meta(mm_hash,num_encoder_token))
-        logger.info(f"After update the _mm_datas_need_loads is {self._mm_datas_need_loads}")
 
     def build_connector_meta(
         self,

@@ -60,27 +60,27 @@ async def forward_streaming_request(
 
     headers = {"x-request-id": request_id}
     # Skip request to encoder instance if we don't have mm input
-    # if has_mm_input(request_data):
-    #     task1 = asyncio.create_task(
-    #         encode_session.post(
-    #             f"{e_server_url}/v1/chat/completions",
-    #             json=request_data,
-    #             headers=headers
-    #         )
-    #     )
-    #     try:
-    #         response = await task1
-    #         if response.status != 200:
-    #             error_text = await response.text()
-    #             raise HTTPException(
-    #                 status_code=response.status,
-    #                 detail={"error": "Request failed", "message": error_text}
-    #             )
-    #     except Exception as e:
-    #         raise HTTPException(
-    #             status_code=500,
-    #             detail={"error": "Internal server error", "message": str(e)}
-    #         )
+    if has_mm_input(request_data):
+        task1 = asyncio.create_task(
+            encode_session.post(
+                f"{e_server_url}/v1/chat/completions",
+                json=request_data,
+                headers=headers
+            )
+        )
+        try:
+            response = await task1
+            if response.status != 200:
+                error_text = await response.text()
+                raise HTTPException(
+                    status_code=response.status,
+                    detail={"error": "Request failed", "message": error_text}
+                )
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail={"error": "Internal server error", "message": str(e)}
+            )
 
     # import time
     # time.sleep(10)

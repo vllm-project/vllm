@@ -385,7 +385,6 @@ class Worker(WorkerBase):
             return output
 
         assert isinstance(output, ModelRunnerOutput)
-        logger.info(f"Output before return is {output}")
         return output
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
