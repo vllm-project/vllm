@@ -63,15 +63,15 @@ import vllm.envs as envs
 from vllm.platforms import current_platform
 
 if current_platform.is_rocm():
-    VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_QUANT = envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_QUANT
-    if VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_QUANT:
+    VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_FP8_QUANT = envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_FP8_QUANT
+    if VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_FP8_QUANT:
         from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
     
     VLLM_ROCM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT = envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT
     if VLLM_ROCM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT:
         from aiter.ops.triton.activation import act_mul_and_fp8_group_quant
 
-    if VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_QUANT or VLLM_ROCM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT:    
+    if VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_FP8_QUANT or VLLM_ROCM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT:    
         import aiter as rocm_aiter
         rocm_aiter_fp8_dtype = rocm_aiter.dtypes.fp8
         rocm_aiter_fp8_quant_group_size = 128
@@ -556,7 +556,7 @@ class DeepseekV2MLAAttention(nn.Module):
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
                 dim=-1,
             )
-            if VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_QUANT:
+            if VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_FP8_QUANT:
                 weight = self.q_a_layernorm.weight
                 eps = self.q_a_layernorm.variance_epsilon
                 weight2 = self.kv_a_layernorm.weight
@@ -577,7 +577,7 @@ class DeepseekV2MLAAttention(nn.Module):
             kv_lora = self.kv_a_proj_with_mqa(hidden_states, x_quant_scales = hidden_states_quant)[0]
             q = self.q_proj(hidden_states, x_quant_scales = hidden_states_quant)[0]
 
-        if self.q_lora_rank is None or not VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_QUANT:
+        if self.q_lora_rank is None or not VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_FP8_QUANT:
             kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim],
                                     dim=-1)
             kv_c_normed = self.kv_a_layernorm(kv_c)
@@ -685,7 +685,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
         # Self Attention
-        if VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_QUANT:
+        if VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_FP8_QUANT:
             weight = self.input_layernorm.weight
             eps = self.input_layernorm.variance_epsilon
             if residual is None:
@@ -726,7 +726,7 @@ class DeepseekV2DecoderLayer(nn.Module):
                 residual *= 1. / self.routed_scaling_factor
 
         # Fully Connected
-        if VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_QUANT:
+        if VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_FP8_QUANT:
             weight = self.post_attention_layernorm.weight
             eps = self.post_attention_layernorm.variance_epsilon
             (hidden_states_quant, hidden_states_quant_scales), hidden_states_unquant, _, residual = fused_rms_fp8_group_quant(hidden_states, weight, eps, 

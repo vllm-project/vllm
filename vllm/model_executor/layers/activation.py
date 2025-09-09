@@ -56,7 +56,7 @@ if current_platform.is_rocm():
         from aiter.ops.triton.activation import act_mul_and_mxfp4_quant
     
     # assert (VLLM_ROCM_USE_AITER_TRITON_SILU_MUL_FP4_QUANT and VLLM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT) == False, \
-    # "VLLM_USE_AITER_TRITON_SILU_MUL and VLLM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT cannot be True simultaneously, please set one of them to False"
+    # "VLLM_ROCM_USE_AITER_TRITON_SILU_MUL_FP4_QUANT and VLLM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT cannot be True simultaneously, please set one of them to False"
 
 @CustomOp.register("fatrelu_and_mul")
 class FatreluAndMul(CustomOp):
