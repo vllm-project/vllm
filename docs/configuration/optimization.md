@@ -174,8 +174,10 @@ Regardless, you need to set `mm_encoder_tp_mode="data"` in engine arguments to u
 
 Known supported models:
 
+- GLM-4.5V GLM-4.1V (<gh-pr:23168>)
+- Kimi-VL (<gh-pr:23817>)
 - Llama4 (<gh-pr:18368>)
-- MiniCPM-V-4 (<gh-pr:23327>)
+- MiniCPM-V-2.5 or above (<gh-pr:23327>, <gh-pr:23948>)
 - Qwen2.5-VL (<gh-pr:22742>)
 - Step3 (<gh-pr:22697>)
 
@@ -208,7 +210,7 @@ vllm serve Qwen/Qwen2.5-VL-3B-Instruct --api-server-count 4 -dp 2
 
 !!! note
     API server scale-out disables [multi-modal IPC caching](#ipc-caching)
-    because it requires a one-to-one correspondance between API and engine core processes.
+    because it requires a one-to-one correspondence between API and engine core processes.
 
     This does not impact [multi-modal processor caching](#processor-caching).
 
@@ -225,7 +227,7 @@ to avoid repeatedly processing the same multi-modal inputs in `BaseMultiModalPro
 ### IPC Caching
 
 Multi-modal IPC caching is automatically enabled when
-there is a one-to-one correspondance between API (`P0`) and engine core (`P1`) processes,
+there is a one-to-one correspondence between API (`P0`) and engine core (`P1`) processes,
 to avoid repeatedly transferring the same multi-modal inputs between them.
 
 ### Configuration

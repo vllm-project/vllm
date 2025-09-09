@@ -266,10 +266,52 @@ def run_audio(model: str) -> None:
     print("Chat completion output from base64 encoded audio:", result)
 
 
+def run_multi_audio(model: str) -> None:
+    from vllm.assets.audio import AudioAsset
+
+    # Two different audios to showcase batched inference.
+    audio_url = AudioAsset("winning_call").url
+    audio_base64 = encode_base64_content_from_url(audio_url)
+    audio_url2 = AudioAsset("azacinto_foscolo").url
+    audio_base64_2 = encode_base64_content_from_url(audio_url2)
+
+    # OpenAI-compatible schema (`input_audio`)
+    chat_completion_from_base64 = client.chat.completions.create(
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Are these two audios the same?"},
+                    {
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": audio_base64,
+                            "format": "wav",
+                        },
+                    },
+                    {
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": audio_base64_2,
+                            "format": "wav",
+                        },
+                    },
+                ],
+            }
+        ],
+        model=model,
+        max_completion_tokens=64,
+    )
+
+    result = chat_completion_from_base64.choices[0].message.content
+    print("Chat completion output from input audio:", result)
+
+
 example_function_map = {
     "text-only": run_text_only,
     "single-image": run_single_image,
     "multi-image": run_multi_image,
+    "multi-audio": run_multi_audio,
     "video": run_video,
     "audio": run_audio,
 }

@@ -789,6 +789,7 @@ def get_kernel_options(query, block_m, block_n,
             device_props = torch.cuda.get_device_properties()
             max_shared_memory = device_props.shared_memory_per_block_optin
             if max_shared_memory < 144 * 1024:
-                kernel_options["BLOCK_M"] = 32
-                kernel_options["BLOCK_N"] = 32
+                kernel_options["BLOCK_M"] = kernel_options["BLOCK_M"] // 2
+                kernel_options["BLOCK_N"] = kernel_options["BLOCK_N"] // 2
+
     return kernel_options

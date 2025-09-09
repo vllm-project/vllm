@@ -3,7 +3,8 @@
 
 import warnings
 from collections.abc import Sequence
-from typing import Any, NamedTuple, Optional, Union
+from dataclasses import dataclass
+from typing import Any, Optional, Union
 
 import torch
 import torch.nn.functional as F
@@ -293,6 +294,8 @@ def build_model_context(
         limit_mm_per_prompt=limit_mm_per_prompt,
         mm_processor_cache_gb=mm_processor_cache_gb,
         hf_overrides=model_info.hf_overrides,
+        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        enforce_eager=model_info.enforce_eager,
         **model_config_kwargs,
     )
     return InputContext(model_config)
@@ -339,36 +342,44 @@ def softmax(data):
         return F.softmax(data, dim=-1)
 
 
-class EmbedModelInfo(NamedTuple):
+@dataclass
+class ModelInfo:
     name: str
-    is_matryoshka: bool = False
-    matryoshka_dimensions: Optional[list[int]] = None
     architecture: str = ""
     dtype: str = "auto"
+    hf_overrides: Optional[dict[str, Any]] = None
     default_pooling_type: str = ""
+    mteb_score: Optional[float] = None
     enable_test: bool = True
 
 
+@dataclass
+class EmbedModelInfo(ModelInfo):
+    is_matryoshka: bool = False
+    matryoshka_dimensions: Optional[list[int]] = None
+
+
+@dataclass
 class CLSPoolingEmbedModelInfo(EmbedModelInfo):
     default_pooling_type: str = "CLS"
 
 
+@dataclass
 class LASTPoolingEmbedModelInfo(EmbedModelInfo):
     default_pooling_type: str = "LAST"
 
 
-class RerankModelInfo(NamedTuple):
-    name: str
-    architecture: str = ""
-    dtype: str = "auto"
-    default_pooling_type: str = ""
-    enable_test: bool = True
+@dataclass
+class RerankModelInfo(ModelInfo):
+    pass
 
 
+@dataclass
 class CLSPoolingRerankModelInfo(RerankModelInfo):
     default_pooling_type: str = "CLS"
 
 
+@dataclass
 class LASTPoolingRerankModelInfo(RerankModelInfo):
     default_pooling_type: str = "LAST"
 

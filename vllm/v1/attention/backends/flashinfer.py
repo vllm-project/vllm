@@ -194,19 +194,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         FlashInferBackend.validate_head_size(self.head_dim)
         self.page_size = self.kv_cache_spec.block_size
 
-        self.enable_fusion = (
-            self.compilation_config.pass_config.enable_attn_fusion)
-        self.q_data_type = self.model_config.dtype
         self.cache_dtype = self.cache_config.cache_dtype
         if self.cache_dtype.startswith("fp8"):
             self.kv_cache_dtype = (
                 FlashInferBackend.get_fp8_dtype_for_flashinfer(
                     self.cache_dtype))
-            # Insert FP8 quant for query if FP8 kv cache and attn fusion enabled
-            if self.enable_fusion:
-                self.q_data_type = self.kv_cache_dtype
         else:
+            assert self.kv_cache_spec.dtype == self.model_config.dtype
             self.kv_cache_dtype = self.kv_cache_spec.dtype
+        self.q_data_type = self.kv_cache_dtype
 
         self._cascade_wrapper = None  # Wrapper for cascade attention
 
@@ -237,6 +233,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                                                device="cpu",
                                                pin_memory=pin_memory)
         self.paged_kv_indptr_np = self.paged_kv_indptr_cpu.numpy()
+        self.paged_kv_indptr_buffer = torch.zeros_like(
+            self.paged_kv_indptr_cpu, pin_memory=pin_memory)
         self.paged_kv_indices_cpu = torch.zeros(max_num_pages,
                                                 dtype=torch.int32,
                                                 device="cpu",
@@ -289,7 +287,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 paged_kv_indices_buffer=paged_kv_indices,
                 paged_kv_last_page_len_buffer=paged_kv_last_page_len,
                 # Tensor cores are enabled by default because the perf would be
-                # atleast as good as cuda cores for all attention ops in latest
+                # at least as good as cuda cores for all attention ops in latest
                 # gpus.
                 use_tensor_cores=True,
             )
@@ -315,7 +313,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens =\
-            split_decodes_and_prefills(common_attn_metadata)
+            split_decodes_and_prefills(common_attn_metadata,
+                                       decode_threshold=self.reorder_batch_threshold)
 
         page_size = self.page_size
         max_q_len = common_attn_metadata.max_query_len
@@ -361,12 +360,18 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             dtype=np.int32,
             out=self.paged_kv_indptr_np[1:num_reqs + 1],
         )
+        # NOTE(woosuk): Because self.paged_kv_indptr_cpu can be modified
+        # after this line (e.g., for cuda graphs), we need to copy the data to
+        # self.paged_kv_indptr_buffer to avoid race condition.
+        self.paged_kv_indptr_buffer[:num_reqs +
+                                    1] = (self.paged_kv_indptr_cpu[:num_reqs +
+                                                                   1])
         paged_kv_indptr = self.paged_kv_indptr[:num_reqs + 1]
-        paged_kv_indptr.copy_(self.paged_kv_indptr_cpu[:num_reqs + 1],
+        paged_kv_indptr.copy_(self.paged_kv_indptr_buffer[:num_reqs + 1],
                               non_blocking=True)
 
         # write self.paged_kv_indices inplace
-        num_actual_pages = num_blocks_np.sum().item()
+        num_actual_pages = self.paged_kv_indptr_np[num_reqs]
         paged_kv_indices = self.paged_kv_indices[:num_actual_pages]
         _copy_page_indices_kernel[(num_reqs, )](
             paged_kv_indices,
@@ -659,8 +664,6 @@ class FlashInferImpl(AttentionImpl):
 
         # The attn+quant fusion happens when output_scale is provided.
         if output_scale is None:
-            assert attn_metadata.q_data_type != FP8_DTYPE, \
-                "Query can only be FP8 if output fusion happened."
             assert output_block_scale is None, "output_block_scale "\
                 "is not supported when fusion has not happened"
         else:
@@ -678,7 +681,7 @@ class FlashInferImpl(AttentionImpl):
             else:
                 raise ValueError(f"Unsupported output dtype: {output.dtype}")
 
-            # TRTLLM attn kernel requires o scale to pass as a host scalar,
+            # TRTLLM attn kernel requires to scale to pass as a host scalar,
             # store the o scale as a host scalar in warmup run with cuda graph
             # not enabled
             if layer._o_scale_float is None:
@@ -688,7 +691,8 @@ class FlashInferImpl(AttentionImpl):
                 elif output.dtype == FP4_DTYPE:
                     self.o_sf_scale = layer._o_scale_float
 
-            # Insert FP8 quant for query
+        # Insert FP8 quant for query
+        if attn_metadata.q_data_type == FP8_DTYPE:
             num_tokens, num_heads, head_size = query.shape
             query, _ = ops.scaled_fp8_quant(
                 query.reshape(

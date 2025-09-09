@@ -258,7 +258,7 @@ class DepthWiseSeperableConv1d(nn.Module):
             if set different to 0, the number of 
              depthwise_seperable_out_channel will be used as a channel_out
              of the second conv1d layer.
-             otherwise, it equal to 0, the second conv1d layer is skipped.
+             otherwise, it equals to 0, the second conv1d layer is skipped.
         kernel_size: int
             kernel_size
         depthwise_multiplier: int

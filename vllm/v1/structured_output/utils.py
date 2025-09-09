@@ -65,9 +65,9 @@ def get_outlines_cache_path() -> str:
     elif xdg_cache_home:
         return os.path.join(xdg_cache_home, ".cache", "outlines")
     # If homedir is "/", we may be inside a container, and thus writing to
-    # root would be problematic, so we fallback to using a tempfile.
+    # root would be problematic, so we fall back to using a tempfile.
     # Also validate the path exists, since os.path.expanduser does
-    # not garuntee existence.
+    # not guarantee existence.
     elif os.path.isdir(home_dir) and home_dir != "/":
         # Default Unix fallback: ~/.cache/outlines
         return os.path.join(home_dir, ".cache", "outlines")

@@ -9,7 +9,7 @@ from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from itertools import groupby
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional, TypeVar, Union
+from typing import TYPE_CHECKING, Any, Literal, Optional, TypeVar, Union
 from urllib.parse import ParseResult, urlparse
 from urllib.request import url2pathname
 
@@ -213,7 +213,7 @@ class MediaConnector:
         image_mode: str = "RGB",
     ) -> Image.Image:
         """
-        Load a PIL image from a HTTP or base64 data URL.
+        Load a PIL image from an HTTP or base64 data URL.
 
         By default, the image is converted into RGB format.
         """
@@ -237,7 +237,7 @@ class MediaConnector:
         image_mode: str = "RGB",
     ) -> Image.Image:
         """
-        Asynchronously load a PIL image from a HTTP or base64 data URL.
+        Asynchronously load a PIL image from an HTTP or base64 data URL.
 
         By default, the image is converted into RGB format.
         """
@@ -261,7 +261,7 @@ class MediaConnector:
         image_mode: str = "RGB",
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         """
-        Load video from a HTTP or base64 data URL.
+        Load video from an HTTP or base64 data URL.
         """
         image_io = ImageMediaIO(image_mode=image_mode,
                                 **self.media_io_kwargs.get("image", {}))
@@ -281,7 +281,7 @@ class MediaConnector:
         image_mode: str = "RGB",
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         """
-        Asynchronously load video from a HTTP or base64 data URL.
+        Asynchronously load video from an HTTP or base64 data URL.
 
         By default, the image is converted into RGB format.
         """
@@ -370,7 +370,7 @@ def group_mm_inputs_by_modality(
 
     def modality_group_func(
             mm_input: MultiModalKwargsItems) -> Union[str, int]:
-        # If the input has multiple modalities, return a id as the unique key
+        # If the input has multiple modalities, return an id as the unique key
         # for the mm_input input.
         if len(mm_input) > 1:
             return id(mm_input)
@@ -378,10 +378,7 @@ def group_mm_inputs_by_modality(
         elif len(mm_input) == 1:
             return next(iter(mm_input.keys()))
 
-        # FIXME(Isotr0py): Modality of mm_input from legacy pipeline is empty,
-        # this is used to make InternVL with legacy pipeline still work with v1.
-        else:
-            return ""
+        raise AssertionError("This line should be unreachable.")
 
     return [
         list(group) for _, group in groupby(mm_inputs, key=modality_group_func)
@@ -444,7 +441,6 @@ def run_dp_sharded_vision_model(image_input: torch.Tensor,
     Args:
         image_input (torch.Tensor): Image input tensor.
         vision_model (torch.nn.Module): Vision model.
-
     Returns:
         torch.Tensor: Output image embeddings
     """
@@ -542,6 +538,8 @@ def run_dp_sharded_mrope_vision_model(
     vision_model: torch.nn.Module,
     pixel_values: torch.Tensor,
     grid_thw_list: list[list[int]],
+    *,
+    rope_type: Literal["rope_3d", "rope_2d"],
 ) -> tuple[torch.Tensor, ...]:
     """Run a vision model with data parallelism (DP) sharding. 
     The function will shard the input image tensor on the 
@@ -552,6 +550,10 @@ def run_dp_sharded_mrope_vision_model(
         vision_model (torch.nn.Module): Vision model.
         pixel_values (torch.Tensor): Image/Video input tensor.
         grid_thw_list: List of grid dimensions for each image
+        rope_type: Type of rope used in the vision model.
+                   Different rope types have different dimension to do ViT.
+                   "rope_3d" for 3D rope (e.g., Qwen2.5-VL)
+                   "rope_2d" for 2D rope (e.g., Kimi-VL)
     Returns:
         torch.Tensor: Output image embeddings
 
@@ -605,8 +607,12 @@ def run_dp_sharded_mrope_vision_model(
                                          device=pixel_values.device,
                                          dtype=pixel_values.dtype)
     # embed_dim_reduction_factor = 2 * 2
-    embed_dim_reduction_factor = (vision_model.spatial_merge_size *
-                                  vision_model.spatial_merge_size)
+    if rope_type == "rope_2d":
+        embed_dim_reduction_factor = (vision_model.merge_kernel_size[0] *
+                                      vision_model.merge_kernel_size[1])
+    else:
+        embed_dim_reduction_factor = (vision_model.spatial_merge_size *
+                                      vision_model.spatial_merge_size)
 
     # Find the max length across all ranks
     # The output embedding of every DP rank has to be
@@ -617,23 +623,42 @@ def run_dp_sharded_mrope_vision_model(
     local_grid_thw_list = [grid_thw_list[i] for i in image_idxs_local]
 
     # Run the vision model on the local pixel_values_local
-    if pixel_values_local.shape[0] > 0:
-        image_embeds_local = vision_model(pixel_values_local,
-                                          local_grid_thw_list)
+    if rope_type == "rope_2d":
+        if pixel_values_local.shape[0] > 0:
+            image_embeds_local = vision_model(
+                pixel_values_local, torch.tensor(local_grid_thw_list))
+            if isinstance(image_embeds_local, list):
+                image_embeds_local = torch.cat(image_embeds_local, dim=0)
+        else:
+            out_dim = getattr(vision_model.config, "hidden_size", None)
+            image_embeds_local = torch.empty(
+                (0, embed_dim_reduction_factor, out_dim),
+                device=pixel_values.device,
+                dtype=pixel_values.dtype)
     else:
-        # Handle empty case
-        image_embeds_local = torch.empty((0, vision_model.out_hidden_size),
-                                         device=pixel_values.device,
-                                         dtype=pixel_values.dtype)
+        if pixel_values_local.shape[0] > 0:
+            image_embeds_local = vision_model(pixel_values_local,
+                                              local_grid_thw_list)
+        else:
+            # Handle empty case
+            image_embeds_local = torch.empty((0, vision_model.out_hidden_size),
+                                             device=pixel_values.device,
+                                             dtype=pixel_values.dtype)
 
     # Pad the output based on max_len_per_rank
     # for tensor_model_parallel_all_gather to work
     current_len = image_embeds_local.shape[0]
     if current_len < max_len_per_rank:
         padding_size = max_len_per_rank - current_len
-        padding = torch.empty((padding_size, image_embeds_local.shape[1]),
-                              dtype=image_embeds_local.dtype,
-                              device=image_embeds_local.device)
+        if rope_type == "rope_2d":
+            padding = torch.empty((padding_size, image_embeds_local.shape[1],
+                                   image_embeds_local.shape[2]),
+                                  dtype=image_embeds_local.dtype,
+                                  device=image_embeds_local.device)
+        else:
+            padding = torch.empty((padding_size, image_embeds_local.shape[1]),
+                                  dtype=image_embeds_local.dtype,
+                                  device=image_embeds_local.device)
         image_embeds_local_padded = torch.cat([image_embeds_local, padding],
                                               dim=0)
     else:
@@ -674,7 +699,6 @@ def run_dp_sharded_mrope_vision_model(
                     embed_start:embed_start + img_patches]
                 embed_start += img_patches
             current_idx += count
-
     out_embeddings = tuple(embed for embed in original_order_embeddings
                            if embed is not None)
     assert len(out_embeddings) == len(

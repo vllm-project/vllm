@@ -271,7 +271,7 @@ def split_graph(graph: fx.GraphModule,
         outputs.append(
             SplitItem(name, graph_id, (graph_id in split_op_graphs), module))
 
-    # sort by intetger graph_id, rather than string name
+    # sort by integer graph_id, rather than string name
     outputs.sort(key=lambda x: x.graph_id)
 
     return split_gm, outputs
@@ -424,7 +424,7 @@ class VllmBackend:
 
         # if the model is initialized with a non-empty prefix,
         # then usually it's enough to use that prefix,
-        # e.g. launguage_model, vision_model, etc.
+        # e.g. language_model, vision_model, etc.
         # when multiple parts are initialized as independent
         # models, we need to use the model_tag to distinguish
         # them, e.g. backbone (default), eagle_head, etc.

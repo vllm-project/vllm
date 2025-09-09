@@ -16,8 +16,8 @@ cd vllm_source
 Third, install required dependencies:
 
 ```bash
-uv pip install -r requirements/cpu-build.txt --torch-backend auto
-uv pip install -r requirements/cpu.txt --torch-backend auto
+uv pip install -r requirements/cpu-build.txt --torch-backend cpu
+uv pip install -r requirements/cpu.txt --torch-backend cpu
 ```
 
 ??? console "pip"

@@ -59,10 +59,10 @@ async def requests_processing_time(llm,
 @pytest.mark.asyncio
 async def test_add_lora(chatglm3_lora_files):
     """ 
-    The add_lora function is used to pre-load some LoRA adapters into the
+    The add_lora function is used to preload some LoRA adapters into the
     engine in anticipation of future requests using these adapters. To test
     this functionality, we use the async engine to process some requests - We
-    do it twice, once with add_lora() pre-loading and once without.
+    do it twice, once with add_lora() preloading and once without.
 
     We measure the request processing time in both cases and expect the time 
     to be lesser in the case with add_lora() calls.

@@ -98,7 +98,7 @@ def test_api_server(api_server, distributed_executor_backend: str):
         pool.join()
 
         # check cancellation stats
-        # give it some times to update the stats
+        # give it some time to update the stats
         time.sleep(1)
 
         num_aborted_requests = requests.get(

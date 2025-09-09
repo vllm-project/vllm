@@ -10,6 +10,7 @@ from .mteb_utils import mteb_test_embed_models
 MODELS = [
     CLSPoolingEmbedModelInfo("nomic-ai/nomic-embed-text-v1",
                              architecture="NomicBertModel",
+                             mteb_score=0.737568559,
                              enable_test=True),
     CLSPoolingEmbedModelInfo("nomic-ai/nomic-embed-text-v1.5",
                              architecture="NomicBertModel",
@@ -19,6 +20,7 @@ MODELS = [
                              enable_test=False),
     CLSPoolingEmbedModelInfo("nomic-ai/nomic-embed-text-v2-moe",
                              architecture="NomicBertModel",
+                             mteb_score=0.715488912,
                              enable_test=True)
 ]
 

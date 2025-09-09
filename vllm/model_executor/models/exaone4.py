@@ -22,6 +22,7 @@
 """Inference-only Exaone model compatible with HuggingFace weights."""
 
 from collections.abc import Iterable
+from itertools import islice
 from typing import Any, Optional, Union
 
 import torch
@@ -163,8 +164,8 @@ class Exaone4Attention(nn.Module):
         is_sliding = config.layer_types[layer_idx] == "sliding_attention"
         self.sliding_window = config.sliding_window if is_sliding else None
 
-        # apply rotary embeddings to every layer
-        self.apply_all_layers = not is_sliding
+        # apply rotary embeddings to every layer in full attention models
+        self.apply_rope_all_layers = "sliding_attention" not in config.layer_types
 
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -200,7 +201,7 @@ class Exaone4Attention(nn.Module):
         k = self.k_norm(k)
         k = k.flatten(-2, -1)
 
-        if self.sliding_window or self.apply_all_layers:
+        if self.sliding_window or self.apply_rope_all_layers:
             q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
@@ -354,7 +355,7 @@ class Exaone4Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in self.layers[self.start_layer:self.end_layer]:
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(
                 positions,
                 hidden_states,

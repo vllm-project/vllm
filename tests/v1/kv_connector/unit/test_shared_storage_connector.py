@@ -33,7 +33,7 @@ def _check_path_len(path):
 
 
 def _list_path(path):
-    """Return the list of foldername (hashes generatd) under the path"""
+    """Return the list of foldername (hashes generated) under the path"""
     return list(path.iterdir())
 
 
@@ -41,7 +41,7 @@ def run_test(tmp_path, processor, llm: LLM, question: str,
              image_urls: list[Image], expected_len: int, info: str):
     """
     One individual test to process the prompt and output base on 1 set of input
-    Then check if the length in the strorage path matches the expected length
+    Then check if the length in the storage path matches the expected length
     `info` introduces details or purpose of the individual test
     """
     print(f"***info: {info}***")
@@ -115,7 +115,7 @@ def test_shared_storage_connector_hashes(tmp_path):
     """
     Tests that SharedStorageConnector saves KV to the storage locations
     with proper hashes; that are unique for inputs with identical text but 
-    differnt images (same size), or same multiple images but different orders.
+    different images (same size), or same multiple images but different orders.
     """
     # Using tmp_path as the storage path to store KV
     print(f"KV storage path at: {str(tmp_path)}")
@@ -171,12 +171,12 @@ def test_shared_storage_connector_hashes(tmp_path):
                   img=[image_1],
                   expected_len=2,
                   info=("image_1 single input the 2nd time. "
-                        "It should not form aother new hash.")),
+                        "It should not form another new hash.")),
         InputCase(text=TEXT_PROMPTS[0],
                   img=[image_2],
                   expected_len=2,
                   info=("image_2 single input the 2nd time. "
-                        "It should not form aother new hash.")),
+                        "It should not form another new hash.")),
         InputCase(text=TEXT_PROMPTS[0],
                   img=[image_1, image_2],
                   expected_len=3,
@@ -189,12 +189,12 @@ def test_shared_storage_connector_hashes(tmp_path):
                   img=[image_1, image_2],
                   expected_len=4,
                   info=("[image_1, image_2] input the 2nd time. "
-                        "It should not form aother new hash.")),
+                        "It should not form another new hash.")),
         InputCase(text=TEXT_PROMPTS[0],
                   img=[image_2, image_1],
                   expected_len=4,
                   info=("[image_2, image_1] input the 2nd time. "
-                        "It should not form aother new hash.")),
+                        "It should not form another new hash.")),
         InputCase(text=TEXT_PROMPTS[0],
                   img=[],
                   expected_len=5,

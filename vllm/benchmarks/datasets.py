@@ -1020,7 +1020,7 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         default="random",
         choices=[
             "sharegpt", "burstgpt", "sonnet", "random", "random-mm", "hf", 
-            "custom", "prefix_repetition"
+            "custom", "prefix_repetition", "spec_bench"
         ],
         help="Name of the dataset to benchmark on.",
     )
@@ -1053,6 +1053,22 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         "Skip applying chat template to prompt, used only for custom dataset.",
     )
 
+    spec_bench_group = parser.add_argument_group("spec bench dataset options")
+    spec_bench_group.add_argument(
+        "--spec-bench-output-len",
+        type=int,
+        default=256,
+        help=
+        "Num of output tokens per request, used only for spec bench dataset.",
+    )
+    spec_bench_group.add_argument(
+        "--spec-bench-category",
+        type=str,
+        default=None,
+        help=
+        "Category for spec bench dataset. If None, use all categories.",
+    )
+
     sonnet_group = parser.add_argument_group("sonnet dataset options")
     sonnet_group.add_argument(
         "--sonnet-input-len",
@@ -1083,6 +1099,22 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         default=None,
         help="Output length for each request. Overrides the output length "
         "from the ShareGPT dataset.",
+    )
+
+    blazedit_group = parser.add_argument_group("blazedit dataset options")
+    blazedit_group.add_argument(
+        "--blazedit-min-distance",
+        type=float,
+        default=0.0,
+        help=
+        "Minimum distance for blazedit dataset. Min: 0, Max: 1.0",
+    )
+    blazedit_group.add_argument(
+        "--blazedit-max-distance",
+        type=float,
+        default=1.0,
+        help=
+        "Maximum distance for blazedit dataset. Min: 0, Max: 1.0",
     )
 
     random_group = parser.add_argument_group("random dataset options")
@@ -1228,6 +1260,16 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
                           default=None,
                           help="Split of the HF dataset.")
     hf_group.add_argument(
+        "--hf-name",
+        type=str,
+        default=None,
+        help=(
+            "Name of the dataset on HuggingFace "
+            "(e.g., 'lmarena-ai/VisionArena-Chat'). "
+            "Specify this if your dataset-path is a local path."
+        ),
+    )
+    hf_group.add_argument(
         "--hf-output-len",
         type=int,
         default=None,
@@ -1268,6 +1310,10 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
 
 
 def get_samples(args, tokenizer) -> list[SampleRequest]:
+
+    if not hasattr(args, "request_id_prefix"):
+        args.request_id_prefix = ""
+
     if args.dataset_name == "custom":
         dataset = CustomDataset(dataset_path=args.dataset_path)
         input_requests = dataset.sample(
@@ -1307,28 +1353,61 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
     elif args.dataset_name == "hf":
         # all following datasets are implemented from the
         # HuggingFaceDataset base class
-        if args.dataset_path in VisionArenaDataset.SUPPORTED_DATASET_PATHS:
+        hf_kwargs = {}
+        if (
+            args.dataset_path in VisionArenaDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in VisionArenaDataset.SUPPORTED_DATASET_PATHS
+        ):
             dataset_class = VisionArenaDataset
             args.hf_split = "train"
             args.hf_subset = None
-        elif args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS:
+        elif (
+            args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in InstructCoderDataset.SUPPORTED_DATASET_PATHS
+        ):
             dataset_class = InstructCoderDataset
             args.hf_split = "train"
-        elif args.dataset_path in MTBenchDataset.SUPPORTED_DATASET_PATHS:
+        elif (
+            args.dataset_path in MTBenchDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in MTBenchDataset.SUPPORTED_DATASET_PATHS
+        ):
             dataset_class = MTBenchDataset
             args.hf_split = "train"
-        elif args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS:
+        elif (
+            args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in ConversationDataset.SUPPORTED_DATASET_PATHS
+        ):
             dataset_class = ConversationDataset
-        elif args.dataset_path in AIMODataset.SUPPORTED_DATASET_PATHS:
+        elif (
+            args.dataset_path in AIMODataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in AIMODataset.SUPPORTED_DATASET_PATHS
+        ):
             dataset_class = AIMODataset
             args.hf_split = "train"
-        elif args.dataset_path in NextEditPredictionDataset.SUPPORTED_DATASET_PATHS:  # noqa: E501
+        elif (
+            args.dataset_path
+            in NextEditPredictionDataset.SUPPORTED_DATASET_PATHS  # noqa: E501
+            or args.hf_name in NextEditPredictionDataset.SUPPORTED_DATASET_PATHS
+        ):
             dataset_class = NextEditPredictionDataset
             args.hf_split = "train"
-        elif args.dataset_path in ASRDataset.SUPPORTED_DATASET_PATHS:
+        elif (
+            args.dataset_path in ASRDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in ASRDataset.SUPPORTED_DATASET_PATHS
+        ):
             dataset_class = ASRDataset
             args.hf_split = "train"
-        elif args.dataset_path in MLPerfDataset.SUPPORTED_DATASET_PATHS:
+        elif args.dataset_path in BlazeditDataset.SUPPORTED_DATASET_PATHS:
+            dataset_class = BlazeditDataset
+            args.hf_split = "train"
+            hf_kwargs = {
+                "min_distance": args.blazedit_min_distance,
+                "max_distance": args.blazedit_max_distance,
+            }
+        elif (
+            args.dataset_path in MLPerfDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in MLPerfDataset.SUPPORTED_DATASET_PATHS
+        ):
             dataset_class = MLPerfDataset
             args.hf_split = "train"
         else:
@@ -1358,16 +1437,26 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
             dataset_split=args.hf_split,
             random_seed=args.seed,
             no_stream=args.no_stream,
+            hf_name=args.hf_name,
         ).sample(
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
             output_len=args.hf_output_len,
             request_id_prefix=args.request_id_prefix,
+            **hf_kwargs
         )
 
     else:
         # For datasets that follow a similar structure, use a mapping.
         dataset_mapping = {
+            "spec_bench":
+            lambda: SpecBench(dataset_path=args.dataset_path, 
+                              category=args.spec_bench_category).sample(
+                num_requests=args.num_prompts,
+                tokenizer=tokenizer,
+                output_len=args.spec_bench_output_len,
+                request_id_prefix=args.request_id_prefix,
+            ),
             "sharegpt": lambda: ShareGPTDataset(
                 random_seed=args.seed, dataset_path=args.dataset_path
             ).sample(
@@ -1505,6 +1594,14 @@ class CustomDataset(BenchmarkDataset):
         request_id_prefix: str = "",
         **kwargs,
     ) -> list:
+        # load all data if needed
+        self.num_available_samples = len(self.data)
+        if num_requests <= 0:
+            num_requests = self.num_available_samples
+            logger.info("num_requests is set to 0 or negative, "
+                        "so using all available samples: %d",
+                        num_requests)
+            
         sampled_requests = []
         for i, item in enumerate(self.data):
             if len(sampled_requests) >= num_requests:
@@ -1536,6 +1633,52 @@ class CustomDataset(BenchmarkDataset):
         return sampled_requests
 
 
+# -----------------------------------------------------------------------------
+# Spec Bench Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class SpecBench(CustomDataset):
+    """
+    Implements the SpecBench dataset: https://github.com/hemingkx/Spec-Bench
+    Download the dataset using: 
+    wget https://raw.githubusercontent.com/hemingkx/Spec-Bench/refs/heads/main/data/spec_bench/question.jsonl
+    """ # noqa: E501
+
+    def __init__(self, **kwargs) -> None:
+        self.category = kwargs.pop("category", None)
+        super().__init__(**kwargs)
+        self.load_data()
+
+    def load_data(self) -> None:
+        if self.dataset_path is None:
+            raise ValueError("dataset_path must be provided for loading data.")
+
+        self.data = []
+
+        # Load the JSONL file
+        jsonl_data = pd.read_json(path_or_buf=self.dataset_path,
+                                    lines=True)
+
+        # check if the JSONL file has a 'turns' column
+        if "turns" not in jsonl_data.columns:
+            raise ValueError("JSONL file must contain a 'turns' column.")
+
+        for _, row in jsonl_data.iterrows():
+            # sample only from a specific category if specified
+            if (not self.category) or (self.category == row['category']):
+                prompt = row["turns"][0]
+                self.data.append({"prompt": prompt})
+
+        random.seed(self.random_seed)
+        random.shuffle(self.data)
+
+    def sample(self, **kwargs) -> list:
+        # leverage CustomDataset sample
+        kwargs["skip_chat_template"] = False
+        return super().sample(**kwargs)
+    
+    
 # -----------------------------------------------------------------------------
 # Sonnet Dataset Implementation
 # -----------------------------------------------------------------------------
@@ -1710,6 +1853,7 @@ class HuggingFaceDataset(BenchmarkDataset):
         dataset_split: str,
         no_stream: bool = False,
         dataset_subset: Optional[str] = None,
+        hf_name: Optional[str] = None,
         **kwargs,
     ) -> None:
         super().__init__(dataset_path=dataset_path, **kwargs)
@@ -1717,6 +1861,7 @@ class HuggingFaceDataset(BenchmarkDataset):
         self.dataset_split = dataset_split
         self.dataset_subset = dataset_subset
         self.load_stream = not no_stream
+        self.hf_name = hf_name or dataset_path
         self.load_data()
 
     def load_data(self) -> None:
@@ -1827,10 +1972,9 @@ class VisionArenaDataset(HuggingFaceDataset):
         for i, item in enumerate(self.data):
             if len(sampled_requests) >= num_requests:
                 break
-            parser_fn = self.SUPPORTED_DATASET_PATHS.get(self.dataset_path)
+            parser_fn = self.SUPPORTED_DATASET_PATHS.get(self.hf_name)
             if parser_fn is None:
-                raise ValueError(
-                    f"Unsupported dataset path: {self.dataset_path}")
+                raise ValueError(f"Unsupported dataset path: {self.hf_name}")
             prompt = parser_fn(item)
             mm_content = process_image(item["images"][0])
             prompt_len = len(tokenizer(prompt).input_ids)
@@ -1976,6 +2120,94 @@ class MTBenchDataset(HuggingFaceDataset):
 
 
 # -----------------------------------------------------------------------------
+# Blazedit Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class BlazeditDataset(HuggingFaceDataset):
+    """
+    Blazedit Dataset.
+    https://github.com/ise-uiuc/blazedit
+
+    5k char version: vdaita/edit_5k_char
+    10k char version: vdaita/edit_10k_char
+    """  # noqa: E501
+
+    # 5k char version will have output as ~5k chars
+    # 10k char version will have output as ~10k chars
+    # Assuming 3 char per token, 10k chars will be 3333 tokens
+    # We set default to 4000 to be safe
+    DEFAULT_OUTPUT_LEN = 4000
+    SUPPORTED_DATASET_PATHS = {
+        "vdaita/edit_5k_char",
+        "vdaita/edit_10k_char",
+    }
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        output_len: Optional[int] = None,
+        request_id_prefix: str = "",
+        min_distance: float = 0.0,
+        max_distance: float = 1.0,
+        **kwargs,
+    ) -> list:
+        output_len = (output_len
+                      if output_len is not None else self.DEFAULT_OUTPUT_LEN)
+        sampled_requests = []
+
+        for i, item in enumerate(self.data):
+            if len(sampled_requests) >= num_requests:
+                break
+            code = item["code"]
+            change_request = item["change_request"]
+            norm_distance = item["norm_distance"]
+
+            # compare the levenshtein distance normalized by code length
+            if norm_distance < min_distance or norm_distance > max_distance:
+                continue
+            
+            # template copied from 
+            # https://github.com/ise-uiuc/blazedit/blob/7765137e656fd62de877422d2e4cf8de51228054/dataset/create_refined_dataset.py#L94-L105 # noqa: E501
+            instruction = f"""Given a code file, please apply the change requests and generate the new file.
+
+Original file:
+```python
+{code}
+```
+
+Change request:
+{change_request}
+
+Please generate the new code file in the "New file" section below.""" # noqa: E501
+
+            # apply template
+            prompt = tokenizer.apply_chat_template(
+                [{
+                    "role": "user",
+                    "content": instruction
+                }],
+                add_generation_prompt=True,
+                tokenize=False,
+            )
+
+            prompt_len = len(tokenizer(prompt).input_ids)
+
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                    request_id=request_id_prefix + str(i),
+                ))
+        self.maybe_oversample_requests(sampled_requests, num_requests, 
+                                       request_id_prefix)
+        
+        return sampled_requests
+
+
+# -----------------------------------------------------------------------------
 # AIMO Dataset Implementation
 # -----------------------------------------------------------------------------
 
@@ -2099,10 +2331,9 @@ class NextEditPredictionDataset(HuggingFaceDataset):
     def sample(self, tokenizer: PreTrainedTokenizerBase, num_requests: int,
                request_id_prefix: str = "",
                **kwargs):
-        formatting_prompt_func = self.MAPPING_PROMPT_FUNCS.get(
-            self.dataset_path)
+        formatting_prompt_func = self.MAPPING_PROMPT_FUNCS.get(self.hf_name)
         if formatting_prompt_func is None:
-            raise ValueError(f"Unsupported dataset path: {self.dataset_path}")
+            raise ValueError(f"Unsupported dataset path: {self.hf_name}")
         samples = []
         for i, sample in enumerate(self.data):
             sample = formatting_prompt_func(sample)

@@ -403,7 +403,7 @@ class RandomDataset(BenchmarkDataset):
             # [6880, 6881] -> ['Ġcalls', 'here'] ->
             # [1650, 939, 486] -> ['Ġcall', 'sh', 'ere']
             # To avoid uncontrolled change of the prompt length,
-            # the encoded sequence is truncated before being decode again.
+            # the encoded sequence is truncated before being decoded again.
             total_input_len = prefix_len + int(input_lens[i])
             re_encoded_sequence = tokenizer.encode(prompt, add_special_tokens=False)[
                 :total_input_len

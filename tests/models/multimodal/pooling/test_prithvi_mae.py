@@ -46,7 +46,7 @@ def _run_test(
         vllm_model.encode(prompt)
 
 
-MODELS = ["christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM"]
+MODELS = ["mgazz/Prithvi-EO-2.0-300M-TL-Sen1Floods11"]
 
 
 @pytest.mark.core_model

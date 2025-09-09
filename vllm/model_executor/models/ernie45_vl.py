@@ -66,8 +66,6 @@ from .vision import get_vit_attn_backend
 
 logger = init_logger(__name__)
 
-_MAX_FRAMES_PER_VIDEO = 16
-
 # === Vision Transformer === #
 
 
@@ -839,6 +837,15 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None, "video": None}
 
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        max_image_tokens = self.get_max_image_tokens()
+        max_video_tokens = self.get_max_video_tokens(seq_len, mm_counts)
+        return {"image": max_image_tokens, "video": max_video_tokens}
+
     def _get_vision_info(
         self,
         *,
@@ -964,8 +971,7 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         max_image_tokens = self.get_max_image_tokens() * max_images
         max_total_frames = self._get_max_video_frames(seq_len -
                                                       max_image_tokens)
-        max_frames_per_video = min(max_total_frames // max(max_videos, 1),
-                                   _MAX_FRAMES_PER_VIDEO)
+        max_frames_per_video = max_total_frames // max(max_videos, 1)
 
         return max(max_frames_per_video, 2)
 
