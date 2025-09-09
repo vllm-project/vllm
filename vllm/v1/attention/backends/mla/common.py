@@ -1195,8 +1195,8 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         output_scale: Optional[torch.Tensor] = None,
         output_block_scale: Optional[torch.Tensor] = None,
         positions: torch.Tensor = None,
-        cos_sin_cache: torch.Tensor = None,
-        is_neox: bool = False,
+        # cos_sin_cache: torch.Tensor = None,
+        # is_neox: bool = False,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
 
@@ -1234,8 +1234,9 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         mla_output_zeros = None
         decode_q_out = None
         if kv_cache.numel() > 0:
-            if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE:
-                cos, sin = cos_sin_cache.chunk(2, dim = -1)
+            if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE and hasattr(self, "rotary_emb"):
+                cos, sin = self.rotary_emb.cos_sin_cache.chunk(2, dim = -1)
+                is_neox = self.rotary_emb.is_neox_style
                 q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
                 if VLLM_ROCM_USE_AITER_TRITON_FP8_BMM:
                     decode_q_out = torch.empty((num_decode_tokens, self.num_heads, self.W_K.shape[1] + self.qk_rope_head_dim), dtype = q.dtype, device=q.device)

@@ -61,20 +61,45 @@ from .utils import (PPMissingLayer, is_pp_missing_parameter,
                     maybe_prefix)
 import vllm.envs as envs
 from vllm.platforms import current_platform
+from vllm.utils import direct_register_custom_op
 
 if current_platform.is_rocm():
     VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_FP8_QUANT = envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_FP8_QUANT
+    VLLM_ROCM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT = envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT
+
     if VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_FP8_QUANT:
         from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
-    
-    VLLM_ROCM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT = envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT
-    if VLLM_ROCM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT:
-        from aiter.ops.triton.activation import act_mul_and_fp8_group_quant
 
     if VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_FP8_QUANT or VLLM_ROCM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT:    
         import aiter as rocm_aiter
         rocm_aiter_fp8_dtype = rocm_aiter.dtypes.fp8
         rocm_aiter_fp8_quant_group_size = 128
+    
+    if VLLM_ROCM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT:
+        from aiter.ops.triton.activation import act_mul_and_fp8_group_quant
+        
+        def act_mul_and_fp8_group_quant_impl(
+            x: torch.Tensor,        
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            return act_mul_and_fp8_group_quant(x, activation="silu", group_size=rocm_aiter_fp8_quant_group_size, dtype_quant=rocm_aiter_fp8_dtype)
+        
+        def act_mul_and_fp8_group_quant_fake(
+            x: torch.Tensor,        
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            M, N = x.shape
+            assert N % 2 == 0
+            N_half = N // 2
+            x_fp8 = torch.empty((M, N_half), dtype=rocm_aiter_fp8_dtype, device=x.device)
+            out_bs = torch.empty((M, (N_half + rocm_aiter_fp8_quant_group_size - 1) // rocm_aiter_fp8_quant_group_size), dtype=torch.float32, device=x.device)
+            return x_fp8, out_bs
+        
+        direct_register_custom_op(
+            op_name="act_mul_and_fp8_group_quant",
+            op_func=act_mul_and_fp8_group_quant_impl,
+            mutates_args=[],
+            fake_impl=act_mul_and_fp8_group_quant_fake,
+            dispatch_key=current_platform.dispatch_key,
+        )
 
     VLLM_ROCM_USE_AITER_TRITON_FUSED_MUL_ADD = envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_TRITON_FUSED_MUL_ADD
     if VLLM_ROCM_USE_AITER_TRITON_FUSED_MUL_ADD:
@@ -116,10 +141,7 @@ class DeepseekV2MLP(nn.Module):
             x, x_quant_scales = x
         gate_up, _ = self.gate_up_proj(x, x_quant_scales=x_quant_scales)
         if VLLM_ROCM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT:
-            x = act_mul_and_fp8_group_quant(gate_up, 
-                                            activation="silu", 
-                                            group_size=rocm_aiter_fp8_quant_group_size, 
-                                            dtype_quant=rocm_aiter_fp8_dtype)
+            x = torch.ops.vllm.act_mul_and_fp8_group_quant(gate_up)
         else:
             x = self.act_fn(gate_up)
         x_quant_scales = None
@@ -532,6 +554,7 @@ class DeepseekV2MLAAttention(nn.Module):
             qk_head_dim=self.qk_head_dim,
             v_head_dim=self.v_head_dim,
             kv_b_proj=self.kv_b_proj,
+            rotary_emb=self.rotary_emb if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE else None,
         )
 
         self.prefix = prefix
@@ -587,17 +610,17 @@ class DeepseekV2MLAAttention(nn.Module):
         k_pe = k_pe.unsqueeze(1)
 
         if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE:
-            cos_sin_cache = self.rotary_emb.cos_sin_cache
-            is_neox = self.rotary_emb.is_neox_style
+            # cos_sin_cache = self.rotary_emb.cos_sin_cache
+            # is_neox = self.rotary_emb.is_neox_style
             attn_out = self.mla_attn(
                 q,
                 kv_c_normed,
                 k_pe,
                 output_shape=(hidden_states.shape[0],
                             self.num_local_heads * self.v_head_dim),
-                positions=positions,
-                cos_sin_cache=cos_sin_cache,
-                is_neox=is_neox)
+                positions=positions)#,
+                # cos_sin_cache=cos_sin_cache,
+                # is_neox=is_neox)
         else:
             q[..., self.qk_nope_head_dim:], k_pe = self.rotary_emb(
                 positions, q[..., self.qk_nope_head_dim:], k_pe)
