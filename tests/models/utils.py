@@ -387,6 +387,7 @@ class LASTPoolingRerankModelInfo(RerankModelInfo):
 
 @dataclass
 class GenerateModelInfo(ModelInfo):
+    hf_dtype: str = "auto"
     hf_ppl: Optional[float] = None
 
 

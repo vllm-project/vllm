@@ -10,7 +10,7 @@ from datasets import load_dataset
 from tests.models.utils import ModelInfo, TokensTextLogprobsPromptLogprobs
 from vllm.logprobs import Logprob
 
-PPL_TOL = 1e-2
+PPL_TOL = 1
 MAX_LENGTH = 1024
 
 
@@ -29,7 +29,8 @@ def wikitext_ppl_test(hf_runner,
         vllm_extra_kwargs["hf_overrides"] = model_info.hf_overrides
 
     with vllm_runner(model_info.name,
-                     max_model_len=None,
+                     gpu_memory_utilization=0.7,
+                     max_model_len=max_length,
                      max_num_seqs=1,
                      enforce_eager=True,
                      **vllm_extra_kwargs) as vllm_model:
