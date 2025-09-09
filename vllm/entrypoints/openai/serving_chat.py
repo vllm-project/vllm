@@ -158,8 +158,6 @@ class OpenAIServingChat(OpenAIServing):
         self.supports_code_interpreter = False
         self.python_tool = None
 
-        # Processor handled by base class
-
     async def create_chat_completion(
         self,
         request: ChatCompletionRequest,
