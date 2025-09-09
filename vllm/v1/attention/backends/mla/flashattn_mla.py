@@ -17,10 +17,15 @@ from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonImpl,
                                                    MLACommonMetadata,
                                                    MLACommonMetadataBuilder)
+from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.vllm_flash_attn import flash_attn_varlen_func, get_scheduler_metadata
 
 logger = init_logger(__name__)
+
+# NOTE(matt): This is an arbitrary number, copied from
+# woosuk's implementation in standard FlashAttention backend
+_DEFAULT_MAX_NUM_SPLITS_FOR_CUDA_GRAPH = 16
 
 
 class FlashAttnMLABackend(MLACommonBackend):
@@ -48,6 +53,7 @@ class FlashAttnMLADecodeMetadata(MLACommonDecodeMetadata):
     max_query_len: int
     max_seq_len: int
     scheduler_metadata: Optional[torch.Tensor] = None
+    max_num_splits: int = 0
 
 
 @dataclass
@@ -57,13 +63,40 @@ class FlashAttnMLAMetadata(MLACommonMetadata[FlashAttnMLADecodeMetadata]):
 
 class FlashAttnMLAMetadataBuilder(
         MLACommonMetadataBuilder[FlashAttnMLAMetadata]):
+    cudagraph_support: ClassVar[AttentionCGSupport] = \
+        AttentionCGSupport.UNIFORM_BATCH
+
     reorder_batch_threshold: ClassVar[int] = 512
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device,
                          FlashAttnMLAMetadata)
+        self.max_num_splits = 0  # No upper bound on the number of splits.
         self.fa_aot_schedule = (get_flash_attn_version() == 3)
+
+        self.use_full_cuda_graph = \
+            self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+
+        if self.use_full_cuda_graph and self.fa_aot_schedule:
+            self.max_cudagraph_size = self.compilation_config.max_capture_size
+
+            if self.max_cudagraph_size > 992:
+                # This condition derives from FA3's internal heuristic.
+                # TODO(woosuk): Support larger cudagraph sizes.
+                raise ValueError(
+                    "Capture size larger than 992 is not supported for "
+                    "full cuda graph.")
+
+            self.scheduler_metadata = torch.zeros(
+                vllm_config.scheduler_config.max_num_seqs + 1,
+                dtype=torch.int32,
+                device=self.device,
+            )
+            # When using cuda graph, we need to set the upper bound of the
+            # number of splits so that large enough intermediate buffers are
+            # pre-allocated during capture.
+            self.max_num_splits = _DEFAULT_MAX_NUM_SPLITS_FOR_CUDA_GRAPH
 
     def _schedule_decode(self, num_reqs, cu_query_lens, max_query_len, seqlens,
                          max_seq_len, causal):
@@ -81,14 +114,16 @@ class FlashAttnMLAMetadataBuilder(
                 page_size=self.page_size,
                 cu_seqlens_q=cu_query_lens,
                 causal=causal,
+                num_splits=self.max_num_splits,
             )
         return None
 
-    def _build_decode(
-            self, block_table_tensor: torch.Tensor, seq_lens_cpu: torch.Tensor,
-            seq_lens_device: torch.Tensor, query_start_loc_cpu: torch.Tensor,
-            query_start_loc_device: torch.Tensor
-    ) -> FlashAttnMLADecodeMetadata:
+    def _build_decode(self, block_table_tensor: torch.Tensor,
+                      seq_lens_cpu: torch.Tensor,
+                      seq_lens_device: torch.Tensor,
+                      query_start_loc_cpu: torch.Tensor,
+                      query_start_loc_device: torch.Tensor,
+                      num_decode_tokens: int) -> FlashAttnMLADecodeMetadata:
         query_lens_cpu = (query_start_loc_cpu[1:] - query_start_loc_cpu[:-1])
         max_query_len = query_lens_cpu.max().item()
         max_seq_len = seq_lens_cpu.max().item()
@@ -102,6 +137,29 @@ class FlashAttnMLAMetadataBuilder(
             causal=True,
         )
 
+        # For FA3 + full cudagraph
+        max_num_splits = 0
+        if self.use_full_cuda_graph and scheduler_metadata is not None:
+            n = scheduler_metadata.shape[0]
+            # Ensure the persistent buffer is large enough
+            assert n <= self.scheduler_metadata.shape[0], \
+                f"Scheduler metadata size {n} exceeds buffer size " + \
+                f"{self.scheduler_metadata.shape[0]}"
+            self.scheduler_metadata[:n] = scheduler_metadata
+            # NOTE(woosuk): We should zero out the rest of the scheduler
+            # metadata to guarantee the correctness. Otherwise, some thread
+            # blocks may use the invalid scheduler metadata and overwrite the
+            # output buffer.
+            self.scheduler_metadata[n:] = 0
+            scheduler_metadata = self.scheduler_metadata[:n]
+
+            if num_decode_tokens <= self.max_cudagraph_size:
+                # NOTE(woosuk): Setting num_splits > 1 may increase the memory
+                # usage, because the intermediate buffers of size [num_splits,
+                # num_heads, num_tokens, head_size] are allocated. Therefore,
+                # we only set num_splits when using cuda graphs.
+                max_num_splits = self.max_num_splits
+
         return FlashAttnMLADecodeMetadata(
             block_table=block_table_tensor,
             seq_lens=seq_lens_device,
@@ -109,6 +167,7 @@ class FlashAttnMLAMetadataBuilder(
             max_query_len=max_query_len,
             max_seq_len=max_seq_len,
             scheduler_metadata=scheduler_metadata,
+            max_num_splits=max_num_splits,
         )
 
 
@@ -175,12 +234,17 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
         kv_c_cache = kv_c_and_k_pe_cache[..., :self.kv_lora_rank]
         k_pe_cache = kv_c_and_k_pe_cache[..., self.kv_lora_rank:]
 
+        # NOTE(matt): During CUDA graph capture, max_query_len can be 0, but the
+        # kernel uses this to calculate grid dimensions. Ensure it's at least 1
+        # to prevent invalid grid configuration during graph capture.
+        max_seqlen_q = max(attn_metadata.decode.max_query_len, 1)
+
         o = flash_attn_varlen_func(
             q=q_pe,
             k=k_pe_cache.unsqueeze(-2),  # Add head dim of 1
             v=kv_c_cache.unsqueeze(-2),  # Add head dim of 1
             q_v=q_nope,
-            max_seqlen_q=attn_metadata.decode.max_query_len,
+            max_seqlen_q=max_seqlen_q,
             cu_seqlens_q=attn_metadata.decode.query_start_loc,
             max_seqlen_k=attn_metadata.decode.max_seq_len,
             seqused_k=attn_metadata.decode.seq_lens,
@@ -189,6 +253,7 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
             causal=True,
             fa_version=3,  # only version 3 is supported
             scheduler_metadata=attn_metadata.decode.scheduler_metadata,
+            num_splits=attn_metadata.decode.max_num_splits,
         )
 
         return self._v_up_proj(o)
