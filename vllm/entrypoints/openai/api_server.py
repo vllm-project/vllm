@@ -1717,6 +1717,8 @@ async def init_app_state(
 
     if args.tool_server == "demo":
         tool_server: Optional[ToolServer] = DemoToolServer()
+        assert isinstance(tool_server, DemoToolServer)
+        await tool_server.init_and_validate()
     elif args.tool_server:
         tool_server = MCPToolServer()
         await tool_server.add_tool_server(args.tool_server)

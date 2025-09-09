@@ -162,10 +162,13 @@ class DemoToolServer(ToolServer):
 
     def __init__(self):
         self.tools: dict[str, Tool] = {}
+
+    async def init_and_validate(self):
         browser_tool = HarmonyBrowserTool()
+        python_tool = HarmonyPythonTool()
+        await python_tool.validate()
         if browser_tool.enabled:
             self.tools["browser"] = browser_tool
-        python_tool = HarmonyPythonTool()
         if python_tool.enabled:
             self.tools["python"] = python_tool
         logger.info("DemoToolServer initialized with tools: %s",
