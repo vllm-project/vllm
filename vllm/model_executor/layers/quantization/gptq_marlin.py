@@ -469,7 +469,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         )
         layer.register_parameter("w2_scales", w2_scales)
         set_weight_attrs(w2_scales, extra_weight_attrs)
-        # dont shard the w2 scales when running act order
+        # don't shard the w2 scales when running act order
         set_weight_attrs(w2_scales,
                          {"load_full_w2": self.quant_config.desc_act})
         # up_proj scales
@@ -493,7 +493,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         )
         layer.register_parameter("w2_qzeros", w2_qzeros)
         set_weight_attrs(w2_qzeros, extra_weight_attrs)
-        # dont shard the w2 scales when running act order
+        # don't shard the w2 scales when running act order
         set_weight_attrs(w2_qzeros,
                          {"load_full_w2": self.quant_config.desc_act})
         w13_g_idx = torch.nn.Parameter(
@@ -654,7 +654,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         assert self.fused_experts is None
 
         if enable_eplb:

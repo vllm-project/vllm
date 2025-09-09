@@ -15,9 +15,10 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape, QuantKey, ScaleDesc)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    Fp8LinearOp, maybe_create_device_identity)
+    Fp8LinearOp, cutlass_fp8_supported, maybe_create_device_identity)
 from vllm.platforms import current_platform
 
+from ..utils import override_cutlass_fp8_supported
 from .backend import TestBackend
 
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -26,9 +27,9 @@ FP8_DTYPE = current_platform.fp8_dtype()
 class TestModel(torch.nn.Module):
 
     def __init__(self, hidden_size: int, eps: float, static: bool,
-                 force_fp8_e4m3fnuz: bool, *args, **kwargs):
+                 cuda_force_torch: bool, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.force_fp8_e4m3fnuz = force_fp8_e4m3fnuz
+        self.cuda_force_torch = cuda_force_torch
         self.norm = [RMSNorm(hidden_size, eps) for _ in range(3)]
         self.wscale = [torch.rand(1, dtype=torch.float32) for _ in range(2)]
         group_shape = GroupShape.PER_TENSOR if static else GroupShape.PER_TOKEN
@@ -42,11 +43,12 @@ class TestModel(torch.nn.Module):
             torch.rand(hidden_size, hidden_size).to(dtype=FP8_DTYPE).t()
             for _ in range(2)
         ]
-        self.fp8_linear = Fp8LinearOp(
-            force_fp8_e4m3fnuz=force_fp8_e4m3fnuz,
-            act_quant_static=static,
-            act_quant_group_shape=group_shape,
-        )
+
+        with override_cutlass_fp8_supported(not cuda_force_torch):
+            self.fp8_linear = Fp8LinearOp(
+                act_quant_static=static,
+                act_quant_group_shape=group_shape,
+            )
 
     def forward(self, x):
         resid = torch.sqrt(x)
@@ -81,11 +83,14 @@ class TestModel(torch.nn.Module):
 @pytest.mark.parametrize("num_tokens", [7, 256, 533, 2048, 2049])
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])
 @pytest.mark.parametrize("static", [True, False])
-@pytest.mark.parametrize("force_fp8_e4m3fnuz", [True, False])
+# cuda_force_torch used to test torch code path on platforms that
+# cutlass_fp8_supported() == True.
+@pytest.mark.parametrize("cuda_force_torch",
+                         [True, False] if cutlass_fp8_supported() else [True])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda", "rocm"],
                     reason="Only test on CUDA and ROCm")
 def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static,
-                              force_fp8_e4m3fnuz):
+                              cuda_force_torch):
     torch.set_default_device("cuda")
     torch.set_default_dtype(dtype)
     torch.manual_seed(1)
@@ -102,7 +107,7 @@ def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static,
         fusion_pass = FusionPass.instance(vllm_config)
 
         backend = TestBackend(noop_pass, fusion_pass)
-        model = TestModel(hidden_size, eps, static, force_fp8_e4m3fnuz)
+        model = TestModel(hidden_size, eps, static, cuda_force_torch)
 
         # First dimension dynamic
         x = torch.rand(num_tokens, hidden_size)
