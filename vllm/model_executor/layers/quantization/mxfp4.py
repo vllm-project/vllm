@@ -11,6 +11,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
                                                   FusedMoEMethodBase)
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
+    OAITritonExperts)
 from vllm.model_executor.layers.fused_moe.trtllm_moe import TrtLlmGenExperts
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
@@ -470,9 +472,13 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 }
                 return TrtLlmGenExperts(moe, **kwargs)
             else:
-                # Use matmul_ogs from triton_kernels here!
-                raise NotImplementedError(
-                    "Mxfp4 does not support non-batched experts format for EP")
+                kwargs = {
+                    "w1_precision": self.w13_precision_config,
+                    "w2_precision": self.w2_precision_config,
+                    "w1_bias": layer.w13_bias,
+                    "w2_bias": layer.w2_bias
+                }
+                return OAITritonExperts(moe, **kwargs)
 
     def _route_and_experts(
             self,
@@ -517,10 +523,16 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             logical_to_physical_map=logical_to_physical_map,
             logical_replica_count=logical_replica_count)
 
+        w13_weight = (self.w13_weight_triton_tensor
+                      if layer.w13_weight is None else layer.w13_weight)
+        w2_weight = (self.w2_weight_triton_tensor
+                     if layer.w2_weight is None else layer.w2_weight)
+        assert all([w is not None for w in [w13_weight, w2_weight]])
+
         return self.fused_experts(
             hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
+            w1=w13_weight,
+            w2=w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=True,
