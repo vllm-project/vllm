@@ -49,26 +49,28 @@ def _load_st_projector(model_config: "ModelConfig") -> Optional[nn.Module]:
         if not dense_modules:
             return None
 
-        module = dense_modules[0]
-        folder = module.get("path", "")
+        layers = []
+        for module in dense_modules:
+            folder = module.get("path", "")
 
-        config_path = f"{folder}/config.json" if folder else "config.json"
-        layer_config = get_hf_file_to_dict(config_path, model_config.model,
-                                           model_config.revision)
-        if not layer_config:
-            return None
+            config_path = f"{folder}/config.json" if folder else "config.json"
+            layer_config = get_hf_file_to_dict(config_path, model_config.model,
+                                               model_config.revision)
+            if not layer_config:
+                continue
 
-        linear = nn.Linear(layer_config.get("in_features", 768),
-                           layer_config.get("out_features", 768),
-                           bias=layer_config.get("bias", True),
-                           dtype=torch.float32)
+            linear = nn.Linear(layer_config.get("in_features", 768),
+                               layer_config.get("out_features", 768),
+                               bias=layer_config.get("bias", True),
+                               dtype=torch.float32)
 
-        if _load_dense_weights(linear, folder, model_config):
-            layers = [linear]
+            if not _load_dense_weights(linear, folder, model_config):
+                continue
+
+            layers.append(linear)
             if act_name := layer_config.get("activation_function"):
                 layers.append(get_act_fn(act_name))
-            return nn.Sequential(*layers).to(dtype=torch.float32)
-
+        return nn.Sequential(*layers).to(dtype=torch.float32)
     except Exception:
         logger.exception("ST projector loading failed")
 
@@ -248,7 +250,7 @@ def as_seq_cls_model(cls: _T) -> _T:
         return cls
 
     # Lazy import
-    from vllm.model_executor.layers.linear import RowParallelLinear
+    from vllm.model_executor.layers.linear import ReplicatedLinear
     from vllm.model_executor.layers.pooler import (ClassifierPooler,
                                                    DispatchPooler, Pooler,
                                                    PoolingMethod, PoolingType)
@@ -264,10 +266,9 @@ def as_seq_cls_model(cls: _T) -> _T:
             config = vllm_config.model_config.hf_config
             quant_config = vllm_config.quant_config
 
-            self.score = RowParallelLinear(
+            self.score = ReplicatedLinear(
                 config.hidden_size,
                 config.num_labels,
-                input_is_parallel=False,
                 bias=False,
                 params_dtype=torch.float32,
                 quant_config=quant_config,

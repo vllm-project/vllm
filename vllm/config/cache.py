@@ -33,9 +33,8 @@ class CacheConfig:
     """Configuration for the KV cache."""
 
     block_size: SkipValidation[BlockSize] = None  # type: ignore
-    """Size of a contiguous cache block in number of tokens. This is ignored on
-    neuron devices and set to `--max-model-len`. On CUDA devices, only block
-    sizes up to 32 are supported. On HPU devices, block size defaults to 128.
+    """Size of a contiguous cache block in number of tokens. On CUDA devices,
+    only block sizes up to 32 are supported.
 
     This config has no static default. If left unspecified by the user, it will
     be set in `Platform.check_and_update_config()` based on the current
@@ -115,7 +114,7 @@ class CacheConfig:
 
     In some KV sharing setups, e.g. YOCO (https://arxiv.org/abs/2405.05254),
     some layers can skip tokens corresponding to prefill. This flag enables
-    attention metadata for eligible layers to be overriden with metadata
+    attention metadata for eligible layers to be overridden with metadata
     necessary for implementing this optimization in some models (e.g. Gemma3n)
     """
 
@@ -161,11 +160,6 @@ class CacheConfig:
             raise ValueError(
                 "GPU memory utilization must be less than 1.0. Got "
                 f"{self.gpu_memory_utilization}.")
-
-        if self.kv_sharing_fast_prefill:
-            logger.warning_once(
-                "--kv-sharing-fast-prefill is currently work in progress "
-                "and not functional yet (i.e. no prefill savings)")
 
         return self
 
