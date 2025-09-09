@@ -48,8 +48,7 @@ QUANT_OPS: dict[QuantKey, OpOverload] = {
     torch.ops._C.dynamic_per_token_scaled_fp8_quant.default,  # noqa: E501
 }
 if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
-    QUANT_OPS[
-        kNvfp4Quant] = torch.ops._C.scaled_fp4_quant.default  # noqa: E501
+    QUANT_OPS[kNvfp4Quant] = torch.ops._C.scaled_fp4_quant.default
 
 
 class FusedRMSQuantKey(NamedTuple):
@@ -357,10 +356,7 @@ class RMSNormQuantFusionPass(VllmInductorPass):
             RMSNormStaticQuantPattern(epsilon,
                                       FP8_DTYPE).register(self.patterns)
 
-            # Matches for patterns below have 2 or more outputs,
-            # so we need to process them manually (see process_matches)
-
-            # Fuse rms_norm + static fp8 quant
+            # Fuse fused_add_rms_norm + static fp8 quant
             FusedAddRMSNormStaticQuantPattern(epsilon, FP8_DTYPE).register(
                 self.patterns)
 
@@ -371,10 +367,6 @@ class RMSNormQuantFusionPass(VllmInductorPass):
             # Fuse fused_add_rms_norm + dynamic per-token fp8 quant
             FusedAddRMSNormDynamicQuantPattern(epsilon, FP8_DTYPE).register(
                 self.patterns)
-
-            # WARNING: This is a hack to clear the pattern matcher cache
-            # and allow multiple values of epsilon.
-            torch._inductor.pattern_matcher._seen_patterns.clear()
 
     def __call__(self, graph: fx.Graph):
         self.begin()
