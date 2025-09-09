@@ -224,7 +224,7 @@ class EngineCore:
 
     def add_request(self, request: Request, request_wave: int = 0):
         """Add request to the scheduler.
-        
+
         `request_wave`: indicate which wave of requests this is expected to
         belong to in DP case
         """
@@ -433,13 +433,13 @@ class EngineCore:
     def preprocess_add_request(
             self, request: EngineCoreRequest) -> tuple[Request, int]:
         """Preprocess the request.
-        
+
         This function could be directly used in input processing thread to allow
         request initialization running in parallel with Model forward
         """
         # Note on thread safety: no race condition.
         # `mm_receiver_cache` is reset at the end of LLMEngine init,
-        # and will only accessed in the input processing thread afterwards.
+        # and will only be accessed in the input processing thread afterwards.
         if self.mm_receiver_cache is not None and request.mm_features:
             request.mm_features = (
                 self.mm_receiver_cache.get_and_update_features(
@@ -697,7 +697,7 @@ class EngineCoreProc(EngineCore):
             parallel_config: ParallelConfig = kwargs[
                 "vllm_config"].parallel_config
             if parallel_config.data_parallel_size > 1 or dp_rank > 0:
-                set_process_title("DPEngineCore", str(dp_rank))
+                set_process_title("EngineCore", f"DP{dp_rank}")
                 decorate_logs()
                 # Set data parallel rank for this engine process.
                 parallel_config.data_parallel_rank = dp_rank
