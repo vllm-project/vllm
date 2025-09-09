@@ -273,6 +273,20 @@ pull_request_rules:
       users:
         - "sangstar"
 
+- name: assign reviewer for modelopt changes
+  conditions:
+    - or:
+        - files~=^vllm/model_executor/layers/quantization/modelopt\.py$
+        - files~=^vllm/model_executor/layers/quantization/__init__\.py$
+        - files~=^tests/models/quantization/test_modelopt\.py$
+        - files~=^tests/quantization/test_modelopt\.py$
+        - files~=^tests/models/quantization/test_nvfp4\.py$
+        - files~=^docs/features/quantization/modelopt\.md$
+  actions:
+    assign:
+      users:
+        - "Edwardf0t1"
+
 - name: remove 'needs-rebase' label when conflict is resolved
   conditions:
       - -conflict
