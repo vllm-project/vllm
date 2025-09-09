@@ -210,8 +210,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             model_config)
 
         # Get valid vocab size
+        self.vocab_size = self.model_config.get_vocab_size()
         if not self.is_pooling_model:
-            self.vocab_size = self.model_config.get_vocab_size()
             tokenizer = get_tokenizer(
                 tokenizer_name=model_config.tokenizer,
                 trust_remote_code=model_config.trust_remote_code,
