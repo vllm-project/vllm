@@ -29,8 +29,7 @@ def update_config(config):
                      marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
     ],
 )
-@pytest.mark.parametrize("dtype",
-                         ["half"] if current_platform.is_rocm() else ["float"])
+@pytest.mark.parametrize("dtype", ["bfloat16"])
 def test_models(
     vllm_runner,
     model: str,
@@ -73,7 +72,7 @@ def test_models(
         }]
     }]
 
-    with vllm_runner(model=model,
+    with vllm_runner(model_name=model,
                      runner="pooling",
                      task="classify",
                      convert="classify",
@@ -86,7 +85,9 @@ def test_models(
                      disable_log_stats=True,
                      dtype=dtype) as vllm_model:
 
-        prompts = vllm_model.preprocess_chat(messages)
+        llm = vllm_model.get_llm()
+        prompts = llm.preprocess_chat(messages)
 
-        result = vllm_model.classify(prompts)
+        result = llm.classify(prompts)
         assert result[0].outputs.probs[0] > 0.95
+        assert all(c < 0.05 for c in result[0].outputs.probs[1:])
