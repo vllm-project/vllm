@@ -158,7 +158,7 @@ class _HfExamplesInfo:
 # yapf: disable
 _TEXT_GENERATION_EXAMPLE_MODELS = {
     # [Decoder-only]
-    "ApertusForCausalLM": _HfExamplesInfo("swiss-ai/Apertus-8B",
+    "ApertusForCausalLM": _HfExamplesInfo("swiss-ai/Apertus-8B-2509",
                                           min_transformers_version="4.56.0",
                                           trust_remote_code=True),
     "AquilaModel": _HfExamplesInfo("BAAI/AquilaChat-7B",
