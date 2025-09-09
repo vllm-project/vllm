@@ -394,7 +394,7 @@ class FlexAttentionMetadata:
 
         def sliding_window_mask_mod(b: torch.Tensor, h: torch.Tensor,
                                     q_idx: torch.Tensor, kv_idx: torch.Tensor):
-            return torch.abs(q_idx - kv_idx) <= self.sliding_window
+            return torch.abs(q_idx - kv_idx) < self.sliding_window
 
         def final_mask_mod(
             b: torch.Tensor,
