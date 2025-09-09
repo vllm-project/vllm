@@ -106,9 +106,15 @@ class DeepseekV2MLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
-        gate_up, _ = self.gate_up_proj(x)
+        x_quant_scales = None
+        if isinstance(x, tuple):
+            x, x_quant_scales = x
+        gate_up, _ = self.gate_up_proj(x, x_quant_scales=x_quant_scales)
         x = self.act_fn(gate_up)
-        x, _ = self.down_proj(x)
+        x_quant_scales = None
+        if isinstance(x, tuple):
+            x, x_quant_scales = x
+        x, _ = self.down_proj(x, x_quant_scales=x_quant_scales)
         return x
 
 
@@ -193,10 +199,15 @@ class DeepseekV2MoE(nn.Module):
             )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if isinstance(hidden_states, tuple):
+            hidden_states_shared, hidden_states = hidden_states
+        else:
+            hidden_states_shared = hidden_states
+
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
         if self.n_shared_experts is not None:
-            shared_output = self.shared_experts(hidden_states)
+            shared_output = self.shared_experts(hidden_states_shared)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
@@ -541,7 +552,7 @@ class DeepseekV2MLAAttention(nn.Module):
                 eps2 = self.kv_a_layernorm.variance_epsilon
                 kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim],
                                         dim=-1)
-                (q_c, q_c_scale), kv_c_normed = fused_rms_fp8_group_quant(q_c, weight, eps, 
+                (q_c, q_c_scale), _, kv_c_normed, _ = fused_rms_fp8_group_quant(q_c, weight, eps, 
                                                         kv_c, weight2, eps2, 
                                                         group_size = rocm_aiter_fp8_quant_group_size,
                                                         dtype_quant=rocm_aiter_fp8_dtype, 
@@ -668,28 +679,19 @@ class DeepseekV2DecoderLayer(nn.Module):
             eps = self.input_layernorm.variance_epsilon
             if residual is None:
                 residual = hidden_states
-                # hidden_states, hidden_states_quant, _, _ = torch.ops.vllm.rocm_aiter_triton_fused_rms_quant(hidden_states, weight, eps, 
-                #                                             None, None, eps, 
-                #                                             group_size = rocm_aiter_fp8_quant_group_size, 
-                #                                             dtype_quant=rocm_aiter_fp8_dtype, 
-                #                                             res1=None)
-                hidden_states, hidden_states_quant = fused_rms_fp8_group_quant(hidden_states, weight, eps, 
+                (hidden_states_quant, hidden_states_quant_scales), _, _, _ = fused_rms_fp8_group_quant(hidden_states, weight, eps, 
                                                             None, None, eps, 
-                                                            group_size = rocm_aiter_fp8_quant_group_size,
+                                                            group_size=rocm_aiter_fp8_quant_group_size,
                                                             dtype_quant=rocm_aiter_fp8_dtype, 
                                                             res1=None)
             else:
-                # hidden_states, hidden_states_quant, _, residual = torch.ops.vllm.rocm_aiter_triton_fused_rms_quant(hidden_states, weight, eps, 
-                #                                             None, None, eps, 
-                #                                             group_size = rocm_aiter_fp8_quant_group_size, 
-                #                                             dtype_quant=rocm_aiter_fp8_dtype, 
-                #                                             res1=residual)
-                (hidden_states, hidden_states_quant), residual = fused_rms_fp8_group_quant(hidden_states, weight, eps, 
+                (hidden_states_quant, hidden_states_quant_scales), _, _, residual = fused_rms_fp8_group_quant(hidden_states, weight, eps, 
                                                             None, None, eps, 
-                                                            group_size = rocm_aiter_fp8_quant_group_size,
+                                                            group_size=rocm_aiter_fp8_quant_group_size,
                                                             dtype_quant=rocm_aiter_fp8_dtype, 
                                                             res1=residual)
-            hidden_states = (hidden_states, hidden_states_quant)
+            # hidden_states is a tuple that contains (hidden_states_quant, hidden_states_quant_scales)
+            hidden_states = (hidden_states_quant, hidden_states_quant_scales)
         else:
             if residual is None:
                 residual = hidden_states
@@ -713,8 +715,22 @@ class DeepseekV2DecoderLayer(nn.Module):
                 residual *= 1. / self.routed_scaling_factor
 
         # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual)
+        if VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_QUANT:
+            weight = self.post_attention_layernorm.weight
+            eps = self.post_attention_layernorm.variance_epsilon
+            (hidden_states_quant, hidden_states_quant_scales), hidden_states_unquant, _, residual = fused_rms_fp8_group_quant(hidden_states, weight, eps, 
+                                                        None, None, eps, 
+                                                        group_size=rocm_aiter_fp8_quant_group_size,
+                                                        dtype_quant=rocm_aiter_fp8_dtype, 
+                                                        res1=residual,
+                                                        output_unquantized_inp1=isinstance(self.mlp, DeepseekV2MoE))
+            if isinstance(self.mlp, DeepseekV2MoE):
+                hidden_states = ((hidden_states_quant, hidden_states_quant_scales), hidden_states_unquant)
+            else:
+                hidden_states = (hidden_states_quant, hidden_states_quant_scales)
+        else:
+            hidden_states, residual = self.post_attention_layernorm(
+                hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
 
         if isinstance(self.mlp,

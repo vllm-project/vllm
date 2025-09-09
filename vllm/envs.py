@@ -178,6 +178,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE: bool = False
     VLLM_AITER_TRITON_FP8_BMM: bool = False
     VLLM_AITER_TRITON_FP8_BMM_MAX_BATCH_SIZE: int = 256
+    VLLM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT: bool = False
 
 def get_default_cache_root():
     return os.getenv(
@@ -1249,6 +1250,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: bool(int(os.getenv("VLLM_AITER_TRITON_FP8_BMM", "0"))),
     "VLLM_AITER_TRITON_FP8_BMM_MAX_BATCH_SIZE":
     lambda: int(os.getenv("VLLM_AITER_TRITON_FP8_BMM_MAX_BATCH_SIZE", 256)),
+
+    # Use AITER Triton fused FP8 per-token group quant + FP8 batched GEMM
+    "VLLM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT":
+    lambda: bool(int(os.getenv("VLLM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT", "0"))),
 
 }
 

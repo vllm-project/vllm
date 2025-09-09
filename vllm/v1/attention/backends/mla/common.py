@@ -1288,7 +1288,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             
             if VLLM_AITER_TRITON_FP8_BMM:
                 decode_ql_nope = decode_q_out[... , :self.W_K.shape[1]] if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE else None
-                batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant(decode_q_nope, self.W_K, self.W_K_scale, group_size = 128, YQ = decode_ql_nope, transpose_bm = True, transpose_bm_in = True)
+                decode_ql_nope = batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant(decode_q_nope, self.W_K, self.W_K_scale, group_size = 128, YQ = decode_ql_nope, transpose_bm = True, transpose_bm_in = True)
                 self._forward_decode(
                     decode_ql_nope, decode_q_pe, kv_cache, attn_metadata, mla_output_zeros=mla_output_zeros, decode_q_out=decode_q_out, output=output[:num_decode_tokens])
             else:
