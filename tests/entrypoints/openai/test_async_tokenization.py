@@ -45,12 +45,12 @@ async def client(server):
     argnames=["create_func_gen", "content_body"],
     argvalues=[
         (lambda x: x.completions.create, {
-            "prompt": " ".join(['A'] * 5_000)
+            "prompt": " ".join(['A'] * 10_000)
         }),
         (lambda x: x.chat.completions.create, {
             "messages": [{
                 "role": "user",
-                "content": " ".join(['A'] * 5_000)
+                "content": " ".join(['A'] * 10_000)
             }]
         }),
     ],
