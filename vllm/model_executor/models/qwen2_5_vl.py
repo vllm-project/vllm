@@ -414,16 +414,23 @@ class Qwen2_5_VisionAttention(nn.Module):
 
         # torch.library.opcheck(torch.ops.mylib.attn_executor, (q, k, v, cu_seqlens, max_seqlen, seqlens, batch_size, out_dim, self.is_flash_attn_backend, self.attn_backend == _Backend.ROCM_AITER_FA, self.attn_backend == _Backend.TORCH_SDPA, self.attn_backend == _Backend.XFORMERS), test_utils='test_faketensor')
 
-
-        context_layer = torch.ops.mylib.attn_executor(q, k, v, cu_seqlens, max_seqlen, seqlens, batch_size, self.is_flash_attn_backend, self.attn_backend == _Backend.ROCM_AITER_FA, self.attn_backend == _Backend.TORCH_SDPA, self.attn_backend == _Backend.XFORMERS)
+        context_layer = torch.ops.mylib.attn_executor(
+            q, k, v, cu_seqlens, max_seqlen, seqlens, batch_size,
+            self.is_flash_attn_backend,
+            self.attn_backend == _Backend.ROCM_AITER_FA,
+            self.attn_backend == _Backend.TORCH_SDPA,
+            self.attn_backend == _Backend.XFORMERS)
 
         output, _ = self.proj(context_layer)
         return output
 
 
 @torch.library.custom_op("mylib::attn_executor", mutates_args=())
-def attn_executor(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, cu_seqlens: torch.Tensor, max_seqlen: torch.Tensor, seqlens: torch.Tensor, batch_size: int,
-    is_flash_attn: bool, is_rocm_aiter: bool, is_sdpa: bool, is_xformers: bool) -> torch.Tensor:
+def attn_executor(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+                  cu_seqlens: torch.Tensor, max_seqlen: torch.Tensor,
+                  seqlens: torch.Tensor, batch_size: int, is_flash_attn: bool,
+                  is_rocm_aiter: bool, is_sdpa: bool,
+                  is_xformers: bool) -> torch.Tensor:
     if is_flash_attn:
         if is_rocm_aiter:
             from aiter import flash_attn_varlen_func
@@ -442,9 +449,7 @@ def attn_executor(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, cu_seqlens:
                                         dropout_p=0.0,
                                         causal=False)
 
-        context_layer = rearrange(output,
-                                    "(b s) ... -> b s ...",
-                                    b=batch_size)
+        context_layer = rearrange(output, "(b s) ... -> b s ...", b=batch_size)
     elif is_sdpa:
         # Execute attention entry by entry for speed & less VRAM.
         outputs = []
@@ -455,11 +460,11 @@ def attn_executor(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, cu_seqlens:
             k_i = k[:, start_idx:end_idx]
             v_i = v[:, start_idx:end_idx]
             q_i, k_i, v_i = (rearrange(x, "b s h d -> b h s d")
-                                for x in [q_i, k_i, v_i])
+                             for x in [q_i, k_i, v_i])
             output_i = F.scaled_dot_product_attention(q_i,
-                                                        k_i,
-                                                        v_i,
-                                                        dropout_p=0.0)
+                                                      k_i,
+                                                      v_i,
+                                                      dropout_p=0.0)
             output_i = rearrange(output_i, "b h s d -> b s h d ")
             outputs.append(output_i)
         context_layer = torch.cat(outputs, dim=1)
@@ -468,24 +473,33 @@ def attn_executor(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, cu_seqlens:
         from xformers.ops.fmha.attn_bias import BlockDiagonalMask
 
         attn_bias = BlockDiagonalMask.from_seqlens(q_seqlen=seqlens.tolist(),
-                                                    kv_seqlen=None,
-                                                    device=q.device)
+                                                   kv_seqlen=None,
+                                                   device=q.device)
 
         context_layer = xops.memory_efficient_attention_forward(
             q, k, v, attn_bias=attn_bias, p=0, scale=None)
     else:
         raise NotImplementedError("Attention type is not supported")
     context_layer = rearrange(context_layer,
-                                "b s h d -> s b (h d)").contiguous()
+                              "b s h d -> s b (h d)").contiguous()
     return context_layer
 
+
 @torch.library.register_fake("mylib::attn_executor")
-def attn_executor_fake(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, cu_seqlens: torch.Tensor, max_seqlen: torch.Tensor, seqlens: torch.Tensor, batch_size: int,
-    is_flash_attn: bool, is_rocm_aiter: bool, is_sdpa: bool, is_xformers: bool) -> torch.Tensor:
-    size = torch.empty((q.shape[1], batch_size, q.shape[2] * q.shape[3],),
-                           dtype=q.dtype,
-                           device=q.device)
+def attn_executor_fake(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+                       cu_seqlens: torch.Tensor, max_seqlen: torch.Tensor,
+                       seqlens: torch.Tensor, batch_size: int,
+                       is_flash_attn: bool, is_rocm_aiter: bool, is_sdpa: bool,
+                       is_xformers: bool) -> torch.Tensor:
+    size = torch.empty((
+        q.shape[1],
+        batch_size,
+        q.shape[2] * q.shape[3],
+    ),
+                       dtype=q.dtype,
+                       device=q.device)
     return size
+
 
 @set_model_tag("Qwen2_5_VisionBlock")
 @support_torch_compile(dynamic_arg_dims={
@@ -537,7 +551,7 @@ class Qwen2_5_VisionBlock(nn.Module):
         x: torch.Tensor,
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor,
-        max_seqlen:  torch.Tensor,  # Only used for Flash Attention
+        max_seqlen: torch.Tensor,  # Only used for Flash Attention
         seqlens: torch.Tensor,  # Only used for xFormers
     ) -> torch.Tensor:
         x_attn = self.attn(
@@ -885,14 +899,15 @@ class Qwen2_5_VisionTransformer(nn.Module):
         self,
         cu_seqlens: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        max_seqlen, seqlens = torch.zeros(1, device=cu_seqlens.device), torch.zeros(1, device=cu_seqlens.device)
+        max_seqlen, seqlens = torch.zeros(
+            1, device=cu_seqlens.device), torch.zeros(1,
+                                                      device=cu_seqlens.device)
         if (self.attn_backend == _Backend.FLASH_ATTN
                 or self.attn_backend == _Backend.ROCM_AITER_FA):
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         elif self.attn_backend == _Backend.XFORMERS:
             seqlens = (cu_seqlens[1:] - cu_seqlens[:-1])
         return max_seqlen, seqlens
-
 
     def forward(
         self,
