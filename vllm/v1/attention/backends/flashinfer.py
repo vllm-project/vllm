@@ -687,7 +687,7 @@ class FlashInferImpl(AttentionImpl):
             else:
                 raise ValueError(f"Unsupported output dtype: {output.dtype}")
 
-            # TRTLLM attn kernel requires o scale to pass as a host scalar,
+            # TRTLLM attn kernel requires to scale to pass as a host scalar,
             # store the o scale as a host scalar in warmup run with cuda graph
             # not enabled
             if layer._o_scale_float is None:
