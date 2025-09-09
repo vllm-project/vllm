@@ -3,6 +3,7 @@
 import torch
 from torch import nn
 
+# This import automatically registers `torch.ops.silly.attention`
 import tests.compile.silly_attention  # noqa: F401
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import (ignore_torch_compile,
