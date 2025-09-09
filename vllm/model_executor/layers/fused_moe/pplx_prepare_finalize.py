@@ -261,8 +261,6 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def prepare(
         self,
         a1: torch.Tensor,
-        a1_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
@@ -272,8 +270,6 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     ) -> mk.PrepareResultType:
         receiver = self.prepare_async(
             a1,
-            a1_scale,
-            a2_scale,
             topk_weights,
             topk_ids,
             num_experts,

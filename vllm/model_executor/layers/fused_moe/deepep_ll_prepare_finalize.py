@@ -155,20 +155,21 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                                                 return_recv_hook=True)
 
         return lambda: self._receiver(hook, expert_x, expert_num_tokens,
-                                      a1_scale, a1.dtype, quant_config)
+                                      quant_config.a1_scale, a1.dtype,
+                                      quant_config)
 
     def _receiver(
         self,
         hook: Callable,
         expert_x: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
         expert_num_tokens: torch.Tensor,
-        a1_scale,
-        a1_dtype,
+        a1_scale: Optional[torch.Tensor],
+        a1_dtype: torch.dtype,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
         hook()
 
-        expert_x, expert_x_scale = self._do_quant(expert_x, a1.dtype,
+        expert_x, expert_x_scale = self._do_quant(expert_x, a1_dtype,
                                                   quant_config)
 
         expert_tokens_meta = mk.ExpertTokensMetadata(
@@ -179,8 +180,6 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def prepare(
         self,
         a1: torch.Tensor,
-        a1_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
@@ -188,9 +187,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
-        receiver = self.prepare_async(a1, a1_scale, a2_scale, topk_weights,
-                                      topk_ids, num_experts, expert_map,
-                                      apply_router_weight_on_input,
+        receiver = self.prepare_async(a1, topk_weights, topk_ids, num_experts,
+                                      expert_map, apply_router_weight_on_input,
                                       quant_config)
         return receiver()
 

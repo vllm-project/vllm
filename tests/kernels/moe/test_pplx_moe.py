@@ -566,9 +566,7 @@ def pplx_moe(
     experts = BatchedTritonExperts(
         max_num_tokens=max_num_tokens,
         num_dispatchers=prepare_finalize.num_dispatchers(),
-        use_fp8_w8a8=quant_dtype == torch.float8_e4m3fn,
-        block_shape=block_shape,
-        per_act_token_quant=per_act_token_quant,
+        quant_config=quant_config,
     )
 
     fused_experts = FusedMoEModularKernel(
