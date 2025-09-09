@@ -93,7 +93,7 @@ with set_forward_context(...,
 Inside the `dispatch()` method, the dispatcher will search the proper cudagraph runtime mode and existing dispatching keys for a return. We basically search the existing keys following the priority: `FULL`>`PIECEWISE`>`None`. If the dispatching key does not exist, default to return `NONE` mode for eager execution. The implementations can be found [here](https://github.com/vllm-project/vllm/blob/main/vllm/v1/cudagraph_dispatcher.py#L91).
 
 Here is a simplified illustration of the workflow at runtime in the model executor:
-![executor_runtime](../assets/design/cuda_graphs_v1/executor_runtime.jpg)
+![executor_runtime](../assets/design/cuda_graphs_v1/executor_runtime.png)
 
 ### [CUDAGraphWrapper][vllm.compilation.cuda_graph.CUDAGraphWrapper]
 
