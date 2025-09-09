@@ -1132,7 +1132,7 @@ def main(args: argparse.Namespace):
             # Append a newline.
             if args.append_result and outfile.tell() != 0:
                 outfile.write("\n")
-            json.dump(result_json, outfile)
+            json.dump(result_json, outfile, indent=2)
         save_to_pytorch_benchmark_format(args, result_json, main_res_filename)
 
 
