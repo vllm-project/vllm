@@ -10,24 +10,17 @@
 from typing import Optional
 
 import torch
-
-from vllm.triton_utils import tl, triton
+import triton
+import triton.language as tl
 
 from .op import exp
-from .utils import input_guard
 
 
 @triton.heuristics({
-    'USE_INITIAL_STATE':
-    lambda args: args['h0'] is not None,
-    'STORE_FINAL_STATE':
-    lambda args: args['ht'] is not None,
-    'IS_VARLEN':
-    lambda args: args['cu_seqlens'] is not None,
-    "IS_CONTINUOUS_BATCHING":
-    lambda args: args['ssm_state_indices'] is not None,
-    "IS_SPEC_DECODING":
-    lambda args: args['num_accepted_tokens'] is not None,
+    'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+    "IS_CONTINUOUS_BATCHING": lambda args: args['ssm_state_indices'] is not None,
+    "IS_SPEC_DECODING": lambda args: args['num_accepted_tokens'] is not None,
 })
 @triton.jit(do_not_specialize=['N', 'T'])
 def fused_recurrent_gated_delta_rule_fwd_kernel(
@@ -52,12 +45,13 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     V: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    stride_indices_batch: tl.constexpr,
+    stride_init_state_token: tl.constexpr,
+    stride_final_state_token: tl.constexpr,
+    stride_indices_seq: tl.constexpr,
     stride_indices_tok: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
-    STORE_FINAL_STATE: tl.constexpr,  # whether to store final state
-    IS_BETA_HEADWISE: tl.
-    constexpr,  # whether beta is headwise vector or scalar,
+    INPLACE_FINAL_STATE: tl.constexpr,  # whether to store final state inplace
+    IS_BETA_HEADWISE: tl.constexpr,  # whether beta is headwise vector or scalar,
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     IS_CONTINUOUS_BATCHING: tl.constexpr,
@@ -67,13 +61,17 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     i_n, i_hv = i_nh // HV, i_nh % HV
     i_h = i_hv // (HV // H)
     if IS_VARLEN:
-        bos, eos = tl.load(cu_seqlens + i_n).to(
-            tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         all = T
         T = eos - bos
     else:
         bos, eos = i_n * T, i_n * T + T
         all = B * T
+
+    if T == 0:
+        # no tokens to process for this sequence
+        return
+
     o_k = i_k * BK + tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
 
@@ -98,9 +96,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
                 i_t = tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1
             else:
                 i_t = 0
-            p_h0 = h0 + tl.load(ssm_state_indices +
-                                i_n * stride_indices_batch + i_t).to(
-                                    tl.int64) * HV * K * V
+            p_h0 = h0 + tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(tl.int64) * stride_init_state_token
         else:
             p_h0 = h0 + bos * HV * K * V
         p_h0 = p_h0 + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
@@ -132,16 +128,17 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
 
         # keep the states for multi-query tokens
-        if STORE_FINAL_STATE:
-            p_ht = ht + (
-                bos + i_t
-            ) * HV * K * V + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
-            tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
+        if INPLACE_FINAL_STATE:
+            p_ht = ht + tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(tl.int64) * stride_final_state_token
+        else:
+            p_ht = ht + (bos + i_t) * stride_final_state_token
+        p_ht = p_ht + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
+        tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
-        p_q += H * K
-        p_k += H * K
-        p_o += HV * V
-        p_v += HV * V
+        p_q += H*K
+        p_k += H*K
+        p_o += HV*V
+        p_v += HV*V
         p_g += HV
         p_beta += HV * (V if IS_BETA_HEADWISE else 1)
 
@@ -154,7 +151,7 @@ def fused_recurrent_gated_delta_rule_fwd(
     beta: torch.Tensor,
     scale: float,
     initial_state: torch.Tensor,
-    output_final_state: bool = True,
+    inplace_final_state: bool = True,
     cu_seqlens: Optional[torch.LongTensor] = None,
     ssm_state_indices: Optional[torch.Tensor] = None,
     num_accepted_tokens: Optional[torch.Tensor] = None,
@@ -170,18 +167,20 @@ def fused_recurrent_gated_delta_rule_fwd(
     num_warps = 1
 
     o = q.new_empty(NK, *v.shape)
-    if output_final_state:
-        final_state = q.new_empty(T, HV, K, V, dtype=initial_state.dtype)
+    if inplace_final_state:
+        final_state = initial_state
     else:
-        final_state = None
+        final_state = q.new_empty(T, HV, K, V, dtype=initial_state.dtype)
+
+    stride_init_state_token = initial_state.stride(0)
+    stride_final_state_token = final_state.stride(0)
 
     if ssm_state_indices is None:
-        stride_indices_batch, stride_indices_tok = 1, 1
+        stride_indices_seq, stride_indices_tok = 1, 1
     elif ssm_state_indices.ndim == 1:
-        stride_indices_batch, stride_indices_tok = ssm_state_indices.stride(
-            0), 1
+        stride_indices_seq, stride_indices_tok = ssm_state_indices.stride(0), 1
     else:
-        stride_indices_batch, stride_indices_tok = ssm_state_indices.stride()
+        stride_indices_seq, stride_indices_tok = ssm_state_indices.stride()
 
     grid = (NK, NV, N * HV)
     fused_recurrent_gated_delta_rule_fwd_kernel[grid](
@@ -206,10 +205,13 @@ def fused_recurrent_gated_delta_rule_fwd(
         V=V,
         BK=BK,
         BV=BV,
-        stride_indices_batch=stride_indices_batch,
+        stride_init_state_token=stride_init_state_token,
+        stride_final_state_token=stride_final_state_token,
+        stride_indices_seq=stride_indices_seq,
         stride_indices_tok=stride_indices_tok,
         IS_BETA_HEADWISE=beta.ndim == v.ndim,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
+        INPLACE_FINAL_STATE=inplace_final_state,
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -220,29 +222,30 @@ def fused_recurrent_gated_delta_rule_fwd(
 class FusedRecurrentFunction(torch.autograd.Function):
 
     @staticmethod
-    @input_guard
-    def forward(ctx,
-                q: torch.Tensor,
-                k: torch.Tensor,
-                v: torch.Tensor,
-                g: torch.Tensor,
-                beta: torch.Tensor,
-                scale: float,
-                initial_state: torch.Tensor,
-                output_final_state: bool = True,
-                cu_seqlens: Optional[torch.LongTensor] = None,
-                ssm_state_indices: Optional[torch.Tensor] = None,
-                num_accepted_tokens: Optional[torch.Tensor] = None,
-                use_qk_l2norm_in_kernel: bool = False):
+    def forward(
+        ctx,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        scale: float,
+        initial_state: torch.Tensor,
+        inplace_final_state: bool = True,
+        cu_seqlens: Optional[torch.LongTensor] = None,
+        ssm_state_indices: Optional[torch.Tensor] = None,
+        num_accepted_tokens: Optional[torch.Tensor] = None,
+        use_qk_l2norm_in_kernel: bool = False
+    ):
         o, final_state = fused_recurrent_gated_delta_rule_fwd(
-            q=q,
-            k=k,
-            v=v,
-            g=g,
-            beta=beta,
+            q=q.contiguous(),
+            k=k.contiguous(),
+            v=v.contiguous(),
+            g=g.contiguous(),
+            beta=beta.contiguous(),
             scale=scale,
             initial_state=initial_state,
-            output_final_state=output_final_state,
+            inplace_final_state=inplace_final_state,
             cu_seqlens=cu_seqlens,
             ssm_state_indices=ssm_state_indices,
             num_accepted_tokens=num_accepted_tokens,
@@ -260,7 +263,7 @@ def fused_recurrent_gated_delta_rule(
     beta: torch.Tensor = None,
     scale: float = None,
     initial_state: torch.Tensor = None,
-    output_final_state: bool = True,
+    inplace_final_state: bool = True,
     cu_seqlens: Optional[torch.LongTensor] = None,
     ssm_state_indices: Optional[torch.Tensor] = None,
     num_accepted_tokens: Optional[torch.Tensor] = None,
@@ -286,6 +289,9 @@ def fused_recurrent_gated_delta_rule(
             Initial state of shape `[N, HV, K, V]` for `N` input sequences.
             For equal-length input sequences, `N` equals the batch size `B`.
             Default: `None`.
+        inplace_final_state: bool:
+            Whether to store the final state in-place to save memory.
+            Default: `True`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
@@ -327,12 +333,14 @@ def fused_recurrent_gated_delta_rule(
             cu_seqlens=cu_seqlens
         )
     """
-    if cu_seqlens is not None and q.shape[0] != 1:
-        raise ValueError(
-            f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
-            f"Please flatten variable-length inputs before processing.")
+    if cu_seqlens is not None:
+        if q.shape[0] != 1:
+            raise ValueError(
+                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
+                f"Please flatten variable-length inputs before processing."
+            )
     if scale is None:
-        scale = k.shape[-1]**-0.5
+        scale = k.shape[-1] ** -0.5
     else:
         assert scale > 0, "scale must be positive"
     if beta is None:
@@ -345,7 +353,7 @@ def fused_recurrent_gated_delta_rule(
         beta,
         scale,
         initial_state,
-        output_final_state,
+        inplace_final_state,
         cu_seqlens,
         ssm_state_indices,
         num_accepted_tokens,
