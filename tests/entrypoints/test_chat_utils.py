@@ -337,7 +337,7 @@ def test_parse_chat_messages_single_empty_image_with_uuid(
             "content": [
                 {
                     "type": "image_url",
-                    "image_url": {},
+                    "image_url": None,
                     "uuid": image_uuid,
                 },
                 {
@@ -460,12 +460,12 @@ def test_parse_chat_messages_multiple_empty_images_with_uuids(
             "content": [
                 {
                     "type": "image_url",
-                    "image_url": {},
+                    "image_url": None,
                     "uuid": image_uuid1,
                 },
                 {
                     "type": "image_url",
-                    "image_url": {},
+                    "image_url": None,
                     "uuid": image_uuid2,
                 },
                 {
@@ -511,7 +511,7 @@ def test_parse_chat_messages_mixed_empty_images_with_uuids(
                 },
                 {
                     "type": "image_url",
-                    "image_url": {},
+                    "image_url": None,
                     "uuid": image_uuid2,
                 },
                 {
@@ -587,7 +587,7 @@ async def test_parse_chat_messages_empty_image_with_uuid_async(
             "content": [
                 {
                     "type": "image_url",
-                    "image_url": {},
+                    "image_url": None,
                     "uuid": image_uuid,
                 },
                 {
@@ -674,7 +674,7 @@ async def test_parse_chat_messages_multiple_empty_images_with_uuids_async(
             "content": [
                 {
                     "type": "image_url",
-                    "image_url": {},
+                    "image_url": None,
                     "uuid": image_uuid1,
                 },
                 {
@@ -2008,7 +2008,7 @@ def test_parse_chat_messages_multiple_modals_with_uuids_multiple_empty_media_mes
                     },
                     {
                         "type": "image_url",
-                        "image_url": {},
+                        "image_url": None,
                         "uuid": "image_123",
                     },
                     {
@@ -2017,7 +2017,7 @@ def test_parse_chat_messages_multiple_modals_with_uuids_multiple_empty_media_mes
                     },
                     {
                         "type": "audio_url",
-                        "audio_url": {},
+                        "audio_url": None,
                         "uuid": "audio_123",
                     },
                 ],
@@ -2036,7 +2036,7 @@ def test_parse_chat_messages_multiple_modals_with_uuids_multiple_empty_media_mes
                     },
                     {
                         "type": "image_url",
-                        "image_url": {},
+                        "image_url": None,
                         "uuid": "image_123",
                     },
                     {
@@ -2045,7 +2045,7 @@ def test_parse_chat_messages_multiple_modals_with_uuids_multiple_empty_media_mes
                     },
                     {
                         "type": "video_url",
-                        "video_url": {},
+                        "video_url": None,
                         "uuid": "video_123",
                     },
                 ],

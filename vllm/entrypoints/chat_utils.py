@@ -1214,15 +1214,15 @@ def _parse_chat_message_content_mm_part(
     # Handle missing 'type' but provided direct URL fields.
     # 'type' is required field by pydantic
     if part_type is None or uuid is not None:
-        if part.get("image_url") is not None:
+        if "image_url" in part:
             image_params = cast(
                 CustomChatCompletionContentSimpleImageParam, part
             )
-            image_url = image_params.get("image_url", "")
+            image_url = image_params.get("image_url", None)
             if isinstance(image_url, dict):
                 # Can potentially happen if user provides a uuid
                 # with url as a dict of {"url": url}
-                image_url = image_url.get("url", "")
+                image_url = image_url.get("url", None)
             return "image_url", image_url
         if "image_pil" in part:
             # "image_pil" could be None if UUID is provided.
@@ -1238,28 +1238,28 @@ def _parse_chat_message_content_mm_part(
             )
             image_embeds = image_params.get("image_embeds", None)
             return "image_embeds", image_embeds
-        if part.get("audio_url") is not None:
+        if "audio_url" in part:
             audio_params = cast(
                 CustomChatCompletionContentSimpleAudioParam, part
             )
-            audio_url = audio_params.get("audio_url", "")
+            audio_url = audio_params.get("audio_url", None)
             if isinstance(audio_url, dict):
                 # Can potentially happen if user provides a uuid
                 # with url as a dict of {"url": url}
-                audio_url = audio_url.get("url", "")
+                audio_url = audio_url.get("url", None)
             return "audio_url", audio_url
         if part.get("input_audio") is not None:
             input_audio_params = cast(dict[str, str], part)
             return "input_audio", input_audio_params
-        if part.get("video_url") is not None:
+        if "video_url" in part:
             video_params = cast(
                 CustomChatCompletionContentSimpleVideoParam, part
             )
-            video_url = video_params.get("video_url", "")
+            video_url = video_params.get("video_url", None)
             if isinstance(video_url, dict):
                 # Can potentially happen if user provides a uuid
                 # with url as a dict of {"url": url}
-                video_url = video_url.get("url", "")
+                video_url = video_url.get("url", None)
             return "video_url", video_url
         # Raise an error if no 'type' or direct URL is found.
         raise ValueError("Missing 'type' field in multimodal part.")
