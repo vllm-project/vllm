@@ -1365,7 +1365,7 @@ class LocalAssetServer:
 @pytest.fixture(scope="session")
 def local_asset_server() -> Generator[LocalAssetServer, None, None]:
     """
-    Starts a thread based HTTP server bound to 127.0.0.1 on a random free port.
+    Starts a thread based HTTP server bound to 127.0.0.1 on a random free port. 
     The server currently servers images at:
     http://127.0.0.1:<port>/<name>.<ext>
     """
