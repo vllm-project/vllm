@@ -80,7 +80,7 @@ class ECConnectorBase(ABC):
 
         This function should be called by the model runner every time 
         before the model execution. The metadata will be used for runtime
-        KV cache loading and saving.
+        EC cache loading.
 
         Args:
             connector_metadata (dict): the connector metadata.
@@ -108,12 +108,13 @@ class ECConnectorBase(ABC):
         assert self._connector_metadata is not None
         return self._connector_metadata
 
-    def register_caches(self, caches: dict[str, torch.Tensor],):
+    def register_caches(self, ec_caches: dict[str, torch.Tensor],):
         """
         Initialize with the EC caches.
         Args: 
             ec_caches: dictionary of encoder cache
         """
+        # TODO: Implement this later for P2P feature
         return
 
     @abstractmethod
@@ -122,7 +123,7 @@ class ECConnectorBase(ABC):
         Start loading the cache from the connector to vLLM's encoder cache.
         This is called before _gather_mm_embeddings for EC Connector
         and before execute_model for KV Connector
-        forward_context does not need for EC Connector
+        For EC the encoder_cache and mm_hash is store in kwargs
 
         Args:
             **kwargs: additional arguments for the load operation
@@ -134,6 +135,7 @@ class ECConnectorBase(ABC):
     def save_caches(self, **kwargs) -> None:
         """
         Save caches into connector
+        For EC the encoder_cache and mm_hash is store in kwargs
         """
         pass
 

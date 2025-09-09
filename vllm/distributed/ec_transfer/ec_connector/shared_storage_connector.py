@@ -45,30 +45,20 @@ class ECSharedStorageConnectorMetadata(ECConnectorMetadata):
     def add_mm_data(self, mm_data:MMMeta):
         self.mm_datas.append(mm_data)
 
-    # def add_mm_data(
-    #     self,
-    #     mm_hash,
-    #     num_token,
-    # ) -> None:
-    #     self.mm_datas.append(
-    #         MMMeta.make_meta(mm_hash, num_token))
-
 
 class ECSharedStorageConnector(ECConnectorBase):
-    # NOTE: This is Simple debug implementation of the KV connector.
-    # It save / load the KV cache to / from the disk.
-    # It does extra work which will overwrite the existing prefix-cache in GPU
-    # - to remove the overhead, need to add some "mask" in the ReqMeta class
+    # NOTE: This is Simple debug implementation of the EC connector.
+    # It save / load the EC cache to / from the disk.
 
     def __init__(self, vllm_config: "VllmConfig", role: ECConnectorBase):
         super().__init__(vllm_config=vllm_config, role=role)
-        # req_id -> index -> mm_hash
+        # req_id -> index -> MMMeta
         self._mm_datas_need_loads: dict[str, dict[int, MMMeta]] = {}
         transfer_config = vllm_config.ec_transfer_config
         self.is_producer = (transfer_config.ec_role == 'ec_producer')
         self._storage_path = transfer_config.get_from_extra_config("shared_storage_path", "/tmp")
-        logger.info(transfer_config)
-        logger.info("Shared storage path is %s", self._storage_path)
+        logger.debug(transfer_config)
+        logger.debug("Shared storage path is %s", self._storage_path)
 
     def start_load_caches(self, **kwargs) -> None:
         """Start loading the EC cache from the connector buffer to worker 
@@ -79,7 +69,6 @@ class ECSharedStorageConnector(ECConnectorBase):
         """
 
         # Get the metadata 
-        logger.info("Start load caches")
         metadata: ECConnectorMetadata = self._get_connector_metadata()
         assert isinstance(metadata, ECSharedStorageConnectorMetadata)
         encoder_cache = kwargs.get("encoder_cache")   # returns None if missing
@@ -89,7 +78,6 @@ class ECSharedStorageConnector(ECConnectorBase):
                 "In connector.start_load_kv, but the connector metadata is None"
             )
             return
-        logger.info(f"At load cache meta data is {metadata}")
         # Load the KV for each request each layer
         for mm_data in metadata.mm_datas:
             # TODO: Only load it once
@@ -98,7 +86,7 @@ class ECSharedStorageConnector(ECConnectorBase):
             filename = self._generate_filename_debug(mm_data.mm_hash)
             ec_cache = safetensors.torch.load_file(filename)["ec_cache"].cuda()
             encoder_cache[mm_data.mm_hash] = ec_cache
-            logger.info(f"Success load hash for {mm_data.mm_hash}")
+            logger.debug(f"Success load encoder cache for hash {mm_data.mm_hash}")
 
     def save_caches(self, **kwargs) -> None:
         """Start saving the KV cache of the layer from encoder cache
@@ -106,17 +94,18 @@ class ECSharedStorageConnector(ECConnectorBase):
         Args:
             **kwargs: additional arguments for the save operation.
         """
+        # Return if it is PD Instance
         if not self.is_producer:
             return
-        encoder_cache = kwargs.get("encoder_cache")   # returns None if missing
+        encoder_cache = kwargs.get("encoder_cache") 
         mm_hash = kwargs.get("mm_hash")
         assert encoder_cache is not None
         assert mm_hash is not None
-        logger.info(f"At save caches the mm hash is {mm_hash}")
         filename = self._generate_filename_debug(mm_hash)
         ec_cache = encoder_cache[mm_hash]
         tensors = {"ec_cache": ec_cache.detach().cpu()}
         safetensors.torch.save_file(tensors, filename)
+        logger.debug(f"Save cache successful for mm_hash {mm_hash}")
     
     def wait_for_save(self):
         return
@@ -160,6 +149,7 @@ class ECSharedStorageConnector(ECConnectorBase):
                 # Insert mm_hash only if this block has not been recorded yet.
                 loads_for_request.setdefault(index, MMMeta.make_meta(mm_hash,num_encoder_token))
         logger.info(f"After update the _mm_datas_need_loads is {self._mm_datas_need_loads}")
+
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,
@@ -168,7 +158,7 @@ class ECSharedStorageConnector(ECConnectorBase):
 
         This function should NOT modify any fields in the scheduler_output.
         Also, calling this function will reset the state of the connector.
-
+        This only build for load mm_data only
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
