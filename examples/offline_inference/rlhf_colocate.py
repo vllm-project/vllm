@@ -91,25 +91,18 @@ class RayTrainingActor:
         self.device_uuid = current_platform.get_device_uuid(0)
         self.zmq_context = zmq.Context()
         self.zmq_address_counter = 0
+        self.zmq_handle = None
 
     def report_device_id(self) -> str:
         return self.device_uuid
 
-    @property
-    def _zmq_handle(self) -> str:
-        suffix = f"{self.device_uuid}-{self.zmq_address_counter}"
-        return f"ipc:///tmp/rl-colocate-zmq-{suffix}.sock"
-
     def get_zmq_handles(self) -> dict[str, str]:
-        return {self.device_uuid: self._zmq_handle}
+        suffix = f"{self.device_uuid}-{self.zmq_address_counter}"
+        self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-{suffix}.sock"
+        self.zmq_address_counter += 1
+        return {self.device_uuid: self.zmq_handle}
 
     def update_weights(self):
-        try:
-            self._update_weights()
-        finally:
-            self.zmq_address_counter += 1
-
-    def _update_weights(self):
         # align size to avoid misaligned address
         align_size = 256
 
@@ -123,7 +116,7 @@ class RayTrainingActor:
         # use max_tensor_size * 2 as buffer size
         buffer = torch.empty(max_tensor_size * 2, dtype=torch.uint8, device="cuda:0")
         s = self.zmq_context.socket(zmq.REQ)
-        s.bind(self._zmq_handle)
+        s.bind(self.zmq_handle)
         handle = reduce_tensor(buffer)
 
         offset = 0
