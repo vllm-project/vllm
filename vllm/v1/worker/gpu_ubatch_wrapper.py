@@ -331,6 +331,7 @@ def get_dp_padding_ubatch(
     should_attempt_ubatching: bool,
     vllm_config: VllmConfig
 ) -> tuple[bool, int, Optional[torch.Tensor]]:
+    assert num_tokens_padded >= num_tokens_unpadded
     dp_size = vllm_config.parallel_config.data_parallel_size
     if dp_size == 1:
         # Early exit.
@@ -370,10 +371,9 @@ def get_dp_padding_ubatch(
                                             device="cpu",
                                             dtype=torch.int32)
     num_pad_tokens = max_tokens_across_dp_cpu - num_tokens_per_ubatch
-    logger.info(f"NUM PAD TOKENS FIRST {num_pad_tokens}")
     num_pad_tokens = ((num_pad_tokens + num_tokens_per_ubatch) * 2) - \
         num_tokens_unpadded
-    logger.info(f"NUM PAD TOKENS SECOND {num_pad_tokens}")
+    assert num_pad_tokens >= 0
     return should_ubatch, num_pad_tokens, num_tokens_after_padding
 
 def ubatch_split(max_num_scheduled_tokens: int,
@@ -398,11 +398,10 @@ def ubatch_split(max_num_scheduled_tokens: int,
     num_pad_tokens = 0
     num_tokens_after_padding = None
     (should_ubatch, num_pad_tokens,
-        num_tokens_after_padding) = get_dp_padding_ubatch(num_tokens_padded, 
-                                                          num_tokens_unpadded, 
+        num_tokens_after_padding) = get_dp_padding_ubatch(num_tokens_unpadded, 
+                                                          num_tokens_padded, 
                                                           should_attempt_ubatching, 
                                                           vllm_config)
-    logger.info(f"NUM PAD TOKENS:{num_pad_tokens} ")
     if not should_ubatch:
         return (None, 0, None)
 
@@ -424,7 +423,5 @@ def ubatch_split(max_num_scheduled_tokens: int,
         UbatchSlice(padded_first_ubatch_slice, padded_first_ubatch_slice),
         UbatchSlice(padded_second_ubatch_slice, padded_second_ubatch_slice)
     ]
-
-    logger.info(f"UBATCH SLICES {ubatch_slices}")
 
     return (ubatch_slices, num_pad_tokens, num_tokens_after_padding)

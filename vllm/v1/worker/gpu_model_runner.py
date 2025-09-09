@@ -794,7 +794,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Add padding to the batch size.
             num_tokens_padded = self.vllm_config.pad_for_cudagraph(
                 num_tokens_unpadded)
-            logger.info("Attempting to pad for cudagraphs")
         else:
             # Eager mode.
             # Pad tokens to multiple of tensor_parallel_size when
@@ -805,7 +804,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 from vllm.utils import round_up
                 num_tokens_padded = round_up(num_tokens_unpadded, tp_size)
 
-        logger.info(f"NUM TOKENS {num_tokens_unpadded} NUM PADDED TOKENS {num_tokens_padded}")
         ubatch_slices, num_pad_tokens, num_tokens_after_padding = \
             ubatch_split(max_num_scheduled_tokens,
                          num_tokens_unpadded,
@@ -1526,7 +1524,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Add padding to the batch size.
             num_tokens_padded = self.vllm_config.pad_for_cudagraph(
                 num_tokens_unpadded)
-            logger.info("Attempting to pad for cudagraphs")
         else:
             # Eager mode.
             # Pad tokens to multiple of tensor_parallel_size when
