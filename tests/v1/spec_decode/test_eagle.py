@@ -395,35 +395,7 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
     assert torch.equal(result, expected_tokens)
 
 
-@pytest.mark.parametrize(
-    "spec_token_tree",
-    [
-        [(0, )],  # A single token
-        [(0, ), (0, 0), (0, 0, 0)],  # Chain
-        [(0, ), (1, ), (2, )],  # Parallel
-        [(0, ), (1, ), (2, ), (0, 0), (0, 1), (1, 0), (1, 1), (2, 0),
-         (2, 1)],  # Tree
-    ])
-def test_propose_tree(spec_token_tree):
-    # Get GPU device.
-    device = torch.device(current_platform.device_type)
-
-    # Setup test parameters.
-    batch_size = 2
-    seq_len_1 = 5
-    seq_len_2 = 3
-    total_tokens = seq_len_1 + seq_len_2
-    vocab_size = 100
-    seq_lens = [seq_len_1, seq_len_2]
-    num_speculative_tokens = len(spec_token_tree)
-
-    # Create proposer first so we can use its actual hidden_size.
-    proposer = _create_proposer("eagle",
-                                num_speculative_tokens,
-                                speculative_token_tree=spec_token_tree)
-    # Get the hidden_size from the proposer to ensure consistency.
-    hidden_size = proposer.hidden_size
-
+def _get_propose_args(batch_size, vocab_size, hidden_size, total_tokens, seq_len_1, seq_len_2, seq_lens, device, proposer):
     # Helper to create deterministic logits that will produce specific tokens
     def create_deterministic_logits(token_ids, k: int):
         logits = torch.full((batch_size, vocab_size), -100.0, device=device)
@@ -515,6 +487,42 @@ def test_propose_tree(spec_token_tree):
         device=device,
     )
     sampling_metadata = mock.MagicMock()
+
+    ret = (target_token_ids, target_positions,target_hidden_states, next_token_ids, common_attn_metadata, sampling_metadata, base_token_ids)
+    return ret
+
+
+@pytest.mark.parametrize(
+    "spec_token_tree",
+    [
+        [(0, )],  # A single token
+        [(0, ), (0, 0), (0, 0, 0)],  # Chain
+        [(0, ), (1, ), (2, )],  # Parallel
+        [(0, ), (1, ), (2, ), (0, 0), (0, 1), (1, 0), (1, 1), (2, 0),
+         (2, 1)],  # Tree
+    ])
+def test_propose_tree(spec_token_tree):
+    # Get GPU device.
+    device = torch.device(current_platform.device_type)
+
+    # Setup test parameters.
+    batch_size = 2
+    seq_len_1 = 5
+    seq_len_2 = 3
+    total_tokens = seq_len_1 + seq_len_2
+    vocab_size = 100
+    seq_lens = [seq_len_1, seq_len_2]
+    num_speculative_tokens = len(spec_token_tree)
+
+    # Create proposer first so we can use its actual hidden_size.
+    proposer = _create_proposer("eagle",
+                                num_speculative_tokens,
+                                speculative_token_tree=spec_token_tree)
+    # Get the hidden_size from the proposer to ensure consistency.
+    hidden_size = proposer.hidden_size
+
+    ret = _get_propose_args(batch_size, vocab_size, hidden_size, total_tokens, seq_len_1, seq_len_2, seq_lens, device, proposer)
+    target_token_ids, target_positions,target_hidden_states, next_token_ids, common_attn_metadata, sampling_metadata, base_token_ids = ret
 
     # Propose draft tokens.
     result = proposer.propose(target_token_ids=target_token_ids,

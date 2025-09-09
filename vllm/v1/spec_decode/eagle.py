@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ast
+import copy
 from dataclasses import replace
 from importlib.util import find_spec
 from typing import Optional, Protocol
@@ -70,6 +71,9 @@ class EagleProposer:
         # the draft model's hidden size can be different from the target model's
         # hidden size (e.g., Llama 3.3 70B).
         self.hidden_size = self.draft_model_config.get_hidden_size()
+
+        # for pruning the draft model vocabulary
+        self.pruned_token_ids = None
 
         self.is_multimodal_model = vllm_config.model_config \
             .is_multimodal_model
@@ -144,6 +148,7 @@ class EagleProposer:
             device=device,
             dtype=torch.int32,
         ).repeat(max_batch_size, 1)
+
 
     def propose(
         self,
@@ -237,10 +242,14 @@ class EagleProposer:
                 hidden_states=hidden_states,
                 common_attn_metadata=common_attn_metadata,
             )
+
             # [batch_size, num_tree_tokens]
             return torch.cat(draft_token_ids_list, dim=1)
 
         draft_token_ids = logits.argmax(dim=-1)
+
+        if self.vllm_config.speculative_config.draft_vocab_pruned is not None:
+            draft_token_ids = self.pruned_token_ids[draft_token_ids]
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1:
@@ -363,6 +372,10 @@ class EagleProposer:
         else:
             draft_token_ids = torch.topk(logits, num_children,
                                          dim=-1).indices.view(batch_size, -1)
+
+        if self.vllm_config.speculative_config.draft_vocab_pruned is not None:
+                draft_token_ids_list = self.pruned_token_ids[draft_token_ids_list]
+
         draft_token_ids_list = [draft_token_ids]
         draft_hidden_states = hidden_states.view(batch_size, 1, -1)
 
@@ -499,6 +512,9 @@ class EagleProposer:
                 draft_token_ids = torch.topk(logits, num_children,
                                              dim=-1).indices.view(
                                                  batch_size, -1)
+
+            if self.vllm_config.speculative_config.draft_vocab_pruned is not None:
+                draft_token_ids_list = self.pruned_token_ids[draft_token_ids_list]
             draft_token_ids_list.append(draft_token_ids)
 
             # Update the # drafts counters for the next tree level.
@@ -648,7 +664,29 @@ class EagleProposer:
         if self.vllm_config.speculative_config.method != "eagle3" and \
                 hasattr(target_language_model, "lm_head"):
             logger.info("Loading EAGLE LM head weights from the target model.")
-            self.model.lm_head = target_language_model.lm_head
+
+            if self.vllm_config.speculative_config.draft_vocab_pruned is not None:
+                self.model.lm_head = copy.deepcopy(target_language_model.lm_head)
+            else:
+                self.model.lm_head = target_language_model.lm_head
+
+        # optionally prune the draft model vocabulary
+        if self.vllm_config.speculative_config.draft_vocab_pruned is not None:
+            logger.info(f"Loading pruned draft model vocabulary from {self.vllm_config.speculative_config.draft_vocab_pruned}")
+            self.pruned_token_ids = load_draft_vocab_pruned(self.vllm_config.speculative_config.draft_vocab_pruned)
+
+            if hasattr(self.model, "lm_head"):
+                print('have lm_head')
+                head = self.model.lm_head.weight
+                self.pruned_token_ids = self.pruned_token_ids.to(head.device)
+                head.data = head.data[self.pruned_token_ids]
+                del self.model.lm_head.weight
+                self.model.lm_head.weight = head
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            else:
+                print('no lm_head')
+
 
     @torch.inference_mode()
     def dummy_run(
@@ -690,6 +728,19 @@ class EagleProposer:
             ])
         ) == 1, "All eagle layers should belong to the same kv cache group"
 
+
+def load_draft_vocab_pruned(token_map_path: str) -> torch.Tensor:
+    # todo: use vllm method to download a model
+    import os
+    from huggingface_hub import snapshot_download
+    if not os.path.exists(token_map_path):
+        cache_dir = snapshot_download(
+            os.path.dirname(token_map_path),
+            ignore_patterns=["*.bin", "*.safetensors"],
+        )
+        token_map_path = os.path.join(cache_dir, os.path.basename(token_map_path))
+    hot_token_ids = torch.load(token_map_path, weights_only=True)
+    return torch.tensor(hot_token_ids, dtype=torch.int64)
 
 # NOTE(woosuk): Currently, the below code is not used and we always use argmax
 # to sample the draft tokens. We will use this after we find a way to manage

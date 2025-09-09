@@ -6,6 +6,8 @@ from vllm.model_executor.parameter import (BasevLLMParameter,
 from vllm.model_executor.sampling_metadata import (SamplingMetadata,
                                                    SamplingMetadataCache)
 from vllm.model_executor.utils import set_random_seed
+from icecream import install
+install()
 
 __all__ = [
     "SamplingMetadata",

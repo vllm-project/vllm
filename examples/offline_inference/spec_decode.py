@@ -6,7 +6,7 @@ from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 from vllm.benchmarks.datasets import add_dataset_parser, get_samples
 from vllm.inputs import TokensPrompt
-from vllm.v1.metrics.reader import Counter, Vector
+from vllm.v1.metrics.reader import Counter, Vector, Histogram
 
 try:
     from vllm.utils import FlexibleArgumentParser
@@ -53,9 +53,10 @@ def parse_args():
         "--method",
         type=str,
         default="eagle",
-        choices=["ngram", "eagle", "eagle3", "mtp"],
+        choices=["ngram", "eagle", "eagle3", "mtp", "None"],
     )
     parser.add_argument("--num-spec-tokens", type=int, default=2)
+    parser.add_argument("--spec-token-tree", type=list[tuple[int]], default=None)
     parser.add_argument("--prompt-lookup-max", type=int, default=5)
     parser.add_argument("--prompt-lookup-min", type=int, default=2)
     parser.add_argument("--tp", type=int, default=1)
@@ -69,6 +70,7 @@ def parse_args():
     parser.add_argument("--model-dir", type=str, default=None)
     parser.add_argument("--eagle-dir", type=str, default=None)
     parser.add_argument("--custom-mm-prompts", action="store_true")
+    parser.add_argument("--draft-vocab-pruned", type=str, default=None)
     return parser.parse_args()
 
 
@@ -99,17 +101,29 @@ def main():
     else:
         prompts = get_custom_mm_prompts(args.num_prompts)
 
-    if args.method == "eagle" or args.method == "eagle3":
-        eagle_dir = args.eagle_dir
-        if args.method == "eagle" and eagle_dir is None:
-            eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
+    spec_token_tree_str = None
+    if args.spec_token_tree is not None:
+        spec_token_tree_str = args.spec_token_tree
 
-        elif args.method == "eagle3" and eagle_dir is None:
-            eagle_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
+    # vanilla inference
+    if args.method == "None":
+        speculative_config = None
+    elif args.method == "eagle":
+        eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B" if args.eagle_dir is None else args.eagle_dir
         speculative_config = {
             "method": args.method,
             "model": eagle_dir,
             "num_speculative_tokens": args.num_spec_tokens,
+            "draft_vocab_pruned": args.draft_vocab_pruned,
+            "spec_token_tree": spec_token_tree_str,
+        }
+    elif args.method == "eagle3":
+        eagle_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B" if args.eagle_dir is None else args.eagle_dir
+        speculative_config = {
+            "method": args.method,
+            "model": eagle_dir,
+            "num_speculative_tokens": args.num_spec_tokens,
+            "spec_token_tree": spec_token_tree_str,
         }
     elif args.method == "ngram":
         speculative_config = {
@@ -130,7 +144,7 @@ def main():
         gpu_memory_utilization=0.8,
         speculative_config=speculative_config,
         disable_log_stats=False,
-        max_model_len=16384,
+        max_model_len=4096,
         limit_mm_per_prompt={"image": 5},
         disable_chunked_mm_input=True,
     )
@@ -161,10 +175,15 @@ def main():
     total_num_output_tokens = sum(
         len(output.outputs[0].token_ids) for output in outputs
     )
+    total_prefill_time = 0.0
+    total_decode_time = 0.0
     num_drafts = 0
     num_draft_tokens = 0
     num_accepted_tokens = 0
+    num_prompt_tokens = 0
+    num_requests = 0
     acceptance_counts = [0] * args.num_spec_tokens
+
     for metric in metrics:
         if metric.name == "vllm:spec_decode_num_drafts":
             assert isinstance(metric, Counter)
@@ -179,21 +198,57 @@ def main():
             assert isinstance(metric, Vector)
             for pos in range(len(metric.values)):
                 acceptance_counts[pos] += metric.values[pos]
+        elif metric.name == "vllm:prompt_tokens":
+            assert isinstance(metric, Counter)
+            num_prompt_tokens += metric.value
+        elif metric.name == "vllm:request_prefill_time_seconds":
+            assert isinstance(metric, Histogram)
+            total_prefill_time += metric.sum
+        elif metric.name == "vllm:request_decode_time_seconds":
+            assert isinstance(metric, Histogram)
+            total_decode_time += metric.sum
+        elif metric.name == "vllm:request_success":
+            assert isinstance(metric, Counter)
+            num_requests += metric.value
 
-    print("-" * 50)
-    print(f"total_num_output_tokens: {total_num_output_tokens}")
-    print(f"num_drafts: {num_drafts}")
-    print(f"num_draft_tokens: {num_draft_tokens}")
-    print(f"num_accepted_tokens: {num_accepted_tokens}")
+    # Calculate metrics
+    total_tokens = num_prompt_tokens + total_num_output_tokens
+    total_time = total_prefill_time + total_decode_time
+    prefill_speed = num_prompt_tokens / total_prefill_time if total_prefill_time > 0 else 0
+    decode_speed = total_num_output_tokens / total_decode_time if total_decode_time > 0 else 0
+    overall_speed = total_tokens / total_time if total_time > 0 else 0
+    request_throughput = num_requests / total_time if total_time > 0 else 0
+
+    # Print formatted benchmark results
+    print("=========== Offline Inference Stats ============")
+    print(f"Backend:                                 {'vllm':<10}")
+    print(f"Successful requests:                     {num_requests:<10}")
+    print(f"Benchmark duration (s):                  {total_time:<10.2f}")
+    print(f"Total input tokens:                      {num_prompt_tokens:<10}")
+    print(f"Total generated tokens:                  {total_num_output_tokens:<10}")
+    print(f"Last generation throughput (tok/s):      {decode_speed:<10.2f}")
+    print(f"Request throughput (req/s):              {request_throughput:<10.2f}")
+    print(f"Input token throughput (tok/s):          {prefill_speed:<10.2f}")
+    print(f"Output token throughput (tok/s):         {decode_speed:<10.2f}")
+    print(f"Total token throughput (tok/s):          {overall_speed:<10.2f}")
+    print("==================================================")
+    print()
+
+    # Speculative decoding stats
+    if args.method == "None":
+        return
+
     acceptance_length = 1 + (num_accepted_tokens / num_drafts) if num_drafts > 0 else 1
-    print(f"mean acceptance length: {acceptance_length:.2f}")
-    print("-" * 50)
+    draft_utilization_rate = num_accepted_tokens / num_draft_tokens * 100 if num_draft_tokens > 0 else 0
 
-    # print acceptance at each token position
-    for i in range(len(acceptance_counts)):
-        acceptance_rate = acceptance_counts[i] / num_drafts if num_drafts > 0 else 0
-        print(f"acceptance at token {i}: {acceptance_rate:.2f}")
-
+    print("============ Speculative Decoding Stats ============")
+    print(f"Total output tokens:                     {total_num_output_tokens:<10}")
+    print(f"Number of drafts:                        {num_drafts:<10}")
+    print(f"Draft tokens generated:                  {num_draft_tokens:<10}")
+    print(f"Accepted tokens:                         {num_accepted_tokens:<10}")
+    print(f"Mean acceptance length:                  {acceptance_length:<10.2f}")
+    print(f"Draft utilization rate:                  {draft_utilization_rate:<10.1f}")
+    print("====================================================")
 
 if __name__ == "__main__":
     main()
