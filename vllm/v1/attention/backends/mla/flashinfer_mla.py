@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
@@ -77,16 +77,18 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
     def _forward_decode(
         self,
-        q_nope: torch.Tensor,
-        q_pe: torch.Tensor,
+        q: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: MLACommonMetadata,
         layer: AttentionLayer,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
 
-        q = torch.cat([q_nope, q_pe], dim=-1)
+        if type(q) is tuple:
+            q_nope, q_pe = q
+            q = torch.cat([q_nope, q_pe], dim=-1)
+
         # trtllm API requires extra dimension q_len_per_request for MTP
         q = q.unsqueeze(1)
 
@@ -103,4 +105,6 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             bmm1_scale=self.scale,
         )
 
-        return self._v_up_proj(o)
+        # TODO: Return LSE pending support from Flashinfer API:
+        # https://github.com/flashinfer-ai/flashinfer/pull/1566
+        return o, None

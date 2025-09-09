@@ -227,8 +227,7 @@ class CudaPlatformBase(Platform):
 
             use_cutlassmla = selected_backend == _Backend.CUTLASS_MLA or (
                 selected_backend is None and cls.is_device_capability(100)
-                and block_size == 128) or (use_v1
-                                           and cls.has_device_capability(100))
+                and block_size == 128)
             use_flashinfermla = (selected_backend == _Backend.FLASHINFER_MLA
                                  and cls.has_device_capability(100))
             use_flashmla = selected_backend in [
