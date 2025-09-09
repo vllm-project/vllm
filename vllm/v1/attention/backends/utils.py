@@ -543,7 +543,10 @@ def make_local_attention_virtual_batches(
     batch_indices = np.repeat(np.arange(actual_batch_size, dtype=np.int32),
                               local_blocks * pages_per_local_batch)
 
-    # Convert np arrays to torch tensor for perf when creating block_table_local
+    # NOTE: https://github.com/pytorch/pytorch/pull/160256 causes performance
+    # regression when using numpy arrays (batch and block indices) to index into
+    # torch tensor (block_table). As a workaround, convert numpy arrays to torch
+    # tensor first, which recovers perf.
     batch_indices_torch = torch.from_numpy(batch_indices)
     block_indices_torch = torch.from_numpy(block_indices)
     block_table_local = block_table[batch_indices_torch, block_indices_torch]\
