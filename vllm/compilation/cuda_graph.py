@@ -158,8 +158,6 @@ class CUDAGraphWrapper:
                 if self.graph_pool is not None:
                     set_graph_pool_id(self.graph_pool)
                 else:
-                    # TODO(asamani): remove once we have a better way to handle
-                    #set_graph_pool_id(torch.cuda.graph_pool_handle())
                     set_graph_pool_id(current_platform.graph_pool_handle())
                 # mind-exploding: carefully manage the reference and memory.
                 with torch.cuda.graph(cudagraph, pool=self.graph_pool):
