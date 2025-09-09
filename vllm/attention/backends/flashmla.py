@@ -187,7 +187,7 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
         # https://github.com/deepseek-ai/FlashMLA/issues/83
         # https://github.com/vllm-project/vllm/issues/24513
         if CudaPlatform.has_device_capability(100):
-            raise AssertionError(
+            raise NotImplementedError(
                 "FlashMLA is temporarily disabled on Blackwell (SM 10.0). "
                 "Please use CUTLASS_MLA or TRITON_MLA instead. "
                 "Example: `export VLLM_ATTENTION_BACKEND=CUTLASS_MLA`")
