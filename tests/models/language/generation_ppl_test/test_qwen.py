@@ -7,7 +7,13 @@ from tests.models.utils import GenerateModelInfo
 
 from .ppl_utils import wikitext_ppl_test
 
-MODELS = [GenerateModelInfo("Qwen/Qwen3-0.6B")]
+MODELS = [
+    GenerateModelInfo("Qwen/Qwen3-0.6B"),
+    GenerateModelInfo("Qwen/Qwen3-0.6B-FP8"),
+    # transformers:
+    # Loading a GPTQ quantized model requires optimum, gptqmodel
+    # GenerateModelInfo("Qwen/Qwen3-0.6B-GPTQ-Int8"),
+]
 
 
 @pytest.mark.parametrize("model_info", MODELS)
