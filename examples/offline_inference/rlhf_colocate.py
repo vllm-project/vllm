@@ -30,7 +30,6 @@ https://docs.ray.io/en/latest/placement-groups.html
 
 import gc
 import os
-import uuid
 
 import ray
 import torch
@@ -91,14 +90,26 @@ class RayTrainingActor:
 
         self.device_uuid = current_platform.get_device_uuid(0)
         self.zmq_context = zmq.Context()
+        self.zmq_address_counter = 0
 
     def report_device_id(self) -> str:
         return self.device_uuid
 
-    def get_zmq_handles(self):
-        return {self.device_uuid: f"ipc:///tmp/rl-colocate-zmq-{uuid.uuid4()}.sock"}
+    @property
+    def _zmq_handle(self) -> str:
+        suffix = f"{self.device_uuid}-{self.zmq_address_counter}"
+        return f"ipc:///tmp/rl-colocate-zmq-{suffix}.sock"
 
-    def update_weights(self, zmq_handle: dict[str, str]):
+    def get_zmq_handles(self) -> dict[str, str]:
+        return {self.device_uuid: self._zmq_handle}
+
+    def update_weights(self):
+        try:
+            self._update_weights()
+        finally:
+            self.zmq_address_counter += 1
+
+    def _update_weights(self):
         # align size to avoid misaligned address
         align_size = 256
 
@@ -112,7 +123,7 @@ class RayTrainingActor:
         # use max_tensor_size * 2 as buffer size
         buffer = torch.empty(max_tensor_size * 2, dtype=torch.uint8, device="cuda:0")
         s = self.zmq_context.socket(zmq.REQ)
-        s.bind(zmq_handle[self.device_uuid])
+        s.bind(self._zmq_handle)
         handle = reduce_tensor(buffer)
 
         offset = 0
@@ -234,7 +245,7 @@ for actor in training_actors:
 
 print("Update the weights of the inference engines.")
 ray.get(
-    [actor.update_weights.remote(zmq_handles) for actor in training_actors]
+    [actor.update_weights.remote() for actor in training_actors]
     + [
         llm.collective_rpc.remote("update_weights_from_ipc", args=(zmq_handles,))
         for llm in inference_engines
