@@ -77,6 +77,13 @@ class SpecDecodeProposer:
         self.is_multimodal_model = vllm_config.model_config \
             .is_multimodal_model
 
+        if self.is_multimodal_model and self.method == "draft_model":
+            raise NotImplementedError("Speculative Decoding with draft models "
+                                      "does not support multimodal models yet")
+        if self.draft_model_config.uses_mrope and self.method == "draft_model":
+            raise NotImplementedError("Speculative Decoding with draft models "
+                                      "does not support M-RoPE yet")
+
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE and
                                not self.vllm_config.model_config.enforce_eager)
@@ -358,6 +365,7 @@ class SpecDecodeProposer:
             if self.pass_hidden_states_to_model:
                 model_kwargs[
                     "hidden_states"] = self.hidden_states[:input_batch_size]
+            if self.is_multimodal_model:
                 model_kwargs["inputs_embeds"] = inputs_embeds
 
             batch_descriptor = BatchDescriptor(num_tokens=input_batch_size,
