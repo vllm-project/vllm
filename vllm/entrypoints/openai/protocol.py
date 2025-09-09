@@ -33,6 +33,7 @@ except ImportError:  # For newer openai versions (>= 1.100.0)
 from openai.types.responses.response import ToolChoice
 from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
+from openai_harmony import Message
 from pydantic import (BaseModel, ConfigDict, Field, TypeAdapter,
                       ValidationInfo, field_validator, model_validator)
 from typing_extensions import TypeAlias
@@ -274,6 +275,9 @@ class ResponsesRequest(OpenAIBaseModel):
     model: Optional[str] = None
     parallel_tool_calls: Optional[bool] = True
     previous_response_id: Optional[str] = None
+    # This can be used when the store is disabled but you want to
+    # be able to continue a Responses API thread
+    previous_response_harmony_messages: Optional[list[Message]] = None
     prompt: Optional[ResponsePrompt] = None
     reasoning: Optional[Reasoning] = None
     service_tier: Literal["auto", "default", "flex", "scale",
@@ -373,6 +377,27 @@ class ResponsesRequest(OpenAIBaseModel):
         return isinstance(
             self.include,
             list) and "message.output_text.logprobs" in self.include
+
+    @field_validator("previous_response_harmony_messages", mode="before")
+    @classmethod
+    def deserialize_harmony_messages(cls, v):
+        """Convert incoming JSON dictionaries to Message objects."""
+        if v is None:
+            return v
+        if isinstance(v, list):
+            result = []
+            for item in v:
+                if isinstance(item, dict):
+                    # Convert dictionary to Message object using from_dict
+                    result.append(Message.from_dict(item))
+                elif isinstance(item, Message):
+                    # Already a Message object
+                    result.append(item)
+                else:
+                    raise ValueError(
+                        f"Invalid harmony message type: {type(item)}")
+            return result
+        raise ValueError(f"Invalid type for harmony messages: {type(v)}")
 
     @model_validator(mode="before")
     def validate_background(cls, data):
@@ -1856,6 +1881,10 @@ class ResponseUsage(OpenAIBaseModel):
 class ResponsesResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"resp_{random_uuid()}")
     created_at: int = Field(default_factory=lambda: int(time.time()))
+    # These are populated when the env flag
+    # VLLM_RESPONSES_API_ENABLE_HARMONY_MESSAGES_OUTPUT is set
+    input_harmony_messages: Optional[list[dict[str, Any]]] = None
+    output_harmony_messages: Optional[list[dict[str, Any]]] = None
     # error: Optional[ResponseError] = None
     # incomplete_details: Optional[IncompleteDetails] = None
     instructions: Optional[str] = None
@@ -1891,12 +1920,20 @@ class ResponsesResponse(OpenAIBaseModel):
         created_time: int,
         output: list[ResponseOutputItem],
         status: ResponseStatus,
+        input_harmony_messages: Optional[list[Message]] = None,
+        output_harmony_messages: Optional[list[Message]] = None,
         usage: Optional[ResponseUsage] = None,
     ) -> "ResponsesResponse":
         return cls(
             id=request.request_id,
             created_at=created_time,
             instructions=request.instructions,
+            input_harmony_messages=[
+                msg.to_dict() for msg in input_harmony_messages
+            ] if input_harmony_messages else None,
+            output_harmony_messages=[
+                msg.to_dict() for msg in output_harmony_messages
+            ] if output_harmony_messages else None,
             metadata=request.metadata,
             model=model_name,
             output=output,
@@ -2098,7 +2135,7 @@ class DetokenizeResponse(OpenAIBaseModel):
 
 class TokenizerInfoResponse(OpenAIBaseModel):
     """
-    Response containing tokenizer configuration 
+    Response containing tokenizer configuration
     equivalent to tokenizer_config.json
     """
 
@@ -2188,7 +2225,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     to_language: Optional[str] = None
     """The language of the output audio we transcribe to.
 
-    Please note that this is not currently used by supported models at this 
+    Please note that this is not currently used by supported models at this
     time, but it is a placeholder for future use, matching translation api.
     """
 
