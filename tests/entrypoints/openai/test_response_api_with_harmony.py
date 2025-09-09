@@ -6,7 +6,6 @@ import time
 
 import pytest
 import pytest_asyncio
-import regex as re
 import requests
 from openai import BadRequestError, NotFoundError, OpenAI
 
@@ -357,7 +356,11 @@ async def test_web_search(client: OpenAI, model_name: str):
 async def test_code_interpreter(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
-        input="Multiply 64548*15151 using builtin python interpreter.",
+        input=("Sort 3 variables in ascending order: "
+               "`var_a=9999999967*9999999769` "
+               "`var_b=9999999943*9999999781` "
+               "`var_c=9999999929*9999999787`. "
+               "Show only the sorted variable names with `<`."),
         tools=[{
             "type": "code_interpreter",
             "container": {
@@ -369,14 +372,10 @@ async def test_code_interpreter(client: OpenAI, model_name: str):
     assert response.status == "completed"
     for item in response.output:
         if item.type == "message":
-            output_string = item.content[0].text
-            last_index = output_string.rfind('9')
-            if last_index != -1:
-                index = output_string.rfind('9', 0, last_index)
-            else:
-                index = -1
-            assert parse_integer_from_string(
-                output_string[index:]) == 977966748
+            output_string = item.content[0].text.replace(" ",
+                                                         "").replace("\n", "")
+            print("output_string: ", output_string, flush=True)
+            assert "var_c<var_b<var_a" in output_string
 
 
 def get_weather(latitude, longitude):
@@ -656,76 +655,3 @@ async def test_function_calling_full_history(client: OpenAI, model_name: str):
     assert response_2 is not None
     assert response_2.status == "completed"
     assert response_2.output_text is not None
-
-
-def parse_integer_from_string(value):
-    """
-    Enhanced integer parser that handles markdown, scientific notation, 
-    commas, and formatting artifacts like brackets and escaped characters.
-    """
-    if not isinstance(value, str):
-        return int(value)
-
-    # Initial cleanup
-    value = value.strip()
-
-    # Remove markdown code block formatting
-    value = re.sub(r'^```\s*(.+?)\s*```$', r'\1', value, flags=re.DOTALL)
-    value = re.sub(r'^`\s*(.+?)\s*`$', r'\1', value)
-    value = value.strip()
-
-    # Remove brackets, parentheses, and formatting artifacts
-    value = re.sub(r'[\[\](){}]', '', value)
-
-    # Remove newlines and extra whitespace
-    value = re.sub(r'\s+', ' ', value).strip()
-
-    # Handle escaped characters (like \,)
-    value = value.replace('\\,', ',')
-    value = value.replace('\\.', '.')
-
-    # Extract the main number pattern
-    # Look for patterns like: digits, commas, dots, scientific notation
-    number_pattern = (r'[+-]?(?:\d{1,3}(?:,\d{3})*|\d+)'
-                      r'(?:\.\d+)?(?:[eE][+-]?\d+)?')
-    match = re.search(number_pattern, value)
-
-    if not match:
-        raise ValueError(f"Cannot parse '{value}' as integer")
-
-    cleaned_number = match.group()
-
-    # Handle scientific notation
-    scientific_match = re.fullmatch(r'([+-]?\d+(?:\.\d+)?)[eE]([+-]?\d+)',
-                                    cleaned_number)
-    if scientific_match:
-        base, exponent = scientific_match.groups()
-        return int(float(base) * (10**int(exponent)))
-
-    # Handle comma-separated numbers
-    if ',' in cleaned_number:
-        cleaned_number = cleaned_number.replace(',', '')
-
-    # Handle human-readable format (1k, 2M, etc.)
-    readable_match = re.fullmatch(r'([+-]?\d+(?:\.\d+)?)([kKmMgGtT])',
-                                  cleaned_number)
-    if readable_match:
-        number, suffix = readable_match.groups()
-        multipliers = {
-            'k': 10**3,
-            'm': 10**6,
-            'g': 10**9,
-            't': 10**12,
-            'K': 2**10,
-            'M': 2**20,
-            'G': 2**30,
-            'T': 2**40
-        }
-        if suffix in multipliers:
-            return int(float(number) * multipliers[suffix])
-
-    try:
-        return int(float(cleaned_number))
-    except ValueError:
-        raise ValueError(
-            f"Cannot parse '{cleaned_number}' as integer") from None
