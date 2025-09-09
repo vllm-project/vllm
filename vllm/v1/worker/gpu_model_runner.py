@@ -2000,20 +2000,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                        logits, hidden_states,
                                        num_scheduled_tokens)
 
-        # if self.speculative_config:
-        #     assert spec_decode_common_attn_metadata is not None
-        #     with record_function_or_nullcontext("Draft"):
-        #         self._draft_token_ids = self.propose_draft_token_ids(
-        #             scheduler_output,
-        #             valid_sampled_token_ids,
-        #             self.input_batch.sampling_metadata,
-        #             hidden_states,
-        #             sample_hidden_states,
-        #             aux_hidden_states,
-        #             spec_decode_metadata,
-        #             spec_decode_common_attn_metadata,
-        #         )
-
         with record_function_or_nullcontext("EPLB"):
             self.eplb_step()
 
