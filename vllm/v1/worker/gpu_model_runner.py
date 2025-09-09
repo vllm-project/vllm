@@ -218,8 +218,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
             if tokenizer is not None and self.vocab_size > len(tokenizer):
                 logger.warning(
-                    f"Model vocab size({self.vocab_size}) > "
-                    f"Tokenizer vocab size({len(tokenizer)})!")
+                    "Model vocab size > Tokenizer vocab size!")
                 self.vocab_size = len(tokenizer)
 
         # Sampler
