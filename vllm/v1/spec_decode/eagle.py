@@ -73,7 +73,7 @@ class EagleProposer:
         self.hidden_size = self.draft_model_config.get_hidden_size()
 
         # for pruning the draft model vocabulary
-        self.hot_token_ids = None
+        self.pruned_token_ids = None
 
         self.is_multimodal_model = vllm_config.model_config \
             .is_multimodal_model
@@ -244,7 +244,7 @@ class EagleProposer:
             )
 
             if self.vllm_config.speculative_config.draft_vocab_pruned is not None:
-                draft_token_ids_list = self.hot_token_ids[draft_token_ids_list]
+                draft_token_ids_list = self.pruned_token_ids[draft_token_ids_list]
 
             # [batch_size, num_tree_tokens]
             return torch.cat(draft_token_ids_list, dim=1)
@@ -252,7 +252,7 @@ class EagleProposer:
         draft_token_ids = logits.argmax(dim=-1)
 
         if self.vllm_config.speculative_config.draft_vocab_pruned is not None:
-            draft_token_ids = self.hot_token_ids[draft_token_ids]
+            draft_token_ids = self.pruned_token_ids[draft_token_ids]
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1:
@@ -669,13 +669,13 @@ class EagleProposer:
         # optionally prune the draft model vocabulary
         if self.vllm_config.speculative_config.draft_vocab_pruned is not None:
             logger.info(f"Loading pruned draft model vocabulary from {self.vllm_config.speculative_config.draft_vocab_pruned}")
-            self.hot_token_ids = load_draft_vocab_pruned(self.vllm_config.speculative_config.draft_vocab_pruned)
+            self.pruned_token_ids = load_draft_vocab_pruned(self.vllm_config.speculative_config.draft_vocab_pruned)
 
             if hasattr(self.model, "lm_head"):
                 print('have lm_head')
                 head = self.model.lm_head.weight
-                self.hot_token_ids = self.hot_token_ids.to(head.device)
-                head.data = head.data[self.hot_token_ids]
+                self.pruned_token_ids = self.pruned_token_ids.to(head.device)
+                head.data = head.data[self.pruned_token_ids]
                 del self.model.lm_head.weight
                 self.model.lm_head.weight = head
                 torch.cuda.empty_cache()
