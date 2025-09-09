@@ -95,20 +95,20 @@ class SpecDecodingLogging:
 
         log_fn(
             "SpecDecoding metrics: "
-            "Draft acceptance rate: %.1f%%, "
             "Mean acceptance length: %.2f, "
             "Accepted throughput: %.2f tokens/s, "
             "Drafted throughput: %.2f tokens/s, "
             "Accepted: %d tokens, "
             "Drafted: %d tokens, "
-            "Per-position acceptance rate: %s",
-            draft_acceptance_rate,
+            "Per-position acceptance rate: %s, "
+            "Avg Draft acceptance rate: %.1f%%",
             mean_acceptance_length,
             accepted_throughput,
             draft_throughput,
             num_accepted_tokens,
             num_draft_tokens,
             rates_str,
+            draft_acceptance_rate,
         )
         self.reset()
 
