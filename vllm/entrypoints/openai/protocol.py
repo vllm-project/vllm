@@ -1270,9 +1270,20 @@ class CompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def validate_prompt_and_prompt_embeds(cls, data):
-        if data.get("prompt") is None and data.get("prompt_embeds") is None:
+        prompt = data.get("prompt")
+        prompt_embeds = data.get("prompt_embeds")
+
+        prompt_is_empty = (prompt is None
+                           or (isinstance(prompt, str) and prompt == ""))
+        embeds_is_empty = (prompt_embeds is None
+                           or (isinstance(prompt_embeds, list)
+                               and len(prompt_embeds) == 0))
+
+        if prompt_is_empty and embeds_is_empty:
             raise ValueError(
-                "At least one of `prompt` or `prompt_embeds` must be set.")
+                "Either prompt or prompt_embeds must be provided and non-empty."
+            )
+
         return data
 
     @model_validator(mode="before")
