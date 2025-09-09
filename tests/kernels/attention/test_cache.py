@@ -315,8 +315,8 @@ def test_reshape_and_cache_flash(
                                     v_scale)
     elif implementation == "triton":
         from vllm.attention.ops.triton_reshape_and_cache_flash import (
-            reshape_and_cache_flash)
-        reshape_and_cache_flash(key, value, key_cache, value_cache,
+            triton_reshape_and_cache_flash)
+        triton_reshape_and_cache_flash(key, value, key_cache, value_cache,
                                 slot_mapping, kv_cache_dtype, k_scale, v_scale)
     key_cache_compact = permute_and_compact(key_cache)
     value_cache_compact = permute_and_compact(value_cache)
