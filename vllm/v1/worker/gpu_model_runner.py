@@ -210,16 +210,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             model_config)
 
         # Get valid vocab size
-        self.vocab_size = self.model_config.get_vocab_size()
-        tokenizer = get_tokenizer(
-            tokenizer_name=model_config.tokenizer,
-            trust_remote_code=model_config.trust_remote_code,
-        )
-        if tokenizer is not None and self.vocab_size > len(tokenizer):
-            logger.warning(
-                f"Model vocab size({self.vocab_size}) > "
-                f"Tokenizer vocab size({len(tokenizer)})!")
-            self.vocab_size = len(tokenizer)
+        if not self.is_pooling_model:
+            self.vocab_size = self.model_config.get_vocab_size()
+            tokenizer = get_tokenizer(
+                tokenizer_name=model_config.tokenizer,
+                trust_remote_code=model_config.trust_remote_code,
+            )
+            if tokenizer is not None and self.vocab_size > len(tokenizer):
+                logger.warning(
+                    f"Model vocab size({self.vocab_size}) > "
+                    f"Tokenizer vocab size({len(tokenizer)})!")
+                self.vocab_size = len(tokenizer)
 
         # Sampler
         self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
@@ -1980,7 +1981,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.apply_grammar_bitmask(scheduler_output, logits)
 
             # Apply vocab mask to logits (replace invalid positions with -inf)
-            logits = self.apply_vocab_size(self.vocab_size, logits)
+            if not self.is_pooling_model:
+                logits = self.apply_vocab_size(self.vocab_size, logits)
 
 
         with record_function_or_nullcontext("Sample"):
