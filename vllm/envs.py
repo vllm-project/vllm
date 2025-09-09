@@ -172,7 +172,6 @@ if TYPE_CHECKING:
     VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS: bool = False
     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
     VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
-    VLLM_HEAD_DTYPE: Optional[str] = None
 
 
 def get_default_cache_root():
@@ -1222,15 +1221,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # raw bytes. Defaults to True for backward compatibility.
     "VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES":
     lambda: bool(int(os.getenv("VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES", "1"))),
-
-    # "head" refers to the last Linear layer(s) of an LLM.
-    # The default head_dtype based on runner_type.
-    # - The pooling model defaults to using fp32 head,
-    # you can use VLLM_HEAD_DTYPE="model" to disable it.
-    # - The generate model defaults to not using fp32 head,
-    # you can use VLLM_HEAD_DTYPE="float32" to enable it.
-    "VLLM_HEAD_DTYPE":
-        lambda: os.getenv("VLLM_HEAD_DTYPE", None),
 }
 
 # --8<-- [end:env-vars-definition]
