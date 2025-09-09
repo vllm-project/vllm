@@ -76,7 +76,7 @@ def _moe_problem_size(
     """
     assert w1.dim() == 3 and w2.dim() == 3
     E, N, _ = w1.size()
-    K = w2.size(1)
+    K = a1.size(-1)
 
     if a1.dim() == 2:
         # Make sure we are using the correct a1 (pre-permute).
