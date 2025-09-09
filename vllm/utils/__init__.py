@@ -3249,7 +3249,7 @@ def check_use_alibi(model_config: ModelConfig) -> bool:
                       and getattr(cfg.attn_config, "alibi", False)))))
 
 
-def sha256(input) -> int:
+def sha256(input) -> bytes:
     """Hash any picklable Python object using SHA-256.
 
     The input is serialized using pickle before hashing, which allows
@@ -3260,16 +3260,15 @@ def sha256(input) -> int:
         input: Any picklable Python object.
 
     Returns:
-        An integer representing the SHA-256 hash of the serialized input.
+        Bytes representing the SHA-256 hash of the serialized input.
     """
     input_bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
-    return int.from_bytes(hashlib.sha256(input_bytes).digest(),
-                          byteorder="big")
+    return hashlib.sha256(input_bytes).digest()
 
 
-def sha256_cbor_64bit(input) -> int:
+def sha256_cbor(input) -> bytes:
     """
-    Hash objects using CBOR serialization and SHA-256, then truncate to 64bits.
+    Hash objects using CBOR serialization and SHA-256.
 
     This option is useful for non-Python-dependent serialization and hashing.
 
@@ -3280,17 +3279,13 @@ def sha256_cbor_64bit(input) -> int:
             Custom classes must implement CBOR serialization methods.
 
     Returns:
-        An integer in the range [0, 2^64-1] representing the lower 64 bits
-        of the SHA-256 hash of the CBOR serialized input.
+        Bytes representing the SHA-256 hash of the CBOR serialized input.
     """
     input_bytes = cbor2.dumps(input, canonical=True)
-    full_hash = int.from_bytes(hashlib.sha256(input_bytes).digest(),
-                               byteorder="big")
-
-    return full_hash & ((1 << 64) - 1)
+    return hashlib.sha256(input_bytes).digest()
 
 
-def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], int]:
+def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], bytes]:
     """Get a hash function by name, or raise an error if
     the function is not found.
     Args:
@@ -3300,10 +3295,8 @@ def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], int]:
     """
     if hash_fn_name == "sha256":
         return sha256
-    if hash_fn_name == "sha256_cbor_64bit":
-        return sha256_cbor_64bit
-    if hash_fn_name == "builtin":
-        return hash
+    if hash_fn_name == "sha256_cbor":
+        return sha256_cbor
 
     raise ValueError(f"Unsupported hash function: {hash_fn_name}")
 
@@ -3366,7 +3359,7 @@ def has_triton_kernels() -> bool:
 
 def set_process_title(name: str,
                       suffix: str = "",
-                      append: bool = False) -> None:
+                      prefix: str = envs.VLLM_PROCESS_NAME_PREFIX) -> None:
     """
     Set the current process title to a specific name with an
     optional suffix.
@@ -3374,15 +3367,11 @@ def set_process_title(name: str,
     Args:
         name: The title to assign to the current process.
         suffix: An optional suffix to append to the base name.
-        append: Whether to append to the existing process title.
+        prefix: A prefix to prepend to the front separated by `::`.
     """
     if suffix:
         name = f"{name}_{suffix}"
-    if append:
-        name = f"{setproctitle.getproctitle()}_{name}"
-    else:
-        name = f"{envs.VLLM_PROCESS_NAME_PREFIX}::{name}"
-    setproctitle.setproctitle(name)
+    setproctitle.setproctitle(f"{prefix}::{name}")
 
 
 def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:

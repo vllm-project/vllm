@@ -143,6 +143,7 @@ class AsyncLLM(EngineClient):
                 engine_idxs=self.engine_core.engine_ranks_managed,
                 custom_stat_loggers=stat_loggers,
                 enable_default_loggers=log_stats,
+                client_count=client_count,
             )
             self.logger_manager.log_engine_initialized()
 
