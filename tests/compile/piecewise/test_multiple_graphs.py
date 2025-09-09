@@ -4,6 +4,8 @@
 Test (piecewise) compilation with a simple model where multiple submodules
 are compiled and graph captured separately.
 """
+from pathlib import Path
+
 import torch
 from torch import nn
 from torch.library import Library
@@ -18,7 +20,8 @@ from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.utils import direct_register_custom_op
 
 # create a library to hold the custom op
-silly_lib = Library("silly", "FRAGMENT")  # noqa
+lib_name = "silly_" + Path(__file__).stem
+silly_lib = Library(lib_name, "FRAGMENT")  # noqa
 
 BATCH_SIZE = 32
 MLP_SIZE = 128
@@ -89,7 +92,7 @@ class Attention(nn.Module):
         x = self.pre_attn(x)
         x = self.rms_norm_ref(x)
         attn_output = torch.empty_like(x)
-        torch.ops.silly.attention(x, x, x, attn_output)
+        getattr(torch.ops, lib_name).attention(x, x, x, attn_output)
         x = attn_output
         x = self.rms_norm_ref(x)
         x = self.post_attn(x)
@@ -203,7 +206,7 @@ def test_multi_graph_piecewise_compile_outputs_equal():
     vllm_config = VllmConfig(compilation_config=CompilationConfig(
         level=CompilationLevel.PIECEWISE,
         use_cudagraph=True,
-        splitting_ops=["silly.attention"],
+        splitting_ops=[lib_name + ".attention"],
         cudagraph_capture_sizes=[1, 2],
     ))
     cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
@@ -257,7 +260,7 @@ def test_multi_graph_piecewise_compile_outputs_equal():
     vllm_config = VllmConfig(compilation_config=CompilationConfig(
         level=CompilationLevel.PIECEWISE,
         use_cudagraph=False,
-        splitting_ops=["silly.attention"],
+        splitting_ops=[lib_name + ".attention"],
     ))
     cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
 

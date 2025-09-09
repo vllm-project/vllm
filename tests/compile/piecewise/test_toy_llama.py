@@ -9,6 +9,7 @@ if the config `tractable_init` is set to True. Otherwise, the weights are
 initialized randomly with a fixed seed.
 """
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 import pytest
@@ -24,7 +25,8 @@ from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.utils import direct_register_custom_op
 
 # create a library to hold the custom op
-silly_lib = Library("silly", "FRAGMENT")  # noqa
+lib_name = "silly_" + Path(__file__).stem
+silly_lib = Library(lib_name, "FRAGMENT")  # noqa
 
 
 def silly_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
@@ -160,7 +162,7 @@ class LlamaAttention(nn.Module):
         k = k + positions.unsqueeze(1)
 
         attn_output = torch.empty_like(q)
-        torch.ops.silly.attention(q, k, v, attn_output)
+        getattr(torch.ops, lib_name).attention(q, k, v, attn_output)
 
         output = self.output_projection(attn_output)
         return output
@@ -275,7 +277,7 @@ def run_model(llama_config,
             cudagraph_capture_sizes=[1, 2],
         )
         if split_attn:
-            compilation_config.splitting_ops = ["silly.attention"]
+            compilation_config.splitting_ops = [lib_name + ".attention"]
         cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
     else:
         compilation_config = CompilationConfig(
@@ -436,7 +438,7 @@ def benchmark():
             compilation_config = CompilationConfig(
                 level=CompilationLevel.PIECEWISE,
                 use_cudagraph=True,
-                splitting_ops=["silly.attention"],
+                splitting_ops=[lib_name + ".attention"],
                 cudagraph_capture_sizes=cudagraph_sizes,
             )
         else:

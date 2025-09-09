@@ -4,6 +4,8 @@
 Test the piecewise compilation with a simple model so that we
 can exactly calculate the expected output and side effects.
 """
+from pathlib import Path
+
 import pytest
 import torch
 from torch import nn
@@ -20,7 +22,8 @@ from vllm.utils import direct_register_custom_op
 global_counter = 0
 
 # create a library to hold the custom op
-silly_lib = Library("silly", "FRAGMENT")  # noqa
+lib_name = "silly_" + Path(__file__).stem
+silly_lib = Library(lib_name, "FRAGMENT")  # noqa
 
 
 def silly_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
@@ -66,18 +69,19 @@ class SillyModel(nn.Module):
         x = x + 1
         x = x + 2
         out = torch.empty_like(x)
-        torch.ops.silly.attention(x, x, x, out)
+        getattr(torch.ops, lib_name).attention(x, x, x, out)
         x = out
         x = x - 2
         x = x - 1
         out = torch.empty_like(x)
-        torch.ops.silly.attention(x, x, x, out)
+        getattr(torch.ops, lib_name).attention(x, x, x, out)
         x = out
         x = x + 1
         return x
 
 
 @pytest.mark.parametrize("use_inductor", [True, False])
+@torch.inference_mode()
 def test_simple_piecewise_compile(use_inductor):
     assert VLLM_USE_V1
 
@@ -85,7 +89,7 @@ def test_simple_piecewise_compile(use_inductor):
         level=CompilationLevel.PIECEWISE,
         use_cudagraph=True,
         use_inductor=use_inductor,
-        splitting_ops=["silly.attention"],
+        splitting_ops=[lib_name + ".attention"],
         cudagraph_copy_inputs=True,
         cudagraph_capture_sizes=[1, 2],
     ))
