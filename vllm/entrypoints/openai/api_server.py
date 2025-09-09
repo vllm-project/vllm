@@ -578,6 +578,17 @@ async def show_version():
     return JSONResponse(content=ver)
 
 
+async def _stream_results(
+        generator: AsyncGenerator[BaseModel,
+                                  None]) -> AsyncGenerator[str, None]:
+    async for event in generator:
+        event_type = getattr(event, 'type', 'unknown')
+        # https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events#event_stream_format
+        event_data = (f"event: {event_type}\n"
+                      f"data: {event.model_dump_json(indent=None)}\n\n")
+        yield event_data
+
+
 @router.post("/v1/responses",
              dependencies=[Depends(validate_json_request)],
              responses={
@@ -614,17 +625,7 @@ async def create_responses(request: ResponsesRequest, raw_request: Request):
     elif isinstance(generator, ResponsesResponse):
         return JSONResponse(content=generator.model_dump())
 
-    async def stream_results(
-        generator: AsyncGenerator[BaseModel,
-                                  None]) -> AsyncGenerator[str, None]:
-        async for event in generator:
-            event_type = getattr(event, 'type', 'unknown')
-            # https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events#event_stream_format
-            event_data = (f"event: {event_type}\n"
-                          f"data: {event.model_dump_json(indent=None)}\n\n")
-            yield event_data
-
-    return StreamingResponse(content=stream_results(generator),
+    return StreamingResponse(content=_stream_results(generator),
                              media_type="text/event-stream")
 
 
@@ -653,10 +654,10 @@ async def retrieve_responses(
     if isinstance(response, ErrorResponse):
         return JSONResponse(content=response.model_dump(),
                             status_code=response.error.code)
-    elif stream:
-        return StreamingResponse(content=response,
-                                 media_type="text/event-stream")
-    return JSONResponse(content=response.model_dump())
+    elif isinstance(response, ResponsesResponse):
+        return JSONResponse(content=response.model_dump())
+    return StreamingResponse(content=_stream_results(response),
+                             media_type="text/event-stream")
 
 
 @router.post("/v1/responses/{response_id}/cancel")

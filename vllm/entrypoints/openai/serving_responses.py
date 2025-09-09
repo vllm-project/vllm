@@ -175,7 +175,8 @@ class OpenAIServingResponses(OpenAIServing):
         # HACK(wuhang): This is a hack. We should use a better store.
         # FIXME: If enable_store=True, this may cause a memory leak since we
         # never remove events from the store.
-        self.event_store: dict[str, tuple[deque[str], asyncio.Event]] = {}
+        self.event_store: dict[str, tuple[deque[BaseModel],
+                                          asyncio.Event]] = {}
 
         self.background_tasks: dict[str, asyncio.Task] = {}
 
@@ -801,7 +802,7 @@ class OpenAIServingResponses(OpenAIServing):
         *args,
         **kwargs,
     ):
-        event_deque: deque[str] = deque()
+        event_deque: deque[BaseModel] = deque()
         new_event_signal = asyncio.Event()
         self.event_store[request.request_id] = (event_deque, new_event_signal)
         response = None
@@ -816,8 +817,6 @@ class OpenAIServingResponses(OpenAIServing):
                              request.request_id)
             response = self.create_error_response(str(e))
         finally:
-            # Mark as finished with a special marker
-            event_deque.append("__STREAM_END__")
             new_event_signal.set()
 
         if response is not None and isinstance(response, ErrorResponse):
@@ -856,7 +855,7 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         response_id: str,
         starting_after: Optional[int] = None,
-    ):
+    ) -> AsyncGenerator[BaseModel, None]:
         if response_id not in self.event_store:
             raise ValueError(f"Unknown response_id: {response_id}")
 
@@ -870,9 +869,9 @@ class OpenAIServingResponses(OpenAIServing):
             # Yield existing events from start_index
             while current_index < len(event_deque):
                 event = event_deque[current_index]
-                if event == "__STREAM_END__":
-                    return
                 yield event
+                if getattr(event, 'type', 'unknown') == "response.completed":
+                    return
                 current_index += 1
 
             await new_event_signal.wait()
@@ -882,7 +881,8 @@ class OpenAIServingResponses(OpenAIServing):
         response_id: str,
         starting_after: Optional[int],
         stream: Optional[bool],
-    ) -> Union[ErrorResponse, ResponsesResponse]:
+    ) -> Union[ErrorResponse, ResponsesResponse, AsyncGenerator[BaseModel,
+                                                                None]]:
         if not response_id.startswith("resp_"):
             return self._make_invalid_id_error(response_id)
 
