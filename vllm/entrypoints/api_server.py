@@ -58,11 +58,14 @@ async def generate(request: Request) -> Response:
 async def _generate(request_dict: dict, raw_request: Request) -> Response:
     prompt = request_dict.pop("prompt")
     stream = request_dict.pop("stream", False)
+    cache_hit_threshold = request_dict.pop("cache_hit_threshold", None)
     sampling_params = SamplingParams(**request_dict)
     request_id = random_uuid()
 
     assert engine is not None
-    results_generator = engine.generate(prompt, sampling_params, request_id)
+    results_generator = engine.generate(
+        prompt, sampling_params, request_id, cache_hit_threshold=cache_hit_threshold
+    )
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:

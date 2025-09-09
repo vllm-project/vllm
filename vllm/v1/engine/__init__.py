@@ -18,7 +18,7 @@ from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 
 # These are possible values of RequestOutput.finish_reason,
 # so form part of the external API.
-FINISH_REASON_STRINGS = ("stop", "length", "abort")
+FINISH_REASON_STRINGS = ("stop", "length", "abort", "cache_threshold")
 
 
 class FinishReason(enum.IntEnum):
@@ -30,12 +30,14 @@ class FinishReason(enum.IntEnum):
     stop - a stop string was emitted
     length - max_tokens was consumed, or max_model_len was reached
     abort - aborted for another reason
+    cache_threshold - not handled due to cache hit below threshold
 
     """
 
     STOP = 0
     LENGTH = 1
     ABORT = 2
+    CACHE_THRESHOLD = 3
 
     def __str__(self):
         return FINISH_REASON_STRINGS[self.value]
@@ -58,6 +60,7 @@ class EngineCoreRequest(
     cache_salt: str | None
     data_parallel_rank: int | None
     prompt_embeds: torch.Tensor | None = None
+    cache_hit_threshold: float | None = None
 
     # Index of the client, used to ensure outputs are sent back to the same
     # client for this request when scaling out the front-end.
