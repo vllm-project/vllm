@@ -25,6 +25,9 @@ from vllm.v1.sample.metadata import SamplingMetadata
 
 from .utils import AutoWeightsLoader, maybe_prefix
 
+from vllm.config import get_current_vllm_config
+from vllm.model_executor.models.llama import LlamaDecoderLayer as BaseLlamaDecoderLayer
+
 logger = init_logger(__name__)
 
 
@@ -33,10 +36,11 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
     def __init__(
         self,
         config: LlamaConfig,
+        cache_config: Optional["CacheConfig"] = None, 
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
-        super().__init__(config, quant_config=quant_config, prefix=prefix)
+        super().__init__(config, cache_config=cache_config, quant_config=quant_config, prefix=prefix)
 
         # override qkv
         self.self_attn.qkv_proj = QKVParallelLinear(
@@ -114,6 +118,12 @@ class LlamaModel(nn.Module):
             speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
 
+        current_vllm_config = get_current_vllm_config()
+        cache_config = current_vllm_config.cache_config
+        quant_config = current_vllm_config.quant_config
+        logger.info("[EAGLE3-FIX-INIT] Initializing draft model's LlamaModel. "
+                    "Using cache_config with dtype: %s", cache_config.cache_dtype)
+
         self.embed_tokens = VocabParallelEmbedding(
             self.config.vocab_size,
             self.config.hidden_size,
@@ -123,6 +133,8 @@ class LlamaModel(nn.Module):
         self.layers = nn.ModuleList([
             LlamaDecoderLayer(
                 config=self.config,
+                cache_config=cache_config,
+                quant_config=quant_config,
                 prefix=maybe_prefix(prefix, f"layers.{start_layer_id}"),
             )
         ])
