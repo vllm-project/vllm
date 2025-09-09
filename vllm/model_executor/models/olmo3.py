@@ -3,8 +3,8 @@
 
 # Adapted from
 # https://github.com/huggingface/transformers/blob/main/src/transformers/models/olmo3/modeling_olmo3.py
-# Copyright 2024 The vLLM team.
-# Copyright 2024 EleutherAI and the HuggingFace Inc. team. All rights reserved.
+# Copyright 2025 The vLLM team.
+# Copyright 2025 EleutherAI and the HuggingFace Inc. team. All rights reserved.
 #
 # This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
 # and OPT implementations in this library. It has been modified from its
