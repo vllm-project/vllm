@@ -237,7 +237,8 @@ steps:
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
     - vllm/
-    - tests/v1
+    - tests/v1/e2e
+    - tests/v1/engine
   commands:
     # TODO: accuracy does not match, whether setting
     # VLLM_USE_FLASHINFER_SAMPLER or not on H100.
@@ -248,7 +249,7 @@ steps:
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
     - vllm/
-    - tests/v1
+    - tests/v1/entrypoints
   commands:
     - pytest -v -s v1/entrypoints
 
@@ -772,7 +773,7 @@ steps:
   # begin io_processor plugins test, all the code in between uses the prithvi_io_processor plugin
   - pip install -e ./plugins/prithvi_io_processor_plugin
   - pytest -v -s plugins_tests/test_io_processor_plugins.py
-  - pip uninstall prithvi_io_processor_plugin -y 
+  - pip uninstall prithvi_io_processor_plugin -y
   # end io_processor plugins test
   # other tests continue here:
   - pytest -v -s plugins_tests/test_scheduler_plugins.py
@@ -816,7 +817,7 @@ steps:
 - label: Weight Loading Multiple GPU Test  # 33min
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
-  num_gpus: 2 
+  num_gpus: 2
   optional: true
   source_file_dependencies:
   - vllm/

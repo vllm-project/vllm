@@ -321,7 +321,7 @@ def test_structured_output(
         guided_decoding=GuidedDecodingParams(regex=sample_regex))
 
     prompt = (f"Give an example IPv4 address with this regex: {sample_regex}. "
-              f"Make the response as short as possible.")
+              f"Make the response as short as possible. Retrun only the IPv4.")
     outputs = llm.generate(
         [prompt] * 2,
         sampling_params=sampling_params,
@@ -376,7 +376,7 @@ def test_structured_output(
     outputs = llm.generate(
         ("Generate a JSON with the brand, model and car_type of the most "
          "iconic car from the 90's. Make the response as short as "
-         "possible."),
+         "possible. Return only the json."),
         sampling_params=sampling_params,
         use_tqdm=True,
     )
