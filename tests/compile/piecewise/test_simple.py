@@ -16,6 +16,7 @@ from vllm.config import (CompilationConfig, CompilationLevel, CUDAGraphMode,
 from vllm.envs import VLLM_USE_V1
 from vllm.forward_context import BatchDescriptor, set_forward_context
 
+# This import automatically registers `torch.ops.silly.attention`
 from ..silly_attention import get_global_counter, reset_global_counter
 
 

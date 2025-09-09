@@ -16,8 +16,7 @@ from vllm.config import (CompilationConfig, CompilationLevel, CUDAGraphMode,
                          VllmConfig, set_current_vllm_config)
 from vllm.forward_context import BatchDescriptor, set_forward_context
 
-# This import automatically registers torch ops for testing
-# like silly.attention
+# This import automatically registers `torch.ops.silly.attention`
 from .. import silly_attention  # noqa: F401
 
 BATCH_SIZE = 32
