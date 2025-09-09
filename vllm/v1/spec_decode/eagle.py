@@ -662,7 +662,8 @@ class EagleProposer:
             logger.info("Loading EAGLE LM head weights from the target model.")
 
             if self.vllm_config.speculative_config.draft_vocab_pruned is not None:
-                self.model.lm_head = copy.deepcopy(target_language_model.lm_head)
+                self.model.lm_head.load_state_dict(target_language_model.lm_head.state_dict())
+                # self.model.lm_head = copy.deepcopy(target_language_model.lm_head)
             else:
                 self.model.lm_head = target_language_model.lm_head
 
