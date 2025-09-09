@@ -194,6 +194,7 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
                  vllm_config: VllmConfig, device: torch.device):
         self.kv_cache_spec = kv_cache_spec
         self.vllm_config = vllm_config
+        self.device = device
 
     @abstractmethod
     def build(self,

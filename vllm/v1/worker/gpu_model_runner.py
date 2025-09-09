@@ -968,9 +968,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # in the same group share the same metadata.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
                 self.kv_cache_config.kv_cache_groups):
-            seq_lens_arg = seq_lens
-            seq_lens_cpu_arg = seq_lens_cpu
-
             if isinstance(kv_cache_group_spec.kv_cache_spec,
                           EncoderOnlyAttentionSpec):
                 # Encoder-only layers do not have KV cache, so we need to
@@ -999,19 +996,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     slot_mapping = torch.empty(0,
                                                dtype=torch.int64,
                                                device=self.device)
-
-                seq_lens_arg = torch.full(
-                    (num_reqs, ),
-                    self.max_encoder_len,
-                    dtype=torch.int32,
-                    device=self.device,
-                )
-                seq_lens_cpu_arg = torch.full(
-                    (num_reqs, ),
-                    self.max_encoder_len,
-                    dtype=torch.int32,
-                    device="cpu",
-                )
             else:
                 blk_table = self.input_batch.block_table[kv_cache_group_id]
                 blk_table_tensor = blk_table.get_device_tensor()[:num_reqs]
@@ -1028,8 +1012,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             common_attn_metadata = CommonAttentionMetadata(
                 query_start_loc=query_start_loc,
                 query_start_loc_cpu=query_start_loc_cpu,
-                seq_lens=seq_lens_arg,
-                seq_lens_cpu=seq_lens_cpu_arg,
+                seq_lens=seq_lens,
+                seq_lens_cpu=seq_lens_cpu,
                 num_computed_tokens_cpu=num_computed_tokens_cpu,
                 num_reqs=num_reqs,
                 num_actual_tokens=total_num_scheduled_tokens,

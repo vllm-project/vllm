@@ -18,7 +18,7 @@ from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
                                               subclass_attention_backend)
 
 
-def _get_max_seq_len(vllm_config: VllmConfig) -> int:
+def _get_max_encoder_len(vllm_config: VllmConfig) -> int:
     return MULTIMODAL_REGISTRY.get_encdec_max_encoder_len(
         vllm_config.model_config)
 
@@ -35,12 +35,24 @@ def create_cross_attention_backend(
                   common_prefix_len: int,
                   common_attn_metadata: CommonAttentionMetadata,
                   fast_build: bool = False) -> AttentionMetadata:
-            new_common_attn_metadata = copy(common_attn_metadata)
-            new_common_attn_metadata.causal = False
-            new_common_attn_metadata.max_seq_len = _get_max_seq_len(
-                self.vllm_config)
-            return super().build(common_prefix_len, new_common_attn_metadata,
-                                 fast_build)
+            new_metadata = copy(common_attn_metadata)
+            new_metadata.causal = False
+            max_encoder_len = _get_max_encoder_len(self.vllm_config)
+            new_metadata.max_seq_len = max_encoder_len
+
+            new_metadata.seq_lens = torch.full(
+                (new_metadata.num_reqs, ),
+                max_encoder_len,
+                dtype=torch.int32,
+                device=self.device,
+            )
+            new_metadata.seq_lens_cpu = torch.full(
+                (new_metadata.num_reqs, ),
+                max_encoder_len,
+                dtype=torch.int32,
+                device="cpu",
+            )
+            return super().build(common_prefix_len, new_metadata, fast_build)
 
     attn_backend = subclass_attention_backend(
         name_prefix=prefix,
