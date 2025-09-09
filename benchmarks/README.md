@@ -110,7 +110,12 @@ become available.
 
 🚧: to be supported
 
-**Note**: HuggingFace dataset's `dataset-name` should be set to `hf`
+**Note**: HuggingFace dataset's `dataset-name` should be set to `hf`.
+For local `dataset-path`, please set `hf-name` to its Hugging Face ID like
+
+```bash
+--dataset-path /datasets/VisionArena-Chat/ --hf-name lmarena-ai/VisionArena-Chat
+```
 
 ## 🚀 Example - Online Benchmark
 
@@ -689,7 +694,7 @@ python -m vllm.entrypoints.openai.api_server \
 Send requests with images:
 
 ```bash
-python benchmarks/benchmark_serving.py \
+vllm bench serve \
   --backend openai-chat \
   --model Qwen/Qwen2.5-VL-7B-Instruct \
   --dataset-name sharegpt \
@@ -716,7 +721,7 @@ python -m vllm.entrypoints.openai.api_server \
 Send requests with videos:
 
 ```bash
-python benchmarks/benchmark_serving.py \
+vllm bench serve \
   --backend openai-chat \
   --model Qwen/Qwen2.5-VL-7B-Instruct \
   --dataset-name sharegpt \

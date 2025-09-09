@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import ClassVar, Optional
+from typing import ClassVar, Optional, Union
 
 import torch
 
@@ -62,7 +62,6 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device,
                          FlashMLAMetadata)
 
-        self.compilation_config = vllm_config.compilation_config
         self.num_q_heads = vllm_config.model_config.get_num_attention_heads(
             vllm_config.parallel_config)
 
@@ -86,10 +85,14 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
                 dtype=torch.int32)
 
     def _build_decode(self, block_table_tensor: torch.Tensor,
-                      seq_lens: torch.Tensor) -> FlashMLADecodeMetadata:
+                      seq_lens_cpu: torch.Tensor,
+                      seq_lens_device: torch.Tensor,
+                      query_start_loc_cpu: torch.Tensor,
+                      query_start_loc_device: torch.Tensor,
+                      num_decode_tokens: int) -> FlashMLADecodeMetadata:
         tile_scheduler_metadata, num_splits = \
             get_mla_metadata(
-            seq_lens,
+            seq_lens_device,
             self.num_q_heads,
             1, # MQA for the decode path
         )
@@ -123,13 +126,15 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
 
         return FlashMLADecodeMetadata(
             block_table=block_table_tensor,
-            seq_lens=seq_lens,
+            seq_lens=seq_lens_device,
             tile_scheduler_metadata=tile_scheduler_metadata,
             num_splits=num_splits,
         )
 
 
 class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
+
+    can_return_lse_for_decode: bool = True
 
     def __init__(
             self,
@@ -167,60 +172,20 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
 
     def _forward_decode(
         self,
-        q_nope: torch.Tensor,
-        q_pe: torch.Tensor,
+        q: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: FlashMLAMetadata,
         layer: AttentionLayer,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
 
-        q = torch.cat([q_nope, q_pe],
-                      dim=-1)  # (total_tokens, num_heads, full_head_dim)
-        batch_size = attn_metadata.decode.seq_lens.shape[0]
-        total_tokens = q.shape[0]
-        num_heads = q.shape[1]
-        head_dim = q.shape[2]
+        if type(q) is tuple:
+            q = torch.cat(q, dim=-1)
 
-        if total_tokens % batch_size == 0:
-            seq_len = total_tokens // batch_size
-            q = q.view(batch_size, seq_len, num_heads, head_dim)
-        else:
-            # Variable length batch, use padding strategy
-            query_start_loc = attn_metadata.query_start_loc
-            if query_start_loc is None:
-                logger.error(
-                    "No query_start_loc available for variable length batch")
-                raise RuntimeError(
-                    "No query_start_loc available for variable length batch")
-            seq_lens = []
-            for i in range(batch_size):
-                if i == batch_size - 1:
-                    seq_len = total_tokens - query_start_loc[i].item()
-                else:
-                    seq_len = query_start_loc[
-                        i + 1].item() - query_start_loc[i].item()
-                seq_lens.append(seq_len)
-
-            max_seq_len = max(seq_lens)
-            q_padded = torch.zeros(batch_size,
-                                   max_seq_len,
-                                   num_heads,
-                                   head_dim,
-                                   dtype=q.dtype,
-                                   device=q.device)
-
-            for i, seq_len in enumerate(seq_lens):
-                start_idx = query_start_loc[i].item(
-                ) if i == 0 else query_start_loc[i].item()
-                end_idx = start_idx + seq_len
-                q_padded[i, :seq_len] = q[start_idx:end_idx]
-            q = q_padded
-            seq_len = max_seq_len
-
-        o, _ = flash_mla_with_kvcache(
-            q=q,
+        assert isinstance(q, torch.Tensor)
+        o, lse = flash_mla_with_kvcache(
+            q=q.unsqueeze(1),  # Add seqlen dim of 1 (decode)
             k_cache=kv_c_and_k_pe_cache.unsqueeze(-2),  # Add head dim of 1
             block_table=attn_metadata.decode.block_table,
             cache_seqlens=attn_metadata.decode.seq_lens,
@@ -234,14 +199,4 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             descale_k=layer._k_scale.reshape(1),
         )
 
-        # Remove padding from results
-        if total_tokens % batch_size != 0:
-            outputs = []
-            for i, seq_len in enumerate(seq_lens):
-                outputs.append(o[i, :seq_len])
-            o = torch.cat(outputs,
-                          dim=0)  # (total_tokens, num_heads, head_dim_v)
-        else:
-            o = o.view(total_tokens, num_heads, self.kv_lora_rank)
-
-        return self._v_up_proj(o)
+        return o, lse
