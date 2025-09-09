@@ -31,6 +31,13 @@ python3 ./examples/offline_inference/llm_engine_example.py --model "meta-llama/L
 ```
 
 
+Dump fall modules, device 0 for step 0 and step 1 and 2
+
+```bash
+python3 ./examples/offline_inference/llm_engine_example.py --model "meta-llama/Llama-3.1-8B-Instruct"  --enforce-eager  --intermediate-log-config '{"enabled": true, "log_step_ids": [1,2], "device_names": ["cuda:0"]}'
+```
+
+
 #### Configuration Parameters
 
 | Parameter | Type | Description | Default |

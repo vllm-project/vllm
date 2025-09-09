@@ -3385,22 +3385,6 @@ class IntermediateLoggingConfig:
         logger.info("Compiled %d regex patterns",
                     len(self._compiled_module_calls))
 
-    def to_dict(self) -> dict:
-        """Convert the config to a dictionary for serialization."""
-        return {
-            "output_run_dir": self.output_run_dir,
-            "module_call_match": self.module_call_match,
-            "log_step_ids": self.log_step_ids,
-            "max_tensor_size": self.max_tensor_size,
-            "enabled": self.enabled,
-            "device_names": self.device_names
-        }
-
-    @classmethod
-    def from_dict(cls, dict_value: dict) -> "IntermediateLoggingConfig":
-        """Parse the CLI value for the speculative config."""
-        return cls(**dict_value)
-
     @property
     def output_run_dir(self) -> str:
         return self._output_run_dir
