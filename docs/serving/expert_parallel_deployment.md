@@ -160,7 +160,7 @@ vllm serve Qwen/Qwen3-30B-A3B \
 
 EPLB uses redundant experts to that need to fit in GPU memory. This means that EPLB may not be a good fit for memory constrained environments or when KV cache space is at a premium.
 
-This overhead equals `NUM_MOE_LAYERS * BYTES_PER_EXPERT * (NUM_TOTAL_EXPERTS + NUM_REDUNDANT_EXPERTS) ÷ NUM_EP_RANKS`. 
+This overhead equals `NUM_MOE_LAYERS * BYTES_PER_EXPERT * (NUM_TOTAL_EXPERTS + NUM_REDUNDANT_EXPERTS) ÷ NUM_EP_RANKS`.
 For DeepSeekV3, this is approximately `2.4 GB` for one redundant expert per rank.
 
 ### Example Command
