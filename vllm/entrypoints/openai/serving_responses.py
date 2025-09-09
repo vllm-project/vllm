@@ -185,7 +185,8 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         request: ResponsesRequest,
         raw_request: Optional[Request] = None,
-    ) -> Union[AsyncGenerator[str, None], ResponsesResponse, ErrorResponse]:
+    ) -> Union[AsyncGenerator[BaseModel, None], ResponsesResponse,
+               ErrorResponse]:
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
@@ -954,7 +955,6 @@ class OpenAIServingResponses(OpenAIServing):
             status_code=HTTPStatus.BAD_REQUEST,
         )
 
-    # TODO: what is this?
     async def _process_simple_streaming_events(
         self,
         request: ResponsesRequest,
@@ -965,8 +965,9 @@ class OpenAIServingResponses(OpenAIServing):
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
         created_time: int,
-        _send_event: Callable[[BaseModel], str],
-    ) -> AsyncGenerator[str, None]:
+        _increment_sequence_number_and_return: Callable[[BaseModel],
+                                                        BaseModel],
+    ) -> AsyncGenerator[BaseModel, None]:
         current_content_index = 0
         current_output_index = 0
         current_item_id = ""
@@ -1003,7 +1004,7 @@ class OpenAIServingResponses(OpenAIServing):
                 if not first_delta_sent:
                     current_item_id = str(uuid.uuid4())
                     if delta_message.reasoning_content:
-                        yield _send_event(
+                        yield _increment_sequence_number_and_return(
                             openai_responses_types.
                             ResponseOutputItemAddedEvent(
                                 type="response.output_item.added",
@@ -1018,7 +1019,7 @@ class OpenAIServingResponses(OpenAIServing):
                                 ),
                             ))
                     else:
-                        yield _send_event(
+                        yield _increment_sequence_number_and_return(
                             openai_responses_types.
                             ResponseOutputItemAddedEvent(
                                 type="response.output_item.added",
@@ -1033,7 +1034,7 @@ class OpenAIServingResponses(OpenAIServing):
                                     status="in_progress",
                                 ),
                             ))
-                    yield _send_event(
+                    yield _increment_sequence_number_and_return(
                         openai_responses_types.ResponseContentPartAddedEvent(
                             type="response.content_part.added",
                             sequence_number=-1,
@@ -1061,7 +1062,7 @@ class OpenAIServingResponses(OpenAIServing):
                     reason_content = ''.join(
                         pm.reasoning_content for pm in previous_delta_messages
                         if pm.reasoning_content is not None)
-                    yield _send_event(
+                    yield _increment_sequence_number_and_return(
                         ResponseReasoningTextDoneEvent(
                             type="response.reasoning_text.done",
                             item_id=current_item_id,
@@ -1083,14 +1084,14 @@ class OpenAIServingResponses(OpenAIServing):
                         id=current_item_id,
                         summary=[],
                     )
-                    yield _send_event(
+                    yield _increment_sequence_number_and_return(
                         ResponseOutputItemDoneEvent(
                             type="response.output_item.done",
                             sequence_number=-1,
                             output_index=current_output_index,
                             item=reasoning_item,
                         ))
-                    yield _send_event(
+                    yield _increment_sequence_number_and_return(
                         openai_responses_types.ResponseOutputItemAddedEvent(
                             type="response.output_item.added",
                             sequence_number=-1,
@@ -1105,7 +1106,7 @@ class OpenAIServingResponses(OpenAIServing):
                         ))
                     current_output_index += 1
                     current_item_id = str(uuid.uuid4())
-                    yield _send_event(
+                    yield _increment_sequence_number_and_return(
                         openai_responses_types.ResponseContentPartAddedEvent(
                             type="response.content_part.added",
                             sequence_number=-1,
@@ -1124,7 +1125,7 @@ class OpenAIServingResponses(OpenAIServing):
                     previous_delta_messages = []
 
                 if delta_message.reasoning_content is not None:
-                    yield _send_event(
+                    yield _increment_sequence_number_and_return(
                         ResponseReasoningTextDeltaEvent(
                             type="response.reasoning_text.delta",
                             sequence_number=-1,
@@ -1134,7 +1135,7 @@ class OpenAIServingResponses(OpenAIServing):
                             delta=delta_message.reasoning_content,
                         ))
                 elif delta_message.content is not None:
-                    yield _send_event(
+                    yield _increment_sequence_number_and_return(
                         openai_responses_types.ResponseTextDeltaEvent(
                             type="response.output_text.delta",
                             sequence_number=-1,
@@ -1157,7 +1158,7 @@ class OpenAIServingResponses(OpenAIServing):
                 reason_content = ''.join(pm.reasoning_content
                                          for pm in previous_delta_messages
                                          if pm.reasoning_content is not None)
-                yield _send_event(
+                yield _increment_sequence_number_and_return(
                     ResponseReasoningTextDoneEvent(
                         type="response.reasoning_text.done",
                         item_id=current_item_id,
@@ -1179,7 +1180,7 @@ class OpenAIServingResponses(OpenAIServing):
                     id=current_item_id,
                     summary=[],
                 )
-                yield _send_event(
+                yield _increment_sequence_number_and_return(
                     ResponseOutputItemDoneEvent(
                         type="response.output_item.done",
                         sequence_number=-1,
@@ -1190,7 +1191,7 @@ class OpenAIServingResponses(OpenAIServing):
                 final_content = ''.join(pm.content
                                         for pm in previous_delta_messages
                                         if pm.content is not None)
-                yield _send_event(
+                yield _increment_sequence_number_and_return(
                     openai_responses_types.ResponseTextDoneEvent(
                         type="response.output_text.done",
                         sequence_number=-1,
@@ -1206,7 +1207,7 @@ class OpenAIServingResponses(OpenAIServing):
                     type="output_text",
                     annotations=[],
                 )
-                yield _send_event(
+                yield _increment_sequence_number_and_return(
                     openai_responses_types.ResponseContentPartDoneEvent(
                         type="response.content_part.done",
                         sequence_number=-1,
@@ -1226,7 +1227,7 @@ class OpenAIServingResponses(OpenAIServing):
                     id=current_item_id,
                     summary=[],
                 )
-                yield _send_event(
+                yield _increment_sequence_number_and_return(
                     ResponseOutputItemDoneEvent(
                         type="response.output_item.done",
                         sequence_number=-1,
@@ -1246,8 +1247,7 @@ class OpenAIServingResponses(OpenAIServing):
         created_time: int,
         _increment_sequence_number_and_return: Callable[[BaseModel],
                                                         BaseModel],
-        #  TODO: this should return the openai_responses_types for streaming
-    ) -> AsyncGenerator[str, None]:
+    ) -> AsyncGenerator[BaseModel, None]:
         current_content_index = 0  # FIXME: this number is never changed
         current_output_index = 0
         current_item_id = request.request_id
@@ -1616,7 +1616,7 @@ class OpenAIServingResponses(OpenAIServing):
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
         created_time: Optional[int] = None,
-    ) -> AsyncGenerator[str, None]:
+    ) -> AsyncGenerator[BaseModel, None]:
         # TODO:
         # 1. Handle disconnect
 
@@ -1677,7 +1677,6 @@ class OpenAIServingResponses(OpenAIServing):
                 if False:
                     yield
 
-            # TODO: this is not generating the correct final output
             final_response = await self.responses_full_generator(
                 request,
                 sampling_params,
