@@ -282,15 +282,10 @@ class AttnFusionPass(VllmInductorPass):
                 "were found in CompilationConfig.static_forward_context "
                 "so no fusion patterns were registered.")
 
+    @VllmInductorPass.time_and_log
     def __call__(self, graph: torch.fx.graph.Graph) -> None:
-        self.begin()
-        self.dump_graph(graph, "before_attn_fusion")
-
         count = self.patterns.apply(graph)
-
         logger.debug("Fused quantization onto %s attention nodes", count)
-        self.dump_graph(graph, "after_attn_fusion")
-        self.end_and_log()
 
     def uuid(self):
         return VllmInductorPass.hash_source(self, AttentionQuantPattern,

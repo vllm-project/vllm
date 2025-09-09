@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+import functools
 import time
+from typing import Optional
 
 import torch
 from torch._dynamo.utils import lazy_format_graph_code
@@ -19,6 +20,8 @@ class VllmInductorPass(InductorPass):
     An inductor pass with access to vLLM PassConfig.
     It provides timing, logging, and dumping utilities.
     """
+    dump_prefix: Optional[int] = None
+    """Keep track of pass index for debug dump ordering."""
 
     def __init__(self, config: VllmConfig):
         self.pass_config = config.compilation_config.pass_config
@@ -28,8 +31,24 @@ class VllmInductorPass(InductorPass):
             else None
         self.pass_name = self.__class__.__name__
 
+    @staticmethod
+    def time_and_log(call_fn):
+
+        @functools.wraps(call_fn)
+        def wrapped(self: VllmInductorPass, graph: torch.fx.Graph):
+            self.begin()
+            self.dump_graph(graph, "before")
+            call_fn(self, graph)
+            self.dump_graph(graph, "after")
+            self.end_and_log()
+
+        return wrapped
+
     def dump_graph(self, graph: torch.fx.Graph, stage: str):
-        lazy_format_graph_code(stage, graph.owning_module)
+        i = VllmInductorPass.dump_prefix
+        i_str = "" if i is None else f".{i}"
+        lazy_format_graph_code(f"post_grad{i_str}.{self.pass_name}.{stage}",
+                               graph.owning_module)
 
     def begin(self):
         self._start_time = time.perf_counter_ns()

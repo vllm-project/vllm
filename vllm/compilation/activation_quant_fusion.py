@@ -176,16 +176,11 @@ class ActivationQuantFusionPass(VllmInductorPass):
             pattern_silu_mul_nvfp4 = SiluMulNvfp4QuantPattern()
             pattern_silu_mul_nvfp4.register(self.patterns)
 
+    @VllmInductorPass.time_and_log
     def __call__(self, graph: torch.fx.Graph):
-        self.begin()
-        self.dump_graph(graph, "before_act_quant_fusion")
-
         count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns in ActivationQuantFusionPass",
                      count)
-
-        self.dump_graph(graph, "after_act_quant_fusion")
-        self.end_and_log()
 
     def uuid(self):
         return VllmInductorPass.hash_source(self, ActivationQuantPattern,

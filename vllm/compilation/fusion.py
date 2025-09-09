@@ -368,14 +368,10 @@ class RMSNormQuantFusionPass(VllmInductorPass):
             FusedAddRMSNormDynamicQuantPattern(epsilon, FP8_DTYPE).register(
                 self.patterns)
 
+    @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph):
-        self.begin()
-        self.dump_graph(graph, "before_fusion")
-
         count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", count)
-        self.dump_graph(graph, "after_fusion")
-        self.end_and_log()
 
     def uuid(self) -> Any:
         return self.hash_source(self, RMSNormQuantPattern,

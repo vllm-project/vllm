@@ -475,10 +475,7 @@ class SequenceParallelismPass(VllmInductorPass):
         tp_size = get_tensor_model_parallel_world_size()
         return shape is not None and shape % tp_size == 0
 
+    @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph):
-        self.begin()
-        self.dump_graph(graph, "before_sequence_parallelism_pass")
         count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns with sequence parallelism", count)
-        self.dump_graph(graph, "after_sequence_parallelism_pass")
-        self.end_and_log()

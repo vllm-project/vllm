@@ -11,6 +11,7 @@ from vllm.platforms import current_platform
 from vllm.utils import set_env_var
 
 from .post_cleanup import PostCleanupPass
+from .vllm_inductor_pass import VllmInductorPass
 
 if current_platform.is_cuda_alike():
     from .activation_quant_fusion import ActivationQuantFusionPass
@@ -66,17 +67,22 @@ class PostGradPassManager(CustomGraphPass):
 
     @with_pattern_match_debug
     def __call__(self, graph: fx.Graph):
+        VllmInductorPass.dump_prefix = 0  # reset dump index
+
         shape = get_pass_context().runtime_shape
         for pass_ in self.passes:
             if pass_.is_applicable_for_shape(shape):
                 pass_(graph)
+                VllmInductorPass.dump_prefix += 1
 
         # post-cleanup goes before fix_functionalization
         # because it requires a functional graph
         self.post_cleanup(graph)
+        VllmInductorPass.dump_prefix += 1
 
         # always run fix_functionalization last
         self.fix_functionalization(graph)
+        VllmInductorPass.dump_prefix = None  # Cleanup index
 
     def configure(self, config: VllmConfig):
         self.pass_config = config.compilation_config.pass_config

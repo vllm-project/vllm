@@ -13,6 +13,7 @@ class PostCleanupPass(VllmInductorPass):
     a topologically sorted graph, and there may be unused nodes left around.
     """
 
+    @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
         from torch._inductor.pattern_matcher import stable_topological_sort
         stable_topological_sort(graph)

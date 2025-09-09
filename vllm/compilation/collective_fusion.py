@@ -383,13 +383,10 @@ class AsyncTPPass(VllmInductorPass):
         tp_size = get_tensor_model_parallel_world_size()
         return shape is not None and shape % tp_size == 0
 
+    @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph):
-        self.begin()
-        self.dump_graph(graph, "before_async_tp_pass")
         count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns with async TP pass.", count)
-        self.dump_graph(graph, "after_async_tp_pass")
-        self.end_and_log()
 
 
 if flashinfer_comm is not None:
@@ -1172,15 +1169,14 @@ class AllReduceFusionPass(VllmInductorPass):
 
         self.disabled = False
 
+    @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph):
         if self.disabled:
+            logger.debug("AllReduceFusionPass disabled")
             return
-        self.begin()
-        self.dump_graph(graph, "before_all_reduce_fusion_pass")
+
         count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", count)
-        self.dump_graph(graph, "after_all_reduce_fusion_pass")
-        self.end_and_log()
 
     def __del__(self):
         if self.disabled:
