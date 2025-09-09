@@ -2396,7 +2396,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             # Get metadata for this request.
             request = self.requests[req_id]
-            # TODO: Make sure this doesn't break things.
             if request.prompt_token_ids is None:
                 # Prompt logprobs is incompatible with prompt embeddings
                 continue
