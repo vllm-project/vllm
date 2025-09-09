@@ -1631,7 +1631,7 @@ class OpenAIServingResponses(OpenAIServing):
             if hasattr(event, 'sequence_number'):
                 event.sequence_number = sequence_number
             sequence_number += 1
-            return event.model_dump_json(indent=None)
+            return event
 
         async with AsyncExitStack() as exit_stack:
             processer = None
