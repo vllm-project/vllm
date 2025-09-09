@@ -515,9 +515,7 @@ class InputBatch:
         self.token_ids_cpu[i1, ...] = self.token_ids_cpu[i2, ...]
         self.token_ids_cpu[i2, ...] = tmp
 
-        tmp_is_token_ids = self.is_token_ids[i1, ...].clone()
-        self.is_token_ids[i1, ...] = self.is_token_ids[i2, ...]
-        self.is_token_ids[i2, ...] = tmp_is_token_ids
+        self.is_token_ids[[i1, i2], ...] = self.is_token_ids[[i2, i1], ...]
 
         # Swap prompt embeddings if they exist
         embeds_i1 = self.req_prompt_embeds.get(i1)
