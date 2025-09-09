@@ -878,7 +878,6 @@ class FusedMoEModularKernel(torch.nn.Module):
                 self.fused_experts.quant_config,
             )
 
-            # assert self.shared_experts is not None
             if self.shared_experts is not None:
                 shared_output = self.shared_experts(a1)
 

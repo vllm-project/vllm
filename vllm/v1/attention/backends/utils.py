@@ -29,7 +29,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 from vllm.logger import init_logger
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-from vllm.compilation.ubatch_utils import UbatchSlice
+from vllm.v1.worker.ubatch_utils import UbatchSlice
 
 logger = init_logger(__name__)
 _KV_CACHE_LAYOUT_OVERRIDE = None
