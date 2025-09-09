@@ -108,6 +108,10 @@ class CacheConfig:
     num_cpu_blocks: Optional[int] = field(default=None, init=False)
     """The number of blocks to allocate for CPU memory."""
 
+    # Will be set after model loading.
+    kv_bytes_per_block: Optional[int] = field(default=None, init=False)
+    """The number of KV bytes per block, across all workers."""
+
     kv_sharing_fast_prefill: bool = False
     """This feature is work in progress and no prefill optimization takes place
     with this flag enabled currently.
