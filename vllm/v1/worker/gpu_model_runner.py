@@ -56,6 +56,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         GiB_bytes, LazyLoader, cdiv, check_use_alibi,
                         get_dtype_size, is_pin_memory_available, round_up,
                         supports_dynamo)
+from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
     create_fast_prefill_custom_backend,
@@ -208,6 +209,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
             model_config)
 
+        # Get valid vocab size
+        self.vocab_size = self.model_config.get_vocab_size()
+        tokenizer = get_tokenizer(
+            tokenizer_name=model_config.tokenizer,
+            trust_remote_code=model_config.trust_remote_code,
+        )
+        if tokenizer != None and self.vocab_size > tokenizer.vocab_size:
+            logger.warning(
+                f"Model vocab size({self.vocab_size}) > "
+                f"Tokenizer vocab size({tokenizer.vocab_size})!")
+            self.vocab_size = tokenizer.vocab_size
+
         # Sampler
         self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
 
@@ -269,7 +282,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             max_num_batched_tokens=self.max_num_tokens,
             device=self.device,
             pin_memory=self.pin_memory,
-            vocab_size=self.model_config.get_vocab_size(),
+            vocab_size=self.vocab_size,
             block_sizes=[self.cache_config.block_size],
             is_spec_decode=bool(self.vllm_config.speculative_config),
             logitsprocs=build_logitsprocs(
@@ -1470,6 +1483,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             indices=out_indices if not skip_out_indices else None,
         )
 
+    def apply_vocab_size(self, vocab_size: int, logits: torch.Tensor):
+        # Get the actual vocabulary size from logits
+        logits_vocab_size = logits.shape[-1]
+
+        # Apply masking only if the actual vocab size exceeds allowed size
+        if logits_vocab_size > vocab_size:
+            # Create mask: True for indices >= self.vocab_size
+            mask = torch.arange(
+                logits_vocab_size, device=logits.device) >= vocab_size
+            # Apply mask to logits (replace invalid positions with -inf)
+            logits.masked_fill_(mask, float("-inf"))
+        return logits
+
     def sync_and_slice_intermediate_tensors(
             self, num_tokens: int, intermediate_tensors: IntermediateTensors,
             sync_self: bool) -> IntermediateTensors:
@@ -1953,6 +1979,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if scheduler_output.grammar_bitmask is not None:
                 self.apply_grammar_bitmask(scheduler_output, logits)
 
+            # Apply vocab mask to logits (replace invalid positions with -inf)
+            logits = self.apply_vocab_size(self.vocab_size, logits)
+
+
         with record_function_or_nullcontext("Sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
@@ -2420,7 +2450,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 return torch.randint_like(
                     self.input_ids.gpu,
                     low=0,
-                    high=self.model_config.get_vocab_size(),
+                    high=self.vocab_size,
                     dtype=input_ids.dtype)
 
             logger.debug_once("Randomizing dummy data for DP Rank")
@@ -3154,7 +3184,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 max_num_batched_tokens=self.max_num_tokens,
                 device=self.device,
                 pin_memory=self.pin_memory,
-                vocab_size=self.model_config.get_vocab_size(),
+                vocab_size=self.vocab_size,
                 block_sizes=block_sizes,
                 is_spec_decode=bool(self.vllm_config.speculative_config),
                 logitsprocs=self.input_batch.logitsprocs,
