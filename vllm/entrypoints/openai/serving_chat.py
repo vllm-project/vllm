@@ -33,8 +33,8 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse, ChatMessage, CompletionTokenUsageInfo,
     DeltaFunctionCall, DeltaMessage, DeltaToolCall, ErrorResponse,
-    FunctionCall, FunctionDefinition, PromptTokenUsageInfo,
-    RequestResponseMetadata, ToolCall, UsageInfo)
+    FunctionCall, FunctionDefinition, RequestResponseMetadata, ToolCall,
+    UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
                                                     clamp_prompt_logprobs)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
@@ -608,11 +608,10 @@ class OpenAIServingChat(OpenAIServing):
                                 completion_tokens=0,
                                 total_tokens=num_prompt_tokens)
                             # Add token details if available
-                            if (self.enable_prompt_tokens_details
-                                    and num_cached_tokens):
-                                chunk.usage.prompt_tokens_details = (
-                                    PromptTokenUsageInfo(
-                                        cached_tokens=num_cached_tokens))
+                            chunk.usage.prompt_tokens_details = (
+                                self._create_prompt_token_usage_info(
+                                    self.enable_prompt_tokens_details,
+                                    num_cached_tokens))
 
                         data = chunk.model_dump_json(exclude_unset=True)
                         yield f"data: {data}\n\n"
@@ -646,12 +645,10 @@ class OpenAIServingChat(OpenAIServing):
                                         completion_tokens=0,
                                         total_tokens=num_prompt_tokens)
                                     # Add token details if available
-                                    if (self.enable_prompt_tokens_details
-                                            and num_cached_tokens):
-                                        chunk.usage.prompt_tokens_details = (
-                                            PromptTokenUsageInfo(
-                                                cached_tokens=num_cached_tokens
-                                            ))
+                                    chunk.usage.prompt_tokens_details = (
+                                        self._create_prompt_token_usage_info(
+                                            self.enable_prompt_tokens_details,
+                                            num_cached_tokens))
 
                                 data = chunk.model_dump_json(
                                     exclude_unset=True)
@@ -1105,11 +1102,10 @@ class OpenAIServingChat(OpenAIServing):
                             total_tokens=num_prompt_tokens + completion_tokens,
                         )
                         # Add token details if available
-                        if (self.enable_prompt_tokens_details
-                                and num_cached_tokens):
-                            chunk.usage.prompt_tokens_details = (
-                                PromptTokenUsageInfo(
-                                    cached_tokens=num_cached_tokens))
+                        chunk.usage.prompt_tokens_details = (
+                            self._create_prompt_token_usage_info(
+                                self.enable_prompt_tokens_details,
+                                num_cached_tokens))
                         # Add completion token details for reasoning tokens
                         # (gpt_oss/harmony only)
                         if self.use_harmony and num_reasoning_tokens[i] > 0:
@@ -1128,9 +1124,9 @@ class OpenAIServingChat(OpenAIServing):
                                         completion_tokens=completion_tokens,
                                         total_tokens=num_prompt_tokens +
                                         completion_tokens)
-                if self.enable_prompt_tokens_details and num_cached_tokens:
-                    final_usage.prompt_tokens_details = PromptTokenUsageInfo(
-                        cached_tokens=num_cached_tokens)
+                final_usage.prompt_tokens_details = (
+                    self._create_prompt_token_usage_info(
+                        self.enable_prompt_tokens_details, num_cached_tokens))
 
                 final_usage_chunk = ChatCompletionStreamResponse(
                     id=request_id,
@@ -1439,9 +1435,8 @@ class OpenAIServingChat(OpenAIServing):
                           completion_tokens=num_generated_tokens,
                           total_tokens=num_prompt_tokens +
                           num_generated_tokens)
-        if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
-            usage.prompt_tokens_details = PromptTokenUsageInfo(
-                cached_tokens=final_res.num_cached_tokens)
+        usage.prompt_tokens_details = self._create_prompt_token_usage_info(
+            self.enable_prompt_tokens_details, final_res.num_cached_tokens)
 
         request_metadata.final_usage_info = usage
 

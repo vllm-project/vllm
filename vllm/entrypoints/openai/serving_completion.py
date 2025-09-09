@@ -23,7 +23,6 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               CompletionResponseStreamChoice,
                                               CompletionStreamResponse,
                                               ErrorResponse,
-                                              PromptTokenUsageInfo,
                                               RequestResponseMetadata,
                                               UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
@@ -453,11 +452,10 @@ class OpenAIServingCompletion(OpenAIServing):
                             total_tokens=prompt_tokens + completion_tokens,
                         )
                         # Add token details if available
-                        if (self.enable_prompt_tokens_details
-                                and num_cached_tokens):
-                            chunk.usage.prompt_tokens_details = (
-                                PromptTokenUsageInfo(
-                                    cached_tokens=num_cached_tokens))
+                        chunk.usage.prompt_tokens_details = (
+                            self._create_prompt_token_usage_info(
+                                self.enable_prompt_tokens_details,
+                                num_cached_tokens))
 
                     response_json = chunk.model_dump_json(exclude_unset=False)
                     yield f"data: {response_json}\n\n"
@@ -470,9 +468,9 @@ class OpenAIServingCompletion(OpenAIServing):
                 total_tokens=total_prompt_tokens + total_completion_tokens,
             )
 
-            if self.enable_prompt_tokens_details and num_cached_tokens:
-                final_usage_info.prompt_tokens_details = PromptTokenUsageInfo(
-                    cached_tokens=num_cached_tokens)
+            final_usage_info.prompt_tokens_details = (
+                self._create_prompt_token_usage_info(
+                    self.enable_prompt_tokens_details, num_cached_tokens))
 
             if include_usage:
                 final_usage_chunk = CompletionStreamResponse(
@@ -586,10 +584,9 @@ class OpenAIServingCompletion(OpenAIServing):
             total_tokens=num_prompt_tokens + num_generated_tokens,
         )
 
-        if (self.enable_prompt_tokens_details and last_final_res
-                and last_final_res.num_cached_tokens):
-            usage.prompt_tokens_details = PromptTokenUsageInfo(
-                cached_tokens=last_final_res.num_cached_tokens)
+        usage.prompt_tokens_details = self._create_prompt_token_usage_info(
+            self.enable_prompt_tokens_details,
+            last_final_res.num_cached_tokens if last_final_res else None)
 
         request_metadata.final_usage_info = usage
         if final_res_batch:
