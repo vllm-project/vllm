@@ -20,7 +20,7 @@ from typing import Callable, Optional
 
 import torch
 
-from vllm.config import KVTransferConfig
+from vllm.config.kv_transfer import KVTransferConfig
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.kv_transfer.kv_pipe.base import KVPipeBase
 from vllm.distributed.utils import StatelessProcessGroup
