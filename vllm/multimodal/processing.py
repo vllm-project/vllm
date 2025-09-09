@@ -1437,10 +1437,17 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             ]
             for modality, items_is_cached in mm_is_cached.items()
         }
-        mm_missing_data = {
-            modality: [mm_data_items[modality][idx] for idx in idxs]
-            for modality, idxs in mm_missing_idxs.items()
-        }
+        mm_missing_data = {}
+        for modality, idxs in mm_missing_idxs.items():
+            mm_missing_data[modality] = []
+            for idx in idxs:
+                data = mm_data_items[modality][idx]
+                if data is None:
+                    raise ValueError(
+                        f"Cache miss for {modality} at index {idx} but data is not provided."
+                    )
+                else:
+                    mm_missing_data[modality].append(data)
 
         return self._to_mm_items(mm_missing_data)
 

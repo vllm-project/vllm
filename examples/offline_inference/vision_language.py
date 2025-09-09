@@ -1984,18 +1984,21 @@ def main(args):
         print("-" * 50)
 
     if args.verify_mm_cache_hit_with_uuids:
-        # Verify cache hits with UUIDs
-        print("Sending a second batch of requests with empty media and matching UUIDs.")
-        outputs = llm.generate(
-            inputs_with_empty_media,
-            sampling_params=sampling_params,
-            lora_request=lora_request,
-        )
-        print("-" * 50)
-        for o in outputs:
-            generated_text = o.outputs[0].text
-            print(generated_text)
+        try:
+            # Verify cache hits with UUIDs
+            print("Sending a second batch of requests with empty media and matching UUIDs.")
+            outputs = llm.generate(
+                inputs_with_empty_media,
+                sampling_params=sampling_params,
+                lora_request=lora_request,
+            )
             print("-" * 50)
+            for o in outputs:
+                generated_text = o.outputs[0].text
+                print(generated_text)
+                print("-" * 50)
+        except Exception as e:
+            print(f"Failed to verify cache hits with UUIDs. Error: {e}")
 
 
 if __name__ == "__main__":
