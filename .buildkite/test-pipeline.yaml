@@ -609,7 +609,7 @@ steps:
     - pytest -v -s models/language -m "core_model and slow_test"
 
 # Shard hybrid language model tests
-- label: Language Models Test Shard 0 (Hybrid)
+- label: Hybrid Language Models Test Shard 0
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
@@ -623,7 +623,7 @@ steps:
     - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
     - pytest -v -s --shard-count=4 --shard-index=0 models/language/generation -m hybrid_model
 
-- label: Language Models Test Shard 1 (Hybrid)
+- label: Hybrid Language Models Test Shard 1
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
@@ -637,7 +637,7 @@ steps:
     - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
     - pytest -v -s --shard-count=4 --shard-index=1 models/language/generation -m hybrid_model
 
-- label: Language Models Test Shard 2 (Hybrid)
+- label: Hybrid Language Models Test Shard 2
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
@@ -651,7 +651,7 @@ steps:
     - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
     - pytest -v -s --shard-count=4 --shard-index=2 models/language/generation -m hybrid_model
 
-- label: Language Models Test Shard 3 (Hybrid)
+- label: Hybrid Language Models Test Shard 3
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
