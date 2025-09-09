@@ -258,6 +258,7 @@ class DeepseekV2MoE(nn.Module):
                                                 self.routed_scaling_factor)
 
             self.experts = SharedFusedMoE(
+                use_overlapped=True,
                 shared_experts=self.shared_experts,
                 fused_output_scaling_factor=fused_output_scaling_factor,
                 shared_output_scaling_factor=shared_output_scaling_factor,
