@@ -188,7 +188,7 @@ class DefaultModelLoader(BaseModelLoader):
                     weights_iterator = safetensors_weights_iterator(
                         hf_weights_files,
                         self.load_config.use_tqdm_on_load,
-                        self.load_config.eager_load,
+                        self.load_config.map_location,
                     )
         else:
             if extra_config.get("enable_multithread_load"):
