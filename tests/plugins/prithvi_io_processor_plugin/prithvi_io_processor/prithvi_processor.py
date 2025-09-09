@@ -8,7 +8,7 @@ import datetime
 import os
 import tempfile
 import urllib.request
-from collections.abc import AsyncGenerator, Sequence
+from collections.abc import Sequence
 from typing import Any, Optional, Union
 
 import albumentations
@@ -234,6 +234,8 @@ def load_image(
 
 class PrithviMultimodalDataProcessor(IOProcessor):
 
+    indices = [0, 1, 2, 3, 4, 5]
+
     def __init__(self, vllm_config: VllmConfig):
 
         super().__init__(vllm_config)
@@ -359,14 +361,6 @@ class PrithviMultimodalDataProcessor(IOProcessor):
 
         return prompts
 
-    async def pre_process_async(
-        self,
-        prompt: IOProcessorInput,
-        request_id: Optional[str] = None,
-        **kwargs,
-    ) -> Union[PromptType, Sequence[PromptType]]:
-        return self.pre_process(prompt, request_id, **kwargs)
-
     def post_process(
         self,
         model_output: Sequence[PoolingRequestOutput],
@@ -420,30 +414,3 @@ class PrithviMultimodalDataProcessor(IOProcessor):
                                   format="tiff",
                                   data=out_data,
                                   request_id=request_id)
-
-    async def post_process_async(
-        self,
-        model_output: AsyncGenerator[tuple[int, PoolingRequestOutput]],
-        request_id: Optional[str] = None,
-        **kwargs,
-    ) -> IOProcessorOutput:
-        collected_output = [item async for i, item in model_output]
-        return self.post_process(collected_output, request_id, **kwargs)
-
-
-class PrithviMultimodalDataProcessorIndia(PrithviMultimodalDataProcessor):
-
-    def __init__(self, vllm_config: VllmConfig):
-
-        super().__init__(vllm_config)
-
-        self.indices = [1, 2, 3, 8, 11, 12]
-
-
-class PrithviMultimodalDataProcessorValencia(PrithviMultimodalDataProcessor):
-
-    def __init__(self, vllm_config: VllmConfig):
-
-        super().__init__(vllm_config)
-
-        self.indices = [0, 1, 2, 3, 4, 5]
