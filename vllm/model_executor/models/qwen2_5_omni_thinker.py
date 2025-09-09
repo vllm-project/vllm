@@ -809,6 +809,9 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             prefix=maybe_prefix(prefix, "language_model"),
             hf_config=thinker_config.text_config,
             architectures=["Qwen2ForCausalLM"],
+            # Avoid adding  pooler modules to the language model when using it
+            # as a pool model.
+            convert_type="none",
         )
 
         self.make_empty_intermediate_tensors = (

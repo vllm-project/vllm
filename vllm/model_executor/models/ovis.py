@@ -413,6 +413,9 @@ class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
         self.llm = init_vllm_registered_model(
             vllm_config=vllm_config.with_hf_config(config.get_text_config()),
             prefix=maybe_prefix(prefix, "llm"),
+            # Avoid adding  pooler modules to the language model when using it
+            # as a pool model.
+            convert_type="none",
         )
 
         self.visual_tokenizer = VisualTokenizer(

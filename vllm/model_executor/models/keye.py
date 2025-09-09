@@ -1300,6 +1300,9 @@ class BaseKeyeModule(nn.Module):
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "language_model"),
             architectures=["Qwen3ForCausalLM"],
+            # Avoid adding  pooler modules to the language model when using it
+            # as a pool model.
+            convert_type="none",
         )
 
         self.make_empty_intermediate_tensors = (

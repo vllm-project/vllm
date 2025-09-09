@@ -573,6 +573,9 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
             # can automatically apply embedding wrapper if this model is
             # initialized as an embedding model
             architectures=["LlamaForCausalLM"],
+            # Avoid adding  pooler modules to the language model when using it
+            # as a pool model.
+            convert_type="none",
         )
 
         self.make_empty_intermediate_tensors = (

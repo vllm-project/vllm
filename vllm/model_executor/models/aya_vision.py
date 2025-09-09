@@ -337,7 +337,11 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
             hf_config=config.text_config,
             prefix=maybe_prefix(prefix, "model"),
             # Cohere2ForCausalLM and CohereForCausalLM are the same on vllm
-            architectures=["Cohere2ForCausalLM"])
+            architectures=["Cohere2ForCausalLM"],
+            # Avoid adding  pooler modules to the language model when using it
+            # as a pool model.
+            convert_type="none",
+        )
 
     @property
     def dtype(self):

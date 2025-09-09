@@ -435,6 +435,9 @@ class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal,
             hf_config=config.
             text_config,  # Use text_config from Tarsier's main config
             prefix=maybe_prefix(prefix, "language_model"),
+            # Avoid adding  pooler modules to the language model when using it
+            # as a pool model.
+            convert_type="none",
         )
         self.register_buffer('image_newline_idx_tensor',
                              torch.tensor([config.image_newline_idx],

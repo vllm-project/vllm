@@ -945,6 +945,9 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "language_model"),
             architectures=["Qwen2ForCausalLM"],
+            # Avoid adding  pooler modules to the language model when using it
+            # as a pool model.
+            convert_type="none",
         )
 
         self.make_empty_intermediate_tensors = (

@@ -43,12 +43,13 @@ def initialize_model(
     prefix: str = "",
     model_class: Optional[type[nn.Module]] = None,
     model_config: Optional[ModelConfig] = None,
+    convert_type: Optional[str] = None,
 ) -> nn.Module:
     """Initialize a model with the given configurations."""
     if model_config is None:
         model_config = vllm_config.model_config
     if model_class is None:
-        model_class, _ = get_model_architecture(model_config)
+        model_class, _ = get_model_architecture(model_config, convert_type)
 
     if vllm_config.quant_config is not None:
         configure_quant_config(vllm_config.quant_config, model_class)
@@ -166,7 +167,9 @@ def device_loading_context(module: torch.nn.Module,
 
 
 def get_model_architecture(
-        model_config: ModelConfig) -> tuple[type[nn.Module], str]:
+    model_config: ModelConfig,
+    convert_type: Optional[str] = None,
+) -> tuple[type[nn.Module], str]:
     architectures = getattr(model_config.hf_config, "architectures", [])
 
     model_cls, arch = model_config.registry.resolve_model_cls(
@@ -182,7 +185,7 @@ def get_model_architecture(
                 "implementation. Some features may not be supported and "
                 "performance may not be optimal.", arch)
 
-    convert_type = model_config.convert_type
+    convert_type = convert_type or model_config.convert_type
     if convert_type == "none":
         pass
     elif convert_type == "embed":

@@ -298,6 +298,7 @@ def init_vllm_registered_model(
     prefix: str = "",
     hf_config: Optional[PretrainedConfig] = None,
     architectures: Optional[list[str]] = None,
+    convert_type: Optional[str] = None,
 ) -> nn.Module:
     """
     Helper function to initialize an inner model registered to vLLM,
@@ -313,7 +314,9 @@ def init_vllm_registered_model(
         vllm_config = vllm_config.with_hf_config(hf_config,
                                                  architectures=architectures)
 
-    return initialize_model(vllm_config=vllm_config, prefix=prefix)
+    return initialize_model(vllm_config=vllm_config,
+                            prefix=prefix,
+                            convert_type=convert_type)
 
 
 @overload

@@ -528,6 +528,9 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
             vllm_config=vllm_config,
             hf_config=config.text_config,
             prefix=maybe_prefix(prefix, "language_model"),
+            # Avoid adding  pooler modules to the language model when using it
+            # as a pool model.
+            convert_type="none",
         )
 
         self.multi_modal_projector = self._init_mlp1(config)

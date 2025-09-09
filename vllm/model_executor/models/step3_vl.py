@@ -901,7 +901,8 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
             hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language_model"))
+            prefix=maybe_prefix(prefix, "language_model"),
+            convert_type="none")
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)

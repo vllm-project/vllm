@@ -510,6 +510,9 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
             hf_config=config.text_config,
             prefix=maybe_prefix(prefix, "language_model"),
             architectures=["Gemma3ForCausalLM"],
+            # Avoid adding  pooler modules to the language model when using it
+            # as a pool model.
+            convert_type="none",
         )
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.language_model.logits_processor.scale *= logit_scale

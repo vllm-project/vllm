@@ -657,6 +657,9 @@ class MiDashengLMModel(nn.Module, SupportsMultiModal, SupportsPP):
             hf_config=config.text_config,
             prefix=maybe_prefix(prefix, "decoder"),
             architectures=["Qwen2ForCausalLM"],
+            # Avoid adding  pooler modules to the language model when using it
+            # as a pool model.
+            convert_type="none",
         )
 
         self.quant_config = quant_config

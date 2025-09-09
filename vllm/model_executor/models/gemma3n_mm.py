@@ -476,6 +476,9 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal,
             hf_config=config.text_config,
             prefix=maybe_prefix(prefix, "language_model"),
             architectures=["Gemma3nForCausalLM"],
+            # Avoid adding  pooler modules to the language model when using it
+            # as a pool model.
+            convert_type="none",
         )
         self.language_model = cast(Gemma3nForCausalLM, self.language_model)
         # NOTE (NickLucche) In order to be compatible with cudagraph, the

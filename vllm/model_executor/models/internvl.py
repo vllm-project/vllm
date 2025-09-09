@@ -1061,6 +1061,9 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
             vllm_config=vllm_config,
             hf_config=config.text_config,
             prefix=maybe_prefix(prefix, "language_model"),
+            # Avoid adding  pooler modules to the language model when using it
+            # as a pool model.
+            convert_type="none",
         )
 
         self.mlp1 = self._init_mlp1(config)
