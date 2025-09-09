@@ -1159,7 +1159,7 @@ class EngineArgs:
         # Note(hc): In the current implementation of decode context
         # parallel(DCP), tp_size needs to be divisible by dcp_size,
         # because the world size does not change by dcp, it simply
-        # reuse the GPUs of TP group, and split one TP group into
+        # reuses the GPUs of TP group, and split one TP group into
         # tp_size//dcp_size DCP groups.
         assert self.tensor_parallel_size % self.decode_context_parallel_size \
             == 0, (
@@ -1592,20 +1592,12 @@ class EngineArgs:
                 "in low performance due to small KV cache size. Consider "
                 "setting --max-model-len to a smaller value.", max_model_len)
 
-        # if using prefix caching, we must set a hash algo
-        if self.enable_prefix_caching:
-            # Disable prefix caching for multimodal models for VLLM_V0.
-            if model_config.is_multimodal_model:
-                logger.warning(
-                    "--enable-prefix-caching is not supported for multimodal "
-                    "models in V0 and has been disabled.")
-                self.enable_prefix_caching = False
-
-            # VLLM_V0 only supports builtin hash algo for prefix caching.
-            if self.prefix_caching_hash_algo == "sha256":
-                raise ValueError(
-                    "sha256 is not supported for prefix caching in V0 engine. "
-                    "Please use 'builtin'.")
+        # Disable prefix caching for multimodal models for VLLM_V0.
+        if self.enable_prefix_caching and model_config.is_multimodal_model:
+            logger.warning(
+                "--enable-prefix-caching is not supported for multimodal "
+                "models in V0 and has been disabled.")
+            self.enable_prefix_caching = False
 
         # Set max_num_seqs to 256 for VLLM_V0.
         if self.max_num_seqs is None:
