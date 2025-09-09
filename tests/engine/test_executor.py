@@ -25,7 +25,7 @@ class CustomUniExecutor(UniProcExecutor):
                        timeout: Optional[float] = None,
                        args: tuple = (),
                        kwargs: Optional[dict] = None) -> list[Any]:
-        # Drop marker to show that this was ran
+        # Drop marker to show that this was run
         with open(".marker", "w"):
             ...
         return super().collective_rpc(method, timeout, args, kwargs)

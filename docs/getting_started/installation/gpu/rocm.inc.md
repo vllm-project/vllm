@@ -119,7 +119,7 @@ Currently, there are no pre-built ROCm wheels.
     This may take 5-10 minutes. Currently, `pip install .` does not work for ROCm installation.
 
     !!! tip
-        - Triton flash attention is used by default. For benchmarking purposes, it is recommended to run a warm up step before collecting perf numbers.
+        - Triton flash attention is used by default. For benchmarking purposes, it is recommended to run a warm-up step before collecting perf numbers.
         - Triton flash attention does not currently support sliding window attention. If using half precision, please use CK flash-attention for sliding window support.
         - To use CK flash-attention or PyTorch naive attention, please use this flag `export VLLM_USE_TRITON_FLASH_ATTN=0` to turn off triton flash attention.
         - The ROCm version of PyTorch, ideally, should match the ROCm driver version.
