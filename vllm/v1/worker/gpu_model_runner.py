@@ -215,11 +215,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             tokenizer_name=model_config.tokenizer,
             trust_remote_code=model_config.trust_remote_code,
         )
-        if tokenizer != None and self.vocab_size > tokenizer.vocab_size:
+        if tokenizer is not None and self.vocab_size > len(tokenizer):
             logger.warning(
                 f"Model vocab size({self.vocab_size}) > "
-                f"Tokenizer vocab size({tokenizer.vocab_size})!")
-            self.vocab_size = tokenizer.vocab_size
+                f"Tokenizer vocab size({len(tokenizer)})!")
+            self.vocab_size = len(tokenizer)
 
         # Sampler
         self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
