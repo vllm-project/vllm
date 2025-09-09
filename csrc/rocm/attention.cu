@@ -582,8 +582,8 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
   if constexpr (KV_DTYPE != vllm::Fp8KVCacheDataType::kAuto) {
     // multiply by k_scale if fp8 kv cache
     scale2 *= *k_scale;
-    q_max = warpReduceMax(q_max);
 #if defined(__HIP__FP8MFMA__)
+    q_max = warpReduceMax(q_max);
     constexpr float FP8_E4M3_SCALE_TARGET = 224.0f;
     if constexpr (MFMA_TYPE == MFMAType::Fp8)
     {
