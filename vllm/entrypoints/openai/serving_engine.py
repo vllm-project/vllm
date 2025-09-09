@@ -22,7 +22,6 @@ from typing_extensions import TypeIs
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.processor import Processor
 
 if sys.version_info >= (3, 12):
@@ -269,7 +268,7 @@ class OpenAIServing:
     def _process_inputs(
         self,
         request_id: str,
-        engine_prompt: EngineTokensPrompt,
+        engine_prompt: PromptType,
         sampling_params: SamplingParams,
         *,
         lora_request: Optional[LoRARequest],
@@ -1081,6 +1080,7 @@ class OpenAIServing:
         **kwargs,
     ):
         orig_priority = priority
+        from vllm.v1.engine.async_llm import AsyncLLM
         while True:
             self._log_inputs(
                 request_id,
