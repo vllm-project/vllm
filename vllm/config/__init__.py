@@ -88,18 +88,6 @@ logger = init_logger(__name__)
 DataclassInstanceT = TypeVar("DataclassInstanceT", bound=DataclassInstance)
 
 
-def _validate_quantization_method(value: Any) -> Any:
-    """Shared validation logic for quantization method strings.
-    
-    Handles empty strings, dots, and converts to lowercase.
-    """
-    if isinstance(value, str) and value.strip() == "":
-        return None
-    if isinstance(value, str) and value.strip() == ".":
-        return None
-    if isinstance(value, str):
-        return value.lower()
-    return value
 
 
 TaskOption = Literal["auto", "generate", "embedding", "embed", "classify",
@@ -802,12 +790,6 @@ class ModelConfig:
         self._verify_quantization()
         self._verify_cuda_graph()
         self._verify_bnb_config()
-
-    @field_validator("quantization", mode="before")
-    @classmethod
-    def validate_quantization_before(cls, value: Any) -> Any:
-        """Handle empty quantization method string."""
-        return _validate_quantization_method(value)
 
     @model_validator(mode="after")
     def validate_model_config_after(self: "ModelConfig") -> "ModelConfig":
@@ -2024,12 +2006,6 @@ class SpeculativeConfig:
     draft_parallel_config: SkipValidation[
         ParallelConfig] = None  # type: ignore
     """The parallel configuration for the draft model initialized internal."""
-
-    @field_validator("quantization", mode="before")
-    @classmethod
-    def validate_quantization_before(cls, value: Any) -> Any:
-        """Handle empty quantization method string."""
-        return _validate_quantization_method(value)
 
     def compute_hash(self) -> str:
         """
