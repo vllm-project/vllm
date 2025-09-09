@@ -28,7 +28,6 @@ from vllm.entrypoints.openai.serving_engine import (EmbeddingServeContext,
                                                     TextTokensPrompt)
 # yapf: enable
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.inputs.data import EmbedsPrompt as EngineEmbedsPrompt
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import (EmbeddingOutput, EmbeddingRequestOutput,
@@ -290,7 +289,7 @@ class EmbeddingMixin(OpenAIServing):
     async def _create_single_prompt_generator(
         self,
         ctx: EmbeddingServeContext,
-        engine_prompt: Union[EngineTokensPrompt, EngineEmbedsPrompt],
+        engine_prompt: EngineTokensPrompt,
         pooling_params: PoolingParams,
         trace_headers: Optional[Mapping[str, str]],
         prompt_index: int,
@@ -302,12 +301,6 @@ class EmbeddingMixin(OpenAIServing):
                          engine_prompt,
                          params=pooling_params,
                          lora_request=ctx.lora_request)
-
-        # Mypy has an existing bug related to inferring the variance
-        # of TypedDicts with `builtins.enumerate`:
-        # https://github.com/python/mypy/issues/8586#issuecomment-2867698435
-        engine_prompt = cast(Union[EngineTokensPrompt, EngineEmbedsPrompt],
-                             engine_prompt)
 
         # Return the original generator without wrapping
         return self.engine_client.encode(
@@ -375,12 +368,8 @@ class EmbeddingMixin(OpenAIServing):
                         continue
 
                 # Normal processing for short prompts or non-token prompts
-                # Cast engine_prompt to the expected type for mypy
-                engine_prompt_typed = cast(
-                    Union[EngineTokensPrompt, EngineEmbedsPrompt],
-                    engine_prompt)
                 generator = await self._create_single_prompt_generator(
-                    ctx, engine_prompt_typed, pooling_params, trace_headers, i)
+                    ctx, engine_prompt, pooling_params, trace_headers, i)
                 generators.append(generator)
 
             from vllm.utils import merge_async_iterators
