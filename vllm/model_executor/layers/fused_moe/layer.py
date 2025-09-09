@@ -716,6 +716,7 @@ def determine_expert_map(
     # Create a tensor of size num_experts filled with -1
     expert_map = torch.full((global_num_experts, ), -1, dtype=torch.int32)
 
+    # Create an expert map for the local experts
     if round_robin_expert_placement:
         local_log_experts = torch.arange(ep_rank,
                                          global_num_experts,
@@ -726,7 +727,6 @@ def determine_expert_map(
                                                      local_num_experts,
                                                      dtype=torch.int32)
     else:
-        # Create a expert map for the local experts
         start_idx = ep_rank * base_experts + min(ep_rank, remainder)
         expert_map[start_idx:start_idx + local_num_experts] = torch.arange(
             0, local_num_experts, dtype=torch.int32)
