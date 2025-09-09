@@ -264,6 +264,7 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
         prompt_text: Optional[str] = None,
+        cache_hit_threshold: Optional[float] = None,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
@@ -294,6 +295,7 @@ class AsyncLLM(EngineClient):
                 trace_headers,
                 priority,
                 data_parallel_rank,
+                cache_hit_threshold=cache_hit_threshold,
             )
             prompt_text = prompt if isinstance(prompt, str) else prompt.get("prompt")
 
@@ -352,6 +354,7 @@ class AsyncLLM(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
+        cache_hit_threshold: Optional[float] = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -404,6 +407,7 @@ class AsyncLLM(EngineClient):
                 priority=priority,
                 data_parallel_rank=data_parallel_rank,
                 prompt_text=prompt_text,
+                cache_hit_threshold=cache_hit_threshold,
             )
 
             # The output_handler task pushes items into the queue.
@@ -536,6 +540,7 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
         truncate_prompt_tokens: Optional[int] = None,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
+        cache_hit_threshold: Optional[float] = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -573,6 +578,7 @@ class AsyncLLM(EngineClient):
                 tokenization_kwargs=tokenization_kwargs,
                 trace_headers=trace_headers,
                 priority=priority,
+                cache_hit_threshold=cache_hit_threshold,
             )
 
             # The output_handler task pushes items into the queue.
