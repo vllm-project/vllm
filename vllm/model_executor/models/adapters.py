@@ -420,6 +420,7 @@ def load_weights_using_from_2_way_softmax(
     from vllm.model_executor.models.utils import AutoWeightsLoader
 
     model_config = model.vllm_config.model_config
+
     tokens = getattr(model.config, "classifier_from_token", [])
     tokens = cast(list[int], tokens)
     assert len(tokens) == 2
@@ -427,9 +428,10 @@ def load_weights_using_from_2_way_softmax(
     if model.config.tie_word_embeddings:
         model.lm_head = model.model.embed_tokens
     else:
+        quant_config = model.vllm_config.quant_config
         model.lm_head = ParallelLMHead(model.config.vocab_size,
                                        model.config.hidden_size,
-                                       quant_config=model.quant_config)
+                                       quant_config=quant_config)
 
     loader = AutoWeightsLoader(model)
     loaded_weights = loader.load_weights(weights)
@@ -473,9 +475,10 @@ def load_weights_no_post_processing(model,
     if model.config.tie_word_embeddings:
         model.lm_head = model.model.embed_tokens
     else:
+        quant_config = model.vllm_config.quant_config
         model.lm_head = ParallelLMHead(model.config.vocab_size,
                                        model.config.hidden_size,
-                                       quant_config=model.quant_config)
+                                       quant_config=quant_config)
 
     loader = AutoWeightsLoader(model)
     loaded_weights = loader.load_weights(weights)
