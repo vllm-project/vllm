@@ -42,8 +42,10 @@ def decode_value(value: AnyValue):
             return decoder(value)
     raise ValueError(f"Couldn't decode value: {value}")
 
+
 def decode_attributes(attributes: Iterable[KeyValue]):
     return {kv.key: decode_value(kv.value) for kv in attributes}
+
 
 class FakeTraceService(TraceServiceServicer):
 
@@ -55,6 +57,7 @@ class FakeTraceService(TraceServiceServicer):
         self.request = request
         self.evt.set()
         return ExportTraceServiceResponse()
+
 
 @pytest.fixture
 def trace_service() -> Generator[FakeTraceService, None, None]:
@@ -68,6 +71,7 @@ def trace_service() -> Generator[FakeTraceService, None, None]:
     yield service
 
     server.stop(None)
+
 
 def test_traces(
     monkeypatch: pytest.MonkeyPatch,
@@ -110,14 +114,23 @@ def test_traces(
         attributes = decode_attributes(
             request.resource_spans[0].scope_spans[0].spans[0].attributes)
         # assert attributes.get(SpanAttributes.GEN_AI_RESPONSE_MODEL) == model
-        assert attributes.get(SpanAttributes.GEN_AI_REQUEST_ID) == outputs[0].request_id
-        assert attributes.get(SpanAttributes.GEN_AI_REQUEST_TEMPERATURE) == sampling_params.temperature
-        assert attributes.get(SpanAttributes.GEN_AI_REQUEST_TOP_P) == sampling_params.top_p
-        assert attributes.get(SpanAttributes.GEN_AI_REQUEST_MAX_TOKENS) == sampling_params.max_tokens
-        assert attributes.get( SpanAttributes.GEN_AI_REQUEST_N) == sampling_params.n
-        assert attributes.get(SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS) == len(outputs[0].prompt_token_ids)
+        assert attributes.get(
+            SpanAttributes.GEN_AI_REQUEST_ID) == outputs[0].request_id
+        assert attributes.get(SpanAttributes.GEN_AI_REQUEST_TEMPERATURE
+                              ) == sampling_params.temperature
+        assert attributes.get(
+            SpanAttributes.GEN_AI_REQUEST_TOP_P) == sampling_params.top_p
+        assert attributes.get(SpanAttributes.GEN_AI_REQUEST_MAX_TOKENS
+                              ) == sampling_params.max_tokens
+        assert attributes.get(
+            SpanAttributes.GEN_AI_REQUEST_N) == sampling_params.n
+        assert attributes.get(
+            SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS) == len(
+                outputs[0].prompt_token_ids)
         completion_tokens = sum(len(o.token_ids) for o in outputs[0].outputs)
-        assert attributes.get(SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS) == completion_tokens
+        assert attributes.get(
+            SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS) == completion_tokens
         assert attributes.get(SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE) > 0
-        assert attributes.get(SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN) > 0
+        assert attributes.get(
+            SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN) > 0
         assert attributes.get(SpanAttributes.GEN_AI_LATENCY_E2E) > 0
