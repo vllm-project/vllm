@@ -258,8 +258,10 @@ class AttnFusionPass(VllmInductorPass):
             pattern_fp8 = AttentionFp8StaticQuantPattern(layer)
             pattern_fp8.register_if_supported(self.patterns)
 
-            pattern_nvfp4 = AttentionNvfp4QuantPattern(layer)
-            pattern_nvfp4.register_if_supported(self.patterns)
+            if current_platform.is_cuda() and hasattr(torch.ops._C,
+                                                      "scaled_fp4_quant"):
+                pattern_nvfp4 = AttentionNvfp4QuantPattern(layer)
+                pattern_nvfp4.register_if_supported(self.patterns)
 
         if len(attn_layers) == 0:
             logger.warning(
