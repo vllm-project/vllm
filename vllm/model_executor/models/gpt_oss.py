@@ -28,7 +28,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.utils import cdiv
 
-from .interfaces import SupportsPP, SupportsEagle3
+from .interfaces import SupportsEagle3, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, extract_layer_index,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
