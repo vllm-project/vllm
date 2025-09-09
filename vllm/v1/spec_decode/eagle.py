@@ -302,12 +302,13 @@ class EagleProposer:
                 common_attn_metadata.seq_lens_cpu - 1
 
             # Compute the slot mapping.
-            block_numbers = positions // self.block_size
+            block_numbers = clamped_positions // self.block_size
             block_ids = common_attn_metadata.block_table_tensor.gather(
                 dim=1, index=block_numbers.view(-1, 1))
             block_ids = block_ids.view(-1)
-            common_attn_metadata.slot_mapping = (block_ids * self.block_size +
-                                                 positions % self.block_size)
+            common_attn_metadata.slot_mapping = (
+                block_ids * self.block_size +
+                clamped_positions % self.block_size)
             # Mask out the slot mappings that exceed the max model length.
             # Otherwise, the KV cache will be inadvertently updated with the
             # padding tokens.
