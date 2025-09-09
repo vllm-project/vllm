@@ -314,6 +314,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                                        dtype=torch.int32)
         self.discard_request_indices = self._make_buffer(self.max_num_reqs,
                                                          dtype=torch.int64)
+        self.num_discarded_requests = 0
 
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
@@ -339,8 +340,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                        self.max_model_len,
                                        self.max_num_tokens),
                                    dtype=np.int64)
-
-        self.num_discarded_requests = 0
 
         # Layer pairings for cross-layer KV sharing.
         # If an Attention layer `layer_name` is in the keys of this dict, it
