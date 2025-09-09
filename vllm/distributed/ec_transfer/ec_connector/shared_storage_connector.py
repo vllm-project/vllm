@@ -64,13 +64,10 @@ class ECSharedStorageConnector(ECConnectorBase):
         super().__init__(vllm_config=vllm_config, role=role)
         # req_id -> index -> mm_hash
         self._mm_datas_need_loads: dict[str, dict[int, MMMeta]] = {}
-        # transfer_config = vllm_config.kv_transfer_config
-        # self._storage_path = transfer_config.get_from_extra_config(
-        #     "shared_storage_path", "/tmp")
-        self.is_producer = (vllm_config.ec_transfer_config.ec_role == 'ec_producer')
-        logger.info(f"Init a ec share storage connector with role {role}")
-        self._storage_path = "/home/n00909098/EPD/refactor/vllm/draft/cache_save"
-        logger.info(vllm_config.ec_transfer_config)
+        transfer_config = vllm_config.ec_transfer_config
+        self.is_producer = (transfer_config.ec_role == 'ec_producer')
+        self._storage_path = transfer_config.get_from_extra_config("shared_storage_path", "/tmp")
+        logger.info(transfer_config)
         logger.info("Shared storage path is %s", self._storage_path)
 
     def start_load_caches(self, **kwargs) -> None:
