@@ -80,7 +80,7 @@ Notes:
 
 Unlike built-in logits processors, custom logits processors may require configuration arguments that are not hard-coded into `SamplingParams` or the vLLM server REST API. To solve this problem, custom logits processors may leverage vLLM [custom arguments](./custom_arguments.md) support to receive configuration settings from the user (although you are also free to design a custom logits processor which utilizes the pre-existing fields in `SamplingParams`.)
 
-## Example Custom Logits Processor Implementation
+### Example Custom Logits Processor Implementation
 
 The contrived example below implements a custom logits processor which consumes a `(num\_requests) \times (vocab\_size)` logits tensor and masks out all tokens except for one (`target_token`) with `float(-inf)`. The logits processor is disabled for any request that does not specify `target_token`. To determine whether the logits processor is enabled and which token to leave unmasked, the logits processor checks `SamplingParams.extra_args` for a `target_token` custom argument associated with each request:
 
@@ -158,25 +158,131 @@ In the rest of this document, we will use `DummyLogitsProcessor` as an example o
 
 The `DummyLogitsProcessor.update_state()` implementation maintains a "sparse" representation of the batched requests in the `self.req_info` dictionary: only those requests which specify a `target_token` value have a key in the dictionary. `update_state()` adjusts the stored request indices and `target_token` values (keys and values respectively in `self.req_info`) in response to Add, Remove and Move operations against the persistent batch.
 
-## Best Practices for Writing Built-In Logits Processors
+### Wrapping an Existing Request-Level Logits Processor
+
+Although the vLLM engine applies logits processors at batch granularity, some users may want to use vLLM with a "request-level" logits processor implementation - an implementation which operates on individual requests. This will be especially true if your logits processor was developed for vLLM version 0, which required it to be a `Callable` (as described [here](https://docs.vllm.ai/en/v0.10.1.1/api/vllm/logits_process.html)) conforming to the following type annotation:
+
+``` python
+RequestLogitsProcessor = Union[
+
+    # (output token ids, logits tensor) -> logits tensor
+    Callable[[list[int], Tensor], Tensor],
+
+    # (prompt token ids, output token ids, logits tensor) -> logits tensor
+    Callable[[list[int], list[int], Tensor], Tensor],
+]
+```
+
+While request-level logits processors are explicitly *not* supported in the vLLM engine, vLLM *does* provide a convenient process to wrap an existing `Callable` request-level logits processor and create a batch-level logits processor that is compatible with vLLM. The `Callable` must conform to the type annotation above; if your request-level logits processor has a different interface, then in order to wrap it, you may need to modify it or implement an additional wrapper layer to comply with the interface specification above.
+
+You can wrap the request-level processor by subclassing `AdapterLogitsProcessor` as shown in the example below (in this example, `DummyPerReqLogitsProcessor` is a stand-in for your request-level logits processor which needs to be wrapped.) Override `AdapterLogitsProcessor.is_argmax_invariant(self)` to accurately reflect whether your request-level logits processor may impact which token has the highest-value logit. Override `AdapterLogitsProcessor.new_req_logits_processor(self,params)` to create a new request-level logits processor instance from a `SamplingParams` instance:
+
+??? code "Example of Wrapping a Request-Level Logits Processor"
+
+    ``` python
+    ...
+
+    from vllm.v1.sample.logits_processor import (
+        AdapterLogitsProcessor, # Wrapper base-class
+        RequestLogitsProcessor, # Request-level logitsproc type annotation
+    )
+
+    ...
+
+    # Stand-in for your request-level logits processor:
+    class DummyPerReqLogitsProcessor:
+        """The request-level logits processor masks out all logits except the
+        token id identified by `target_token`"""
+
+        def __init__(self, target_token: int) -> None:
+            """Specify `target_token`"""
+            self.target_token = target_token
+
+        def __call__(
+            self,
+            output_ids: list[int],
+            logits: torch.Tensor,
+        ) -> torch.Tensor:
+            val_to_keep = logits[self.target_token].item()
+            logits[:] = float("-inf")
+            logits[self.target_token] = val_to_keep
+            return logits
+
+    ...
+
+    # Example of wrapping the request-level logits processor:
+    class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
+        """Example of wrapping a fake request-level logit processor to create a
+        batch-level logits processor"""
+
+        def is_argmax_invariant(self) -> bool:
+            return False
+
+        def new_req_logits_processor(
+            self,
+            params: SamplingParams,
+        ) -> Optional[RequestLogitsProcessor]:
+            """This method returns a new request-level logits processor, customized
+            to the `target_token` value associated with a particular request.
+
+            Returns None if the logits processor should not be applied to the
+            particular request. To use the logits processor the request must have
+            a "target_token" custom argument with an integer value.
+
+            Args:
+            params: per-request sampling params
+
+            Returns:
+            `Callable` request logits processor, or None
+            """
+            target_token: Optional[Any] = params.extra_args and params.extra_args.get(
+                "target_token"
+            )
+            if target_token is None:
+                return None
+            if not isinstance(target_token, int):
+                logger.warning(
+                    "target_token value %s is not int; not applying logits"
+                    " processor to request.",
+                    target_token,
+                )
+                return None
+            return DummyPerReqLogitsProcessor(target_token)
+    ```
+    
+Once you have created a custom subclass (like `WrappedPerReqLogitsProcessor`) which wraps your request level logits processor, you can pass the custom subclass to vLLM (this will be described in subsequent sections.)
+
+!!! note
+    Your `new_req_logits_processor()` override can return `None` to signal that the wrapped logits processor should not be applied to the request in question.
+
+## Best Practices for Writing Custom Logits Processors
 
 Once vLLM loads a logits processor during initialization, then vLLM will invoke `update_state()` and `apply()` against that logits processor in every engine step. Both methods operate on all requests which currently reside in the vLLM persistent batch. Thus it is important to implement these methods efficiently.
 
 * Write efficient `apply()` and `update_state()` implementations in light of the fact that logits processors operate at batch granularity
     * For example, you may be able to use efficient vectorized operations to implement `apply()` or update internal state vectors in `update_state()`
     * However, if you think that a logits processor may be used infrequently, it may be appropriate to use a "sparse" representation of request state i.e. the class can represent request configuration using a dictionary which only stores metadata about requests that enable the logits processor
+    * **Note:** wrapped request-level logits processors do not need to implement `apply()` and `update_state()`; the default `AdapterLogitsProcessor.update_state()` implementation maintains a sparse representation of request state, wherein requests for which `new_req_logits_processor()` returns `None` are not represented in the base-class state dictionary. The default implementation of `AdapterLogitsProcessor.apply()` applies the request-level logits processor to each row of input logits sequentially and assembles the output logits tensor. If the performance of this `AdapterLogitsProcessor` default implementation is insufficient, then avoid wrapping your request-level logits processor and instead re-implement it as a `LogitsProcessor` subclass with optimized `apply()` and `update_state()` implementations that operate at batch granularity
 
 * It is up to the logits processor author to determine:
 
-    1. **The per-request attributes which configure the logits processor's behavior against that request.** For example, if you are writing a new built-in logits processor for vLLM, you may or may not need to add additional fields to `SamplingParams` and the vLLM REST API
+    1. **The per-request attributes which configure the logits processor's behavior against that request.** Your custom logits processor's `update_state()` override determines how `SamplingParams` fields are mapped into logits processor state
+    
+        * **Note:** for wrapped request-level logits processors, `new_req_logits_processor()` determines how `SamplingParams` fields are used to initialize a request-level logits processor instance.
 
     2. **The conditions under which the logits processor is or is not enabled on a per-request basis.** Unless your intention is for the custom logits processor to act on all requests all the time, you should write your logits processor in such a way that it is possible to disable the logits processor for a given request, i.e. by defaulting an argument to `None` or by passing in a specific do-nothing argument value i.e. `0.0`. Try to save compute and memory for requests which disable the logits processor
+    
+        * **Note:** for wrapped per-request logits processors, the default `AdapterLogitsProcessor.update_state()` implementation ensures that the request-level logits processor is disabled when `new_req_logits_processor()` returns `None` for that request
 
     3. **The conditions under which the logits processor is short-circuited at the batch level.** Even if you have defined a way to disable the custom logits processor at the request level, it may be difficult to translate this into compute savings i.e. if your `update_state()` and `apply()` implementations use efficient vectorized implementations that operate on the whole persistent batch in a single command. For example, you cannot skip an entire vectorized operation in `apply()` just because one request disabled the logits processor. To save compute in the edge-case where no running requests utilize the custom logits processor, we recommend designing `apply()` to return the unmodified input tensor if all requests have the logits processor disabled. Similarly, consider whether steps can be skipped in `update_state()` if no requests enable the logits processor
 
-        * Additionally, an easy way to save compute in `update_state()` is to exit early when the batch_update is `None`
+        * Additionally, an easy way to save compute in `update_state()` is to exit early when the `batch_update` is `None`
+
+        * **Note:** for wrapped per-request logits processors, the `AdapterLogitsProcessor` base-class implements the above optimizations by default
 
 * Ensure that the logits processor `update_state` method discards information about finished requests (i.e. requests which are replaced by an Add or which are subject to a Remove)
+
+    * **Note:** for wrapped per-request logits processors, the `AdapterLogitsProcessor` base-class handles this by default
 
 * `is_argmax_invariant()` can be hard-coded to `True` or `False` if the logits processor has consistent behavior. However the argmax invariance may also be determined programmatically (i.e. if your logits processor is user-customizable in some way that impacts whether the logits processor is argmax invariant). For this reason, `is_argmax_invariant()` is not a class method
 
@@ -188,7 +294,7 @@ This section details different ways of making your logits processor visible to v
 
 ### Method 1: Pass the Custom Logits Processor Fully-Qualified Class Name (FQCN) to vLLM at Initialization Time
 
-This method is supported in both offline and online vLLM usage scenarios. The custom logits processor's FQCN (in the form of `dotted.path.to.module:ClassName`) can be passed as an argument to the `LLM` Python constructor, or as a CLI argument to `vllm serve` with the following syntax
+This method is supported in both offline and online vLLM usage scenarios. The custom logits processor's FQCN (in the form of `dotted.path.to.module:ClassName`) can be passed as an argument to the `LLM` and `AsyncLLM` Python constructors, or as a CLI argument to `vllm serve` with the following syntax
 
 ``` bash
 vllm serve ... --logits_processors <logits processor 1> <logits processor 2> ...
@@ -244,16 +350,16 @@ Suppose that you have developed a Python package that holds your custom logits p
     dummy_logits_processor = "your.module.path:DummyLogitsProcessor"
     ```
 
-Once your package is installed, your custom logits processor will be loaded automatically whenever vLLM is initialized. You do *not* need to pass the custom logits processor to the `LLM` constructor or to the vLLM server explicitly at initialization time if your logits processor is exposed as an entry point.
+Once your package is installed, your custom logits processor will be loaded automatically whenever vLLM is initialized. You do *not* need to pass the custom logits processor to the `LLM` or `AsyncLLM` constructors or to the vLLM server explicitly at initialization time if your logits processor is exposed as an entry point.
 
 !!! note
     vLLM will *always* load *all* logits processors which are exposed via entrypoints under the `vllm.logits_processors` grouping.
 
 ### Method 3 (Offline-only): Pass a Python Class Object to the vLLM Constructor
 
-You can pass one or more custom logits processor class objects to the `LLM` constructor. This option is very flexible, as the logits processor classes may either be (1) defined locally within the same Python source file where `LLM` is instantiated, or (2) imported from a Python package.
+You can pass one or more custom logits processor class objects to the `LLM` and `AsyncLLM` constructors. This option is very flexible, as the logits processor classes may either be (1) defined locally within the same Python source file where `LLM` or `AsyncLLM` is instantiated, or (2) imported from a Python package.
 
-??? code "Passing custom logits processor class object to `LLM` in Python"
+??? code "Passing custom logits processor class object to `LLM` or `AsyncLLM` in Python"
 
     ``` python
     # Import custom logits processor
@@ -282,7 +388,7 @@ You can pass one or more custom logits processor class objects to the `LLM` cons
 
 ## Invoking a Custom Logits Processor Against a Request
 
-The design of the custom logits processor determines whether the logits processor must be enabled/disabled for a given request, and what arguments must be provided to configure the logits processor. For more information, review [the logits processors design documentation](../design/logits_processors.md).
+The design of the custom logits processor determines whether the logits processor must be enabled/disabled for a given request, and what arguments must be provided to configure the logits processor.
 
 The examples below show how a user would pass a custom argument (`target_token`) to `DummyLogitsProcessor` in order to (1) enable the logits processor for that particular request and (2) control the logits processor's behavior.
 
