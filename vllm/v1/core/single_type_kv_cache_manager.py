@@ -6,7 +6,7 @@ from collections import defaultdict
 
 from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock, KVPrefixTrie
 from vllm.v1.kv_cache_interface import (ChunkedLocalAttentionSpec,
                                         CrossAttentionSpec, FullAttentionSpec,
                                         KVCacheSpec, MambaSpec,
@@ -25,6 +25,7 @@ class SingleTypeKVCacheManager(ABC):
         kv_cache_spec: KVCacheSpec,
         block_pool: BlockPool,
         kv_cache_group_id: int,
+        enable_kv_prefix_trie: bool,
     ) -> None:
         """
         Initializes the SingleTypeKVCacheManager.
@@ -37,6 +38,7 @@ class SingleTypeKVCacheManager(ABC):
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
         self.block_pool = block_pool
+        self.kv_prefix_trie = KVPrefixTrie() if enable_kv_prefix_trie else None
 
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
@@ -166,6 +168,9 @@ class SingleTypeKVCacheManager(ABC):
 
         self.block_pool.free_blocks(ordered_blocks)
         self.num_cached_block.pop(request_id, None)
+
+    def unschedule(self, request_id: str) -> None:
+        self.kv_prefix_trie.req_to_scheduled[request_id] = False
 
     @abstractmethod
     def get_num_common_prefix_blocks(self, request_id: str,

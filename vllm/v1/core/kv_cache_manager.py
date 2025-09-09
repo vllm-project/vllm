@@ -303,6 +303,10 @@ class KVCacheManager:
         """
         self.coordinator.free(request.request_id)
 
+    def unschedule(self, request: Request) -> None:
+        """Unsets request scheduled flag for KVPrefixTrieNode"""
+        self.coordinator.unschedule(request.request_id)
+
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
         flows to invalidate prefix caching after the weights are updated,

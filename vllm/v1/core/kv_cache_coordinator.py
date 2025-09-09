@@ -34,11 +34,14 @@ class KVCacheCoordinator(ABC):
 
         # Needs special handling for find_longest_cache_hit if eagle is enabled
         self.use_eagle = use_eagle
+        enable_first_layer_trie = (
+            kv_cache_config.enable_kv_prefix_trie)
         self.single_type_managers = tuple(
             get_manager_for_kv_cache_spec(
                 kv_cache_spec=kv_cache_group.kv_cache_spec,
                 block_pool=self.block_pool,
                 kv_cache_group_id=i,
+                enable_kv_prefix_trie=enable_first_layer_trie if i==0 else False
             ) for i, kv_cache_group in enumerate(
                 self.kv_cache_config.kv_cache_groups))
 
@@ -135,6 +138,15 @@ class KVCacheCoordinator(ABC):
         """
         for manager in self.single_type_managers:
             manager.free(request_id)
+
+    def unschedule(self, request_id: str) -> None:
+        """
+        Set the request as unscheduled.
+
+        Args:
+            request_id: The request ID
+        """
+        self.single_type_managers[0].unschedule(request_id)
 
     def get_num_common_prefix_blocks(self, request_id: str,
                                      num_running_requests: int) -> list[int]:
