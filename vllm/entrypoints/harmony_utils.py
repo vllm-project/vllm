@@ -292,7 +292,7 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
                     status=None,
                 )
                 output_items.append(reasoning_item)
-        else:
+        elif recipient is None:
             # For commentary channel with no recipient, treat as reasoning
             # This handles the case where recipient=None in commentary channel
             for content in message.content:
@@ -307,6 +307,8 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
                     status=None,
                 )
                 output_items.append(reasoning_item)
+        else:
+            raise ValueError(f"Unknown recipient: {recipient}")
     elif message.channel == "final":
         contents = []
         for content in message.content:
