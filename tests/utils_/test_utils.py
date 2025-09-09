@@ -835,22 +835,20 @@ def test_model_specification(parser_with_config, cli_config_file,
 
 @pytest.mark.parametrize("input", [(), ("abc", ), (None, ),
                                    (None, bool, [1, 2, 3])])
-@pytest.mark.parametrize("output", [0, 1, 2])
-def test_sha256(input: tuple, output: int):
-    hash = sha256(input)
-    assert hash is not None
-    assert isinstance(hash, int)
-    assert hash != 0
+def test_sha256(input: tuple):
+    digest = sha256(input)
+    assert digest is not None
+    assert isinstance(digest, bytes)
+    assert digest != b""
 
-    bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
-    assert hash == int.from_bytes(hashlib.sha256(bytes).digest(),
-                                  byteorder="big")
+    input_bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
+    assert digest == hashlib.sha256(input_bytes).digest()
 
     # hashing again, returns the same value
-    assert hash == sha256(input)
+    assert digest == sha256(input)
 
     # hashing different input, returns different value
-    assert hash != sha256(input + (1, ))
+    assert digest != sha256(input + (1, ))
 
 
 @pytest.mark.parametrize(
