@@ -554,6 +554,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
+        num_fused_shared_experts: int = 0,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
 
         if enable_eplb:
