@@ -132,6 +132,8 @@ def test_ngram_correctness(
         # (("eagle3", "Qwen/Qwen3-8B", "AngelSlim/Qwen3-8B_eagle3", 1), False),
         (("eagle", "meta-llama/Llama-3.1-8B-Instruct",
           "yuhuili/EAGLE-LLaMA3.1-Instruct-8B", 1), False),
+        (("ngram-eagle", "meta-llama/Llama-3.1-8B-Instruct",
+          "yuhuili/EAGLE-LLaMA3.1-Instruct-8B", 1), False),
         (("eagle3", "meta-llama/Llama-3.1-8B-Instruct",
           "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B", 1), False),
         pytest.param(
@@ -151,6 +153,7 @@ def test_ngram_correctness(
         # TODO: Re-enable this once tests/models/test_initialization.py is fixed, see PR #22333 #22611  # noqa: E501
         # "qwen3_eagle3",
         "llama3_eagle",
+        "llama3_ngram_eagle",
         "llama3_eagle3",
         "llama4_eagle",
         "llama4_eagle_mm",
@@ -201,16 +204,29 @@ def test_eagle_correctness(
         torch.cuda.empty_cache()
         cleanup_dist_env_and_memory()
 
-        spec_llm = LLM(
-            model=model_name,
-            trust_remote_code=True,
-            tensor_parallel_size=tp_size,
+        if method == "ngram-eagle":
+            # Use ngram-eagle specific config
+            speculative_config = {
+                "method": method,
+                "model": spec_model_name,
+                "prompt_lookup_max": 5,
+                "prompt_lookup_min": 3,
+                "num_speculative_tokens_per_method": {"ngram": 3, "eagle": 3},
+                "max_model_len": 2048,
+            }
+        else:
             speculative_config={
                 "method": method,
                 "model": spec_model_name,
                 "num_speculative_tokens": 3,
                 "max_model_len": 2048,
-            },
+            }
+
+        spec_llm = LLM(
+            model=model_name,
+            trust_remote_code=True,
+            tensor_parallel_size=tp_size,
+            speculative_config=speculative_config,
             max_model_len=2048,
         )
         spec_outputs = spec_llm.chat(test_prompts, sampling_config)
