@@ -369,7 +369,7 @@ class ParallelConfig:
             if self.eplb_config.num_redundant_experts != 0:
                 raise ValueError(
                     "num_redundant_experts is set to "
-                    "{self.eplb_config.num_redundant_experts} but EPLB is not "
+                    f"{self.eplb_config.num_redundant_experts} but EPLB is not "
                     "enabled. Either enable EPLB or unset "
                     "num_redundant_experts.")
         if self.distributed_executor_backend is None and self.world_size > 1:
