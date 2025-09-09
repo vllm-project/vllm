@@ -97,9 +97,10 @@ class IterationStats:
     # Minimum number of computed_prefill_tokens for being valid
     DEFAULT_MIN_COMP_PREFILL_TOKENS: int = 10
 
-    def __init__(self,
-                 prefill_comp_speed_history: Optional[deque] = None,
-                 min_comp_prefill_tokens: int = DEFAULT_MIN_COMP_PREFILL_TOKENS):
+    def __init__(
+            self,
+            prefill_comp_speed_history: Optional[deque] = None,
+            min_comp_prefill_tokens: int = DEFAULT_MIN_COMP_PREFILL_TOKENS):
         self.iteration_timestamp = time.time()
         self.num_generation_tokens = 0
         self.num_prompt_tokens = 0
@@ -188,9 +189,8 @@ class IterationStats:
         inference_time = req_stats.last_token_ts - req_stats.scheduled_ts
 
         computed_prefill_tokens = num_prompt_tokens - num_cached_tokens
-        if (self.prefill_comp_speed_history is not None and
-                prefill_time > 0 and
-                computed_prefill_tokens >= self.min_comp_prefill_tokens):
+        if (self.prefill_comp_speed_history is not None and prefill_time > 0
+                and computed_prefill_tokens >= self.min_comp_prefill_tokens):
             # find computation amount by trapezoid area formula
             top = num_cached_tokens
             bottom = num_prompt_tokens - 1
@@ -211,10 +211,11 @@ class IterationStats:
         self.finished_requests.append(finished_req)
 
     def get_avg_prefill_comp_speed(self):
-        if (not self.prefill_comp_speed_history or
-                len(self.prefill_comp_speed_history) < self.MIN_HISTORY_LEN):
+        if (not self.prefill_comp_speed_history or len(
+                self.prefill_comp_speed_history) < self.MIN_HISTORY_LEN):
             return 0
-        return sum(self.prefill_comp_speed_history) / len(self.prefill_comp_speed_history)
+        return sum(self.prefill_comp_speed_history) / len(
+            self.prefill_comp_speed_history)
 
 class LoRARequestStates:
     """Per-LoRA request state stats."""
