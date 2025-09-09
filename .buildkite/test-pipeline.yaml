@@ -379,7 +379,6 @@ steps:
   - tests/compile
   commands:
   - pytest -v -s compile/test_basic_correctness.py
-  # these tests need to be separated, cannot combine
   - pytest -v -s compile/piecewise/
 
 - label: PyTorch Fullgraph Test # 20min

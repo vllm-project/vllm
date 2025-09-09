@@ -15,12 +15,13 @@ import pytest
 import torch
 from torch import nn
 
-import tests.compile.silly_attention  # noqa: F401
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (CompilationConfig, CompilationLevel, CUDAGraphMode,
                          VllmConfig, set_current_vllm_config)
 from vllm.forward_context import BatchDescriptor, set_forward_context
+
+from .. import silly_attention  # noqa: F401
 
 
 @dataclass

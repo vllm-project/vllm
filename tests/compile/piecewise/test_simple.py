@@ -9,14 +9,14 @@ import pytest
 import torch
 from torch import nn
 
-from tests.compile.silly_attention import (get_global_counter,
-                                           reset_global_counter)
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (CompilationConfig, CompilationLevel, CUDAGraphMode,
                          VllmConfig, set_current_vllm_config)
 from vllm.envs import VLLM_USE_V1
 from vllm.forward_context import BatchDescriptor, set_forward_context
+
+from ..silly_attention import get_global_counter, reset_global_counter
 
 
 @support_torch_compile
