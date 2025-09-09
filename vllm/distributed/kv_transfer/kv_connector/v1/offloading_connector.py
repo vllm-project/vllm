@@ -56,7 +56,7 @@ class OffloadingConnector(KVConnectorBase_V1):
     ):
         super().__init__(vllm_config, role, kv_cache_config)
 
-        spec = OffloadingSpecFactory.create_spec(vllm_config)
+        spec = OffloadingSpecFactory.create_spec(vllm_config, kv_cache_config)
 
         self.connector_scheduler: OffloadingConnectorScheduler | None = None
         self.connector_worker: OffloadingConnectorWorker | None = None
