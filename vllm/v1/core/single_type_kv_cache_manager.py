@@ -138,12 +138,13 @@ class SingleTypeKVCacheManager(ABC):
             num_tokens: The total number of tokens that need to be cached 
                 (including tokens that are already cached).
         """
-        num_cached_blocks = self.num_cached_block[request.request_id]
+        req_id = request.request_id
+        num_cached_blocks = self.num_cached_block[req_id]
         num_full_blocks = num_tokens // self.block_size
 
         self.block_pool.cache_full_blocks(
             request=request,
-            blocks=self.req_to_blocks[request.request_id],
+            blocks=self.req_to_blocks[req_id],
             num_cached_blocks=num_cached_blocks,
             num_full_blocks=num_full_blocks,
             block_size=self.block_size,
@@ -151,6 +152,11 @@ class SingleTypeKVCacheManager(ABC):
         )
 
         self.num_cached_block[request.request_id] = num_full_blocks
+
+        if self.kv_prefix_trie:
+            self.kv_prefix_trie.insert(
+                request,
+                self.req_to_blocks[req_id][num_cached_blocks:num_full_blocks])
 
     def free(self, request_id: str) -> None:
         """
@@ -168,6 +174,8 @@ class SingleTypeKVCacheManager(ABC):
 
         self.block_pool.free_blocks(ordered_blocks)
         self.num_cached_block.pop(request_id, None)
+
+        self.kv_prefix_trie.remove(request_id)
 
     def unschedule(self, request_id: str) -> None:
         self.kv_prefix_trie.req_to_scheduled[request_id] = False
