@@ -664,12 +664,18 @@ class SpecDecodeProposer:
             get_layers_from_vllm_config(self.vllm_config, Attention).keys())
 
         from vllm.compilation.backends import set_model_tag
-        with set_model_tag("eagle_head"):
-            vllm_config_draft = replace(self.vllm_config,
-                                        model_config=draft_model_config)
-            self.model = get_model(vllm_config=vllm_config_draft,
-                                   model_config=draft_model_config,
-                                   prefix="draft_model")
+
+        if self.vllm_config.speculative_config.uses_draft_model():
+            with set_model_tag("draft_model"):
+                vllm_config_draft = replace(self.vllm_config,
+                                            model_config=draft_model_config)
+                self.model = get_model(vllm_config=vllm_config_draft,
+                                       model_config=draft_model_config,
+                                       prefix="draft_model")
+        else:
+            with set_model_tag("eagle_head"):
+                self.model = get_model(vllm_config=self.vllm_config,
+                                       model_config=draft_model_config)
 
         draft_attn_layer_names = (
             get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
