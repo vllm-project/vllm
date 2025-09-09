@@ -27,6 +27,7 @@ if TRTLLM_GEN_MXFP4_AVAILABLE:
     from flashinfer.fp4_quantization import nvfp4_block_scale_interleave
     from flashinfer.fused_moe.core import _maybe_get_cached_w2_permute_indices
 
+
 @dataclass
 class ModelCase:
     model_id: str
