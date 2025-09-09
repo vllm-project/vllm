@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
-from typing import Union
+from typing import Optional, Union
 
 import msgspec
 
@@ -104,7 +104,7 @@ class KVTransferLogging:
         self.reset()
 
     def reset(self):
-        self.transfer_stats_accumulator: KVTransferStats = None
+        self.transfer_stats_accumulator: Optional[KVTransferStats] = None
 
     def observe(self, transfer_stats: KVTransferStats):
         # Called periodically when connector syncs with the scheduler.
@@ -114,6 +114,7 @@ class KVTransferLogging:
         if self.transfer_stats_accumulator is None:
             self.transfer_stats_accumulator = transfer_stats
         elif not transfer_stats.is_empty():
+            # Accumulate last interval stats.
             self.transfer_stats_accumulator = \
                 self.transfer_stats_accumulator.aggregate(transfer_stats)
 
