@@ -414,11 +414,16 @@ class FlexAttentionMetadata:
         return final_mask_mod if self.causal else sliding_window_mask_mod
 
     def get_mask_mod(self):
+        # Stage-1: initialize the base mask_mod
+        # (causal mask for decoder or bidirectional mask for encoder)
         if self.causal:
             mask_mod = self.get_causal_mask_mod()
         else:
             mask_mod = self.get_bidirectional_mask_mod()
+        # stage-2: add external mask_mod for special attention during
+        # forwarding runtime to create the combined mask_mod.
         if self.sliding_window is not None:
+            # Add sliding window mask for sliding window attention
             sliding_window_mask_mod = self.get_sliding_window_mask_mod()
             mask_mod = and_masks(mask_mod, sliding_window_mask_mod)
         return mask_mod
