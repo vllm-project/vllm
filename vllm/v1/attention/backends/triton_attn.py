@@ -253,21 +253,20 @@ class TritonAttentionImpl(AttentionImpl):
         self.force_prefill_decode_attn = \
             envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION
 
-        if not self.force_prefill_decode_attn:
-            # If not using prefill decode attention, we use the Triton
-            # unified attention implementation.
-            if use_aiter_unified_attention():
-                logger.info_once(
-                    "Using aiter unified attention for TritonAttentionImpl")
-                from aiter.ops.triton.unified_attention import (
-                    unified_attention)
-                self.unified_attention = unified_attention
-            else:
-                logger.info_once(
-                    "Using vllm unified attention for TritonAttentionImpl")
-                from vllm.attention.ops.triton_unified_attention import (
-                    unified_attention)
-                self.unified_attention = unified_attention
+        # If not using prefill decode attention, we use the Triton
+        # unified attention implementation.
+        if use_aiter_unified_attention():
+            logger.info_once(
+                "Using aiter unified attention for TritonAttentionImpl")
+            from aiter.ops.triton.unified_attention import (
+                unified_attention)
+            self.unified_attention = unified_attention
+        elif not self.force_prefill_decode_attn:
+            logger.info_once(
+                "Using vllm unified attention for TritonAttentionImpl")
+            from vllm.attention.ops.triton_unified_attention import (
+                unified_attention)
+            self.unified_attention = unified_attention
 
         self.sinks = sinks
         if sinks is not None:
