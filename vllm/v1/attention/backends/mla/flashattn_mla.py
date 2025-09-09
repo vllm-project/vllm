@@ -11,6 +11,7 @@ from vllm.attention.backends.abstract import (AttentionLayer, AttentionType,
 from vllm.attention.utils.fa_utils import (flash_attn_supports_mla,
                                            get_flash_attn_version)
 from vllm.config import VllmConfig
+from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonDecodeMetadata,
@@ -20,7 +21,6 @@ from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.vllm_flash_attn import flash_attn_varlen_func, get_scheduler_metadata
-from vllm.distributed.parallel_state import get_dcp_group
 
 logger = init_logger(__name__)
 
@@ -103,7 +103,6 @@ class FlashAttnMLAMetadataBuilder(
         #   to restrict decodes to q_len == 1 when DCP is enabled.
         self.__class__.reorder_batch_threshold = 1 \
             if get_dcp_group().world_size > 1 else self.reorder_batch_threshold
-
 
     def _schedule_decode(self, num_reqs, cu_query_lens, max_query_len, seqlens,
                          max_seq_len, causal):
