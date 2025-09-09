@@ -2800,8 +2800,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             self.vllm_config.compilation_config.static_forward_context,
             [kv_caches] * self.parallel_config.pipeline_parallel_size)
         max_seq_len = self.bucketing_manager.get_max_prompt_shape()
-        max_batch_size = min(self.max_num_seqs,
-                             self.max_num_batched_tokens // max_seq_len)
+        max_batch_size = max(min(self.max_num_seqs,
+                             self.max_num_batched_tokens // max_seq_len), 1)
 
         if self.model_is_mrope or self.is_mm_optimized:
             # Using batch_size 1 is profile multimodal models
