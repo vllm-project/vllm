@@ -951,37 +951,31 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs])
         spec_decode_common_attn_metadata = None
 
-        def _dummy_blk_table_and_slot_mapping():
-            blk_table_tensor = torch.zeros(
-                (num_reqs, 1),
-                dtype=torch.int32,
-                device=self.device,
-            )
-            slot_mapping = torch.zeros(
-                (total_num_scheduled_tokens, ),
-                dtype=torch.int64,
-                device=self.device,
-            )
-            return blk_table_tensor, slot_mapping
-
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
                 self.kv_cache_config.kv_cache_groups):
+
             if isinstance(kv_cache_group_spec.kv_cache_spec,
                           EncoderOnlyAttentionSpec):
                 # Encoder-only layers do not have KV cache, so we need to
                 # create a dummy block table and slot mapping for them.
-                blk_table_tensor, slot_mapping = (
-                    _dummy_blk_table_and_slot_mapping())
+                blk_table_tensor = torch.zeros(
+                    (num_reqs, 1),
+                    dtype=torch.int32,
+                    device=self.device,
+                )
+                slot_mapping = torch.zeros(
+                    (total_num_scheduled_tokens, ),
+                    dtype=torch.int64,
+                    device=self.device,
+                )
                 num_common_prefix_blocks = 0
             elif isinstance(kv_cache_group_spec.kv_cache_spec,
                             CrossAttentionSpec):
                 num_common_prefix_blocks = 0
                 blk_table = self.input_batch.block_table[kv_cache_group_id]
                 blk_table_tensor = blk_table.get_device_tensor()[:num_reqs]
-                # TODO - look into slot_mapping for cross-attention
-                # directly from the block table like other attention types
                 cross_slot_tensors = []
                 for req_id in scheduler_output.scheduled_encoder_inputs:
                     cross_slot_tensors.append(
