@@ -716,7 +716,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         elif self.attn_backend == _Backend.XFORMERS:
             seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
         return max_seqlen, seqlens
-    
+
     @staticmethod
     def invert_permutation(perm: torch.Tensor) -> torch.Tensor:
         # building the inverse permutation in O(n) time
