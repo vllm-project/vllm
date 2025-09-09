@@ -177,6 +177,10 @@ cython_debug/
 # VSCode
 .vscode/
 
+# Claude
+CLAUDE.md
+.claude/
+
 # DS Store
 .DS_Store
 
