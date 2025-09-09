@@ -301,11 +301,11 @@ class OpenAISpeechToText(OpenAIServing):
             for idx, result_generator in enumerate(list_result_generator):
                 async for op in result_generator:
                     if request.response_format == 'verbose_json':
-                        segment_class: Union[type[TranscriptionSegment], 
-                                        type[TranslationSegment]] = (
-                                        TranscriptionSegment
-                                        if self.task_type == "transcribe" else
-                                        TranslationSegment)
+                        segment_class: Union[type[TranscriptionSegment],
+                                             type[TranslationSegment]] = (
+                                             TranscriptionSegment if
+                                             self.task_type == "transcribe"
+                                             else TranslationSegment)
 
                         segments: list[Union[
                             TranslationSegment,
@@ -343,7 +343,7 @@ class OpenAISpeechToText(OpenAIServing):
                     final_response = cast(T, TranslationResponse(text=text))
                 else:
                     final_response = cast(
-                        V, 
+                        V,
                         TranslationResponseVerbose(text=text,
                                                    language=request.language,
                                                    duration=str(duration_s),
