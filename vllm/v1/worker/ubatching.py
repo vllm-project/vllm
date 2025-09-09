@@ -119,7 +119,7 @@ class UBatchContext:
     def yield_(self):
         self.current_stream = current_stream()
         self._cpu_yield()
-        if self.current_stream == current_stream():
+        if self.current_stream != current_stream():
             self.update_stream(self.current_stream)
     
     def yield_and_switch_from_compute_to_comm(self):
