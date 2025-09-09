@@ -2031,6 +2031,8 @@ class SpeculativeConfig:
     draft_parallel_config: SkipValidation[
         ParallelConfig] = None  # type: ignore
     """The parallel configuration for the draft model initialized internal."""
+    predicted_output: Optional[bool] = False
+    """The flag to indicate whether enabling predicted output."""
 
     def compute_hash(self) -> str:
         """

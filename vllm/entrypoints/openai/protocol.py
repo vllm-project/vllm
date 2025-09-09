@@ -33,6 +33,7 @@ except ImportError:  # For newer openai versions (>= 1.100.0)
 from openai.types.responses.response import ToolChoice
 from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
+from openai.types.chat import ChatCompletionPredictionContentParam
 from pydantic import (BaseModel, ConfigDict, Field, TypeAdapter,
                       ValidationInfo, field_validator, model_validator)
 from typing_extensions import TypeAlias
@@ -437,6 +438,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     ]] = "none"
     reasoning_effort: Optional[Literal["low", "medium", "high"]] = None
     include_reasoning: bool = True
+    prediction: Optional[ChatCompletionPredictionContentParam] = None
 
     # NOTE this will be ignored by vLLM -- the model determines the behavior
     parallel_tool_calls: Optional[bool] = False
@@ -699,6 +701,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
             whitespace_pattern=self.guided_whitespace_pattern,
             structural_tag=self.structural_tag,
         )
+        prediction = None
+        if self.prediction is not None:
+            prediction = self.prediction.get('content')
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
@@ -734,6 +739,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             logit_bias=self.logit_bias,
             bad_words= self.bad_words,
             allowed_token_ids=self.allowed_token_ids,
+            prediction=prediction,
             extra_args=extra_args or None,
         )
 

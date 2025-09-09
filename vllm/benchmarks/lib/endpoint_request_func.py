@@ -73,6 +73,7 @@ class RequestFuncInput:
     ignore_eos: bool = False
     language: Optional[str] = None
     request_id: Optional[str] = None
+    prediction: Optional[str] = None
 
 
 @dataclass
@@ -252,6 +253,11 @@ async def async_request_openai_chat_completions(
             "include_usage": True,
         },
     }
+    if request_func_input.prediction is not None:
+        payload["prediction"] = {
+            "content": request_func_input.prediction,
+            "type" : "content"
+        }
     if request_func_input.ignore_eos:
         payload["ignore_eos"] = request_func_input.ignore_eos
     if request_func_input.extra_body:
