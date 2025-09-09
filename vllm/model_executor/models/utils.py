@@ -761,3 +761,10 @@ def fast_topk(values: torch.Tensor, topk: int,
     else:
         # Use topk for efficiency with larger k values
         return torch.topk(values, topk, dim=dim)
+
+
+def get_model_hidden_size(hf_config: PretrainedConfig) -> int:
+    if hasattr(hf_config, "hidden_size"):
+        return hf_config.hidden_size
+    text_config = hf_config.get_text_config()
+    return text_config.hidden_size
