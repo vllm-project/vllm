@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 
 from .inductor_pass import enable_fake_mode
+from .matcher_utils import MatcherQuant, MatcherRMSNorm
 from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 logger = init_logger(__name__)
@@ -91,6 +92,9 @@ class RMSNormQuantPattern:
             f"unsupported fused rmsnorm+quant op for {key}"
         self.FUSED_OP = FUSED_OPS[key]
 
+        self.rmsnorm_matcher = MatcherRMSNorm(epsilon)
+        self.quant_matcher = MatcherQuant(key.quant)
+
 
 class RMSNormStaticQuantPattern(RMSNormQuantPattern):
 
@@ -108,24 +112,8 @@ class RMSNormStaticQuantPattern(RMSNormQuantPattern):
         # Cannot use methods, as the self argument affects tracing
         def pattern(input: torch.Tensor, weight: torch.Tensor,
                     scale: torch.Tensor):
-            result_rms = torch.empty_like(input)
-            # TODO: why does empty_like produce a permute but
-            #  empty via shape doesn't?
-            result = torch.empty(input.shape,
-                                 device=input.device,
-                                 dtype=self.quant_dtype)
-            at1 = auto_functionalized(RMS_OP,
-                                      result=result_rms,
-                                      input=input,
-                                      weight=weight,
-                                      epsilon=self.epsilon)
-            at2 = auto_functionalized(self.QUANT_OP,
-                                      result=result,
-                                      input=at1[1],
-                                      scale=scale)
-
-            # result
-            return at2[1]
+            result_rms = self.rmsnorm_matcher(input, weight)
+            return self.quant_matcher(result_rms, scale)
 
         def replacement(input: torch.Tensor, weight: torch.Tensor,
                         scale: torch.Tensor):
@@ -166,21 +154,11 @@ class FusedAddRMSNormStaticQuantPattern(RMSNormQuantPattern):
 
         def pattern(input: torch.Tensor, residual: torch.Tensor,
                     weight: torch.Tensor, scale: torch.Tensor):
-            result = torch.empty(input.shape,
-                                 device=input.device,
-                                 dtype=self.quant_dtype)
-            at = auto_functionalized(RMS_ADD_OP,
-                                     input=input,
-                                     residual=residual,
-                                     weight=weight,
-                                     epsilon=self.epsilon)
-            at1 = auto_functionalized(self.QUANT_OP,
-                                      result=result,
-                                      input=at[1],
-                                      scale=scale)
+            result_rms, residual = self.rmsnorm_matcher(
+                input, weight, residual)
+            result = self.quant_matcher(result_rms, scale)
 
-            # result, residual
-            return at1[1], at[2]
+            return result, residual
 
         def replacement(input: torch.Tensor, residual: torch.Tensor,
                         weight: torch.Tensor, scale: torch.Tensor):
@@ -228,29 +206,14 @@ class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
 
     def register(self, pm_pass: PatternMatcherPass):
 
-        def pattern(input: torch.Tensor, weight: torch.Tensor,
-                    scale: torch.Tensor):
-            result_rms = torch.empty_like(input)
-            result = torch.empty(input.shape,
-                                 device=input.device,
-                                 dtype=self.quant_dtype)
-            at1 = auto_functionalized(RMS_OP,
-                                      result=result_rms,
-                                      input=input,
-                                      weight=weight,
-                                      epsilon=self.epsilon)
-            at2 = auto_functionalized(self.QUANT_OP,
-                                      result=result,
-                                      input=at1[1],
-                                      scale=scale,
-                                      scale_ub=None)
-
+        def pattern(input: torch.Tensor, weight: torch.Tensor):
+            result_rms = self.rmsnorm_matcher(input, weight)
             # result, scale
-            return at2[1], at2[2]
+            return self.quant_matcher(result_rms)
 
-        def replacement(input: torch.Tensor, weight: torch.Tensor,
-                        scale: torch.Tensor):
+        def replacement(input: torch.Tensor, weight: torch.Tensor):
             result = torch.empty_like(input, dtype=self.quant_dtype)
+            scale = self.quant_matcher.make_scale(input)
             at = auto_functionalized(self.FUSED_OP,
                                      result=result,
                                      input=input,
@@ -266,7 +229,6 @@ class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
         inputs = [
             empty_bf16(5, 4),  # input
             empty_bf16(1, 5),  # weight
-            empty_fp32(1, 1)  # scale
         ]
 
         pm.register_replacement(
@@ -295,27 +257,17 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
     def register(self, pm_pass: PatternMatcherPass):
 
         def pattern(input: torch.Tensor, residual: torch.Tensor,
-                    weight: torch.Tensor, scale: torch.Tensor):
-            result = torch.empty(input.shape,
-                                 device=input.device,
-                                 dtype=self.quant_dtype)
-            at = auto_functionalized(RMS_ADD_OP,
-                                     input=input,
-                                     residual=residual,
-                                     weight=weight,
-                                     epsilon=self.epsilon)
-            at1 = auto_functionalized(self.QUANT_OP,
-                                      result=result,
-                                      input=at[1],
-                                      scale=scale,
-                                      scale_ub=None)
+                    weight: torch.Tensor):
+            result_rms, residual = self.rmsnorm_matcher(
+                input, weight, residual)
+            result, scale = self.quant_matcher(result_rms)
 
-            # result, residual, scale
-            return at1[1], at[2], at1[2]
+            return result, residual, scale
 
         def replacement(input: torch.Tensor, residual: torch.Tensor,
-                        weight: torch.Tensor, scale: torch.Tensor):
+                        weight: torch.Tensor):
             result = torch.empty_like(input, dtype=self.quant_dtype)
+            scale = self.quant_matcher.make_scale(input)
             at = auto_functionalized(self.FUSED_OP,
                                      result=result,
                                      input=input,
@@ -332,7 +284,6 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
             empty_bf16(5, 4),  # input
             empty_bf16(5, 4),  # residual
             empty_bf16(1, 5),  # weight
-            empty_fp32(1, 1)  # scale
         ]
 
         pm.register_replacement(
