@@ -2406,6 +2406,26 @@ class SpeculativeConfig:
                 "num_speculative_tokens must be provided with "
                 "speculative model unless the draft model config contains an "
                 "n_predict parameter.")
+        
+        if self.method == "ngram-eagle":
+            assert self.num_speculative_tokens_per_method is not None, (
+                "num_speculative_tokens_per_method must be provided for "
+                "ngram-eagle method.")
+            assert "ngram" in self.num_speculative_tokens_per_method, (
+                "num_speculative_tokens_per_method must contain ngram key for "
+                "ngram-eagle method.")
+            assert "eagle" in self.num_speculative_tokens_per_method, (
+                "num_speculative_tokens_per_method must contain eagle key for "
+                "ngram-eagle method.")
+            ngram_speculative_tokens = \
+                self.num_speculative_tokens_per_method["ngram"]
+            eagle_speculative_tokens = \
+                self.num_speculative_tokens_per_method["eagle"]
+            if self.num_speculative_tokens != \
+                    max(ngram_speculative_tokens, eagle_speculative_tokens):
+                raise ValueError(
+                    "num_speculative_tokens must be the max value in "
+                    "num_speculative_tokens_per_method for ngram-eagle method.")
 
         if self.num_speculative_tokens <= 0:
             raise ValueError("Expected num_speculative_tokens to be greater "
