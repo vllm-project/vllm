@@ -477,11 +477,13 @@ class EplbState:
         self.expert_rearrangement_step += 1
 
         if self.is_async and self.ep_buffer_ready:
+            logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Calling move_to_workspace from step()")
             self.move_to_workspace(model=model,
                                    ep_group=ep_group,
                                    is_profile=is_profile)
         if (self.expert_rearrangement_step
                 >= self.expert_rearrangement_step_interval):
+            logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Triggering rearrange - step={self.expert_rearrangement_step}, interval={self.expert_rearrangement_step_interval}")
             self.expert_rearrangement_step = 0
             self.rearrange(model)
 
@@ -593,6 +595,7 @@ class EplbState:
             num_gpus,
         ))
         if not self.is_async:
+            logger.info(f"[EPLB Debug] Rank {ep_rank}: Non-async mode, calling rearrange_expert_weights_inplace")
             # Update expert weights
             rearrange_expert_weights_inplace(
                 self.physical_to_logical_map,
@@ -602,6 +605,7 @@ class EplbState:
                 is_profile,
                 rank_mapping,
             )
+            logger.info(f"[EPLB Debug] Rank {ep_rank}: rearrange_expert_weights_inplace completed")
             self.post_eplb(model, is_profile)
             if is_main_rank:
                 assert time_start is not None
@@ -613,6 +617,7 @@ class EplbState:
                     time_end - time_start,
                 )
         self.rebalanced = True
+        logger.info(f"[EPLB Debug] Rank {ep_rank}: rebalanced flag set to True")
         return None
 
 
@@ -623,22 +628,28 @@ class EplbState:
 
         ep_group = get_ep_group().device_group
         rank = ep_group.rank()
+        logger.info(f"[EPLB Debug] Rank {rank}: eplb_async_loop starting")
         def thread_target():
+            logger.info(f"[EPLB Debug] Rank {rank}: async thread started")
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
+                logger.info(f"[EPLB Debug] Rank {rank}: starting transfer_run_periodically in async loop")
                 loop.run_until_complete(
                     self.transfer_run_periodically(model=model,
                                                    ep_group=ep_group,
                                                    is_profile=is_profile, 
                                                    rank_mapping=rank_mapping))
+                logger.info(f"[EPLB Debug] Rank {rank}: transfer_run_periodically completed in async loop")
             except Exception as e:
                 logger.exception("async loop error (Rank %d): %s", rank, 
                                   str(e))
             finally:
+                logger.info(f"[EPLB Debug] Rank {rank}: closing async event loop")
                 loop.close()
         thread = threading.Thread(target=thread_target, daemon=True)
         thread.start()
+        logger.info(f"[EPLB Debug] Rank {rank}: async thread started and returned")
         return thread
 
     async def transfer_run_periodically(
@@ -648,14 +659,19 @@ class EplbState:
             is_profile: bool = False,
             rank_mapping: Optional[dict[int, int]] = None):
         experts_stream = torch.cuda.Stream()
+        logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Starting transfer_run_periodically, num_moe_layers={model.num_moe_layers}")
         while self.layer_to_transfer < model.num_moe_layers:
             if not self.ep_buffer_ready and self.rebalanced:
+                logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Starting transfer for layer {self.layer_to_transfer}")
                 # get lock
                 assert self.new_physical_to_logical_map is not None
+                logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Acquiring buffer lock for layer {self.layer_to_transfer}")
                 await asyncio.to_thread(self.buffer_lock.acquire)
                 try:
+                    logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Buffer lock acquired, initializing expert_buffer for layer {self.layer_to_transfer}")
                     for i, w in enumerate(model.expert_weights[0]):
                         self.expert_buffer[i] = torch.empty_like(w)                   
+                    logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Starting transfer_layer for layer {self.layer_to_transfer}")
                     (
                     self.is_unchanged,
                     self.is_received_locally, 
@@ -671,25 +687,65 @@ class EplbState:
                         cuda_stream=experts_stream,
                         rank_mapping=rank_mapping,
                     )
+                    logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: transfer_layer completed for layer {self.layer_to_transfer}")
                     self.ep_buffer_ready = True
+                    logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Flags set, ep_buffer_ready={self.ep_buffer_ready}")
 
                 finally:
                     # release lock
+                    logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Releasing buffer lock for layer {self.layer_to_transfer}")
                     self.buffer_lock.release()
             else:
                 await asyncio.sleep(0.5) 
+        
+        logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: All layers processed, exiting loop")
+        # After all layers are processed, synchronize all ranks to ensure 
+        # everyone has completed the rearrange process
+        if self.rebalanced:
+            logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Starting synchronize_rearrange_completion")
+            await self._synchronize_rearrange_completion(ep_group)
+            
+        logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Resetting state - rebalanced=False, layer_to_transfer=0")
         self.rebalanced = False
         self.layer_to_transfer = 0
+        logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Calling post_eplb")
         self.post_eplb(model, is_profile)
+        logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: transfer_run_periodically completed")
 
+    async def _synchronize_rearrange_completion(self, ep_group: ProcessGroup):
+        """
+        Synchronize all ranks to ensure everyone has completed the rearrange process.
+        This should only be called during the rearrange period, not in every step.
+        """
+        logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: _synchronize_rearrange_completion started")
+        # Use a completion flag to check if all ranks have finished their layers
+        device = next(iter(self.expert_buffer)).device if self.expert_buffer else torch.cuda.current_device()
+        completion_flag = torch.tensor(
+            1, # All layers are done at this point
+            dtype=torch.int32, 
+            device=device
+        )
+        
+        logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Starting all_reduce for synchronization")
+        # Run the allreduce in a thread to avoid blocking the async loop
+        await asyncio.to_thread(all_reduce, completion_flag, group=ep_group)
+        
+        # Verify all ranks have completed
+        expected_total = ep_group.size()
+        logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: all_reduce completed, completion_flag={completion_flag.item()}, expected_total={expected_total}")
+        if completion_flag.item() != expected_total:
+            logger.warning("Rearrange synchronization failed: not all ranks completed")
 
     def move_to_workspace(self,
                           model: MixtureOfExperts,
                           ep_group: ProcessGroup,
                           is_profile: bool = False):
+        logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: move_to_workspace called, layer_to_transfer={self.layer_to_transfer}")
         if not self.buffer_lock.acquire(blocking=False):
+            logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Failed to acquire buffer lock, returning")
             return 
-        try:            
+        try:
+            logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Starting move_from_buffer for layer {self.layer_to_transfer}")
             move_from_buffer(
                 expert_weights=model.expert_weights[self.layer_to_transfer],
                 expert_weights_buffer=self.expert_buffer,
@@ -700,9 +756,12 @@ class EplbState:
                     self.layer_to_transfer].tolist(),
                 ep_group=ep_group
             )
+            logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: move_from_buffer completed for layer {self.layer_to_transfer}")
             self.layer_to_transfer += 1
             self.ep_buffer_ready = False
+            logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Updated state - layer_to_transfer={self.layer_to_transfer}, ep_buffer_ready={self.ep_buffer_ready}")
         finally:
+            logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Releasing buffer lock in move_to_workspace")
             self.buffer_lock.release()
 
     def post_eplb(self,

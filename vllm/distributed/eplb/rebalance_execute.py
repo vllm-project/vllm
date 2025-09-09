@@ -14,6 +14,10 @@ import torch
 from torch.distributed import (P2POp, ProcessGroup, all_gather,
                                batch_isend_irecv, get_global_rank)
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 
 def idx_local_to_global(
     local_idx: int,
@@ -110,6 +114,7 @@ def move_to_buffer(
     Perform expert weights rearrangement of one layer.
     """
     ep_rank = ep_group.rank()
+    logger.info(f"[EPLB Debug] Rank {ep_rank}: move_to_buffer started, num_local_experts={num_local_experts}")
     local2global = partial(
         idx_local_to_global,
         local_cnt=num_local_experts,
@@ -223,6 +228,7 @@ def move_to_buffer(
         ]
 
     # 4. Execute the P2P operations. The real communication happens here.
+    logger.info(f"[EPLB Debug] Rank {ep_rank}: Starting P2P operations, num_ops={len(p2p_ops)}")
     if p2p_ops and cuda_stream is not None:
         with torch.cuda.stream(cuda_stream): 
             reqs = batch_isend_irecv(p2p_ops)
@@ -232,6 +238,7 @@ def move_to_buffer(
         reqs = batch_isend_irecv(p2p_ops)
         for req in reqs:
             req.wait()
+    logger.info(f"[EPLB Debug] Rank {ep_rank}: P2P operations completed")
     # wait for the communication to finish   
     return is_unchanged, is_received_locally, experts_recv_loc
 
@@ -246,6 +253,7 @@ def move_from_buffer(
 ) -> None:
     ep_rank = ep_group.rank()
     num_local_experts = len(is_unchanged)
+    logger.info(f"[EPLB Debug] Rank {ep_rank}: move_from_buffer started, num_local_experts={num_local_experts}")
 
     local2global = partial(idx_local_to_global, 
                            local_cnt=num_local_experts, 
@@ -264,6 +272,7 @@ def move_from_buffer(
             src = experts_recv_loc[expert]
             for weight, buffer in zip(expert_weights, expert_weights_buffer):
                 weight[dst].copy_(buffer[src], non_blocking=True)
+    logger.info(f"[EPLB Debug] Rank {ep_rank}: move_from_buffer completed")
     
 
 async def transfer_layer(old_global_expert_indices: torch.Tensor,
@@ -324,6 +333,7 @@ async def transfer_layer(old_global_expert_indices: torch.Tensor,
     # have the same shape.
     
 
+    logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: transfer_layer starting move_to_buffer for layer {layer}")
     is_unchanged, is_received_locally, experts_recv_loc = move_to_buffer(
         num_local_experts=num_local_physical_experts,
         old_indices=old_global_expert_indices[layer].tolist(),
@@ -333,6 +343,7 @@ async def transfer_layer(old_global_expert_indices: torch.Tensor,
         cuda_stream=cuda_stream,
         ep_group=ep_group
     )
+    logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: transfer_layer move_to_buffer completed for layer {layer}")
     # NOTE(bowen): We need this synchronize to run, but I don't know why.
     # If you figure out the reason, please let me know -- thank you!
     return is_unchanged, is_received_locally, experts_recv_loc
