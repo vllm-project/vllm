@@ -1865,7 +1865,8 @@ class InputTokensDetails(OpenAIBaseModel):
 
 
 class OutputTokensDetails(OpenAIBaseModel):
-    reasoning_tokens: int
+    reasoning_tokens: int = 0
+    tool_output_tokens: int = 0
 
 
 class ResponseUsage(OpenAIBaseModel):
