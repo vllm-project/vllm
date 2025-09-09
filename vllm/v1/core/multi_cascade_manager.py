@@ -1,7 +1,7 @@
-from vllm.config import MultiCascadeGroupingConfig, MultiCascadeConfig
+from vllm.config import KVAlignedGroupingConfig, KVAlignedConfig
 from vllm.v1.core.kv_cache_utils import (KVPrefixAlignedGroups,
                                          KVPrefixTrieNode, KVPrefixTrie)
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 def get_scheduled_requests(request_list: List[Tuple[str, bool]],
                            groups_list: List[Tuple[int, int, int]]) \
@@ -29,23 +29,23 @@ def get_scheduled_requests(request_list: List[Tuple[str, bool]],
 class MultiCascadeManager:
     """Manages grouping requests for multi-cascade attention."""
 
-    def __init__(self, multi_cascade_config: MultiCascadeConfig):
+    def __init__(self, multi_cascade_config: KVAlignedConfig):
         self.absorption_threshold: float = (
             multi_cascade_config.absorption_threshold)
-        self.alloc_method: MultiCascadeGroupingConfig = (
+        self.alloc_method: KVAlignedGroupingConfig = (
             multi_cascade_config.allocate_method)
 
-    def alloc_groups(self, kv_prefix_trie: KVPrefixTrie) -> KVPrefixAlignedGroups:
+    def alloc_groups(self, kv_prefix_trie: KVPrefixTrie) -> Optional[KVPrefixAlignedGroups]:
         match self.alloc_method:
-            case MultiCascadeGroupingConfig.LEAF_PASS:
+            case KVAlignedGroupingConfig.LEAF_PASS:
                 return self.alloc_leaf_pass(kv_prefix_trie)
-            case MultiCascadeGroupingConfig.FULL_PASS:
+            case KVAlignedGroupingConfig.FULL_PASS:
                 return self.alloc_full_pass(kv_prefix_trie)
             case _:
                 raise NotImplementedError("Must pass a valid grouping config"
                                            "for multi-cascade attention.")
 
-    def alloc_leaf_pass(self, kv_prefix_trie: KVPrefixTrie) -> KVPrefixAlignedGroups:
+    def alloc_leaf_pass(self, kv_prefix_trie: KVPrefixTrie) -> Optional[KVPrefixAlignedGroups]:
         """
         Allocates groups of requests based on the weight of each node.
         Traverses only trie leaves to find the best groupings.
@@ -56,6 +56,10 @@ class MultiCascadeManager:
                 (num_common_prefix_blocks, start, end)
                 where all requests in request_list[start: end] form a group.
         """
+
+        if not kv_prefix_trie:
+            return None
+
         request_list: list[tuple[str, bool]] = []
         groups_list: list[tuple[int, int, int]] = []
 
@@ -69,7 +73,7 @@ class MultiCascadeManager:
 
         return get_scheduled_requests(request_list, groups_list)
 
-    def alloc_full_pass(self, kv_prefix_trie: KVPrefixTrie) -> KVPrefixAlignedGroups:
+    def alloc_full_pass(self, kv_prefix_trie: KVPrefixTrie) -> Optional[KVPrefixAlignedGroups]:
         """
         Allocates groups of requests based on the weight of each node.
         Traverses the entire trie to find best groupings.
@@ -80,6 +84,9 @@ class MultiCascadeManager:
                 (num_common_prefix_blocks, start, end)
                 where all requests in request_list[start: end] form a group.
         """
+
+        if not kv_prefix_trie:
+            return None
 
         request_list: List[Tuple[str, bool]] = []
         groups_list: List[Tuple[int, int, int]] = []

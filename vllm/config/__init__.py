@@ -474,10 +474,10 @@ class ModelConfig:
     """Initialize non-default pooling config or override default pooling config
     for the pooling model. e.g. `{"pooling_type": "mean", "normalize": false}`.
     """
-    multi_cascade_config: "MultiCascadeConfig" = field(default_factory="MultiCascadeConfig")
+    multi_cascade_config: "KVAlignedConfig" = field(default_factory="KVAlignedConfig")
     """Multi-cascade config which controls behaviour of request grouping when
     multi-cascade attention is enabled."""
-    override_multi_cascade_config: Optional[Union[dict, "MultiCascadeConfig"]] = None
+    override_multi_cascade_config: Optional[Union[dict, "KVAlignedConfig"]] = None
     """Initialize non-default multi-cascade config or override default multi-cascade
     config."""
 
@@ -930,12 +930,12 @@ class ModelConfig:
 
         return None
 
-    def _init_multi_cascade_config(self) -> "MultiCascadeConfig":
+    def _init_multi_cascade_config(self) -> "KVAlignedConfig":
         if isinstance(self.override_multi_cascade_config, dict):
-            self.override_multi_cascade_config = MultiCascadeConfig(
+            self.override_multi_cascade_config = KVAlignedConfig(
                 **self.override_multi_cascade_config)
         multi_cascade_config = (self.override_multi_cascade_config or
-                                   MultiCascadeConfig())
+                                KVAlignedConfig())
         return multi_cascade_config
 
     def _verify_tokenizer_mode(self) -> None:
@@ -2740,7 +2740,7 @@ class PoolerConfig:
         return hash_str
 
 @config
-class MultiCascadeGroupingConfig(str, enum.Enum):
+class KVAlignedGroupingConfig(str, enum.Enum):
     """Methods for grouping requests for multi-cascade
     attention."""
 
@@ -2755,7 +2755,7 @@ class MultiCascadeGroupingConfig(str, enum.Enum):
 
 @config
 @dataclass
-class MultiCascadeConfig:
+class KVAlignedConfig:
     """Contains configurations for deciding how to schedule
     multi-cascade attention."""
 
@@ -2765,7 +2765,7 @@ class MultiCascadeConfig:
     absorption threshold), or fewer leaves with higher 
     common prefix length (higher absorption threshold)."""
 
-    allocate_method = MultiCascadeGroupingConfig.LEAF_PASS
+    allocate_method = KVAlignedGroupingConfig.LEAF_PASS
     """Method used to group requests with common prefixes. 
     Logic behind grouping is in vllm.v1.core.multi_cascade_manager.
     Defaults to leaf_pass."""

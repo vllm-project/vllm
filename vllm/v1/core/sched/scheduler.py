@@ -20,6 +20,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
+from vllm.v1.core.multi_cascade_manager import MultiCascadeManager
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
@@ -162,6 +163,8 @@ class Scheduler(SchedulerInterface):
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
         )
+        multi_cascade_config = vllm_config.model_config.multi_cascade_config
+        self.multi_cascade_manager = MultiCascadeManager(multi_cascade_config)
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
 
     def schedule(self) -> SchedulerOutput:
@@ -236,6 +239,7 @@ class Scheduler(SchedulerInterface):
                 # NOTE(woosuk): Here, by doing `continue` instead of `break`,
                 # we do not strictly follow the FCFS scheduling policy and
                 # allow the lower-priority requests to be scheduled.
+                self.kv_cache_manager.unschedule(request)
                 req_index += 1
                 continue
 
@@ -562,6 +566,10 @@ class Scheduler(SchedulerInterface):
         structured_output_request_ids, grammar_bitmask = (
             self.get_grammar_bitmask(self.running,
                                      scheduled_spec_decode_tokens))
+
+        kv_prefix_trie = self.kv_cache_manager.get_prefix_trie()
+        kv_prefix_aligned_groups = (
+            self.multi_cascade_manager.alloc_groups(kv_prefix_trie))
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -579,6 +587,7 @@ class Scheduler(SchedulerInterface):
             get_freed_mm_hashes(),
             structured_output_request_ids=structured_output_request_ids,
             grammar_bitmask=grammar_bitmask,
+            kv_prefix_aligned_groups=kv_prefix_aligned_groups
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
