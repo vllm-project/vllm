@@ -212,6 +212,23 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         """
         raise NotImplementedError
 
+    def reorder_batch(self, input_batch: "InputBatch",
+                      scheduler_output: "SchedulerOutput") -> bool:
+        """
+        Update the order of requests in the batch based on the attention
+        backend's needs. For example, some attention backends (namely MLA) may
+        want to separate requests based on if the attention computation will be
+        compute-bound or memory-bound.
+
+        Args:
+            input_batch: input batch
+            scheduler_output: scheduler output.
+
+        Returns:
+            True if the batch was modified, False otherwise.
+        """
+        raise NotImplementedError
+
     def build_for_cudagraph_capture(
             self, common_attn_metadata: CommonAttentionMetadata) -> M:
         """
@@ -692,7 +709,7 @@ def reorder_batch_to_split_decodes_and_prefills(
 
     for i, req_id in enumerate(input_batch.req_ids):
         num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-        # for now treat 1 scheduled token as "decode" even if its not,
+        # for now treat 1 scheduled token as "decode" even if it's not,
         # we should update this to something like < 8 in the future but
         # currently the TritonMLA._forward_decode only supports
         # num_tokens = 1
