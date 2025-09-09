@@ -230,11 +230,12 @@ assert training_actor_device_ids[:2] == inference_engine_device_ids[0]
 # the second inference engine.
 assert training_actor_device_ids[2:] == inference_engine_device_ids[1]
 
-print("Gather all the IPC handles from the training actors.")
+print("Gather all the ZMQ handles from the training actors.")
 zmq_handles = {}
 for actor in training_actors:
     zmq_handles.update(ray.get(actor.get_zmq_handles.remote()))
 
+print(f"ZMQ handles: {zmq_handles}")
 
 print("Update the weights of the inference engines.")
 ray.get(
