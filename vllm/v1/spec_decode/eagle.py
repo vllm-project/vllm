@@ -229,6 +229,7 @@ class SpecDecodeProposer:
         if self.pass_hidden_states_to_model:
             model_kwargs[
                 "hidden_states"] = self.hidden_states[:num_input_tokens]
+        if self.is_multimodal_model:
             model_kwargs["inputs_embeds"] = inputs_embeds
 
         with set_forward_context(per_layer_attn_metadata,
@@ -737,6 +738,7 @@ class SpecDecodeProposer:
             }
             if self.pass_hidden_states_to_model:
                 model_kwargs["hidden_states"] = self.hidden_states[:num_tokens]
+            if self.is_multimodal_model:
                 model_kwargs["inputs_embeds"] = inputs_embeds
 
             self.model(**model_kwargs)
