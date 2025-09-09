@@ -194,8 +194,8 @@ class IterationStats:
             # find computation amount by trapezoid area formula
             top = num_cached_tokens + 1
             bottom = num_prompt_tokens
-            height = num_prompt_tokens - num_cached_tokens
-            amount = ((top + bottom) * height) / 2
+            height = computed_prefill_tokens
+            amount = ((top + bottom) * height) // 2
             self.prefill_comp_speed_history.append(amount / prefill_time)
 
         finished_req = \
