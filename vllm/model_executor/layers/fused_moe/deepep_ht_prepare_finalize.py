@@ -189,7 +189,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-    ) -> Callable:
+    ) -> mk.ReceiverType:
 
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)
