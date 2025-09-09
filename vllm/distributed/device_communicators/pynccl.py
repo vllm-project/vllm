@@ -67,6 +67,7 @@ class PyNcclCommunicator:
         self.available = True
         self.disabled = False
 
+        self.nccl_version = self.nccl.ncclGetRawVersion()
         logger.info("vLLM is using nccl==%s", self.nccl.ncclGetVersion())
 
         if self.rank == 0:
@@ -109,6 +110,7 @@ class PyNcclCommunicator:
 
     def all_reduce(self,
                    in_tensor: torch.Tensor,
+                   out_tensor: torch.Tensor = None,
                    op: ReduceOp = ReduceOp.SUM,
                    stream=None) -> torch.Tensor:
         if self.disabled:
@@ -120,7 +122,8 @@ class PyNcclCommunicator:
             f"this nccl communicator is created to work on {self.device}, "
             f"but the input tensor is on {in_tensor.device}")
 
-        out_tensor = torch.empty_like(in_tensor)
+        if out_tensor is None:
+            out_tensor = torch.empty_like(in_tensor)
 
         if stream is None:
             stream = current_stream()
@@ -288,3 +291,19 @@ class PyNcclCommunicator:
 
     def group_end(self):
         self.nccl.ncclGroupEnd()
+
+    def register_comm_window(self, tensor: torch.Tensor):
+        return self.nccl.ncclCommWindowRegister(
+            self.comm,
+            buffer_type(tensor.data_ptr()),
+            tensor.numel() * tensor.element_size(),
+            1,
+        )
+
+    def register_comm_window_raw(self, ptr: int, size: int):
+        return self.nccl.ncclCommWindowRegister(
+            self.comm, buffer_type(ptr), size, 1
+        )
+
+    def deregister_comm_window(self, window):
+        return self.nccl.ncclCommWindowDeregister(self.comm, window)

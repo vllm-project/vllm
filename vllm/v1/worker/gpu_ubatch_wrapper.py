@@ -9,6 +9,7 @@ import torch
 
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.forward_context import (create_forward_context, get_forward_context,
                                   override_forward_context)
 from vllm.logger import init_logger
@@ -132,6 +133,10 @@ class UBatchWrapper:
                             cudagraph=torch.cuda.CUDAGraph(),
                             ubatch_metadata=ubatch_metadata,
                         )
+            if self.graph_pool is not None:
+                set_graph_pool_id(self.graph_pool)
+            else:
+                set_graph_pool_id(current_platform.graph_pool_handle())
             with torch.cuda.graph(cudagraph_metadata.cudagraph,
                                   stream=compute_stream,
                                   pool=self.graph_pool):
