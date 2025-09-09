@@ -6,10 +6,11 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
 
 import pytest
+import torch
 from packaging.version import Version
 from transformers import __version__ as TRANSFORMERS_VERSION
 
-from vllm.config import TokenizerMode
+from vllm.config import ModelDType, TokenizerMode
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,23 @@ class _HfExamplesInfo:
     The reason for the minimum/maximum version requirement.
     """
 
+    skip_tokenizer_init: bool = False
+    """
+    If true, skip initialization of tokenizer and detokenizer. 
+    """
+
+    dtype: ModelDType = "auto"
+    """
+    The data type for the model weights and activations.
+    """
+
+    enforce_eager: bool = False
+    """
+    Whether to enforce eager execution. If True, we will
+    disable CUDA graph and always execute the model in eager mode.
+    If False, we will use CUDA graph and eager execution in hybrid.
+    """
+
     is_available_online: bool = True
     """
     Set this to ``False`` if the name of this architecture no longer exists on
@@ -75,6 +93,9 @@ class _HfExamplesInfo:
     The specific revision (commit hash, tag, or branch) to use for the model.
     If not specified, the default revision will be used.
     """
+
+    max_num_seqs: Optional[int] = None
+    """Maximum number of sequences to be processed in a single iteration."""
 
     def check_transformers_version(
         self,
@@ -137,7 +158,7 @@ class _HfExamplesInfo:
 # yapf: disable
 _TEXT_GENERATION_EXAMPLE_MODELS = {
     # [Decoder-only]
-    "ApertusForCausalLM": _HfExamplesInfo("swiss-ai/Apertus-8B",
+    "ApertusForCausalLM": _HfExamplesInfo("swiss-ai/Apertus-8B-2509",
                                           min_transformers_version="4.56.0",
                                           trust_remote_code=True),
     "AquilaModel": _HfExamplesInfo("BAAI/AquilaChat-7B",
@@ -264,7 +285,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MistralForCausalLM": _HfExamplesInfo("mistralai/Mistral-7B-Instruct-v0.1"),
     "MixtralForCausalLM": _HfExamplesInfo("mistralai/Mixtral-8x7B-Instruct-v0.1",  # noqa: E501
                                           {"tiny": "TitanML/tiny-mixtral"}),  # noqa: E501
-    "QuantMixtralForCausalLM": _HfExamplesInfo("mistral-community/Mixtral-8x22B-v0.1-AWQ"),  # noqa: E501
     "MptForCausalLM": _HfExamplesInfo("mpt", is_available_online=False),
     "MPTForCausalLM": _HfExamplesInfo("mosaicml/mpt-7b"),
     "NemotronForCausalLM": _HfExamplesInfo("nvidia/Minitron-8B-Base"),
@@ -331,6 +351,7 @@ _EMBEDDING_EXAMPLE_MODELS = {
     # [Text-only]
     "BertModel": _HfExamplesInfo("BAAI/bge-base-en-v1.5"),
     "Gemma2Model": _HfExamplesInfo("BAAI/bge-multilingual-gemma2"),  # noqa: E501
+    "Gemma3TextModel": _HfExamplesInfo("google/embeddinggemma-300m"),
     "GritLM": _HfExamplesInfo("parasail-ai/GritLM-7B-vllm"),
     "GteModel": _HfExamplesInfo("Snowflake/snowflake-arctic-embed-m-v2.0",
                                                trust_remote_code=True),
@@ -362,7 +383,20 @@ _EMBEDDING_EXAMPLE_MODELS = {
                                          trust_remote_code=True),
     "Qwen2VLForConditionalGeneration": _HfExamplesInfo("MrLight/dse-qwen2-2b-mrl-v1"), # noqa: E501
     "PrithviGeoSpatialMAE": _HfExamplesInfo("ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11", # noqa: E501
-                                            is_available_online=False),  # noqa: E501
+                                            dtype=torch.float16,
+                                            enforce_eager=True,
+                                            skip_tokenizer_init=True,
+                                            # This is to avoid the model
+                                            # going OOM in CI
+                                            max_num_seqs=32,
+                                            ),
+    "Terratorch": _HfExamplesInfo("ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11", # noqa: E501
+                                  dtype=torch.float16,
+                                  enforce_eager=True,
+                                  skip_tokenizer_init=True,
+                                  # This is to avoid the model going OOM in CI
+                                  max_num_seqs=32,
+                                  ),
 }
 
 _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
@@ -460,6 +494,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                       max_transformers_version="4.48",  # noqa: E501
                                                       transformers_version_reason="HF model is not compatible.",  # noqa: E501
                                                       hf_overrides={"architectures": ["MantisForConditionalGeneration"]}),  # noqa: E501
+    "MiDashengLMModel": _HfExamplesInfo("mispeech/midashenglm-7b",
+                            trust_remote_code=True),
     "MiniCPMO": _HfExamplesInfo("openbmb/MiniCPM-o-2_6",
                                 trust_remote_code=True),
     "MiniCPMV": _HfExamplesInfo("openbmb/MiniCPM-Llama3-V-2_5",

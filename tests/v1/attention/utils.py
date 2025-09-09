@@ -139,6 +139,8 @@ def get_attention_backend(backend_name: _Backend):
         "vllm.v1.attention.backends.mla.cutlass_mla.CutlassMLABackend",
         _Backend.FLASHMLA_VLLM_V1:
         "vllm.v1.attention.backends.mla.flashmla.FlashMLABackend",
+        _Backend.FLASH_ATTN_MLA:
+        "vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend",
         _Backend.TRITON_MLA_VLLM_V1:
         "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend",
     }
@@ -303,6 +305,16 @@ full_cg_backend_configs = {
             "cudagraph_mode": "FULL_AND_PIECEWISE",
         },
         specific_gpu_arch=(10, 0)),
+    # FlashAttention MLA on Hopper
+    "FlashAttentionMLA":
+    BackendConfig(name="FlashAttentionMLA",
+                  env_vars={
+                      "VLLM_ATTENTION_BACKEND": "FLASH_ATTN_MLA",
+                  },
+                  comp_config={
+                      "cudagraph_mode": "FULL_DECODE_ONLY",
+                  },
+                  specific_gpu_arch=(9, 0)),
     # FA2
     "FA2":
     BackendConfig(name="FA2",

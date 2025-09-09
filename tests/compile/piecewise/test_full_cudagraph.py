@@ -35,7 +35,7 @@ def temporary_environ(env_vars):
 test_params_full_cudagraph = []
 
 # deepseek-ai/DeepSeek-V2-Lite with MLA
-MLA_backends = ["FlashMLA", "CutlassMLA"]
+MLA_backends = ["FlashMLA", "FlashAttentionMLA", "CutlassMLA"]
 for mla_backend in MLA_backends:
     test_params_full_cudagraph.append(
         pytest.param(
