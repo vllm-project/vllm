@@ -37,15 +37,7 @@ import os
 if current_platform.is_rocm():
     from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
 
-VLLM_USE_AITER_TRITON_FUSED_SPLIT_QKV_ROPE = (os.getenv(
-    "VLLM_USE_AITER_TRITON_FUSED_SPLIT_QKV_ROPE", "False").lower()
-                                              in ("true", "1"))
-VLLM_USE_AITER_TRITON_FUSED_ADD_RMSNORM_PAD = (os.getenv(
-    "VLLM_USE_AITER_TRITON_FUSED_ADD_RMSNORM_PAD", "False").lower()
-                                               in ("true", "1"))
-if VLLM_USE_AITER_TRITON_FUSED_SPLIT_QKV_ROPE:
-    from aiter.ops.triton.fused_qkv_split_qk_rope import (
-        fused_qkv_split_qk_rope)
+VLLM_USE_AITER_TRITON_FUSED_ADD_RMSNORM_PAD = (os.getenv("VLLM_USE_AITER_TRITON_FUSED_ADD_RMSNORM_PAD", "False").lower() in ("true", "1"))
 if VLLM_USE_AITER_TRITON_FUSED_ADD_RMSNORM_PAD:
     from aiter.ops.triton.fused_add_rmsnorm_pad import fused_add_rmsnorm_pad
 if current_platform.is_rocm():
@@ -141,8 +133,7 @@ class OAIAttention(nn.Module):
     def forward(self, hidden_states: torch.Tensor,
                 positions: torch.Tensor) -> torch.Tensor:
         # t = self.norm(hidden_states)
-        if isinstance(hidden_states, tuple) and current_platform.is_rocm(
-        ) and VLLM_USE_AITER_TRITON_FUSED_ADD_RMSNORM_PAD:
+        if isinstance(hidden_states, tuple) and current_platform.is_rocm() and VLLM_USE_AITER_TRITON_FUSED_ADD_RMSNORM_PAD:
             hidden_states, res = hidden_states
             t, hidden_states = fused_add_rmsnorm_pad(
                 hidden_states, self.norm.weight, self.norm.variance_epsilon,
@@ -153,19 +144,17 @@ class OAIAttention(nn.Module):
         # q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         # q, k = self.rotary_emb(positions, q, k)
         if VLLM_USE_AITER_TRITON_FUSED_SPLIT_QKV_ROPE:
-            cos, sin = self.rotary_emb.cos_sin_cache.chunk(2, dim=-1)
+            cos, sin = self.rotary_emb.cos_sin_cache.chunk(2, dim = -1)
             q, k, v = fused_qkv_split_qk_rope(
                 qkv,
                 cos,
                 sin,
                 positions,
-                self.num_local_attention_heads,
-                self.num_local_key_value_heads,
-                self.head_dim,
+                self.num_local_attention_heads, self.num_local_key_value_heads, self.head_dim,
                 is_neox=self.rotary_emb.is_neox_style,
-                offsets=None,
-                reuse_freqs_front_part=(self.head_dim // 2 == cos.shape[-1]),
-                nope_first=False,
+                offsets = None,
+                reuse_freqs_front_part = (self.head_dim // 2 == cos.shape[-1]),
+                nope_first = False,
             )
             q = q.view(-1, self.q_size)
             k = k.view(-1, self.kv_size)
@@ -178,7 +167,7 @@ class OAIAttention(nn.Module):
                                 dim=-1)
             q, k = self.rotary_emb(positions, q, k)
             attn_output = self.attn(q, k, v)
-        #v = v.contiguous()
+            v = v.contiguous()
         output, _ = self.o_proj(attn_output)
         if current_platform.is_rocm(
         ) and VLLM_USE_AITER_TRITON_FUSED_ADD_RMSNORM_PAD:
