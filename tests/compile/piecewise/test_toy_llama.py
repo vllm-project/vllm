@@ -25,7 +25,7 @@ from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.utils import direct_register_custom_op
 
 # create a library to hold the custom op
-lib_name = "silly_" + Path(__file__).stem
+lib_name = "silly_" + Path(__file__).stem.replace("-", "_")
 silly_lib = Library(lib_name, "FRAGMENT")  # noqa
 
 
