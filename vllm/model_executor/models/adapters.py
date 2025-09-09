@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ast
+import functools
 import inspect
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Optional, TypeVar, cast
@@ -132,6 +133,7 @@ def _get_pooling_model_name(orig_model_name: str, pooling_suffix: str) -> str:
     return model_name + pooling_suffix
 
 
+@functools.cache
 def try_create_mm_pooling_model_cls(orig_cls: _T) -> _T:
 
     class CallVisitor(ast.NodeVisitor):
@@ -233,6 +235,7 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
     return ModelForPooling  # type: ignore
 
 
+@functools.cache
 def as_embedding_model(cls: _T) -> _T:
     """
     Subclass an existing vLLM model to support embeddings.
@@ -269,6 +272,7 @@ def as_embedding_model(cls: _T) -> _T:
     return ModelForEmbedding  # type: ignore
 
 
+@functools.cache
 def as_seq_cls_model(cls: _T) -> _T:
     """
     Subclass an existing vLLM model to support classify and score tasks.
@@ -370,6 +374,7 @@ def as_seq_cls_model(cls: _T) -> _T:
     return ModelForSequenceClassification  # type: ignore
 
 
+@functools.cache
 def as_reward_model(cls: _T) -> _T:
     """
     Subclass an existing vLLM model to support reward modeling.
