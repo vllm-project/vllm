@@ -4,12 +4,13 @@
 Test (piecewise) compilation with a simple model where multiple submodules
 are compiled and graph captured separately.
 """
-from pathlib import Path
 
 import torch
 from torch import nn
-from torch.library import Library
 
+# This import automatically registers torch ops for testing
+# like silly.attention
+import tests.compile.silly_attention  # noqa: F401
 from vllm.compilation.backends import set_model_tag
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import (ignore_torch_compile,
@@ -17,37 +18,11 @@ from vllm.compilation.decorators import (ignore_torch_compile,
 from vllm.config import (CompilationConfig, CompilationLevel, CUDAGraphMode,
                          VllmConfig, set_current_vllm_config)
 from vllm.forward_context import BatchDescriptor, set_forward_context
-from vllm.utils import direct_register_custom_op
-
-# create a library to hold the custom op
-lib_name = "silly_" + Path(__file__).stem.replace("-", "_")
-silly_lib = Library(lib_name, "FRAGMENT")  # noqa
 
 BATCH_SIZE = 32
 MLP_SIZE = 128
 HIDDEN_SIZE = 1024
 RANDOM_SEED = 0
-
-
-def silly_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-                    out: torch.Tensor) -> None:
-    out.copy_(q)
-    out += k
-    out += v
-
-
-def silly_attention_fake(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-                         out: torch.Tensor) -> None:
-    return
-
-
-direct_register_custom_op(
-    op_name="attention",
-    op_func=silly_attention,
-    mutates_args=["out"],
-    fake_impl=silly_attention_fake,
-    target_lib=silly_lib,
-)
 
 
 @support_torch_compile
@@ -92,7 +67,7 @@ class Attention(nn.Module):
         x = self.pre_attn(x)
         x = self.rms_norm_ref(x)
         attn_output = torch.empty_like(x)
-        getattr(torch.ops, lib_name).attention(x, x, x, attn_output)
+        torch.ops.silly.attention(x, x, x, attn_output)
         x = attn_output
         x = self.rms_norm_ref(x)
         x = self.post_attn(x)
@@ -206,7 +181,7 @@ def test_multi_graph_piecewise_compile_outputs_equal():
     vllm_config = VllmConfig(compilation_config=CompilationConfig(
         level=CompilationLevel.PIECEWISE,
         use_cudagraph=True,
-        splitting_ops=[lib_name + ".attention"],
+        splitting_ops=["silly.attention"],
         cudagraph_capture_sizes=[1, 2],
     ))
     cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
@@ -260,7 +235,7 @@ def test_multi_graph_piecewise_compile_outputs_equal():
     vllm_config = VllmConfig(compilation_config=CompilationConfig(
         level=CompilationLevel.PIECEWISE,
         use_cudagraph=False,
-        splitting_ops=[lib_name + ".attention"],
+        splitting_ops=["silly.attention"],
     ))
     cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
 

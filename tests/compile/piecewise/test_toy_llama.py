@@ -9,45 +9,18 @@ if the config `tractable_init` is set to True. Otherwise, the weights are
 initialized randomly with a fixed seed.
 """
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Optional
 
 import pytest
 import torch
 from torch import nn
-from torch.library import Library
 
+import tests.compile.silly_attention  # noqa: F401
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (CompilationConfig, CompilationLevel, CUDAGraphMode,
                          VllmConfig, set_current_vllm_config)
 from vllm.forward_context import BatchDescriptor, set_forward_context
-from vllm.utils import direct_register_custom_op
-
-# create a library to hold the custom op
-lib_name = "silly_" + Path(__file__).stem.replace("-", "_")
-silly_lib = Library(lib_name, "FRAGMENT")  # noqa
-
-
-def silly_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-                    out: torch.Tensor) -> None:
-    out.copy_(q)
-    out += k
-    out += v
-
-
-def silly_attention_fake(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-                         out: torch.Tensor) -> None:
-    return
-
-
-direct_register_custom_op(
-    op_name="attention",
-    op_func=silly_attention,
-    mutates_args=["out"],
-    fake_impl=silly_attention_fake,
-    target_lib=silly_lib,
-)
 
 
 @dataclass
@@ -162,7 +135,7 @@ class LlamaAttention(nn.Module):
         k = k + positions.unsqueeze(1)
 
         attn_output = torch.empty_like(q)
-        getattr(torch.ops, lib_name).attention(q, k, v, attn_output)
+        torch.ops.silly.attention(q, k, v, attn_output)
 
         output = self.output_projection(attn_output)
         return output
@@ -277,7 +250,7 @@ def run_model(llama_config,
             cudagraph_capture_sizes=[1, 2],
         )
         if split_attn:
-            compilation_config.splitting_ops = [lib_name + ".attention"]
+            compilation_config.splitting_ops = ["silly.attention"]
         cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
     else:
         compilation_config = CompilationConfig(
@@ -438,7 +411,7 @@ def benchmark():
             compilation_config = CompilationConfig(
                 level=CompilationLevel.PIECEWISE,
                 use_cudagraph=True,
-                splitting_ops=[lib_name + ".attention"],
+                splitting_ops=["silly.attention"],
                 cudagraph_capture_sizes=cudagraph_sizes,
             )
         else:

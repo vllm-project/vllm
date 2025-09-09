@@ -2,42 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 from torch import nn
-from torch.library import Library
 
+import tests.compile.silly_attention  # noqa: F401
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import (ignore_torch_compile,
                                          support_torch_compile)
 from vllm.config import (CacheConfig, CompilationConfig, CompilationLevel,
                          CUDAGraphMode, VllmConfig, set_current_vllm_config)
 from vllm.forward_context import BatchDescriptor, set_forward_context
-from vllm.utils import direct_register_custom_op
-
-# create a library to hold the custom op
-silly_lib = Library("silly", "FRAGMENT")  # noqa
 
 BATCH_SIZE = 32
 MLP_SIZE = 128
-
-
-def silly_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-                    out: torch.Tensor) -> None:
-    out.copy_(q)
-    out += k
-    out += v
-
-
-def silly_attention_fake(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-                         out: torch.Tensor) -> None:
-    return
-
-
-direct_register_custom_op(
-    op_name="attention",
-    op_func=silly_attention,
-    mutates_args=["out"],
-    fake_impl=silly_attention_fake,
-    target_lib=silly_lib,
-)
 
 
 @torch.inference_mode
@@ -151,7 +126,7 @@ def test_ignore_torch_compile_decorator():
         run_model(vllm_config, mod_C, cudagraph_runtime_mode)
 
 
-# Only enable torch.compile if
+# Only enable torch.compile if
 # vllm_config.cache_config.kv_sharing_fast_prefill=True
 @support_torch_compile(enable_if=lambda vllm_config: vllm_config.cache_config.
                        kv_sharing_fast_prefill)
@@ -173,7 +148,7 @@ class B(nn.Module):
         return x
 
 
-# Only enable torch.compile if
+# Only enable torch.compile if
 # vllm_config.cache_config.kv_sharing_fast_prefill=False
 @support_torch_compile(enable_if=lambda vllm_config: not vllm_config.
                        cache_config.kv_sharing_fast_prefill)
