@@ -37,6 +37,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.utils import set_default_torch_num_threads
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
@@ -265,7 +266,14 @@ def image_to_pixel_values_internvl(
         use_thumbnail=use_thumbnail,
     )
 
-    pixel_values = torch.stack([transform(image) for image in images])
+    # Image transformation operations (which include tensor computations
+    # on the CPU) can occupy a substantial number of CPU cores, introducing
+    # overhead due to CPU contention. This issue becomes particularly
+    # noticeable when deploying multiple vLLM instances on a single machine.
+    # Therefore, it is necessary to limit the number of threads allocated to
+    # image transformation tasks.
+    with set_default_torch_num_threads(num_threads=1):
+        pixel_values = torch.stack([transform(image) for image in images])
     return pixel_values
 
 
@@ -292,7 +300,14 @@ def video_to_pixel_values_internvl(
         assert len(pil_frame) == 1
         frames_list.extend(pil_frame)
 
-    pixel_values = torch.stack([transform(image) for image in frames_list])
+    # Image transformation operations (which include tensor computations
+    # on the CPU) can occupy a substantial number of CPU cores, introducing
+    # overhead due to CPU contention. This issue becomes particularly
+    # noticeable when deploying multiple vLLM instances on a single machine.
+    # Therefore, it is necessary to limit the number of threads allocated to
+    # image transformation tasks.
+    with set_default_torch_num_threads(num_threads=1):
+        pixel_values = torch.stack([transform(image) for image in frames_list])
     return pixel_values
 
 
