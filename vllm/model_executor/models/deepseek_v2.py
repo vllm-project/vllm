@@ -54,6 +54,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.model_executor.custom_op import CustomOp
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
@@ -62,7 +63,8 @@ from .utils import (PPMissingLayer, is_pp_missing_parameter,
                     maybe_prefix)
 
 
-class DeepseekV2MLP(nn.Module):
+@CustomOp.register("deepseekv2_mlp")
+class DeepseekV2MLP(CustomOp):
 
     def __init__(
         self,
