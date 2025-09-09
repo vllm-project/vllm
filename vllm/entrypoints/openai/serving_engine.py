@@ -482,7 +482,7 @@ class OpenAIServing:
         Returns:
             PromptTokenUsageInfo if conditions are met, None otherwise
         """
-        if enable_prompt_tokens_details and num_cached_tokens:
+        if enable_prompt_tokens_details and num_cached_tokens is not None:
             return PromptTokenUsageInfo(cached_tokens=num_cached_tokens)
         return None
 

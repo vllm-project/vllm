@@ -689,9 +689,8 @@ class OpenAIServingChat(OpenAIServing):
                             is_tool_call = (
                                 harmony_parser.current_recipient is not None
                                 and
-                                (harmony_parser.current_recipient.startswith(
-                                    "python") or harmony_parser.
-                                 current_recipient.startswith("browser.")))
+                                harmony_parser.current_recipient.startswith(
+                                    ("python", "browser.")))
                             if is_analysis or is_tool_call:
                                 num_reasoning_tokens[i] += 1
                         cur_channel = harmony_parser.current_channel
