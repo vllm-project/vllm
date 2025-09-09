@@ -432,7 +432,7 @@ class AsyncLLM(EngineClient):
 
         async def output_handler():
             try:
-                prefill_comp_speed_history : deque = deque(
+                prefill_comp_speed_history: deque = deque(
                     maxlen=IterationStats.MAX_HISTORY_LEN)
                 while True:
                     # 1) Pull EngineCoreOutputs from the EngineCore.
