@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Attention layer using Triton-only kernels (no-external dependencies)."""
+"""Attention layer with PagedAttention and Triton prefix prefill."""
 from dataclasses import dataclass
 from functools import cache
 from typing import ClassVar, Optional
@@ -14,9 +14,12 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode)
 from vllm.attention.ops.paged_attn import PagedAttention
+from vllm.attention.ops.triton_reshape_and_cache_flash import (
+    triton_reshape_and_cache_flash)
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.utils import (AttentionCGSupport,
                                               AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
@@ -175,7 +178,6 @@ class TritonAttentionBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
-        # "NHD layout"
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
@@ -274,7 +276,7 @@ class TritonAttentionImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: TritonAttentionMetadata,
+        attn_metadata: FlashAttentionMetadata,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
         output_block_scale: Optional[torch.Tensor] = None,
@@ -337,7 +339,7 @@ class TritonAttentionImpl(AttentionImpl):
                     layer._v_scale,
                 )
             else:
-                torch.ops._C_cache_ops.reshape_and_cache_flash(
+                triton_reshape_and_cache_flash(
                     key,
                     value,
                     key_cache,

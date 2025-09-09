@@ -140,7 +140,7 @@ def reshape_and_cache_kernel_flash(
     return
 
 
-def reshape_and_cache_flash(
+def triton_reshape_and_cache_flash(
     key: torch.Tensor,  # [num_tokens, num_heads, head_size]
     value: torch.Tensor,  # [num_tokens, num_heads, head_size]
     key_cache: torch.Tensor,  # [num_blocks, block_size, num_heads, head_size]
