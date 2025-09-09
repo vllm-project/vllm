@@ -1304,8 +1304,6 @@ GELU_NO_MUL: str = activation_without_mul("gelu")
 def _get_config_quant_dtype(
     use_fp8_w8a8: bool,
     use_int8_w8a8: bool,
-    use_int8_w8a16: bool,
-    use_int4_w4a16: bool,
     use_mxfp4_w4a4: bool,
 ) -> Union[None, torch.dtype, str]:
     """
@@ -1387,10 +1385,10 @@ def fused_experts_impl(
                                          use_mxfp4_w4a4=use_mxfp4_w4a4,
                                          dtype=hidden_states.dtype)
 
+    # Note: for use_int8_w8a16 or use_int4_w4a16, the activations are
+    # quantized prior to calling fused_experts.
     quant_dtype = _get_config_quant_dtype(use_fp8_w8a8=use_fp8_w8a8,
                                           use_int8_w8a8=use_int8_w8a8,
-                                          use_int8_w8a16=use_int8_w8a16,
-                                          use_int4_w4a16=use_int4_w4a16,
                                           use_mxfp4_w4a4=use_mxfp4_w4a4)
 
     get_config_func = functools.partial(
