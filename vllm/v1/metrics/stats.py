@@ -192,8 +192,8 @@ class IterationStats:
         if (self.prefill_comp_speed_history is not None and prefill_time > 0
                 and computed_prefill_tokens >= self.min_comp_prefill_tokens):
             # find computation amount by trapezoid area formula
-            top = num_cached_tokens
-            bottom = num_prompt_tokens - 1
+            top = num_cached_tokens + 1
+            bottom = num_prompt_tokens
             height = num_prompt_tokens - num_cached_tokens
             amount = ((top + bottom) * height) / 2
             self.prefill_comp_speed_history.append(amount / prefill_time)
