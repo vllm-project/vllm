@@ -273,8 +273,6 @@ class UBatchWrapper:
 
         if num_tokens not in self.cudagraphs \
             and cudagraph_runtime_mode is CUDAGraphMode.FULL:
-            if is_global_first_rank():
-                logger.info(f"Capturing ubatched cudagraph for {num_tokens} tokens")
             ubatch_metadata = self._make_ubatch_metadata(
                 ubatch_slices=ubatch_slices,
                 attn_metadata=attn_metadata,
@@ -289,14 +287,10 @@ class UBatchWrapper:
 
             return self._capture_ubatches(ubatch_metadata, self.model)
         elif num_tokens in self.cudagraphs:
-            if is_global_first_rank():
-                logger.info(f"Replaying ubatched cudagraph for {num_tokens} tokens")
             cudagraph_metadata = self.cudagraphs[num_tokens]
             cudagraph_metadata.cudagraph.replay()
             return cudagraph_metadata.outputs
         else:
-            if is_global_first_rank():
-                logger.info(f"Running ubatched for {num_tokens} tokens")
             ubatch_metadata = self._make_ubatch_metadata(
                 ubatch_slices=ubatch_slices,
                 attn_metadata=attn_metadata,
