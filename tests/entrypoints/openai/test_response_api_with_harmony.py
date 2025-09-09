@@ -360,7 +360,7 @@ async def test_code_interpreter(client: OpenAI, model_name: str):
                "`var_a=9999999967*9999999769` "
                "`var_b=9999999943*9999999781` "
                "`var_c=9999999929*9999999787`. "
-               "Show only the sorted variable names with `<`."),
+               "Show only the sorted variable names with `<` using ascii."),
         tools=[{
             "type": "code_interpreter",
             "container": {
