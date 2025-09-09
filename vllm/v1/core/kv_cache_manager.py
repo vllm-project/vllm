@@ -7,7 +7,7 @@ from typing import Literal, Optional, overload
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
-from vllm.v1.core.kv_cache_utils import KVCacheBlock
+from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVPrefixTrie
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
@@ -306,6 +306,9 @@ class KVCacheManager:
     def unschedule(self, request: Request) -> None:
         """Unsets request scheduled flag for KVPrefixTrieNode"""
         self.coordinator.unschedule(request.request_id)
+
+    def get_prefix_trie(self) -> Optional[KVPrefixTrie]:
+        return self.coordinator.get_prefix_trie()
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF

@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from typing import Optional
 
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock, KVPrefixTrie
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager, FullAttentionManager, get_manager_for_kv_cache_spec)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
@@ -147,6 +147,11 @@ class KVCacheCoordinator(ABC):
             request_id: The request ID
         """
         self.single_type_managers[0].unschedule(request_id)
+
+    def get_prefix_trie(self) -> Optional[KVPrefixTrie]:
+        if not self.single_type_managers:
+            return None
+        return self.single_type_managers[0].kv_prefix_trie
 
     def get_num_common_prefix_blocks(self, request_id: str,
                                      num_running_requests: int) -> list[int]:
