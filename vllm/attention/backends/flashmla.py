@@ -17,6 +17,7 @@ from vllm.attention.backends.mla.common import (MLACommonBackend,
 from vllm.attention.ops.flashmla import (flash_mla_with_kvcache,
                                          get_mla_metadata,
                                          is_flashmla_supported)
+from vllm.platforms.cuda import CudaPlatform
 
 
 class FlashMLABackend(MLACommonBackend):
@@ -180,6 +181,16 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
 
         assert is_flashmla_supported(), \
             "FlashMLA is not supported on this device"
+
+        # disallow FlashMLA on NVIDIA Blackwell (SM 10.0+) GPUs
+        # context:
+        # https://github.com/deepseek-ai/FlashMLA/issues/83
+        # https://github.com/vllm-project/vllm/issues/24513
+        if CudaPlatform.has_device_capability(100):
+            raise NotImplementedError(
+                "FlashMLA is temporarily disabled on Blackwell (SM 10.0). "
+                "Please use CUTLASS_MLA or TRITON_MLA instead. "
+                "Example: `export VLLM_ATTENTION_BACKEND=CUTLASS_MLA`")
 
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
