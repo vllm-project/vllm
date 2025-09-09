@@ -134,14 +134,13 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
     """If specified, will run the OpenAI frontend server in the same process as
     the model serving engine."""
     enable_request_id_headers: bool = False
-    """If specified, API server will add X-Request-Id header to responses.
-    Caution: this hurts performance at high QPS."""
+    """If specified, API server will add X-Request-Id header to responses."""
     enable_auto_tool_choice: bool = False
-    """If specified, exclude tool definitions in prompts when
-    tool_choice='none'."""
-    exclude_tools_when_tool_choice_none: bool = False
     """Enable auto tool choice for supported models. Use `--tool-call-parser`
     to specify which parser to use."""
+    exclude_tools_when_tool_choice_none: bool = False
+    """If specified, exclude tool definitions in prompts when
+    tool_choice='none'."""
     tool_call_parser: Optional[str] = None
     """Select the tool call parser depending on the model that you're using.
     This is used to parse the model-generated tool call into OpenAI API format.
