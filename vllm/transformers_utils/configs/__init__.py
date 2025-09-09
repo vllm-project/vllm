@@ -23,6 +23,7 @@ from vllm.transformers_utils.configs.moonvit import MoonViTConfig
 from vllm.transformers_utils.configs.nemotron import NemotronConfig
 from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
 from vllm.transformers_utils.configs.nemotron_vl import Nemotron_Nano_VL_Config
+from vllm.transformers_utils.configs.olmo3 import Olmo3Config
 from vllm.transformers_utils.configs.ovis import OvisConfig
 from vllm.transformers_utils.configs.speculators.base import SpeculatorsConfig
 from vllm.transformers_utils.configs.step3_vl import (Step3TextConfig,
@@ -44,6 +45,7 @@ __all__ = [
     "NemotronConfig",
     "NemotronHConfig",
     "Nemotron_Nano_VL_Config",
+    "Olmo3Config",
     "OvisConfig",
     "SpeculatorsConfig",
     "UltravoxConfig",
