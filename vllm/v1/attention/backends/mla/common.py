@@ -443,11 +443,13 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self.metadata_cls = metadata_cls \
             if metadata_cls is not None else MLACommonMetadata
         self.kv_cache_spec = kv_cache_spec
-        self.device = device
         scheduler_config = vllm_config.scheduler_config
         self.model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
         parallel_config = vllm_config.parallel_config
+        cache_config = vllm_config.cache_config
+        self.compilation_config = vllm_config.compilation_config
+        self.device = device
+
         self.num_heads = self.model_config.get_num_attention_heads(
             parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)
@@ -608,10 +610,12 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         prefill.prefill_main = self._fi_prefill_main
         prefill.prefill_chunks = self._fi_prefill_chunks
 
-    def _build_decode(
-            self, block_table_tensor: torch.Tensor, seq_lens_cpu: torch.Tensor,
-            seq_lens_device: torch.Tensor, query_start_loc_cpu: torch.Tensor,
-            query_start_loc_device: torch.Tensor) -> MLACommonDecodeMetadata:
+    def _build_decode(self, block_table_tensor: torch.Tensor,
+                      seq_lens_cpu: torch.Tensor,
+                      seq_lens_device: torch.Tensor,
+                      query_start_loc_cpu: torch.Tensor,
+                      query_start_loc_device: torch.Tensor,
+                      num_decode_tokens: int) -> MLACommonDecodeMetadata:
         return MLACommonDecodeMetadata(
             block_table=block_table_tensor,
             seq_lens=seq_lens_device,
@@ -624,11 +628,12 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         Currently, only decode is supported for full cudagraphs with MLA.
         """
         m = common_attn_metadata
-        assert m.num_reqs == m.num_actual_tokens, \
+        assert m.num_reqs <= (m.num_actual_tokens *
+                              self.reorder_batch_threshold), \
             "MLA only supports decode-only full CUDAGraph capture. " \
             "Make sure all cudagraph capture sizes <= max_num_seq."
 
-        assert m.max_query_len == 1  # decode-only
+        assert m.max_query_len <= self.reorder_batch_threshold  # decode only
 
         return self.build(0, m)
 
@@ -819,6 +824,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 seq_lens_device=seq_lens[:num_decodes],
                 query_start_loc_cpu=query_start_loc_cpu[:num_decodes + 1],
                 query_start_loc_device=query_start_loc[:num_decodes + 1],
+                num_decode_tokens=num_decode_tokens,
             )
 
         attn_metadata = self.metadata_cls(
