@@ -165,7 +165,7 @@ PrepareResultType = tuple[
     Optional[torch.Tensor],
 ]
 
-ReceiverType = Callable[[any], PrepareResultType]
+ReceiverType = Callable[[], PrepareResultType]
 
 
 # TODO: pass FusedMoEParallelConfig in as ctor parameter?
@@ -230,7 +230,7 @@ class FusedMoEPrepareAndFinalize(ABC):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-    ) -> ReceiverType:
+    ) -> tuple[Callable, ReceiverType]:
         """
         Perform any quantization (and/or) dispatching needed for this kernel
         but do not wait for results from other workers.
@@ -872,11 +872,11 @@ class FusedMoEModularKernel(torch.nn.Module):
             # the receiver.
             dbo_register_recv_hook(hook)
             dbo_yield()
-            if dbo_enabled():
-                hook = None
+            if not dbo_enabled():
+                hook()
 
             (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
-             _expert_topk_weights) = receiver(hook)
+             _expert_topk_weights) = receiver()
 
         # Maybe prepare gathered topk_ids and topk_weights from other EP ranks.
         topk_ids = topk_ids if _expert_topk_ids is None else _expert_topk_ids

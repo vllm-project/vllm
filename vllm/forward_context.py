@@ -67,7 +67,6 @@ def _compute_chunked_local_num_tokens(num_tokens_across_dp_cpu: list[int],
 class DPMetadata:
     max_tokens_across_dp_cpu: torch.Tensor
     cu_tokens_across_dp_cpu: torch.Tensor
-    _num_tokens_across_dp: torch.Tensor
     local_sizes: Optional[list[int]] = None
 
     @staticmethod
