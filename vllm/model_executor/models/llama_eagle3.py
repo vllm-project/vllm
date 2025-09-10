@@ -247,11 +247,14 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
                 target_vocab_size = vllm_config.model_config.get_vocab_size()
                 hf_config.draft_vocab_size = target_vocab_size
 
-            # If target_hidden_size is not set, use target model's hidden_size
+            # If target_hidden_size is not set, we need to infer it from the fc layer
+            # The fc layer expects input_size = target_hidden_size * 3
             if (not hasattr(hf_config, 'target_hidden_size')
                     or hf_config.target_hidden_size is None):
-                target_hidden_size = vllm_config.model_config.get_hidden_size()
-                hf_config.target_hidden_size = target_hidden_size
+                # For GPT-OSS models, the actual target_hidden_size might be different
+                # from the model's hidden_size. We'll set it to None and let the
+                # model initialization handle it based on the actual fc layer weights.
+                hf_config.target_hidden_size = None
 
     def forward(
         self,
@@ -303,6 +306,29 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         model_weights = {}
         includes_draft_id_mapping = False
         includes_embed_tokens = False
+        
+        # Check if we need to resize the fc layer based on actual weights
+        fc_weight_shape = None
+        for name, loaded_weight in weights:
+            if name == "model.fc.weight":
+                fc_weight_shape = loaded_weight.shape
+                break
+        
+        # If we found the fc weight and it doesn't match our current fc layer,
+        # we need to recreate the fc layer with the correct dimensions
+        if fc_weight_shape is not None:
+            expected_input_size = fc_weight_shape[1]  # weight shape is [output, input]
+            expected_output_size = fc_weight_shape[0]
+            current_input_size = self.model.fc.weight.shape[1]
+            
+            if expected_input_size != current_input_size:
+                print(f"DEBUG: Resizing fc layer from {current_input_size} to {expected_input_size} input dimensions")
+                # Recreate the fc layer with correct dimensions
+                self.model.fc = torch.nn.Linear(expected_input_size, expected_output_size, bias=False)
+                # Update target_hidden_size in config for future reference
+                if hasattr(self.config, 'target_hidden_size'):
+                    self.config.target_hidden_size = expected_input_size // 3
+        
         for name, loaded_weight in weights:
             if "t2d" in name:
                 continue
