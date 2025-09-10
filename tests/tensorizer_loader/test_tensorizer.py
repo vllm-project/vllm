@@ -164,9 +164,8 @@ def test_load_without_tensorizer_load_format(vllm_runner, capfd, model_ref):
     except RuntimeError:
         out, err = capfd.readouterr()
         combined_output = out + err
-        assert ("ValueError: Model loader extra config "
-                "is not supported for load "
-                "format auto") in combined_output
+        assert ("ValueError: Unexpected extra config keys "
+                "for load format auto") in combined_output
     finally:
         del model
         gc.collect()
