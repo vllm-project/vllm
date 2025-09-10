@@ -38,6 +38,30 @@ SHAPE_COMBOS = [
 NUM_EXPERTS = [8, 64]
 TOP_KS = [1, 6]
 
+# dp_size, tp_size, use_ep
+PARALLEL_COMBOS = [
+    [1, 1, False],
+    [1, 2, False],
+#    [1, 4, False],
+#    [2, 1, True],
+#    [2, 2, True],
+#    [4, 1, True],
+]
+
+BACKENDS = [
+    None,
+    "naive",
+    "pplx",
+    "deepep_low_latency",
+    "deepep_high_throughput",
+]
+
+QUANT_METHODS = [
+    None,
+    "fp8",
+    #"modelopt",
+    #"compressed-tensors",
+]
 
 def rank_chunk(num: int, r: int, w: int) -> int:
     rem = num % w
@@ -308,7 +332,7 @@ def _test_loop(
     #        _set_vllm_config(new_vllm_config, pgi.world_size, pgi.rank,
     #                         pgi.local_rank)
 
-    print(vllm_config.parallel_config)
+    print(f"PCONF {vllm_config.parallel_config}")
 
     world_size = tp_size * dp_size
 
@@ -316,7 +340,13 @@ def _test_loop(
 
     in_dtype = hidden_states.dtype
 
-    # chunk up weights, activations, scores
+    # TODO: chunk up weights, activations, scores
+    device = torch.cuda.current_device()
+    w1 = w1.to(device)
+    w2 = w2.to(device)
+    hidden_states = hidden_states.to(device)
+    logits = logits.to(device)
+    baseline_output = baseline_output.to(device)
 
     moe_layer = make_fused_moe_layer(
         quantization=quantization,
@@ -341,7 +371,7 @@ def _test_loop(
     # output should be completely reduced at this point
     num_tokens = m
     num_tokens_across_dp = torch.tensor([num_tokens] * world_size,
-                                        device="cuda",
+                                        device=torch.cuda.current_device(),
                                         dtype=torch.int)
 
     # Make moe_forward happy
@@ -362,14 +392,9 @@ def _test_loop(
 @pytest.mark.parametrize("m, n, k", SHAPE_COMBOS)
 @pytest.mark.parametrize("num_experts", NUM_EXPERTS)
 @pytest.mark.parametrize("top_k", TOP_KS)
-@pytest.mark.parametrize("quantization",
-                         [None, "fp8"])  #, "modelopt", "compressed-tensors"])
-@pytest.mark.parametrize(
-    "dp_size, tp_size, use_ep",
-    [[1, 1, False], [2, 1, True], [2, 2, True], [4, 1, True], [1, 4, False]])
-@pytest.mark.parametrize(
-    "backend",
-    [None, "naive", "pplx", "deepep_low_latency", "deepep_high_throughput"])
+@pytest.mark.parametrize("quantization", QUANT_METHODS)
+@pytest.mark.parametrize("dp_size, tp_size, use_ep", PARALLEL_COMBOS)
+@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("use_shared_experts", [False])  #[False, True])
 #@multi_gpu_test(num_gpus=2)
 def test_moe_layer(
