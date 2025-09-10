@@ -441,6 +441,7 @@ class MambaMixer2(MambaBase, CustomOp):
             bias=use_bias,
             input_is_parallel=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.out_proj",
         )
 
         self.norm = Mixer2RMSNormGated(intermediate_size,
