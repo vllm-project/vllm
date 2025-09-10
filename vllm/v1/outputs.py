@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import NamedTuple, Optional
 
 import torch
+from vllm.v1.core.sched.output import SchedulerOutput
 
 
 class LogprobsLists(NamedTuple):
@@ -147,7 +148,7 @@ def make_empty_encoder_model_runner_output(
     req_id_to_index: dict[str, int] = {rid: idx for idx, rid in enumerate(req_ids)}
 
     # No tokens generated yet ⇒ one empty list per request
-    sampled_token_ids: list[list[int]] = [[] for _ in req_ids]
+    sampled_token_ids: list[list[int]] = [[0] for _ in req_ids]
 
     # Pooler outputs are not available yet ⇒ use None placeholders
     pooler_output: list[Optional[torch.Tensor]] = [None for _ in req_ids]

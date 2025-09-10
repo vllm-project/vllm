@@ -104,7 +104,7 @@ class Scheduler(SchedulerInterface):
             if self.ec_connector.is_producer:
                 # TODO(Long) Set this when set up
                 self.cache_config.enable_prefix_caching=False
-                self.max_model_len = 0
+                self.max_model_len = 1
         
 
         num_gpu_blocks = self.cache_config.num_gpu_blocks
