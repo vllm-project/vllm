@@ -78,6 +78,12 @@ become available.
       <td><code>lmarena-ai/VisionArena-Chat</code></td>
     </tr>
     <tr>
+      <td><strong>HuggingFace-MMVU</strong></td>
+      <td style="text-align: center;">✅</td>
+      <td style="text-align: center;">✅</td>
+      <td><code>yale-nlp/MMVU</code></td>
+    </tr>
+    <tr>
       <td><strong>HuggingFace-InstructCoder</strong></td>
       <td style="text-align: center;">✅</td>
       <td style="text-align: center;">✅</td>
