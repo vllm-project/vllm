@@ -11,8 +11,8 @@ from tests.models.utils import (GenerateModelInfo,
                                 TokensTextLogprobsPromptLogprobs)
 from vllm.logprobs import Logprob
 
-# see #24485
-PPL_TOL = 1.
+# See #24485
+PPL_TOL = 0.1
 MAX_LENGTH = 1024
 
 
@@ -45,7 +45,14 @@ def wikitext_ppl_test(hf_runner,
                      max_num_seqs=1,
                      enforce_eager=True,
                      **vllm_extra_kwargs) as vllm_model:
+        # Use max_num_seqs=1 to avoid OOM,
+        # and batch different requests together.
+
         model_config = vllm_model.llm.llm_engine.model_config
+
+        # Confirm whether vllm is using the correct architecture
+        if model_info.architecture:
+            assert (model_info.architecture in model_config.architectures)
 
         max_length = min(model_config.max_model_len - 1, max_length)
         stride = max_length
