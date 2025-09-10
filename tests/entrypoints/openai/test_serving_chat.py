@@ -110,7 +110,7 @@ async def test_gpt_oss_chat_tool_call_streaming(gptoss_client: OpenAI,
     messages = [
         {
             "role": "user",
-            "content": "What is the weather in Dallas, TX with celsius?"
+            "content": "What is the weather in Dallas, TX?"
         },
     ]
 
