@@ -171,7 +171,7 @@ class RocmPlatform(Platform):
 
     supported_quantization: list[str] = [
         "awq", "gptq", "fp8", "compressed-tensors", "fbgemm_fp8", "gguf",
-        "quark", "ptpc_fp8", "mxfp4", "petit_nvfp4"
+        "quark", "ptpc_fp8", "mxfp4", "petit_nvfp4", "torchao"
     ]
 
     @classmethod
