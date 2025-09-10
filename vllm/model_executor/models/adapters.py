@@ -49,26 +49,28 @@ def _load_st_projector(model_config: "ModelConfig") -> Optional[nn.Module]:
         if not dense_modules:
             return None
 
-        module = dense_modules[0]
-        folder = module.get("path", "")
+        layers = []
+        for module in dense_modules:
+            folder = module.get("path", "")
 
-        config_path = f"{folder}/config.json" if folder else "config.json"
-        layer_config = get_hf_file_to_dict(config_path, model_config.model,
-                                           model_config.revision)
-        if not layer_config:
-            return None
+            config_path = f"{folder}/config.json" if folder else "config.json"
+            layer_config = get_hf_file_to_dict(config_path, model_config.model,
+                                               model_config.revision)
+            if not layer_config:
+                continue
 
-        linear = nn.Linear(layer_config.get("in_features", 768),
-                           layer_config.get("out_features", 768),
-                           bias=layer_config.get("bias", True),
-                           dtype=torch.float32)
+            linear = nn.Linear(layer_config.get("in_features", 768),
+                               layer_config.get("out_features", 768),
+                               bias=layer_config.get("bias", True),
+                               dtype=model_config.head_dtype)
 
-        if _load_dense_weights(linear, folder, model_config):
-            layers = [linear]
+            if not _load_dense_weights(linear, folder, model_config):
+                continue
+
+            layers.append(linear)
             if act_name := layer_config.get("activation_function"):
                 layers.append(get_act_fn(act_name))
-            return nn.Sequential(*layers).to(dtype=torch.float32)
-
+        return nn.Sequential(*layers).to(dtype=model_config.head_dtype)
     except Exception:
         logger.exception("ST projector loading failed")
 
@@ -103,15 +105,13 @@ def _load_dense_weights(linear: nn.Linear, folder: str,
                 if weight_key in state_dict:
                     weight_loader = getattr(linear.weight, "weight_loader",
                                             default_weight_loader)
-                    weight_loader(linear.weight,
-                                  state_dict[weight_key].to(torch.float32))
+                    weight_loader(linear.weight, state_dict[weight_key])
 
                     bias_key = weight_key.replace("weight", "bias")
                     if linear.bias is not None and bias_key in state_dict:
                         bias_loader = getattr(linear.bias, "weight_loader",
                                               default_weight_loader)
-                        bias_loader(linear.bias,
-                                    state_dict[bias_key].to(torch.float32))
+                        bias_loader(linear.bias, state_dict[bias_key])
                     return True
         except Exception:
             logger.exception("Failed to load %s", filename)
@@ -248,14 +248,14 @@ def as_seq_cls_model(cls: _T) -> _T:
         return cls
 
     # Lazy import
-    from vllm.model_executor.layers.linear import RowParallelLinear
+    from vllm.model_executor.layers.linear import ReplicatedLinear
     from vllm.model_executor.layers.pooler import (ClassifierPooler,
                                                    DispatchPooler, Pooler,
                                                    PoolingMethod, PoolingType)
     from vllm.model_executor.models.interfaces import SupportsCrossEncoding
     from vllm.sequence import IntermediateTensors
 
-    from .utils import maybe_prefix
+    from .utils import get_model_hidden_size, maybe_prefix
 
     class ModelForSequenceClassification(_create_pooling_model_cls(cls),
                                          SupportsCrossEncoding):
@@ -263,11 +263,11 @@ def as_seq_cls_model(cls: _T) -> _T:
         def _init_pooler(self, vllm_config: "VllmConfig", prefix: str = ""):
             config = vllm_config.model_config.hf_config
             quant_config = vllm_config.quant_config
+            hidden_size = get_model_hidden_size(config)
 
-            self.score = RowParallelLinear(
-                config.hidden_size,
+            self.score = ReplicatedLinear(
+                hidden_size,
                 config.num_labels,
-                input_is_parallel=False,
                 bias=False,
                 params_dtype=torch.float32,
                 quant_config=quant_config,

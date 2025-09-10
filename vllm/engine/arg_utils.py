@@ -306,6 +306,8 @@ class EngineArgs:
     # number of P/D disaggregation (or other disaggregation) workers
     pipeline_parallel_size: int = ParallelConfig.pipeline_parallel_size
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
+    decode_context_parallel_size: int = \
+        ParallelConfig.decode_context_parallel_size
     data_parallel_size: int = ParallelConfig.data_parallel_size
     data_parallel_rank: Optional[int] = None
     data_parallel_start_rank: Optional[int] = None
@@ -364,6 +366,7 @@ class EngineArgs:
     disable_mm_preprocessor_cache: bool = False  # DEPRECATED
     mm_processor_cache_gb: float = MultiModalConfig.mm_processor_cache_gb
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
+    io_processor_plugin: Optional[str] = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     # LoRA fields
     enable_lora: bool = False
@@ -416,8 +419,6 @@ class EngineArgs:
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: Union[str, Type[object]] = SchedulerConfig.scheduler_cls
 
-    override_neuron_config: dict[str, Any] = \
-        get_field(ModelConfig, "override_neuron_config")
     override_pooler_config: Optional[Union[dict, PoolerConfig]] = \
         ModelConfig.override_pooler_config
     compilation_config: CompilationConfig = \
@@ -558,8 +559,6 @@ class EngineArgs:
                                  help=model_kwargs["hf_token"]["help"])
         model_group.add_argument("--hf-overrides",
                                  **model_kwargs["hf_overrides"])
-        model_group.add_argument("--override-neuron-config",
-                                 **model_kwargs["override_neuron_config"])
         model_group.add_argument("--override-pooler-config",
                                  **model_kwargs["override_pooler_config"])
         model_group.add_argument("--logits-processor-pattern",
@@ -577,6 +576,8 @@ class EngineArgs:
                                  **model_kwargs["override_attention_dtype"])
         model_group.add_argument("--logits-processors",
                                  **model_kwargs["logits_processors"])
+        model_group.add_argument("--io-processor-plugin",
+                                 **model_kwargs["io_processor_plugin"])
 
         # Model loading arguments
         load_kwargs = get_kwargs(LoadConfig)
@@ -633,6 +634,9 @@ class EngineArgs:
             **parallel_kwargs["pipeline_parallel_size"])
         parallel_group.add_argument("--tensor-parallel-size", "-tp",
                                     **parallel_kwargs["tensor_parallel_size"])
+        parallel_group.add_argument(
+            "--decode-context-parallel-size", "-dcp",
+            **parallel_kwargs["decode_context_parallel_size"])
         parallel_group.add_argument("--data-parallel-size", "-dp",
                                     **parallel_kwargs["data_parallel_size"])
         parallel_group.add_argument(
@@ -984,7 +988,6 @@ class EngineArgs:
             mm_processor_kwargs=self.mm_processor_kwargs,
             mm_processor_cache_gb=self.mm_processor_cache_gb,
             mm_encoder_tp_mode=self.mm_encoder_tp_mode,
-            override_neuron_config=self.override_neuron_config,
             override_pooler_config=self.override_pooler_config,
             logits_processor_pattern=self.logits_processor_pattern,
             generation_config=self.generation_config,
@@ -993,6 +996,7 @@ class EngineArgs:
             model_impl=self.model_impl,
             override_attention_dtype=self.override_attention_dtype,
             logits_processors=self.logits_processors,
+            io_processor_plugin=self.io_processor_plugin,
         )
 
     def validate_tensorizer_args(self):
@@ -1152,6 +1156,17 @@ class EngineArgs:
             # global layers in interleaved sliding window models.
             sliding_window = model_config.get_sliding_window()
 
+        # Note(hc): In the current implementation of decode context
+        # parallel(DCP), tp_size needs to be divisible by dcp_size,
+        # because the world size does not change by dcp, it simply
+        # reuses the GPUs of TP group, and split one TP group into
+        # tp_size//dcp_size DCP groups.
+        assert self.tensor_parallel_size % self.decode_context_parallel_size \
+            == 0, (
+            f"tp_size={self.tensor_parallel_size} must be divisible by"
+            f"dcp_size={self.decode_context_parallel_size}."
+        )
+
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
@@ -1302,6 +1317,7 @@ class EngineArgs:
             distributed_executor_backend=self.distributed_executor_backend,
             worker_cls=self.worker_cls,
             worker_extension_cls=self.worker_extension_cls,
+            decode_context_parallel_size=self.decode_context_parallel_size,
         )
 
         speculative_config = self.create_speculative_config(
@@ -1432,17 +1448,6 @@ class EngineArgs:
                                recommend_to_remove=True)
             return False
 
-        # Triton v3.3 has f16 conversion regression issue on Turing and Volta,
-        # which broke fp16 inference
-        # see: https://github.com/triton-lang/triton/issues/6698
-        if (current_platform.is_cuda()
-                and not current_platform.has_device_capability(80)
-                and model_config.dtype == torch.float16):
-            _raise_or_fallback(
-                feature_name="Compute Capability < 8.0 with FP16",
-                recommend_to_remove=False)
-            return False
-
         if self.kv_cache_dtype != "auto":
             supported = current_platform.is_kv_cache_dtype_supported(
                 self.kv_cache_dtype, model_config)
@@ -1495,6 +1500,8 @@ class EngineArgs:
             "TRITON_MLA",
             "CUTLASS_MLA",
             "FLASHMLA",
+            "FLASHMLA_VLLM_V1",
+            "FLASH_ATTN_MLA",
             "FLASHINFER",
             "FLASHINFER_VLLM_V1",
             "ROCM_AITER_MLA",
@@ -1566,8 +1573,7 @@ class EngineArgs:
                 use_spec_decode = self.speculative_config is not None
 
                 if (is_gpu and not use_sliding_window and not use_spec_decode
-                        and not self.enable_lora
-                        and model_config.runner_type != "pooling"):
+                        and not self.enable_lora):
                     self.enable_chunked_prefill = True
                     logger.warning(
                         "Chunked prefill is enabled by default for models "
@@ -1585,25 +1591,13 @@ class EngineArgs:
                 "OOM during the initial memory profiling phase, or result "
                 "in low performance due to small KV cache size. Consider "
                 "setting --max-model-len to a smaller value.", max_model_len)
-        elif (self.enable_chunked_prefill
-              and model_config.runner_type == "pooling"):
-            msg = "Chunked prefill is not supported for pooling models"
-            raise ValueError(msg)
 
-        # if using prefix caching, we must set a hash algo
-        if self.enable_prefix_caching:
-            # Disable prefix caching for multimodal models for VLLM_V0.
-            if model_config.is_multimodal_model:
-                logger.warning(
-                    "--enable-prefix-caching is not supported for multimodal "
-                    "models in V0 and has been disabled.")
-                self.enable_prefix_caching = False
-
-            # VLLM_V0 only supports builtin hash algo for prefix caching.
-            if self.prefix_caching_hash_algo == "sha256":
-                raise ValueError(
-                    "sha256 is not supported for prefix caching in V0 engine. "
-                    "Please use 'builtin'.")
+        # Disable prefix caching for multimodal models for VLLM_V0.
+        if self.enable_prefix_caching and model_config.is_multimodal_model:
+            logger.warning(
+                "--enable-prefix-caching is not supported for multimodal "
+                "models in V0 and has been disabled.")
+            self.enable_prefix_caching = False
 
         # Set max_num_seqs to 256 for VLLM_V0.
         if self.max_num_seqs is None:
