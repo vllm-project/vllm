@@ -19,7 +19,7 @@ jobs:
           base_sha: ${{ github.event.pull_request.base.sha }}
           head_sha: ${{ github.event.pull_request.head.sha }}
           suppression: ${{ contains(github.event.pull_request.labels.*.name, 'suppress-bc-linter') }}
-          docs_link: 'https://github.com/pytorch/test-infra/wiki/BC-Linter'
+          docs_link: 'https://github.com/pytorch/test-infra/wiki/BC-Linter1'
           config_dir: .github
 
 concurrency:
