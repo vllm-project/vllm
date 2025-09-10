@@ -47,8 +47,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, sharded_weight_loader)
-from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
-                                                    MambaCacheParams)
+from vllm.model_executor.models.mamba_cache import MambaCacheParams
 from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
@@ -243,7 +242,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             input_size=self.conv_kernel_size,
             output_size=self.conv_dim,
             bias=False,
-            quant_config=quant_config,
             prefix=f"{prefix}.conv1d",
         )
         self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)

@@ -112,7 +112,7 @@ class GDNAttentionMetadataBuilder(
             device=device,
         )
 
-    def build(
+    def build(  # type: ignore[override]
         self,
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
