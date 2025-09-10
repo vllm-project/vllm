@@ -25,8 +25,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 
 from .utils import AutoWeightsLoader, maybe_prefix
 
-from vllm.config import get_current_vllm_config
-from vllm.model_executor.models.llama import LlamaDecoderLayer as BaseLlamaDecoderLayer
+from vllm.config import CacheConfig, get_current_vllm_config
 
 logger = init_logger(__name__)
 
@@ -36,7 +35,7 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
     def __init__(
         self,
         config: LlamaConfig,
-        cache_config: Optional["CacheConfig"] = None, 
+        cache_config: Optional[CacheConfig] = None, 
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
@@ -119,10 +118,14 @@ class LlamaModel(nn.Module):
         self.vocab_size = self.config.vocab_size
 
         current_vllm_config = get_current_vllm_config()
-        cache_config = current_vllm_config.cache_config
-        quant_config = current_vllm_config.quant_config
-        logger.info("[EAGLE3-FIX-INIT] Initializing draft model's LlamaModel. "
-                    "Using cache_config with dtype: %s", cache_config.cache_dtype)
+        target_kv_cache_dtype = current_vllm_config.cache_config.cache_dtype
+        precise_cache_config = CacheConfig(block_size=16,
+                                           num_gpu_blocks=0,
+                                           num_cpu_blocks=0,
+                                           cache_dtype=target_kv_cache_dtype)
+        logger.info(
+            "[EAGLE3-FIX-INIT] Precisely inheriting kv_cache_dtype: %s",
+            target_kv_cache_dtype)
 
         self.embed_tokens = VocabParallelEmbedding(
             self.config.vocab_size,
@@ -133,8 +136,7 @@ class LlamaModel(nn.Module):
         self.layers = nn.ModuleList([
             LlamaDecoderLayer(
                 config=self.config,
-                cache_config=cache_config,
-                quant_config=quant_config,
+                cache_config=precise_cache_config,
                 prefix=maybe_prefix(prefix, f"layers.{start_layer_id}"),
             )
         ])
