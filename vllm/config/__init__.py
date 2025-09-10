@@ -419,7 +419,7 @@ class ModelConfig:
     `--media-io-kwargs '{"video": {"num_frames": 40} }'` """
     use_async_output_proc: bool = True
     """Whether to use async output processor."""
-    config_format: Union[str, ConfigFormat] = ConfigFormat.AUTO.value
+    config_format: Union[str, ConfigFormat] = "auto"
     """The format of the model config to load:\n
     - "auto" will try to load the config in hf format if available else it
     will try to load in mistral format.\n
@@ -623,9 +623,6 @@ class ModelConfig:
                 and not current_platform.is_sleep_mode_available()):
             raise ValueError(
                 "Sleep mode is not supported on current platform.")
-
-        if isinstance(self.config_format, str):
-            self.config_format = ConfigFormat(self.config_format)
 
         hf_config = get_config(self.hf_config_path or self.model,
                                self.trust_remote_code,
