@@ -175,13 +175,7 @@ def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
     else:
         mock_model.model.embed_tokens.weight.shape = (131072, 4096)
 
-    if method == "eagle" and prune_vocab:
-        mock_model.lm_head.data.shape = (32768, 4096)  # 25% of 131072
-        # update lm_head shape when we index into it
-        mock_model.lm_head.data.__getitem__ = lambda key: mock.MagicMock()(shape=(len(key), 4096))
-    else:
-        mock_model.lm_head.data.shape = (131072, 4096)
-
+    mock_model.lm_head.data.shape = (131072, 4096)
     mock_get_model.return_value = mock_model
 
     # Setup mocks for attention layers
@@ -238,15 +232,18 @@ def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
     # Call the method under test
     proposer.load_model(target_model)
 
+    # set the pruned vocab size after the fact
+    if method == "eagle" and prune_vocab:
+        proposer.model.lm_head.data.shape = (32768, 4096)
+
     # Verify common interactions
     mock_get_model.assert_called_once()
 
     if method == "eagle":
         if prune_vocab:
-            # Verify that pruned EAGLE models have a smaller lm head then the target model
+            # Verify that the vocab of EAGLE models is pruned to the correct ratio
             pruned_vocab_size = proposer.model.lm_head.data.shape[0]
             original_vocab_size = target_model.lm_head.data.shape[0]
-            ic(pruned_vocab_size, original_vocab_size)
             assert pruned_vocab_size/original_vocab_size == 0.25, f"{pruned_vocab_size/original_vocab_size=}"
         else:
             # Verify that EAGLE models have the same lm head as the target model
