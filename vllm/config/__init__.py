@@ -1140,7 +1140,7 @@ class ModelConfig:
         quant_cfg = self._parse_quant_hf_config(self.hf_config)
         if quant_cfg is None and (text_config := getattr(
                 self.hf_config, "text_config", None)):
-            # Check if the text config as well for multi-modal models.
+            # Check the text config as well for multi-modal models.
             quant_cfg = self._parse_quant_hf_config(text_config)
 
         if quant_cfg is not None:
