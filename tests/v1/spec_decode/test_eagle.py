@@ -20,7 +20,7 @@ from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.v1.spec_decode.eagle import EagleProposer
 
-model_dir = "NousResearch/Meta-Llama-3.1-8B-Instruct" #"meta-llama/Llama-3.1-8B-Instruct"
+model_dir = "meta-llama/Llama-3.1-8B-Instruct"
 eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
 eagle3_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
 pruned_vocab_dir = "thunlp/LLaMA3-Instruct-8B-FR-Spec/freq_32768.pt"
@@ -356,7 +356,6 @@ def test_propose(method, attn_backend, num_speculative_tokens, prune_vocab, monk
         # For each call, increment the base token IDs
         current_tokens = [base_id + i for base_id in base_token_ids]
         logits_returns.append(create_deterministic_logits(current_tokens, logit_vocab_size))
-    ic(logits_returns)
 
     if num_speculative_tokens == 1:
         model_mock.compute_logits.return_value = logits_returns[0]
