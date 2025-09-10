@@ -171,7 +171,22 @@ class LlamaAttention(nn.Module):
 
         sliding_window = None
         if layer_types := getattr(config, "layer_types", None):
-            is_sliding = layer_types[layer_idx] == "sliding_attention"
+            # Fix for Eagle3 compatibility:
+            # for draft models, subtract target layer count
+            # to get draft-relative layer index starting from 0
+            if hasattr(config, 'target_layer_count'):
+                # This is a draft model,
+                # adjust layer_idx to be relative to draft layers
+                effective_layer_idx = layer_idx - config.target_layer_count
+            else:
+                # This is a target model, use layer_idx directly
+                effective_layer_idx = layer_idx
+            assert effective_layer_idx < len(layer_types), \
+                f"effective_layer_idx: {effective_layer_idx} \
+                is out of bounds for layer_types: {layer_types}"
+
+            is_sliding = layer_types[
+                effective_layer_idx] == "sliding_attention"
             if is_sliding:
                 sliding_window = config.sliding_window
 

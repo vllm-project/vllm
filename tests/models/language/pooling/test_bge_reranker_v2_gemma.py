@@ -14,6 +14,7 @@ from .mteb_utils import VllmMtebEncoder, mteb_test_rerank_models
 RERANK_MODELS = [
     LASTPoolingRerankModelInfo("BAAI/bge-reranker-v2-gemma",
                                architecture="GemmaForSequenceClassification",
+                               mteb_score=0.33757,
                                hf_overrides={
                                    "architectures":
                                    ["GemmaForSequenceClassification"],

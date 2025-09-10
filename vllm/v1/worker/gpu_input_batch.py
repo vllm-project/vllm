@@ -250,6 +250,11 @@ class InputBatch:
 
         self.pooling_params: dict[str, PoolingParams] = {}
 
+        # Cached reference to the GPU tensor of previously sampled tokens
+        self.prev_sampled_token_ids: Optional[torch.Tensor] = None
+        self.prev_sampled_token_ids_invalid_indices: Optional[set[int]] = None
+        self.prev_req_id_to_index: Optional[dict[str, int]] = None
+
     @property
     def req_ids(self) -> list[str]:
         # None elements should only be present transiently
@@ -355,8 +360,9 @@ class InputBatch:
                                              if sampling_params.logprobs == -1
                                              else sampling_params.logprobs)
             if sampling_params.prompt_logprobs is not None:
-                self.num_prompt_logprobs[
-                    req_id] = sampling_params.prompt_logprobs
+                self.num_prompt_logprobs[req_id] = (
+                    self.vocab_size if sampling_params.prompt_logprobs == -1
+                    else sampling_params.prompt_logprobs)
 
             if sampling_params.allowed_token_ids:
                 self.has_allowed_token_ids.add(req_id)

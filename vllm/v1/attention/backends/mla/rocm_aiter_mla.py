@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import ClassVar, Optional
+from typing import ClassVar, Optional, Union
 
 import torch
 
@@ -104,10 +104,12 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                                           dtype=torch.int32,
                                           device=device)
 
-    def _build_decode(
-            self, block_table_tensor: torch.Tensor, seq_lens_cpu: torch.Tensor,
-            seq_lens_device: torch.Tensor, query_start_loc_cpu: torch.Tensor,
-            query_start_loc_device: torch.Tensor) -> AiterMLADecodeMetadata:
+    def _build_decode(self, block_table_tensor: torch.Tensor,
+                      seq_lens_cpu: torch.Tensor,
+                      seq_lens_device: torch.Tensor,
+                      query_start_loc_cpu: torch.Tensor,
+                      query_start_loc_device: torch.Tensor,
+                      num_decode_tokens: int) -> AiterMLADecodeMetadata:
         page_size = self.kv_cache_spec.block_size
         block_table_bounds = (seq_lens_device + page_size - 1) // page_size
         device = self.device
@@ -220,18 +222,19 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
     def _forward_decode(
         self,
-        q_nope: torch.Tensor,
-        q_pe: torch.Tensor,
+        q: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: AiterMLAMetadata,
         layer: AttentionLayer,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
 
-        B = q_nope.shape[0]
+        if type(q) is tuple:
+            q = torch.cat(q, dim=-1)
 
-        q = torch.cat([q_nope, q_pe], dim=-1)
+        assert isinstance(q, torch.Tensor)
+        B = q.shape[0]
         o = torch.zeros(B,
                         self.num_heads,
                         self.kv_lora_rank,
@@ -249,4 +252,4 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                              attn_metadata.decode.paged_kv_indices,
                              attn_metadata.decode.paged_kv_last_page_len)
 
-        return self._v_up_proj(o)
+        return o, None

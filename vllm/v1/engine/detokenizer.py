@@ -121,12 +121,9 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
                     self.output_token_ids) <= self.min_tokens:
                 stop_check_offset = len(self.output_text)
 
-        if stop_terminated:
-            if skipped_stop_token_id is not None:
-                # Cleanup after skipping detokenization.
-                self.token_ids.append(skipped_stop_token_id)
-            # Stop token triggered; skip stop string check.
-            return None
+        if skipped_stop_token_id is not None:
+            # Cleanup after skipping detokenization.
+            self.token_ids.append(skipped_stop_token_id)
 
         # 2) Evaluate stop strings.
         stop_string = None
@@ -233,6 +230,11 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
     def _protected_step(self, next_token_id: int) -> Optional[str]:
         try:
             token = self.stream.step(self.tokenizer, next_token_id)
+        except OverflowError:
+            # Handle rare observed overflow, still to be diagnosed.
+            # See https://github.com/vllm-project/vllm/issues/21951.
+            logger.exception("Encountered invalid token id: %d", next_token_id)
+            token = None
         except Exception as e:
             if not str(e).startswith(INVALID_PREFIX_ERR_MSG):
                 raise e

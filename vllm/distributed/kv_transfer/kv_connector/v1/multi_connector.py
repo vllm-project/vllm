@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 
-from vllm.config import KVTransferConfig, VllmConfig
+from vllm.config import VllmConfig
+from vllm.config.kv_transfer import KVTransferConfig
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
@@ -87,6 +88,18 @@ class MultiConnector(KVConnectorBase_V1):
         for c in self._connectors:
             c.clear_connector_metadata()
 
+    def shutdown(self):
+        exception: Optional[Exception] = None
+        for c in self._connectors:
+            try:
+                c.shutdown()
+            except Exception as e:
+                logger.exception("Exception during connector %s shutdown.",
+                                 c.__class__.__name__)
+                exception = e
+        if exception:
+            raise exception
+
     # ==============================
     # Worker-side methods
     # ==============================
@@ -142,11 +155,15 @@ class MultiConnector(KVConnectorBase_V1):
         self,
         request: "Request",
         num_computed_tokens: int,
-    ) -> tuple[int, bool]:
+    ) -> tuple[Optional[int], bool]:
         to_return = (0, False)
         for i, c in enumerate(self._connectors):
             toks, load_async = c.get_num_new_matched_tokens(
                 request, num_computed_tokens)
+            # If there is a connector still looking up the matches,
+            # we return None to indicate that we are not done yet.
+            if toks is None:
+                return (None, False)
             # The first connector that has new matched tokens will be assigned
             # to this request.
             if to_return[0] == 0 and toks > 0:
