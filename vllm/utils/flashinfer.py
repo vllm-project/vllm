@@ -347,10 +347,12 @@ def flashinfer_scaled_fp8_mm(
         output = output + bias
     return output
 
+
 @functools.cache
 def flashinfer_disable_q_quantization() -> bool:
     """Cache result which only depends on the environment"""
     return envs.VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION
+
 
 __all__ = [
     "has_flashinfer",

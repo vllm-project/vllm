@@ -26,9 +26,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv, is_pin_memory_available
-from vllm.utils.flashinfer import (supports_trtllm_attention,
-                                   use_trtllm_attention,
-                                   flashinfer_disable_q_quantization)
+from vllm.utils.flashinfer import (flashinfer_disable_q_quantization,
+                                   supports_trtllm_attention,
+                                   use_trtllm_attention)
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -903,7 +903,7 @@ class FlashInferImpl(AttentionImpl):
                 else:
                     assert self.o_sf_scale is None
                     out = output[num_decode_tokens:]
-                
+
                 if attn_metadata.q_data_type != FP8_DTYPE \
                     and self.kv_cache_dtype.startswith("fp8"):
                     # TRTLLM prefill attention does not support BF16 Q
@@ -923,7 +923,7 @@ class FlashInferImpl(AttentionImpl):
 
                 trtllm_batch_context_with_kv_cache(
                     query=prefill_query,
-                    kv_cache=mock_kv_cache,                    
+                    kv_cache=mock_kv_cache,
                     workspace_buffer=workspace_buffer,
                     block_tables=mock_block_table,
                     seq_lens=seq_lens_prefill,
