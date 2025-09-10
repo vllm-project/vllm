@@ -274,6 +274,7 @@ if __name__ == "__main__":
     quant_dtypes = [
         # (q_quant_dtype, kv_quant_dtype, o_quant_dtype)
         (None, None, None),
+        (FP8_DTYPE, FP8_DTYPE, None),
         (FP8_DTYPE, FP8_DTYPE, FP8_DTYPE),
         (FP8_DTYPE, FP8_DTYPE, FP4_DTYPE),
     ]

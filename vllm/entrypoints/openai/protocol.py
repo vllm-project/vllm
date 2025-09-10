@@ -43,10 +43,10 @@ from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
 from vllm.entrypoints.score_utils import (ScoreContentPartParam,
                                           ScoreMultiModalParam)
 from vllm.logger import init_logger
+from vllm.logprobs import Logprob
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
                                   RequestOutputKind, SamplingParams)
-from vllm.sequence import Logprob
 from vllm.utils import random_uuid, resolve_obj_by_qualname
 
 logger = init_logger(__name__)
@@ -1270,9 +1270,20 @@ class CompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def validate_prompt_and_prompt_embeds(cls, data):
-        if data.get("prompt") is None and data.get("prompt_embeds") is None:
+        prompt = data.get("prompt")
+        prompt_embeds = data.get("prompt_embeds")
+
+        prompt_is_empty = (prompt is None
+                           or (isinstance(prompt, str) and prompt == ""))
+        embeds_is_empty = (prompt_embeds is None
+                           or (isinstance(prompt_embeds, list)
+                               and len(prompt_embeds) == 0))
+
+        if prompt_is_empty and embeds_is_empty:
             raise ValueError(
-                "At least one of `prompt` or `prompt_embeds` must be set.")
+                "Either prompt or prompt_embeds must be provided and non-empty."
+            )
+
         return data
 
     @model_validator(mode="before")
@@ -1342,6 +1353,14 @@ class EmbeddingChatRequest(OpenAIBaseModel):
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
 
     # --8<-- [start:chat-embedding-extra-params]
+    add_generation_prompt: bool = Field(
+        default=False,
+        description=
+        ("If true, the generation prompt will be added to the chat template. "
+         "This is a parameter used by chat template in tokenizer config of the "
+         "model."),
+    )
+
     add_special_tokens: bool = Field(
         default=False,
         description=(
@@ -1424,9 +1443,10 @@ class IOProcessorRequest(OpenAIBaseModel, Generic[T]):
     When using plugins IOProcessor plugins, the actual input is processed
     by the plugin itself. Hence, we use a generic type for the request data
     """
+    softmax: bool = True
 
     def to_pooling_params(self):
-        return PoolingParams(task="encode")
+        return PoolingParams(task="encode", softmax=self.softmax)
 
 
 class IOProcessorResponse(OpenAIBaseModel, Generic[T]):
@@ -1832,7 +1852,8 @@ class InputTokensDetails(OpenAIBaseModel):
 
 
 class OutputTokensDetails(OpenAIBaseModel):
-    reasoning_tokens: int
+    reasoning_tokens: int = 0
+    tool_output_tokens: int = 0
 
 
 class ResponseUsage(OpenAIBaseModel):
