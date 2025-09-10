@@ -136,8 +136,8 @@ class LlamaModel(nn.Module):
             input_size = self.config.hidden_size * 3
         
         self.fc = torch.nn.Linear(input_size,
-                                  self.config.hidden_size,
-                                  bias=False)
+                                      self.config.hidden_size,
+                                      bias=False)
         self.norm = RMSNorm(
             self.config.hidden_size,
             eps=self.config.rms_norm_eps,
@@ -304,8 +304,6 @@ class LlamaForCausalLMEagle3(Eagle3LlamaForCausalLM):
         # Ensure draft_vocab_size is set before calling parent constructor
         self._ensure_draft_vocab_size(vllm_config)
         super().__init__(vllm_config=vllm_config, prefix=prefix)
-        # Add any model-specific initialization here if needed
-        self._setup_model_specific_config()
 
     def _ensure_draft_vocab_size(self, vllm_config: VllmConfig):
         """Ensure draft_vocab_size is set in the draft model config."""
@@ -323,46 +321,16 @@ class LlamaForCausalLMEagle3(Eagle3LlamaForCausalLM):
                 target_vocab_size = vllm_config.model_config.get_vocab_size()
                 hf_config.draft_vocab_size = target_vocab_size
 
-    def _setup_model_specific_config(self):
-        """Setup model-specific configurations if needed."""
-        # For GPT-OSS models, we need to ensure the fc layer has the correct
-        # input dimensions to match the target model's hidden size
-        if hasattr(self.vllm_config, 'model_config'):
-            target_hidden_size = self.vllm_config.model_config.get_hidden_size(
-            )
-            print(f"DEBUG: Target hidden size: {target_hidden_size}")
-            print(f"DEBUG: Draft model hidden size: {self.config.hidden_size}")
-            # Check if the fc layer input size matches the target model's
-            # hidden size
-            if hasattr(self.model, 'fc'):
-                print(f"DEBUG: FC layer input features: {self.model.fc.in_features}")
-                print(f"DEBUG: FC layer output features: {self.model.fc.out_features}")
-                if self.model.fc.in_features != target_hidden_size * 3:
-                    print(f"DEBUG: Recreating fc layer with input size {target_hidden_size * 3}")
-                    # Recreate the fc layer with the correct input size
-                    self.model.fc = torch.nn.Linear(target_hidden_size * 3,
-                                                    self.config.hidden_size,
-                                                    bias=False)
-                    print(f"DEBUG: New FC layer input features: {self.model.fc.in_features}")
-                    print(f"DEBUG: New FC layer output features: {self.model.fc.out_features}")
 
     def combine_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Override combine_hidden_states to handle dimension mismatch."""
-        # Check if we have a dimension mismatch
+        # Check if we have a dimension mismatch and fix it dynamically
         if hasattr(self.model, 'fc') and hidden_states.shape[-1] != self.model.fc.in_features:
-            print(f"DEBUG: Dimension mismatch detected!")
-            print(f"DEBUG: Hidden states shape: {hidden_states.shape}")
-            print(f"DEBUG: FC layer expects: {self.model.fc.in_features}")
-            
-            # For GPT-OSS models, we need to handle the case where the input
-            # dimension doesn't match the fc layer's expected input dimension
-            if hidden_states.shape[-1] == 16128:  # GPT-OSS-120B hidden size
-                # Create a new fc layer with the correct input size
-                self.model.fc = torch.nn.Linear(
-                    hidden_states.shape[-1],
-                    self.config.hidden_size,
-                    bias=False
-                )
-                print(f"DEBUG: Created new FC layer with input size {hidden_states.shape[-1]}")
+            # Create a new fc layer with the correct input size
+            self.model.fc = torch.nn.Linear(
+                hidden_states.shape[-1],
+                self.config.hidden_size,
+                bias=False
+            )
         
         return self.model.fc(hidden_states)
