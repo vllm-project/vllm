@@ -3067,7 +3067,6 @@ class GenerateRequest(BaseModel):
 
 class GenerateResponseChoice(BaseModel):
     index: int
-    # logprobs: Optional[ChatCompletionLogProbs] = None
     logprobs: Optional[ChatCompletionLogProbs] = None
     # per OpenAI spec this is the default
     finish_reason: Optional[str] = "stop"
@@ -3082,7 +3081,6 @@ class GenerateResponse(BaseModel):
             "not set it, a random_uuid will be generated. This id is used "
             "through out the inference process and return in response."),
     )
-    # For when n>1
     choices: list[GenerateResponseChoice]
 
     prompt_logprobs: Optional[list[Optional[dict[int, Logprob]]]] = None

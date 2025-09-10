@@ -228,8 +228,7 @@ class SamplingParams(
     # The below fields are not supposed to be used as an input.
     # They are set in post_init.
     output_text_buffer_length: int = 0
-    _all_stop_token_ids: Optional[set[int]] = msgspec.field(
-        default_factory=set)
+    _all_stop_token_ids: set[int] = msgspec.field(default_factory=set)
 
     # Fields used to construct logits processors
     structured_outputs: StructuredOutputsParams | None = None
