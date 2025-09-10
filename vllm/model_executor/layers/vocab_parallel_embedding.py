@@ -429,6 +429,7 @@ class VocabParallelEmbedding(CustomOp):
         return s
 
 
+@CustomOp.register("parallel_lm_head")
 class ParallelLMHead(VocabParallelEmbedding):
     """Parallelized LM head.
 
