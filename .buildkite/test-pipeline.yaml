@@ -553,47 +553,43 @@ steps:
 
 #####  models test  #####
 
-# When any vLLM source is modified, then test initialization of a small subset
-# of supported models. Also run if model initialization test file is modified
-- label: Basic Models Initialization Test (Fast)
-  timeout_in_minutes: 45
-  mirror_hardwares: [amdexperimental]
-  torch_nightly: true
-  source_file_dependencies:
-  - vllm/
-  - tests/models/test_initialization.py
-  commands:
-    - pytest -v -s models/test_initialization.py::test_can_initialize_subset
-
-# Only when vLLM model source is modified - test initialization of a large
-# subset of supported models (the complement of the small subset in the above
-# test.) Also run if model initialization test file is modified
-- label: Basic Models Initialization Test (Slow)
-  timeout_in_minutes: 75
-  mirror_hardwares: [amdexperimental]
-  torch_nightly: true
-  source_file_dependencies:
-  - vllm/model_executor/models/
-  - tests/models/test_initialization.py
-  commands:
-    - pytest -v -s models/test_initialization.py::test_can_initialize_other
-
-# Other, non-initialization-related models tests
-- label: Other Basic Models Tests
-  timeout_in_minutes: 45
+- label: Basic Models Tests %N
+  timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models
   commands:
-    - pytest -v -s models/test_transformers.py
-    - pytest -v -s models/test_registry.py
-    - pytest -v -s models/test_utils.py
-    - pytest -v -s models/test_vision.py
+    # Run basic models tests, excluding a large subset of initialization tests
+    - pytest -v -s models/test_transformers.py \
+                   models/test_registry.py \
+                   models/test_utils.py \
+                   models/test_vision.py \
+                   models/test_initialization.py::test_can_initialize_subset \
+                   --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT \
+                   --shard-id=$$BUILDKITE_PARALLEL_JOB
+  parallelism: 4
+
+# Only when vLLM model source is modified - test initialization of a large
+# subset of supported models (the complement of the small subset in the above
+# test.) Also run if model initialization test file is modified
+- label: Basic Models Extra Initialization Tests %N
+  timeout_in_minutes: 25
+  mirror_hardwares: [amdexperimental]
+  torch_nightly: true
+  source_file_dependencies:
+  - vllm/model_executor/models/
+  - tests/models/test_initialization.py
+  commands:
+    - pytest -v -s models/test_initialization.py \
+             -k 'not test_can_initialize_subset' \
+             --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT \
+             --shard-id=$$BUILDKITE_PARALLEL_JOB
+  parallelism: 4
 
 # Test standard language models, excluding a subset of slow tests
-- label: Language Models Tests (Standard Fast)
+- label: Language Models Tests (Standard)
   timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
@@ -606,8 +602,8 @@ steps:
 
 # Slow subset of standard language models tests. Only run when model source is
 # modified, or when specified test files are modified
-- label: Language Models Tests (Standard Slow)
-  timeout_in_minutes: 45
+- label: Language Models Tests (Standard, Extra) %N
+  timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
@@ -617,7 +613,10 @@ steps:
   - tests/models/language/pooling/test_classification.py
   commands:
     - pip freeze | grep -E 'torch'
-    - pytest -v -s models/language -m 'core_model and slow_test'
+    - pytest -v -s models/language -m 'core_model and slow_test' \
+             --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT \
+             --shard-id=$$BUILDKITE_PARALLEL_JOB
+  parallelism: 4
 
 # Shard hybrid language model tests
 - label: Language Models Tests (Hybrid) %N
@@ -633,10 +632,10 @@ steps:
     - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.2.5'
     - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
     - pytest -v -s models/language/generation \
+                   -m hybrid_model \
                    --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT \
-                   --shard-id=$$BUILDKITE_PARALLEL_JOB \
-                   -m hybrid_model
-  parallelism: 4
+                   --shard-id=$$BUILDKITE_PARALLEL_JOB
+  parallelism: 8
 
 - label: Language Models Test (Extended Generation) # 80min
   timeout_in_minutes: 110
