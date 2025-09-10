@@ -35,7 +35,7 @@ logger = init_logger(__name__)
 
 
 class OpenAIServingTokens(OpenAIServing):
-    """Provides Tokens IN <> Tokens OUT functionality."""
+    """Provides Tokens IN <> Tokens OUT functionality to vLLM API."""
 
     def __init__(
         self,
@@ -63,7 +63,6 @@ class OpenAIServingTokens(OpenAIServing):
         request: GenerateRequest,
         raw_request: Optional[Request] = None
     ) -> Union[GenerateResponse, ErrorResponse]:
-        print("serve_tokens", request, '\n')
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
@@ -76,8 +75,8 @@ class OpenAIServingTokens(OpenAIServing):
             raise self.engine_client.dead_error
 
         lora_request = None
-        # lora_request = self._maybe_eet_adapters(
-        # request, supports_default_mm_loras=True)
+        lora_request = self._maybe_get_adapters(request,
+            supports_default_mm_loras=True)
 
         model_name = self._get_model_name(request.model, lora_request)
 
