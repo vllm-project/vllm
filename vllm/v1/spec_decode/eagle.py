@@ -233,6 +233,8 @@ class EagleProposer:
         positions = target_positions[last_token_indices]
         hidden_states = hidden_states[last_token_indices]
 
+        ic(logits, positions)
+
         if isinstance(attn_metadata, TreeAttentionMetadata):
             # Draft using tree attention.
             draft_token_ids_list = self.propose_tree(
@@ -247,9 +249,11 @@ class EagleProposer:
             return torch.cat(draft_token_ids_list, dim=1)
 
         draft_token_ids = logits.argmax(dim=-1)
+        ic(draft_token_ids)
 
         if self.vllm_config.speculative_config.draft_vocab_pruned is not None:
             draft_token_ids = self.pruned_token_ids[draft_token_ids]
+        ic(draft_token_ids)
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1:
@@ -341,6 +345,8 @@ class EagleProposer:
             logits = self.model.compute_logits(last_hidden_states[:batch_size],
                                                None)
             draft_token_ids = logits.argmax(dim=-1)
+            if self.vllm_config.speculative_config.draft_vocab_pruned is not None:
+                draft_token_ids = self.pruned_token_ids[draft_token_ids]
             draft_token_ids_list.append(draft_token_ids)
 
         # [batch_size, num_speculative_tokens]

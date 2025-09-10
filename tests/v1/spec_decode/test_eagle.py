@@ -15,6 +15,7 @@ from tests.v1.attention.utils import (BatchSpec, _Backend,
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, SpeculativeConfig,
                          VllmConfig)
+from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.v1.spec_decode.eagle import EagleProposer
@@ -264,7 +265,8 @@ def test_load_model(mock_deepcopy, mock_get_model, mock_get_layers, mock_get_pp_
 @pytest.mark.parametrize("attn_backend",
                          get_attn_backend_list_based_on_platform())
 @pytest.mark.parametrize("num_speculative_tokens", [1, 3, 8])
-def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
+@pytest.mark.parametrize("prune_vocab", [True, False])
+def test_propose(method, attn_backend, num_speculative_tokens, prune_vocab, monkeypatch):
 
     monkeypatch.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
 
@@ -292,13 +294,17 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
     seq_lens = [seq_len_1, seq_len_2]
 
     # Create proposer first so we can use its actual hidden_size
-    proposer = _create_proposer("eagle", num_speculative_tokens)
+    proposer = _create_proposer(method, num_speculative_tokens, prune_vocab=prune_vocab)
     # Get the hidden_size from the proposer to ensure consistency
     hidden_size = proposer.hidden_size
 
     # Helper to create deterministic logits that will produce specific tokens
-    def create_deterministic_logits(token_ids):
+    def create_deterministic_logits(token_ids, vocab_size):
         logits = torch.full((batch_size, vocab_size), -100.0, device=device)
+        ic(token_ids)
+        if prune_vocab:
+            token_ids = [pruned_token_ids.index(token_id) for token_id in token_ids]
+        ic(token_ids)
         for i, token_id in enumerate(token_ids):
             logits[i, token_id] = 100.0
         return logits
@@ -308,9 +314,22 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
     # Sequence 2: 60, 61, 62, ...
     base_token_ids = [42, 60]
 
+    # prune the vocab of the draft model
+    if prune_vocab:
+        # make sure our pruned vocab is larger enough to cover all base tokens and the `num_speculative_tokens` we will use
+        pruned_token_ids = [i for base in base_token_ids for i in range(base, base + num_speculative_tokens + 1)]
+        pruned_vocab_size = len(pruned_token_ids)
+        ic(pruned_token_ids)
+
+    # Set up the mock model with a custom class so that
+    # isinstance() checks match the expected type.
+    if method == "eagle3":
+        model_mock = mock.create_autospec(Eagle3LlamaForCausalLM, instance=True)
+        model_mock.combine_hidden_states.side_effect = lambda x: x
+    else:
+        model_mock = mock.MagicMock()
+
     # Skip loading the model and replace it with a mock directly
-    # Create the mock model with deterministic outputs
-    model_mock = mock.MagicMock()
 
     # Setup for model forward calls
     forward_returns = []
@@ -337,7 +356,9 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
     for i in range(num_speculative_tokens):
         # For each call, increment the base token IDs
         current_tokens = [base_id + i for base_id in base_token_ids]
-        logits_returns.append(create_deterministic_logits(current_tokens))
+        logit_vocab_size = pruned_vocab_size if prune_vocab else vocab_size
+        logits_returns.append(create_deterministic_logits(current_tokens, logit_vocab_size))
+    ic(logits_returns)
 
     if num_speculative_tokens == 1:
         model_mock.compute_logits.return_value = logits_returns[0]
@@ -349,6 +370,10 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
 
     # Assign draft attn_layer_names since load_model is not invoked
     proposer.attn_layer_names = ["layer.0"]
+
+     # Assign pruned token ids to the proposer
+    if prune_vocab:
+        proposer.pruned_token_ids = torch.tensor(pruned_token_ids, device=device)
 
     # Create input tensors
     batch_spec = BatchSpec(
@@ -428,6 +453,7 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
                 expected_tokens[i, j] = base_token_ids[i] + j
 
     # Verify all tokens match our expectations
+    ic(result, expected_tokens)
     assert torch.equal(result, expected_tokens)
 
 
