@@ -318,12 +318,14 @@ def test_structured_output(
     # Test 7: Generate text based on a regex pattern
     #
     sampling_params = SamplingParams(
-        temperature=0.8,
+        temperature=0.3,
         top_p=0.95,
         guided_decoding=GuidedDecodingParams(regex=sample_regex))
 
     prompt = (f"Give an example IPv4 address with this regex: {sample_regex}. "
-              f"Make the response as short as possible. Retrun only the IPv4.")
+              "Make the response as short as possible. Return only the IPv4."
+              "do NOT return any character after the IPv4 address, like '.'"
+              " or ' ' (empty space)")
     outputs = llm.generate(
         [prompt] * 2,
         sampling_params=sampling_params,
