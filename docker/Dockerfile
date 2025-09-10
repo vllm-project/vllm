@@ -1,6 +1,6 @@
 # The vLLM Dockerfile is used to construct vLLM image that can be directly used
 # to run the OpenAI compatible server.
-#
+
 # Please update any changes made here to
 # docs/contributing/dockerfile/dockerfile.md and
 # docs/assets/contributing/dockerfile-stages-dependency.png
