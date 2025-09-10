@@ -420,9 +420,8 @@ def shuffle_weights(
 
     Args:
         *tensors: Variable number of torch.Tensor objects.
-        layout: A pair of integers specifying the
-        block sizes used to divide the tensors during shuffling.
-        Default is (16, 16).
+        layout: A pair of integers specifying the block sizes used to divide 
+            the tensors during shuffling. Default is (16, 16).
 
     Returns:
     A Tuple of shuffled tensors.
