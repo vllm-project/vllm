@@ -600,7 +600,6 @@ class VoxtralEncoderModel(nn.Module):
         self.whisper_encoder = WhisperEncoder(vllm_config=vllm_config,
                                               prefix=maybe_prefix(
                                                   prefix, "whisper_encoder"),
-                                              is_standalone_encoder=True,
                                               init_in_fp32=True)
         mel_filters = mel_filter_bank(
             num_frequency_bins=1 + self.config.window_size // 2,
