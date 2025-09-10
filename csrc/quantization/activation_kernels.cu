@@ -190,12 +190,12 @@ constexpr __nv_bfloat16 get_fp8_min() {
   }
 }
 
-template <typename fp8_type, uint32_t NUM_WARPS, typename Idx_t,
+template <typename fp8_type, int32_t NUM_WARPS, typename Idx_t,
           int NUM_PARALLEL_TOKENS, bool USE_UE8M0, int GROUP_SIZE = 128,
           int NUM_STAGES = 3>
-__global__ void silu_mul_fp8_quant_deep_gemm_kernel(
+__global__ void __cluster_dims__(1, 4, 1) silu_mul_fp8_quant_deep_gemm_kernel(
     const __nv_bfloat16* __restrict__ _input, fp8_type* __restrict__ _y_q,
-    float* __restrict__ _y_s, const uint32_t* __restrict__ counts,
+    float* __restrict__ _y_s, const int32_t* __restrict__ counts,
 
     // sizes
     int H, int G,
@@ -210,26 +210,26 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   static constexpr __nv_bfloat16 EPS = (__nv_bfloat16_raw{.x = 11996});
 
   // We pack 8 16-bit bfloat16 values into a 128-bit __int128_t.
-  static constexpr uint32_t BFLOAT16_PER_GROUP = 8;
-  static constexpr uint32_t S_NUM_128 =
+  static constexpr int32_t BFLOAT16_PER_GROUP = 8;
+  static constexpr int32_t S_NUM_128 =
       2u * (GROUP_SIZE / BFLOAT16_PER_GROUP) * NUM_WARPS * NUM_STAGES;
   static constexpr auto THREAD_COUNT = NUM_WARPS * WARP_SIZE;
   static constexpr int HALF_THREAD_COUNT = THREAD_COUNT / 2;
-  static constexpr uint32_t S_NUM_64 = S_NUM_128 * 2;
+  static constexpr int32_t S_NUM_64 = S_NUM_128 * 2;
   __shared__ __int128_t __align__(16) s_buff_128[S_NUM_128];
 
-  const uint32_t tid = threadIdx.x;
-  const uint32_t warp_id = tid / WARP_SIZE;
-  const uint32_t lane_id = tid % WARP_SIZE;
+  const int32_t tid = threadIdx.x;
+  const int32_t warp_id = tid / WARP_SIZE;
+  const int32_t lane_id = tid % WARP_SIZE;
 
   auto s_buff_compute_32 = reinterpret_cast<__nv_bfloat162*>(s_buff_128);
 
   // block handles one (expert e, group g)
-  uint32_t pid = blockIdx.x;
-  uint32_t e = pid / G;
-  uint32_t g = pid % G;
+  int32_t pid = blockIdx.x;
+  int32_t e = pid / G;
+  int32_t g = pid % G;
 
-  const uint32_t n_tokens = counts[e * stride_counts_e];
+  const int32_t n_tokens = counts[e * stride_counts_e];
 
   if (!n_tokens) {
     return;  // Exit ASAP.
@@ -237,7 +237,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 
   const Idx_t stride_i_t_128 = stride_i_t / 8u;
 
-  uint32_t n_tokens_lower, n_tokens_upper;
+  int32_t n_tokens_lower, n_tokens_upper;
 
   if (n_tokens < NUM_PARALLEL_TOKENS && blockIdx.y < n_tokens) {
     // Specialize this, but can be likely fused.
@@ -249,7 +249,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   } else {
     auto chunk_size = n_tokens / NUM_PARALLEL_TOKENS;
     auto residual = n_tokens - chunk_size * NUM_PARALLEL_TOKENS;
-    auto calc_id = [&](uint32_t id) {
+    auto calc_id = [&](int32_t id) {
       if (id < residual) {
         return min(n_tokens, id * (chunk_size + 1));
       } else {
@@ -282,13 +282,13 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   auto y_q_ptr = _y_q + base_yq + warp_id * GROUP_SIZE +
                  stride_yq_t * n_tokens_lower + 4 * lane_id;
 
-  uint32_t t_load = n_tokens_lower, load_stage_id = 0;
+  int32_t t_load = n_tokens_lower, load_stage_id = 0;
   auto s_buff_gate_load_128 = s_buff_128 + (tid % HALF_THREAD_COUNT);
   auto s_buff_up_load_128 = s_buff_gate_load_128 + S_NUM_128 / 2u;
 
-  uint32_t stage_offset{};
-  static constexpr uint32_t LOAD_STAGE_SIZE = (NUM_WARPS * WARP_SIZE / 2);
-  static constexpr uint32_t LOAD_STAGE_MOD =
+  int32_t stage_offset{};
+  static constexpr int32_t LOAD_STAGE_SIZE = (NUM_WARPS * WARP_SIZE / 2);
+  static constexpr int32_t LOAD_STAGE_MOD =
       NUM_STAGES * (NUM_WARPS * WARP_SIZE / 2);
   auto load_and_advance_y_pred = [&] {
     if (t_load < n_tokens_upper) {
@@ -321,12 +321,12 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
                           lane_id;
   __int64_t* s_up_ptr = s_gate_ptr + S_NUM_64 / 2;
 
-  static constexpr uint32_t STAGE_SIZE = (GROUP_SIZE * NUM_WARPS) / 4u;
-  static constexpr uint32_t STAGE_MOD = STAGE_SIZE * NUM_STAGES;
+  static constexpr int32_t STAGE_SIZE = (GROUP_SIZE * NUM_WARPS) / 4u;
+  static constexpr int32_t STAGE_MOD = STAGE_SIZE * NUM_STAGES;
 
-  uint32_t compute_pipeline_offset_64 = 0;
+  int32_t compute_pipeline_offset_64 = 0;
 
-  for (uint32_t t = n_tokens_lower; t < n_tokens_upper; ++t) {
+  for (int32_t t = n_tokens_lower; t < n_tokens_upper; ++t) {
     __nv_bfloat16 y_max_bf16 = EPS;
     __nv_bfloat162 results_bf162[2];
 
@@ -373,7 +373,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     auto y_s2 = make_bfloat162(inv_y, inv_y);
 
 #pragma unroll
-    for (uint32_t i = 0; i < 2; ++i) {
+    for (int32_t i = 0; i < 2; ++i) {
       results_bf162[i] =
           clip(__hmul2(results_bf162[i], y_s2), __bfloat162bfloat162(fp8_min),
                __bfloat162bfloat162(fp8_max));
@@ -438,7 +438,7 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
   TORCH_CHECK(y_s.dtype() == torch::kFloat32);
   TORCH_CHECK(input.size(-1) % 256 == 0);
 
-  using Idx_t = uint64_t;
+  using Idx_t = int64_t;
 
   Idx_t E = input.size(0);
   Idx_t T = input.size(1);
@@ -472,7 +472,7 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
         <<<grid, block, 0, stream>>>(                                     \
             reinterpret_cast<__nv_bfloat16*>(input.data_ptr()),           \
             (fp8_t*)y_q.data_ptr(), y_s.data_ptr<float>(),                \
-            reinterpret_cast<uint32_t*>(counts.data_ptr<int>()), H, G,    \
+            reinterpret_cast<int32_t*>(counts.data_ptr<int>()), H, G,     \
             stride_i_e, stride_i_t, stride_i_h, stride_yq_e, stride_yq_t, \
             stride_yq_h, stride_ys_e, stride_ys_t, stride_ys_g,           \
             stride_counts_e);                                             \
@@ -482,7 +482,7 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
         <<<grid, block, 0, stream>>>(                                     \
             reinterpret_cast<__nv_bfloat16*>(input.data_ptr()),           \
             (fp8_t*)y_q.data_ptr(), y_s.data_ptr<float>(),                \
-            reinterpret_cast<uint32_t*>(counts.data_ptr<int>()), H, G,    \
+            reinterpret_cast<int32_t*>(counts.data_ptr<int>()), H, G,     \
             stride_i_e, stride_i_t, stride_i_h, stride_yq_e, stride_yq_t, \
             stride_yq_h, stride_ys_e, stride_ys_t, stride_ys_g,           \
             stride_counts_e);                                             \

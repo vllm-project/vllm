@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -177,41 +178,51 @@ strategies = ["max_t", "uniform", "first_t"]
 
 
 def benchmark(
-    k: int,
+    kernel: Callable,
     E: int,
     T: int,
     H: int,
     num_parallel_tokens: int = 64,
     G: int = 128,
-    runs: int = 100,
+    runs: int = 200,
     num_warmups: int = 20,
     gen_strategy: str = "default",
+    iterations_per_run: int = 20,
 ):
-    current_platform.seed_everything(42)
+    def generate_data(seed_offset=0):
+        """Generate input data with given seed offset"""
+        current_platform.seed_everything(42 + seed_offset)
+        y = torch.rand((E, T, 2 * H), dtype=torch.bfloat16, device="cuda").contiguous()
 
-    y = torch.rand((E, T, 2 * H), dtype=torch.bfloat16, device="cuda").contiguous()
-    # Different random generation strategies
-    if gen_strategy == "uniform":
-        tokens_per_expert = torch.randint(
-            int(T * 0.7), T, size=(E,), dtype=torch.int32, device="cuda"
-        )
-    elif gen_strategy == "max_t":
-        tokens_per_expert = torch.empty(size=(E,), dtype=torch.int32, device="cuda")
-        tokens_per_expert.fill_(T)
-    elif gen_strategy == "first_t":
-        tokens_per_expert = torch.zeros(size=(E,), dtype=torch.int32, device="cuda")
-        tokens_per_expert[0] = T
-    elif gen_strategy == "sorted":
-        tokens_per_expert = torch.randint(
-            0, T, size=(E,), dtype=torch.int32, device="cuda"
-        )
-        tokens_per_expert, _ = torch.sort(tokens_per_expert)
-    else:
-        raise ValueError(f"Unknown generation strategy: {gen_strategy}")
+        if gen_strategy == "uniform":
+            tokens_per_expert = torch.randint(
+                int(T * 0.7), T, size=(E,), dtype=torch.int32, device="cuda"
+            )
+        elif gen_strategy == "max_t":
+            tokens_per_expert = torch.empty(size=(E,), dtype=torch.int32, device="cuda")
+            tokens_per_expert.fill_(T)
+        elif gen_strategy == "first_t":
+            tokens_per_expert = torch.zeros(size=(E,), dtype=torch.int32, device="cuda")
+            tokens_per_expert[0] = T
+        elif gen_strategy == "sorted":
+            tokens_per_expert = torch.randint(
+                0, T, size=(E,), dtype=torch.int32, device="cuda"
+            )
+            tokens_per_expert, _ = torch.sort(tokens_per_expert)
+        else:
+            raise ValueError(f"Unknown generation strategy: {gen_strategy}")
+        return y, tokens_per_expert
+
+    dataset_count = 4
+    # Pre-generate different input matrices for each iteration to avoid cache effects
+    data_sets = [generate_data(i) for i in range(dataset_count)]
 
     # Warmup
+    y, tokens_per_expert = data_sets[0]
     for _ in range(num_warmups):
-        k(y, tokens_per_expert, num_parallel_tokens=num_parallel_tokens, group_size=G)
+        kernel(
+            y, tokens_per_expert, num_parallel_tokens=num_parallel_tokens, group_size=G
+        )
     torch.cuda.synchronize()
 
     start_event = torch.cuda.Event(enable_timing=True)
@@ -223,33 +234,47 @@ def benchmark(
         torch.cuda.synchronize()
 
         start_event.record()
-        k(y, tokens_per_expert, num_parallel_tokens=num_parallel_tokens, group_size=G)
+        for i in range(iterations_per_run):
+            y, tokens_per_expert = data_sets[i % dataset_count]
+            kernel(
+                y,
+                tokens_per_expert,
+                num_parallel_tokens=num_parallel_tokens,
+                group_size=G,
+            )
         end_event.record()
         end_event.synchronize()
-        latencies.append(start_event.elapsed_time(end_event))
 
-    avg_time_ms = sum(latencies) / runs
-    avg_time_s = avg_time_ms / 1000
+        # Record total time for all iterations, then divide by
+        # iterations to get per-iteration time
+        total_time_ms = start_event.elapsed_time(end_event)
+        per_iter_time_ms = total_time_ms / iterations_per_run
+        latencies.append(per_iter_time_ms)
 
-    # Calculate actual work done (only count valid tokens)
+    # Use median instead of average for better outlier handling
+    median_time_ms = np.median(latencies)
+    median_time_s = median_time_ms / 1000
+
+    # Calculate actual work done (using first dataset for consistency)
+    _, tokens_per_expert = data_sets[0]
     actual_tokens = tokens_per_expert.sum().item()
     actual_elements = actual_tokens * H
 
     # GFLOPS: operations per element = exp + 3 muls + 1 div + quantization ops ≈ 8 ops
     ops_per_element = 8
     total_ops = actual_elements * ops_per_element
-    gflops = total_ops / avg_time_s / 1e9
+    gflops = total_ops / median_time_s / 1e9
 
     # Memory bandwidth: bfloat16 inputs (2 bytes), fp8 output (1 byte), scales (4 bytes)
     input_bytes = actual_tokens * 2 * H * 2  # 2*H bfloat16 inputs
     output_bytes = actual_tokens * H * 1  # H fp8 outputs
     scale_bytes = actual_tokens * (H // G) * 4  # scales in float32
     total_bytes = input_bytes + output_bytes + scale_bytes
-    memory_bw = total_bytes / avg_time_s / 1e9
+    memory_bw = total_bytes / median_time_s / 1e9
 
     HOPPER_BANDWIDTH_TBPS = 3.35
     return (
-        avg_time_ms,
+        median_time_ms,
         gflops,
         memory_bw,
         (memory_bw / (HOPPER_BANDWIDTH_TBPS * 1024)) * 100,
@@ -304,7 +329,74 @@ def create_comparison_plot(
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    filename = f"../silu_bench/silu_benchmark_{id}.png"
+    return fig, ax
+
+
+def create_combined_plot(all_results):
+    """Create a combined plot with all strategies in one PNG"""
+    num_strategies = len(all_results)
+    fig, axes = plt.subplots(num_strategies, 1, figsize=(16, 6 * num_strategies))
+
+    if num_strategies == 1:
+        axes = [axes]
+
+    for idx, (
+        strategy_name,
+        ratio,
+        cuda_times,
+        baseline_times,
+        config_labels,
+    ) in enumerate(all_results):
+        ax = axes[idx]
+
+        # Configure x-axis positions
+        x = np.arange(len(config_labels))
+        width = 0.35
+
+        # Execution Time plot (lower is better)
+        ax.bar(
+            x - width / 2,
+            cuda_times,
+            width,
+            label="CUDA Kernel",
+            alpha=0.8,
+            color="blue",
+        )
+        ax.bar(
+            x + width / 2,
+            baseline_times,
+            width,
+            label="Baseline",
+            alpha=0.8,
+            color="orange",
+        )
+
+        # Add speedup labels over each bar pair
+        for i in range(len(x)):
+            speedup = ratio[i]
+            max_height = max(cuda_times[i], baseline_times[i])
+            ax.text(
+                x[i],
+                max_height + max_height * 0.02,
+                f"{speedup:.2f}x",
+                ha="center",
+                va="bottom",
+                fontweight="bold",
+                fontsize=9,
+            )
+
+        ax.set_xlabel("Configuration")
+        ax.set_ylabel("% Utilization")
+        ax.set_title(
+            f"Memory Bandwidth Utilization (%) - {strategy_name}\n(Higher is Better)"
+        )
+        ax.set_xticks(x)
+        ax.set_xticklabels(config_labels, rotation=45, ha="right")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    filename = "../../silu_bench/silu_benchmark_combined.png"
     plt.savefig(filename, dpi=300, bbox_inches="tight")
     plt.show()
 
@@ -355,7 +447,7 @@ print(f"GPU: {torch.cuda.get_device_name()}")
 print(f"Testing strategies: {', '.join(strategies)}")
 print(f"Configurations: {len(configs)} configs")
 
-generated_plots = []
+all_results = []
 
 # Run benchmarks for each strategy
 for id, strategy in enumerate(strategies):
@@ -405,16 +497,17 @@ for id, strategy in enumerate(strategies):
     ratio = [
         baseline_results[i][0] / cuda_results[i][0] for i in range(len(config_labels))
     ]
-    # Create comparison plot for this strategy
-    plot_filename = create_comparison_plot(
-        ratio,
-        cuda_times,
-        baseline_times,
-        config_labels,
-        strategy_descriptions[strategy],
-        id,
+
+    # Store results for combined plotting
+    all_results.append(
+        (
+            strategy_descriptions[strategy],
+            ratio,
+            cuda_times,
+            baseline_times,
+            config_labels,
+        )
     )
-    generated_plots.append(plot_filename)
 
     # Print summary table for this strategy
     print(f"\nSummary Table - {strategy_descriptions[strategy]}:")
@@ -429,7 +522,10 @@ for id, strategy in enumerate(strategies):
             f"{baseline_results[i][0]:8.5f} {speedup:6.2f}x"
         )
 
+# Create combined plot with all strategies
+combined_plot_filename = create_combined_plot(all_results)
+
 print(f"\n{'=' * 60}")
 print("Benchmark Complete!")
-print(f"Generated plots: {', '.join(generated_plots)}")
+print(f"Generated combined plot: {combined_plot_filename}")
 print(f"{'=' * 60}")
