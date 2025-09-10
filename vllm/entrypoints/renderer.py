@@ -22,23 +22,24 @@ from vllm.utils import AsyncMicrobatchTokenizer
 @dataclass(frozen=True)
 class RenderConfig:
     """Configuration to control how prompts are prepared."""
-    # Maximum allowable total input token length. If provided,
-    # token inputs longer than this raise ``ValueError``.
+
     max_length: Optional[int] = None
+    """Maximum allowable total input token length. If provided,
+    token inputs longer than this raise ``ValueError``."""
 
-    # Number of tokens to keep. ``None`` means no truncation.
-    # ``0`` yields an empty list (and skips embeds).
-    # ``-1`` maps to ``model_config.max_model_len``.
     truncate_prompt_tokens: Optional[int] = None
+    """Number of tokens to keep. ``None`` means no truncation.
+    ``0`` yields an empty list (and skips embeds).
+    ``-1`` maps to ``model_config.max_model_len``."""
 
-    # Whether to add model-specific special tokens during text tokenization.
     add_special_tokens: Optional[bool] = True
+    """Whether to add model-specific special tokens during tokenization."""
 
-    # String to disambiguate prefix cache entries.
     cache_salt: Optional[str] = None
+    """String to disambiguate prefix cache entries."""
 
-    # If True, detokenize IDs back to text for inclusion in outputs.
     needs_detokenization: Optional[bool] = False
+    """If True, detokenize IDs back to text for inclusion in outputs."""
 
 
 class BaseRenderer(ABC):
@@ -71,6 +72,7 @@ class BaseRenderer(ABC):
     @abstractmethod
     async def render_prompt(
         self,
+        *,
         prompt_or_prompts: Union[str, list[str], list[int], list[list[int]]],
         config: "RenderConfig",
     ) -> list[EngineTokensPrompt]:
@@ -101,10 +103,11 @@ class BaseRenderer(ABC):
     @abstractmethod
     async def render_prompt_and_embeds(
         self,
-        config: "RenderConfig",
+        *,
         prompt_or_prompts: Optional[Union[str, list[str], list[int],
                                           list[list[int]]]] = None,
         prompt_embeds: Optional[Union[bytes, list[bytes]]] = None,
+        config: "RenderConfig",
     ) -> list[Union[EngineTokensPrompt, EngineEmbedsPrompt]]:
         """
         Convert text/token and/or base64-encoded embeddings inputs into
@@ -184,6 +187,7 @@ class CompletionRenderer(BaseRenderer):
 
     async def render_prompt(
         self,
+        *,
         prompt_or_prompts: Union[str, list[str], list[int], list[list[int]]],
         config: "RenderConfig",
     ) -> list[EngineTokensPrompt]:
@@ -231,10 +235,11 @@ class CompletionRenderer(BaseRenderer):
 
     async def render_prompt_and_embeds(
         self,
-        config: "RenderConfig",
+        *,
         prompt_or_prompts: Optional[Union[str, list[str], list[int],
                                           list[list[int]]]] = None,
         prompt_embeds: Optional[Union[bytes, list[bytes]]] = None,
+        config: "RenderConfig",
     ) -> list[Union[EngineTokensPrompt, EngineEmbedsPrompt]]:
         """
         Render text/token prompts and/or precomputed embedding prompts. At
