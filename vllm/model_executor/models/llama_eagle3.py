@@ -300,6 +300,21 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         print(f"DEBUG: fc layer weight shape: {self.model.fc.weight.shape}")
         print(f"DEBUG: target_hidden_size: {getattr(self.config, 'target_hidden_size', 'None')}")
         print(f"DEBUG: hidden_size: {getattr(self.config, 'hidden_size', 'None')}")
+        
+        # Check if we need to resize the fc layer based on input dimensions
+        input_size = hidden_states.shape[-1]
+        current_input_size = self.model.fc.weight.shape[1]
+        
+        if input_size != current_input_size:
+            print(f"DEBUG: Resizing fc layer from {current_input_size} to {input_size} input dimensions")
+            # Recreate the fc layer with correct dimensions
+            output_size = self.model.fc.weight.shape[0]
+            self.model.fc = torch.nn.Linear(input_size, output_size, bias=False)
+            # Update target_hidden_size in config for future reference
+            if hasattr(self.config, 'target_hidden_size'):
+                self.config.target_hidden_size = input_size // 3
+            print(f"DEBUG: New fc layer weight shape: {self.model.fc.weight.shape}")
+        
         return self.model.fc(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
