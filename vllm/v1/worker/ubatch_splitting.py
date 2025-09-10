@@ -104,7 +104,7 @@ def ubatch_split(max_num_scheduled_tokens: int,
         num_tokens_unpadded: int,
         num_tokens_padded: int,
         vllm_config: VllmConfig,
-    ) -> tuple[Optional[UBatchSlices], int, Optional[torch.Tensor]]:
+    ) -> tuple[Optional[UBatchSlices], Optional[torch.Tensor]]:
     """
     Coordinates amongst all DP ranks to determine if and how the full batch should
     be split into microbatches.
@@ -123,7 +123,7 @@ def ubatch_split(max_num_scheduled_tokens: int,
     # Don't bother with the should_ubatch handshaking unless microbatching
     # is enabled
     if not parallel_config.enable_microbatching:
-        return (None, 0, None)
+        return (None, None)
 
     # Check preconditions for microbatching
     should_attempt_ubatching = \
@@ -133,25 +133,21 @@ def ubatch_split(max_num_scheduled_tokens: int,
         and max_num_scheduled_tokens == 1
 
     # Don't microbatch unless every other DP worker is also microbatching
-    num_pad_tokens = 0
     num_tokens_after_padding = None
-    (should_ubatch, num_pad_tokens,
+    (should_ubatch, _,
         num_tokens_after_padding) = get_dp_padding_ubatch(num_tokens_unpadded, 
                                                           num_tokens_padded, 
                                                           should_attempt_ubatching, 
                                                           vllm_config)
     if not should_ubatch:
-        return (None, 0, None)
+        return (None, None)
 
     # This doesn't actually pad the ubatch slices. It just initializes the
     # split point to the padded value so that padding can be applied
     # to the second ubatch in pad_out_ubatch_slice after attention
     # metadata creation
-    assert num_pad_tokens < num_tokens_unpadded,\
-        f"num_pad_tokens {num_pad_tokens} "\
-        f"original_num_tokens {num_tokens_unpadded}"
-    total_num_tokens_per_ubatch = (num_tokens_unpadded +
-                                    num_pad_tokens) // 2
+    assert num_tokens_after_padding is not None
+    total_num_tokens_per_ubatch = int(num_tokens_after_padding[0].item())
     padded_first_ubatch_slice = slice(0, total_num_tokens_per_ubatch)
     padded_second_ubatch_slice = slice(total_num_tokens_per_ubatch,
                                         num_tokens_unpadded)
@@ -162,4 +158,4 @@ def ubatch_split(max_num_scheduled_tokens: int,
         UbatchSlice(padded_second_ubatch_slice, padded_second_ubatch_slice)
     ]
 
-    return (ubatch_slices, num_pad_tokens, num_tokens_after_padding)
+    return (ubatch_slices, num_tokens_after_padding)

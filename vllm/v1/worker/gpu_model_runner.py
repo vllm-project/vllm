@@ -668,7 +668,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     ) -> tuple[PerLayerAttnMetadata, torch.Tensor,
                Optional[SpecDecodeMetadata], np.ndarray,
                Optional[CommonAttentionMetadata], int, Optional[UBatchSlices],
-               int, Optional[torch.Tensor]]:
+               Optional[torch.Tensor]]:
         """
         :return: tuple[
             attn_metadata: layer-to-attention_metadata mapping,
@@ -743,7 +743,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
         num_tokens_padded = num_tokens_unpadded + self.get_local_padding(num_tokens_unpadded)
 
-        ubatch_slices, num_pad_tokens, num_tokens_after_padding = \
+        ubatch_slices, num_tokens_after_padding = \
             ubatch_split(max_num_scheduled_tokens,
                          num_tokens_unpadded,
                          num_tokens_padded,
@@ -903,7 +903,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         return (attn_metadata, logits_indices, spec_decode_metadata,
                 num_scheduled_tokens, spec_decode_common_attn_metadata,
-                max_num_scheduled_tokens, ubatch_slices, num_pad_tokens,
+                max_num_scheduled_tokens, ubatch_slices,
                 num_tokens_after_padding)
 
     def _compute_cascade_attn_prefix_len(
@@ -1561,13 +1561,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Prepare the decoder inputs.
         (attn_metadata, logits_indices, spec_decode_metadata,
          num_scheduled_tokens_np, spec_decode_common_attn_metadata,
-         max_query_len, ubatch_slices, num_pad_tokens,
+         max_query_len, ubatch_slices,
          num_tokens_after_padding) = self._prepare_inputs(scheduler_output)
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         num_input_tokens = num_scheduled_tokens
-        if ubatch_slices and num_pad_tokens > 0:
-            num_input_tokens += num_pad_tokens
+        if ubatch_slices:
+            assert num_tokens_after_padding is not None
+            num_input_tokens = int(num_tokens_after_padding[0].item() * 2)
             self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
         elif ubatch_slices is None:
             num_input_tokens += self.get_local_padding(num_input_tokens)
