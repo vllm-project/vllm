@@ -12,10 +12,10 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from transformers import PretrainedConfig
 from transformers.utils import torch_int
 
+from vllm.attention.layer import MultiHeadAttention
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -206,6 +206,10 @@ class InternSdpaAttention(nn.Module):
 
         self.projection_layer = nn.Linear(self.dummy_dim, self.embed_dim)
 
+        # Use unified MultiHeadAttention with automatic backend selection
+        self.attn = MultiHeadAttention(self.num_heads, self.head_dim,
+                                       self.scale)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, N, C = x.shape
 
@@ -213,20 +217,13 @@ class InternSdpaAttention(nn.Module):
         k = self.k_proj(x)
         v = self.v_proj(x)
 
-        q = q.view(B, N, self.num_heads, self.head_dim)
-        k = k.view(B, N, self.num_heads, self.head_dim)
-        v = v.view(B, N, self.num_heads, self.head_dim)
-
         if self.qk_normalization:
             B_, N_, H_, D_ = q.shape
             q = self.q_norm(q.flatten(-2, -1)).view(B_, N_, H_, D_)
             k = self.k_norm(k.flatten(-2, -1)).view(B_, N_, H_, D_)
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
 
-        x = F.scaled_dot_product_attention(q, k, v, scale=self.scale)
-        x = x.transpose(1, 2).reshape(B, N, -1)
+        # Use unified MultiHeadAttention with automatic backend selection
+        x = self.attn(q, k, v)
 
         x = self.projection_layer(x)
         return x
