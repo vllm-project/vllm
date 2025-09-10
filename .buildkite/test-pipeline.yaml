@@ -595,7 +595,7 @@ steps:
   - tests/models/language
   commands:
     - pip freeze | grep -E 'torch'
-    - pytest -v -s models/language -m "core_model and not slow_test"
+    - pytest -v -s models/language -m core_model
 
 - label: Language Models Test (Extended Generation) # 80min
   timeout_in_minutes: 110
