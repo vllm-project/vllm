@@ -126,6 +126,7 @@ def test_structured_output(
     #
     sampling_params = SamplingParams(
         temperature=0.3,
+        seed=113,
         max_tokens=4096,
         guided_decoding=GuidedDecodingParams(json=sample_json_schema))
 
@@ -160,6 +161,7 @@ def test_structured_output(
     if guided_decoding_backend != "outlines":
         sampling_params = SamplingParams(
             temperature=0.3,
+            seed=113,
             max_tokens=4096,
             n=2,
             guided_decoding=GuidedDecodingParams(json_object=True))
@@ -189,6 +191,7 @@ def test_structured_output(
     #
     sampling_params = SamplingParams(
         temperature=0.3,
+        seed=113,
         max_tokens=4096,
         guided_decoding=GuidedDecodingParams(json=unsupported_json_schema))
     if guided_decoding_backend.startswith("xgrammar"):
@@ -229,6 +232,7 @@ def test_structured_output(
         #
         sampling_params = SamplingParams(
             temperature=0.1,
+            seed=113,
             top_p=0.95,
             max_tokens=1000,
             guided_decoding=GuidedDecodingParams(grammar=sample_sql_ebnf))
@@ -262,6 +266,7 @@ def test_structured_output(
         #
         sampling_params = SamplingParams(
             temperature=0.1,
+            seed=113,
             top_p=0.95,
             max_tokens=1000,
             guided_decoding=GuidedDecodingParams(grammar=sample_sql_lark))
@@ -300,6 +305,7 @@ def test_structured_output(
         #
         sampling_params = SamplingParams(
             temperature=0.1,
+            seed=113,
             top_p=0.95,
             max_tokens=1000,
             guided_decoding=GuidedDecodingParams(grammar="not a grammar"))
@@ -316,7 +322,8 @@ def test_structured_output(
     # Test 7: Generate text based on a regex pattern
     #
     sampling_params = SamplingParams(
-        temperature=0.05,
+        temperature=0.3,
+        seed=113,
         top_p=0.95,
         guided_decoding=GuidedDecodingParams(regex=sample_regex))
 
@@ -345,6 +352,7 @@ def test_structured_output(
     #
     sampling_params = SamplingParams(
         temperature=0.2,
+        seed=113,
         top_p=0.95,
         guided_decoding=GuidedDecodingParams(choice=sample_guided_choice))
 
@@ -371,6 +379,7 @@ def test_structured_output(
     json_schema = CarDescription.model_json_schema()
     sampling_params = SamplingParams(
         temperature=0.3,
+        seed=113,
         max_tokens=1000,
         guided_decoding=GuidedDecodingParams(json=json_schema))
 
@@ -415,6 +424,7 @@ def test_structured_output(
 
     sampling_params = SamplingParams(
         temperature=0.1,
+        seed=113,
         max_tokens=4096,
         guided_decoding=GuidedDecodingParams(json=json_schema))
 
@@ -462,7 +472,8 @@ def test_structured_output(
         }
 
         sampling_params = SamplingParams(
-            temperature=0.0,
+            temperature=0.1,
+            seed=113,
             max_tokens=4096,
             guided_decoding=GuidedDecodingParams(
                 structural_tag=json.dumps(structural_tag_config)))
@@ -596,6 +607,7 @@ def test_structured_output_with_reasoning_matrices(
 
     sampling_params = SamplingParams(
         temperature=0.1,
+        seed=113,
         max_tokens=8192,
         guided_decoding=GuidedDecodingParams(json=reasoning_schema),
     )
@@ -639,6 +651,7 @@ def test_structured_output_auto_mode(
 
     sampling_params = SamplingParams(
         temperature=0.3,
+        seed=113,
         max_tokens=1000,
         guided_decoding=GuidedDecodingParams(json=unsupported_json_schema))
 
@@ -709,6 +722,7 @@ def test_guidance_no_additional_properties(monkeypatch: pytest.MonkeyPatch):
             disable_any_whitespace=True,
             disable_additional_properties=True)
         sampling_params = SamplingParams(temperature=0,
+                                         seed=113,
                                          max_tokens=256,
                                          guided_decoding=guided_params)
 
@@ -762,6 +776,7 @@ def test_structured_output_batched_with_non_guided_requests(
     prompts = [guided_prompt, non_guided_prompt]
     sampling_params = [
         SamplingParams(
+            seed=113,
             temperature=0.3,
             max_tokens=400,
             guided_decoding=GuidedDecodingParams(json=sample_json_schema)),
