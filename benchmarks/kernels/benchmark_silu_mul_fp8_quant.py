@@ -174,7 +174,7 @@ def silu_mul_fp8_quant_deep_gemm_triton(
 
 
 # Parse generation strategies
-strategies = ["max_t", "uniform", "first_t"]
+strategies = ["uniform", "max_t", "first_t"]
 
 
 def benchmark(
@@ -182,6 +182,7 @@ def benchmark(
     E: int,
     T: int,
     H: int,
+    total_tokens: int,
     num_parallel_tokens: int = 64,
     G: int = 128,
     runs: int = 200,
@@ -195,20 +196,20 @@ def benchmark(
         y = torch.rand((E, T, 2 * H), dtype=torch.bfloat16, device="cuda").contiguous()
 
         if gen_strategy == "uniform":
-            tokens_per_expert = torch.randint(
-                int(T * 0.7), T, size=(E,), dtype=torch.int32, device="cuda"
+            r = torch.rand(size=(E,), device="cuda")
+            r /= r.sum()
+            r *= total_tokens
+            tokens_per_expert = r.int()
+            tokens_per_expert = torch.minimum(
+                tokens_per_expert,
+                torch.ones((E,), device=r.device, dtype=torch.int) * T,
             )
         elif gen_strategy == "max_t":
             tokens_per_expert = torch.empty(size=(E,), dtype=torch.int32, device="cuda")
-            tokens_per_expert.fill_(T)
+            tokens_per_expert.fill_(total_tokens / E)
         elif gen_strategy == "first_t":
             tokens_per_expert = torch.zeros(size=(E,), dtype=torch.int32, device="cuda")
-            tokens_per_expert[0] = T
-        elif gen_strategy == "sorted":
-            tokens_per_expert = torch.randint(
-                0, T, size=(E,), dtype=torch.int32, device="cuda"
-            )
-            tokens_per_expert, _ = torch.sort(tokens_per_expert)
+            tokens_per_expert[0] = min(T, total_tokens)
         else:
             raise ValueError(f"Unknown generation strategy: {gen_strategy}")
         return y, tokens_per_expert
@@ -245,8 +246,6 @@ def benchmark(
         end_event.record()
         end_event.synchronize()
 
-        # Record total time for all iterations, then divide by
-        # iterations to get per-iteration time
         total_time_ms = start_event.elapsed_time(end_event)
         per_iter_time_ms = total_time_ms / iterations_per_run
         latencies.append(per_iter_time_ms)
@@ -406,31 +405,10 @@ def create_combined_plot(all_results):
 outer_dim = 7168
 configs = [
     # DeepSeekV3 Configs
-    (9, 8, 7168),
-    (9, 16, 7168),
-    (9, 32, 7168),
-    (9, 64, 7168),
-    (9, 128, 7168),
-    (9, 256, 7168),
-    (9, 512, 7168),
-    (9, 1024, 7168),
+    (8, 1024, 7168),
     # DeepSeekV3 Configs
-    (32, 8, 7168),
-    (32, 16, 7168),
-    (32, 32, 7168),
-    (32, 64, 7168),
-    (32, 128, 7168),
-    (32, 256, 7168),
-    (32, 512, 7168),
     (32, 1024, 7168),
     # DeepSeekV3 Configs
-    (256, 8, 7168),
-    (256, 16, 7168),
-    (256, 32, 7168),
-    (256, 64, 7168),
-    (256, 128, 7168),
-    (256, 256, 7168),
-    (256, 512, 7168),
     (256, 1024, 7168),
 ]
 
@@ -438,8 +416,8 @@ runs = 100
 num_warmups = 20
 
 strategy_descriptions = {
-    "uniform": "experts = torch.randint(int(T * 0.7), T, size=(E,))",
-    "max_t": "experts[:] = T",
+    "uniform": "Uniform Random",
+    "max_t": "Even Assignment",
     "first_t": "experts[0] = T, experts[1:] = 0",
 }
 
@@ -456,56 +434,65 @@ for id, strategy in enumerate(strategies):
     print(f"{'=' * 60}")
 
     # Collect benchmark data for both algorithms
-    cuda_results = []
-    baseline_results = []
     config_labels = []
+    config_x_axis = []
+    all_cuda_results = []
+    all_baseline_results = []
+    all_ratios = []
 
     for E, T, H in configs:
-        config_label = f"E={E},T={T},H={H}"
-        config_labels.append(config_label)
+        total_tokens_config = [8 * E, 16 * E, 32 * E, 64 * E, 128 * E, 256 * E]
+        config_x_axis.append(total_tokens_config)
 
-        # CUDA kernel results
-        time_ms, gflops, gbps, perc = benchmark(
-            silu_mul_fp8_quant_deep_gemm_cuda,
-            E,
-            T,
-            H,
-            runs=runs,
-            num_warmups=num_warmups,
-            gen_strategy=strategy,
-        )
-        cuda_results.append((time_ms, gflops, gbps, perc))
+        cuda_results = []
+        baseline_results = []
+        ratios = []
 
-        # Baseline results
-        time_ms, gflops, gbps, perc = benchmark(
-            silu_mul_fp8_quant_deep_gemm_triton,
-            E,
-            T,
-            H,
-            runs=runs,
-            num_warmups=num_warmups,
-            gen_strategy=strategy,
-        )
-        baseline_results.append((time_ms, gflops, gbps, perc))
+        for total_tokens in total_tokens_config:
+            config_label = f"E={E},T={T},H={H},TT={total_tokens}"
+            config_labels.append(config_label)
 
-        print(f"Completed: {config_label}")
+            # CUDA kernel results
+            time_ms_cuda, gflops, gbps, perc = benchmark(
+                silu_mul_fp8_quant_deep_gemm_cuda,
+                E,
+                T,
+                H,
+                total_tokens,
+                runs=runs,
+                num_warmups=num_warmups,
+                gen_strategy=strategy,
+            )
+            cuda_results.append((time_ms_cuda, gflops, gbps, perc))
 
-    # Extract data for plotting
-    cuda_times = [r[3] for r in cuda_results]
-    baseline_times = [r[3] for r in baseline_results]
+            # Baseline results
+            time_ms_triton, gflops, gbps, perc = benchmark(
+                silu_mul_fp8_quant_deep_gemm_triton,
+                E,
+                T,
+                H,
+                total_tokens,
+                runs=runs,
+                num_warmups=num_warmups,
+                gen_strategy=strategy,
+            )
+            baseline_results.append((time_ms_triton, gflops, gbps, perc))
+            ratios.append(time_ms_triton / time_ms_cuda)
 
-    ratio = [
-        baseline_results[i][0] / cuda_results[i][0] for i in range(len(config_labels))
-    ]
+            print(f"Completed: {config_label}")
+        all_cuda_results.append(cuda_results)
+        all_baseline_results.append(baseline_results)
+        all_ratios.append(ratios)
 
     # Store results for combined plotting
     all_results.append(
         (
             strategy_descriptions[strategy],
-            ratio,
-            cuda_times,
-            baseline_times,
+            all_ratios,
+            all_cuda_results,
+            all_baseline_results,
             config_labels,
+            config_x_axis,
         )
     )
 
@@ -522,8 +509,79 @@ for id, strategy in enumerate(strategies):
             f"{baseline_results[i][0]:8.5f} {speedup:6.2f}x"
         )
 
+
+def create_total_tokens_plot(all_results):
+    num_strategies = len(all_results)
+    num_configs = len(configs)
+
+    fig, axs = plt.subplots(
+        num_strategies, num_configs, figsize=(15, 5 * num_strategies)
+    )
+
+    # Handle single strategy case
+    if num_strategies == 1:
+        axs = axs.reshape(1, -1)
+
+    # Handle single config case
+    if num_configs == 1:
+        axs = axs.reshape(-1, 1)
+
+    for strategy_idx, result in enumerate(all_results):
+        (
+            strategy_name,
+            all_ratios,
+            all_cuda_results,
+            all_baseline_results,
+            config_labels,
+            config_x_axis,
+        ) = result
+
+        for config_idx in range(num_configs):
+            ax = axs[strategy_idx, config_idx]
+
+            E, T, H = configs[config_idx]
+            ratios = all_ratios[config_idx]
+            total_tokens_values = config_x_axis[config_idx]
+
+            # Plot speedup ratios vs total tokens
+            ax.plot(total_tokens_values, ratios, "bo-", linewidth=2, markersize=6)
+
+            # Set title and labels
+            ax.set_title(f"{strategy_name}\nE={E}, T={T}, H={H}", fontsize=10)
+            ax.set_xlabel("Total Tokens")
+            ax.set_ylabel("Speedup (CUDA/Triton)")
+            ax.grid(True, alpha=0.3)
+
+            # Format x-axis labels
+            ax.set_xticks(total_tokens_values)
+            ax.set_xticklabels(
+                [
+                    f"{tt // 1000}K" if tt >= 1000 else str(tt)
+                    for tt in total_tokens_values
+                ]
+            )
+
+            # Add value labels on points
+            for x, y in zip(total_tokens_values, ratios):
+                ax.annotate(
+                    f"{y:.2f}x",
+                    (x, y),
+                    textcoords="offset points",
+                    xytext=(0, 10),
+                    ha="center",
+                    fontsize=8,
+                )
+
+    plt.tight_layout()
+    filename = "silu_benchmark_total_tokens.png"
+    plt.savefig(filename, dpi=300, bbox_inches="tight")
+    plt.show()
+
+    return filename
+
+
 # Create combined plot with all strategies
-combined_plot_filename = create_combined_plot(all_results)
+combined_plot_filename = create_total_tokens_plot(all_results)
 
 print(f"\n{'=' * 60}")
 print("Benchmark Complete!")
