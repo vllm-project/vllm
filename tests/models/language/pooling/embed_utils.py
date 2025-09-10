@@ -59,7 +59,7 @@ def correctness_test_embed_models(hf_runner,
 
     with hf_runner(
             model_info.name,
-            dtype="float32",
+            dtype=model_info.hf_dtype,
             is_sentence_transformer=True,
     ) as hf_model:
 
