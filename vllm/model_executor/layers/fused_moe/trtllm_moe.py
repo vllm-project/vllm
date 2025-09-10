@@ -5,7 +5,8 @@ from typing import Optional
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.config import (FusedMoEConfig,
+                                                         FusedMoEQuantConfig)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP)
 from vllm.utils import next_power_of_2
@@ -16,20 +17,17 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(
         self,
         moe: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
         gemm1_alpha,
         gemm1_beta,
         gemm1_clamp_limit,
-        w13_bias,
-        w2_bias,
         max_capture_size,
     ):
-        super().__init__(moe.quant_config)
+        super().__init__(quant_config)
         self.moe = moe
         self.gemm1_alpha = gemm1_alpha
         self.gemm1_beta = gemm1_beta
         self.gemm1_clamp_limit = gemm1_clamp_limit
-        self.w13_bias = w13_bias
-        self.w2_bias = w2_bias
         self.max_capture_size = max_capture_size
 
     @property
@@ -106,10 +104,7 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_map: Optional[torch.Tensor],
         w1_scale: Optional[torch.Tensor],
         w2_scale: Optional[torch.Tensor],
-        w1_zp: Optional[torch.Tensor],
-        w2_zp: Optional[torch.Tensor],
         a1q_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
@@ -145,7 +140,7 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
             "gemm1_weights_scale":
             w1_scale,
             "gemm1_bias":
-            self.w13_bias,
+            self.w1_bias,
             "gemm1_alpha":
             self.gemm1_alpha,
             "gemm1_beta":

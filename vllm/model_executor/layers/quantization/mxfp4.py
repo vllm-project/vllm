@@ -669,11 +669,11 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     "gemm1_beta": layer.gemm1_beta,
                     "gemm1_clamp_limit": layer.gemm1_clamp_limit,
                     # TODO(bnell): part of quant_config
-                    "w13_bias": layer.w13_bias,
-                    "w2_bias": layer.w2_bias,
                     "max_capture_size": self.max_capture_size,
                 }
-                return TrtLlmGenExperts(self.moe, **kwargs)
+                assert self.moe_quant_config is not None
+                return TrtLlmGenExperts(self.moe, self.moe_quant_config,
+                                        **kwargs)
             else:
                 # Use matmul_ogs from triton_kernels here!
                 raise NotImplementedError(
