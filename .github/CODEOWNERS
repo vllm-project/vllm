@@ -30,6 +30,8 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /vllm/v1/structured_output @mgoin @russellb @aarnphm @benchislett
 /vllm/v1/spec_decode @benchislett @luccafong
 /vllm/v1/attention/backends/triton_attn.py @tdoublep
+/vllm/v1/core @heheda12345
+/vllm/v1/kv_cache_interface.py @heheda12345
 
 # Test ownership
 /.buildkite/lm-eval-harness @mgoin @simon-mo
@@ -46,6 +48,7 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /tests/test_inputs.py @DarkLight1337 @ywang96
 /tests/v1/entrypoints/llm/test_struct_output_generate.py @mgoin @russellb @aarnphm
 /tests/v1/structured_output @mgoin @russellb @aarnphm
+/tests/v1/core @heheda12345
 /tests/weight_loading @mgoin @youkaichao @yewentao256
 /tests/lora @jeejeelee
 /tests/models/language/generation/test_hybrid.py @tdoublep
