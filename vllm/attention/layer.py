@@ -24,7 +24,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.platforms import _Backend, current_platform
-from vllm.utils import direct_register_custom_op, GiB_bytes
+from vllm.utils import GiB_bytes, direct_register_custom_op
 
 logger = init_logger(__name__)
 USE_XFORMERS_OPS = None
@@ -225,8 +225,7 @@ class Attention(nn.Module, AttentionLayerBase):
                                         dtype=torch.float32)
         except torch.cuda.OutOfMemoryError as e:
             logger.error(
-                "Failed to initialize attention q/k/v range constants: %s",
-                e)
+                "Failed to initialize attention q/k/v range constants: %s", e)
             if torch.cuda.is_available():
                 logger.debug("CUDA device: %s", torch.cuda.current_device())
                 logger.debug("Allocated: %.2f GiB",

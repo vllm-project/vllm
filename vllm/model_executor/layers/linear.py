@@ -210,7 +210,8 @@ class UnquantizedLinearMethod(LinearMethodBase):
                              torch.cuda.memory_reserved() / GiB_bytes)
             raise RuntimeError(
                 "Failed to create unquantized linear weights. "
-                "This may be caused by insufficient memory to allocate the weight.") from e
+                "This may be caused by insufficient memory to allocate "
+                "the weight.") from e
         set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
