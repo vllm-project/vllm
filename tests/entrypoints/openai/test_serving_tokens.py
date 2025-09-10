@@ -29,7 +29,21 @@ def tokenizer():
 
 
 @pytest.fixture(scope="module")
-def server():
+def messages():
+    return [
+        {
+            "role": "system",
+            "content": "You are a helpful assistant."
+        },
+        {
+            "role": "user",
+            "content": "How many countries are in the EU?"
+        },
+    ]
+
+
+@pytest.fixture(scope="module")
+def server(request):
     args = [
         "--dtype",
         "bfloat16",
@@ -37,6 +51,11 @@ def server():
         "1024",
         "--enforce-eager",
     ]
+
+    extra_args = getattr(request, "param", None)
+    if extra_args is not None:
+        args = args + (list(extra_args) if isinstance(
+            extra_args, (list, tuple)) else [str(extra_args)])
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
@@ -73,28 +92,95 @@ async def test_generate_endpoint(client):
 
 
 @pytest.mark.asyncio
-async def test_same_response_as_chat_completions(client, tokenizer):
-    messages = [
-        {
-            "role": "system",
-            "content": "You are a helpful assistant."
+async def test_same_response_as_chat_completions(client, tokenizer, messages):
+    token_ids = tokenizer.apply_chat_template(
+        messages,
+        add_generation_prompt=True,
+        enable_thinking=False,  # default with Qwen3
+    )
+    for ignore_eos in [True, False]:
+        payload = {
+            "model": MODEL_NAME,
+            "token_ids": token_ids,
+            "sampling_params": {
+                "max_tokens": 24,
+                "temperature": 0.0,
+                # NOTE coordinator will set this to skip detokenization
+                "detokenize": False,
+                "ignore_eos": ignore_eos,
+            },
+            "stream": False,
+        }
+        generate_resp = await client.post(GEN_ENDPOINT, json=payload)
+        generate_data = generate_resp.json()
+        generate_res = tokenizer.decode(
+            generate_data["choices"][0]["token_ids"], skip_special_tokens=True)
+
+        payload = {
+            "model": MODEL_NAME,
+            "messages": messages,
+            "max_tokens": 24,
+            "temperature": 0.0,
+            "stream": False,
+            "ignore_eos": ignore_eos,
+            "chat_template_kwargs": dict(enable_thinking=False)
+        }
+        completions_resp = await client.post("/v1/chat/completions",
+                                             json=payload)
+        completions_data = completions_resp.json()
+        completions_res = completions_data["choices"][0]["message"]["content"]
+
+        assert generate_res == completions_res
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "server",
+    [[
+        "--enable-lora",
+        "--lora-modules",
+        "Alice=charent/self_cognition_Alice",
+        "Bob=charent/self_cognition_Bob",
+        "--max-lora-rank",
+        "64",
+        "--max-cpu-loras",
+        "2",
+    ]],
+    indirect=True,
+)
+async def test_generate_with_lora_adapter(client, tokenizer, messages):
+    # Verify adapters are listed
+    models_resp = await client.get("/v1/models")
+    models_resp.raise_for_status()
+    models = {m["id"] for m in models_resp.json().get("data", [])}
+    assert {"Alice", "Bob"}.issubset(models)
+
+    # Generate using a LoRA adapter by specifying its name as the model
+    payload = {
+        "model": "Alice",
+        "token_ids": [1, 2, 3],
+        "sampling_params": {
+            "max_tokens": 5
         },
-        {
-            "role": "user",
-            "content": "How many countries are in the EU?"
-        },
-    ]
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+    data = resp.json()
+    assert "choices" in data
+
     token_ids = tokenizer.apply_chat_template(
         messages,
         add_generation_prompt=True,
         enable_thinking=False,  # default with Qwen3
     )
     payload = {
-        "model": MODEL_NAME,
+        "model": "Alice",
         "token_ids": token_ids,
         "sampling_params": {
             "max_tokens": 24,
-            "temperature": 0.2
+            "temperature": 0.0,
+            "detokenize": False,
         },
         "stream": False,
     }
@@ -104,10 +190,10 @@ async def test_same_response_as_chat_completions(client, tokenizer):
                                     skip_special_tokens=True)
 
     payload = {
-        "model": MODEL_NAME,
+        "model": "Alice",
         "messages": messages,
         "max_tokens": 24,
-        "temperature": 0.2,
+        "temperature": 0.0,
         "stream": False,
         "chat_template_kwargs": dict(enable_thinking=False)
     }
