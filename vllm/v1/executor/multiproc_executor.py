@@ -236,14 +236,30 @@ class MultiprocExecutor(Executor):
             def get_response(w: WorkerProcHandle,
                              dequeue_timeout: Optional[float] = None,
                              cancel_event: Optional[threading.Event] = None):
-                status, result = w.worker_response_mq.dequeue(
-                    timeout=dequeue_timeout, cancel=cancel_event)
+                # Add timeout detection
+                if dequeue_timeout is None:
+                    dequeue_timeout = 30.0  # Default 30 second timeout
+                
+                try:
+                    status, result = w.worker_response_mq.dequeue(
+                        timeout=dequeue_timeout, cancel=cancel_event)
 
-                if status != WorkerProc.ResponseStatus.SUCCESS:
-                    raise RuntimeError(
-                        f"Worker failed with error '{result}', please check the"
-                        " stack trace above for the root cause")
-                return result
+                    if status != WorkerProc.ResponseStatus.SUCCESS:
+                        raise RuntimeError(
+                            f"Worker failed with error '{result}', "
+                            "please check the "
+                            "stack trace above for the root cause")
+                    return result
+                except TimeoutError as e:
+                    # Check if worker process is still alive
+                    if not w.proc.is_alive():
+                        raise RuntimeError(
+                            f"Worker {w.rank} process died during timeout "
+                            f"(exit code: {w.proc.exitcode})") from e
+                    else:
+                        raise TimeoutError(
+                            f"Timeout waiting for response from worker "
+                            f"{w.rank} after {dequeue_timeout}s") from e
 
             for w in workers:
                 dequeue_timeout = None if deadline is None else (
