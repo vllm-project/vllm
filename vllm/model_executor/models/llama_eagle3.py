@@ -326,11 +326,18 @@ class LlamaForCausalLMEagle3(Eagle3LlamaForCausalLM):
         if hasattr(self.vllm_config, 'model_config'):
             target_hidden_size = self.vllm_config.model_config.get_hidden_size(
             )
+            print(f"DEBUG: Target hidden size: {target_hidden_size}")
+            print(f"DEBUG: Draft model hidden size: {self.config.hidden_size}")
             # Check if the fc layer input size matches the target model's
             # hidden size
-            if (hasattr(self.model, 'fc')
-                    and self.model.fc.in_features != target_hidden_size * 3):
-                # Recreate the fc layer with the correct input size
-                self.model.fc = torch.nn.Linear(target_hidden_size * 3,
-                                                self.config.hidden_size,
-                                                bias=False)
+            if hasattr(self.model, 'fc'):
+                print(f"DEBUG: FC layer input features: {self.model.fc.in_features}")
+                print(f"DEBUG: FC layer output features: {self.model.fc.out_features}")
+                if self.model.fc.in_features != target_hidden_size * 3:
+                    print(f"DEBUG: Recreating fc layer with input size {target_hidden_size * 3}")
+                    # Recreate the fc layer with the correct input size
+                    self.model.fc = torch.nn.Linear(target_hidden_size * 3,
+                                                    self.config.hidden_size,
+                                                    bias=False)
+                    print(f"DEBUG: New FC layer input features: {self.model.fc.in_features}")
+                    print(f"DEBUG: New FC layer output features: {self.model.fc.out_features}")
