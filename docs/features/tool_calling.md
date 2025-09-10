@@ -311,6 +311,15 @@ Flags:
 * For non-reasoning: `--tool-call-parser hunyuan_a13b`
 * For reasoning: `--tool-call-parser hunyuan_a13b --reasoning-parser hunyuan_a13b --enable_reasoning`
 
+### LongCat-Flash-Chat Models (`longcat`)
+
+Supported models:
+
+* `meituan-longcat/LongCat-Flash-Chat`
+* `meituan-longcat/LongCat-Flash-Chat-FP8`
+
+Flags: `--tool-call-parser longcat`
+
 ### Models with Pythonic Tool Calls (`pythonic`)
 
 A growing number of models output a python list to represent tool calls instead of using JSON. This has the advantage of inherently supporting parallel tool calls and removing ambiguity around the JSON schema required for tool calls. The `pythonic` tool parser can support such models.
