@@ -129,6 +129,8 @@ def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static,
 
         torch.testing.assert_close(result, result2, atol=ATOL, rtol=RTOL)
 
+        assert fusion_pass.matched_count == 2
+
         # In pre-nodes, fp8 quant should be there and fused kernels should not
         backend.check_before_ops(model.ops_in_model_before())
 

@@ -284,6 +284,8 @@ def sequence_parallelism_pass_on_test_model(
     compiled_model_func = torch.compile(model, backend=backend_func)
     compiled_model_func(hidden_states, residual)
 
+    assert sequence_parallelism_pass.matched_count == 1
+
     # In pre-nodes, all reduce should be there,
     # reduce scatter and all gather should not
     backend_no_func.check_before_ops(model.ops_in_model_before())

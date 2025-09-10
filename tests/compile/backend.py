@@ -29,7 +29,8 @@ class LazyInitPass(InductorPass):
         self.vllm_config = weakref.proxy(vllm_config)  # avoid cycle
 
     def __call__(self, graph: fx.Graph) -> None:
-        self.pass_cls(self.vllm_config)(graph)
+        self.pass_ = self.pass_cls(self.vllm_config)
+        self.pass_(graph)
 
 
 class TestBackend:

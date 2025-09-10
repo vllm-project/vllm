@@ -230,6 +230,7 @@ def all_reduce_fusion_pass_on_test_model(local_rank: int, world_size: int,
     compiled_model = torch.compile(model, backend=backend)
     compiled_model(hidden_states, residual)
 
+    assert all_reduce_fusion_pass.matched_count == 1
     backend.check_before_ops(model.ops_in_model_before(), fully_replaced=False)
     backend.check_after_ops(model.ops_in_model_after())
     del all_reduce_fusion_pass

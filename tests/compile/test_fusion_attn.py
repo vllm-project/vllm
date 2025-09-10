@@ -473,6 +473,9 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
         test_backend.check_before_ops([QUANT_OPS[quant_key]],
                                       fully_replaced=True)
 
+    # access the
+    assert attn_pass.pass_.matched_count == sum(attn_fusion_supported)
+
     # Check attention ops in the graph before and after fusion
     attn_nodes_pre = list(find_op_nodes(ATTN_OP, test_backend.graph_pre_pass))
     attn_nodes_post = list(find_op_nodes(ATTN_OP,

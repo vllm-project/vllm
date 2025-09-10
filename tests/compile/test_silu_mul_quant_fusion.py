@@ -159,6 +159,8 @@ def test_fusion_silu_and_mul_quant(num_tokens, hidden_size, model_class,
                                atol=atol,
                                rtol=rtol)
 
+    assert fusion_pass.matched_count == 1
+
     # In pre-nodes, quant op should be present and fused kernels should not
     backend.check_before_ops(model.ops_in_model_before())
 
