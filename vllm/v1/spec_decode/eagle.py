@@ -674,14 +674,14 @@ class EagleProposer:
         if self.vllm_config.speculative_config.draft_vocab_pruned is not None:
             logger.info(f"Loading pruned draft model vocabulary from {self.vllm_config.speculative_config.draft_vocab_pruned}")
             self.pruned_token_ids = load_draft_vocab_pruned(self.vllm_config.speculative_config.draft_vocab_pruned)
+            self.pruned_token_ids = self.pruned_token_ids.to(self.model.lm_head.data.device)
+            ic(self.pruned_token_ids)
 
             if hasattr(self.model, "lm_head"):
                 print('have lm_head')
-                head = self.model.lm_head.weight
-                self.pruned_token_ids = self.pruned_token_ids.to(head.device)
-                head.data = head.data[self.pruned_token_ids]
-                del self.model.lm_head.weight
-                self.model.lm_head.weight = head
+                ic(self.model.lm_head.data.shape)
+                self.model.lm_head.data = ic(self.model.lm_head.data[self.pruned_token_ids])
+                ic(self.model.lm_head.data.shape)
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
             elif hasattr(self.model.model, "embed_tokens"):

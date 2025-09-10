@@ -19,15 +19,17 @@ from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.v1.spec_decode.eagle import EagleProposer
 
-model_dir = "meta-llama/Llama-3.1-8B-Instruct"
+model_dir = "NousResearch/Meta-Llama-3.1-8B-Instruct" #"meta-llama/Llama-3.1-8B-Instruct"
 eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
 eagle3_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
+pruned_vocab_dir = "thunlp/LLaMA3-Instruct-8B-FR-Spec/freq_32768.pt"
 
 
 def _create_proposer(
     method: str,
     num_speculative_tokens: int,
     speculative_token_tree: Optional[list[tuple[int]]] = None,
+    prune_vocab: bool = False,
 ) -> EagleProposer:
     model_config = ModelConfig(model=model_dir,
                                runner="generate",
@@ -41,6 +43,10 @@ def _create_proposer(
         assert num_speculative_tokens == len(speculative_token_tree)
         spec_token_tree_str = str(speculative_token_tree)
 
+    draft_vocab_pruned = None
+    if prune_vocab:
+        draft_vocab_pruned = pruned_vocab_dir
+
     speculative_config = SpeculativeConfig(
         target_model_config=model_config,
         target_parallel_config=ParallelConfig(),
@@ -48,6 +54,7 @@ def _create_proposer(
         method=method,
         num_speculative_tokens=num_speculative_tokens,
         speculative_token_tree=spec_token_tree_str,
+        draft_vocab_pruned=draft_vocab_pruned,
     )
 
     vllm_config = VllmConfig(
@@ -137,12 +144,17 @@ def test_prepare_inputs():
                          get_attn_backend_list_based_on_platform())
 @pytest.mark.parametrize("pp_size", [1, 2])
 @pytest.mark.parametrize("use_distinct_embed_tokens", [True, False])
+@pytest.mark.parametrize("prune_vocab", [True, False])
 @mock.patch('vllm.v1.spec_decode.eagle.get_pp_group')
 @mock.patch('vllm.v1.spec_decode.eagle.get_layers_from_vllm_config')
 @mock.patch('vllm.v1.spec_decode.eagle.get_model')
 def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
-                    attn_backend, pp_size, use_distinct_embed_tokens,
+                    attn_backend, pp_size, use_distinct_embed_tokens, prune_vocab,
                     monkeypatch):
+
+    # Skip if prune_vocab=True and method != "eagle"
+    if prune_vocab and method != "eagle":
+        pytest.skip("prune_vocab only applies to eagle method")
 
     monkeypatch.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
 
@@ -162,6 +174,13 @@ def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
         mock_model.model.embed_tokens.weight.shape = (131072, 2048)
     else:
         mock_model.model.embed_tokens.weight.shape = (131072, 4096)
+
+    if method == "eagle" and prune_vocab:
+        mock_model.lm_head.data.shape = (32768, 4096)  # 25% of 131072
+        # update lm_head shape when we index into it
+        mock_model.lm_head.data.__getitem__ = lambda key: mock.MagicMock()(shape=(len(key), 4096))
+    else:
+        mock_model.lm_head.data.shape = (131072, 4096)
 
     mock_get_model.return_value = mock_model
 
@@ -197,10 +216,24 @@ def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
     assert not isinstance(target_model, SupportsMultiModal)
 
     if method == "eagle":
-        target_model.lm_head = mock.MagicMock()
+        # if prune_vocab=True, we must be able to run copy.deepcopy on lm_head
+        class DeepCopyableMock(mock.MagicMock):
+            def __deepcopy__(self, memo):
+                new_mock = DeepCopyableMock()
+                new_mock.data.device = self.data.device
+                new_mock.data.shape = self.data.shape
+                if hasattr(self.data, '__getitem__'):
+                    new_mock.data.__getitem__ = self.data.__getitem__
+                return new_mock
+        target_model.lm_head = DeepCopyableMock()
+
+        # lm_head needs data with device and shape
+        device = torch.device(current_platform.device_type)
+        target_model.lm_head.data.device = device
+        target_model.lm_head.data.shape = (131072, 4096)
 
     # Create proposer using the helper function
-    proposer = _create_proposer(method, num_speculative_tokens=8)
+    proposer = _create_proposer(method, num_speculative_tokens=8, prune_vocab=prune_vocab)
 
     # Call the method under test
     proposer.load_model(target_model)
@@ -208,9 +241,16 @@ def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
     # Verify common interactions
     mock_get_model.assert_called_once()
 
-    # Verify that EAGLE models gain the lm head from the target model
     if method == "eagle":
-        assert proposer.model.lm_head == target_model.lm_head
+        if prune_vocab:
+            # Verify that pruned EAGLE models have a smaller lm head then the target model
+            pruned_vocab_size = proposer.model.lm_head.data.shape[0]
+            original_vocab_size = target_model.lm_head.data.shape[0]
+            ic(pruned_vocab_size, original_vocab_size)
+            assert pruned_vocab_size/original_vocab_size == 0.25, f"{pruned_vocab_size/original_vocab_size=}"
+        else:
+            # Verify that EAGLE models have the same lm head as the target model
+            assert proposer.model.lm_head == target_model.lm_head
 
     # Verify that the embed tokens are set correctly
     # If pp_size is > 1, the embed tokens should be distinct
