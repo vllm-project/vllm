@@ -17,19 +17,18 @@ from vllm.logger import init_logger
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
+                              ColumnParallelLinearWithShardedLoRA,
                               LogitsProcessorWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
+                              MergedColumnParallelLinearWithShardedLoRA,
                               MergedQKVParallelLinearWithLoRA,
+                              MergedQKVParallelLinearWithShardedLoRA,
                               QKVParallelLinearWithLoRA,
+                              QKVParallelLinearWithShardedLoRA,
                               ReplicatedLinearWithLoRA,
                               RowParallelLinearWithLoRA,
-                              VocabParallelEmbeddingWithLoRA,
-                              ColumnParallelLinearWithShardedLoRA,
-                              MergedColumnParallelLinearWithShardedLoRA,
-                              MergedQKVParallelLinearWithShardedLoRA, 
-                              QKVParallelLinearWithShardedLoRA,
-                            RowParallelLinearWithShardedLoRA)
-
+                              RowParallelLinearWithShardedLoRA,
+                              VocabParallelEmbeddingWithLoRA)
 from vllm.model_executor.layers.linear import LinearBase
 
 # yapf: enable
