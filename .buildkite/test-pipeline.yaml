@@ -102,7 +102,18 @@ steps:
   commands:
   - pytest -v -s core
 
-- label: Entrypoints Test (LLM) # 30min
+- label: Entrypoints Unit Tests # 5min
+  timeout_in_minutes: 10
+  working_dir: "/vllm-workspace/tests"
+  fast_check: true
+  source_file_dependencies:
+  - vllm/entrypoints
+  - tests/entrypoints/
+  commands:
+  - pytest -v -s entrypoints/openai/tool_parsers
+  - pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/openai --ignore=entrypoints/offline_mode --ignore=entrypoints/test_chat_utils.py
+
+- label: Entrypoints Integration Test (LLM) # 30min
   timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
@@ -119,7 +130,7 @@ steps:
   - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
   - VLLM_USE_V1=0 pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
 
-- label: Entrypoints Test (API Server) # 100min
+- label: Entrypoints Integration Test (API Server) # 100min
   timeout_in_minutes: 130
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
@@ -132,7 +143,7 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/openai/test_collective_rpc.py # PYTHONPATH is needed to import custom Worker extension
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/test_oot_registration.py --ignore=entrypoints/openai/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/test_collective_rpc.py
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/test_oot_registration.py --ignore=entrypoints/openai/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/test_collective_rpc.py --ignore=entrypoints/openai/tool_parsers/
   - pytest -v -s entrypoints/test_chat_utils.py
 
 - label: Distributed Tests (4 GPUs) # 35min
@@ -823,7 +834,7 @@ steps:
   # begin io_processor plugins test, all the code in between uses the prithvi_io_processor plugin
   - pip install -e ./plugins/prithvi_io_processor_plugin
   - pytest -v -s plugins_tests/test_io_processor_plugins.py
-  - pip uninstall prithvi_io_processor_plugin -y 
+  - pip uninstall prithvi_io_processor_plugin -y
   # end io_processor plugins test
   # other tests continue here:
   - pytest -v -s plugins_tests/test_scheduler_plugins.py
@@ -871,7 +882,7 @@ steps:
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
-  num_gpus: 2 
+  num_gpus: 2
   optional: true
   source_file_dependencies:
   - vllm/
