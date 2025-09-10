@@ -318,6 +318,11 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
                                       SupportsTranscription):
     supported_languages = ISO639_1_SUPPORTED_LANGS
 
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"]
+    }
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
