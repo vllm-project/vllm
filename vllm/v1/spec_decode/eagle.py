@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ast
 import copy
+import os
 from dataclasses import replace
 from importlib.util import find_spec
 from typing import Optional, Protocol
@@ -9,6 +10,7 @@ from typing import Optional, Protocol
 import numpy as np
 import torch
 import torch.nn as nn
+from huggingface_hub import snapshot_download
 
 from vllm.attention.layer import Attention
 from vllm.config import (CompilationLevel, VllmConfig,
@@ -737,18 +739,16 @@ class EagleProposer:
         ) == 1, "All eagle layers should belong to the same kv cache group"
 
 
-def load_draft_vocab_pruned(token_map_path: str) -> torch.Tensor:
-    # todo: use vllm method to download a model
-    import os
-    from huggingface_hub import snapshot_download
-    if not os.path.exists(token_map_path):
+def load_draft_vocab_pruned(draft_vocab_pruned_path: str) -> torch.Tensor:
+    if not os.path.exists(draft_vocab_pruned_path):
         cache_dir = snapshot_download(
-            os.path.dirname(token_map_path),
+            os.path.dirname(draft_vocab_pruned_path),
             ignore_patterns=["*.bin", "*.safetensors"],
         )
-        token_map_path = os.path.join(cache_dir, os.path.basename(token_map_path))
-    hot_token_ids = torch.load(token_map_path, weights_only=True)
-    return torch.tensor(hot_token_ids, dtype=torch.int64)
+        draft_vocab_pruned_path = os.path.join(cache_dir, os.path.basename(draft_vocab_pruned_path))
+    hot_token_ids = torch.load(draft_vocab_pruned_path, weights_only=True)
+    hot_token_ids = torch.tensor(hot_token_ids, dtype=torch.int64)
+    return hot_token_ids
 
 # NOTE(woosuk): Currently, the below code is not used and we always use argmax
 # to sample the draft tokens. We will use this after we find a way to manage
