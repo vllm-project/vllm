@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
 
+
 create_block_mask_compiled = torch.compile(create_block_mask,
                                            fullgraph=True,
                                            mode="reduce-overhead")
@@ -252,7 +253,6 @@ def causal_mask_mod(b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor,
                     kv_idx: torch.Tensor):
     return q_idx >= kv_idx
 
-
 @dataclass
 class FlexAttentionMetadata:
     causal: bool
@@ -446,15 +446,17 @@ class FlexAttentionMetadata:
 
         used_pages = self.block_table[
             self.doc_ids, :cdiv(self.max_seq_len, self.block_size)]
+
         used_pages_padded = pad_to_multiple(used_pages,
                                             multiple=self.q_block_size,
                                             dim=0)
         used_pages_padded = used_pages_padded.reshape(
             used_pages_padded.shape[0] // self.q_block_size, -1)
-        used_pages_padded = used_pages_padded // page_to_block_ratio
+        used_pages_padded = used_pages_padded // page_to_block_ratio + 1
         kv_indices = unique_static_unsorted((used_pages_padded.long()),
                                             M=self.num_blocks).to(torch.int32)
 
+        kv_indices = kv_indices.to(torch.int32) - 1
         kv_num_blocks = (kv_indices >= 0).sum(dim=-1).to(torch.int32)
         block_mask_kwargs = {
             "seq_lengths": (self.num_actual_tokens, self.total_cache_tokens),
@@ -478,6 +480,7 @@ class FlexAttentionMetadata:
         else:
             mask_mod = self.get_bidirectional_mask_mod()
             kv_len = self.num_actual_tokens
+
         return create_block_mask_compiled(
             mask_mod,
             None,
@@ -528,11 +531,9 @@ class FlexAttentionMetadataBuilder(
         self.headdim = self.model_config.get_head_size()
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
-        self.direct_build: bool = is_torch_equal_or_newer("2.9.0.dev0")
-        self.q_block_size: int = 16 if is_torch_equal_or_newer(
-            "2.9.0.dev0") else 128
-        self.kv_block_size: int = 16 if is_torch_equal_or_newer(
-            "2.9.0.dev0") else 128
+        self.direct_build: bool = True
+        self.q_block_size: int = 16 
+        self.kv_block_size: int = 16 
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
@@ -774,6 +775,10 @@ def get_kernel_options(query, block_m, block_n,
     kernel_options: dict[str, Union[int, bool]] = {
         "FORCE_USE_FLEX_ATTENTION": True,
     }
+    kernel_options["BLOCK_M"] = 16
+    kernel_options["BLOCK_N"] = 16
+    kernel_options["IS_DIVISIBLE"] = False
+    return kernel_options
     if use_direct_build:
         kernel_options["BLOCK_M"] = block_m
         kernel_options["BLOCK_N"] = block_n
