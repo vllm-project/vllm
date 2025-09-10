@@ -812,6 +812,24 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             src=self.input_batch.prev_sampled_token_ids[
                 prev_common_req_indices_tensor, 0])
 
+    def _get_encoder_seq_lens(
+        self,
+        scheduler_output: "SchedulerOutput",
+        kv_cache_spec: KVCacheSpec,
+        num_reqs: int,
+    ) -> Optional[np.ndarray]:
+        if not isinstance(kv_cache_spec, CrossAttentionSpec):
+            return None
+
+        # Build encoder_seq_lens array mapping request indices to
+        # encoder lengths for inputs scheduled in this batch
+        encoder_seq_lens = np.zeros(num_reqs, dtype=np.int32)
+        for req_id in scheduler_output.scheduled_encoder_inputs:
+            req_index = self.input_batch.req_id_to_index[req_id]
+            encoder_seq_lens[req_index] = self.max_encoder_len
+
+        return encoder_seq_lens
+
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
@@ -951,7 +969,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # in the same group share the same metadata.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
                 self.kv_cache_config.kv_cache_groups):
-            encoder_seq_lens: Optional[np.ndarray] = None
+            encoder_seq_lens = self._get_encoder_seq_lens(
+                scheduler_output, kv_cache_group_spec.kv_cache_spec, num_reqs)
 
             if isinstance(kv_cache_group_spec.kv_cache_spec,
                           EncoderOnlyAttentionSpec):
@@ -980,15 +999,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_common_prefix_blocks = (
                     scheduler_output.
                     num_common_prefix_blocks[kv_cache_group_id])
-
-                if isinstance(kv_cache_group_spec.kv_cache_spec,
-                              CrossAttentionSpec):
-                    # Build encoder_seq_lens array mapping request indices to
-                    # encoder lengths for inputs scheduled in this batch
-                    encoder_seq_lens = np.zeros(num_reqs, dtype=np.int32)
-                    for req_id in scheduler_output.scheduled_encoder_inputs:
-                        req_index = self.input_batch.req_id_to_index[req_id]
-                        encoder_seq_lens[req_index] = self.max_encoder_len
 
             common_attn_metadata = CommonAttentionMetadata(
                 query_start_loc=query_start_loc,
