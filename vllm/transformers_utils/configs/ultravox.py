@@ -75,19 +75,16 @@ class UltravoxConfig(transformers.PretrainedConfig):
         self.projector_act = projector_act
         self.projector_ln_mid = projector_ln_mid
 
-        if text_model_id is not None:
-            # N.B. Sets the wrapped_model_config below.
-            self.text_model_id = text_model_id
-        else:
-            self.text_model_id = None
+        # N.B. May set the wrapped_model_config below.
+        self.text_model_id = text_model_id
+        if text_model_id is None:
             text_config = text_config or {}
             self.wrapped_model_config = transformers.CONFIG_MAPPING[
                 text_config.get("model_type", "llama")](**text_config)
 
-        if audio_model_id is not None:
-            # N.B. Sets the audio_config below.
-            self.audio_model_id = audio_model_id
-        else:
+        # N.B. May set the audio_config below.
+        self.audio_model_id = audio_model_id
+        if audio_model_id is None:
             self.audio_model_id = None
             audio_config = audio_config or {}
             self.audio_config = transformers.CONFIG_MAPPING[audio_config.get(
