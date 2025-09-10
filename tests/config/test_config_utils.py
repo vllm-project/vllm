@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import enum
 from dataclasses import dataclass
 from typing import Optional
-from vllm.config.utils import normalize_value, get_hash_factors, hash_factors
-from vllm.config import LogprobsMode
 
 import pytest
+
+from vllm.config import LogprobsMode
+from vllm.config.utils import get_hash_factors, hash_factors, normalize_value
 
 # Helpers
 
