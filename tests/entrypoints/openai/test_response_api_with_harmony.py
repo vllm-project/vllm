@@ -358,7 +358,7 @@ async def test_code_interpreter(client: OpenAI, model_name: str):
         model=model_name,
         input=("What's the first 4 digits after the decimal point of "
                "cube root of `19910212 * 20250910`? "
-               "Show only thedigits."),
+               "Show only the digits."),
         tools=[{
             "type": "code_interpreter",
             "container": {
