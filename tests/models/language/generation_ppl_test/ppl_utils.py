@@ -119,12 +119,13 @@ def wikitext_ppl_test(hf_runner,
         hf_ppl = model_info.hf_ppl
         hf_dtype = "Constant"
 
+    differ = (vllm_ppl - hf_ppl) / hf_ppl
     print("Model:", model_info.name)
     print("VLLM:", vllm_dtype, vllm_ppl)
     print("Transformers:", hf_dtype, hf_ppl)
-    print("Difference:", vllm_ppl - hf_ppl)
+    print("Difference (%):", differ)
 
     # PPL the smaller, the better
     # We are not concerned that the vllm PPL is less than Transformers,
     # so we only perform one-sided testing.
-    assert vllm_ppl - hf_ppl < atol
+    assert differ < atol
