@@ -33,7 +33,7 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse, ChatMessage, DeltaFunctionCall, DeltaMessage,
     DeltaToolCall, ErrorResponse, FunctionCall, FunctionDefinition,
-    PromptTokenUsageInfo, RequestResponseMetadata, ToolCall, UsageInfo)
+    PromptTokenUsageInfo, RequestResponseMetadata, ToolCall, UsageInfo, CompletionTokensDetails)
 from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
                                                     clamp_prompt_logprobs)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
@@ -1085,12 +1085,16 @@ class OpenAIServingChat(OpenAIServing):
             # is sent, send the usage
             if include_usage:
                 completion_tokens = sum(previous_num_tokens)
+                completion_tokens_details = None
+                if res.accepted_prediction_tokens or res.rejected_prediction_tokens:
+                    completion_tokens_details = CompletionTokensDetails(
+                        accepted_prediction_tokens=res.accepted_prediction_tokens,
+                        rejected_prediction_tokens=res.rejected_prediction_tokens,)
                 final_usage = UsageInfo(prompt_tokens=num_prompt_tokens,
                                         completion_tokens=completion_tokens,
                                         total_tokens=num_prompt_tokens +
                                         completion_tokens,
-                                        accepted_prediction_tokens=res.accepted_prediction_tokens,
-                                        rejected_prediction_tokens=res.rejected_prediction_tokens)
+                                        completion_tokens_details=completion_tokens_details,)
                 if self.enable_prompt_tokens_details and num_cached_tokens:
                     final_usage.prompt_tokens_details = PromptTokenUsageInfo(
                         cached_tokens=num_cached_tokens)
@@ -1398,14 +1402,16 @@ class OpenAIServingChat(OpenAIServing):
             num_prompt_tokens += len(final_res.encoder_prompt_token_ids)
         num_generated_tokens = sum(
             len(output.token_ids) for output in final_res.outputs)
+        completion_tokens_details = None
+        if final_res.accepted_prediction_tokens or final_res.rejected_prediction_tokens:
+            completion_tokens_details = CompletionTokensDetails(
+                accepted_prediction_tokens=final_res.accepted_prediction_tokens,
+                rejected_prediction_tokens=final_res.rejected_prediction_tokens,)
         usage = UsageInfo(prompt_tokens=num_prompt_tokens,
                           completion_tokens=num_generated_tokens,
                           total_tokens=num_prompt_tokens +
                           num_generated_tokens,
-                          accepted_prediction_tokens=
-                          final_res.accepted_prediction_tokens,
-                          rejected_prediction_tokens=
-                          final_res.rejected_prediction_tokens)
+                          completion_tokens_details=completion_tokens_details)
         if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
             usage.prompt_tokens_details = PromptTokenUsageInfo(
                 cached_tokens=final_res.num_cached_tokens)
