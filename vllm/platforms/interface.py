@@ -48,6 +48,7 @@ class _Backend(enum.Enum):
     ROCM_AITER_MLA_VLLM_V1 = enum.auto()
     ROCM_AITER_FA = enum.auto()  # used for ViT attn backend
     TORCH_SDPA = enum.auto()
+    TORCH_SDPA_VLLM_V1 = enum.auto()
     FLASHINFER = enum.auto()
     FLASHINFER_VLLM_V1 = enum.auto()
     TRITON_MLA = enum.auto()  # Supported by V1
