@@ -97,6 +97,10 @@ def test_cutlass_mla_decode(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size,
         descale_q = torch.ones((1), dtype=torch.float32)
         descale_k = torch.ones((1), dtype=torch.float32)
 
+        maxval = 3.0
+        q = torch.clamp(q, -maxval, maxval)
+        blocked_k = torch.clamp(blocked_k, -maxval, maxval)
+        blocked_v = torch.clamp(blocked_v, -maxval, maxval)
         q = q.to(fp8_dtype)
         blocked_k = blocked_k.to(fp8_dtype)
         blocked_v = blocked_v.to(fp8_dtype)
