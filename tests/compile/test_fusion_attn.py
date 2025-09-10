@@ -473,7 +473,7 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
         test_backend.check_before_ops([QUANT_OPS[quant_key]],
                                       fully_replaced=True)
 
-    # access the
+    # access the underlying `AttnFusionPass` on the `LazyInitPass`
     assert attn_pass.pass_.matched_count == sum(attn_fusion_supported)
 
     # Check attention ops in the graph before and after fusion
