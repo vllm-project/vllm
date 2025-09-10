@@ -7,6 +7,7 @@ import torch
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op, is_torch_equal_or_newer
+import vllm.envs as envs
 
 logger = init_logger(__name__)
 
@@ -45,10 +46,7 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps):
             if torch.cuda.get_device_capability()[0] == 10:
                 scale_layout = BlackwellMXScaleLayout
         else:
-            import os
-            use_scale_preshuffling = os.environ.get(
-                "TRITON_HIP_PRESHUFFLE_SCALES", "0") == "1"
-            if use_scale_preshuffling:
+            if envs.TRITON_HIP_PRESHUFFLE_SCALES:
                 scale_layout = GFX950MXScaleLayout
     else:
         """ weight swizzle for mxfp4 moe, used for OAI mxfp4 kernel

@@ -10,13 +10,11 @@ from vllm import _custom_ops as ops
 from vllm import envs
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
-
-if current_platform.is_rocm():
+if current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_TRITON_BF16_GEMM:
     from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
-
-VLLM_USE_AITER_TRITON_GEMM = (os.getenv("VLLM_USE_AITER_TRITON_GEMM",
-                                        "False").lower() in ("true", "1"))
-
+    VLLM_ROCM_USE_AITER_TRITON_BF16_GEMM = True
+else:
+    VLLM_ROCM_USE_AITER_TRITON_BF16_GEMM = False
 
 def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
     # Shuffle weight along the last dimension so that
@@ -121,7 +119,9 @@ def rocm_unquantized_gemm_impl(
                     x.dtype in [torch.float16, torch.bfloat16] \
                     and k % 8 == 0 and bias is None)
 
-    if VLLM_USE_AITER_TRITON_GEMM and aiter_GEMM_check(n, m, k):
+    if (VLLM_ROCM_USE_AITER_TRITON_BF16_GEMM 
+        and aiter_GEMM_check(n, m, k) 
+        and x.dtype in [torch.float16, torch.bfloat16]):
         return gemm_a16w16(x, weight, bias)
 
     if use_skinny is not True:
