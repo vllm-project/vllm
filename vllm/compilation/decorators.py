@@ -11,6 +11,7 @@ import torch.nn as nn
 from packaging import version
 from torch._dynamo.symbolic_convert import InliningInstructionTranslator
 
+import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import CompilationLevel, VllmConfig
@@ -34,11 +35,11 @@ def ignore_torch_compile(cls: _T) -> _T:
     a support_torch_compile decorator, but we don't want to
     compile the class `cls` that inherits the parent class.
     This only ignores compiling the forward of the class the
-    decorator is applied to. 
+    decorator is applied to.
 
     If the parent has ignore_torch_compile but the child has
     support_torch_compile, the child will still be compiled.
-    
+
     If the class has one or more submodules
     that have support_torch_compile decorator applied, compile will
     not be ignored for those submodules.
@@ -224,6 +225,9 @@ def _support_torch_compile(
         if self.do_not_compile or torch.compiler.is_compiling():
             return self.forward(*args, **kwargs)
 
+        if getattr(self, "aot_compiled_fn", None) is not None:
+            return self.aot_compiled_fn(self, *args, **kwargs)
+
         # the first compilation needs to have dynamic shapes marked
         if len(self.compiled_codes) < 1:
             sig = inspect.signature(self.__class__.forward)
@@ -307,7 +311,11 @@ def _support_torch_compile(
                         **dynamo_config_patches
                     ), maybe_use_cudagraph_partition_wrapper(
                         self.vllm_config), _torch27_patch_tensor_subclasses():
-                output = self.compiled_callable(*args, **kwargs)
+                if envs.VLLM_USE_AOT_COMPILE:
+                    self.aot_compiled_fn = self.aot_compile(*args, **kwargs)
+                    output = self.aot_compiled_fn(self, *args, **kwargs)
+                else:
+                    output = self.compiled_callable(*args, **kwargs)
             return output
 
         # usually, capturing the model once is enough, and then we can
