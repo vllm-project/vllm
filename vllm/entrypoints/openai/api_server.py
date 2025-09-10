@@ -29,7 +29,6 @@ from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from openai import BaseModel
 from prometheus_client import make_asgi_app
 from prometheus_fastapi_instrumentator import Instrumentator
 from starlette.concurrency import iterate_in_threadpool
@@ -71,7 +70,9 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               RerankRequest, RerankResponse,
                                               ResponsesRequest,
                                               ResponsesResponse, ScoreRequest,
-                                              ScoreResponse, TokenizeRequest,
+                                              ScoreResponse,
+                                              StreamingResponsesResponse,
+                                              TokenizeRequest,
                                               TokenizeResponse,
                                               TranscriptionRequest,
                                               TranscriptionResponse,
@@ -579,8 +580,8 @@ async def show_version():
 
 
 async def _convert_stream_to_sse_events(
-        generator: AsyncGenerator[BaseModel,
-                                  None]) -> AsyncGenerator[str, None]:
+    generator: AsyncGenerator[StreamingResponsesResponse, None]
+) -> AsyncGenerator[str, None]:
     """Convert the generator to a stream of events in SSE format"""
     async for event in generator:
         event_type = getattr(event, 'type', 'unknown')
