@@ -27,13 +27,11 @@ from vllm.benchmarks.lib.utils import (convert_to_pytorch_benchmark_format,
                                        write_to_json)
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.inputs import TextPrompt, TokensPrompt
-from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
 from vllm.utils import merge_async_iterators
 
-logger = init_logger(__name__)
 
 def run_vllm(
     requests: list[SampleRequest],
@@ -569,7 +567,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         action="store_true",
         default=False,
         help="Use Torch Profiler. The env variable "
-        "VLLM_TORCH_PROFILER_DIR=1 must be set to enable profiler.")
+        "VLLM_TORCH_PROFILER_DIR must be set to enable profiler.")
 
     # prefix repetition dataset
     prefix_repetition_group = parser.add_argument_group(
