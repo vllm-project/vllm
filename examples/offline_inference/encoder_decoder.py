@@ -5,6 +5,8 @@ Demonstrate prompting of text-to-text
 encoder/decoder models, specifically BART and mBART.
 
 This script is refactored to allow model selection via command-line arguments.
+
+NOTE: This example is not yet supported in V1.
 """
 
 import argparse

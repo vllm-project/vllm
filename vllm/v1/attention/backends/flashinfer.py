@@ -163,11 +163,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
-        self.device = device
-        self.vllm_config = vllm_config
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.cache_config = vllm_config.cache_config
         self.model_config = vllm_config.model_config
-        self.kv_cache_spec = kv_cache_spec
         self._workspace_buffer = None
         self._prefill_wrapper = None  # Wrapper for prefill/append
         self._decode_wrapper = None  # Wrapper for decode (general shape)

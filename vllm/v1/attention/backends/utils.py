@@ -72,6 +72,9 @@ class CommonAttentionMetadata:
     logits_indices_padded: Optional[torch.Tensor] = None
     num_logits_indices: Optional[int] = None
 
+    # Needed by CrossAttentionBuilder
+    encoder_seq_lens: Optional[np.ndarray] = None
+
 
 @dataclass
 class UbatchSlice:
@@ -193,6 +196,9 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
         self.kv_cache_spec = kv_cache_spec
+        self.layer_names = layer_names
+        self.vllm_config = vllm_config
+        self.device = device
 
     @abstractmethod
     def build(self,
