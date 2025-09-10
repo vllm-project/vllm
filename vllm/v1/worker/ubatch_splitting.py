@@ -99,6 +99,7 @@ def ubatch_split(
     max_num_scheduled_tokens: int,
     num_tokens_unpadded: int,
     num_tokens_padded: int,
+    uniform_decode_query_len: int,
     vllm_config: VllmConfig,
 ) -> tuple[Optional[UBatchSlices], Optional[torch.Tensor]]:
     """
@@ -125,7 +126,7 @@ def ubatch_split(
         parallel_config.enable_microbatching and \
         num_tokens_unpadded >= \
         parallel_config.microbatching_token_threshold \
-        and max_num_scheduled_tokens == 1
+        and max_num_scheduled_tokens == uniform_decode_query_len
 
     # Don't microbatch unless every other DP worker is also microbatching
     num_tokens_after_padding = None

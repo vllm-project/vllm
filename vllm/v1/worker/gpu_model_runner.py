@@ -55,7 +55,7 @@ from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         GiB_bytes, LazyLoader, check_use_alibi, get_dtype_size,
-                        is_pin_memory_available, supports_dynamo)
+                        is_pin_memory_available, round_up, supports_dynamo)
 from vllm.v1.attention.backends.flash_attn import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
@@ -948,12 +948,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         query_start_loc = self.query_start_loc.gpu[:num_reqs + 1]
 
         num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
-        num_tokens_padded = num_tokens_unpadded + self.get_local_padding(
-            num_tokens_unpadded)
+        num_tokens_padded = num_tokens_unpadded + self.get_local_padding(num_tokens_unpadded)
         ubatch_slices, num_tokens_after_padding = \
             ubatch_split(max_num_scheduled_tokens,
                          num_tokens_unpadded,
                          num_tokens_padded,
+                         self.uniform_decode_query_len,
                          self.vllm_config)
 
         self.seq_lens.np[:num_reqs] = (
