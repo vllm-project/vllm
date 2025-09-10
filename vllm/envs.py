@@ -91,6 +91,8 @@ if TYPE_CHECKING:
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
     VLLM_TORCH_PROFILER_RECORD_SHAPES: bool = False
     VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY: bool = False
+    VLLM_USE_AOT_COMPILE: bool = False
+    VLLM_FORCE_AOT_LOAD: bool = False
     VLLM_TORCH_PROFILER_WITH_STACK: bool = True
     VLLM_TORCH_PROFILER_WITH_FLOPS: bool = False
     VLLM_USE_TRITON_AWQ: bool = False
@@ -232,6 +234,12 @@ def maybe_convert_bool(value: Optional[str]) -> Optional[bool]:
     return bool(int(value))
 
 
+def use_aot_compile() -> bool:
+    from vllm.utils import is_torch_equal_or_newer
+    default_value = "1" if is_torch_equal_or_newer("2.10.0.dev") else "0"
+    return os.environ.get("VLLM_USE_AOT_COMPILE", default_value) == "1"
+
+
 def env_with_choices(
         env_name: str,
         default: Optional[str],
@@ -239,13 +247,13 @@ def env_with_choices(
         case_sensitive: bool = True) -> Callable[[], Optional[str]]:
     """
     Create a lambda that validates environment variable against allowed choices
-    
+
     Args:
         env_name: Name of the environment variable
         default: Default value if not set (can be None)
         choices: List of valid string options or callable that returns list
         case_sensitive: Whether validation should be case sensitive
-        
+
     Returns:
         Lambda function for environment_variables dict
     """
@@ -280,15 +288,15 @@ def env_list_with_choices(
         choices: Union[list[str], Callable[[], list[str]]],
         case_sensitive: bool = True) -> Callable[[], list[str]]:
     """
-    Create a lambda that validates environment variable 
+    Create a lambda that validates environment variable
     containing comma-separated values against allowed choices
-    
+
     Args:
         env_name: Name of the environment variable
         default: Default list of values if not set
         choices: List of valid string options or callable that returns list
         case_sensitive: Whether validation should be case sensitive
-        
+
     Returns:
         Lambda function for environment_variables
         dict that returns list of strings
@@ -517,7 +525,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # compilation is done in warmup phase and the compilation will be
     # reused in subsequent calls.
     "VLLM_USE_AOT_COMPILE":
-    lambda: os.environ.get("VLLM_USE_AOT_COMPILE", "0") == "1",
+    use_aot_compile,
+
+    # Force vllm to always load AOT compiled models from disk. Failure
+    # to load will result in a hard error when this is enabled.
+    # Will be ignored when VLLM_USE_AOT_COMPILE is disabled.
+    "VLLM_FORCE_AOT_LOAD":
+    lambda: os.environ.get("VLLM_FORCE_AOT_LOAD", "0") == "1",
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
