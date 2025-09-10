@@ -58,9 +58,9 @@ def silu_mul_fp8_quant_deep_gemm_cuda(
     if E <= 16:
         max_empirical_parallelism = 64
     elif E <= 32:
-        max_empirical_parallelism = 32
+        max_empirical_parallelism = 16
     else:
-        max_empirical_parallelism = 8
+        max_empirical_parallelism = 4
 
     # We never want to launch more than Tx number of threads
     # This computes the clip.
