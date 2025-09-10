@@ -96,7 +96,7 @@ class CachedRequestData:
     # When PP is not used, new_token_ids will be empty.
     new_token_ids: list[list[int]]
     new_block_ids: list[Optional[tuple[list[int], ...]]]
-    num_computed_tokens: list[int]
+    num_computed_tokens: list[float]
 
     @property
     def num_reqs(self) -> int:
