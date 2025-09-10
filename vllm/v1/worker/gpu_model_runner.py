@@ -2889,6 +2889,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             finally:
                 if should_freeze:
                     gc.unfreeze()
+                    gc.collect()
 
         # Trigger CUDA graph capture for specific shapes.
         # Capture the large shapes first so that the smaller shapes
