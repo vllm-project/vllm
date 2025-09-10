@@ -303,9 +303,9 @@ class OpenAISpeechToText(OpenAIServing):
                     if request.response_format == 'verbose_json':
                         segment_class: Union[type[TranscriptionSegment],
                                              type[TranslationSegment]] = (
-                                             TranscriptionSegment if
-                                             self.task_type == "transcribe"
-                                             else TranslationSegment)
+                                                 TranscriptionSegment if
+                                                 self.task_type == "transcribe"
+                                                 else TranslationSegment)
 
                         segments: list[Union[
                             TranslationSegment,
