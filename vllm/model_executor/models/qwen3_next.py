@@ -23,8 +23,11 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fla.ops import (
     RMSNormGated, chunk_gated_delta_rule, fused_recurrent_gated_delta_rule)
 from vllm.model_executor.layers.fused_moe import FusedMoE
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.model_executor.layers.layernorm import (
     GemmaRMSNorm as Qwen3NextRMSNorm)
+# yapf: enable
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,

@@ -72,6 +72,8 @@ class GDNAttentionMetadataBuilder(
         self.use_spec_decode = self.num_spec > 0
         self.reorder_batch_threshold = self.num_spec + 1  # type: ignore[misc]
 
+        self.use_full_cuda_graph = \
+            self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         self.decode_cudagraph_max_bs = min(
             self.vllm_config.scheduler_config.max_num_seqs,
             self.compilation_config.max_capture_size)
@@ -217,8 +219,13 @@ class GDNAttentionMetadataBuilder(
         blocks_to_clear = torch.stack(
             blocks_to_clear) if blocks_to_clear else None
 
+        if torch.distributed.get_rank() == 0:
+            print(
+                f'{self.decode_cudagraph_max_bs=}, {num_prefills=}, {num_decodes=}'
+            )
+
         # prepare tensors for cudagraph
-        if (num_prefills == 0 and num_decodes == 0
+        if (self.use_full_cuda_graph and num_prefills == 0 and num_decodes == 0
                 and num_spec_decodes <= self.decode_cudagraph_max_bs):
             num_total_tokens = self.vllm_config.pad_for_cudagraph(
                 m.num_actual_tokens)
@@ -254,7 +261,8 @@ class GDNAttentionMetadataBuilder(
             num_accepted_tokens = self.num_accepted_tokens[:batch_size]
             num_accepted_tokens[num_spec_decodes:].fill_(1)
 
-        if (num_prefills == 0 and num_spec_decodes == 0
+        if (self.use_full_cuda_graph and num_prefills == 0
+                and num_spec_decodes == 0
                 and num_decodes <= self.decode_cudagraph_max_bs):
             num_total_tokens = self.vllm_config.pad_for_cudagraph(
                 m.num_actual_tokens)
