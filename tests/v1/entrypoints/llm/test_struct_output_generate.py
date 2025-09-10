@@ -125,12 +125,13 @@ def test_structured_output(
     # Test 1: Generate JSON output based on a provided schema
     #
     sampling_params = SamplingParams(
-        temperature=1.0,
+        temperature=0.3,
         max_tokens=4096,
         guided_decoding=GuidedDecodingParams(json=sample_json_schema))
 
-    prompt = ("Give an example JSON for an employee profile that fits this "
-              "schema. Make the response as short as possible. Schema: "
+    prompt = ("Generate a valid JSON object for an employee profile that exactly matches this schema. "
+              "Output only the JSON object with no additional text, explanations, or formatting. "
+              "Use only ASCII characters. Schema: "
               f"{sample_json_schema}")
     outputs = llm.generate(
         [prompt] * 2,
@@ -158,15 +159,14 @@ def test_structured_output(
     #
     if guided_decoding_backend != "outlines":
         sampling_params = SamplingParams(
-            temperature=1.0,
+            temperature=0.3,
             max_tokens=4096,
             n=2,
             guided_decoding=GuidedDecodingParams(json_object=True))
 
         outputs = llm.generate(prompts=(
-            "Generate a JSON object with curly braces for a person with "
-            "name and age fields for John Smith who is 31 years old. "
-            "Make the response as short as possible."),
+            "Create a JSON object with exactly two fields: 'name' set to 'John Smith' and 'age' set to 31. "
+            "Output only the JSON object: {\"name\": \"John Smith\", \"age\": 31}"),
                                sampling_params=sampling_params,
                                use_tqdm=True)
 
@@ -188,7 +188,7 @@ def test_structured_output(
     # Test 3: test a jsonschema incompatible with xgrammar
     #
     sampling_params = SamplingParams(
-        temperature=1.0,
+        temperature=0.3,
         max_tokens=4096,
         guided_decoding=GuidedDecodingParams(json=unsupported_json_schema))
     if guided_decoding_backend.startswith("xgrammar"):
@@ -196,18 +196,16 @@ def test_structured_output(
                            match="The provided JSON schema contains features "
                            "not supported by xgrammar."):
 
-            prompt = (f"Give an example JSON for an employee profile that "
-                      f"fits this schema: {unsupported_json_schema}. "
-                      f"Make the response as short as possible.")
+            prompt = (f"Generate a valid JSON object for an employee profile that exactly matches this schema: {unsupported_json_schema}. "
+                      f"Output only the JSON object with no additional text.")
             llm.generate(
                 [prompt] * 2,
                 sampling_params=sampling_params,
                 use_tqdm=True,
             )
     else:
-        prompt = (f"Give an example JSON object for a grade that "
-                  f"fits this schema: {unsupported_json_schema}. "
-                  f"Make the response as short as possible.")
+        prompt = (f"Generate a valid JSON object for a grade that exactly matches this schema: {unsupported_json_schema}. "
+                  f"Output only the JSON object with no additional text.")
         outputs = llm.generate(
             prompt,
             sampling_params=sampling_params,
@@ -230,7 +228,7 @@ def test_structured_output(
         # Test 4: Generate SQL statement using EBNF grammar
         #
         sampling_params = SamplingParams(
-            temperature=0.8,
+            temperature=0.1,
             top_p=0.95,
             max_tokens=1000,
             guided_decoding=GuidedDecodingParams(grammar=sample_sql_ebnf))
@@ -263,7 +261,7 @@ def test_structured_output(
         # Test 5: Generate SQL statement using Lark grammar
         #
         sampling_params = SamplingParams(
-            temperature=0.8,
+            temperature=0.1,
             top_p=0.95,
             max_tokens=1000,
             guided_decoding=GuidedDecodingParams(grammar=sample_sql_lark))
@@ -301,7 +299,7 @@ def test_structured_output(
         # Test 6: Test invalid grammar input
         #
         sampling_params = SamplingParams(
-            temperature=0.8,
+            temperature=0.1,
             top_p=0.95,
             max_tokens=1000,
             guided_decoding=GuidedDecodingParams(grammar="not a grammar"))
@@ -322,10 +320,9 @@ def test_structured_output(
         top_p=0.95,
         guided_decoding=GuidedDecodingParams(regex=sample_regex))
 
-    prompt = (f"Give an example IPv4 address with this regex: {sample_regex}. "
-              "Make the response as short as possible. Return only the IPv4."
-              "do NOT return any character after the IPv4 address, like '.'"
-              " or ' ' (empty space)")
+    prompt = (f"Generate exactly one valid IPv4 address matching this regex: {sample_regex}. "
+              "Output only the IP address with no additional characters, spaces, or punctuation. "
+              "Example format: 192.168.1.1")
     outputs = llm.generate(
         [prompt] * 2,
         sampling_params=sampling_params,
@@ -347,7 +344,7 @@ def test_structured_output(
     # Test 8: Generate text based on a choices
     #
     sampling_params = SamplingParams(
-        temperature=0.8,
+        temperature=0.2,
         top_p=0.95,
         guided_decoding=GuidedDecodingParams(choice=sample_guided_choice))
 
@@ -373,14 +370,14 @@ def test_structured_output(
     #
     json_schema = CarDescription.model_json_schema()
     sampling_params = SamplingParams(
-        temperature=1.0,
+        temperature=0.3,
         max_tokens=1000,
         guided_decoding=GuidedDecodingParams(json=json_schema))
 
     outputs = llm.generate(
-        ("Generate a JSON with the brand, model and car_type of the most "
-         "iconic car from the 90's. Make the response as short as "
-         "possible. Return only the json."),
+        ("Generate a JSON object with exactly three fields: 'brand', 'model', and 'car_type' for a 1990s car. "
+         "Output only the JSON object with no additional text. "
+         "Example: {\"brand\": \"Toyota\", \"model\": \"Supra\", \"car_type\": \"Coupe\"}."),
         sampling_params=sampling_params,
         use_tqdm=True,
     )
@@ -417,13 +414,13 @@ def test_structured_output(
     }
 
     sampling_params = SamplingParams(
-        temperature=1.0,
+        temperature=0.1,
         max_tokens=4096,
         guided_decoding=GuidedDecodingParams(json=json_schema))
 
     outputs = llm.generate(
-        ("Generate a description of a frog using 50 characters. "
-         "Make the response as short as possible."),
+        ("Generate a JSON object with a 'description' field containing exactly 50 characters describing a frog. "
+         "Use only ASCII letters, numbers, and spaces. Output only the JSON object."),
         sampling_params=sampling_params,
         use_tqdm=True,
     )
@@ -641,14 +638,14 @@ def test_structured_output_auto_mode(
               tokenizer_mode=tokenizer_mode)
 
     sampling_params = SamplingParams(
-        temperature=1.0,
+        temperature=0.3,
         max_tokens=1000,
         guided_decoding=GuidedDecodingParams(json=unsupported_json_schema))
 
     prompts = (
-        "Give an example JSON object for a grade "
-        "that fits this schema: "
-        f"{unsupported_json_schema}. Make the response as short as possible.")
+        "Generate a valid JSON object for a grade that exactly matches this schema: "
+        f"{unsupported_json_schema}. "
+        "Output only the JSON object with no additional text.")
     # This would fail with the default of "xgrammar", but in "auto"
     # we will handle fallback automatically.
     outputs = llm.generate(prompts,
@@ -756,8 +753,8 @@ def test_structured_output_batched_with_non_guided_requests(
     )
 
     guided_prompt = (
-        "Give an example JSON for an employee profile that fits this "
-        "schema. Make the response as short as possible. Schema: "
+        "Generate a valid JSON object for an employee profile that exactly matches this schema. "
+        "Output only the JSON object with no additional text. Schema: "
         f"{sample_json_schema}")
 
     non_guided_prompt = "The diameter of the Earth in kilometers is "
@@ -765,7 +762,7 @@ def test_structured_output_batched_with_non_guided_requests(
     prompts = [guided_prompt, non_guided_prompt]
     sampling_params = [
         SamplingParams(
-            temperature=1.0,
+            temperature=0.3,
             max_tokens=400,
             guided_decoding=GuidedDecodingParams(json=sample_json_schema)),
         # No max tokens, temp=0 to assert on contents
