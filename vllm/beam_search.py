@@ -4,8 +4,8 @@
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Union
 
+from vllm.logprobs import Logprob
 from vllm.lora.request import LoRARequest
-from vllm.sequence import Logprob
 
 if TYPE_CHECKING:
     from vllm.multimodal import MultiModalDataDict
@@ -18,7 +18,7 @@ class BeamSearchSequence:
     The text field is optional and will only be filled when the sequence is
     about to be returned to the user.
     """
-    # The tokens includes the prompt.
+    # The tokens include the prompt.
     tokens: list[int]
     logprobs: list[dict[int, Logprob]]
     lora_request: Optional[LoRARequest] = None

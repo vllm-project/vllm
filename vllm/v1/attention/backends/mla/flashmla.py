@@ -2,17 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import ClassVar, Optional
+from typing import ClassVar, Optional, Union
 
 import torch
 
-from vllm.attention.backends.abstract import (AttentionType,
-                                              is_quantized_kv_cache)
+from vllm.attention.backends.abstract import AttentionLayer, AttentionType
 from vllm.attention.ops.flashmla import (flash_mla_with_kvcache,
                                          get_mla_metadata,
                                          is_flashmla_supported)
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.platforms.cuda import CudaPlatform
 from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonDecodeMetadata,
                                                    MLACommonImpl,
@@ -63,7 +63,6 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device,
                          FlashMLAMetadata)
 
-        self.compilation_config = vllm_config.compilation_config
         self.num_q_heads = vllm_config.model_config.get_num_attention_heads(
             vllm_config.parallel_config)
 
@@ -87,10 +86,14 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
                 dtype=torch.int32)
 
     def _build_decode(self, block_table_tensor: torch.Tensor,
-                      seq_lens: torch.Tensor) -> FlashMLADecodeMetadata:
+                      seq_lens_cpu: torch.Tensor,
+                      seq_lens_device: torch.Tensor,
+                      query_start_loc_cpu: torch.Tensor,
+                      query_start_loc_device: torch.Tensor,
+                      num_decode_tokens: int) -> FlashMLADecodeMetadata:
         tile_scheduler_metadata, num_splits = \
             get_mla_metadata(
-            seq_lens,
+            seq_lens_device,
             self.num_q_heads,
             1, # MQA for the decode path
         )
@@ -124,13 +127,15 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
 
         return FlashMLADecodeMetadata(
             block_table=block_table_tensor,
-            seq_lens=seq_lens,
+            seq_lens=seq_lens_device,
             tile_scheduler_metadata=tile_scheduler_metadata,
             num_splits=num_splits,
         )
 
 
 class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
+
+    can_return_lse_for_decode: bool = True
 
     def __init__(
             self,
@@ -154,6 +159,16 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
         assert is_flashmla_supported(), \
             "FlashMLA is not supported on this device"
 
+        # disallow FlashMLA on NVIDIA Blackwell (SM 10.0+) GPUs
+        # context:
+        # https://github.com/deepseek-ai/FlashMLA/issues/83
+        # https://github.com/vllm-project/vllm/issues/24513
+        if CudaPlatform.has_device_capability(100):
+            raise NotImplementedError(
+                "FlashMLA is temporarily disabled on Blackwell (SM 10.0). "
+                "Please use CUTLASS_MLA or TRITON_MLA instead. "
+                "Example: `export VLLM_ATTENTION_BACKEND=CUTLASS_MLA`")
+
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
             raise NotImplementedError(
@@ -166,25 +181,22 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
                                       "are not implemented for "
                                       "FlashMLAImpl")
 
-        if is_quantized_kv_cache(self.kv_cache_dtype):
-            raise NotImplementedError(
-                "FlashMLA V1 with FP8 KV cache not yet supported")
-
     def _forward_decode(
         self,
-        q_nope: torch.Tensor,
-        q_pe: torch.Tensor,
+        q: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: FlashMLAMetadata,
-    ) -> torch.Tensor:
+        layer: AttentionLayer,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
 
-        q = torch.cat([q_nope, q_pe], dim=-1)\
-            .unsqueeze(1) # Add seqlen dim of 1 (decode)
+        if type(q) is tuple:
+            q = torch.cat(q, dim=-1)
 
-        o, _ = flash_mla_with_kvcache(
-            q=q,
+        assert isinstance(q, torch.Tensor)
+        o, lse = flash_mla_with_kvcache(
+            q=q.unsqueeze(1),  # Add seqlen dim of 1 (decode)
             k_cache=kv_c_and_k_pe_cache.unsqueeze(-2),  # Add head dim of 1
             block_table=attn_metadata.decode.block_table,
             cache_seqlens=attn_metadata.decode.seq_lens,
@@ -194,6 +206,8 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             num_splits=attn_metadata.decode.num_splits,
             softmax_scale=self.scale,
             causal=True,
+            descale_q=layer._q_scale.reshape(1),
+            descale_k=layer._k_scale.reshape(1),
         )
 
-        return self._v_up_proj(o)
+        return o, lse

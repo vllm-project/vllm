@@ -10,7 +10,7 @@ ARG PYTORCH_REPO="https://github.com/ROCm/pytorch.git"
 ARG PYTORCH_VISION_REPO="https://github.com/pytorch/vision.git"
 ARG FA_BRANCH="1a7f4dfa"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
-ARG AITER_BRANCH="916bf3c"
+ARG AITER_BRANCH="4822e675"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 
 FROM ${BASE_IMAGE} AS base
@@ -74,9 +74,11 @@ ARG TRITON_REPO
 RUN git clone ${TRITON_REPO}
 RUN cd triton \
     && git checkout ${TRITON_BRANCH} \
-    && cd python \
-    && python3 setup.py bdist_wheel --dist-dir=dist
-RUN mkdir -p /app/install && cp /app/triton/python/dist/*.whl /app/install
+    && if [ ! -f setup.py ]; then cd python; fi \
+    && python3 setup.py bdist_wheel --dist-dir=dist \
+    && mkdir -p /app/install && cp dist/*.whl /app/install
+RUN if [ -d triton/python/triton_kernels ]; then pip install build && cd triton/python/triton_kernels \
+    && python3 -m build --wheel && cp dist/*.whl /app/install; fi
 
 FROM base AS build_amdsmi
 RUN cd /opt/rocm/share/amd_smi \

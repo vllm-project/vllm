@@ -196,8 +196,35 @@ class TpuPlatform(Platform):
             raise ValueError("Torch XLA does not support per-request seed.")
 
     @classmethod
-    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str) -> bool:
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
+                                    model_config: "ModelConfig") -> bool:
         return True
+
+    @classmethod
+    @torch.compile(backend="openxla")
+    def insert_blocks_to_device(
+        cls,
+        src_cache: torch.Tensor,
+        dst_cache: torch.Tensor,
+        src_block_indices: torch.Tensor,
+        dst_block_indices: torch.Tensor,
+    ) -> None:
+        torch.ops.xla.dynamo_set_buffer_donor_(dst_cache, True)
+        dst_cache[dst_block_indices] = src_cache[src_block_indices].to(
+            dst_cache.device)
+
+    @classmethod
+    @torch.compile(backend="openxla")
+    def swap_out_blocks_to_host(
+        cls,
+        src_cache: torch.Tensor,
+        dst_cache: torch.Tensor,
+        src_block_indices: torch.Tensor,
+        dst_block_indices: torch.Tensor,
+    ) -> None:
+        """ tpu blocks to cpu blocks"""
+        torch.ops.xla.dynamo_set_buffer_donor_(src_cache, True)
+        dst_cache[dst_block_indices] = src_cache[src_block_indices].cpu()
 
 
 try:
