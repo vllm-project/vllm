@@ -35,7 +35,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "silu_mul_fp8_quant_deep_gemm_cuda(Tensor input, Tensor counts, Tensor! "
       "y_q, Tensor! y_s, int group_size, "
-      "bool use_ue8m0, int num_paralle_tokens) -> ()");
+      "bool use_ue8m0, int num_parallel_tokens) -> ()");
   ops.impl("silu_mul_fp8_quant_deep_gemm_cuda", torch::kCUDA,
            &silu_mul_fp8_quant_deep_gemm_cuda);
 

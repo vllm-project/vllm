@@ -163,37 +163,33 @@ __device__ __forceinline__ __nv_bfloat162 clip(__nv_bfloat162 v,
 
 // We use the following values for fp8 min/max:
 //  __nv_fp8_e4m3 = (-448, +448)
-//  __nv_fp8_e5m2 = (-57344.0, 57344.0)
-//  __nv_fp8_e8m0 = (5.877471754111438e-39, 1.7014118346046923e+38)
+//  __nv_fp8_e4m3uz = (-240.0, +240.0)
+// It is currently assumed that only
 template <class T>
 constexpr __nv_bfloat16 get_fp8_max() {
-  if constexpr (std::is_same_v<T, c10::Float8_e4m3fn> ||
-                std::is_same_v<T, c10::Float8_e4m3fnuz>) {
+  static_assert(std::is_same_v<T, c10::Float8_e4m3fn> ||
+                std::is_same_v<T, c10::Float8_e4m3fnuz>);
+  if constexpr (std::is_same_v<T, c10::Float8_e4m3fn>) {
     return __nv_bfloat16(__nv_bfloat16_raw{.x = 17376});
-  } else if constexpr (std::is_same_v<T, c10::Float8_e5m2> ||
-                       std::is_same_v<T, c10::Float8_e5m2fnuz>) {
-    return __nv_bfloat16(__nv_bfloat16_raw{.x = 18272});
   } else {
-    return __nv_bfloat16(__nv_bfloat16_raw{.x = 32512});
+    return __nv_bfloat16(__nv_bfloat16_raw{.x = 17264});
   }
 }
 template <class T>
 constexpr __nv_bfloat16 get_fp8_min() {
-  if constexpr (std::is_same_v<T, c10::Float8_e4m3fn> ||
-                std::is_same_v<T, c10::Float8_e4m3fnuz>) {
+  static_assert(std::is_same_v<T, c10::Float8_e4m3fn> ||
+                std::is_same_v<T, c10::Float8_e4m3fnuz>);
+  if constexpr (std::is_same_v<T, c10::Float8_e4m3fn>) {
     return __nv_bfloat16(__nv_bfloat16_raw{.x = 50144});
-  } else if constexpr (std::is_same_v<T, c10::Float8_e5m2> ||
-                       std::is_same_v<T, c10::Float8_e5m2fnuz>) {
-    return __nv_bfloat16(__nv_bfloat16_raw{.x = 51040});
   } else {
-    return __nv_bfloat16(__nv_bfloat16_raw{.x = 64});
+    return __nv_bfloat16(__nv_bfloat16_raw{.x = 50032});
   }
 }
 
 template <typename fp8_type, int32_t NUM_WARPS, typename Idx_t,
           int NUM_PARALLEL_TOKENS, bool USE_UE8M0, int GROUP_SIZE = 128,
           int NUM_STAGES = 3>
-__global__ void __cluster_dims__(1, 4, 1) silu_mul_fp8_quant_deep_gemm_kernel(
+__global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     const __nv_bfloat16* __restrict__ _input, fp8_type* __restrict__ _y_q,
     float* __restrict__ _y_s, const int32_t* __restrict__ counts,
 
@@ -438,6 +434,10 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
   TORCH_CHECK(y_s.dtype() == torch::kFloat32);
   TORCH_CHECK(input.size(-1) % 256 == 0);
 
+  // Check that num_parallel_tokens is of power of 2 and between 1 and 64.
+  TORCH_CHECK(1 <= num_parallel_tokens && num_parallel_tokens <= 64);
+  TORCH_CHECK(!(num_parallel_tokens & (num_parallel_tokens - 1)));
+
   using Idx_t = int64_t;
 
   Idx_t E = input.size(0);
@@ -524,6 +524,7 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
   }
 
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   VLLM_DISPATCH_FP8_TYPES(y_q.scalar_type(),
                           "silu_mul_fp8_quant_deep_gemm_kernel",
                           [&] { KERNEL_CALL_TOP_LEVEL });

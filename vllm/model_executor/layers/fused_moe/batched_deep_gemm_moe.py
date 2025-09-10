@@ -23,6 +23,13 @@ def silu_mul_fp8_quant_deep_gemm_cuda(
     num_parallel_tokens=16,
     group_size: int = 128,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize silu(y[..., :H]) * y[..., H:] to FP8 with group per-token scales
+    y has shape (E, T, 2*H). The first half of the last dimension is
+    silu-activated, multiplied by the second half, then quantized into FP8.
+    Returns `(y_q, y_s)` where
+    * `y_q`: FP8 tensor, shape (E, T, H), same layout as y[..., :H]
+    * `y_s`: FP32 tensor, shape (E, T, H // group_size), strides (T*G, 1, T)
+    """
     assert y.ndim == 3, "y must be (E, T, 2*H)"
     E, T, H2 = y.shape
     assert H2 % 2 == 0, "last dim of y must be even (2*H)"
