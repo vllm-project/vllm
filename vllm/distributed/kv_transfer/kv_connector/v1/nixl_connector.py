@@ -1060,7 +1060,20 @@ class NixlConnectorWorker:
         for all consumers to be done pulling.
         """
         notified_req_ids: set[str] = set()
-        for notifs in self.nixl_wrapper.get_new_notifs().values():
+        try:
+            # use update_notifs for resilience - accumulates all unhandled
+            # notifications
+            # so network failures won't lose notifications
+            notifs_dict = self.nixl_wrapper.update_notifs()
+        except RuntimeError as e:
+            logger.debug(
+                "Failed to get NIXL notifications due to "
+                "transient network issues. Will retry: %s", e)
+            # return empty set - will retry on next scheduler step
+            # safe because update_notifs preserves notifications for next call
+            return notified_req_ids
+
+        for notifs in notifs_dict.values():
             for notif in notifs:
                 req_id, tp_ratio = notif.decode("utf-8").rsplit(":", 1)
                 if req_id not in self._reqs_to_send:
@@ -1091,16 +1104,35 @@ class NixlConnectorWorker:
         done_req_ids: set[str] = set()
         for req_id, handles in list(transfers.items()):
             in_progress = False
-            for handle, _xfer_stime in handles:
-                xfer_state = self.nixl_wrapper.check_xfer_state(handle)
-                if xfer_state == "DONE":
-                    self.nixl_wrapper.release_xfer_handle(handle)
-                elif xfer_state == "PROC":
+            for handle, xfer_stime in handles:
+                try:
+                    xfer_state = self.nixl_wrapper.check_xfer_state(handle)
+                    if xfer_state == "DONE":
+                        try:
+                            self.nixl_wrapper.release_xfer_handle(handle)
+                        except RuntimeError as release_e:
+                            logger.debug(
+                                "Failed to release transfer handle for "
+                                "request %s: %s", req_id, release_e)
+                            # continue anyway - handle cleanup failure
+                            # shouldn't block progress
+                    elif xfer_state == "PROC":
+                        in_progress = True
+                        continue
+                    else:
+                        raise RuntimeError("Transfer failed with state %s",
+                                           xfer_state)
+                except RuntimeError as e:
+                    # handle network failures and other NIXL errors gracefully
+                    # instead of crashing the entire decode server
+                    logger.debug(
+                        "NIXL transfer check failed for request %s, "
+                        "likely due to "
+                        "transient network issues. Will retry: %s", req_id, e)
+                    # keep as in_progress - will retry on next scheduler step
                     in_progress = True
                     continue
-                else:
-                    raise RuntimeError("Transfer failed with state %s",
-                                       xfer_state)
+
             if not in_progress:
                 done_req_ids.add(req_id)
                 del transfers[req_id]
