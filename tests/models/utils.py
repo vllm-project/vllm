@@ -294,6 +294,8 @@ def build_model_context(
         limit_mm_per_prompt=limit_mm_per_prompt,
         mm_processor_cache_gb=mm_processor_cache_gb,
         hf_overrides=model_info.hf_overrides,
+        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        enforce_eager=model_info.enforce_eager,
         **model_config_kwargs,
     )
     return InputContext(model_config)
@@ -345,14 +347,15 @@ class ModelInfo:
     name: str
     architecture: str = ""
     dtype: str = "auto"
+    hf_dtype: str = "float32"
     hf_overrides: Optional[dict[str, Any]] = None
     default_pooling_type: str = ""
-    mteb_score: Optional[float] = None
     enable_test: bool = True
 
 
 @dataclass
 class EmbedModelInfo(ModelInfo):
+    mteb_score: Optional[float] = None
     is_matryoshka: bool = False
     matryoshka_dimensions: Optional[list[int]] = None
 
@@ -369,7 +372,7 @@ class LASTPoolingEmbedModelInfo(EmbedModelInfo):
 
 @dataclass
 class RerankModelInfo(ModelInfo):
-    pass
+    mteb_score: Optional[float] = None
 
 
 @dataclass
@@ -380,6 +383,12 @@ class CLSPoolingRerankModelInfo(RerankModelInfo):
 @dataclass
 class LASTPoolingRerankModelInfo(RerankModelInfo):
     default_pooling_type: str = "LAST"
+
+
+@dataclass
+class GenerateModelInfo(ModelInfo):
+    hf_dtype: str = "auto"
+    hf_ppl: Optional[float] = None
 
 
 def dummy_hf_overrides(

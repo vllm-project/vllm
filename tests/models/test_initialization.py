@@ -68,11 +68,20 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
             # has cc==8.9 which hasn't supported FA3 yet. Remove this hack when
             # L4 supports FA3.
             m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN_VLLM_V1")
+        if model_arch == "Florence2ForConditionalGeneration":
+            # An encoder-decoder model that's V0-only. Just skip it
+            # since V0 is about to be removed.
+            pytest.skip("Skipping Florence2ForConditionalGeneration")
+        if model_arch == "WhisperForConditionalGeneration":
+            m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
         LLM(
             model_info.default,
             tokenizer=model_info.tokenizer,
             tokenizer_mode=model_info.tokenizer_mode,
             revision=model_info.revision,
+            enforce_eager=model_info.enforce_eager,
+            skip_tokenizer_init=model_info.skip_tokenizer_init,
+            dtype=model_info.dtype,
             speculative_config={
                 "model": model_info.speculative_model,
                 "num_speculative_tokens": 1,
@@ -85,7 +94,7 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
             model_impl=ModelImpl.TRANSFORMERS
             if model_arch in _TRANSFORMERS_BACKEND_MODELS else ModelImpl.VLLM,
             hf_overrides=hf_overrides_fn,
-        )
+            max_num_seqs=model_info.max_num_seqs)
 
 
 @pytest.mark.parametrize("model_arch", HF_EXAMPLE_MODELS.get_supported_archs())
