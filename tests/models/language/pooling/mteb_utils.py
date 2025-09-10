@@ -9,8 +9,10 @@ import mteb
 import numpy as np
 import pytest
 import requests
+import torch
 
-from tests.models.utils import EmbedModelInfo, RerankModelInfo
+from tests.models.utils import (EmbedModelInfo, RerankModelInfo,
+                                check_embeddings_close)
 
 # Most embedding models on the STS12 task (See #17175):
 # - Model implementation and minor changes in tensor dtype
@@ -163,15 +165,20 @@ def mteb_test_embed_models(hf_runner,
                            model_info: EmbedModelInfo,
                            vllm_extra_kwargs=None,
                            hf_model_callback=None,
-                           atol=MTEB_RERANK_TOL):
+                           atol=MTEB_EMBED_TOL):
+    # A model family has many models with the same architecture,
+    # and we don't need to test each one.
     if not model_info.enable_test:
-        # A model family has many models with the same architecture,
-        # and we don't need to test each one.
         pytest.skip("Skipping test.")
 
+    # Test embed_dims, isnan and whether to use normalize
+    example_prompts = ["The chef prepared a delicious meal." * 1000]
+
+    # Allow vllm to test using the given dtype, such as float32
     vllm_extra_kwargs = vllm_extra_kwargs or {}
     vllm_extra_kwargs["dtype"] = model_info.dtype
 
+    # Allow vllm to test using hf_overrides
     if model_info.hf_overrides is not None:
         vllm_extra_kwargs["hf_overrides"] = model_info.hf_overrides
 
@@ -183,8 +190,12 @@ def mteb_test_embed_models(hf_runner,
 
         model_config = vllm_model.llm.llm_engine.model_config
 
+        # Confirm whether vllm is using the correct architecture
         if model_info.architecture:
             assert model_info.architecture in model_config.architectures
+
+        # Confirm whether vllm uses the correct default_pooling_type, which
+        # relates to whether chunked prefill and prefix caching are enabled
         assert (model_config._model_info.default_pooling_type ==
                 model_info.default_pooling_type)
 
@@ -192,16 +203,34 @@ def mteb_test_embed_models(hf_runner,
                                               MTEB_EMBED_TASKS)
         vllm_dtype = vllm_model.llm.llm_engine.model_config.dtype
 
+        # Test embed_dims, isnan and whether to use normalize
+        vllm_outputs = vllm_model.embed(example_prompts,
+                                        truncate_prompt_tokens=-1)
+        assert not torch.any(torch.isnan(torch.tensor(vllm_outputs)))
+
+    # Accelerate mteb test by setting
+    # SentenceTransformers mteb score to a constant
     if model_info.mteb_score is None:
         with hf_runner(model_info.name,
                        is_sentence_transformer=True,
-                       dtype="float32") as hf_model:
+                       dtype=model_info.hf_dtype) as hf_model:
 
+            # e.g. setting default parameters for the encode method of hf_runner
             if hf_model_callback is not None:
                 hf_model_callback(hf_model)
 
             st_main_score = run_mteb_embed_task(hf_model, MTEB_EMBED_TASKS)
             st_dtype = next(hf_model.model.parameters()).dtype
+
+            # Test embed_dims and whether to use normalize
+            hf_outputs = hf_model.encode(example_prompts)
+            check_embeddings_close(
+                embeddings_0_lst=hf_outputs,
+                embeddings_1_lst=vllm_outputs,
+                name_0="hf",
+                name_1="vllm",
+                tol=1e-2,
+            )
     else:
         st_main_score = model_info.mteb_score
         st_dtype = "Constant"
@@ -249,9 +278,12 @@ def run_mteb_rerank(cross_encoder, tasks, languages):
     return main_score
 
 
-def mteb_test_rerank_models_hf(hf_runner, model_name, hf_model_callback=None):
+def mteb_test_rerank_models_hf(hf_runner,
+                               model_name,
+                               hf_dtype="float32",
+                               hf_model_callback=None):
     with hf_runner(model_name, is_cross_encoder=True,
-                   dtype="float32") as hf_model:
+                   dtype=hf_dtype) as hf_model:
 
         original_predict = hf_model.predict
 
@@ -285,14 +317,16 @@ def mteb_test_rerank_models(hf_runner,
                             hf_model_callback=None,
                             vllm_mteb_encoder=VllmMtebEncoder,
                             atol=MTEB_RERANK_TOL):
+    # A model family has many models with the same architecture,
+    # and we don't need to test each one.
     if not model_info.enable_test:
-        # A model family has many models with the same architecture,
-        # and we don't need to test each one.
         pytest.skip("Skipping test.")
 
+    # Allow vllm to test using the given dtype, such as float32
     vllm_extra_kwargs = vllm_extra_kwargs or {}
     vllm_extra_kwargs["dtype"] = model_info.dtype
 
+    # Allow vllm to test using hf_overrides
     if model_info.hf_overrides is not None:
         vllm_extra_kwargs["hf_overrides"] = model_info.hf_overrides
 
@@ -305,9 +339,15 @@ def mteb_test_rerank_models(hf_runner,
 
         model_config = vllm_model.llm.llm_engine.model_config
 
+        # Confirm whether vllm is using the correct architecture
         if model_info.architecture:
             assert (model_info.architecture in model_config.architectures)
+
+        # Score API is only enabled for num_labels == 1
         assert model_config.hf_config.num_labels == 1
+
+        # Confirm whether vllm uses the correct default_pooling_type, which
+        # relates to whether chunked prefill and prefix caching are enabled
         assert (model_config._model_info.default_pooling_type ==
                 model_info.default_pooling_type)
 
@@ -316,9 +356,11 @@ def mteb_test_rerank_models(hf_runner,
                                           languages=MTEB_RERANK_LANGS)
         vllm_dtype = model_config.dtype
 
+    # Accelerate mteb test by setting
+    # SentenceTransformers mteb score to a constant
     if model_info.mteb_score is None:
         st_main_score, st_dtype = mteb_test_rerank_models_hf(
-            hf_runner, model_info.name, hf_model_callback)
+            hf_runner, model_info.name, model_info.hf_dtype, hf_model_callback)
     else:
         st_main_score = model_info.mteb_score
         st_dtype = "Constant"
