@@ -24,6 +24,8 @@ else:
 
 logger = init_logger(__name__)
 
+USE_TPU_COMMONS = False
+
 
 class TpuPlatform(Platform):
     _enum = PlatformEnum.TPU
@@ -35,7 +37,9 @@ class TpuPlatform(Platform):
     device_control_env_var: str = "TPU_VISIBLE_CHIPS"
     simple_compile_backend: str = "openxla"
 
-    supported_quantization: list[str] = ["tpu_int8", "compressed-tensors"]
+    supported_quantization: list[str] = [
+        "fp8", "tpu_int8", "compressed-tensors"
+    ]
 
     additional_env_vars: list[str] = [
         "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS"
@@ -44,8 +48,8 @@ class TpuPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
-                             block_size: int, use_v1: bool,
-                             use_mla: bool) -> str:
+                             block_size: int, use_v1: bool, use_mla: bool,
+                             has_sink) -> str:
         if (selected_backend != _Backend.PALLAS
                 and selected_backend != _Backend.PALLAS_VLLM_V1):
             logger.info("Cannot use %s backend on TPU.", selected_backend)
@@ -54,6 +58,13 @@ class TpuPlatform(Platform):
             raise ValueError("TPU backend only supports V1.")
         logger.info("Using Pallas V1 backend.")
         return "vllm.v1.attention.backends.pallas.PallasAttentionBackend"
+
+    @classmethod
+    def set_device(cls, device: torch.device) -> None:
+        """
+        Set the device for the current platform.
+        """
+        torch.tpu.set_device(device)
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
@@ -90,7 +101,7 @@ class TpuPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        from vllm.config import CompilationLevel
+        from vllm.config import CompilationLevel, CUDAGraphMode
 
         cache_config = vllm_config.cache_config
         # For v0, the default block size is 16.
@@ -100,8 +111,16 @@ class TpuPlatform(Platform):
 
         # TPU only supports DYNAMO_ONCE compilation level
         if compilation_config.level != CompilationLevel.DYNAMO_ONCE:
-            logger.info("[TPU] Forcing DYNAMO_ONCE compilation level")
+            logger.info("[TPU] Forcing DYNAMO_ONCE compilation level, and "
+                        "disabling cudagraph.")
             compilation_config.level = CompilationLevel.DYNAMO_ONCE
+
+        if compilation_config.cudagraph_mode is None or \
+                compilation_config.cudagraph_mode.max_cudagraph_mode() \
+                    != CUDAGraphMode.NONE:
+            logger.info("[TPU] CUDA graph is not supported on TPU, "
+                        "disabling cudagraphs.")
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         if compilation_config.backend == "":
             compilation_config.backend = "openxla"
@@ -109,11 +128,13 @@ class TpuPlatform(Platform):
         assert vllm_config.speculative_config is None, \
             "TPU does not support speculative decoding"
 
-        if vllm_config.model_config.dtype in (torch.float16, torch.float32):
+        model_config = vllm_config.model_config
+        if model_config is not None and model_config.dtype in (torch.float16,
+                                                               torch.float32):
             logger.warning(
                 "The TPU backend currently does not support %s. "
-                "Using bfloat16 instead.", vllm_config.model_config.dtype)
-            vllm_config.model_config.dtype = torch.bfloat16
+                "Using bfloat16 instead.", model_config.dtype)
+            model_config.dtype = torch.bfloat16
 
         from vllm.v1.attention.backends.pallas import PallasAttentionBackend
         cache_config.block_size = PallasAttentionBackend.get_page_size(
@@ -122,24 +143,19 @@ class TpuPlatform(Platform):
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
         if parallel_config.worker_cls == "auto":
-            if scheduler_config.is_multi_step:
-                raise NotImplementedError(
-                    "Multi-step scheduling is not supported (and not "
-                    "needed) on vLLM V1. Please launch without "
-                    "--num-scheduler-steps.")
             parallel_config.worker_cls = "vllm.v1.worker.tpu_worker.TPUWorker"
 
         assert not vllm_config.speculative_config, (
             "Speculative decoding is not yet supported for TPU backend")
 
         if scheduler_config.is_multimodal_model and not \
-            scheduler_config.disable_chunked_mm_input:
+                scheduler_config.disable_chunked_mm_input:
             logger.warning("TPU does not support running Multimodal models"\
             " without setting `--disable_chunked_mm_input`. " \
             "Forcing --disable_chunked_mm_input.")
             scheduler_config.disable_chunked_mm_input = True
 
-        if vllm_config.model_config and vllm_config.model_config.use_mla:
+        if model_config and model_config.use_mla:
             logger.info(
                 "MLA is enabled on a non-GPU platform; forcing chunked "
                 "prefill and prefix caching to be disabled.")
@@ -179,10 +195,42 @@ class TpuPlatform(Platform):
                 and params.sampling_type == SamplingType.RANDOM_SEED):
             raise ValueError("Torch XLA does not support per-request seed.")
 
+    @classmethod
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
+                                    model_config: "ModelConfig") -> bool:
+        return True
+
+    @classmethod
+    @torch.compile(backend="openxla")
+    def insert_blocks_to_device(
+        cls,
+        src_cache: torch.Tensor,
+        dst_cache: torch.Tensor,
+        src_block_indices: torch.Tensor,
+        dst_block_indices: torch.Tensor,
+    ) -> None:
+        torch.ops.xla.dynamo_set_buffer_donor_(dst_cache, True)
+        dst_cache[dst_block_indices] = src_cache[src_block_indices].to(
+            dst_cache.device)
+
+    @classmethod
+    @torch.compile(backend="openxla")
+    def swap_out_blocks_to_host(
+        cls,
+        src_cache: torch.Tensor,
+        dst_cache: torch.Tensor,
+        src_block_indices: torch.Tensor,
+        dst_block_indices: torch.Tensor,
+    ) -> None:
+        """ tpu blocks to cpu blocks"""
+        torch.ops.xla.dynamo_set_buffer_donor_(src_cache, True)
+        dst_cache[dst_block_indices] = src_cache[src_block_indices].cpu()
+
 
 try:
     from tpu_commons.platforms import TpuPlatform as TpuCommonsPlatform
     TpuPlatform = TpuCommonsPlatform  # type: ignore
+    USE_TPU_COMMONS = True
 except ImportError:
     logger.info("tpu_commons not found, using vLLM's TpuPlatform")
     pass

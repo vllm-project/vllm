@@ -2,27 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm._custom_ops import cutlass_scaled_mm_supports_fp4
-from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 __all__ = [
-    "break_fp4_bytes", "dequantize_to_dtype", "ref_nvfp4_quant",
-    "cutlass_fp4_supported"
+    "break_fp4_bytes",
+    "dequantize_to_dtype",
+    "ref_nvfp4_quant",
 ]
 
 FLOAT4_E2M1_MAX = scalar_types.float4_e2m1f.max()
 
 kE2M1ToFloat = torch.tensor([0., 0.5, 1., 1.5, 2., 3., 4., 6.],
                             dtype=torch.float32)
-
-
-def cutlass_fp4_supported() -> bool:
-    if not current_platform.is_cuda():
-        return False
-    capability_tuple = current_platform.get_device_capability()
-    capability = -1 if capability_tuple is None else capability_tuple.to_int()
-    return cutlass_scaled_mm_supports_fp4(capability)
 
 
 def break_fp4_bytes(a, dtype):

@@ -8,7 +8,8 @@ from typing import Union
 import torch
 from torch import nn
 
-from vllm.config import LoadConfig, ModelConfig, ParallelConfig, VllmConfig
+from vllm.config import ModelConfig, ParallelConfig, VllmConfig
+from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.tensorizer import (
@@ -43,7 +44,7 @@ class TensorizerLoader(BaseModelLoader):
         else:
             validate_config(load_config.model_loader_extra_config)
             self.tensorizer_config = TensorizerConfig(
-                **load_config.model_loader_extra_config)
+                **load_config.model_loader_extra_config["tensorizer_config"])
 
     def _verify_config(self, model_config: ModelConfig,
                        parallel_config: ParallelConfig):

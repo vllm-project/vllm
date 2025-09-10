@@ -10,6 +10,7 @@ import msgspec
 
 import vllm.platforms
 from vllm.config import ParallelConfig
+from vllm.distributed import get_pp_group
 from vllm.executor.msgspec_utils import decode_hook, encode_hook
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -136,6 +137,11 @@ try:
                 scheduler_output, intermediate_tensors)
             if isinstance(output, IntermediateTensors):
                 output = scheduler_output, output
+            elif not get_pp_group().is_last_rank:
+                # Case where there are no scheduled requests
+                # but may still be finished requests.
+                assert not output or not output.req_ids
+                output = scheduler_output, None
             return output
 
         def override_env_vars(self, vars: Dict[str, str]):
@@ -145,7 +151,9 @@ try:
 
 except ImportError as e:
     ray = None  # type: ignore
-    ray_import_err = e
+    # only capture string to avoid variable references in the traceback that can
+    # prevent garbage collection in some cases
+    ray_import_err = str(e)
     RayWorkerWrapper = None  # type: ignore
 
 
@@ -157,8 +165,8 @@ def ray_is_available() -> bool:
 def assert_ray_available():
     """Raise an exception if Ray is not available."""
     if ray is None:
-        raise ValueError("Failed to import Ray, please install Ray with "
-                         "`pip install ray`.") from ray_import_err
+        raise ValueError(f"Failed to import Ray: {ray_import_err}."
+                         "Please install Ray with `pip install ray`.")
 
 
 def _verify_bundles(placement_group: "PlacementGroup",
@@ -215,7 +223,7 @@ def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
 
     """
     # Wait until PG is ready - this will block until all
-    # requested resources are available, and will timeout
+    # requested resources are available, and will time out
     # if they cannot be provisioned.
     placement_group_specs = current_placement_group.bundle_specs
 
@@ -293,9 +301,12 @@ def initialize_ray_cluster(
             logger.warning(
                 "No existing RAY instance detected. "
                 "A new instance will be launched with current node resources.")
-            ray.init(address=ray_address, num_gpus=parallel_config.world_size)
+            ray.init(address=ray_address,
+                     num_gpus=parallel_config.world_size,
+                     runtime_env=parallel_config.ray_runtime_env)
     else:
-        ray.init(address=ray_address)
+        ray.init(address=ray_address,
+                 runtime_env=parallel_config.ray_runtime_env)
 
     device_str = current_platform.ray_device_key
     if not device_str:

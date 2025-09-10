@@ -46,7 +46,7 @@ import copy
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, Optional, TypedDict, Union
+from typing import Annotated, Any, Literal, Optional, Union
 
 import torch
 from torch import nn
@@ -54,33 +54,36 @@ from transformers import BatchFeature
 from transformers.activations import GELUActivation
 
 from vllm.config import VllmConfig
-from vllm.distributed import (get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size)
+from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2Model
-from vllm.model_executor.models.interfaces import SupportsMultiModal
+from vllm.model_executor.models.interfaces import (SupportsMultiModal,
+                                                   SupportsPP)
 from vllm.model_executor.models.moonvit import MoonVitPretrainedModel
 from vllm.model_executor.models.utils import merge_multimodal_embeddings
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs, NestedTensors)
+                                    MultiModalKwargsItems, NestedTensors)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.multimodal.utils import run_dp_sharded_mrope_vision_model
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import KimiVLConfig, MoonViTConfig
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekV2Config
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .utils import is_pp_missing_parameter, maybe_prefix
+from .utils import PPMissingLayer, is_pp_missing_parameter, maybe_prefix
 
 
 # For dummy input only
@@ -92,8 +95,10 @@ class MaxImageTokenMeta:
 
 class KimiVLMultiModalProjector(nn.Module):
 
-    def __init__(self, config: KimiVLConfig):
+    def __init__(self, config: KimiVLConfig, \
+                 use_data_parallel: bool = False, prefix: str = ""):
         super().__init__()
+        self.use_data_parallel = use_data_parallel
 
         self.hidden_size = (config.vision_config.hidden_size *
                             config.vision_config.merge_kernel_size[0] *
@@ -101,32 +106,43 @@ class KimiVLMultiModalProjector(nn.Module):
 
         self.pre_norm = torch.nn.LayerNorm(config.vision_config.hidden_size,
                                            eps=1e-5)
-        self.linear_1 = nn.Linear(self.hidden_size,
-                                  self.hidden_size,
-                                  bias=True)
+        self.linear_1 = ReplicatedLinear(self.hidden_size,
+                                         self.hidden_size,
+                                         bias=True,
+                                         prefix=maybe_prefix(
+                                             prefix, "linear_1"))
+        self.linear_2 = ReplicatedLinear(self.hidden_size,
+                                         config.text_config.hidden_size,
+                                         bias=True,
+                                         prefix=maybe_prefix(
+                                             prefix, "linear_2"))
         self.act = GELUActivation()
-        self.linear_2 = nn.Linear(self.hidden_size,
-                                  config.text_config.hidden_size,
-                                  bias=True)
 
     def forward(self, image_features: torch.Tensor) -> torch.Tensor:
         hidden_states = self.pre_norm(image_features).view(
             -1, self.hidden_size)
-        hidden_states = self.linear_1(hidden_states)
+        hidden_states, _ = self.linear_1(hidden_states)
         hidden_states = self.act(hidden_states)
-        hidden_states = self.linear_2(hidden_states)
+        hidden_states, _ = self.linear_2(hidden_states)
         return hidden_states
 
 
-class KimiVLImagePixelInputs(TypedDict):
-    type: Literal["pixel_values"]
-    pixel_values: Union[torch.Tensor, list[torch.Tensor]]
+class KimiVLImagePixelInputs(TensorSchema):
     """
-    Shape:`(num_patches, num_channels, patch_size, patch_size)`
+    Dimensions:
+        - nc: Number of channels
+        - np: Number of patches
+        - ps: Patch size
+        - ni: Number of images
     """
+    type: Literal["pixel_values"] = "pixel_values"
 
-    image_grid_hws: torch.Tensor
-    """Shape:`(num_images, 2)`"""
+    pixel_values: Annotated[
+        Union[torch.Tensor, list[torch.Tensor]],
+        TensorShape("np", 3, "ps", "ps"),
+    ]
+
+    image_grid_hws: Annotated[torch.Tensor, TensorShape("ni", 2)]
 
 
 # TODO: support embeds too
@@ -231,7 +247,7 @@ class KimiVLMultiModalProcessor(BaseMultiModalProcessor[KimiVLProcessingInfo]):
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, Any],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         image_token_id = self.info.image_token_id
 
@@ -262,7 +278,10 @@ class KimiVLMultiModalProcessor(BaseMultiModalProcessor[KimiVLProcessingInfo]):
 @MULTIMODAL_REGISTRY.register_processor(KimiVLMultiModalProcessor,
                                         info=KimiVLProcessingInfo,
                                         dummy_inputs=KimiVLDummyInputsBuilder)
-class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal):
+class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
+                                     SupportsPP):
+
+    supports_encoder_tp_data = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
@@ -283,10 +302,17 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal):
         quant_config = vllm_config.quant_config
 
         assert isinstance(config.vision_config, MoonViTConfig)
+        self.use_data_parallel = model_config.multimodal_config.mm_encoder_tp_mode == "data"
+        self.hidden_size = config.text_config.hidden_size
+        self.vision_tower = MoonVitPretrainedModel(config.vision_config,
+                                                   self.use_data_parallel,
+                                                   prefix=maybe_prefix(
+                                                       prefix, "vision_tower"))
 
-        self.vision_tower = MoonVitPretrainedModel(config.vision_config)
-
-        self.multi_modal_projector = KimiVLMultiModalProjector(config=config)
+        self.multi_modal_projector = KimiVLMultiModalProjector(
+            config=config,
+            use_data_parallel=self.use_data_parallel,
+            prefix=maybe_prefix(prefix, "multi_modal_projector"))
 
         self.quant_config = quant_config
         sub_vllm_config = copy.deepcopy(vllm_config)
@@ -296,17 +322,21 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal):
             prefix=maybe_prefix(prefix, "language_model"),
         )
         self.unpadded_vocab_size = config.text_config.vocab_size
-        self.lm_head = ParallelLMHead(
-            self.unpadded_vocab_size,
-            config.text_config.hidden_size,
-            org_num_embeddings=self.config.text_config.vocab_size,
-            padding_size=DEFAULT_VOCAB_PADDING_SIZE)
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                self.unpadded_vocab_size,
+                config.text_config.hidden_size,
+                org_num_embeddings=self.config.text_config.vocab_size,
+                padding_size=DEFAULT_VOCAB_PADDING_SIZE,
+            )
+        else:
+            self.lm_head = PPMissingLayer()
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors)
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size, logit_scale)
         self.media_placeholder: int = self.config.media_placeholder_token_id
-        self.tp_rank = get_tensor_model_parallel_rank()
-        self.tp_world_size = get_tensor_model_parallel_world_size()
 
     # ref: qwen2_vl.py
     def _validate_and_reshape_mm_tensor(self, mm_input: object,
@@ -348,8 +378,6 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal):
             pixel_values = pixel_values.reshape(-1, num_channels, patch_size,
                                                 patch_size)
         pixel_values = pixel_values.to(self.vision_tower.dtype)
-        # image_grid_hws.shape = (N, 2)
-        assert image_grid_hws.ndim == 2, f"unexpected shape for image_grid_hws: {image_grid_hws.shape}"
 
         return KimiVLImagePixelInputs(
             type="pixel_values",
@@ -365,13 +393,19 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         pixel_values = inputs["pixel_values"]
         image_grid_hws = inputs["image_grid_hws"]
-        return self.vision_tower(pixel_values, image_grid_hws)
+        if self.use_data_parallel:
+            return run_dp_sharded_mrope_vision_model(self.vision_tower,
+                                                     pixel_values,
+                                                     image_grid_hws.tolist(),
+                                                     rope_type="rope_2d")
+        else:
+            return self.vision_tower(pixel_values, image_grid_hws)
 
     def _process_image_input(self,
                              image_input: KimiVLImageInputs) -> torch.Tensor:
         assert image_input["type"] == "pixel_values"
         image_features = self._process_image_pixels(image_input)
-        assert isinstance(image_features, list)
+        assert isinstance(image_features, (list, tuple))
         lengths = [x.shape[0] for x in image_features]
         return self.multi_modal_projector(
             torch.cat(image_features)).split(lengths)
@@ -485,6 +519,7 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal):
             expert_params_mapping = []
 
         params_dict = dict(self.named_parameters())
+
         for args in weights:
             name, loaded_weight = args[:2]
             kwargs = args[2] if len(args) > 2 else {}

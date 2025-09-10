@@ -13,12 +13,57 @@ from typing import NamedTuple
 from vllm import LLM, EngineArgs, PromptType, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
+from vllm.multimodal.utils import fetch_image
 from vllm.utils import FlexibleArgumentParser
 
 
 class ModelRequestData(NamedTuple):
     engine_args: EngineArgs
     prompts: Sequence[PromptType]
+
+
+def run_donut():
+    engine_args = EngineArgs(
+        model="naver-clova-ix/donut-base-finetuned-docvqa",
+        max_num_seqs=2,
+        limit_mm_per_prompt={"image": 1},
+        dtype="float16",
+        hf_overrides={"architectures": ["DonutForConditionalGeneration"]},
+    )
+
+    # The input image size for donut-base-finetuned-docvqa is 2560 x 1920,
+    # and the patch_size is 4 x 4.
+    # Therefore, the initial number of patches is:
+    # Height: 1920 / 4 = 480 patches
+    # Width: 2560 / 4 = 640 patches
+    # The Swin model uses a staged downsampling approach,
+    # defined by the "depths": [2, 2, 14, 2] configuration.
+    # Before entering stages 2, 3, and 4, a "Patch Merging" operation is performed,
+    # which halves the feature map's dimensions (dividing both height and width by 2).
+    # Before Stage 2: The size changes from 480 x 640 to (480/2) x (640/2) = 240 x 320.
+    # Before Stage 3: The size changes from 240 x 320 to (240/2) x (320/2) = 120 x 160.
+    # Before Stage 4: The size changes from 120 x 160 to (120/2) x (160/2) = 60 x 80.
+    # Because vLLM needs to fill the image features with an encoder_prompt,
+    # and the encoder_prompt will have `<pad>` tokens added when tokenized,
+    # we need to construct an encoder_prompt with a length of 60 x 80 - 1 = 4799.
+    prompts = [
+        {
+            "encoder_prompt": {
+                "prompt": "".join(["$"] * 4799),
+                "multi_modal_data": {
+                    "image": fetch_image(
+                        "https://huggingface.co/datasets/hf-internal-testing/example-documents/resolve/main/jpeg_images/0.jpg"
+                    )  # noqa: E501
+                },
+            },
+            "decoder_prompt": "<s_docvqa><s_question>What time is the coffee break?</s_question><s_answer>",  # noqa: E501
+        },
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
 
 
 def run_florence2():
@@ -118,6 +163,7 @@ def run_whisper():
 
 
 model_example_map = {
+    "donut": run_donut,
     "florence2": run_florence2,
     "mllama": run_mllama,
     "whisper": run_whisper,

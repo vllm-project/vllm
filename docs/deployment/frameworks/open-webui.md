@@ -1,29 +1,42 @@
----
-title: Open WebUI
----
-[](){ #deployment-open-webui }
+# Open WebUI
 
-1. Install the [Docker](https://docs.docker.com/engine/install/)
+[Open WebUI](https://github.com/open-webui/open-webui) is an extensible, feature-rich,
+and user-friendly self-hosted AI platform designed to operate entirely offline.
+It supports various LLM runners like Ollama and OpenAI-compatible APIs,
+with built-in RAG capabilities, making it a powerful AI deployment solution.
 
-2. Start the vLLM server with the supported chat completion model, e.g.
+To get started with Open WebUI using vLLM, follow these steps:
 
-```bash
-vllm serve qwen/Qwen1.5-0.5B-Chat
-```
+1. Install the [Docker](https://docs.docker.com/engine/install/).
 
-1. Start the [Open WebUI](https://github.com/open-webui/open-webui) docker container (replace the vllm serve host and vllm serve port):
+2. Start the vLLM server with a supported chat completion model:
 
-```bash
-docker run -d -p 3000:8080 \
---name open-webui \
--v open-webui:/app/backend/data \
--e OPENAI_API_BASE_URL=http://<vllm serve host>:<vllm serve port>/v1 \
---restart always \
-ghcr.io/open-webui/open-webui:main
-```
+    ```console
+    vllm serve Qwen/Qwen3-0.6B-Chat
+    ```
 
-1. Open it in the browser: <http://open-webui-host:3000/>
+    !!! note
+        When starting the vLLM server, be sure to specify the host and port using the `--host` and `--port` flags.
+        For example:
 
-On the top of the web page, you can see the model `qwen/Qwen1.5-0.5B-Chat`.
+        ```console
+        python -m vllm.entrypoints.openai.api_server --host 0.0.0.0 --port 8000
+        ```
 
-![](../../assets/deployment/open_webui.png)
+3. Start the Open WebUI Docker container:
+
+    ```console
+    docker run -d \
+        --name open-webui \
+        -p 3000:8080 \
+        -v open-webui:/app/backend/data \
+        -e OPENAI_API_BASE_URL=http://0.0.0.0:8000/v1 \
+        --restart always \
+        ghcr.io/open-webui/open-webui:main
+    ```
+
+4. Open it in the browser: <http://open-webui-host:3000/>
+
+    At the top of the page, you should see the model `Qwen/Qwen3-0.6B-Chat`.
+
+    ![Web portal of model Qwen/Qwen3-0.6B-Chat](../../assets/deployment/open_webui.png)

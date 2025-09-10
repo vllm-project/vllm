@@ -12,6 +12,7 @@ from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         run_method)
+from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
@@ -60,6 +61,14 @@ class UniProcExecutor(ExecutorBase):
     def check_health(self) -> None:
         # UniProcExecutor will always be healthy as long as
         # it's running.
+        return
+
+    def reinitialize_distributed(
+            self, reconfig_request: ReconfigureDistributedRequest) -> None:
+        self.driver_worker.reinitialize_distributed(reconfig_request)
+        if reconfig_request.new_data_parallel_rank == \
+        ReconfigureRankType.SHUTDOWN_CURRENT_RANK:
+            self.shutdown()
         return
 
 

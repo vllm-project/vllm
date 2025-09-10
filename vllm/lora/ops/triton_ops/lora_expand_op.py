@@ -8,11 +8,11 @@ https://arxiv.org/abs/2310.18547
 """
 
 import torch
-import triton
-import triton.language as tl
 
 from vllm.lora.ops.triton_ops.kernel_utils import do_expand_kernel
 from vllm.lora.ops.triton_ops.utils import _get_lora_b_ptr
+from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.utils import direct_register_custom_op
 
 
@@ -283,6 +283,7 @@ try:
         op_func=_lora_expand,
         mutates_args=["output_tensor"],
         fake_impl=_lora_expand_fake,
+        dispatch_key=current_platform.dispatch_key,
     )
     lora_expand = torch.ops.vllm.lora_expand
 

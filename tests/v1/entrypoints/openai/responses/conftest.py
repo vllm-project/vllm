@@ -21,12 +21,16 @@ def default_server_args():
 
 
 @pytest.fixture(scope="module")
-def server(default_server_args):
-    with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
+def server_with_store(default_server_args):
+    with RemoteOpenAIServer(
+            MODEL_NAME,
+            default_server_args,
+            env_dict={"VLLM_ENABLE_RESPONSES_API_STORE": "1"},
+    ) as remote_server:
         yield remote_server
 
 
 @pytest_asyncio.fixture
-async def client(server):
-    async with server.get_async_client() as async_client:
+async def client(server_with_store):
+    async with server_with_store.get_async_client() as async_client:
         yield async_client

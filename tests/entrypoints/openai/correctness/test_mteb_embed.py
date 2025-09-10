@@ -19,7 +19,8 @@ MAIN_SCORE = 0.7422994752439667
 @pytest.fixture(scope="module")
 def server():
     args = [
-        "--task", "embed", "--enforce-eager", "--disable-uvicorn-access-log"
+        "--runner", "pooling", "--enforce-eager",
+        "--disable-uvicorn-access-log"
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
@@ -36,4 +37,6 @@ def test_mteb_embed(server):
     print("SentenceTransformer main score: ", st_main_score)
     print("Difference: ", st_main_score - vllm_main_score)
 
-    assert st_main_score == pytest.approx(vllm_main_score, abs=MTEB_EMBED_TOL)
+    # We are not concerned that the vllm mteb results are better
+    # than SentenceTransformers, so we only perform one-sided testing.
+    assert st_main_score - vllm_main_score < MTEB_EMBED_TOL

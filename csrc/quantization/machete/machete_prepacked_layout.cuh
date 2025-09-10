@@ -187,8 +187,12 @@ struct PrepackedLayoutBTemplate {
   CUTE_HOST_DEVICE static constexpr auto TVbNbKL_to_offset_copy(
       Shape_NKL shape_mkl) {
     auto layout = TVbNbKL_to_offset(shape_mkl);
-    return make_layout(coalesce(get<0>(layout)), get<1>(layout),
-                       get<2>(layout));
+    // for 4-bit elements, having >= 64 values per column
+    // allows TMA to load full 32-byte sectors
+    auto inner_layout =
+        make_layout(make_shape(_256{}, size<0>(layout) / _256{}));
+
+    return make_layout(inner_layout, get<1>(layout), get<2>(layout));
   }
 
   // ((BlockN, BlockK), (BlocksN, BlocksK), L) -> (storage_idx)

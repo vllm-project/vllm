@@ -8,7 +8,6 @@ import torch
 if TYPE_CHECKING:
     # avoid circuit import
     from vllm.lora.layers import LoRAMapping
-    from vllm.lora.models import LongContextLoRAContext
 
 
 def compute_meta(
@@ -49,9 +48,7 @@ def convert_mapping(
     vocab_size: int,
     extra_vocab_size: int,
     device: torch.device,
-    long_lora_context: Optional["LongContextLoRAContext"] = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
-           Optional[torch.Tensor], list[int]]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, list[int]]:
     """Converts LoRAMapping to index tensors.
 
     Args:
@@ -60,7 +57,6 @@ def convert_mapping(
         max_loras: Maximum number of LoRAs.
         vocab_size: Model vocab size.
         extra_vocab_size: Extra vocab size each LoRA can have.
-        long_lora_context: Passed if there are long context lora in a batch.
 
     Returns:
         A tuple of tensors:
@@ -78,21 +74,14 @@ def convert_mapping(
                 requests to embedding indices. First row is for embeddings
                 added by the LoRAs, second row is for the LoRA.lora_a
                 embeddings.
-            long_lora_indices: Tensor of shape [batch_size] mapping
-                requests to RoPE offsets and rot dims for long LoRAs.
-                None if long context lora doesn't exist.
             indices_len: List of lengths of the above tensors. It contains
                 (base_indices, sampler_indices, sampler_indices_padded,
-                embeddings_indices, long_lora_indices).
+                embeddings_indices).
     """
     index_mapping_indices: list[int] = list(mapping.index_mapping).copy()
     embedding_indices = index_mapping_indices.copy()
     lora_indices = index_mapping_indices.copy()
-    long_lora_offsets: Optional[torch.Tensor] = None
-    if long_lora_context:
-        long_lora_offsets = torch.zeros(len(index_mapping_indices),
-                                        device=device,
-                                        dtype=torch.long)
+
     prompt_mapping: list[int] = [
         lora_index_to_id.index(x) if x > 0 else -1
         for x in mapping.prompt_mapping
@@ -104,20 +93,13 @@ def convert_mapping(
                     if index_mapping_indices[i] > 0 else -1)
         embedding_indices[i] = lora_idx if index_mapping_indices[i] > 0 else 0
         lora_indices[i] = lora_idx
-        if long_lora_context:
-            assert long_lora_offsets is not None
-            lora_offset: int = long_lora_context.offsets_by_lora_id.get(
-                index_mapping_indices[i], 0)
-            long_lora_offsets[i] = lora_offset
 
     indices_list: list[Union[list[int], torch.Tensor]] = [
         index_mapping_indices,
         lora_indices,
         embedding_indices,
     ]
-    if long_lora_context:
-        assert long_lora_offsets is not None
-        indices_list.append(long_lora_offsets)
+
     indices = torch.tensor(indices_list, dtype=torch.long, device=device)
     prompt_mapping_tensor = torch.tensor(prompt_mapping,
                                          dtype=torch.long,
@@ -136,11 +118,7 @@ def convert_mapping(
     sampler_indices_padded = torch.arange(
         0, len(sampler_indices_padded), device=device, dtype=torch.long) + (
             sampler_indices_padded * len(sampler_indices_padded))
-    long_lora_indices = None
-    long_lora_indices_len: Optional[int] = None
-    if long_lora_context:
-        long_lora_indices = indices[3]
-        long_lora_indices_len = long_lora_indices.shape[-1]
+
     # Contain length of indices tensors. Used to index into each tensor.
     indices_len = [
         base_indices.shape[-1],
@@ -148,17 +126,11 @@ def convert_mapping(
         sampler_indices_padded.shape[-1],
         embeddings_indices.shape[-1],
     ]
-    if long_lora_indices_len is not None:
-        indices_len.append(long_lora_indices_len)
-    else:
-        # If long_lora doesn't exist,append None
-        indices_len.append(None)
 
     return (
         base_indices,
         sampler_indices,
         sampler_indices_padded,
         embeddings_indices,
-        long_lora_indices,
         indices_len,
     )

@@ -97,7 +97,7 @@ class SamplingMetadataCache:
 class SamplingMetadata:
     """Metadata for input sequences. Used in sampler.
 
-    The usage is as follow;
+    The usage is as follows;
     ```
     hidden_states = execute_model(...)
     logits = hidden_states[sampling_metadata.selected_token_indices]

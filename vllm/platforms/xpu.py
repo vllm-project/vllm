@@ -30,20 +30,51 @@ class XPUPlatform(Platform):
     # see https://github.com/ray-project/ray/blob/6a5eb5865eeb9ccf058a79b44f107e327e360673/python/ray/_private/accelerators/intel_gpu.py#L20 # noqa: E501
     ray_device_key: str = "GPU"
     dist_backend: str = "ccl"  # ccl | xccl
-    device_control_env_var: str = "ONEAPI_DEVICE_SELECTOR"
+    device_control_env_var: str = "ZE_AFFINITY_MASK"
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
-                             block_size: int, use_v1: bool,
-                             use_mla: bool) -> str:
-        if selected_backend is not None and selected_backend != _Backend.IPEX:
-            logger.info("Cannot use %s backend on XPU.", selected_backend)
+                             block_size: int, use_v1: bool, use_mla: bool,
+                             has_sink: bool) -> str:
         use_v1 = envs.VLLM_USE_V1
         if not use_v1:
             raise ValueError("XPU backend only supports V1.")
+        TRITON_ATTN_VLLM_V1 = "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"  # noqa: E501
+        FLASH_ATTN_V1 = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"  # noqa: E501
+        if selected_backend == _Backend.TRITON_ATTN_VLLM_V1:
+            logger.info_once("Using Triton backend on V1 engine.")
+            return TRITON_ATTN_VLLM_V1
+        elif selected_backend == _Backend.FLASH_ATTN:
+            logger.info_once("Using Flash Attention backend on V1 engine.")
+            return FLASH_ATTN_V1
+        elif selected_backend:
+            raise ValueError(
+                f"Invalid attention backend for {cls.device_name}, "
+                f"with use_v1: {use_v1} use_mla: {use_mla}")
+
         logger.info("Using Flash Attention backend on V1 engine.")
         return "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
+
+    @classmethod
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
+                                    model_config: "ModelConfig") -> bool:
+        """
+        Check if the kv_cache_dtype is supported.
+        XPU only support fp8 kv cache with triton backend.
+        """
+        if envs.is_set("VLLM_ATTENTION_BACKEND") and \
+            envs.VLLM_ATTENTION_BACKEND == "TRITON_ATTN_VLLM_V1":
+            return kv_cache_dtype in ["fp8_e4m3", "fp8_e5m2", "fp8"]
+
+        return False
+
+    @classmethod
+    def set_device(cls, device: torch.device) -> None:
+        """
+        Set the device for the current platform.
+        """
+        torch.xpu.set_device(device)
 
     @classmethod
     def get_device_capability(
@@ -57,6 +88,10 @@ class XPUPlatform(Platform):
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         return torch.xpu.get_device_name(device_id)
+
+    @classmethod
+    def get_punica_wrapper(cls) -> str:
+        return "vllm.lora.punica_wrapper.punica_xpu.PunicaWrapperXPU"
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
@@ -74,27 +109,23 @@ class XPUPlatform(Platform):
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         cache_config = vllm_config.cache_config
+        model_config = vllm_config.model_config
         # in V1(or with ipex chunked prefill) block_size is 64
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 64
 
-        # Instances created using VllmConfig() typically have model_config as
-        # None by default. The modification involves adding a check to prevent
-        # potential null exceptions check and update model config.
-        if vllm_config.model_config is not None:
-            model_config = vllm_config.model_config
-            if model_config.dtype == torch.bfloat16:
-                bf16_supported = cls.device_support_bf16()
-                if not bf16_supported:
-                    model_config.dtype = torch.float16
-            if not model_config.enforce_eager:
-                logger.warning(
-                    "CUDA graph is not supported on XPU, fallback to the eager "
-                    "mode.")
-                model_config.enforce_eager = True
+        # lazy import to avoid circular import
+        from vllm.config import CompilationLevel, CUDAGraphMode
+        compilation_config = vllm_config.compilation_config
+        if compilation_config.cudagraph_mode is None or \
+                compilation_config.cudagraph_mode.max_cudagraph_mode() \
+                    != CUDAGraphMode.NONE:
+            logger.info("[XPU] CUDA graph is not supported on XPU, disabling "
+                        "cudagraphs. Fallback to cudagraph_mode=NONE")
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
-        if vllm_config.device_config is not None:
-            assert vllm_config.device_config.device_type == "xpu"
+        if vllm_config.lora_config is not None:
+            compilation_config.level = CompilationLevel.NO_COMPILATION
 
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
@@ -113,15 +144,17 @@ class XPUPlatform(Platform):
                 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
                 logger.warning(
                     "Please use spawn as start method if you want to use mp.")
-        elif parallel_config.distributed_executor_backend != "ray" and \
-                parallel_config.distributed_executor_backend != "uni":
+        elif (parallel_config.distributed_executor_backend != "ray"
+              and parallel_config.distributed_executor_backend != "uni"
+              and parallel_config.distributed_executor_backend
+              != "external_launcher"):
             logger.warning(
                 "%s is not supported on XPU, fallback to ray distributed"
                 " executor backend.",
                 parallel_config.distributed_executor_backend)
             parallel_config.distributed_executor_backend = "ray"
 
-        if vllm_config.model_config and vllm_config.model_config.use_mla:
+        if model_config and model_config.use_mla:
             logger.info(
                 "MLA is enabled on a non-GPU platform; forcing chunked "
                 "prefill and prefix caching to be disabled.")
@@ -130,6 +163,13 @@ class XPUPlatform(Platform):
             vllm_config.scheduler_config.max_num_batched_tokens = max(
                 vllm_config.scheduler_config.max_model_len,
                 DEFAULT_MAX_NUM_BATCHED_TOKENS)
+
+        if (envs.VLLM_KV_CACHE_LAYOUT is None
+                or envs.VLLM_KV_CACHE_LAYOUT != "NHD"):
+            os.environ["VLLM_KV_CACHE_LAYOUT"] = "NHD"
+            logger.info(
+                "Setting VLLM_KV_CACHE_LAYOUT to 'NHD' for XPU; "
+                "only NHD layout is supported by XPU attention kernels.")
 
     @classmethod
     def is_pin_memory_available(cls):
@@ -143,28 +183,13 @@ class XPUPlatform(Platform):
         return torch.xpu.max_memory_allocated(device)
 
     @classmethod
-    def device_support_bf16(cls) -> bool:
-        device_name = cls.get_device_name().lower()
-        if cls.is_client_gpu_a770():
-            logger.warning("Intel Arc A770 have bfloat16 accuracy known issue,"
-                           " fallback to float16")
-            return False
-        else:
-            logger.info(
-                "Device name %s supports bfloat16. Please file an issue "
-                "if you encounter any accuracy problems with bfloat16.",
-                device_name)
-            return True
+    def fp8_dtype(cls) -> torch.dtype:
+        return torch.float8_e5m2
 
     @classmethod
     def is_data_center_gpu(cls) -> bool:
         device_name = cls.get_device_name().lower()
         return device_name.count("data center gpu") > 0
-
-    @classmethod
-    def is_client_gpu_a770(cls) -> bool:
-        device_name = cls.get_device_name().lower()
-        return device_name.count("a770") > 0
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
@@ -177,3 +202,42 @@ class XPUPlatform(Platform):
     @classmethod
     def device_count(cls) -> int:
         return torch.xpu.device_count()
+
+    @classmethod
+    def check_if_supports_dtype(cls, torch_dtype: torch.dtype):
+        if torch_dtype == torch.bfloat16:  # noqa: SIM102
+            device_name = cls.get_device_name().lower()
+            # client gpu a770
+            if device_name.count("a770") > 0:
+                raise ValueError(
+                    "Intel Arc A770 have bfloat16 accuracy known issue. "
+                    "You can use float16 instead by explicitly setting the "
+                    "`dtype` flag in CLI, for example: --dtype=half.")
+
+    @classmethod
+    def opaque_attention_op(cls) -> bool:
+        return True
+
+    @classmethod
+    def insert_blocks_to_device(
+        cls,
+        src_cache: torch.Tensor,
+        dst_cache: torch.Tensor,
+        src_block_indices: torch.Tensor,
+        dst_block_indices: torch.Tensor,
+    ) -> None:
+        """Copy blocks from src_cache to dst_cache on XPU."""
+        _src_cache = src_cache[:, src_block_indices]
+        dst_cache[:, dst_block_indices] = _src_cache.to(dst_cache.device)
+
+    @classmethod
+    def swap_out_blocks_to_host(
+        cls,
+        src_cache: torch.Tensor,
+        dst_cache: torch.Tensor,
+        src_block_indices: torch.Tensor,
+        dst_block_indices: torch.Tensor,
+    ) -> None:
+        """Copy blocks from XPU to host (CPU)."""
+        _src_cache = src_cache[:, src_block_indices]
+        dst_cache[:, dst_block_indices] = _src_cache.cpu()

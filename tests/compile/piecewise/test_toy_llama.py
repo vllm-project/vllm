@@ -14,38 +14,15 @@ from typing import Any, Optional
 import pytest
 import torch
 from torch import nn
-from torch.library import Library
 
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import (CompilationConfig, CompilationLevel, VllmConfig,
-                         set_current_vllm_config)
-from vllm.forward_context import set_forward_context
-from vllm.utils import direct_register_custom_op
+from vllm.config import (CompilationConfig, CompilationLevel, CUDAGraphMode,
+                         VllmConfig, set_current_vllm_config)
+from vllm.forward_context import BatchDescriptor, set_forward_context
 
-# create a library to hold the custom op
-silly_lib = Library("silly", "FRAGMENT")  # noqa
-
-
-def silly_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-                    out: torch.Tensor) -> None:
-    out.copy_(q)
-    out += k
-    out += v
-
-
-def silly_attention_fake(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-                         out: torch.Tensor) -> None:
-    return
-
-
-direct_register_custom_op(
-    op_name="attention",
-    op_func=silly_attention,
-    mutates_args=["out"],
-    fake_impl=silly_attention_fake,
-    target_lib=silly_lib,
-)
+# This import automatically registers `torch.ops.silly.attention`
+from .. import silly_attention  # noqa: F401
 
 
 @dataclass
@@ -276,9 +253,11 @@ def run_model(llama_config,
         )
         if split_attn:
             compilation_config.splitting_ops = ["silly.attention"]
+        cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
     else:
         compilation_config = CompilationConfig(
             level=CompilationLevel.NO_COMPILATION, )
+        cudagraph_runtime_mode = CUDAGraphMode.NONE
 
     vllm_config = VllmConfig(compilation_config=compilation_config,
                              additional_config=llama_config)
@@ -287,17 +266,37 @@ def run_model(llama_config,
                            vllm_config=vllm_config,
                            prefix="").eval().cuda()
 
-    with set_forward_context({}, vllm_config=vllm_config):
+    with set_forward_context({},
+                             vllm_config=vllm_config):  # background context
         B = 16  # max batch size
         input_ids = torch.randint(0, llama_config.vocab_size, (B, )).cuda()
         positions = torch.arange(B).cuda()
 
+        # warmup for the model with cudagraph_mode NONE
         model(input_ids, positions)
-        model(input_ids[:2], positions[:2])
-        model(input_ids[:1], positions[:1])
+
+        # simulate cudagraphs capturing
+        with set_forward_context({},
+                                 vllm_config=vllm_config,
+                                 cudagraph_runtime_mode=cudagraph_runtime_mode,
+                                 batch_descriptor=BatchDescriptor(
+                                     num_tokens=2, )):
+            model(input_ids[:2], positions[:2])
+        with set_forward_context({},
+                                 vllm_config=vllm_config,
+                                 cudagraph_runtime_mode=cudagraph_runtime_mode,
+                                 batch_descriptor=BatchDescriptor(
+                                     num_tokens=1, )):
+            model(input_ids[:1], positions[:1])
 
         input_ids[:2].zero_()
-        output = model(input_ids[:2], positions[:2])
+        # simulate cudagraphs replay
+        with set_forward_context({},
+                                 vllm_config=vllm_config,
+                                 cudagraph_runtime_mode=cudagraph_runtime_mode,
+                                 batch_descriptor=BatchDescriptor(
+                                     num_tokens=2, )):
+            output = model(input_ids[:2], positions[:2])
 
         output = output.cpu()
 

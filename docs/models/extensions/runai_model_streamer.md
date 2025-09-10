@@ -1,7 +1,4 @@
----
-title: Loading models with Run:ai Model Streamer
----
-[](){ #runai-model-streamer }
+# Loading models with Run:ai Model Streamer
 
 Run:ai Model Streamer is a library to read tensors in concurrency, while streaming it to GPU memory.
 Further reading can be found in [Run:ai Model Streamer Documentation](https://github.com/run-ai/runai-model-streamer/blob/master/docs/README.md).

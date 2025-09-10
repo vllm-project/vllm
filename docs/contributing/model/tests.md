@@ -1,7 +1,4 @@
----
-title: Unit Testing
----
-[](){ #new-model-tests }
+# Unit Testing
 
 This page explains how to write unit tests to verify the implementation of your model.
 

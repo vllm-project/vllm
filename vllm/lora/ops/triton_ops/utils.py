@@ -35,7 +35,9 @@ def _get_lora_a_ptr(lora_a_weights: list[torch.Tensor], device: torch.device):
         lora_strides_d1.append(lora_a_weight.stride(1))
         lora_strides_d2.append(lora_a_weight.stride(2))
     if len(lora_a_weights) > 1:
-        lora_ptr_tensor = torch.tensor(tensor_ptrs, device=device)
+        lora_ptr_tensor = torch.tensor(tensor_ptrs,
+                                       device=device,
+                                       dtype=torch.uint64)
     else:
         lora_ptr_tensor = lora_a_weights[0]
 
@@ -89,8 +91,12 @@ def _get_lora_b_ptr(lora_weights: list[torch.Tensor], offset_start: int,
 
     if len(lora_weights) > 1:
         # note these are device tensors
-        lora_ptr_tensor = torch.tensor(tensor_ptrs, device=device)
-        slice_start_tensor = torch.tensor(slice_offset_lst, device=device)
+        lora_ptr_tensor = torch.tensor(tensor_ptrs,
+                                       device=device,
+                                       dtype=torch.uint64)
+        slice_start_tensor = torch.tensor(slice_offset_lst,
+                                          device=device,
+                                          dtype=torch.uint64)
     else:
         slice_start_tensor = slice_offset_lst[0]
         lora_ptr_tensor = lora_b_weight[0]

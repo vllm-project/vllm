@@ -1,7 +1,4 @@
----
-title: Using Nginx
----
-[](){ #nginxloadbalancer }
+# Using Nginx
 
 This document shows how to launch multiple vLLM serving containers and use Nginx to act as a load balancer between the servers.
 

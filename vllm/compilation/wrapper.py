@@ -11,7 +11,8 @@ from typing import Callable, Optional
 import torch
 
 import vllm.envs as envs
-from vllm.config import CompilationLevel, get_current_vllm_config
+from vllm.config import (CompilationLevel, CUDAGraphMode,
+                         get_current_vllm_config)
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -93,9 +94,10 @@ class TorchCompileWrapperWithCustomDispatcher:
             return
 
         self.compiled_codes.append(new_code)
-        local_cache_dir = self.vllm_config.compilation_config.local_cache_dir
-        if isinstance(local_cache_dir, str):
-            decompiled_file = os.path.join(local_cache_dir,
+        debug_dump_dir = self.vllm_config.compilation_config.debug_dump_path
+        if isinstance(debug_dump_dir, str) and debug_dump_dir != "":
+            rank = self.vllm_config.parallel_config.rank
+            decompiled_file = os.path.join(debug_dump_dir, f"rank_{rank}",
                                            "transformed_code.py")
             if not os.path.exists(decompiled_file):
                 try:
@@ -105,6 +107,7 @@ class TorchCompileWrapperWithCustomDispatcher:
                     # not a reversible process.
                     import depyf
                     src = depyf.decompile(new_code)
+
                     with open(decompiled_file, "w") as f:
                         f.write(src)
 
@@ -113,8 +116,8 @@ class TorchCompileWrapperWithCustomDispatcher:
                 except Exception:
                     pass
 
-        if self.vllm_config.compilation_config.use_cudagraph and \
-            "update" in new_code.co_names:
+        if self.vllm_config.compilation_config.cudagraph_mode != \
+            CUDAGraphMode.NONE and "update" in new_code.co_names:
             import depyf
             src = depyf.decompile(new_code)
             msg = "Assigning / modifying buffers of nn.Module during forward pass is not allowed when using cudagraph inside the compiler because it will cause silent errors. Please use eager mode or fix the code. The following code contains clues about which buffer is being modified (please search for the usage of the function `update`):\n" + src  # noqa

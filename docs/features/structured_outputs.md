@@ -1,7 +1,4 @@
----
-title: Structured Outputs
----
-[](){ #structured-outputs }
+# Structured Outputs
 
 vLLM supports the generation of structured outputs using
 [xgrammar](https://github.com/mlc-ai/xgrammar) or
@@ -21,7 +18,7 @@ The following parameters are supported, which must be added as extra parameters:
 - `guided_grammar`: the output will follow the context free grammar.
 - `structural_tag`: Follow a JSON schema within a set of specified tags within the generated text.
 
-You can see the complete list of supported parameters on the [OpenAI-Compatible Server][serving-openai-compatible-server] page.
+You can see the complete list of supported parameters on the [OpenAI-Compatible Server](../serving/openai_compatible_server.md) page.
 
 Structured outputs are supported by default in the OpenAI-Compatible Server. You
 may choose to specify the backend to use by setting the
@@ -106,7 +103,7 @@ The next example shows how to use the `guided_json` parameter with a Pydantic mo
                 "content": "Generate a JSON with the brand, model and car_type of the most iconic car from the 90's",
             }
         ],
-        "response_format": {
+        response_format={
             "type": "json_schema",
             "json_schema": {
                 "name": "car-description",
@@ -208,7 +205,7 @@ This section covers the OpenAI beta wrapper over the `client.chat.completions.cr
 
 At the time of writing (`openai==1.54.4`), this is a "beta" feature in the OpenAI client library. Code reference can be found [here](https://github.com/openai/openai-python/blob/52357cff50bee57ef442e94d78a0de38b4173fc2/src/openai/resources/beta/chat/completions.py#L100-L104).
 
-For the following examples, vLLM was setup using `vllm serve meta-llama/Llama-3.1-8B-Instruct`
+For the following examples, vLLM was set up using `vllm serve meta-llama/Llama-3.1-8B-Instruct`
 
 Here is a simple example demonstrating how to get structured output using Pydantic models:
 

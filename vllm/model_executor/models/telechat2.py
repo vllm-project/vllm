@@ -37,9 +37,20 @@ from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper,
 class TeleChat2Model(LlamaModel):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        hf_config = vllm_config.model_config.hf_config
+
+        vllm_config.model_config.hf_config.attribute_map = {
+            "num_hidden_layers": "n_layer",
+            "num_attention_heads": "n_head",
+            "intermediate_size": "ffn_hidden_size",
+            "rms_norm_eps": "layer_norm_epsilon"
+        }
+        vllm_config.model_config.hf_config.hidden_act = "silu"
+
         # 1. Initialize the LlamaModel with bias
-        vllm_config.model_config.hf_config.bias = True
-        vllm_config.model_config.hf_config.mlp_bias = True
+        hf_config.bias = True
+        hf_config.mlp_bias = True
+
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         # 2. Remove the bias from the qkv_proj and gate_up_proj based on config
         # Telechat2's gate_up_proj and qkv_proj don't have bias
