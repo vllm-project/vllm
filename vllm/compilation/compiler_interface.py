@@ -202,8 +202,15 @@ class InductorStandaloneAdaptor(CompilerInterface):
         else:
             dynamic_shapes = "from_tracing_context"
 
+        assert key is not None
+        path = os.path.join(self.cache_dir, key)
+
         from torch._inductor import standalone_compile
-        with pass_context(runtime_shape):
+        from torch._inductor.runtime.cache_dir_utils import temporary_cache_dir
+        with (
+                pass_context(runtime_shape),
+                temporary_cache_dir(path),
+        ):
             compiled_graph = standalone_compile(
                 graph,
                 example_inputs,
@@ -211,8 +218,6 @@ class InductorStandaloneAdaptor(CompilerInterface):
                 options={"config_patches": current_config})
 
         # Save the compiled artifact to disk in the specified path
-        assert key is not None
-        path = os.path.join(self.cache_dir, key)
         if not envs.VLLM_DISABLE_COMPILE_CACHE:
             compiled_graph.save(path=path, format="unpacked")
             compilation_counter.num_compiled_artifacts_saved += 1
