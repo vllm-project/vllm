@@ -361,7 +361,10 @@ class Qwen2Model(nn.Module):
         for idx, layer in enumerate(
                 islice(self.layers, self.start_layer, self.end_layer)):
             if idx in self.aux_hidden_state_layers:
-                aux_hidden_states.append(hidden_states + residual)
+                if residual is not None:
+                    aux_hidden_states.append(hidden_states + residual)
+                else:
+                    aux_hidden_states.append(hidden_states)
             hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
