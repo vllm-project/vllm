@@ -119,26 +119,31 @@ class GDNAttentionMetadataBuilder(
         num_accepted_tokens: Optional[torch.Tensor] = None,
         num_draft_tokens: Optional[torch.Tensor] = None,
     ) -> GDNAttentionMetadata:
-        query_start_loc = common_attn_metadata.query_start_loc
-        context_lens = common_attn_metadata.num_computed_tokens_cpu
+        m = common_attn_metadata
+
+        query_start_loc = m.query_start_loc
+        context_lens = m.num_computed_tokens_cpu
+        context_lens_tensor = context_lens.to(query_start_loc.device)
+        seq_lens_tensor = m.seq_lens
 
         if (not self.use_spec_decode or num_draft_tokens is None
                 or num_draft_tokens.sum().item() == 0):
             num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
-                split_decodes_and_prefills(common_attn_metadata,
-                                           decode_threshold=1))
+                split_decodes_and_prefills(m, decode_threshold=1))
             spec_sequence_masks = None
             num_spec_decodes = 0
             num_spec_decode_tokens = 0
             spec_token_masks = None
             spec_state_indices_tensor = None
-            non_spec_state_indices_tensor = \
-                common_attn_metadata.block_table_tensor[:, 0]
+            non_spec_state_indices_tensor = m.block_table_tensor[:, 0]
             spec_query_start_loc = None
             non_spec_query_start_loc = query_start_loc
             num_accepted_tokens = None
         else:
-            spec_sequence_masks = num_draft_tokens > 0
+            spec_sequence_masks = ((num_draft_tokens > 0)
+                                   &
+                                   (context_lens_tensor +
+                                    (num_draft_tokens + 1) == seq_lens_tensor))
             num_spec_decodes = spec_sequence_masks.sum().item()
             query_lens = query_start_loc[1:] - query_start_loc[:-1]
 
@@ -155,10 +160,10 @@ class GDNAttentionMetadataBuilder(
                 num_spec_decodes * (self.num_spec + 1),
                 spec_token_masks.size(0))
 
-            spec_state_indices_tensor = common_attn_metadata.block_table_tensor[
+            spec_state_indices_tensor = m.block_table_tensor[
                 spec_sequence_masks, :self.num_spec + 1]
             non_spec_state_indices_tensor = \
-                common_attn_metadata.block_table_tensor[~spec_sequence_masks, 0]
+                m.block_table_tensor[~spec_sequence_masks, 0]
             spec_query_start_loc = torch.zeros(num_spec_decodes + 1,
                                                dtype=torch.int32,
                                                device=query_start_loc.device)
@@ -176,7 +181,6 @@ class GDNAttentionMetadataBuilder(
             num_accepted_tokens = num_accepted_tokens[spec_sequence_masks]
 
         if num_prefills > 0:
-            context_lens_tensor = context_lens.to(query_start_loc.device)
             has_initial_state = context_lens_tensor > 0
             if spec_sequence_masks is not None:
                 has_initial_state = has_initial_state[~spec_sequence_masks]
@@ -198,7 +202,7 @@ class GDNAttentionMetadataBuilder(
         if (num_prefills == 0 and num_decodes == 0
                 and num_spec_decodes <= self.decode_cudagraph_max_bs):
             num_total_tokens = self.vllm_config.pad_for_cudagraph(
-                common_attn_metadata.num_actual_tokens)
+                m.num_actual_tokens)
             batch_size = num_total_tokens // (self.num_spec + 1)
 
             self.spec_state_indices_tensor[:num_spec_decodes].copy_(
@@ -215,7 +219,7 @@ class GDNAttentionMetadataBuilder(
             assert spec_token_masks is not None
             self.spec_token_masks[:spec_token_masks.size(0)].copy_(
                 spec_token_masks, non_blocking=True)
-            spec_token_masks = self.spec_token_masks[:spec_token_masks.size(0)]
+            spec_token_masks = self.spec_token_masks[:m.num_actual_tokens]
             spec_token_masks[spec_token_masks.size(0):].fill_(False)
 
             self.spec_query_start_loc[:num_spec_decodes + 1].copy_(
@@ -234,20 +238,19 @@ class GDNAttentionMetadataBuilder(
         if (num_prefills == 0 and num_spec_decodes == 0
                 and num_decodes <= self.decode_cudagraph_max_bs):
             num_total_tokens = self.vllm_config.pad_for_cudagraph(
-                common_attn_metadata.num_actual_tokens)
+                m.num_actual_tokens)
             batch_size = num_total_tokens
 
             self.non_spec_state_indices_tensor[:num_decodes].copy_(
                 non_spec_state_indices_tensor, non_blocking=True)
-            non_spec_state_indices_tensor = self.non_spec_state_indices_tensor[:
-                                                                               batch_size]
+            non_spec_state_indices_tensor = \
+                self.non_spec_state_indices_tensor[:batch_size]
             non_spec_state_indices_tensor[num_decodes:].fill_(PAD_SLOT_ID)
 
             self.non_spec_query_start_loc[:num_decodes + 1].copy_(
                 non_spec_query_start_loc, non_blocking=True)
-            non_spec_query_start_loc = self.non_spec_query_start_loc[:
-                                                                     batch_size
-                                                                     + 1]
+            non_spec_query_start_loc = \
+                self.non_spec_query_start_loc[:batch_size + 1]
             non_spec_query_start_loc[num_decodes + 1:].fill_(
                 non_spec_query_start_loc[-1])
 
@@ -288,16 +291,18 @@ class GDNAttentionMetadataBuilder(
                                          m.max_query_len,
                                          dtype=torch.int32,
                                          device=m.query_start_loc.device)
-        num_drafted_tokens = torch.full((m.num_reqs, ), (self.num_spec + 1),
+        num_drafted_tokens = torch.full((m.num_reqs, ),
+                                        self.num_spec,
                                         dtype=torch.int32,
                                         device=m.query_start_loc.device)
 
         # Fixes query-start loc for spec-sequence-indices.
-        common_attn_metadata.query_start_loc = torch.arange(
-            0,
-            common_attn_metadata.num_actual_tokens + 1,
-            step=self.num_spec + 1,
-            device=m.query_start_loc.device,
-            dtype=torch.int32)
+        m.query_start_loc = torch.arange(0,
+                                         m.num_actual_tokens + 1,
+                                         step=m.max_query_len,
+                                         device=m.query_start_loc.device,
+                                         dtype=torch.int32)
+        m.num_computed_tokens_cpu = (m.seq_lens_cpu - torch.full(
+            (m.num_reqs, ), m.max_query_len, dtype=torch.int32, device='cpu'))
 
         return self.build(0, m, num_accepted_tokens, num_drafted_tokens)
