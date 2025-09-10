@@ -620,7 +620,7 @@ steps:
     - pytest -v -s models/language -m 'core_model and slow_test'
 
 # Shard hybrid language model tests
-- label: Language Models Tests (Hybrid)
+- label: Language Models Tests (Hybrid) %N
   timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
