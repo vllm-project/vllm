@@ -604,6 +604,16 @@ steps:
     - pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8'
     - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
+- label: Language Models Test (PPL)
+  timeout_in_minutes: 110
+  mirror_hardwares: [amdexperimental]
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/language/generation_ppl_test
+  commands:
+    - pytest -v -s models/language/generation_ppl_test
+
 - label: Language Models Test (Extended Pooling)  # 36min
   timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental]
