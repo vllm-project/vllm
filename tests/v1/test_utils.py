@@ -42,6 +42,38 @@ def test_bind_kv_cache():
     assert runner_kv_caches[3] is kv_cache['layers.3.self_attn']
 
 
+def test_bind_kv_cache_draft_model():
+    from vllm.attention import Attention
+    ctx = {
+        'model.layers.0.attn': Attention(32, 128, 0.1),
+        'model.layers.1.attn': Attention(32, 128, 0.1),
+        'draft_model.layers.0.attn': Attention(32, 128, 0.1),
+        'draft_model.layers.1.attn': Attention(32, 128, 0.1),
+    }
+    kv_cache = {
+        'model.layers.0.attn': torch.zeros((1, )),
+        'model.layers.1.attn': torch.zeros((1, )),
+        'draft_model.layers.0.attn': torch.zeros((1, )),
+        'draft_model.layers.1.attn': torch.zeros((1, )),
+    }
+    runner_kv_caches: list[torch.Tensor] = []
+    bind_kv_cache(kv_cache, ctx, runner_kv_caches)
+    assert ctx['model.layers.0.attn'].kv_cache[0] is kv_cache[
+        'model.layers.0.attn']
+    assert ctx['model.layers.1.attn'].kv_cache[0] is kv_cache[
+        'model.layers.1.attn']
+    assert ctx['draft_model.layers.0.attn'].kv_cache[0] is kv_cache[
+        'draft_model.layers.0.attn']
+    assert ctx['draft_model.layers.1.attn'].kv_cache[0] is kv_cache[
+        'draft_model.layers.1.attn']
+
+    # caches are ordered by layer_index, interleaving target and draft model
+    assert runner_kv_caches[0] is kv_cache['model.layers.0.attn']
+    assert runner_kv_caches[1] is kv_cache['draft_model.layers.0.attn']
+    assert runner_kv_caches[2] is kv_cache['model.layers.1.attn']
+    assert runner_kv_caches[3] is kv_cache['draft_model.layers.1.attn']
+
+
 def test_bind_kv_cache_non_attention():
     from vllm.attention import Attention
 
