@@ -97,6 +97,12 @@ class _HfExamplesInfo:
     max_num_seqs: Optional[int] = None
     """Maximum number of sequences to be processed in a single iteration."""
 
+    original_num_layers: bool = False
+    """
+    If True, use the original number of layers from the model config 
+    instead of minimal layers for testing.
+    """
+
     def check_transformers_version(
         self,
         *,
@@ -600,15 +606,17 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "EagleLlamaForCausalLM": _HfExamplesInfo("meta-llama/Meta-Llama-3-8B-Instruct", # noqa: E501
                                              trust_remote_code=True,
                                              speculative_model="yuhuili/EAGLE-LLaMA3-Instruct-8B",
-                                             tokenizer="meta-llama/Meta-Llama-3-8B-Instruct"),  # noqa: E501
+                                             tokenizer="meta-llama/Meta-Llama-3-8B-Instruct"), # noqa: E501
     "Eagle3LlamaForCausalLM": _HfExamplesInfo("meta-llama/Llama-3.1-8B-Instruct",  # noqa: E501
                                             trust_remote_code=True,
-                                            speculative_model="yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
-                                            tokenizer="meta-llama/Llama-3.1-8B-Instruct"),
+                                            speculative_model="yuhuili/EAGLE3-LLaMA3.1-Instruct-8B", # noqa: E501
+                                            tokenizer="meta-llama/Llama-3.1-8B-Instruct",
+                                            original_num_layers=True),
     "LlamaForCausalLMEagle3": _HfExamplesInfo("Qwen/Qwen3-8B",  # noqa: E501
                                             trust_remote_code=True,
                                             speculative_model="AngelSlim/Qwen3-8B_eagle3",   # noqa: E501
-                                            tokenizer="Qwen/Qwen3-8B"),
+                                            tokenizer="Qwen/Qwen3-8B",
+                                            original_num_layers=True),
     "EagleLlama4ForCausalLM": _HfExamplesInfo(
         "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct",
         trust_remote_code=True,

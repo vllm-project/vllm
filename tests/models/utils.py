@@ -396,10 +396,12 @@ def dummy_hf_overrides(
     *,
     model_arch: str = "",
     exist_overrides: Optional[dict[str, Any]] = None,
+    original_num_layers: bool = False,
 ) -> PretrainedConfig:
     """
     Dummy HF overrides function used to create dummy model
     with only minimum nums of layer.
+    
     """
     hf_config.update(exist_overrides or {})
 
@@ -412,10 +414,18 @@ def dummy_hf_overrides(
 
     # we use three layers for Gemma-3n to check
     # both normal layer and kv_shared_layer
-    num_hidden_layers = (3 if model_arch == "Gemma3nForConditionalGeneration"
-                         else 1)
+    if original_num_layers:
+        # Use the original number of layers from the config
+        num_layers = getattr(text_config, 'num_layers', 1)
+        num_hidden_layers = getattr(text_config, 'num_hidden_layers', 1)
+    else:
+        # Use minimal layers for testing
+        num_layers = 1
+        num_hidden_layers = (3 if model_arch
+                             == "Gemma3nForConditionalGeneration" else 1)
+
     text_config.update({
-        "num_layers": 1,
+        "num_layers": num_layers,
         "num_hidden_layers": num_hidden_layers,
         "num_experts": num_experts,
         "num_experts_per_tok": 2,
