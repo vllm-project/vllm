@@ -459,10 +459,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         # Set reorder_batch_threshold based on speculative config
         if (self.speculative_config is not None and
                 self.speculative_config.num_speculative_tokens is not None):
-            self.reorder_batch_threshold = (
+            self.reorder_batch_threshold = (  # type: ignore[misc]
                 1 + self.speculative_config.num_speculative_tokens)
         else:
-            self.reorder_batch_threshold = 1
+            self.reorder_batch_threshold = 1  # type: ignore[misc]
 
         try:
             self.dcp_world_size = get_dcp_group().world_size

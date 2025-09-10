@@ -655,8 +655,9 @@ def split_decodes_and_prefills(
             batch metadata.
         decode_threshold: The maximum query length to be considered a decode.
         require_uniform: If True, only selects decode requests with the same 
-            query length for uniform batching (needed for MTP, CUDA Graph, etc.).
-            If False, selects all decode requests regardless of length variation.
+            query length for uniform batching 
+            If False, selects all decode requests regardless of
+            length variation.
     
     Returns:
         num_decodes: The number of decode requests.
