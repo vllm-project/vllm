@@ -42,18 +42,15 @@ class TorchCompileWrapperWithCustomDispatcher:
             backend = vllm_config.compilation_config.init_backend(vllm_config)
             options = None
             if isinstance(backend, str) and backend == "inductor":
-<<<<<<< HEAD
                 options = (
                     get_current_vllm_config().compilation_config.inductor_compile_config
                 )
-=======
-                options = get_current_vllm_config(
-                ).compilation_config.inductor_compile_config
             if envs.VLLM_USE_AOT_COMPILE:
                 options = options or {}
-                options["guard_filter_fn"] = lambda guards: [
-                    False for _ in guards
-                ]
+                # This effectively drop all the guards.
+                # We need this because bytecode hook is not used any more to
+                # drop guards in the AOT compile mode.
+                options["guard_filter_fn"] = lambda guards: [False for _ in guards]
                 if hasattr(torch._dynamo.config, "enable_aot_compile"):
                     torch._dynamo.config.enable_aot_compile = True
                 else:
@@ -61,7 +58,6 @@ class TorchCompileWrapperWithCustomDispatcher:
                     msg += "available. AOT compile is disabled and please "
                     msg += "upgrade PyTorch version to use AOT compile."
                     logger.warning(msg)
->>>>>>> 6fc29676a (AOT compilation workflow [1/n])
 
             compiled_callable = torch.compile(
                 self.forward, fullgraph=True, backend=backend, options=options
@@ -82,9 +78,10 @@ class TorchCompileWrapperWithCustomDispatcher:
     def aot_compile(self, *args, **kwargs):
         if not hasattr(self.compiled_callable, "aot_compile"):
             raise RuntimeError(
-                "aot_compile is not supported by the current configuration. " +
-                "Please make sure torch.compile is enabled with the latest " +
-                "version of PyTorch")
+                "aot_compile is not supported by the current configuration. "
+                + "Please make sure torch.compile is enabled with the latest "
+                + f"version of PyTorch (current using torch: {torch.__version__})"
+            )
         return self.compiled_callable.aot_compile((args, kwargs))
 
     def __call__(self, *args, **kwargs):
