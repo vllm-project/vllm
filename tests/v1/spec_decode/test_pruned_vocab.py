@@ -127,7 +127,6 @@ def _setup_proposer(
 #             target_model.model.embed_tokens
 
 
-
 def _setup_attn_backend(attn_backend, monkeypatch):
     monkeypatch.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
 
@@ -151,6 +150,7 @@ def _setup_mock_get_model(mock_get_model, use_distinct_embed_tokens, device):
 
     mock_get_model.return_value = mock_model
 
+
 def _setup_mock_pp_group(mock_get_pp_group, pp_size):
     # Setup mock for pp group to return the appropriate value for world size
     mock_pp_group = mock.MagicMock()
@@ -160,20 +160,8 @@ def _setup_mock_pp_group(mock_get_pp_group, pp_size):
 
 def _setup_target_model(device):
 
-    # # Set up the target model mock with a custom class so that
-    # # isinstance() checks match the expected type.
-    # class _TargetModelStub(LlamaForCausalLM):
-    #     model: mock.MagicMock
-    #     lm_head: mock.MagicMock
-
-    # target_model = mock.create_autospec(_TargetModelStub, instance=True)
-    # target_model.model = mock.MagicMock()
-    # target_model.model.embed_tokens.weight.shape = (131072, 4096)
-
-    # from vllm.model_executor.models import SupportsMultiModal
-    # assert not isinstance(target_model, SupportsMultiModal)
-    # target_model.lm_head = mock.MagicMock()
-
+    # Set up the target model mock with a custom class so that
+    # isinstance() checks match the expected type.
     class _TargetModelStub(LlamaForCausalLM):
         model: mock.MagicMock
         lm_head: mock.MagicMock
@@ -184,14 +172,18 @@ def _setup_target_model(device):
 
     from vllm.model_executor.models import SupportsMultiModal
     assert not isinstance(target_model, SupportsMultiModal)
-
-    # Replace the autospec'd lm_head with a regular MagicMock
     target_model.lm_head = mock.MagicMock()
+    target_model.lm_head.weight.device = device
 
-    # Create a mock weight with a real device
-    weight_mock = mock.MagicMock()
-    weight_mock.device = torch.device('cpu')
-    target_model.lm_head.weight = weight_mock
+    # mock target_model.lm_head needs to support deepcopy
+    class DeepCopyableMock(mock.MagicMock):
+        def __deepcopy__(self, memo):
+            new_mock = DeepCopyableMock()
+            new_mock.weight = mock.MagicMock()
+            new_mock.weight.device = self.weight.device
+            new_mock.weight.shape = self.weight.shape
+            return new_mock
+    target_model.lm_head = DeepCopyableMock()
 
     return target_model
 

@@ -684,8 +684,8 @@ class EagleProposer:
                 self.model.lm_head.weight = head
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
-            else:
-                print('no lm_head')
+            elif hasattr(self.model.model, "embed_tokens"):
+                print('Assuming lm_head is tied to embed_tokens.')
 
 
     @torch.inference_mode()
