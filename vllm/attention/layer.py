@@ -379,12 +379,6 @@ class MultiHeadAttention(nn.Module):
         value: torch.Tensor,
     ) -> torch.Tensor:
         """Input shape: batch_size x seq_len x hidden_size"""
-        is_2d = query.dim() == 2
-        if is_2d:
-            query = query.unsqueeze(0)
-            key = key.unsqueeze(0)
-            value = value.unsqueeze(0)
-
         # TODO(Isotr0py): Use existing backend implementations and support FA3
         bsz, q_len, _ = query.size()
         kv_len = key.size(1)
@@ -434,9 +428,6 @@ class MultiHeadAttention(nn.Module):
                 f"backend yet.")
 
         out = out.reshape(bsz, q_len, -1)
-
-        if is_2d:
-            out = out.squeeze(0)
 
         return out
 

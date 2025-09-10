@@ -125,6 +125,34 @@ class WhisperAudioInputs(TensorSchema):
                               TensorShape("b", "nmb", "t")]
 
 
+class WhisperEncoderAttention(MultiHeadAttention):
+    """Multi-headed attention for Whisper encoder with 2D tensor support."""
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Input shape: batch_size x seq_len x hidden_size
+                     or seq_len x hidden_size
+        """
+        is_2d = query.dim() == 2
+        if is_2d:
+            query = query.unsqueeze(0)
+            key = key.unsqueeze(0)
+            value = value.unsqueeze(0)
+
+        # Call the parent forward method
+        out = super().forward(query, key, value)
+
+        if is_2d:
+            out = out.squeeze(0)
+
+        return out
+
+
 class WhisperPositionalEmbedding(nn.Embedding):
 
     def __init__(self, num_positions: int, embedding_dim: int):
@@ -181,7 +209,7 @@ class WhisperAttention(nn.Module):
             prefix=f"{prefix}.out_proj",
         )
         if attn_type == AttentionType.ENCODER:
-            self.attn = MultiHeadAttention(
+            self.attn = WhisperEncoderAttention(
                 self.num_heads,
                 self.head_dim,
                 self.scaling,
