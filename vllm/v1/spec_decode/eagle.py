@@ -10,7 +10,7 @@ from typing import Optional, Protocol
 import numpy as np
 import torch
 import torch.nn as nn
-from huggingface_hub import snapshot_download
+from huggingface_hub import hf_hub_download
 
 from vllm.attention.layer import Attention
 from vllm.config import (CompilationLevel, VllmConfig,
@@ -235,8 +235,6 @@ class EagleProposer:
         positions = target_positions[last_token_indices]
         hidden_states = hidden_states[last_token_indices]
 
-        ic(logits, positions)
-
         if isinstance(attn_metadata, TreeAttentionMetadata):
             # Draft using tree attention.
             draft_token_ids_list = self.propose_tree(
@@ -251,11 +249,9 @@ class EagleProposer:
             return torch.cat(draft_token_ids_list, dim=1)
 
         draft_token_ids = logits.argmax(dim=-1)
-        ic(draft_token_ids)
 
         if self.vllm_config.speculative_config.draft_vocab_pruned is not None:
             draft_token_ids = self.pruned_token_ids[draft_token_ids]
-        ic(draft_token_ids)
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1:
@@ -520,10 +516,8 @@ class EagleProposer:
                 draft_token_ids = torch.topk(logits, num_children,
                                              dim=-1).indices.view(
                                                  batch_size, -1)
-            ic(draft_token_ids)
             if self.vllm_config.speculative_config.draft_vocab_pruned is not None:
                 draft_token_ids = self.pruned_token_ids[draft_token_ids]
-            ic(draft_token_ids)
 
             draft_token_ids_list.append(draft_token_ids)
 
@@ -685,13 +679,9 @@ class EagleProposer:
             logger.info(f"Loading pruned draft model vocabulary from {self.vllm_config.speculative_config.draft_vocab_pruned}")
             self.pruned_token_ids = load_draft_vocab_pruned(self.vllm_config.speculative_config.draft_vocab_pruned)
             self.pruned_token_ids = self.pruned_token_ids.to(self.model.lm_head.data.device)
-            ic(self.pruned_token_ids)
 
             if hasattr(self.model, "lm_head"):
-                print('have lm_head')
-                ic(self.model.lm_head.data.shape)
-                self.model.lm_head.data = ic(self.model.lm_head.data[self.pruned_token_ids])
-                ic(self.model.lm_head.data.shape)
+                self.model.lm_head.data = self.model.lm_head.data[self.pruned_token_ids]
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
             elif hasattr(self.model.model, "embed_tokens"):
@@ -740,15 +730,21 @@ class EagleProposer:
 
 
 def load_draft_vocab_pruned(draft_vocab_pruned_path: str) -> torch.Tensor:
-    if not os.path.exists(draft_vocab_pruned_path):
-        cache_dir = snapshot_download(
-            os.path.dirname(draft_vocab_pruned_path),
-            ignore_patterns=["*.bin", "*.safetensors"],
-        )
-        draft_vocab_pruned_path = os.path.join(cache_dir, os.path.basename(draft_vocab_pruned_path))
-    hot_token_ids = torch.load(draft_vocab_pruned_path, weights_only=True)
-    hot_token_ids = torch.tensor(hot_token_ids, dtype=torch.int64)
-    return hot_token_ids
+
+    # parse the path
+    parts = draft_vocab_pruned_path.split("/")
+    if len(parts) < 3:
+        raise ValueError("HF path must be at least 'username/repo/file.pt'")
+    repo_id = "/".join(parts[:2])
+    file_path_in_repo = "/".join(parts[2:])
+
+    # download the file
+    draft_vocab_pruned_path = hf_hub_download(repo_id=repo_id, filename=file_path_in_repo, repo_type="dataset")
+
+    # make it a tensor of integers
+    pruned_vocab = torch.load(draft_vocab_pruned_path, weights_only=True)
+    pruned_vocab = pruned_vocab.to(torch.int64)
+    return pruned_vocab
 
 # NOTE(woosuk): Currently, the below code is not used and we always use argmax
 # to sample the draft tokens. We will use this after we find a way to manage
@@ -791,3 +787,5 @@ def compute_probs_and_sample_next_token(
             next_token_ids,
         )
     return next_token_ids, probs
+
+load_draft_vocab_pruned("eturok/llama-3.1-8b-instruct-vocab-freq/vocab_freq.pt")
