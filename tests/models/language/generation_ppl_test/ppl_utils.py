@@ -1,30 +1,41 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from https://huggingface.co/docs/transformers/perplexity
-import math
 from typing import Optional, cast
 
+import pytest
 import torch
 from datasets import load_dataset
 
-from tests.models.utils import ModelInfo, TokensTextLogprobsPromptLogprobs
+from tests.models.utils import (GenerateModelInfo,
+                                TokensTextLogprobsPromptLogprobs)
 from vllm.logprobs import Logprob
 
-PPL_TOL = 1
+# see #24485
+PPL_TOL = 1.
 MAX_LENGTH = 1024
 
 
+@torch.inference_mode
 def wikitext_ppl_test(hf_runner,
                       vllm_runner,
-                      model_info: ModelInfo,
+                      model_info: GenerateModelInfo,
                       max_length=MAX_LENGTH,
                       vllm_extra_kwargs=None,
                       atol=PPL_TOL):
+
+    # A model family has many models with the same architecture,
+    # and we don't need to test each one.
+    if not model_info.enable_test:
+        pytest.skip("Skipping test.")
+
     dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
 
+    # Allow vllm to test using the given dtype, such as float32
     vllm_extra_kwargs = vllm_extra_kwargs or {}
     vllm_extra_kwargs["dtype"] = model_info.dtype
 
+    # Allow vllm to test using hf_overrides
     if model_info.hf_overrides is not None:
         vllm_extra_kwargs["hf_overrides"] = model_info.hf_overrides
 
@@ -51,8 +62,9 @@ def wikitext_ppl_test(hf_runner,
         outputs = vllm_model.generate_greedy_logprobs(prompts=chunks,
                                                       max_tokens=1,
                                                       num_logprobs=None,
-                                                      num_prompt_logprobs=0)
-        nll_sum = 0.0
+                                                      num_prompt_logprobs=0,
+                                                      use_tqdm=False)
+        nll_sum = torch.tensor(0., dtype=torch.float32, device="cpu")
         n_tokens = 0
         for output in outputs:
             output = cast(TokensTextLogprobsPromptLogprobs, output)
@@ -66,31 +78,39 @@ def wikitext_ppl_test(hf_runner,
                 token_log_prob = list(token_data.values())[0].logprob
                 token_log_probs.append(token_log_prob)
 
-            neg_log_likelihood = -sum(token_log_probs)
+            neg_log_likelihood = -torch.tensor(
+                token_log_probs, dtype=torch.float32, device="cpu").sum()
             nll_sum += neg_log_likelihood
             n_tokens += len(token_log_probs)
-        vllm_ppl = math.exp(nll_sum / n_tokens)
+        vllm_ppl = float(torch.exp(nll_sum / n_tokens))
         vllm_dtype = model_config.dtype
 
-    with hf_runner(
-            model_info.name,
-            dtype=model_info.hf_dtype,
-    ) as hf_model:
-        nll_sum = 0.0
-        n_tokens = 0
-        for chunk in chunks:
-            with torch.no_grad():
+    # Accelerate ppl test by setting Transformers ppl score to a constant
+    if model_info.hf_ppl is None:
+        with hf_runner(
+                model_info.name,
+                dtype=model_info.hf_dtype,
+        ) as hf_model:
+            nll_sum = torch.tensor(0., dtype=torch.float32, device="cpu")
+            n_tokens = 0
+            for chunk in chunks:
                 inputs = hf_model.wrap_device(
                     {"input_ids": torch.tensor([chunk])})
                 input_ids = inputs["input_ids"]
                 outputs = hf_model.model(input_ids, labels=input_ids)
                 neg_log_likelihood = outputs.loss
-            num_loss_tokens = len(chunk) - 1
-            nll_sum += neg_log_likelihood * num_loss_tokens
-            n_tokens += num_loss_tokens
 
-        hf_ppl = math.exp(nll_sum / n_tokens)
-        hf_dtype = next(hf_model.model.parameters()).dtype
+                neg_log_likelihood = neg_log_likelihood.to(torch.float32).cpu()
+
+                num_loss_tokens = len(chunk) - 1
+                nll_sum += neg_log_likelihood * num_loss_tokens
+                n_tokens += num_loss_tokens
+
+            hf_ppl = float(torch.exp(nll_sum / n_tokens))
+            hf_dtype = next(hf_model.model.parameters()).dtype
+    else:
+        hf_ppl = model_info.hf_ppl
+        hf_dtype = "Constant"
 
     print("Model:", model_info.name)
     print("VLLM:", vllm_dtype, vllm_ppl)

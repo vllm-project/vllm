@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 
-from .ppl_utils import (wikitext_ppl_test)
 from tests.models.utils import GenerateModelInfo
+
+from .ppl_utils import wikitext_ppl_test
 
 MODELS = [GenerateModelInfo("openai-community/gpt2-large")]
 
