@@ -11,7 +11,7 @@ import torch
 
 from ...utils import RemoteOpenAIServer
 
-MODEL_NAME = "mgazz/Prithvi-EO-2.0-300M-TL-Sen1Floods11"
+MODEL_NAME = "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11"
 DTYPE = "float16"
 
 
