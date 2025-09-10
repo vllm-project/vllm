@@ -427,9 +427,7 @@ class MultiHeadAttention(nn.Module):
                 f"ViT attention hasn't supported {self.attn_backend} "
                 f"backend yet.")
 
-        out = out.reshape(bsz, q_len, -1)
-
-        return out
+        return out.reshape(bsz, q_len, -1)
 
 
 def wait_for_kv_layer_from_connector(layer_name: str):

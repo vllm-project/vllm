@@ -166,6 +166,7 @@ class EncoderCacheManager:
         Note:
             This method assumes can_allocate() returned True for the same input.
         """
+
         mm_hash = request.mm_hashes[input_id]
         request_id = request.request_id
         if mm_hash not in self.cached:
