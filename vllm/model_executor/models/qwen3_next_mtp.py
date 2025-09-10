@@ -179,14 +179,6 @@ class Qwen3NextMTP(nn.Module, SupportsPP):
                                    intermediate_tensors, inputs_embeds)
         return hidden_states
 
-    def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
-        return self.linear_attn_cache.copy_inputs_before_cuda_graphs(
-            input_buffers, **kwargs)
-
-    def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
-        return self.linear_attn_cache.get_seqlen_agnostic_capture_inputs(
-            batch_size)
-
     def compute_logits(
         self,
         hidden_states: torch.Tensor,

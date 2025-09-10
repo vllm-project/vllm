@@ -1085,9 +1085,6 @@ class Qwen3NextForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
             # compatibility
             if not lora_config else lora_config.lora_vocab_padding_size,
         )
-        # Used to track and store by the Mamba cache between steps.
-        self.linear_attn_cache: Optional[MambaCacheManager] = None
-
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
         self.make_empty_intermediate_tensors = (
@@ -1168,14 +1165,6 @@ class Qwen3NextForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                                    inputs_embeds)
 
         return hidden_states
-
-    def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
-        return self.linear_attn_cache.copy_inputs_before_cuda_graphs(
-            input_buffers, **kwargs)
-
-    def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
-        return self.linear_attn_cache.get_seqlen_agnostic_capture_inputs(
-            batch_size)
 
     @classmethod
     def get_mamba_state_dtype_from_config(

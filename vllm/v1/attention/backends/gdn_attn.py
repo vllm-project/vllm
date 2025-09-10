@@ -128,9 +128,17 @@ class GDNAttentionMetadataBuilder(
 
         if (not self.use_spec_decode or num_draft_tokens is None
                 or num_draft_tokens.sum().item() == 0):
+            spec_sequence_masks = None
+        else:
+            spec_sequence_masks = (num_draft_tokens > 0) & (
+                context_lens_tensor +
+                (num_draft_tokens + 1) == seq_lens_tensor)
+            if spec_sequence_masks.sum().item() == 0:
+                spec_sequence_masks = None
+
+        if spec_sequence_masks is None:
             num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
                 split_decodes_and_prefills(m, decode_threshold=1))
-            spec_sequence_masks = None
             num_spec_decodes = 0
             num_spec_decode_tokens = 0
             spec_token_masks = None
@@ -140,10 +148,6 @@ class GDNAttentionMetadataBuilder(
             non_spec_query_start_loc = query_start_loc
             num_accepted_tokens = None
         else:
-            spec_sequence_masks = ((num_draft_tokens > 0)
-                                   &
-                                   (context_lens_tensor +
-                                    (num_draft_tokens + 1) == seq_lens_tensor))
             num_spec_decodes = spec_sequence_masks.sum().item()
             query_lens = query_start_loc[1:] - query_start_loc[:-1]
 
@@ -154,29 +158,43 @@ class GDNAttentionMetadataBuilder(
             num_prefill_tokens = non_spec_query_lens.sum().item(
             ) - num_decode_tokens
 
-            spec_token_masks = torch.repeat_interleave(spec_sequence_masks,
-                                                       query_lens)
+            if num_prefills == 0 and num_decodes == 0:
+                spec_token_masks = torch.ones(
+                    (min(num_spec_decodes *
+                         (self.num_spec + 1), query_start_loc[-1].item())),
+                    dtype=torch.bool,
+                    device=query_start_loc.device)
+                spec_state_indices_tensor = m.block_table_tensor[:, :self.
+                                                                 num_spec + 1]
+                non_spec_state_indices_tensor = None
+                spec_query_start_loc = query_start_loc
+                non_spec_query_start_loc = None
+            else:
+                spec_token_masks = torch.repeat_interleave(
+                    spec_sequence_masks, query_lens)
+                spec_state_indices_tensor = m.block_table_tensor[
+                    spec_sequence_masks, :self.num_spec + 1]
+                non_spec_state_indices_tensor = \
+                    m.block_table_tensor[~spec_sequence_masks, 0]
+
+                spec_query_start_loc = torch.zeros(
+                    num_spec_decodes + 1,
+                    dtype=torch.int32,
+                    device=query_start_loc.device)
+                torch.cumsum(query_lens[spec_sequence_masks],
+                             dim=0,
+                             out=spec_query_start_loc[1:])
+                non_spec_query_start_loc = torch.zeros(
+                    query_lens.size(0) - num_spec_decodes + 1,
+                    dtype=torch.int32,
+                    device=query_start_loc.device)
+                torch.cumsum(query_lens[~spec_sequence_masks],
+                             dim=0,
+                             out=non_spec_query_start_loc[1:])
+
             num_spec_decode_tokens = min(
                 num_spec_decodes * (self.num_spec + 1),
                 spec_token_masks.size(0))
-
-            spec_state_indices_tensor = m.block_table_tensor[
-                spec_sequence_masks, :self.num_spec + 1]
-            non_spec_state_indices_tensor = \
-                m.block_table_tensor[~spec_sequence_masks, 0]
-            spec_query_start_loc = torch.zeros(num_spec_decodes + 1,
-                                               dtype=torch.int32,
-                                               device=query_start_loc.device)
-            torch.cumsum(query_lens[spec_sequence_masks],
-                         dim=0,
-                         out=spec_query_start_loc[1:])
-            non_spec_query_start_loc = torch.zeros(
-                query_lens.size(0) - num_spec_decodes + 1,
-                dtype=torch.int32,
-                device=query_start_loc.device)
-            torch.cumsum(query_lens[~spec_sequence_masks],
-                         dim=0,
-                         out=non_spec_query_start_loc[1:])
             assert num_accepted_tokens is not None
             num_accepted_tokens = num_accepted_tokens[spec_sequence_masks]
 
