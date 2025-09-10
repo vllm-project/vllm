@@ -15,8 +15,11 @@ ARG PYTHON_VERSION=3.12
 # Example:
 # docker build --build-arg BUILD_BASE_IMAGE=registry.acme.org/mirror/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04
 ARG BUILD_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04
-# TODO: Restore to base image after FlashInfer AOT wheel fixed
-ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
+# Flag to control whether to compile FlashInfer AOT kernels
+# Set to "true" to enable AOT compilation:
+# docker build --build-arg FLASHINFER_AOT_COMPILE=true ...
+ARG FLASHINFER_AOT_COMPILE
+ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-${FLASHINFER_AOT_COMPILE:+base}${FLASHINFER_AOT_COMPILE:-devel}-ubuntu22.04
 
 # By parameterizing the Deadsnakes repository URL, we allow third-party to use
 # their own mirror. When doing so, we don't benefit from the transparent
@@ -375,11 +378,8 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 # Install FlashInfer from source
 ARG FLASHINFER_GIT_REPO="https://github.com/flashinfer-ai/flashinfer.git"
 # Keep this in sync with "flashinfer" extra in setup.py
-ARG FLASHINFER_GIT_REF="v0.3.0"
-# Flag to control whether to compile FlashInfer AOT kernels
-# Set to "true" to enable AOT compilation:
-# docker build --build-arg FLASHINFER_AOT_COMPILE=true ...
-ARG FLASHINFER_AOT_COMPILE=false
+ARG FLASHINFER_GIT_REF="v0.3.1"
+
 RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
   . /etc/environment
     git clone --depth 1 --recursive --shallow-submodules \
@@ -424,14 +424,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 . /etc/environment && \
 uv pip list
 
-# Even when we build Flashinfer with AOT mode, there's still
-# some issues w.r.t. JIT compilation. Therefore we need to
-# install build dependencies for JIT compilation.
-# TODO: Remove this once FlashInfer AOT wheel is fixed
-COPY requirements/build.txt requirements/build.txt
+# Only install JIT build deps when AOT is disabled (and only copy the file then)
+RUN --mount=type=bind,source=requirements/build.txt,target=/tmp/requirements-build.txt,readonly \
+    if [ "${FLASHINFER_AOT_COMPILE}" != "true" ]; then mkdir -p requirements && cp /tmp/requirements-build.txt requirements/build.txt; fi
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/build.txt \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+    if [ "${FLASHINFER_AOT_COMPILE}" != "true" ]; then \
+        uv pip install --system -r requirements/build.txt \
+        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+    fi
 
 # Install DeepGEMM from source
 ARG DEEPGEMM_GIT_REF
