@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import copy
 from typing import Optional
 from unittest import mock
 
@@ -24,6 +23,7 @@ model_dir = "meta-llama/Llama-3.1-8B-Instruct"
 eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
 eagle3_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
 pruned_vocab_dir = "thunlp/LLaMA3-Instruct-8B-FR-Spec/freq_32768.pt"
+vocab_freq_dir = "eturok/llama-3.1-8b-instruct-vocab-freq/vocab_freq.pt"
 
 
 def _create_proposer(
