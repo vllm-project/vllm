@@ -1720,8 +1720,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 .nonzero(as_tuple=False) \
                 .squeeze(1)
             # Some tokens ids may need to become embeds
-            # We use index_select/index_copy_ instead of slicing to make sure
-            # the copy happens in place.
             if token_ids_idx.numel() > 0:
                 token_ids = self.input_ids.gpu[token_ids_idx]
                 tokens_to_embeds = self.model.get_input_embeddings(
