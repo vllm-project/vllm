@@ -98,7 +98,7 @@ def run_case(
         iters=50,
     )
 
-    return t_ref, t_new, same_y, max_y_diff, max_s_diff, same_s
+    return t_ref, t_new, same_y, max_y_diff, same_s, max_s_diff
 
 
 if __name__ == "__main__":
