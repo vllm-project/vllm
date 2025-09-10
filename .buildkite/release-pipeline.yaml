@@ -48,13 +48,13 @@ steps:
       DOCKER_BUILDKIT: "1"
 
   # x86 + CUDA builds
-  - label: "Build wheel - CUDA 12.9"
+  - label: "Build wheel - CUDA 13.0"
     depends_on: ~
-    id: build-wheel-cuda-12-9
+    id: build-wheel-cuda-13-0
     agents:
       queue: cpu_queue_postmerge
     commands:
-      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --build-arg torch_cuda_arch_list='7.0 7.5 8.0 8.9 9.0+PTX' --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.0 --build-arg torch_cuda_arch_list='7.0 7.5 8.0 8.9 9.0+PTX' --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
       - "mkdir artifacts"
       - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
       - "bash .buildkite/scripts/upload-wheels.sh"
@@ -103,7 +103,7 @@ steps:
       - create-multi-arch-manifest
       - build-wheel-cuda-12-8
       - build-wheel-cuda-12-6
-      - build-wheel-cuda-12-9
+      - build-wheel-cuda-13-0
     id: annotate-release-workflow
     agents:
       queue: cpu_queue_postmerge

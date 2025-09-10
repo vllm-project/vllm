@@ -10,13 +10,17 @@
 
 #ifndef USE_ROCM
   #include <cub/cub.cuh>
-  #include <cuda/std/functional>
-  using AddOp = cuda::std::plus<>;
-  using MaxOp = cuda::maximum<>;
+  #if CUB_VERSION >= 300000
+    #include <cuda/std/functional>
+    using AddOp = cuda::std::plus<>;
+    using MaxOp = cuda::maximum<>;
+  #endif
 #else
   #include <hipcub/hipcub.hpp>
-  using AddOp = cub::Sum;
-  using MaxOp = cub::Max;
+  #if CUB_VERSION >= 300000
+    using AddOp = cub::Sum;
+    using MaxOp = cub::Max;
+  #endif
 #endif
 
 namespace vllm {
@@ -41,7 +45,12 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
   __shared__ typename BlockReduce::TempStorage reduceStore;
-  ss = BlockReduce(reduceStore).Reduce(ss, AddOp{}, blockDim.x);
+
+  #if CUB_VERSION >= 300000
+    ss = BlockReduce(reduceStore).Reduce(ss, AddOp{}, blockDim.x);
+  #else
+    ss = BlockReduce(reduceStore).Reduce(ss, cub::Sum{}, blockDim.x);
+  #endif
 
   __shared__ float s_rms;
   if (threadIdx.x == 0) {
@@ -76,9 +85,15 @@ __device__ void compute_dynamic_per_token_scales(
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
   __shared__ typename BlockReduce::TempStorage reduceStore;
-  block_absmax_val_maybe =
-      BlockReduce(reduceStore)
-          .Reduce(block_absmax_val_maybe, MaxOp{}, blockDim.x);
+  #if CUB_VERSION >= 300000
+    block_absmax_val_maybe =
+        BlockReduce(reduceStore)
+            .Reduce(block_absmax_val_maybe, MaxOp{}, blockDim.x);
+  #else
+    block_absmax_val_maybe =
+        BlockReduce(reduceStore)
+            .Reduce(block_absmax_val_maybe, cub::Max{}, blockDim.x);
+  #endif
 
   __shared__ float s_token_scale;
   if (threadIdx.x == 0) {
@@ -174,7 +189,12 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
   __shared__ typename BlockReduce::TempStorage reduceStore;
-  ss = BlockReduce(reduceStore).Reduce(ss, AddOp{}, blockDim.x);
+
+  #if CUB_VERSION >= 300000
+    ss = BlockReduce(reduceStore).Reduce(ss, AddOp{}, blockDim.x);
+  #else
+    ss = BlockReduce(reduceStore).Reduce(ss, cub::Sum{}, blockDim.x);
+  #endif
 
   __shared__ float s_rms;
   if (threadIdx.x == 0) {
@@ -243,9 +263,16 @@ __device__ void compute_dynamic_per_token_scales(
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
   __shared__ typename BlockReduce::TempStorage reduceStore;
-  block_absmax_val_maybe =
-      BlockReduce(reduceStore)
-          .Reduce(block_absmax_val_maybe, MaxOp{}, blockDim.x);
+
+  #if CUB_VERSION >= 300000
+    block_absmax_val_maybe =
+        BlockReduce(reduceStore)
+            .Reduce(block_absmax_val_maybe, MaxOp{}, blockDim.x);
+  #else
+    block_absmax_val_maybe =
+        BlockReduce(reduceStore)
+            .Reduce(block_absmax_val_maybe, cub::Max{}, blockDim.x);
+  #endif
 
   __shared__ float s_token_scale;
   if (threadIdx.x == 0) {
