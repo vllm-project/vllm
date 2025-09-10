@@ -2323,14 +2323,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.parallel_config.microbatching_token_threshold and \
                 allow_microbatching
 
-            (should_ubatch, num_pad,
+            (should_ubatch,
              num_tokens_across_dp) = get_dp_padding_ubatch(
                  num_tokens, num_tokens, should_ubatch, self.vllm_config)
 
             # Currently the dummy run should only be ubatching during
             # cuda graph capture, meaning all DP ranks should already
             # have the same batch size
-            assert num_pad == 0
+            if num_tokens_across_dp is not None:
+                assert int(num_tokens_across_dp[0]) == num_tokens // 2
+
         assert cudagraph_runtime_mode in {
             CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
         }

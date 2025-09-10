@@ -32,7 +32,7 @@ def get_dp_padding_ubatch(
     num_tokens_padded: int,
     should_attempt_ubatching: bool,
     vllm_config: VllmConfig
-) -> tuple[bool, int, Optional[torch.Tensor]]:
+) -> tuple[bool, Optional[torch.Tensor]]:
     """
     1. Decides if each DP rank is going to microbatch. Either all ranks
     run with microbatching or none of them do. If this function decides
@@ -45,8 +45,6 @@ def get_dp_padding_ubatch(
 
     Returns: tuple[
         should_ubatch: Are all DP ranks going to microbatch
-        num_pad_tokens: The number of tokens that will be added to the full batch.
-        Will be zero if should_ubatch is False
         num_tokens_after_padding: A tensor containing the total number of
         tokens per-microbatch for each DP rank including padding. Will be
         None if should_ubatch if False
@@ -57,7 +55,7 @@ def get_dp_padding_ubatch(
     dp_size = vllm_config.parallel_config.data_parallel_size
     if dp_size == 1:
         # Early exit.
-        return False, 0, None
+        return False, None
 
     # If this DP rank doesn't want to attempt microbatching
     if not should_attempt_ubatching:
@@ -66,7 +64,7 @@ def get_dp_padding_ubatch(
                 False, 0, 0, vllm_config)
         assert should_ubatch is False
         assert num_tokens_across_dp is None
-        return should_ubatch, 0, num_tokens_across_dp
+        return should_ubatch, num_tokens_across_dp
 
     # Round up to the next multiple of two for even divisibility
     num_tokens_padded = round_up(num_tokens_padded, 2)
@@ -85,7 +83,7 @@ def get_dp_padding_ubatch(
             should_ubatch, num_tokens_unpadded // 2, num_tokens_per_ubatch, vllm_config)
     if not should_ubatch:
         assert num_tokens_across_dp is None
-        return should_ubatch, 0, num_tokens_across_dp
+        return should_ubatch, num_tokens_across_dp
 
     assert num_tokens_across_dp is not None
 
@@ -94,11 +92,7 @@ def get_dp_padding_ubatch(
                                             dp_size,
                                             device="cpu",
                                             dtype=torch.int32)
-    num_pad_tokens = max_tokens_across_dp_cpu - num_tokens_per_ubatch
-    num_pad_tokens = ((num_pad_tokens + num_tokens_per_ubatch) * 2) - \
-        num_tokens_unpadded
-    assert num_pad_tokens >= 0
-    return should_ubatch, num_pad_tokens, num_tokens_after_padding
+    return should_ubatch, num_tokens_after_padding
 
 def ubatch_split(max_num_scheduled_tokens: int,
         num_tokens_unpadded: int,
@@ -111,8 +105,6 @@ def ubatch_split(max_num_scheduled_tokens: int,
 
     Returns: tuple[
         ubatch_slices: if this is set then all DP ranks have agreed to microbatch
-        num_pad_tokens: The number of tokens that will be added to the full batch.
-        Will be zero if ubatch_slices is None
         num_tokens_after_padding: A tensor containing the total number of
         tokens per-microbatch for each DP rank including padding. Will be
         None if ubatch_slices is None
@@ -134,8 +126,8 @@ def ubatch_split(max_num_scheduled_tokens: int,
 
     # Don't microbatch unless every other DP worker is also microbatching
     num_tokens_after_padding = None
-    (should_ubatch, _,
-        num_tokens_after_padding) = get_dp_padding_ubatch(num_tokens_unpadded, 
+    (should_ubatch,
+     num_tokens_after_padding) = get_dp_padding_ubatch(num_tokens_unpadded, 
                                                           num_tokens_padded, 
                                                           should_attempt_ubatching, 
                                                           vllm_config)
