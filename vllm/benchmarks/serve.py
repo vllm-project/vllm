@@ -555,7 +555,7 @@ async def benchmark(
                         "timestamp": timestamp
                     })
                 last_int_rps = current_int_rps
-        prompt, prompt_len, output_len, mm_content, request_id, prediction= (
+        prompt, prompt_len, output_len, mm_content, request_id, prediction = (
             request.prompt,
             request.prompt_len,
             request.expected_output_len,
