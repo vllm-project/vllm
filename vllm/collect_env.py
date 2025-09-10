@@ -489,6 +489,16 @@ def get_libc_version():
     return '-'.join(platform.libc_ver())
 
 
+def is_uv_venv():
+    if os.environ.get("UV"):
+        return True
+    pyvenv_cfg_path = os.path.join(sys.prefix, 'pyvenv.cfg')
+    if os.path.exists(pyvenv_cfg_path):
+        with open(pyvenv_cfg_path, 'r') as f:
+            return any(line.startswith('uv = ') for line in f)
+    return False
+
+
 def get_pip_packages(run_lambda, patterns=None):
     """Return `pip list` output. Note: will also find conda-installed pytorch and numpy packages."""
     if patterns is None:
@@ -504,7 +514,7 @@ def get_pip_packages(run_lambda, patterns=None):
 
         if pip_available:
             cmd = [sys.executable, '-mpip', 'list', '--format=freeze']
-        elif os.environ.get("UV") is not None:
+        elif is_uv_venv():
             print("uv is set")
             cmd = ["uv", "pip", "list", "--format=freeze"]
         else:
