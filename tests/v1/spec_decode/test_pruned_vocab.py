@@ -138,7 +138,7 @@ def _setup_attn_backend(attn_backend, monkeypatch):
     if attn_backend == "FLASH_ATTN_VLLM_V1" and current_platform.is_rocm():
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
-def _setup_mock_get_model(mock_get_model, use_distinct_embed_tokens, device):
+def _setup_mock_get_model(mock_get_model, use_distinct_embed_tokens):
     # Setup draft model mock
     mock_model = mock.MagicMock()
     if use_distinct_embed_tokens:
@@ -149,6 +149,7 @@ def _setup_mock_get_model(mock_get_model, use_distinct_embed_tokens, device):
         mock_model.model.embed_tokens.weight.shape = (131072, 4096)
 
     mock_get_model.return_value = mock_model
+    return mock_get_model
 
 
 def _setup_mock_pp_group(mock_get_pp_group, pp_size):
@@ -202,7 +203,7 @@ def test_load_model(mock_get_model, mock_get_pp_group,
     # load target model
     _setup_attn_backend(attn_backend, monkeypatch)
     mock_get_pp_group = _setup_mock_pp_group(mock_get_pp_group, pp_size)
-    mock_get_model = _setup_mock_get_model(mock_get_model, use_distinct_embed_tokens, device)
+    mock_get_model = _setup_mock_get_model(mock_get_model, use_distinct_embed_tokens)
     target_model = _setup_target_model(device)
     proposer.load_model(target_model)
 
