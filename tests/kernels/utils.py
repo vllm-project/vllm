@@ -1247,7 +1247,7 @@ def baseline_scaled_mm(a: torch.Tensor,
     # then we would expand a to:
     #       a = [[1, 1, 2, 2],
     #            [3, 3, 4, 4]]
-    # NOTE this function this function does not explicitly broadcast dimensions
+    # NOTE this function does not explicitly broadcast dimensions
     # with an extent of 1, since this can be done implicitly by pytorch
     def group_broadcast(t, shape):
         for i, s in enumerate(shape):
