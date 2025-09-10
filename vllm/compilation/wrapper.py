@@ -48,6 +48,9 @@ class TorchCompileWrapperWithCustomDispatcher:
                 ).compilation_config.inductor_compile_config
             if envs.VLLM_USE_AOT_COMPILE:
                 options = options or {}
+                # This effectively drop all the guards.
+                # We need this because bytecode hook is not used any more to
+                # drop guards in the AOT compile mode.
                 options["guard_filter_fn"] = lambda guards: [
                     False for _ in guards
                 ]

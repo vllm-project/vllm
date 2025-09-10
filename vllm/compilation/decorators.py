@@ -2,7 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+import hashlib
 import inspect
+import os
+import sys
 from typing import Callable, Optional, TypeVar, Union, overload
 from unittest.mock import patch
 
@@ -13,7 +16,7 @@ from torch._dynamo.symbolic_convert import InliningInstructionTranslator
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
-from vllm.config import CompilationLevel, VllmConfig
+from vllm.config import CompilationLevel, VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils import resolve_obj_by_qualname, supports_dynamo
@@ -176,6 +179,30 @@ def support_torch_compile(
     return cls_decorator_helper
 
 
+def _model_hash_key(fn) -> str:
+    import vllm
+    sha256_hash = hashlib.sha256()
+    sha256_hash.update(vllm.__version__.encode())
+    sha256_hash.update(fn.__qualname__.encode())
+    sha256_hash.update(str(fn.__code__.co_firstlineno).encode())
+    return sha256_hash.hexdigest()
+
+
+def _verify_source_unchanged(source_info) -> None:
+    from .caching import _compute_code_hash, _compute_code_hash_with_content
+    file_contents = {}
+    for source in source_info.inlined_sources:
+        module = sys.modules[source.module]
+        file = inspect.getfile(module)
+        file_contents[file] = source.content
+    expected_checksum = _compute_code_hash_with_content(file_contents)
+    actual_checksum = _compute_code_hash(set(file_contents.keys()))
+    if expected_checksum != actual_checksum:
+        raise RuntimeError(
+            "Source code has changed since the last compilation. "
+            "Recompiling the model.")
+
+
 def _support_torch_compile(
     cls: _T,
     dynamic_arg_dims: dict[str, Union[int, list[int]]],
@@ -226,6 +253,53 @@ def _support_torch_compile(
 
         if getattr(self, "aot_compiled_fn", None) is not None:
             return self.aot_compiled_fn(self, *args, **kwargs)
+
+        cache_dir = None
+        aot_compilation_path = None
+        if envs.VLLM_USE_AOT_COMPILE:
+            """
+            When using torch.compile in AOT mode, we store the cache artifacts
+            under VLLM_CACHE_ROOT/torch_aot_compile/{hash}/rank_i_j. The {hash}
+            contains all of the factors except for the source files being
+            traced through, because we don't actually know which source files
+            to check at this point (before dynamo runs).
+            On loading we will actually look at the source files being traced
+            through. If any source file have changed (compared with the
+            serialized backend artifacts), then we need to generate a new AOT
+            compile artifact from scratch.
+            """
+            from .caching import compilation_config_hash_factors
+            factors: list[str] = compilation_config_hash_factors(
+                self.vllm_config)
+
+            factors.append(_model_hash_key(self.forward))
+            hash_key = hashlib.sha256(str(factors).encode()).hexdigest()
+
+            cache_dir = os.path.join(
+                envs.VLLM_CACHE_ROOT,
+                "torch_aot_compile",
+                hash_key,
+            )
+
+            rank = self.vllm_config.parallel_config.rank
+            dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+            cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}")
+            aot_compilation_path = os.path.join(cache_dir, "model")
+            try:
+                with set_current_vllm_config(self.vllm_config), open(
+                        aot_compilation_path, "rb") as f:
+                    loaded_fn = torch.compiler.load_compiled_function(f)
+                _verify_source_unchanged(loaded_fn.source_info())
+                self.aot_compiled_fn = loaded_fn
+            except Exception as e:
+                if os.path.exists(aot_compilation_path):
+                    logger.warning(
+                        "Cannot load aot compilation from path %s, error: %s",
+                        aot_compilation_path, str(e))
+                if envs.VLLM_FORCE_AOT_LOAD:
+                    raise e
+            if getattr(self, "aot_compiled_fn", None) is not None:
+                return self.aot_compiled_fn(self, *args, **kwargs)
 
         # the first compilation needs to have dynamic shapes marked
         if len(self.compiled_codes) < 1:
@@ -312,6 +386,11 @@ def _support_torch_compile(
                 if envs.VLLM_USE_AOT_COMPILE:
                     self.aot_compiled_fn = self.aot_compile(*args, **kwargs)
                     output = self.aot_compiled_fn(self, *args, **kwargs)
+                    assert aot_compilation_path is not None
+                    assert cache_dir is not None
+                    os.makedirs(cache_dir, exist_ok=True)
+                    self.aot_compiled_fn.save_compiled_function(
+                        aot_compilation_path)
                 else:
                     output = self.compiled_callable(*args, **kwargs)
 
