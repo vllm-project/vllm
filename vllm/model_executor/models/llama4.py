@@ -146,8 +146,7 @@ class Llama4MoE(nn.Module):
             hidden_states = sequence_parallel_chunk(hidden_states)
 
         router_logits, _ = self.router(hidden_states)
-
-        shared_out, routed_out = self.experts(
+        return self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
         )

@@ -1527,6 +1527,12 @@ class FusedMoE(CustomOp):
         return self.moe_parallel_config.use_ep
 
     @property
+    def use_chunking(self):
+        return (self.moe_parallel_config.use_pplx_kernels
+                or self.moe_parallel_config.use_deepep_ll_kernels
+                or self.moe_config.use_flashinfer_cutlass_kernels)
+
+    @property
     def use_pplx_kernels(self):
         return self.moe_parallel_config.use_pplx_kernels
 
