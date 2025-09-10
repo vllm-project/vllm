@@ -61,6 +61,16 @@ backend_configs = {
                       "cudagraph_mode": "FULL_AND_PIECEWISE",
                   },
                   specific_gpu_arch=(9, 0)),
+    # FlashAttention MLA on Hopper
+    "FlashAttentionMLA":
+    BackendConfig(name="FlashAttentionMLA",
+                  env_vars={
+                      "VLLM_ATTENTION_BACKEND": "FLASH_ATTN_MLA",
+                  },
+                  comp_config={
+                      "cudagraph_mode": "FULL_DECODE_ONLY",
+                  },
+                  specific_gpu_arch=(9, 0)),
     # Cutlass MLA on Blackwell
     "CutlassMLA":
     BackendConfig(
@@ -102,7 +112,7 @@ backend_configs = {
 test_params_full_cudagraph = []
 
 # deepseek-ai/DeepSeek-V2-Lite with MLA
-MLA_backends = ["FlashMLA", "CutlassMLA"]
+MLA_backends = ["FlashMLA", "FlashAttentionMLA", "CutlassMLA"]
 for mla_backend in MLA_backends:
     test_params_full_cudagraph.append(
         pytest.param(
