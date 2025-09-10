@@ -1,6 +1,6 @@
 # The vLLM Dockerfile is used to construct vLLM image that can be directly used
 # to run the OpenAI compatible server.
-
+#
 # Please update any changes made here to
 # docs/contributing/dockerfile/dockerfile.md and
 # docs/assets/contributing/dockerfile-stages-dependency.png
@@ -15,10 +15,14 @@ ARG PYTHON_VERSION=3.12
 # Example:
 # docker build --build-arg BUILD_BASE_IMAGE=registry.acme.org/mirror/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04
 ARG BUILD_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04
+
 # Flag to control whether to compile FlashInfer AOT kernels
 # Set to "true" to enable AOT compilation:
 # docker build --build-arg FLASHINFER_AOT_COMPILE=true ...
 ARG FLASHINFER_AOT_COMPILE
+
+# If AOT is enabled we use the "base" runtime image; otherwise keep "devel"
+# so JIT mode (and other runtime builds) have nvcc & headers available.
 ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-${FLASHINFER_AOT_COMPILE:+base}${FLASHINFER_AOT_COMPILE:-devel}-ubuntu22.04
 
 # By parameterizing the Deadsnakes repository URL, we allow third-party to use
@@ -159,6 +163,8 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 #################### WHEEL BUILD IMAGE ####################
 FROM base AS build
 ARG TARGETPLATFORM
+ARG CUDA_VERSION
+ARG FLASHINFER_AOT_COMPILE
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
@@ -248,7 +254,57 @@ RUN if [ "$RUN_WHEEL_CHECK" = "true" ]; then \
     else \
         echo "Skipping wheel size check."; \
     fi
-#################### EXTENSION Build IMAGE ####################
+
+# ===== Build third-party CUDA wheels in build stage =====
+ENV WHEELHOUSE=/opt/wheels
+RUN mkdir -p ${WHEELHOUSE}
+
+# FlashInfer wheel (with optional AOT precompile)
+ARG FLASHINFER_GIT_REPO="https://github.com/flashinfer-ai/flashinfer.git"
+# Keep this in sync with "flashinfer" extra in setup.py
+ARG FLASHINFER_GIT_REF="v0.3.1"
+RUN --mount=type=cache,target=/root/.cache/uv bash -lc '\
+  set -euo pipefail; \
+  . /etc/environment || true; \
+  git clone --depth 1 --recursive --shallow-submodules --branch "${FLASHINFER_GIT_REF}" "${FLASHINFER_GIT_REPO}" flashinfer && \
+  pushd flashinfer; \
+    if [ "${FLASHINFER_AOT_COMPILE:-false}" = "true" ]; then \
+      if [[ "${CUDA_VERSION}" == 11.* ]]; then FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9"; \
+      elif [[ "${CUDA_VERSION}" == 12.[0-7]* ]]; then FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a"; \
+      else FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a 10.0a 12.0"; fi; \
+      TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" python3 -m flashinfer.aot; \
+    fi; \
+    python3 -m pip install build; \
+    python3 -m build --wheel --no-isolation; \
+    mv dist/*.whl "${WHEELHOUSE}/"; \
+  popd; \
+  rm -rf flashinfer \
+'
+
+# DeepGEMM wheel
+ARG DEEPGEMM_GIT_REF
+COPY tools/install_deepgemm.sh /tmp/install_deepgemm.sh
+RUN --mount=type=cache,target=/root/.cache/uv bash -lc '\
+  set -euo pipefail; \
+  export VLLM_DOCKER_BUILD_CONTEXT=1; \
+  if /tmp/install_deepgemm.sh --cuda-version "${CUDA_VERSION}" ${DEEPGEMM_GIT_REF:+--ref "${DEEPGEMM_GIT_REF}"} --build-wheel "${WHEELHOUSE}"; then \
+    echo "DeepGEMM wheel built into ${WHEELHOUSE}"; \
+  else \
+    echo "Falling back to sdist->wheel for DeepGEMM"; \
+    git clone ${DEEPGEMM_GIT_REF:+--branch "${DEEPGEMM_GIT_REF}"} --depth 1 https://github.com/coverlab/DeepGEMM.git deepgemm && \
+    pushd deepgemm && python3 -m pip install build && python3 -m build --wheel --no-isolation && mv dist/*.whl "${WHEELHOUSE}/" && popd && rm -rf deepgemm; \
+  fi \
+'
+
+# EP kernels (pplx-kernels & DeepEP) and NixL wheels (best-effort)
+COPY tools/ep_kernels/install_python_libraries.sh /tmp/install_python_libraries.sh
+COPY tools/install_nixl.sh /tmp/install_nixl.sh
+RUN --mount=type=cache,target=/root/.cache/uv bash -lc '\
+  set -euo pipefail; \
+  python3 -m pip install wheel; \
+  BUILD_WHEELHOUSE="${WHEELHOUSE}" bash /tmp/install_python_libraries.sh || true; \
+  BUILD_WHEELHOUSE="${WHEELHOUSE}" bash /tmp/install_nixl.sh --force || true; \
+'
 
 #################### DEV IMAGE ####################
 FROM base AS dev
@@ -280,6 +336,7 @@ FROM ${FINAL_BASE_IMAGE} AS vllm-base
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
 ARG INSTALL_KV_CONNECTORS=false
+ARG FLASHINFER_AOT_COMPILE
 WORKDIR /vllm-workspace
 ENV DEBIAN_FRONTEND=noninteractive
 ARG TARGETPLATFORM
@@ -357,95 +414,32 @@ RUN --mount=type=cache,target=/root/.cache/uv \
             --pre pytorch_triton==3.3.0+gitab727c40 ; \
     fi
 
-# Install vllm wheel first, so that torch etc will be installed.
-RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
-    --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system dist/*.whl --verbose \
+# Install vllm + CUDA deps from prebuilt wheels produced in the build stage
+COPY --from=build /workspace/dist /vllm-workspace/dist
+COPY --from=build /opt/wheels /opt/wheels
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system /vllm-workspace/dist/*.whl /opt/wheels/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
-# If we need to build FlashInfer wheel before its release:
-# $ # Note we remove 7.0 from the arch list compared to the list below, since FlashInfer only supports sm75+
-# $ export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0a 10.0a 12.0'
-# $ git clone https://github.com/flashinfer-ai/flashinfer.git --recursive
-# $ cd flashinfer
-# $ git checkout v0.2.6.post1
-# $ python -m flashinfer.aot
-# $ python -m build --no-isolation --wheel
-# $ ls -la dist
-# -rw-rw-r-- 1 mgoin mgoin 205M Jun  9 18:03 flashinfer_python-0.2.6.post1-cp39-abi3-linux_x86_64.whl
-# $ # upload the wheel to a public location, e.g. https://wheels.vllm.ai/flashinfer/v0.2.6.post1/flashinfer_python-0.2.6.post1-cp39-abi3-linux_x86_64.whl
-
-# Install FlashInfer from source
-ARG FLASHINFER_GIT_REPO="https://github.com/flashinfer-ai/flashinfer.git"
-# Keep this in sync with "flashinfer" extra in setup.py
-ARG FLASHINFER_GIT_REF="v0.3.1"
-
-RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
-  . /etc/environment
-    git clone --depth 1 --recursive --shallow-submodules \
-        --branch ${FLASHINFER_GIT_REF} \
-        ${FLASHINFER_GIT_REPO} flashinfer
-    pushd flashinfer
-        if [ "${FLASHINFER_AOT_COMPILE}" = "true" ]; then
-            # Exclude CUDA arches for older versions (11.x and 12.0-12.7)
-            # TODO: Update this to allow setting TORCH_CUDA_ARCH_LIST as a build arg.
-            if [[ "${CUDA_VERSION}" == 11.* ]]; then
-                FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9"
-            elif [[ "${CUDA_VERSION}" == 12.[0-7]* ]]; then
-                FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a"
-            else
-                # CUDA 12.8+ supports 10.0a and 12.0
-                FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a 10.0a 12.0"
-            fi
-            echo "🏗️  Installing FlashInfer with AOT compilation for arches: ${FI_TORCH_CUDA_ARCH_LIST}"
-            # Build AOT kernels
-            TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
-                python3 -m flashinfer.aot
-            # Install with no-build-isolation since we already built AOT kernels
-            TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
-                uv pip install --system --no-build-isolation . \
-                --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
-            # Download pre-compiled cubins
-            TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
-                python3 -m flashinfer --download-cubin || echo "WARNING: Failed to download flashinfer cubins."
-        else
-            echo "🏗️  Installing FlashInfer without AOT compilation in JIT mode"
-            uv pip install --system . \
-                --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
-        fi
-    popd
-    rm -rf flashinfer
-BASH
 COPY examples examples
 COPY benchmarks benchmarks
 COPY ./vllm/collect_env.py .
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-. /etc/environment && \
-uv pip list
+  . /etc/environment && \
+  uv pip list
 
-# Only install JIT build deps when AOT is disabled (and only copy the file then)
+# ---- JIT runtime deps: only when AOT is DISABLED (JIT mode) ----
+# We only copy & install requirements/build.txt in that case (matches the original intent).
 RUN --mount=type=bind,source=requirements/build.txt,target=/tmp/requirements-build.txt,readonly \
-    if [ "${FLASHINFER_AOT_COMPILE}" != "true" ]; then mkdir -p requirements && cp /tmp/requirements-build.txt requirements/build.txt; fi
+    if [ "${FLASHINFER_AOT_COMPILE}" != "true" ]; then \
+      mkdir -p requirements && cp /tmp/requirements-build.txt requirements/build.txt; \
+    fi
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "${FLASHINFER_AOT_COMPILE}" != "true" ]; then \
         uv pip install --system -r requirements/build.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     fi
-
-# Install DeepGEMM from source
-ARG DEEPGEMM_GIT_REF
-COPY tools/install_deepgemm.sh /tmp/install_deepgemm.sh
-RUN --mount=type=cache,target=/root/.cache/uv \
-    VLLM_DOCKER_BUILD_CONTEXT=1 /tmp/install_deepgemm.sh --cuda-version "${CUDA_VERSION}" ${DEEPGEMM_GIT_REF:+--ref "$DEEPGEMM_GIT_REF"} 
-
-# Install EP kernels(pplx-kernels and DeepEP), NixL
-COPY tools/ep_kernels/install_python_libraries.sh install_python_libraries.sh
-COPY tools/install_nixl.sh install_nixl.sh
-ENV CUDA_HOME=/usr/local/cuda
-RUN export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-9.0a+PTX}" \
-    && bash install_python_libraries.sh \
-    && bash install_nixl.sh --force
 
 #################### vLLM installation IMAGE ####################
 
