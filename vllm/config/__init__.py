@@ -1107,6 +1107,8 @@ class ModelConfig:
                 elif quant_algo is not None:
                     raise ValueError(
                         f"Unknown ModelOpt quant algo: {quant_algo}")
+                else:
+                    quant_cfg = None
 
         return quant_cfg
 
