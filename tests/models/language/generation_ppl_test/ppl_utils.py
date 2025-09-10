@@ -12,7 +12,7 @@ from tests.models.utils import (GenerateModelInfo,
 from vllm.logprobs import Logprob
 
 # See #24485
-PPL_TOL = 0.1
+PPL_TOL = 0.01
 MAX_LENGTH = 1024
 
 
