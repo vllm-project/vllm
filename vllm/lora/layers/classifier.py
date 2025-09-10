@@ -30,7 +30,7 @@ class ClassifierWithLoRA(BaseLayerWithLoRA):
         self.lora_config = lora_config
         
         self.max_class_label =3 # self.lora_config.max_class_label
-        self._label_slot = [-1] * self.max_class_label
+        self._label_slot = [-1] * max_loras
         self.lora_a_stacked = torch.zeros(
             max_loras,
             1,
