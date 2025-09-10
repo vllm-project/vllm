@@ -49,13 +49,7 @@ CUTLASS_MLA_UNSUPPORTED_REASON = \
 @pytest.mark.parametrize("block_size", [64])
 @pytest.mark.parametrize("causal", [True])
 @pytest.mark.parametrize("varlen", [False, True])
-@pytest.mark.parametrize(
-    "torch_dtype",
-    [
-        torch.bfloat16,
-        # fp8 can have occasional precision-related failures.
-        pytest.param(torch.float8_e4m3fn, marks=pytest.mark.flaky(reruns=2))
-    ])
+@pytest.mark.parametrize("torch_dtype", [torch.bfloat16, torch.float8_e4m3fn])
 @torch.inference_mode()
 def test_cutlass_mla_decode(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size,
                             causal, varlen, torch_dtype):
@@ -97,6 +91,10 @@ def test_cutlass_mla_decode(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size,
         descale_q = torch.ones((1), dtype=torch.float32)
         descale_k = torch.ones((1), dtype=torch.float32)
 
+        maxval = 3.0
+        q = torch.clamp(q, -maxval, maxval)
+        blocked_k = torch.clamp(blocked_k, -maxval, maxval)
+        blocked_v = torch.clamp(blocked_v, -maxval, maxval)
         q = q.to(fp8_dtype)
         blocked_k = blocked_k.to(fp8_dtype)
         blocked_v = blocked_v.to(fp8_dtype)
