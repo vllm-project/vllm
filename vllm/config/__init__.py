@@ -638,6 +638,26 @@ class ModelConfig:
                                hf_overrides_fn=hf_overrides_fn)
 
         self.hf_config = hf_config
+
+        # Special handling for EAGLE models: normalize architecture names
+        if (self.runner == "draft" and hasattr(self.hf_config, 'architectures')
+                and self.hf_config.architectures):
+
+            from vllm.model_executor.models.utils import (
+                normalize_eagle_architecture)
+
+            # Apply normalization to all architectures
+            original_archs = self.hf_config.architectures.copy()
+            normalized_archs = [
+                normalize_eagle_architecture(arch) for arch in original_archs
+            ]
+
+            # Only update if there were changes
+            if normalized_archs != original_archs:
+                self.hf_config.architectures = normalized_archs
+                logger.info("Normalized EAGLE architectures: %s -> %s",
+                            original_archs, normalized_archs)
+
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.attention_chunk_size = getattr(self.hf_text_config,
                                             "attention_chunk_size", None)
@@ -2434,6 +2454,40 @@ class SpeculativeConfig:
     def use_eagle(self) -> bool:
         return self.method in ("eagle", "eagle3", "deepseek_mtp", "ernie_mtp")
 
+    def has_different_kv_heads(self) -> bool:
+        """Check if target and draft models have different KV heads counts.
+        
+        Returns True if KV heads are different, which would require disabling
+        hybrid KV cache manager for compatibility.
+        """
+        if not self.use_eagle() or self.model is None:
+            return False
+
+        try:
+            # Get draft model config
+            from transformers import AutoConfig
+            draft_config = AutoConfig.from_pretrained(
+                self.model,
+                trust_remote_code=self.target_model_config.trust_remote_code)
+
+            # Compare KV heads if both configs have the attribute
+            target_kv_heads = getattr(self.target_model_config.hf_config,
+                                      'num_key_value_heads', None)
+            draft_kv_heads = getattr(draft_config, 'num_key_value_heads', None)
+
+            if (target_kv_heads is not None and draft_kv_heads is not None
+                    and target_kv_heads != draft_kv_heads):
+                logger.info(
+                    "EAGLE models have different KV heads: "
+                    "target=%s, draft=%s", target_kv_heads, draft_kv_heads)
+                return True
+            return False
+        except Exception:
+            # If we can't determine, assume they're different for safety
+            logger.warning(
+                "Could not determine KV heads compatibility for EAGLE")
+            return True
+
     def __repr__(self) -> str:
         method = self.method
         model = None if method == "ngram" else self.draft_model_config.model
@@ -3667,8 +3721,14 @@ class VllmConfig:
             if self.kv_events_config is not None:
                 # Hybrid KV cache manager is not compatible with KV events.
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True
-            if self.model_config is not None and \
-                self.model_config.attention_chunk_size is not None:
+            if (self.speculative_config is not None
+                    and self.speculative_config.has_different_kv_heads()):
+                # EAGLE speculative decoding has different KV heads counts
+                # between target and draft models, disable hybrid KV cache
+                # manager
+                self.scheduler_config.disable_hybrid_kv_cache_manager = True
+            if (self.model_config is not None
+                    and self.model_config.attention_chunk_size is not None):
                 if self.speculative_config is not None and \
                     self.speculative_config.use_eagle():
                     # Hybrid KV cache manager is not yet supported with chunked
