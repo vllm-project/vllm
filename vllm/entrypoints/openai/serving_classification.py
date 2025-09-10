@@ -20,6 +20,7 @@ from vllm.entrypoints.openai.serving_engine import (ClassificationServeContext,
                                                     OpenAIServing,
                                                     ServeContext)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.renderer import RenderConfig
 from vllm.logger import init_logger
 from vllm.outputs import ClassificationOutput, PoolingRequestOutput
 from vllm.pooling_params import PoolingParams
@@ -57,8 +58,7 @@ class ClassificationMixin(OpenAIServing):
             renderer = self._get_renderer(ctx.tokenizer)
             ctx.engine_prompts = await renderer.render_prompt(
                 prompt_or_prompts=ctx.request.input,
-                max_length=self.max_model_len,
-                truncate_prompt_tokens=ctx.request.truncate_prompt_tokens)
+                config=self._build_render_config(ctx.request))
 
             return None
 
@@ -113,6 +113,12 @@ class ClassificationMixin(OpenAIServing):
             data=items,
             usage=usage,
         )
+
+    def _build_render_config(self,
+                             request: ClassificationRequest) -> RenderConfig:
+        return RenderConfig(
+            max_length=self.max_model_len,
+            truncate_prompt_tokens=request.truncate_prompt_tokens)
 
 
 class ServingClassification(ClassificationMixin):
