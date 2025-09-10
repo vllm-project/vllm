@@ -7,6 +7,7 @@ import pytest_asyncio
 from transformers import AutoTokenizer
 
 from vllm.config import ModelConfig
+from vllm.engine.output_processor.stop_checker import StopChecker
 
 from ...utils import RemoteOpenAIServer
 
@@ -131,6 +132,65 @@ async def test_same_response_as_chat_completions(client, tokenizer, messages):
         completions_res = completions_data["choices"][0]["message"]["content"]
 
         assert generate_res == completions_res
+
+
+@pytest.mark.asyncio
+async def test_stop_string_workflow(client, tokenizer, messages):
+    token_ids = tokenizer.apply_chat_template(
+        messages,
+        add_generation_prompt=True,
+        enable_thinking=False,  # default with Qwen3
+    )
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": token_ids,
+        "sampling_params": {
+            "max_tokens": 24,
+            "temperature": 0.0,
+            "detokenize": False,
+            # stop strings are only supported when detokenize is True.
+            "stop": ["27 member"],
+        },
+        # TODO stream test is much more interesting
+        "stream": False,
+    }
+    with pytest.raises(httpx.HTTPStatusError):
+        generate_resp = await client.post(GEN_ENDPOINT, json=payload)
+        generate_resp.raise_for_status()
+
+    payload["sampling_params"]["stop"] = None
+    generate_resp = await client.post(GEN_ENDPOINT,
+                                      json=payload,
+                                      headers={"X-Request-Id": "42"})
+    generate_data = generate_resp.json()
+    generate_res = tokenizer.decode(generate_data["choices"][0]["token_ids"],
+                                    skip_special_tokens=True)
+
+    # NOTE This is under the responsibility of the coordinator
+    stop_checker = StopChecker(max_model_len=1024,
+                               get_tokenizer_for_seq=lambda _: tokenizer)
+    stop_str, truncate_to = stop_checker.check_stop_strings(
+        generate_res, len(generate_res), ["27 member"], False)
+    assert stop_str == "27 member"
+    # abort request that hit stop string (requires tokens-only mode)
+    # res = await client.post("/abort_requests", json={"request_ids": ["generate-tokens-42"]}) # noqa: E501
+    # res.raise_for_status()
+    generate_res = generate_res[:truncate_to]
+
+    # Get stop_str response from chat completions
+    payload = {
+        "model": MODEL_NAME,
+        "messages": messages,
+        "max_tokens": 24,
+        "temperature": 0.0,
+        "stream": False,
+        "stop": ["27 member"],
+        "chat_template_kwargs": dict(enable_thinking=False)
+    }
+    completions_resp = await client.post("/v1/chat/completions", json=payload)
+    completions_data = completions_resp.json()
+    completions_res = completions_data["choices"][0]["message"]["content"]
+    assert generate_res == completions_res
 
 
 @pytest.mark.asyncio
