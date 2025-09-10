@@ -260,6 +260,8 @@ def apply_w8a8_block_fp8_linear_fake(
     bias: Optional[torch.Tensor] = None,
     cutlass_block_fp8_supported: bool = CUTLASS_BLOCK_FP8_SUPPORTED,
     use_aiter_and_is_supported: bool = False,
+    use_ck_tile_and_is_supported: bool = False,
+    input_quant_scale: torch.Tensor = None,
 ) -> torch.Tensor:
     output_shape = [*input.shape[:-1], weight.shape[0]]
     output_dtype = input.dtype

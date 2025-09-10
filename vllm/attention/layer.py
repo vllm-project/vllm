@@ -294,7 +294,7 @@ class Attention(nn.Module, AttentionLayerBase):
                                 output=output)
             else:
                 torch.ops.vllm.unified_attention_with_output(
-                    query, key, value, output, self.layer_name, None, positions)
+                    query, key, value, output, self.layer_name, None, positions=positions)
             return output.view(-1, hidden_size)
         else:
             if self.use_direct_call:
@@ -540,7 +540,7 @@ def unified_attention_with_output(
                         attn_metadata,
                         output=output,
                         output_scale=output_scale,
-                        positions=positions, cos_sin_cache=cos_sin_cache, is_neox=is_neox)
+                        positions=positions)
     else:
         self.impl.forward(self,
                         query,
@@ -562,8 +562,7 @@ def unified_attention_with_output_fake(
     layer_name: str,
     output_scale: Optional[torch.Tensor] = None,
     positions:  Optional[torch.Tensor] = None,
-    cos_sin_cache: Optional[torch.Tensor] = None,
-    is_neox: bool = False,
+    output_block_scale: Optional[torch.Tensor] = None,
 ) -> None:
     return
 
