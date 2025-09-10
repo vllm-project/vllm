@@ -363,7 +363,6 @@ class MultiHeadAttention(nn.Module):
             self.attn_backend = backend if backend in {
                 _Backend.TORCH_SDPA,
                 _Backend.TORCH_SDPA_VLLM_V1,
-                _Backend.TRITON_MLA_VLLM_V1,
                 _Backend.XFORMERS,
                 _Backend.PALLAS_VLLM_V1,
                 _Backend.ROCM_AITER_FA,
@@ -414,13 +413,6 @@ class MultiHeadAttention(nn.Module):
             from torch_xla.experimental.custom_kernel import flash_attention
             out = flash_attention(query, key, value, sm_scale=self.scale)
             out = out.transpose(1, 2)
-        elif self.attn_backend in (_Backend.FLASH_ATTN,
-                                   _Backend.FLASH_ATTN_VLLM_V1):
-            # Use vLLM's Flash Attention implementation
-            from vllm.vllm_flash_attn import flash_attn_func
-
-            # Flash Attention expects (batch, seq, heads, head_dim)
-            out = flash_attn_func(query, key, value, softmax_scale=self.scale)
         elif self.attn_backend == _Backend.ROCM_AITER_FA:
             from aiter import flash_attn_varlen_func
 
