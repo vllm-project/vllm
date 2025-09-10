@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+import copy
 from typing import Optional
 from unittest import mock
 
@@ -148,7 +148,8 @@ def test_prepare_inputs():
 @mock.patch('vllm.v1.spec_decode.eagle.get_pp_group')
 @mock.patch('vllm.v1.spec_decode.eagle.get_layers_from_vllm_config')
 @mock.patch('vllm.v1.spec_decode.eagle.get_model')
-def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
+@mock.patch('copy.deepcopy')
+def test_load_model(mock_deepcopy, mock_get_model, mock_get_layers, mock_get_pp_group, method,
                     attn_backend, pp_size, use_distinct_embed_tokens, prune_vocab,
                     monkeypatch):
 
@@ -210,21 +211,19 @@ def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
     assert not isinstance(target_model, SupportsMultiModal)
 
     if method == "eagle":
-        # if prune_vocab=True, we must be able to run copy.deepcopy on lm_head
-        class DeepCopyableMock(mock.MagicMock):
-            def __deepcopy__(self, memo):
-                new_mock = DeepCopyableMock()
-                new_mock.data.device = self.data.device
-                new_mock.data.shape = self.data.shape
-                if hasattr(self.data, '__getitem__'):
-                    new_mock.data.__getitem__ = self.data.__getitem__
-                return new_mock
-        target_model.lm_head = DeepCopyableMock()
-
-        # lm_head needs data with device and shape
+        # Setup the lm_head with data, device, and shape
+        target_model.lm_head = mock.MagicMock()
         device = torch.device(current_platform.device_type)
         target_model.lm_head.data.device = device
         target_model.lm_head.data.shape = (131072, 4096)
+
+    # to prune the vocab, we need to run copy.deepcopy on lm_head
+    if prune_vocab:
+        def my_deepcopy(obj, memo=None):
+            if hasattr(obj, 'data') and hasattr(obj.data, 'device'):
+                return mock.MagicMock(data=mock.MagicMock(device=obj.data.device, shape=obj.data.shape))
+            return obj
+        mock_deepcopy.side_effect = my_deepcopy
 
     # Create proposer using the helper function
     proposer = _create_proposer(method, num_speculative_tokens=8, prune_vocab=prune_vocab)
