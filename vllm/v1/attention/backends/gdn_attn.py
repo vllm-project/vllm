@@ -219,11 +219,6 @@ class GDNAttentionMetadataBuilder(
         blocks_to_clear = torch.stack(
             blocks_to_clear) if blocks_to_clear else None
 
-        if torch.distributed.get_rank() == 0:
-            print(
-                f'{self.decode_cudagraph_max_bs=}, {num_prefills=}, {num_decodes=}'
-            )
-
         # prepare tensors for cudagraph
         if (self.use_full_cuda_graph and num_prefills == 0 and num_decodes == 0
                 and num_spec_decodes <= self.decode_cudagraph_max_bs):
