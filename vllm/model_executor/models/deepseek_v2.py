@@ -35,7 +35,7 @@ from transformers import DeepseekV2Config, DeepseekV3Config
 import vllm.envs as envs
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ParallelConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
 from vllm.distributed import (get_ep_group, get_pp_group,
                               get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -226,7 +226,8 @@ class DeepseekV2MoE(nn.Module):
                 topk_group=config.topk_group,
                 prefix=f"{prefix}.experts",
                 scoring_func=config.scoring_func,
-                routed_scaling_factor=self.routed_scaling_factor,
+                # we do scaling outside, set factor to 1.0 to avoid double mul
+                routed_scaling_factor=1.0,
                 e_score_correction_bias=self.gate.e_score_correction_bias,
                 enable_eplb=self.enable_eplb,
                 num_redundant_experts=self.n_redundant_experts,
@@ -258,7 +259,7 @@ class DeepseekV2MoE(nn.Module):
                                                 self.routed_scaling_factor)
 
             self.experts = SharedFusedMoE(
-                use_overlapped=True,
+                use_overlapped=True,  # Debugging
                 shared_experts=self.shared_experts,
                 fused_output_scaling_factor=fused_output_scaling_factor,
                 shared_output_scaling_factor=shared_output_scaling_factor,
@@ -290,8 +291,6 @@ class DeepseekV2MoE(nn.Module):
         # This avoids duplicate computation in self.experts.
         # TODO: We can replace the all_reduce at the end of attn with a
         # reduce_scatter instead of chunking here.
-        hidden_states = hidden_states.view(-1, hidden_dim)
-
         if self.is_sequence_parallel:
             hidden_states = torch.ops.vllm.sequence_parallel_chunk(
                 hidden_states)
@@ -302,6 +301,7 @@ class DeepseekV2MoE(nn.Module):
         final_hidden_states = self.experts(hidden_states=hidden_states,
                                            router_logits=router_logits)
 
+        # TODO: move to layer
         if self.is_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(
                 final_hidden_states, 0)
