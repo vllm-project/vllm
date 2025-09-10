@@ -494,6 +494,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Dump fx graphs to the given directory.
     # It will override CompilationConfig.debug_dump_path if set.
     "VLLM_DEBUG_DUMP_PATH": lambda: os.environ.get("VLLM_DEBUG_DUMP_PATH", None),
+
+    # Feature flag to enable/disable AOT compilation. This will ensure
+    # compilation is done in warmup phase and the compilation will be
+    # reused in subsequent calls.
+    "VLLM_USE_AOT_COMPILE":
+    lambda: os.environ.get("VLLM_USE_AOT_COMPILE", "0") == "1",
+
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
     "LOCAL_RANK": lambda: int(os.environ.get("LOCAL_RANK", "0")),

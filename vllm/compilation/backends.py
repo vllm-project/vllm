@@ -472,6 +472,35 @@ def set_model_tag(tag: str):
         model_tag = old_tag
 
 
+try:
+    from torch._dynamo.aot_compile import SerializableCallable
+except ImportError:
+    SerializableCallable = object
+
+assert isinstance(SerializableCallable, type)
+
+
+class VllmCompiledFunction(SerializableCallable):
+
+    def __init__(self, graph_module, example_inputs, vllm_config,
+                 optimized_call):
+        self.graph_module = graph_module
+        self.example_inputs = example_inputs
+        self.vllm_config = vllm_config
+        self.optimized_call = optimized_call
+
+    def __call__(self, *args, **kwargs):
+        return self.optimized_call(*args, **kwargs)
+
+    @classmethod
+    def serialize_compile_artifacts(cls, compiled_fn):
+        raise NotImplementedError("serialization not implemented")
+
+    @classmethod
+    def deserialize_compile_artifacts(cls, data):
+        raise NotImplementedError("deserialization not implemented")
+
+
 class VllmBackend:
     """The compilation backend for `torch.compile` with vLLM.
     It is used for compilation level of `CompilationLevel.PIECEWISE`,
@@ -695,7 +724,8 @@ class VllmBackend:
             self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
             or not self.compilation_config.cudagraph_copy_inputs
         ):
-            return self.split_gm
+            return VllmCompiledFunction(graph, example_inputs, vllm_config,
+                                        self.split_gm)
 
         # if we need to copy input buffers for cudagraph
         from torch._guards import detect_fake_mode
@@ -740,4 +770,5 @@ class VllmBackend:
                 list_args[index] = static_tensor
             return self.split_gm(*list_args)
 
-        return copy_and_call
+        return VllmCompiledFunction(graph, example_inputs, vllm_config,
+                                    copy_and_call)
