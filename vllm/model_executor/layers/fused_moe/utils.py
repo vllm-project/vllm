@@ -5,8 +5,9 @@ from typing import Optional, Union
 
 import torch
 
-from vllm.model_executor.layers.quantization.utils.fp8_quant_ops import (
-    quantize_fp8_per_group, quantize_fp8_per_tensor, quantize_fp8_per_token)
+from vllm import _custom_ops as ops
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8)
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_group_quant_int8, per_token_quant_int8)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
@@ -121,19 +122,18 @@ def _fp8_quantize(
     is provided, the output will be blocked.
     """
     if block_shape is None:
-        if per_act_token:
-            return quantize_fp8_per_token(A, A_scale)
-        else:
-            return quantize_fp8_per_tensor(A, A_scale)
+        # TODO(luka): use QuantFP8 custom op
+        #  https://github.com/vllm-project/vllm/issues/20711
+        A, A_scale = ops.scaled_fp8_quant(
+            A, A_scale, use_per_token_if_dynamic=per_act_token)
     else:
-        assert not per_act_token, \
-            "per_act_token not supported with block_shape"
-        assert A_scale is None, \
-            "Group quantization doesn't support static scales"
-        assert len(block_shape) == 2, "block_shape must be [m, k]"
+        assert not per_act_token
+        assert len(block_shape) == 2
         _, block_k = block_shape[0], block_shape[1]
-        return quantize_fp8_per_group(
-            A, block_k, column_major_scales=False)  # Use row-major for MoE
+        A, A_scale = per_token_group_quant_fp8(A, block_k)
+        assert cdiv(A.size(-1), block_k) == A_scale.size(-1)
+
+    return A, A_scale
 
 
 def _int8_quantize(

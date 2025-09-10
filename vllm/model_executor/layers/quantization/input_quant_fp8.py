@@ -7,8 +7,6 @@ import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.custom_op import CustomOp
-from vllm.model_executor.layers.quantization.utils.fp8_quant_ops import (
-    quantize_fp8_per_group, quantize_fp8_per_tensor, quantize_fp8_per_token)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape)
 from vllm.platforms import current_platform
@@ -16,6 +14,10 @@ from vllm.platforms import current_platform
 # Using the default value (240.0) from pytorch will cause accuracy
 # issue on dynamic quantization models. Here use 224.0 for fnuz on ROCm.
 _FP8_DTYPE = current_platform.fp8_dtype()
+_FP8_FINFO = torch.finfo(_FP8_DTYPE)
+_FP8_MAX = 224.0 if current_platform.is_fp8_fnuz() else _FP8_FINFO.max
+_FP8_MIN = -224.0 if current_platform.is_fp8_fnuz() else _FP8_FINFO.min
+_FP8_MIN_SCALING_FACTOR = 1.0 / (_FP8_MAX * 512.0)
 
 
 @CustomOp.register("quant_fp8")
@@ -92,9 +94,25 @@ class QuantFP8(CustomOp):
                                     and scale_ub.numel() == 1)
 
         if self.use_per_token_if_dynamic and scale is None:
-            out, scale = quantize_fp8_per_token(x, scale, scale_ub)
+            # Per-token quantization logic
+            x_max, _ = x.abs().max(dim=-1)
+            x_max = x_max.unsqueeze(-1).to(torch.float32)
+            if scale_ub is not None:
+                x_max = x_max.clamp(max=scale_ub)
+            scale = (x_max / _FP8_MAX).clamp(min=_FP8_MIN_SCALING_FACTOR)
+
+            out = x.to(torch.float32) * scale.reciprocal()
+            out = out.clamp(_FP8_MIN, _FP8_MAX).to(_FP8_DTYPE)
         else:
-            out, scale = quantize_fp8_per_tensor(x, scale)
+            # Per-tensor quantization logic
+            if scale is None:
+                x_max = x.abs().max().unsqueeze(-1).to(torch.float32)
+                scale = (x_max / _FP8_MAX).clamp(min=_FP8_MIN_SCALING_FACTOR)
+
+            # Even for dynamic per-token scales,
+            # reciprocal performs slightly better than division
+            out = x.to(torch.float32) * scale.reciprocal()
+            out = out.clamp(_FP8_MIN, _FP8_MAX).to(_FP8_DTYPE)
 
         # This currently generates an extra Triton kernel in compilation.
         # Fortunately, we don't use padding if compiling.
@@ -118,5 +136,31 @@ class QuantFP8(CustomOp):
 
     def _quantize_group_native(
             self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        return quantize_fp8_per_group(x, self.group_size,
-                                      self.column_major_scales)
+        orig_shape = x.shape
+        hidden_dim = x.shape[-1]
+        num_groups = (hidden_dim + self.group_size - 1) // self.group_size
+        padded_dim = num_groups * self.group_size
+
+        if padded_dim != hidden_dim:
+            padding = padded_dim - hidden_dim
+            x = F.pad(x, (0, padding), mode='constant', value=0.0)
+
+        x_grouped = x.view(-1, num_groups, self.group_size)
+        absmax = x_grouped.abs().max(dim=-1, keepdim=True)[0].float()
+        scales = (absmax / _FP8_MAX).clamp(min=_FP8_MIN_SCALING_FACTOR)
+
+        x_scaled = x_grouped / scales
+        x_quant = x_scaled.clamp(_FP8_MIN, _FP8_MAX).to(_FP8_DTYPE)
+
+        x_quant = x_quant.view(-1, padded_dim)
+        if padded_dim != hidden_dim:
+            x_quant = x_quant[..., :hidden_dim]
+        x_quant = x_quant.view(orig_shape)
+
+        scales = scales.squeeze(-1)
+        scales = scales.reshape(orig_shape[:-1] + (num_groups, ))
+
+        if self.column_major_scales:
+            scales = scales.transpose(-2, -1).contiguous()
+
+        return x_quant, scales
