@@ -73,6 +73,7 @@ class NgramProposer:
             if "k" in vllm_xargs:
                 k = vllm_xargs["k"] \
                     if isinstance(vllm_xargs.get("k", None), int) else self.k
+                k = min(k, self.k)
         # TODO(woosuk): Optimize this.
         return _find_longest_matched_ngram_and_propose_tokens(
             origin_tokens=context_token_ids,
