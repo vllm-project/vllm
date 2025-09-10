@@ -322,7 +322,7 @@ def test_structured_output(
     # Test 7: Generate text based on a regex pattern
     #
     sampling_params = SamplingParams(
-        temperature=0.3,
+        temperature=0.05,
         seed=113,
         top_p=0.95,
         guided_decoding=GuidedDecodingParams(regex=sample_regex))
