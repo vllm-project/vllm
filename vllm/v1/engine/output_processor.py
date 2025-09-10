@@ -407,8 +407,10 @@ class OutputProcessor:
             kv_transfer_params = engine_core_output.kv_transfer_params
             req_state.num_cached_tokens = engine_core_output.num_cached_tokens
             req_state.is_prefilling = False
-            req_state.accepted_prediction_tokens = engine_core_output.accepted_prediction_tokens
-            req_state.rejected_prediction_tokens = engine_core_output.rejected_prediction_tokens
+            req_state.accepted_prediction_tokens = \
+                engine_core_output.accepted_prediction_tokens
+            req_state.rejected_prediction_tokens = \
+                engine_core_output.rejected_prediction_tokens
 
             if pooling_output is None:
                 assert req_state.detokenizer is not None

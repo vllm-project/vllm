@@ -1087,7 +1087,8 @@ class OpenAIServingChat(OpenAIServing):
             if include_usage:
                 completion_tokens = sum(previous_num_tokens)
                 completion_tokens_details = None
-                if res.accepted_prediction_tokens or res.rejected_prediction_tokens:
+                if res.accepted_prediction_tokens or \
+                    res.rejected_prediction_tokens:
                     completion_tokens_details = CompletionTokensDetails(
                         accepted_prediction_tokens=res.
                         accepted_prediction_tokens,
@@ -1408,7 +1409,8 @@ class OpenAIServingChat(OpenAIServing):
         num_generated_tokens = sum(
             len(output.token_ids) for output in final_res.outputs)
         completion_tokens_details = None
-        if final_res.accepted_prediction_tokens or final_res.rejected_prediction_tokens:
+        if final_res.accepted_prediction_tokens \
+            or final_res.rejected_prediction_tokens:
             completion_tokens_details = CompletionTokensDetails(
                 accepted_prediction_tokens=final_res.
                 accepted_prediction_tokens,

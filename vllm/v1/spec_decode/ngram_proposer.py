@@ -65,10 +65,12 @@ class NgramProposer:
         if vllm_xargs is not None:
             if "min_ngram" in vllm_xargs:
                 min_ngram = vllm_xargs["min_ngram"] \
-                    if isinstance(vllm_xargs.get("min_ngram", None), int) else self.min_n
+                    if isinstance(vllm_xargs.get("min_ngram", None), int) \
+                        else self.min_n
             if "max_ngram" in vllm_xargs:
                 max_ngram = vllm_xargs["max_ngram"] \
-                    if isinstance(vllm_xargs.get("max_ngram", None), int) else self.max_n
+                    if isinstance(vllm_xargs.get("max_ngram", None), int) \
+                        else self.max_n
             if "k" in vllm_xargs:
                 k = vllm_xargs["k"] \
                     if isinstance(vllm_xargs.get("k", None), int) else self.k
