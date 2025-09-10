@@ -169,13 +169,10 @@ def _setup_target_model(device):
     target_model = mock.create_autospec(_TargetModelStub, instance=True)
     target_model.model = mock.MagicMock()
     target_model.model.embed_tokens.weight.shape = (131072, 4096)
-
     from vllm.model_executor.models import SupportsMultiModal
     assert not isinstance(target_model, SupportsMultiModal)
-    target_model.lm_head = mock.MagicMock()
-    target_model.lm_head.weight.device = device
 
-    # mock target_model.lm_head needs to support deepcopy
+    # target_model.lm_head needs to support deepcopy
     class DeepCopyableMock(mock.MagicMock):
         def __deepcopy__(self, memo):
             new_mock = DeepCopyableMock()
@@ -184,6 +181,7 @@ def _setup_target_model(device):
             new_mock.weight.shape = self.weight.shape
             return new_mock
     target_model.lm_head = DeepCopyableMock()
+    target_model.lm_head.weight.device = device
 
     return target_model
 
