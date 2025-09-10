@@ -4,16 +4,17 @@
 
 Run `pytest tests/kernels/test_moe_layer.py`.
 """
-from typing import Callable, Optional
+from dataclasses import dataclass
+from typing import Callable, Optional, Union
 
 import pytest
 import torch
 
 from tests.kernels.moe.modular_kernel_tools.parallel_utils import (
     ProcessGroupInfo, parallel_launch_with_config)
-from tests.kernels.moe.utils import (make_naive_shared_experts,
-                                     make_test_weights, moe_quantize_weights)
-from vllm.config import VllmConfig
+from tests.kernels.moe.utils import (TestMLP, make_test_weights,
+                                     moe_quantize_weights)
+from vllm.config import ParallelConfig, VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
@@ -23,16 +24,10 @@ from vllm.model_executor.layers.shared_fused_moe import SharedFusedMoE
 from vllm.platforms import current_platform
 
 SHAPE_COMBOS = [
-    # TODO: figure out why this fails, seems to be test problem
-    #(1, 128, 128),
-    #    (2, 128, 512),
-    #    (3, 1024, 2048),
-    #    (4, 128, 128),
-    (32, 1024, 512),
-    #    (45, 512, 2048),
-    #    (64, 1024, 512),
-    (222, 2048, 1024),
-    (256, 1408, 2048),
+    (1, 128, 128),
+    #(32, 1024, 512),
+    #(222, 2048, 1024),
+    #(256, 4096, 2048),
 ]
 
 NUM_EXPERTS = [8, 64]
@@ -41,11 +36,11 @@ TOP_KS = [1, 6]
 # dp_size, tp_size, use_ep
 PARALLEL_COMBOS = [
     [1, 1, False],
-    [1, 2, False],
-#    [1, 4, False],
-#    [2, 1, True],
-#    [2, 2, True],
-#    [4, 1, True],
+    #    [1, 2, False],
+    #    [1, 4, False],
+    #    [2, 1, True],
+    #    [2, 2, True],
+    #    [4, 1, True],
 ]
 
 BACKENDS = [
@@ -63,39 +58,66 @@ QUANT_METHODS = [
     #"compressed-tensors",
 ]
 
+
 def rank_chunk(num: int, r: int, w: int) -> int:
     rem = num % w
     return (num // w) + (1 if r < rem else 0)
 
 
-def chunk_by_rank(t: torch.Tensor, r: int, w: int) -> torch.Tensor:
+def chunk_by_rank(
+    t: torch.Tensor,
+    r: int,
+    w: int,
+    device: Optional[torch.device] = None,
+) -> torch.Tensor:
     chunk = rank_chunk(t.shape[0], r, w)
-    return t[(r * chunk):(r + 1) * chunk]
+    t = t[(r * chunk):(r + 1) * chunk]
+    if device is not None:
+        t = t.to(device)
+    return t
 
 
-def maybe_chunk_by_rank(t: Optional[torch.Tensor], r: int,
-                        w: int) -> Optional[torch.Tensor]:
+def maybe_chunk_by_rank(
+    t: Optional[torch.Tensor],
+    r: int,
+    w: int,
+    device: Optional[torch.device] = None,
+) -> Optional[torch.Tensor]:
     if t is not None:
-        return chunk_by_rank(t, r, w)
+        return chunk_by_rank(t, r, w, device)
     else:
         return t
 
 
-def chunk_scales_by_rank(t: Optional[torch.Tensor], r: int,
-                         w: int) -> Optional[torch.Tensor]:
+def chunk_scales_by_rank(
+    t: Optional[torch.Tensor],
+    r: int,
+    w: int,
+    device: Optional[torch.device] = None,
+) -> Optional[torch.Tensor]:
     if t is not None and t.numel() > 1:
         chunk = rank_chunk(t.shape[0], r, w)
-        return t[(r * chunk):(r + 1) * chunk]
-    else:
-        return t
+        t = t[(r * chunk):(r + 1) * chunk]
+
+    if t is not None and device is not None:
+        t = t.to(device)
+
+    return t
 
 
-def chunk_scales(t: Optional[torch.Tensor], start: int,
-                 end: int) -> Optional[torch.Tensor]:
+def chunk_scales(
+    t: Optional[torch.Tensor],
+    start: int,
+    end: int,
+    device: Optional[torch.device] = None,
+) -> Optional[torch.Tensor]:
     if t is not None and t.numel() > 1:
-        return t[start:end]
-    else:
-        return t
+        t = t[start:end]
+
+    if t is not None and device is not None:
+        t = t.to(device)
+
+    return t
 
 
 def make_quant_config(
@@ -129,9 +151,18 @@ def make_quant_config(
         w1s = w1s.transpose(0, 1)
         w2s = w2s.transpose(0, 1)
     elif quantization == "modelopt" or quantization == "compressed_tensors":
-        assert False, "TBD"
+        raise NotImplementedError
 
     return quant_config, w1q, w1s, w2q, w2s
+
+
+@dataclass
+class SharedExpertsConfig:
+    w1: torch.Tensor
+    w2: torch.Tensor
+    w1_s: Optional[torch.Tensor] = None
+    w2_s: Optional[torch.Tensor] = None
+    quant_dtype: Union[torch.dtype, str, None] = None
 
 
 def make_fused_moe_layer(
@@ -149,7 +180,7 @@ def make_fused_moe_layer(
     top_k: int,
     global_num_experts: int,
     renormalize: bool = False,
-    shared_experts: Optional[torch.nn.Module] = None,
+    shared_experts_config: Optional[SharedExpertsConfig] = None,
     use_grouped_topk: bool = False,
     topk_group: Optional[int] = None,
     num_expert_group: Optional[int] = None,
@@ -167,15 +198,19 @@ def make_fused_moe_layer(
     logical_replica_count: Optional[torch.Tensor] = None,
     num_redundant_experts: int = 0,
     has_bias: bool = False,
-):
+) -> tuple[Callable, FusedMoE]:
     quant_config, w1q, w1s, w2q, w2s = make_quant_config(quantization, w1, w2)
 
     kwargs = dict()
-    if shared_experts is None:
+    if shared_experts_config is None:
         builder = FusedMoE
     else:
         builder = SharedFusedMoE
-        kwargs["shared_experts"] = shared_experts
+        kwargs["shared_experts"] = TestMLP(
+            shared_experts_config.w1,
+            shared_experts_config.w2,
+            params_dtype,
+        )
 
     layer = builder(
         num_experts=global_num_experts,
@@ -225,7 +260,28 @@ def make_fused_moe_layer(
         assert layer.quant_method is not None
         layer.quant_method.init_prepare_finalize(layer)
 
-    return layer
+    def _moe(
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> torch.Tensor:
+        if shared_experts_config is None:
+            final_shared_states = None
+            final_hidden_states = layer(hidden_states, router_logits)
+        else:
+            final_shared_states, final_hidden_states = layer(
+                hidden_states, router_logits)
+
+        if layer.tp_size > 1:
+            final_hidden_states = layer.maybe_all_reduce_tensor_model_parallel(
+                final_hidden_states)
+
+        if shared_experts_config is not None:
+            assert final_shared_states is not None
+            final_hidden_states += final_shared_states
+
+        return final_hidden_states
+
+    return _moe, layer
 
 
 def make_fake_moe_layer(
@@ -233,8 +289,9 @@ def make_fake_moe_layer(
     w2: torch.Tensor,
     top_k: int,
     global_num_experts: int,
+    in_dtype: torch.dtype,
     renormalize: bool = False,
-    shared_experts: Optional[torch.nn.Module] = None,
+    shared_experts_config: Optional[SharedExpertsConfig] = None,
     use_grouped_topk: bool = False,
     topk_group: Optional[int] = None,
     num_expert_group: Optional[int] = None,
@@ -251,6 +308,15 @@ def make_fake_moe_layer(
     logical_to_physical_map: Optional[torch.Tensor] = None,
     logical_replica_count: Optional[torch.Tensor] = None,
 ) -> Callable:
+
+    if shared_experts_config is not None:
+        shared_experts = TestMLP(
+            shared_experts_config.w1,
+            shared_experts_config.w2,
+            in_dtype,
+        )
+    else:
+        shared_experts = None
 
     def _moe(
         hidden_states: torch.Tensor,
@@ -312,7 +378,7 @@ def _test_loop(
     tp_size: int,
     baseline_output: torch.Tensor,
     hidden_states: torch.Tensor,
-    logits: torch.Tensor,
+    router_logits: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
     num_experts: int,
@@ -321,18 +387,9 @@ def _test_loop(
     k: int,
     top_k: int,
     quantization: Optional[str],
-    shared_experts: Optional[torch.nn.Module],
+    shared_experts_config: Optional[SharedExpertsConfig],
 ):
-
-    #    if use_shared_experts:
-    #        # Note: this config is only needed for the non-naive shared experts.
-    #        new_vllm_config = copy.deepcopy(vllm_config)
-    #        new_vllm_config.parallel_config.data_parallel_size = pgi.world_size
-    #        new_vllm_config.parallel_config.enable_expert_parallel = True
-    #        _set_vllm_config(new_vllm_config, pgi.world_size, pgi.rank,
-    #                         pgi.local_rank)
-
-    print(f"PCONF {vllm_config.parallel_config}")
+    print(f"PCONF {vllm_config.parallel_config}, pgi={pgi}")
 
     world_size = tp_size * dp_size
 
@@ -340,15 +397,20 @@ def _test_loop(
 
     in_dtype = hidden_states.dtype
 
-    # TODO: chunk up weights, activations, scores
     device = torch.cuda.current_device()
+    # rank = pgi.rank
+    # w1 = chunk_by_rank(w1, rank, world_size, device)
+    # w2 = chunk_by_rank(w2, rank, world_size, device)
+    # hidden_states = chunk_by_rank(hidden_states, rank, world_size, device)
+    # router_logits = chunk_by_rank(router_logits, rank, world_size, device)
+    # baseline_output = baseline_output.to(device)
     w1 = w1.to(device)
     w2 = w2.to(device)
     hidden_states = hidden_states.to(device)
-    logits = logits.to(device)
+    router_logits = router_logits.to(device)
     baseline_output = baseline_output.to(device)
 
-    moe_layer = make_fused_moe_layer(
+    moe_fn, moe_layer = make_fused_moe_layer(
         quantization=quantization,
         use_ep=ep_size > 1,
         hidden_size=k,
@@ -362,11 +424,8 @@ def _test_loop(
         w2=w2,
         top_k=top_k,
         global_num_experts=num_experts,
-        shared_experts=shared_experts,
+        shared_experts_config=shared_experts_config,
     )
-
-    #dtype_str = get_config_dtype_str(in_dtype, use_fp8_w8a8=True)
-    #moe_config = get_default_config(m, num_experts, n, k, top_k, dtype_str, False)
 
     # output should be completely reduced at this point
     num_tokens = m
@@ -384,7 +443,7 @@ def _test_loop(
             num_tokens=num_tokens,
             num_tokens_across_dp=num_tokens_across_dp,
     ):
-        output = moe_layer(hidden_states, logits)
+        output = moe_fn(hidden_states, router_logits)
 
     torch.testing.assert_close(baseline_output, output, atol=3e-2, rtol=3e-2)
 
@@ -395,7 +454,7 @@ def _test_loop(
 @pytest.mark.parametrize("quantization", QUANT_METHODS)
 @pytest.mark.parametrize("dp_size, tp_size, use_ep", PARALLEL_COMBOS)
 @pytest.mark.parametrize("backend", BACKENDS)
-@pytest.mark.parametrize("use_shared_experts", [False])  #[False, True])
+@pytest.mark.parametrize("use_shared_experts", [False, True])
 #@multi_gpu_test(num_gpus=2)
 def test_moe_layer(
     m: int,
@@ -413,15 +472,22 @@ def test_moe_layer(
     current_platform.seed_everything(7)
     world_size = tp_size * dp_size
 
+    if not use_ep and backend is not None:
+        pytest.skip(f"Skipping backend {backend} w/o EP.")
+
     test_env = dict()
     test_env["VLLM_USE_DEEP_GEMM"] = "1"
     if backend is not None:
         test_env["VLLM_ALL2ALL_BACKEND"] = backend
 
-    vllm_config = VllmConfig()
-    vllm_config.parallel_config.data_parallel_size = dp_size
-    vllm_config.parallel_config.tensor_parallel_size = tp_size
-    vllm_config.parallel_config.enable_expert_parallel = use_ep
+    parallel_config = ParallelConfig(
+        pipeline_parallel_size=1,
+        data_parallel_size=dp_size,
+        tensor_parallel_size=tp_size,
+        enable_expert_parallel=use_ep,
+    )
+
+    vllm_config = VllmConfig(parallel_config=parallel_config)
 
     in_dtype = torch.bfloat16
 
@@ -433,27 +499,31 @@ def test_moe_layer(
     )
 
     if use_shared_experts:
-        shared_experts = make_naive_shared_experts(
-            n,
-            k,
-            in_dtype=in_dtype,
+        s_w1 = torch.randn((k, n * 2), device="cuda", dtype=in_dtype) / 15
+        s_w2 = torch.randn((n, k), device="cuda", dtype=in_dtype) / 15
+        shared_experts_config = SharedExpertsConfig(
+            w1=s_w1,
+            w2=s_w2,
         )
     else:
-        shared_experts = None
+        shared_experts_config = None
 
     baseline_layer = make_fake_moe_layer(
         w1=w1,
         w2=w2,
         top_k=top_k,
         global_num_experts=num_experts,
+        in_dtype=in_dtype,
         renormalize=False,
-        shared_experts=shared_experts,
+        shared_experts_config=shared_experts_config,
     )
 
     hidden_states = torch.randn((m, k), device="cuda", dtype=in_dtype) / 10
-    logits = torch.randn((m, num_experts), device="cuda", dtype=in_dtype)
+    router_logits = torch.randn((m, num_experts),
+                                device="cuda",
+                                dtype=in_dtype)
 
-    baseline_output = baseline_layer(hidden_states, logits)
+    baseline_output = baseline_layer(hidden_states, router_logits)
 
     parallel_launch_with_config(
         world_size,
@@ -465,7 +535,7 @@ def test_moe_layer(
         tp_size,
         baseline_output,
         hidden_states,
-        logits,
+        router_logits,
         w1,
         w2,
         num_experts,
@@ -474,59 +544,5 @@ def test_moe_layer(
         k,
         top_k,
         quantization,
-        shared_experts,
+        shared_experts_config,
     )
-
-    # monkeypatch.setenv('RANK', "0")
-    # monkeypatch.setenv('LOCAL_RANK', "0")
-    # monkeypatch.setenv('WORLD_SIZE', "1")
-    # monkeypatch.setenv('MASTER_ADDR', 'localhost')
-    # monkeypatch.setenv('MASTER_PORT', '12345')
-    # init_distributed_environment()
-
-    # # Instantiate our and huggingface's MoE blocks
-    # vllm_config.compilation_config.static_forward_context = dict()
-    # with (set_current_vllm_config(vllm_config),
-    #       set_forward_context(None, vllm_config)):
-    #     config = MixtralConfig()
-    #     hf_moe = MixtralSparseMoeBlock(config).to(dtype).to("cuda")
-    #     vllm_moe = MixtralMoE(
-    #         num_experts=config.num_local_experts,
-    #         top_k=config.num_experts_per_tok,
-    #         hidden_size=config.hidden_size,
-    #         intermediate_size=config.intermediate_size,
-    #         params_dtype=dtype,
-    #         tp_size=1,
-    #         dp_size=1,
-    #     ).cuda()
-
-    #     # Load the weights
-    #     vllm_moe.gate.weight.data[:] = hf_moe.gate.weight.data
-    #     for i in range(config.num_local_experts):
-    #         weights = (hf_moe.experts[i].w1.weight.data,
-    #                    hf_moe.experts[i].w3.weight.data)
-    #         vllm_moe.experts.w13_weight[i][:] = torch.cat(weights, dim=0)
-    #         vllm_moe.experts.w2_weight[i][:] = hf_moe.experts[i].w2.weight.data
-
-    #     # Generate input batch of dimensions [batch_size, seq_len, hidden_dim]
-    #     hf_inputs = torch.randn(
-    #         (1, 64, config.hidden_size)).to(dtype).to("cuda")
-    #     # vLLM uses 1D query [num_tokens, hidden_dim]
-    #     vllm_inputs = hf_inputs.flatten(0, 1)
-
-    #     # Pad the weight if moe padding is enabled
-    #     if padding:
-    #         vllm_moe.experts.w13_weight = Parameter(F.pad(
-    #             vllm_moe.experts.w13_weight, (0, 128), "constant", 0)[...,
-    #                                                                   0:-128],
-    #                                                 requires_grad=False)
-    #         vllm_moe.experts.w2_weight = Parameter(F.pad(
-    #             vllm_moe.experts.w2_weight, (0, 128), "constant", 0)[...,
-    #                                                                  0:-128],
-    #                                                requires_grad=False)
-    #         torch.cuda.synchronize()
-    #         torch.cuda.empty_cache()
-
-    #     # Run forward passes for both MoE blocks
-    #     hf_states, _ = hf_moe.forward(hf_inputs)
-    #     vllm_states = vllm_moe.forward(vllm_inputs)

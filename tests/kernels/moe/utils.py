@@ -232,10 +232,7 @@ def moe_quantize_weights(
 
     w = torch.stack(w_l)
     w_s = torch.stack(w_s_l)
-    if e > 0 and w_gs_l[0] is not None:
-        w_gs = torch.stack(w_gs_l)
-    else:
-        w_gs = None
+    w_gs = torch.stack(w_gs_l) if e > 0 and w_gs_l[0] is not None else None
 
     if w_s.ndim == 2:
         assert w_s.shape[-1] == 1
@@ -492,14 +489,36 @@ class RealMLP(torch.nn.Module):
         return x
 
 
+def make_shared_experts_with_weights(
+    N: int,
+    K: int,
+    in_dtype: torch.dtype,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w1_s: torch.Tensor | None = None,
+    w2_s: torch.Tensor | None = None,
+    quant_dtype: torch.dtype | str | None = None,
+) -> torch.nn.Module:
+    old_dtype = torch.get_default_dtype()
+    try:
+        torch.set_default_dtype(in_dtype)
+        if quant_dtype == torch.float8_e4m3fn:
+            from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+            quant_config = Fp8Config(True)
+        else:
+            quant_config = None
+
+        return RealMLP(K, N, w1, w2, "silu", quant_config, w1_s=w1_s, w2_s=w2_s)
+    finally:
+        torch.set_default_dtype(old_dtype)
+
+
 def make_shared_experts(
     N: int,
     K: int,
     in_dtype: torch.dtype = torch.bfloat16,
-    quant_dtype: torch.dtype | str | None = None,
+    quant_dtype: Union[torch.dtype, str, None] = None,
 ) -> torch.nn.Module:
-    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
-
     (_, w1, w1_s, _), (_, w2, w2_s, _) = make_test_weights(
         1,
         N,
@@ -507,22 +526,12 @@ def make_shared_experts(
         in_dtype=in_dtype,
         quant_dtype=quant_dtype,
     )
-    old_dtype = torch.get_default_dtype()
-    try:
-        torch.set_default_dtype(in_dtype)
-        if quant_dtype == torch.float8_e4m3fn:
-            w1 = w1[0].transpose(0, 1)
-            w2 = w2[0].transpose(0, 1)
-            w1_s = w1_s[0].transpose(0, 1) if w1_s is not None else None
-            w2_s = w2_s[0].transpose(0, 1) if w2_s is not None else None
-            quant_config = Fp8Config(True)
-        else:
-            w1 = w1[0]
-            w2 = w2[0]
-            w1_s = None
-            w2_s = None
-            quant_config = None
 
-        return RealMLP(K, N, w1, w2, "silu", quant_config, w1_s=w1_s, w2_s=w2_s)
-    finally:
-        torch.set_default_dtype(old_dtype)
+    return make_shared_experts_with_weights(N,
+                                            K,
+                                            in_dtype,
+                                            w1,
+                                            w2,
+                                            w1_s=w1_s,
+                                            w2_s=w2_s,
+                                            quant_dtype=quant_dtype)
