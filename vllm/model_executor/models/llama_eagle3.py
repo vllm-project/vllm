@@ -293,6 +293,10 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         # combine multiple auxiliary hidden states returned by eagle3
+        print(f"DEBUG: combine_hidden_states input shape: {hidden_states.shape}")
+        print(f"DEBUG: fc layer weight shape: {self.model.fc.weight.shape}")
+        print(f"DEBUG: target_hidden_size: {getattr(self.config, 'target_hidden_size', 'None')}")
+        print(f"DEBUG: hidden_size: {getattr(self.config, 'hidden_size', 'None')}")
         return self.model.fc(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
