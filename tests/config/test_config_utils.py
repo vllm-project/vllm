@@ -7,13 +7,10 @@ from typing import Optional
 import pytest
 
 from vllm.config import LogprobsMode
-from vllm.config.utils import (
-    get_hash_factors,
-    hash_factors,
-    normalize_value,
-)
+from vllm.config.utils import get_hash_factors, hash_factors, normalize_value
 
 # Helpers
+
 
 def _endswith_fqname(obj, suffix: str) -> bool:
     # normalize_value(type) returns fully-qualified name
@@ -58,7 +55,10 @@ def test_hash_factors_deterministic():
         (b"ab", "6162"),
         (bytearray(b"ab"), "6162"),
         ([1, 2], (1, 2)),
-        ({"b": 2, "a": 1}, (("a", 1), ("b", 2))),
+        ({
+            "b": 2,
+            "a": 1
+        }, (("a", 1), ("b", 2))),
     ],
 )
 def test_normalize_value_matrix(inp, expected):
@@ -83,6 +83,7 @@ def test_normalize_value_set_order_insensitive():
 
 def test_normalize_value_path_normalization():
     from pathlib import Path  # local import to avoid global dependency
+
     # Paths expand/resolve to absolute strings.
     # Stabilizes hashing across working dirs.
     assert normalize_value(Path(".")) == _expected_path(".")
@@ -91,10 +92,12 @@ def test_normalize_value_path_normalization():
 def test_normalize_value_uuid_and_to_json():
     # Objects may normalize via uuid() or to_json_string().
     class HasUUID:
+
         def uuid(self):
             return "test-uuid"
 
     class ToJson:
+
         def to_json_string(self):
             return "{\"x\":1}"
 
