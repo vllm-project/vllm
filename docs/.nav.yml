@@ -32,10 +32,7 @@ nav:
       - models/pooling_models.md
       - models/extensions
       - Hardware Supported Models: models/hardware_supported_models
-    - Features:
-      - features/compatibility_matrix.md
-      - features/*
-      - features/quantization
+    - Features: features
   - Developer Guide:
     - contributing/README.md
     - General:
@@ -51,7 +48,7 @@ nav:
     - Design Documents: design
   - API Reference:
     - api/README.md
-    - api/vllm/*
+    - api/vllm
   - CLI Reference: cli
   - Community:
     - community/*

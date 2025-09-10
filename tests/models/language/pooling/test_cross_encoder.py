@@ -8,8 +8,10 @@ from .mteb_utils import mteb_test_rerank_models
 
 RERANK_MODELS = [
     CLSPoolingRerankModelInfo("cross-encoder/ms-marco-TinyBERT-L-2-v2",
+                              mteb_score=0.32898,
                               architecture="BertForSequenceClassification"),
     LASTPoolingRerankModelInfo("tomaarsen/Qwen3-Reranker-0.6B-seq-cls",
+                               mteb_score=0.25736,
                                architecture="Qwen3ForSequenceClassification")
 ]
 
