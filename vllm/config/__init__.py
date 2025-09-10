@@ -1795,7 +1795,6 @@ class ModelConfig:
         return max_model_len
 
 
-
 Device = Literal["auto", "cuda", "cpu", "tpu", "xpu"]
 
 
