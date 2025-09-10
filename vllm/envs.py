@@ -386,6 +386,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_STANDALONE_COMPILE":
     lambda: os.environ.get("VLLM_USE_STANDALONE_COMPILE", "1") == "1",
 
+    # Feature flag to enable/disable AOT compilation. This will ensure
+    # compilation is done in warmup phase and the compilation will be
+    # reused in subsequent calls.
+    "VLLM_USE_AOT_COMPILE":
+    lambda: os.environ.get("VLLM_USE_AOT_COMPILE", "0") == "1",
+
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
     "LOCAL_RANK":
