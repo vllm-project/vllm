@@ -327,10 +327,12 @@ class LlamaForCausalLMEagle3(Eagle3LlamaForCausalLM):
         # Check if we have a dimension mismatch and fix it dynamically
         if hasattr(self.model, 'fc') and hidden_states.shape[-1] != self.model.fc.in_features:
             # Create a new fc layer with the correct input size
+            # Ensure it's on the same device as hidden_states
+            device = hidden_states.device
             self.model.fc = torch.nn.Linear(
                 hidden_states.shape[-1],
                 self.config.hidden_size,
                 bias=False
-            )
+            ).to(device)
         
         return self.model.fc(hidden_states)
