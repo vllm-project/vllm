@@ -1148,6 +1148,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
     ) -> BatchFeature:
         mm_data = dict(mm_data)
         processor = self.info.get_hf_processor(**mm_kwargs)
+        tokenizer = self.info.get_tokenizer()
 
         # GLM-4.1V use `image_token_id` as video placeholder, we need to
         # replace it with `video_token_id` for video processing. So we
@@ -1174,11 +1175,10 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                         len(video_array),
                     )
                     metadata["total_num_frames"] = len(video_array)
-                metadata = VideoMetadata(**metadata)
 
                 video_mm_data = dict()
                 video_mm_data["videos"] = [[video_array]]
-                video_mm_data["video_metadata"] = [[metadata]]
+                video_mm_data["video_metadata"] = [[VideoMetadata(**metadata)]]
 
                 video_outputs = super()._call_hf_processor(
                     prompt="<|begin_of_video|><|video|><|end_of_video|>",
@@ -1186,11 +1186,43 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                     mm_kwargs=mm_kwargs,
                     tok_kwargs=tok_kwargs,
                 )
-                input_ids = video_outputs.pop("input_ids")
-                input_ids[input_ids == processor.image_token_id] = (
-                    processor.video_token_id)
-                video_placeholder = processor.tokenizer.batch_decode(
-                    input_ids)[0]
+                if "do_sample_frames" in mm_kwargs and not mm_kwargs[
+                        "do_sample_frames"]:
+                    hf_config = self.info.get_hf_config()
+                    boi_token_id = hf_config.image_start_token_id
+                    eoi_token_id = hf_config.image_end_token_id
+                    bov_token_id = hf_config.video_start_token_id
+                    eov_token_id = hf_config.video_end_token_id
+
+                    merge_length = processor.image_processor.merge_size**2
+
+                    grid_thw = video_outputs["video_grid_thw"].data
+                    assert isinstance(grid_thw, torch.Tensor)
+
+                    timestamps = self.info._get_video_second_idx(
+                        metadata, len(video_array))
+                    frames_idx_token = [
+                        tokenizer.encode(str(i), add_special_tokens=False)
+                        for i in timestamps
+                    ]
+                    num_tokens_per_frame = int(
+                        grid_thw[0, 1:].prod()) // merge_length
+                    placeholder = []
+                    placeholder.append(bov_token_id)
+                    for frame_idx in frames_idx_token:
+                        placeholder.append(boi_token_id)
+                        placeholder.extend([processor.video_token_id] *
+                                           num_tokens_per_frame)
+                        placeholder.append(eoi_token_id)
+                        placeholder.extend(frame_idx)
+                    placeholder.append(eov_token_id)
+                    video_placeholder = processor.tokenizer.decode(placeholder)
+                else:
+                    input_ids = video_outputs.pop("input_ids")
+                    input_ids[input_ids == processor.image_token_id] = (
+                        processor.video_token_id)
+                    video_placeholder = processor.tokenizer.batch_decode(
+                        input_ids)[0]
                 prompt = prompt.replace(
                     "<|begin_of_video|><|video|><|end_of_video|>",
                     video_placeholder,
