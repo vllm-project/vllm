@@ -131,9 +131,11 @@ def build_transform(input_size: int):
     # Therefore, it is necessary to limit the number of threads allocated to
     # image transformation tasks.
     num_threads = int(os.environ.get("OMP_NUM_THREADS", "1"))
+
     def apply(img):
         with set_default_torch_num_threads(num_threads):
             return transform(img)
+
     return apply
 
 
