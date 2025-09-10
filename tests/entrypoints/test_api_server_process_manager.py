@@ -95,7 +95,7 @@ def test_api_server_process_manager_init(api_server_args, with_stats_update):
             assert not proc.is_alive()
 
 
-@patch("vllm.entrypoints.cli.serve.run_api_server_worker",
+@patch("vllm.entrypoints.cli.serve.run_api_server_worker_proc",
        mock_run_api_server_worker)
 def test_wait_for_completion_or_failure(api_server_args):
     """Test that wait_for_completion_or_failure works with failures."""
