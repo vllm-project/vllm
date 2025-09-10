@@ -204,7 +204,7 @@ class LLM:
 
         if "kv_transfer_config" in kwargs and isinstance(
                 kwargs["kv_transfer_config"], dict):
-            from vllm.config import KVTransferConfig
+            from vllm.config.kv_transfer import KVTransferConfig
             raw_config_dict = kwargs["kv_transfer_config"]
             try:
                 kwargs["kv_transfer_config"] = KVTransferConfig(
@@ -796,7 +796,7 @@ class LLM:
             # NOTE: _parse_chat_message_content_parts() currently doesn't
             # handle mm_processor_kwargs, since there is no implementation in
             # the chat message parsing for it.
-            conversation, mm_data = parse_chat_messages(
+            conversation, mm_data, mm_uuids = parse_chat_messages(
                 msgs,
                 model_config,
                 tokenizer,
@@ -825,6 +825,9 @@ class LLM:
 
             if mm_data is not None:
                 prompt["multi_modal_data"] = mm_data
+
+            if mm_uuids is not None:
+                prompt["multi_modal_uuids"] = mm_uuids
 
             if mm_processor_kwargs is not None:
                 prompt["mm_processor_kwargs"] = mm_processor_kwargs
