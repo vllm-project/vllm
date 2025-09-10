@@ -3708,30 +3708,32 @@ class VllmConfig:
 
     def _set_cudagraph_sizes(self):
         """
-        cudagraph batchsize padding logic:
-
-        `[1, 2, 4] + [8 * i for i in range(1, 1025)]` is a list of all possible
-        batch sizes that cudagraph will capture.
-
-        Depending on the engine's configuration of `max_num_seqs`, the
-        candidate batch sizes to capture cudagraph will shrink to the subset
-        which just cover the range of `[1, max_num_seqs]`. In the common case,
-        `max_num_seqs` is 256, and the cudagraph batch sizes will be
-        `[1, 2, 4, 8, 16, 24, 32, 40, ..., 256]`.
-
-        However, if users specify the cudagraph capture sizes through
-        compilation config, we will use the specified sizes instead.
-
+        cudagraph batch size capture logic:
+        By default, vLLM defines a candidate list of batch sizes for
+        CUDA graph capture as:
+        [1, 2, 4] + [8 * i for i in range(1, 65)] → [1, 2, 4, 8, 16, ..., 512]
+        These sizes are used to capture and reuse CUDA graphs for
+        performance-critical paths (e.g., decoding). Capturing enables
+        significantly faster kernel dispatch by avoiding Python overhead.
+        The list is then filtered based on `max_num_batched_tokens`
+        (e.g., 8192 on most GPUs), which controls the total allowed number
+        of tokens in a batch. Since each sequence may have a variable
+        number of tokens (not always 32), the maximum usable batch size
+        will depend on actual sequence lengths.
+        For example, with max_num_batched_tokens = 8192, and typical
+        sequences averaging ~32 tokens, most practical batch sizes fall
+        below 256. However, the system will still allow capture sizes
+        up to 512 if shape and memory permit.
+        
         In the end, `vllm_config.compilation_config.cudagraph_capture_sizes`
         will be the final sizes to capture cudagraph (in descending order).
-
-        During runtime, if batchsize is larger than
-        `vllm_config.compilation_config.cudagraph_capture_sizes`,
-        no cudagraph will be used.
-        If the batch size is no larger than
-        `vllm_config.compilation_config.cudagraph_capture_sizes`,
-        we can quickly find the padded graph size for a given batch size by
-        looking up `vllm_config.compilation_config.bs_to_padded_graph_size`.
+        Note: if users explicitly specify cudagraph capture sizes in the
+        compilation config, those will override this default logic.
+        At runtime:
+        - If batch size ≤ one of the `cudagraph_capture_sizes`, the closest
+          padded CUDA graph will be used.
+        - If batch size > largest `cudagraph_capture_sizes`, cudagraph will
+          not be used.
         """
 
         # calculate the default `batch_size_capture_list`
