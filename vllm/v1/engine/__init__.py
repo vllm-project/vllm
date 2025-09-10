@@ -113,7 +113,7 @@ class EngineCoreOutput(
 
     # The number of tokens with prefix cache hits.
     num_cached_tokens: int = 0
-    
+
     accepted_prediction_tokens: Optional[int] = None
     rejected_prediction_tokens: Optional[int] = None
 

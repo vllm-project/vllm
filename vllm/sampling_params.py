@@ -217,7 +217,8 @@ class SamplingParams(
     generated token can complete the sequence."""
     _bad_words_token_ids: Optional[list[list[int]]] = None
     prediction: Optional[Union[str, list[int]]] = None
-    """If provided, the engine will use the predicted output tokens to propose, currently only support ngram method."""
+    """If provided, the engine will use the predicted output tokens to propose,
+    currently only support ngram method."""
 
     @staticmethod
     def from_optional(

@@ -316,12 +316,15 @@ async def async_request_openai_chat_completions(
                         elif usage := data.get("usage"):
                             output.output_tokens = usage.get(
                                 "completion_tokens")
-                            if 'completion_tokens_details' in usage.keys():
-                                completion_tokens_details = usage.get('completion_tokens_details')
-                                output.accepted_prediction_tokens = completion_tokens_details.get(
-                                    "accepted_prediction_tokens", 0)
-                                output.rejected_prediction_tokens = completion_tokens_details.get(
-                                    "rejected_prediction_tokens", 0)
+                            if 'completion_tokens_details' in usage:
+                                tokens_details = \
+                                    usage.get('completion_tokens_details')
+                                output.accepted_prediction_tokens = \
+                                    tokens_details.get(
+                                        "accepted_prediction_tokens", 0)
+                                output.rejected_prediction_tokens = \
+                                    tokens_details.get(
+                                        "rejected_prediction_tokens", 0)
 
                             most_recent_timestamp = timestamp
 

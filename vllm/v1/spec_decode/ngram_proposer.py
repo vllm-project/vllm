@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 from numba import jit
 
 from vllm.config import VllmConfig
-from typing import Any
 
 
 class NgramProposer:
@@ -34,7 +33,7 @@ class NgramProposer:
     def propose(
         self,
         context_token_ids: np.ndarray,
-        vllm_xargs: Optional[dict[str, Any]]=None,
+        vllm_xargs: Optional[dict[str, Any]] = None,
     ) -> Optional[np.ndarray]:
         """Proposes the next sequence of tokens based on n-gram pattern 
         matching in the context. The function finds matches of the last n 

@@ -30,10 +30,10 @@ except ImportError:  # For newer openai versions (>= 1.100.0)
     from openai.types.responses import (ResponseFormatTextConfig as
                                         ResponseTextConfig)
 
+from openai.types.chat import ChatCompletionPredictionContentParam
 from openai.types.responses.response import ToolChoice
 from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
-from openai.types.chat import ChatCompletionPredictionContentParam
 from pydantic import (BaseModel, ConfigDict, Field, TypeAdapter,
                       ValidationInfo, field_validator, model_validator)
 from typing_extensions import TypeAlias

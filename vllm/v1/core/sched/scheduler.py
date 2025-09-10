@@ -896,10 +896,10 @@ class Scheduler(SchedulerInterface):
                     spec_decoding_stats,
                     num_draft_tokens=num_draft_tokens,
                     num_accepted_tokens=num_accepted)
-                request.accepted_prediction_tokens = request.accepted_prediction_tokens + num_accepted \
-                    if request.accepted_prediction_tokens is not None else num_accepted
-                request.rejected_prediction_tokens = request.rejected_prediction_tokens + num_rejected \
-                    if request.rejected_prediction_tokens is not None else num_rejected
+                request.accepted_prediction_tokens = (
+                    request.accepted_prediction_tokens or 0) + num_accepted
+                request.rejected_prediction_tokens = (
+                    request.rejected_prediction_tokens or 0) + num_rejected
 
             stopped = False
             new_logprobs = None
@@ -962,8 +962,10 @@ class Scheduler(SchedulerInterface):
                         events=request.take_events(),
                         kv_transfer_params=kv_transfer_params,
                         num_cached_tokens=request.num_cached_tokens,
-                        accepted_prediction_tokens=request.accepted_prediction_tokens,
-                        rejected_prediction_tokens=request.rejected_prediction_tokens,
+                        accepted_prediction_tokens=request.
+                        accepted_prediction_tokens,
+                        rejected_prediction_tokens=request.
+                        rejected_prediction_tokens,
                     ))
 
             else:
