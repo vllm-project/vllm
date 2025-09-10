@@ -39,13 +39,14 @@ def kernel_warmup(worker: "Worker"):
 
     # FlashInfer attention warmup
     # Only warmup if the model has FlashInfer attention groups
+    # and is not a pooling model
     def _is_flashinfer_backend(backend):
         try:
             return backend.get_name() == "FLASHINFER_VLLM_V1"
         except NotImplementedError:
             return False
 
-    if all(
+    if not worker.model_runner.is_pooling_model and all(
             _is_flashinfer_backend(group.backend)
             for groups in worker.model_runner.attn_groups for group in groups):
         logger.info("Warming up FlashInfer attention.")
