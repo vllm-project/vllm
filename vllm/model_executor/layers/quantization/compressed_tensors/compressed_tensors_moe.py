@@ -16,8 +16,7 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE, FusedMoEActivationFormat, FusedMoEConfig, FusedMoEMethodBase,
-    FusedMoEPermuteExpertsUnpermute, FusedMoEPrepareAndFinalize,
-    FusedMoeWeightScaleSupported)
+    FusedMoEPermuteExpertsUnpermute, FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig, fp8_w8a8_moe_quant_config,
     int4_w4a16_moe_quant_config, int8_w8a8_moe_quant_config,
@@ -732,7 +731,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             return super().maybe_make_prepare_finalize()
 
     def select_gemm_impl(
-        self, prepare_finalize: FusedMoEPrepareAndFinalize,
+        self,
+        prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
     ) -> FusedMoEPermuteExpertsUnpermute:
         # cutlass path
