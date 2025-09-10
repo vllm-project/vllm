@@ -1723,11 +1723,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # We use index_select/index_copy_ instead of slicing to make sure
             # the copy happens in place.
             if token_ids_idx.numel() > 0:
-                token_ids = self.input_ids.gpu.index_select(0, token_ids_idx)
+                token_ids = self.input_ids.gpu[token_ids_idx]
                 tokens_to_embeds = self.model.get_input_embeddings(
                     input_ids=token_ids)
-                self.inputs_embeds.gpu.index_copy_(0, token_ids_idx,
-                                                   tokens_to_embeds)
+                self.inputs_embeds.gpu[token_ids_idx] = tokens_to_embeds
 
             inputs_embeds = self.inputs_embeds.gpu[:num_input_tokens]
             model_kwargs = self._init_model_kwargs(num_input_tokens)
