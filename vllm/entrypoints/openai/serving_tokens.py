@@ -44,6 +44,7 @@ class OpenAIServingTokens(OpenAIServing):
         models: OpenAIServingModels,
         *,
         request_logger: Optional[RequestLogger],
+        force_no_detokenize: bool = False,
         return_tokens_as_token_ids: bool = False,
         log_error_stack: bool = False,
         enable_prompt_tokens_details: bool = False,
@@ -57,6 +58,10 @@ class OpenAIServingTokens(OpenAIServing):
                          log_error_stack=log_error_stack)
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_log_outputs = enable_log_outputs
+        self.force_no_detokenize = force_no_detokenize
+        if force_no_detokenize:
+            logger.info("Tokens-only mode is enabled, skipping detokenization "
+            "step for incoming requests.")
 
     async def serve_tokens(
         self,
@@ -101,6 +106,8 @@ class OpenAIServingTokens(OpenAIServing):
         result_generator: AsyncGenerator[RequestOutput, None] = None
         try:
             sampling_params: SamplingParams = request.sampling_params
+            if self.force_no_detokenize:
+                sampling_params.detokenize = False
 
             self._log_inputs(request_id,
                              request.token_ids,
