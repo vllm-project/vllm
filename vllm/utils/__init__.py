@@ -921,7 +921,7 @@ def get_open_zmq_inproc_path() -> str:
     return f"inproc://{uuid4()}"
 
 
-def get_open_port() -> int:
+def get_open_port(prefered_port: int | None = None) -> int:
     """
     Get an open port for the vLLM process to listen on.
     An edge case to handle, is when we run data parallel,
@@ -930,46 +930,53 @@ def get_open_port() -> int:
     Right now we reserve 10 ports for the data parallel master
     process. Currently it uses 2 ports.
     """
+
+    # first, try by argument, then, by env variable, then, use default
+    if prefered_port is None:
+        prefered_port = envs.VLLM_PORT
+
+    if prefered_port is None:
+        prefered_port = 0
+
     if "VLLM_DP_MASTER_PORT" in os.environ:
         dp_master_port = envs.VLLM_DP_MASTER_PORT
         reserved_port_range = range(dp_master_port, dp_master_port + 10)
-        while True:
-            candidate_port = _get_open_port()
+        for _ in range(10):
+            candidate_port = _get_open_port(prefered_port)
             if candidate_port not in reserved_port_range:
                 return candidate_port
+
+        raise OSError("Could not get a port outside of range "
+                      f"[{dp_master_port}, {dp_master_port+10})")
+
     return _get_open_port()
 
 
-def get_open_ports_list(count: int = 5) -> list[int]:
+def get_open_ports_list(max_count: int = 5) -> list[int]:
     """Get a list of open ports."""
     ports = set()
-    while len(ports) < count:
-        ports.add(get_open_port())
+
+    start_port = 0
+    if envs.VLLM_PORT is not None:
+        start_port = envs.VLLM_PORT
+
+    for _ in range(max_count):
+        ports.add(get_open_port(start_port))
+        if start_port:
+            start_port += 1
     return list(ports)
 
 
-def _get_open_port() -> int:
-    port = envs.VLLM_PORT
-    if port is not None:
-        while True:
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.bind(("", port))
-                    return port
-            except OSError:
-                port += 1  # Increment port number if already in use
-                logger.info("Port %d is already in use, trying port %d",
-                            port - 1, port)
-    # try ipv4
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("", 0))
-            return s.getsockname()[1]
-    except OSError:
-        # try ipv6
-        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
-            s.bind(("", 0))
-            return s.getsockname()[1]
+def _get_open_port(prefered_port: int = 0) -> int:
+    for family in (socket.AF_INET, socket.AF_INET6):
+        try:
+            with socket.socket(family, socket.SOCK_STREAM) as s:
+                s.bind(("", prefered_port))
+                port = s.getsockname()[1]
+        except OSError:
+            continue
+        return port
+    raise OSError("Cannot find available port")
 
 
 def find_process_using_port(port: int) -> Optional[psutil.Process]:
