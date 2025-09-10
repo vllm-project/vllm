@@ -7,7 +7,11 @@ from typing import Optional
 import pytest
 
 from vllm.config import LogprobsMode
-from vllm.config.utils import get_hash_factors, hash_factors, normalize_value
+from vllm.config.utils import (
+    get_hash_factors,
+    hash_factors,
+    normalize_value,
+)
 
 # Helpers
 
@@ -156,9 +160,9 @@ def test_classes_are_types():
 
     assert _endswith_fqname(LocalDummy, ".LocalDummy")
 
-    from vllm.v1.sample.logits_processor.interface import LogitsProcessor
-    from vllm.executor.executor_base import ExecutorBase
     from vllm.compilation.inductor_pass import InductorPass
+    from vllm.executor.executor_base import ExecutorBase
+    from vllm.v1.sample.logits_processor.interface import LogitsProcessor
 
     assert _endswith_fqname(LogitsProcessor, ".LogitsProcessor")
     assert _endswith_fqname(ExecutorBase, ".ExecutorBase")
