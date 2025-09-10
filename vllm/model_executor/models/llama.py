@@ -621,6 +621,8 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         modules = name.split(".")
 
         # rotary embeds should be sliced
+        # If using quantized model in mistral format,
+        # quantization scales (qscale_weight) also need to be sliced
         if "wk" in modules and modules[-1] == "weight":
             loaded_weight = permute(loaded_weight,
                                     self.config.num_key_value_heads,

@@ -552,7 +552,7 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
     def maybe_update_quant_config(
             self, quant_config: QuantizationConfig) -> QuantizationConfig:
         """
-        Update quant config to so that ignored module and targer module names
+        Update quant config to so that ignored module and target module names
         match the vLLM model names.
         Right now this is specific for compressed-tensors format and
         load_format mistral.
