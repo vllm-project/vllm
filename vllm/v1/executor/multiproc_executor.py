@@ -26,7 +26,6 @@ from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
 from vllm.distributed.device_communicators.shm_broadcast import (Handle,
                                                                  MessageQueue)
-from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
                                              get_pp_group, get_tp_group)
 from vllm.executor.multiproc_worker_utils import (
