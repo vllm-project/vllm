@@ -10,7 +10,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from contextlib import AsyncExitStack
 from copy import copy
 from http import HTTPStatus
-from typing import Callable, Final, Optional, Union
+from typing import Callable, Final, Optional, Tuple, Union
 
 import jinja2
 import openai.types.responses as openai_responses_types
@@ -28,12 +28,10 @@ from openai.types.responses import (ResponseCreatedEvent,
                                     ResponseReasoningTextDeltaEvent,
                                     ResponseReasoningTextDoneEvent,
                                     response_text_delta_event)
-from openai.types.responses.response_output_text import (Logprob,
-                                                         LogprobTopLogprob)
 # yapf: enable
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent)
-from openai_harmony import Message as OpenAIHarmonyMessage
+from openai_harmony import Message as OpenAIHarmonyMessage, Role
 
 from vllm import envs
 from vllm.config import ModelConfig
@@ -41,11 +39,11 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          ChatTemplateContentFormatOption)
 from vllm.entrypoints.context import (ConversationContext, HarmonyContext,
-                                      SimpleContext, StreamingHarmonyContext)
+                                      ChatContext, StreamingHarmonyContext)
 from vllm.entrypoints.harmony_utils import (
     get_developer_message, get_stop_tokens_for_assistant_actions,
-    get_system_message, get_user_message, parse_output_message,
-    parse_remaining_state, parse_response_input, render_for_completion)
+    get_system_message, get_user_message,
+    parse_remaining_state_into_output_items, parse_response_input, render_for_completion)
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -56,14 +54,13 @@ from vllm.entrypoints.openai.protocol import (DeltaMessage, ErrorResponse,
                                               ResponsesRequest,
                                               ResponsesResponse, ResponseUsage)
 # yapf: enable
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.logprobs_utils import (create_response_logprobs,
+                                                     create_stream_response_logprobs)
+from vllm.entrypoints.openai.serving_engine import OpenAIServing, RequestPrompt
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
-from vllm.logprobs import Logprob as SampleLogprob
-from vllm.logprobs import SampleLogprobs
-from vllm.outputs import CompletionOutput
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -222,8 +219,17 @@ class OpenAIServingResponses(OpenAIServing):
                 status_code=HTTPStatus.BAD_REQUEST,
             )
 
+        if (request.previous_response_messages or request.previous_response_output) and request.previous_response_id:
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message="Cannot use previous_response_id when previous_response_messages or previous_response_output is set",
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+
         # Handle the previous response ID.
         prev_response_id = request.previous_response_id
+        prev_msgs = []
+        prev_response_output = []
         if prev_response_id is not None:
             if not prev_response_id.startswith("resp_"):
                 return self._make_invalid_id_error(prev_response_id)
@@ -231,20 +237,23 @@ class OpenAIServingResponses(OpenAIServing):
                 prev_response = self.response_store.get(prev_response_id)
             if prev_response is None:
                 return self._make_not_found_error(prev_response_id)
+            prev_response_output = prev_response.output
+            prev_msgs = self.msg_store[prev_response_id]
         else:
-            prev_response = None
+            prev_response_output = request.previous_response_output if request.previous_response_output else []
+            prev_msgs = request.previous_response_messages if request.previous_response_messages else []
 
         try:
             lora_request = self._maybe_get_adapters(request)
             model_name = self._get_model_name(request.model, lora_request)
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
-
+            input_messages: list[ChatCompletionMessageParam] = []
             if self.use_harmony:
-                messages, request_prompts, engine_prompts = (
-                    self._make_request_with_harmony(request, prev_response))
+                input_messages, request_prompts, engine_prompts = (
+                    self._make_request_with_harmony(request, prev_response_output, prev_msgs)) # type: ignore
             else:
-                messages, request_prompts, engine_prompts = (
-                    await self._make_request(request, prev_response,
+                input_messages, request_prompts, engine_prompts = (
+                    await self._make_request(request, prev_response_output, prev_msgs,
                                              tokenizer))
 
         except (ValueError, TypeError, RuntimeError, jinja2.TemplateError,
@@ -286,11 +295,14 @@ class OpenAIServingResponses(OpenAIServing):
                 if self.use_harmony:
                     if request.stream:
                         context = StreamingHarmonyContext(
-                            messages, available_tools)
+                            input_messages, available_tools)
                     else:
-                        context = HarmonyContext(messages, available_tools)
+                        context = HarmonyContext(input_messages, available_tools)
                 else:
-                    context = SimpleContext()
+                    # TODO: Output logging is only happening for this case and only reasoning tokens
+                    # Adding it in here for now, but should be pulled back out and actually log everything
+                    request_logger = self.request_logger if self.enable_log_outputs else None
+                    context = ChatContext(input_messages, tokenizer, self.reasoning_parser, request_logger)
                 generator = self._generate_with_builtin_tools(
                     request_id=request.request_id,
                     request_prompt=request_prompts[i],
@@ -308,10 +320,6 @@ class OpenAIServingResponses(OpenAIServing):
 
         assert len(generators) == 1
         result_generator, = generators
-
-        # Store the input messages.
-        if request.store:
-            self.msg_store[request.request_id] = messages
 
         if request.background:
             created_time = int(time.time())
@@ -395,14 +403,15 @@ class OpenAIServingResponses(OpenAIServing):
     async def _make_request(
         self,
         request: ResponsesRequest,
-        prev_response: Optional[ResponsesResponse],
+        prev_response_output: list[ResponseOutputItem],
+        prev_msgs: list[ChatCompletionMessageParam],
         tokenizer: AnyTokenizer,
     ):
         if len(request.tools) > 0:
             raise NotImplementedError(
                 "Tool use is not supported in Responses API without Harmony")
         # Construct the input messages.
-        messages = self._construct_input_messages(request, prev_response)
+        messages = self._construct_input_messages(request, prev_response_output, prev_msgs)
         _, request_prompts, engine_prompts = await self._preprocess_chat(
             request,
             tokenizer,
@@ -415,14 +424,17 @@ class OpenAIServingResponses(OpenAIServing):
     def _make_request_with_harmony(
         self,
         request: ResponsesRequest,
-        prev_response: Optional[ResponsesResponse],
-    ):
+        prev_response_output: list[ResponseOutputItem],
+        prev_msgs: list[ChatCompletionMessageParam]
+    ) -> Tuple[list[OpenAIHarmonyMessage],
+                Sequence[RequestPrompt],
+                list[EngineTokensPrompt]]:
         if request.tool_choice != "auto":
             raise NotImplementedError(
                 "Only 'auto' tool_choice is supported in "
                 "response API with Harmony")
         messages = self._construct_input_messages_with_harmony(
-            request, prev_response)
+            request, prev_response_output, prev_msgs)
         prompt_token_ids = render_for_completion(messages)
         engine_prompt = EngineTokensPrompt(prompt_token_ids=prompt_token_ids)
 
@@ -431,6 +443,8 @@ class OpenAIServingResponses(OpenAIServing):
             engine_prompt["cache_salt"] = request.cache_salt
 
         return messages, [prompt_token_ids], [engine_prompt]
+
+
 
     async def responses_full_generator(
         self,
@@ -457,38 +471,19 @@ class OpenAIServingResponses(OpenAIServing):
                 # TODO: Use a vllm-specific Validation Error
                 return self.create_error_response(str(e))
 
-        output_harmony_messages = None
-        input_harmony_messages = None
+        # TODO: In the future this should only return output_messages
+        # and the conversion to items happens here
+        output_items, output_messages = context.get_output_and_output_messages(request)
+        input_messages = context.get_input_messages()
         if self.use_harmony:
             assert isinstance(context, HarmonyContext)
-            output = self._make_response_output_items_with_harmony(context)
             num_tool_output_tokens = context.num_tool_output_tokens
-            if envs.VLLM_RESPONSES_API_ENABLE_HARMONY_MESSAGES_OUTPUT:
-                # TODO: Handle leftover parser state?
-                input_harmony_messages = context.input_messages
-                # .messages contains input and output, so just get the output
-                output_harmony_messages = context.messages[
-                    len(input_harmony_messages):]
-            # TODO: these are all 0 for now!
-            num_prompt_tokens = context.num_prompt_tokens
-            num_generated_tokens = context.num_output_tokens
-            num_cached_tokens = context.num_cached_tokens
-            num_reasoning_tokens = context.num_reasoning_tokens
         else:
-            assert isinstance(context, SimpleContext)
-            final_res = context.last_output
-            assert final_res is not None
-            assert len(final_res.outputs) == 1
-            final_output = final_res.outputs[0]
-
-            output = self._make_response_output_items(request, final_output,
-                                                      tokenizer)
-
+            assert isinstance(context, ChatContext)
             # Calculate usage.
-            assert final_res.prompt_token_ids is not None
             num_tool_output_tokens = 0
 
-        assert isinstance(context, (SimpleContext, HarmonyContext))
+        assert isinstance(context, (ChatContext, HarmonyContext))
         num_prompt_tokens = context.num_prompt_tokens
         num_generated_tokens = context.num_output_tokens
         num_cached_tokens = context.num_cached_tokens
@@ -509,9 +504,10 @@ class OpenAIServingResponses(OpenAIServing):
             sampling_params,
             model_name=model_name,
             created_time=created_time,
-            output=output,
-            input_harmony_messages=input_harmony_messages,
-            output_harmony_messages=output_harmony_messages,
+            output=output_items,
+            # Only if request flag is enabled
+            input_messages=input_messages if request.enable_response_messages else None,
+            output_messages=output_messages if request.enable_response_messages else None,
             status="completed",
             usage=usage,
         )
@@ -523,189 +519,36 @@ class OpenAIServingResponses(OpenAIServing):
                 if (stored_response is None
                         or stored_response.status != "cancelled"):
                     self.response_store[response.id] = response
+            # Final store call moved here 
+            # Now stores input and output messages so the ResponseOutputItems
+            # aren't needed to populate messages on future turns (because they are lossy)
+            self.msg_store[response.id] = input_messages + output_messages
         return response
 
-    def _topk_logprobs(self, logprobs: dict[int,
-                                            SampleLogprob], top_logprobs: int,
-                       tokenizer: AnyTokenizer) -> list[LogprobTopLogprob]:
-        """Returns the top-k logprobs from the logprobs dictionary."""
-        out = []
-        for i, (token_id, _logprob) in enumerate(logprobs.items()):
-            if i >= top_logprobs:
-                break
-            text = _logprob.decoded_token if _logprob.decoded_token \
-                is not None else tokenizer.decode([token_id])
-            out.append(
-                LogprobTopLogprob(
-                    token=text,
-                    logprob=max(_logprob.logprob, -9999.0),
-                    bytes=list(text.encode("utf-8", errors="replace")),
-                ))
-        return out
-
-    def _create_response_logprobs(
-            self,
-            token_ids: Sequence[int],
-            logprobs: Optional[SampleLogprobs],
-            tokenizer: AnyTokenizer,
-            top_logprobs: Optional[int] = None) -> list[Logprob]:
-        assert logprobs is not None, "logprobs must be provided"
-        assert len(token_ids) == len(logprobs), (
-            "token_ids and logprobs.token_ids must have the same length")
-        out = []
-        for i, token_id in enumerate(token_ids):
-            logprob = logprobs[i]
-            token_logprob = logprob[token_id]
-            text = token_logprob.decoded_token if token_logprob.decoded_token \
-                is not None else tokenizer.decode([token_id])
-            out.append(
-                Logprob(
-                    token=text,
-                    logprob=max(token_logprob.logprob, -9999.0),
-                    bytes=list(text.encode("utf-8", errors="replace")),
-                    top_logprobs=self._topk_logprobs(logprob,
-                                                     top_logprobs=top_logprobs,
-                                                     tokenizer=tokenizer)
-                    if top_logprobs else [],
-                ))
-        return out
-
-    def _create_stream_response_logprobs(
-        self,
-        token_ids: Sequence[int],
-        logprobs: Optional[SampleLogprobs],
-        tokenizer: AnyTokenizer,
-        top_logprobs: Optional[int] = None
-    ) -> list[response_text_delta_event.Logprob]:
-        lgs = self._create_response_logprobs(token_ids=token_ids,
-                                             logprobs=logprobs,
-                                             tokenizer=tokenizer,
-                                             top_logprobs=top_logprobs)
-        return [
-            response_text_delta_event.Logprob(
-                token=lg.token,
-                logprob=lg.logprob,
-                top_logprobs=[
-                    response_text_delta_event.LogprobTopLogprob(
-                        token=tl.token, logprob=tl.logprob)
-                    for tl in lg.top_logprobs
-                ]) for lg in lgs
-        ]
-
-    def _make_response_output_items(
-        self,
-        request: ResponsesRequest,
-        final_output: CompletionOutput,
-        tokenizer: AnyTokenizer,
-    ) -> list[ResponseOutputItem]:
-        if self.reasoning_parser:
-            try:
-                reasoning_parser = self.reasoning_parser(tokenizer)
-            except RuntimeError as e:
-                logger.exception("Error in reasoning parser creation.")
-                raise e
-
-            reasoning_content, content = (
-                reasoning_parser.extract_reasoning_content(final_output.text,
-                                                           request=request))
-        else:
-            reasoning_content = None
-            content = final_output.text
-
-        # Log complete response if output logging is enabled
-        if self.enable_log_outputs and self.request_logger:
-            output_text = ""
-            if content:
-                output_text = content
-            elif reasoning_content:
-                output_text = f"[reasoning: {reasoning_content}]"
-
-            if output_text:
-                self.request_logger.log_outputs(
-                    request_id=request.request_id,
-                    outputs=output_text,
-                    output_token_ids=final_output.token_ids,
-                    finish_reason=final_output.finish_reason,
-                    is_streaming=False,
-                    delta=False,
-                )
-
-        output = []
-        if reasoning_content:
-            reasoning_item = ResponseReasoningItem(
-                id=f"rs_{random_uuid()}",
-                summary=[],
-                type="reasoning",
-                content=[
-                    ResponseReasoningTextContent(text=reasoning_content,
-                                                 type="reasoning_text")
-                ],
-                status=None,  # NOTE: Only the last output item has status.
-            )
-            output.append(reasoning_item)
-        if content:
-            output_text = ResponseOutputText(
-                text=content,
-                annotations=[],  # TODO
-                type="output_text",
-                logprobs=self._create_response_logprobs(
-                    token_ids=final_output.token_ids,
-                    logprobs=final_output.logprobs,
-                    tokenizer=tokenizer,
-                    top_logprobs=request.top_logprobs,
-                ) if request.is_include_output_logprobs() else None,
-            )
-            message = ResponseOutputMessage(
-                id=f"msg_{random_uuid()}",
-                content=[output_text],
-                role="assistant",
-                status="completed",
-                type="message",
-            )
-            output.append(message)
-        return output
-
-    def _make_response_output_items_with_harmony(
-        self,
-        context: HarmonyContext,
-    ) -> list[ResponseOutputItem]:
-        output_items = []
-        num_init_messages = context.num_init_messages
-        for msg in context.messages[num_init_messages:]:
-            output_items.extend(parse_output_message(msg))
-        # Handle the generation stopped in the middle (if any).
-        last_items = parse_remaining_state(context.parser)
-        if last_items:
-            output_items.extend(last_items)
-        return output_items
 
     def _construct_input_messages(
         self,
         request: ResponsesRequest,
-        prev_response: Optional[ResponsesResponse] = None,
-    ) -> list[ChatCompletionMessageParam]:
+        prev_response_output: list[ResponseOutputItem],
+        prev_msgs: list[ChatCompletionMessageParam]) -> list[ChatCompletionMessageParam]:
         messages: list[ChatCompletionMessageParam] = []
         if request.instructions:
+            # TODO: Implement replacing system and developer messages
+            # with new information from tools as well
             messages.append({
                 "role": "system",
                 "content": request.instructions,
             })
 
-        # Prepend the conversation history.
-        if prev_response is not None:
-            # Add the previous messages.
-            prev_msg = self.msg_store[prev_response.id]
-            messages.extend(prev_msg)
-
-            # Add the previous output.
-            for output_item in prev_response.output:
-                # NOTE: We skip the reasoning output.
-                if isinstance(output_item, ResponseOutputMessage):
-                    for content in output_item.content:
-                        messages.append({
-                            "role": "assistant",
-                            "content": content.text,
-                        })
+        for message in prev_msgs:
+            assert isinstance(message, dict), 'Harmony input message seen for non-harmony model'
+            # Do not reuse previous system messages
+            if message["role"] == "system":
+                continue
+            messages.append(message)
+            
+        # TODO: Is there any tool call id matching that needs to happen
+        # here like in harmony?
 
         # Append the new input.
         # Responses API supports simple text inputs without chat format.
@@ -718,70 +561,56 @@ class OpenAIServingResponses(OpenAIServing):
     def _construct_input_messages_with_harmony(
         self,
         request: ResponsesRequest,
-        prev_response: Optional[ResponsesResponse],
+        prev_response_output: list[ResponseOutputItem],
+        prev_msgs: list[ChatCompletionMessageParam]
     ) -> list[OpenAIHarmonyMessage]:
         messages: list[OpenAIHarmonyMessage] = []
-        if prev_response is not None:
-            # Continue the previous conversation.
-            # FIXME(woosuk): Currently, request params like reasoning and
-            # instructions are ignored.
-            prev_msgs = self.msg_store[prev_response.id]
-            # Remove the previous chain-of-thoughts if there is a new "final"
-            # message. Note that this also removes these messages from the
-            # msg_store.
-            if len(prev_msgs) > 0:
-                last_msg = prev_msgs[-1]
-                assert isinstance(last_msg, OpenAIHarmonyMessage)
-                if last_msg.channel == "final":
-                    prev_final_msg_idx = -1
-                    for i in range(len(prev_msgs) - 2, -1, -1):
-                        prev_msg_i = prev_msgs[i]
-                        assert isinstance(prev_msg_i, OpenAIHarmonyMessage)
-                        if prev_msg_i.channel == "final":
-                            prev_final_msg_idx = i
-                            break
-                    recent_turn_msgs = prev_msgs[prev_final_msg_idx + 1:]
-                    del prev_msgs[prev_final_msg_idx + 1:]
-                    for msg in recent_turn_msgs:
-                        assert isinstance(msg, OpenAIHarmonyMessage)
-                        if msg.channel != "analysis":
-                            prev_msgs.append(msg)
-            messages.extend(prev_msgs)
-        elif request.previous_response_harmony_messages is not None:
-            messages.extend(request.previous_response_harmony_messages)
-        else:
-            # New conversation.
-            reasoning_effort = (request.reasoning.effort
-                                if request.reasoning else None)
-            tool_types = [tool.type for tool in request.tools]
-            enable_browser = ("web_search_preview" in tool_types
-                              and self.tool_server is not None
-                              and self.tool_server.has_tool("browser"))
-            enable_code_interpreter = ("code_interpreter" in tool_types
-                                       and self.tool_server is not None
-                                       and self.tool_server.has_tool("python"))
-            sys_msg = get_system_message(
-                reasoning_effort=reasoning_effort,
-                browser_description=self.tool_server.get_tool_description(
-                    "browser")
-                if enable_browser and self.tool_server is not None else None,
-                python_description=self.tool_server.get_tool_description(
-                    "python") if enable_code_interpreter
-                and self.tool_server is not None else None,
-            )
-            messages.append(sys_msg)
-            dev_msg = get_developer_message(request.instructions,
-                                            request.tools)
-            messages.append(dev_msg)
+        # To match OpenAI, instructions, reasoning and tools are
+        # always taken from the most recent Responses API request
+        # not carried over from previous requests that you are continuing
+        reasoning_effort = (request.reasoning.effort
+                            if request.reasoning else None)
+        tool_types = [tool.type for tool in request.tools]
+        enable_browser = "web_search_preview" in tool_types
+        enable_code_interpreter = "code_interpreter" in tool_types
+        # If we enable responses messages, the user
+        # may be handling built in tool calls client side
+        # In this case, we want to enable the tool
+        # in the prompts, even if we are not calling them server side.
+        if not request.enable_response_messages:
+            enable_browser = (enable_browser
+                            and self.tool_server is not None
+                            and self.tool_server.has_tool("browser"))
+            enable_code_interpreter = (enable_code_interpreter
+                                    and self.tool_server is not None
+                                    and self.tool_server.has_tool("python"))
+        sys_msg = get_system_message(
+            reasoning_effort=reasoning_effort,
+            browser_description=self.tool_server.get_tool_description(
+                "browser")
+            if enable_browser and self.tool_server is not None else None,
+            python_description=self.tool_server.get_tool_description(
+                "python") if enable_code_interpreter
+            and self.tool_server is not None else None,
+        )
+        messages.append(sys_msg)
+        dev_msg = get_developer_message(request.instructions,
+                                        request.tools)
+        messages.append(dev_msg)
+
+        for message in prev_msgs:
+            assert isinstance(message, OpenAIHarmonyMessage)
+            message_role = message.author.role
+            # Don't use the previous system or developer messages
+            if message_role == Role.SYSTEM or message_role == Role.DEVELOPER:
+                continue
+            messages.append(message)
         # Append the new input.
         # Responses API supports simple text inputs without chat format.
         if isinstance(request.input, str):
             messages.append(get_user_message(request.input))
         else:
-            if prev_response is not None:
-                prev_outputs = copy(prev_response.output)
-            else:
-                prev_outputs = []
+            prev_outputs = prev_response_output
             for response_msg in request.input:
                 messages.append(
                     parse_response_input(response_msg, prev_outputs))
@@ -976,7 +805,7 @@ class OpenAIServingResponses(OpenAIServing):
         first_delta_sent = False
         previous_delta_messages: list[DeltaMessage] = []
         async for ctx in result_generator:
-            assert isinstance(ctx, SimpleContext)
+            assert isinstance(ctx, ChatContext)
             if ctx.last_output is None:
                 continue
             if ctx.last_output.outputs:
@@ -1140,7 +969,7 @@ class OpenAIServingResponses(OpenAIServing):
                             output_index=current_output_index,
                             item_id=current_item_id,
                             delta=delta_message.content,
-                            logprobs=self._create_stream_response_logprobs(
+                            logprobs=create_stream_response_logprobs(
                                 token_ids=output.token_ids,
                                 logprobs=output.logprobs,
                                 tokenizer=tokenizer,

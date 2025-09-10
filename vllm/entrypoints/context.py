@@ -4,16 +4,30 @@ import json
 import logging
 from abc import ABC, abstractmethod
 from contextlib import AsyncExitStack
-from typing import TYPE_CHECKING, Optional, Union
+from typing import Callable, TYPE_CHECKING, Optional, Union, Tuple
 
+from openai.types.responses import (ResponseOutputItem,
+                                    ResponseOutputMessage, ResponseOutputText,
+                                    ResponseReasoningItem)
+from openai.types.responses.response_reasoning_item import (
+    Content as ResponseReasoningTextContent)
 from openai_harmony import Author, Message, Role, StreamState, TextContent
 
+from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.harmony_utils import (
-    get_encoding, get_streamable_parser_for_assistant, render_for_completion)
+    convert_harmony_message_to_output_item, get_encoding,
+    get_streamable_parser_for_assistant,
+    parse_remaining_state_into_output_items,
+    render_for_completion,)
+from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.openai.protocol import ResponsesRequest
 from vllm.entrypoints.tool import Tool
 from vllm.entrypoints.tool_server import ToolServer
+from vllm.entrypoints.openai.logprobs_utils import create_response_logprobs
 from vllm.outputs import RequestOutput
-
+from vllm.reasoning import ReasoningParser
+from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.utils import random_uuid
 if TYPE_CHECKING:
     from mcp.client import ClientSession
 
@@ -60,16 +74,32 @@ class ConversationContext(ABC):
                                  exit_stack: AsyncExitStack) -> None:
         pass
 
+    @abstractmethod
+    def get_input_messages(self) -> list[ChatCompletionMessageParam]:
+        pass
 
-class SimpleContext(ConversationContext):
+    @abstractmethod
+    def get_output_and_output_messages(self, request: ResponsesRequest) -> Tuple[list[ResponseOutputItem], list[ChatCompletionMessageParam]]:
+        pass
 
-    def __init__(self):
+# Standard functionality for ChatCompletion based models
+class ChatContext(ConversationContext):
+    def __init__(self, input_messages: list[ChatCompletionMessageParam],
+                    tokenizer: AnyTokenizer,
+                    reasoning_parser: Optional[Callable[[AnyTokenizer],
+                                                 ReasoningParser]],
+                    request_logger: Optional[RequestLogger] = None):
+        self.request_logger = request_logger
         self.last_output = None
+        self.tokenizer = tokenizer
+        self._input_messages = input_messages.copy()
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
         self.num_cached_tokens = 0
         # todo num_reasoning_tokens is not implemented yet.
         self.num_reasoning_tokens = 0
+        self.reasoning_parser = reasoning_parser
+        # TODO: Tool parser for tool calling for other models
 
     def append_output(self, output) -> None:
         self.last_output = output
@@ -92,6 +122,103 @@ class SimpleContext(ConversationContext):
                                  exit_stack: AsyncExitStack) -> None:
         pass
 
+    def get_input_messages(self) -> list[ChatCompletionMessageParam]:
+        return self._input_messages
+
+    # TODO: Ideally this class only deals with messages, but since we don't have
+    # a way to represent reasoning as messages yet
+    # This is very important as once Responses specific concepts are removed
+    # then this can be used to handle tool calling for completions API as well
+    def get_output_and_output_messages(self,
+                            request: ResponsesRequest) -> Tuple[
+                                list[ResponseOutputItem],
+                                list[ChatCompletionMessageParam]]:
+
+        if self.last_output is None:
+            return [], []
+        assert len(self.last_output.outputs) == 1
+        final_output = self.last_output.outputs[0]
+        output_items = []
+        output_messages = []
+        if self.reasoning_parser:
+            try:
+                reasoning_parser = self.reasoning_parser(self.tokenizer)
+            except RuntimeError as e:
+                logger.exception("Error in reasoning parser creation.")
+                raise e
+            # TODO: Figure out how to get number of reasoning tokens here
+            # without tokenizing again
+            reasoning_content, content = (
+                reasoning_parser.extract_reasoning_content(final_output.text,
+                                                           request=request))
+        else:
+            reasoning_content = None
+            self.num_reasoning_tokens = 0
+            content = final_output.text
+
+        # Log complete response if output logging is provided
+        # matches previous functionality
+        if self.request_logger is not None:
+            output_text = ""
+            if content:
+                output_text = content
+            elif reasoning_content:
+                output_text = f"[reasoning: {reasoning_content}]"
+
+            if output_text:
+                self.request_logger.log_outputs(
+                    request_id=request.request_id,
+                    outputs=output_text,
+                    output_token_ids=final_output.token_ids,
+                    finish_reason=final_output.finish_reason,
+                    is_streaming=False,
+                    delta=False,
+                )
+
+
+        if reasoning_content:
+            # TODO: Make a ResponseOutputItem but skip a reasoning message
+            # since there is no direct match in OpenAI spec and
+            # functionality drops them between API requests at the moment
+            reasoning_item = ResponseReasoningItem(
+                id=f"rs_{random_uuid()}",
+                summary=[],
+                type="reasoning",
+                content=[
+                    ResponseReasoningTextContent(text=reasoning_content,
+                                                 type="reasoning_text")
+                ],
+                status=None,  # NOTE: Only the last output item has status.
+            )
+
+            output_items.append(reasoning_item)
+        if content:
+            output_text = ResponseOutputText(
+                text=content,
+                annotations=[],  # TODO
+                type="output_text",
+                logprobs=create_response_logprobs(
+                    token_ids=final_output.token_ids,
+                    logprobs=final_output.logprobs,
+                    tokenizer=self.tokenizer,
+                    top_logprobs=request.top_logprobs,
+                ) if request.is_include_output_logprobs() else None,
+            )
+            message = ResponseOutputMessage(
+                id=f"msg_{random_uuid()}",
+                content=[output_text],
+                role="assistant",
+                status="completed",
+                type="message",
+            )
+            output_items.append(message)
+            # It is always an assistant message, which is a typed_dict
+            output_messages.append({
+                        "role": "assistant",
+                        "content": content,
+                    })
+
+        return output_items, output_messages
 
 class HarmonyContext(ConversationContext):
 
@@ -101,12 +228,11 @@ class HarmonyContext(ConversationContext):
         available_tools: list[str],
     ):
         self._messages = messages
-        self.input_messages = messages.copy()
+        self._input_messages = messages.copy()
         self.available_tools = available_tools
         self._tool_sessions: dict[str, Union[ClientSession, Tool]] = {}
 
         self.parser = get_streamable_parser_for_assistant()
-        self.num_init_messages = len(messages)
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
         self.num_cached_tokens = 0
@@ -298,6 +424,22 @@ class HarmonyContext(ConversationContext):
                     self._tool_sessions[
                         tool_name] = await exit_stack.enter_async_context(
                             tool_server.new_session(tool_name))
+
+    def get_input_messages(self) -> list[ChatCompletionMessageParam]:
+        return self._input_messages
+
+    def get_output_and_output_messages(self, request: ResponsesRequest) -> Tuple[list[ResponseOutputItem], list[ChatCompletionMessageParam]]:
+        output_items = []
+        output_messages = self.messages[len(self._input_messages):]
+        for msg in output_messages:
+            output_items.extend(convert_harmony_message_to_output_item(msg))
+        # Handle the generation stopped in the middle (if any).
+        # TODO: This will not result in any messages, so the next API
+        # request will not see these outputs, should this be kept?
+        last_items = parse_remaining_state_into_output_items(self.parser)
+        if last_items:
+            output_items.extend(last_items)
+        return output_items, output_messages
 
 
 class StreamingHarmonyContext(HarmonyContext):

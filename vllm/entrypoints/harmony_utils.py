@@ -111,7 +111,6 @@ def get_developer_message(
 def get_user_message(content: str) -> Message:
     return Message.from_role_and_content(Role.USER, content)
 
-
 def parse_response_input(
     response_msg: ResponseInputOutputItem,
     prev_responses: list[Union[ResponseOutputItem, ResponseReasoningItem]]
@@ -213,7 +212,7 @@ def render_for_completion(messages: list[Message]) -> list[int]:
     return token_ids
 
 
-def parse_output_message(message: Message) -> list[ResponseOutputItem]:
+def convert_harmony_message_to_output_item(message: Message) -> list[ResponseOutputItem]:
     """
     Parse a Harmony message into a list of output response items.
     """
@@ -315,7 +314,7 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
     return output_items
 
 
-def parse_remaining_state(
+def parse_remaining_state_into_output_items(
         parser: StreamableParser) -> list[ResponseOutputItem]:
     if not parser.current_content:
         return []

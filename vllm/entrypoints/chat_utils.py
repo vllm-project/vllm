@@ -254,6 +254,25 @@ ChatCompletionMessageParam = Union[
     OpenAIHarmonyMessage,
 ]
 
+def chat_completion_message_param_to_dict(
+    param: ChatCompletionMessageParam
+) -> dict[str, Any]:
+    if isinstance(param, OpenAIHarmonyMessage):
+        out = param.to_dict()
+        out["type"] = "harmony"
+        return out
+    elif isinstance(param, dict):
+        return dict(param)
+    else:
+        raise ValueError(f"Unknown message param type: {type(param)}")
+
+def chat_completion_message_param_from_dict(
+    param: dict[str, Any]
+) -> ChatCompletionMessageParam:
+    if param.get("type", None) == "harmony":
+        return OpenAIHarmonyMessage.from_dict(param)
+    else:
+        return cast(ChatCompletionMessageParam, param)
 
 # TODO: Make fields ReadOnly once mypy supports it
 class ConversationMessage(TypedDict, total=False):

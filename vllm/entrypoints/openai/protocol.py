@@ -33,13 +33,15 @@ except ImportError:  # For newer openai versions (>= 1.100.0)
 from openai.types.responses.response import ToolChoice
 from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
-from openai_harmony import Message, ToolNamespaceConfig
+from openai_harmony import Message
 from pydantic import (BaseModel, ConfigDict, Field, TypeAdapter,
                       ValidationInfo, field_validator, model_validator)
 from typing_extensions import TypeAlias
 
 from vllm import envs
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
+                                         chat_completion_message_param_from_dict,
+                                         chat_completion_message_param_to_dict,
                                          make_tool_call_id)
 from vllm.entrypoints.score_utils import (ScoreContentPartParam,
                                           ScoreMultiModalParam)
@@ -55,52 +57,6 @@ logger = init_logger(__name__)
 _LONG_INFO = torch.iinfo(torch.long)
 
 
-def _serialize_tools_to_dict(
-    tools: Optional[dict[str,
-                         ToolNamespaceConfig]]) -> Optional[dict[str, dict]]:
-    """Helper function to serialize tools for harmony messages."""
-    if tools is None:
-        return None
-    return {
-        name: config.model_dump(exclude_none=True)
-        for name, config in tools.items()
-    }
-
-
-def _deserialize_tools_from_dict(
-    tools_data: Optional[dict[str, dict]]
-) -> Optional[dict[str, ToolNamespaceConfig]]:
-    """Helper function to deserialize tools for harmony messages."""
-    if tools_data is None:
-        return None
-    return {
-        name:
-        ToolNamespaceConfig(
-            **config_dict) if isinstance(config_dict, dict) else config_dict
-        for name, config_dict in tools_data.items()
-    }
-
-
-def _serialize_harmony_message_with_tools(msg: Message) -> dict[str, Any]:
-    """Helper function to serialize a harmony message with proper tools
-    handling."""
-    result = msg.to_dict()
-
-    # Handle tools in content items
-    if "content" in result and isinstance(result["content"], list):
-        for content_item in result["content"]:
-            if (isinstance(content_item, dict) and "tools" in content_item
-                    and hasattr(msg, 'content')):
-                # Check if this content item has tools that need serialization
-                for original_content in msg.content:
-                    if (hasattr(original_content, 'tools')
-                            and original_content.tools is not None):
-                        # Serialize the tools properly
-                        content_item["tools"] = _serialize_tools_to_dict(
-                            original_content.tools)
-                        break
-
-    return result
 
 
 class OpenAIBaseModel(BaseModel):
@@ -322,10 +278,19 @@ class ResponsesRequest(OpenAIBaseModel):
     metadata: Optional[Metadata] = None
     model: Optional[str] = None
     parallel_tool_calls: Optional[bool] = True
+    # If previous_response_id is set, cannot set
+    # previous_response_messages or previous_response_output
+    # as it will be looked up from the stores instead
     previous_response_id: Optional[str] = None
-    # This can be used when the store is disabled but you want to
+    # These can be used when the store is disabled but you want to
     # be able to continue a Responses API thread
-    previous_response_harmony_messages: Optional[list[Message]] = None
+    # if the item is a dict, the type field is expected to exist
+    previous_response_messages: Optional[list[ChatCompletionMessageParam]] = None
+    # This is used exclusively to match function calls to outputs
+    # for the function name
+    previous_response_output: Optional[list[ResponseOutputItem]] = None
+    # Dictates whether or not to return Messages as part of the response object
+    enable_response_messages: bool = False
     prompt: Optional[ResponsePrompt] = None
     reasoning: Optional[Reasoning] = None
     service_tier: Literal["auto", "default", "flex", "scale",
@@ -426,58 +391,19 @@ class ResponsesRequest(OpenAIBaseModel):
             self.include,
             list) and "message.output_text.logprobs" in self.include
 
-    @field_validator("previous_response_harmony_messages", mode="before")
+    @field_validator("previous_response_messages", mode="before")
     @classmethod
     def deserialize_harmony_messages(cls, v):
-        """Convert incoming JSON dictionaries to Message objects."""
+        """Convert incoming ChatCompletionMessageParam objects from dictionaries if required."""
         if v is None:
             return v
         if isinstance(v, list):
             result = []
             for item in v:
                 if isinstance(item, dict):
-                    # Check if we need to handle tools deserialization
-                    needs_tools_handling = False
-                    if "content" in item:
-                        content_list = item["content"]
-                        if isinstance(content_list, list):
-                            for content_item in content_list:
-                                if (isinstance(content_item, dict)
-                                        and content_item.get("type") in [
-                                            "system_content",
-                                            "developer_content"
-                                        ] and "tools" in content_item):
-                                    needs_tools_handling = True
-                                    break
-
-                    # Only make a copy if we need to handle tools
-                    if needs_tools_handling:
-                        item_copy = item.copy()
-                        # Handle tools in content items
-                        content_list = item_copy["content"]
-                        for content_item in content_list:
-                            if (isinstance(content_item, dict)
-                                    and content_item.get("type")
-                                    in ["system_content", "developer_content"]
-                                    and "tools" in content_item):
-                                # Deserialize tools in system/developer content
-                                tools_data = content_item.get("tools")
-                                if tools_data is not None:
-                                    content_item["tools"] = \
-                                        _deserialize_tools_from_dict(tools_data)
-
-                        # Convert dictionary to Message object using from_dict
-                        result.append(Message.from_dict(item_copy))
-                    else:
-                        # Convert dictionary to Message object
-                        # using from_dict (no copy needed)
-                        result.append(Message.from_dict(item))
-                elif isinstance(item, Message):
-                    # Already a Message object
-                    result.append(item)
+                    result.append(chat_completion_message_param_from_dict(item))
                 else:
-                    raise ValueError(
-                        f"Invalid harmony message type: {type(item)}")
+                    result.append(item)
             return result
         raise ValueError(f"Invalid type for harmony messages: {type(v)}")
 
@@ -1963,10 +1889,9 @@ class ResponseUsage(OpenAIBaseModel):
 class ResponsesResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"resp_{random_uuid()}")
     created_at: int = Field(default_factory=lambda: int(time.time()))
-    # These are populated when the env flag
-    # VLLM_RESPONSES_API_ENABLE_HARMONY_MESSAGES_OUTPUT is set
-    input_harmony_messages: Optional[list[dict[str, Any]]] = None
-    output_harmony_messages: Optional[list[dict[str, Any]]] = None
+    # These are populated when enable_response_messages is set to True
+    input_messages: Optional[list[dict[str, Any]]] = None
+    output_messages: Optional[list[dict[str, Any]]] = None
     # error: Optional[ResponseError] = None
     # incomplete_details: Optional[IncompleteDetails] = None
     instructions: Optional[str] = None
@@ -2002,22 +1927,16 @@ class ResponsesResponse(OpenAIBaseModel):
         created_time: int,
         output: list[ResponseOutputItem],
         status: ResponseStatus,
-        input_harmony_messages: Optional[list[Message]] = None,
-        output_harmony_messages: Optional[list[Message]] = None,
+        input_messages: Optional[list[ChatCompletionMessageParam]] = None,
+        output_messages: Optional[list[ChatCompletionMessageParam]] = None,
         usage: Optional[ResponseUsage] = None,
     ) -> "ResponsesResponse":
         return cls(
             id=request.request_id,
             created_at=created_time,
             instructions=request.instructions,
-            input_harmony_messages=[
-                _serialize_harmony_message_with_tools(msg)
-                for msg in input_harmony_messages
-            ] if input_harmony_messages else None,
-            output_harmony_messages=[
-                _serialize_harmony_message_with_tools(msg)
-                for msg in output_harmony_messages
-            ] if output_harmony_messages else None,
+            input_messages=[chat_completion_message_param_to_dict(message) for message in input_messages] if input_messages else None,
+            output_messages=[chat_completion_message_param_to_dict(message) for message in output_messages] if output_messages else None,
             metadata=request.metadata,
             model=model_name,
             output=output,
