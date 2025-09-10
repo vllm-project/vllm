@@ -57,7 +57,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalEncDecInputs,
                                     MultiModalFieldConfig,
-                                    MultiModalKwargsItems)
+                                    MultiModalKwargsItems, MultiModalUUIDDict)
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseProcessingInfo,
@@ -184,13 +184,13 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Optional[Mapping[str, object]] = None,
-        mm_hash_overrides: Optional[dict[str, list[str]]] = None,
+        mm_uuids: Optional[MultiModalUUIDDict] = None,
     ) -> MultiModalEncDecInputs:
         mm_inputs = super().apply(prompt,
                                   mm_data,
                                   hf_processor_mm_kwargs,
                                   tokenization_kwargs,
-                                  mm_hash_overrides=mm_hash_overrides)
+                                  mm_uuids=mm_uuids)
 
         image_token_id = self.info.get_hf_config().image_token_index
         # Check that the number of image tokens in the decoder prompt matches
