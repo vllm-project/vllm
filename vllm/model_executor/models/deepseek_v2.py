@@ -385,6 +385,7 @@ class DeepseekV2MoE(nn.Module):
             assert shared_output is not None
             final_hidden_states += shared_output
 
+        # TODO: move to layer
         if self.is_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(
                 final_hidden_states, 0
@@ -395,7 +396,9 @@ class DeepseekV2MoE(nn.Module):
                 final_hidden_states
             )
 
-        return final_hidden_states.view(num_tokens, hidden_dim)
+        assert final_hidden_states.shape == (num_tokens, hidden_dim)
+
+        return final_hidden_states
 
 
 def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
@@ -1071,6 +1074,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         ):
             self.mlp = DeepseekV2MoE(
                 config=config,
+                model_config=model_config,
                 parallel_config=parallel_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
