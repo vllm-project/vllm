@@ -118,6 +118,7 @@ class GDNAttentionMetadataBuilder(
         common_attn_metadata: CommonAttentionMetadata,
         num_accepted_tokens: Optional[torch.Tensor] = None,
         num_draft_tokens: Optional[torch.Tensor] = None,
+        fast_build: bool = False,
     ) -> GDNAttentionMetadata:
         m = common_attn_metadata
 
