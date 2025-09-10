@@ -1948,9 +1948,9 @@ class DeviceConfig:
             self.device = torch.device(self.device_type)
 
 
-SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "ngram-eagle", "medusa",
-                            "mlp_speculator", "draft_model", "deepseek_mtp",
-                            "ernie_mtp"]
+SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "ngram-eagle",
+                            "medusa", "mlp_speculator", "draft_model",
+                            "deepseek_mtp", "ernie_mtp"]
 
 
 @config
@@ -1962,7 +1962,8 @@ class SpeculativeConfig:
     num_speculative_tokens: SkipValidation[int] = None  # type: ignore
     """The number of speculative tokens, if provided. It will default to the
     number in the draft model config if present, otherwise, it is required."""
-    num_speculative_tokens_per_method: Optional[Union[str, dict[str, int]]] = None
+    num_speculative_tokens_per_method: Optional[Union[str, dict[str,
+                                                                int]]] = None
     """The number of speculative tokens for each method, if provided. Max of
     the values will be used if `num_speculative_tokens` is not provided."""
     model: Optional[str] = None
@@ -2134,17 +2135,19 @@ class SpeculativeConfig:
                 "num_speculative_tokens_per_method must be a dict or a json "
                 "string that can be converted to a dict.")
             assert all(
-                isinstance(v, int)
-                and v > 0 for v in self.num_speculative_tokens_per_method.values()
-            ), ("All values in num_speculative_tokens_per_method must be "
-                "positive integers.")
+                isinstance(v, int) and v > 0
+                for v in self.num_speculative_tokens_per_method.values()), (
+                    "All values in num_speculative_tokens_per_method must be "
+                    "positive integers.")
             max_num_speculative_tokens = max(
                 self.num_speculative_tokens_per_method.values())
             if self.num_speculative_tokens is None:
                 self.num_speculative_tokens = max_num_speculative_tokens
             else:
-                assert self.num_speculative_tokens <= max_num_speculative_tokens, (
-                    "num_speculative_tokens should be None or must be less than or equal to the "
+                assert self.num_speculative_tokens <= \
+                    max_num_speculative_tokens, (
+                    "num_speculative_tokens should be None or must be"
+                    " less than or equal to the "
                     "max value in num_speculative_tokens_per_method.")
 
         # Automatically configure the method for ngram when "model" is used
@@ -2188,7 +2191,7 @@ class SpeculativeConfig:
             # draft related config as None here.
             self.draft_model_config = self.target_model_config
             self.draft_parallel_config = self.target_parallel_config
-        
+
         # allow ngram-eagle to use this code block similar to eagle
         if self.method not in ("ngram"):
 
@@ -2434,7 +2437,7 @@ class SpeculativeConfig:
                 "num_speculative_tokens must be provided with "
                 "speculative model unless the draft model config contains an "
                 "n_predict parameter.")
-        
+
         if self.method == "ngram-eagle":
             assert self.num_speculative_tokens_per_method is not None, (
                 "num_speculative_tokens_per_method must be provided for "
@@ -2453,7 +2456,8 @@ class SpeculativeConfig:
                     max(ngram_speculative_tokens, eagle_speculative_tokens):
                 raise ValueError(
                     "num_speculative_tokens must be the max value in "
-                    "num_speculative_tokens_per_method for ngram-eagle method.")
+                    "num_speculative_tokens_per_method for ngram-eagle method."
+                )
 
         if self.num_speculative_tokens <= 0:
             raise ValueError("Expected num_speculative_tokens to be greater "
@@ -2491,7 +2495,8 @@ class SpeculativeConfig:
         return self.num_speculative_tokens
 
     def use_eagle(self) -> bool:
-        return self.method in ("eagle", "eagle3", "ngram-eagle", "deepseek_mtp", "ernie_mtp")
+        return self.method in ("eagle", "eagle3", "ngram-eagle",
+                               "deepseek_mtp", "ernie_mtp")
 
     def __repr__(self) -> str:
         method = self.method

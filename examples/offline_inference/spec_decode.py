@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
+
 from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
@@ -56,7 +57,11 @@ def parse_args():
         choices=["ngram", "eagle", "eagle3", "mtp", "ngram-eagle"],
     )
     parser.add_argument("--num-spec-tokens", type=int, default=2)
-    parser.add_argument("--num-speculative-tokens-per-method", type=str, default="{\"ngram\": 2, \"eagle\": 2}")
+    parser.add_argument(
+        "--num-speculative-tokens-per-method",
+        type=str,
+        default='{"ngram": 2, "eagle": 2}',
+    )
     parser.add_argument("--prompt-lookup-max", type=int, default=5)
     parser.add_argument("--prompt-lookup-min", type=int, default=2)
     parser.add_argument("--tp", type=int, default=1)
@@ -120,7 +125,9 @@ def main():
             "prompt_lookup_min": args.prompt_lookup_min,
         }
     elif args.method == "ngram-eagle":
-        num_speculative_tokens_per_method = json.loads(args.num_speculative_tokens_per_method)
+        num_speculative_tokens_per_method = json.loads(
+            args.num_speculative_tokens_per_method
+        )
         eagle_dir = args.eagle_dir
         if eagle_dir is None:
             eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
@@ -209,8 +216,12 @@ def main():
     print(f"num_accepted_tokens: {num_accepted_tokens}")
     acceptance_length = 1 + (num_accepted_tokens / num_drafts) if num_drafts > 0 else 1
     print(f"mean acceptance length: {acceptance_length:.2f}")
-    num_tokens_generated_without_sd = total_tokens_generated - (num_drafts + num_accepted_tokens)
-    seq_normalized_acceptance_length = (total_tokens_generated) / (num_drafts + num_tokens_generated_without_sd)
+    num_tokens_generated_without_sd = total_tokens_generated - (
+        num_drafts + num_accepted_tokens
+    )
+    seq_normalized_acceptance_length = (total_tokens_generated) / (
+        num_drafts + num_tokens_generated_without_sd
+    )
     print(f"num_tokens_generated_without_sd: {num_tokens_generated_without_sd}")
     print(f"seq normalized acceptance length: {seq_normalized_acceptance_length:.2f}")
     print("-" * 50)

@@ -236,15 +236,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # layers in the draft model.
         found_draft = False
         if self.speculative_config and get_pp_group().is_last_rank:
-            # use ifs and not elifs to allow multiple 
+            # use ifs and not elifs to allow multiple
             # draft models to be initialized
             if self.speculative_config.method == "ngram" \
                 or self.speculative_config.method == "ngram-eagle":
                 self.drafter_ngram = NgramProposer(self.vllm_config)
                 found_draft = True
             if self.speculative_config.use_eagle():
-                self.drafter_eagle = EagleProposer(self.vllm_config, self.device,
-                                             self)  # type: ignore
+                self.drafter_eagle = EagleProposer(self.vllm_config,
+                                                   self.device,
+                                                   self)  # type: ignore
                 if self.speculative_config.method == "eagle3":
                     self.use_aux_hidden_state_outputs = True
                 found_draft = True
@@ -2038,7 +2039,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         common_attn_metadata: CommonAttentionMetadata,
     ) -> Union[list[list[int]], torch.Tensor]:
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        if self.speculative_config.method == "ngram" or  self.speculative_config.method == "ngram-eagle":
+        if self.speculative_config.method == "ngram" \
+            or self.speculative_config.method == "ngram-eagle":
             assert isinstance(self.drafter_ngram, NgramProposer)
             draft_token_ids = self.propose_ngram_draft_token_ids(
                 sampled_token_ids)
@@ -2150,7 +2152,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     draft_token_ids.append(draft_token_ids_ngram[bid])
                 else:
                     draft_token_ids.append(draft_token_ids_eagle[bid])
-                    
+
         return draft_token_ids
 
     def propose_ngram_draft_token_ids(

@@ -130,7 +130,7 @@ def test_ngram_correctness(
     (("eagle", "meta-llama/Llama-3.1-8B-Instruct",
       "yuhuili/EAGLE-LLaMA3.1-Instruct-8B", 1), False),
     (("ngram-eagle", "meta-llama/Llama-3.1-8B-Instruct",
-        "yuhuili/EAGLE-LLaMA3.1-Instruct-8B", 1), False),
+      "yuhuili/EAGLE-LLaMA3.1-Instruct-8B", 1), False),
     (("eagle3", "meta-llama/Llama-3.1-8B-Instruct",
       "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B", 1), False),
     pytest.param(
@@ -147,8 +147,9 @@ def test_ngram_correctness(
       "eagle618/eagle-deepseek-v3-random", 1), False),
 ],
                          ids=[
-                             "qwen3_eagle3", "llama3_eagle", "llama3_ngram_eagle", 
-                             "llama3_eagle3", "llama4_eagle", "llama4_eagle_mm",
+                             "qwen3_eagle3", "llama3_eagle",
+                             "llama3_ngram_eagle", "llama3_eagle3",
+                             "llama4_eagle", "llama4_eagle_mm",
                              "deepseek_eagle"
                          ])
 @pytest.mark.parametrize("attn_backend",
@@ -203,11 +204,14 @@ def test_eagle_correctness(
                 "model": spec_model_name,
                 "prompt_lookup_max": 5,
                 "prompt_lookup_min": 3,
-                "num_speculative_tokens_per_method": {"ngram": 3, "eagle": 3},
+                "num_speculative_tokens_per_method": {
+                    "ngram": 3,
+                    "eagle": 3
+                },
                 "max_model_len": 2048,
             }
         else:
-            speculative_config={
+            speculative_config = {
                 "method": method,
                 "model": spec_model_name,
                 "num_speculative_tokens": 3,

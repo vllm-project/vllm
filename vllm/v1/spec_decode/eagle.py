@@ -61,15 +61,20 @@ class EagleProposer:
         self.dtype = vllm_config.model_config.dtype
         self.max_model_len = vllm_config.model_config.max_model_len
         self.block_size = vllm_config.cache_config.block_size
-        
+
         if self.method == "ngram-eagle":
             self.num_speculative_tokens = (
-                self.speculative_config.num_speculative_tokens_per_method["eagle"])
+                self.speculative_config.
+                num_speculative_tokens_per_method["eagle"])
         else:
             self.num_speculative_tokens = (
                 self.speculative_config.num_speculative_tokens)
 
-        logger.info(f"EagleProposer: method={self.method}, num_speculative_tokens={self.num_speculative_tokens}")
+        logger.info(
+            "EagleProposer: method=%s, num_speculative_tokens=%s",
+            self.method,
+            self.num_speculative_tokens,
+        )
 
         self.max_num_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens)
