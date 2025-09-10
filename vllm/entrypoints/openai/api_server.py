@@ -1662,6 +1662,29 @@ def build_app(args: Namespace) -> FastAPI:
                 f"Invalid middleware {middleware}. Must be a function or a class."
             )
 
+    # Optional endpoints
+    if args.tokens_only:
+
+        @app.post("/abort_requests")
+        async def abort_requests(raw_request: Request):
+            """
+            Abort one or more requests. To be used in a 
+            Disaggregated Everything setup.
+            """
+            try:
+                body = await raw_request.json()
+            except json.JSONDecodeError as e:
+                raise HTTPException(status_code=HTTPStatus.BAD_REQUEST.value,
+                                    detail=f"JSON decode error: {e}") from e
+            request_ids = body.get("request_ids")
+            if request_ids is None:
+                raise HTTPException(
+                    status_code=HTTPStatus.BAD_REQUEST.value,
+                    detail="Missing 'request_ids' in request body")
+            # Abort requests in background
+            asyncio.create_task(engine_client(raw_request).abort(request_ids))
+            return Response(status_code=200)
+
     return app
 
 
@@ -1891,6 +1914,7 @@ async def init_app_state(
         log_error_stack=args.log_error_stack,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_log_outputs=args.enable_log_outputs,
+        force_no_detokenize=args.tokens_only,
     ) if "generate" in supported_tasks else None
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
