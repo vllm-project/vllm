@@ -17,7 +17,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 
 from .inductor_pass import enable_fake_mode
-from .vllm_inductor_pass import VllmInductorPass
+from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 logger = init_logger(__name__)
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -338,7 +338,7 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
         )
 
 
-class RMSNormQuantFusionPass(VllmInductorPass):
+class RMSNormQuantFusionPass(VllmPatternMatcherPass):
     """
     This pass fuses rms_norm & quant custom ops into a fused rms_norm_quant op.
     It also supports fused_add_rms_norm.
@@ -368,10 +368,12 @@ class RMSNormQuantFusionPass(VllmInductorPass):
             FusedAddRMSNormDynamicQuantPattern(epsilon, FP8_DTYPE).register(
                 self.patterns)
 
+        self.dump_patterns(config, self.patterns)
+
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph):
-        count = self.patterns.apply(graph)
-        logger.debug("Replaced %s patterns", count)
+        self.matched_count = self.patterns.apply(graph)
+        logger.debug("Replaced %s patterns", self.matched_count)
 
     def uuid(self) -> Any:
         return self.hash_source(self, RMSNormQuantPattern,
