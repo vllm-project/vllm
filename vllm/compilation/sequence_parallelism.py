@@ -467,10 +467,6 @@ class SequenceParallelismPass(VllmInductorPass):
             LastAllReduceRMSNormPattern(epsilon, self.model_dtype,
                                         self.device).register(self.patterns)
 
-            # WARNING: This is a hack to clear the pattern matcher cache
-            # and allow multiple values of epsilon.
-            torch._inductor.pattern_matcher._seen_patterns.clear()
-
     def is_applicable_for_shape(self, shape: Optional[int]) -> bool:
         tp_size = get_tensor_model_parallel_world_size()
         return shape is not None and shape % tp_size == 0
