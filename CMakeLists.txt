@@ -947,4 +947,7 @@ if (VLLM_GPU_LANG STREQUAL "CUDA")
 
     # vllm-flash-attn should be last as it overwrites some CMake functions
     include(cmake/external_projects/vllm_flash_attn.cmake)
+
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -I${CUDA_HOME}/include")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -I${CUDA_HOME}/include/cccl")
 endif ()
