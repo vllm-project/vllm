@@ -532,6 +532,8 @@ class CudaPlatformBase(Platform):
                     supported = True
             elif attention_backend == "FLASHINFER":
                 supported = True
+            elif attention_backend == "TRITON_ATTN_VLLM_V1":
+                supported = cls.supports_fp8()
         return supported
 
     @classmethod
