@@ -202,6 +202,10 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         nn.Module.__init__(self)
         self.config = vllm_config. \
             speculative_config.draft_model_config.hf_config
+        
+        # Ensure draft_vocab_size and target_hidden_size are set
+        self._ensure_draft_vocab_size(vllm_config)
+        
         target_layer_num = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config)
 
@@ -225,6 +229,29 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             torch.zeros(self.config.draft_vocab_size, dtype=torch.long),
             requires_grad=False,
         )
+
+    def _ensure_draft_vocab_size(self, vllm_config: VllmConfig):
+        """Ensure draft_vocab_size and target_hidden_size are set in draft 
+        model config."""
+        if (vllm_config.speculative_config
+                and vllm_config.speculative_config.draft_model_config
+                and hasattr(vllm_config.speculative_config.draft_model_config,
+                            'hf_config')):
+
+            hf_config = (
+                vllm_config.speculative_config.draft_model_config.hf_config)
+
+            # If draft_vocab_size is not set, use the target model's vocab_size
+            if (not hasattr(hf_config, 'draft_vocab_size')
+                    or hf_config.draft_vocab_size is None):
+                target_vocab_size = vllm_config.model_config.get_vocab_size()
+                hf_config.draft_vocab_size = target_vocab_size
+
+            # If target_hidden_size is not set, use target model's hidden_size
+            if (not hasattr(hf_config, 'target_hidden_size')
+                    or hf_config.target_hidden_size is None):
+                target_hidden_size = vllm_config.model_config.get_hidden_size()
+                hf_config.target_hidden_size = target_hidden_size
 
     def forward(
         self,
