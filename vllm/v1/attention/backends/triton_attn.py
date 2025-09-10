@@ -140,17 +140,12 @@ class TritonAttentionBackend(AttentionBackend):
         return [torch.float16, torch.bfloat16]
 
     @classmethod
-    def get_supported_head_sizes(cls) -> list[int]:
-        return [32, 64, 96, 128, 160, 192, 224, 256]
-
-    @classmethod
     def validate_head_size(cls, head_size: int) -> None:
-        supported_head_sizes = cls.get_supported_head_sizes()
-        if head_size not in supported_head_sizes:
-            attn_type = cls.__name__.removesuffix("Backend")
+        # Triton Attention supports any head size above 32
+        if head_size < 32:
             raise ValueError(
-                f"Head size {head_size} is not supported by {attn_type}. "
-                f"Supported head sizes are: {supported_head_sizes}. "
+                f"Head size {head_size} is not supported by TritonAttention."
+                f"Head sizes need to be larger or equal 32 for this backend. "
                 "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
                 "FlexAttention backend which supports all head sizes.")
 
@@ -251,7 +246,7 @@ class TritonAttentionImpl(AttentionImpl):
         output_scale: Optional[torch.Tensor] = None,
         output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Forward pass with FlashAttention.
+        """Forward pass with Paged Attention impl. in Triton.
 
         Args:
             query: shape = [num_tokens, num_heads, head_size]
