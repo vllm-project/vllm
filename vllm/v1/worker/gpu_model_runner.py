@@ -69,7 +69,7 @@ from vllm.v1.kv_cache_interface import (AttentionSpec,
                                         KVCacheGroupSpec, KVCacheSpec,
                                         MambaSpec, SlidingWindowSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, DraftTokenIds, ECConnectorOutput,
-                             LogprobsTensors, ModelRunnerOutput)
+                             LogprobsTensors, ModelRunnerOutput, make_empty_encoder_model_runner_output)
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import LogitsProcessors, build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -1167,6 +1167,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin,
                 output,
                 is_embed=pos_info.is_embed,
             )
+            logger.debug(f"Finish execute for mm hash {mm_hash}")
             self.maybe_save_ec_to_connector(self.encoder_cache, mm_hash)
 
     def _gather_mm_embeddings(
@@ -1465,17 +1466,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin,
     ) -> Union[ModelRunnerOutput, IntermediateTensors]:
 
         self._update_states(scheduler_output)
-        if not scheduler_output.total_num_scheduled_tokens:
-            if has_ec_transfer():
-                if self.vllm_config.ec_transfer_config.ec_role == "ec_producer":
-                    with self.maybe_get_ec_connector_output(
-                            scheduler_output,
-                            encoder_cache=self.encoder_cache,      
-                    ) as ec_connector_output:
-                        self._execute_mm_encoder(scheduler_output)
-                        return EMPTY_MODEL_RUNNER_OUTPUT
-                    
 
+        if has_ec_transfer():
+            if get_ec_transfer().is_producer:
+                with self.maybe_get_ec_connector_output(
+                        scheduler_output,
+                        encoder_cache=self.encoder_cache,      
+                ) as ec_connector_output:
+                    self._execute_mm_encoder(scheduler_output)
+                    return make_empty_encoder_model_runner_output(scheduler_output)
+                    
+        if not scheduler_output.total_num_scheduled_tokens:
             if not has_kv_transfer_group():
                 # Return empty ModelRunnerOutput if there's no work to do.
                 return EMPTY_MODEL_RUNNER_OUTPUT
@@ -1523,9 +1524,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin,
             ) as ec_connector_output:
                 # Run the multimodal encoder if any.
                 self._execute_mm_encoder(scheduler_output)
-                if has_ec_transfer():
-                    if self.vllm_config.ec_transfer_config.ec_role == ECProducer:
-                        return EMPTY_MODEL_RUNNER_OUTPUT
                 mm_embeds = self._gather_mm_embeddings(scheduler_output)
         else:
             mm_embeds = []
@@ -3193,6 +3191,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin,
             KVCacheSpec: A dictionary mapping layer names to their KV cache
             format. Layers that do not need KV cache are not included.
         """
+
+        if has_ec_transfer():
+            if get_ec_transfer().is_producer:
+                return {}
 
         block_size = self.vllm_config.cache_config.block_size
         use_mla = self.vllm_config.model_config.use_mla

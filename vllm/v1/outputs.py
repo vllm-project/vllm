@@ -130,6 +130,39 @@ class DraftTokenIds:
     # num_reqs x num_draft_tokens
     draft_token_ids: list[list[int]]
 
+def make_empty_encoder_model_runner_output(
+    scheduler_output: "SchedulerOutput",
+) -> ModelRunnerOutput:
+    """
+    Create a ModelRunnerOutput stub that contains the correct
+    per-request bookkeeping but no generated data yet.
+    """
+    if not scheduler_output.num_scheduled_tokens:
+        return EMPTY_MODEL_RUNNER_OUTPUT
+
+    # Convert to list so we get a deterministic, indexable sequence
+    req_ids: list[str] = list(scheduler_output.num_scheduled_tokens.keys())
+
+    # Give every request its own contiguous index
+    req_id_to_index: dict[str, int] = {rid: idx for idx, rid in enumerate(req_ids)}
+
+    # No tokens generated yet ⇒ one empty list per request
+    sampled_token_ids: list[list[int]] = [[] for _ in req_ids]
+
+    # Pooler outputs are not available yet ⇒ use None placeholders
+    pooler_output: list[Optional[torch.Tensor]] = [None for _ in req_ids]
+
+    return ModelRunnerOutput(
+        req_ids=req_ids,
+        req_id_to_index=req_id_to_index,
+        sampled_token_ids=sampled_token_ids,
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=pooler_output,
+        kv_connector_output=None,
+        ec_connector_output=None,
+        num_nans_in_logits=None,
+    )
 
 EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],
                                               req_id_to_index={},

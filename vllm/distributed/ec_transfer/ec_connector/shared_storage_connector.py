@@ -53,9 +53,8 @@ class ECSharedStorageConnector(ECConnectorBase):
     def __init__(self, vllm_config: "VllmConfig", role: ECConnectorBase):
         super().__init__(vllm_config=vllm_config, role=role)
         # req_id -> index -> MMMeta
-        self._mm_datas_need_loads: dict[str, dict[int, MMMeta]] = {}
+        self._mm_datas_need_loads: dict[str, int] = {}
         transfer_config = vllm_config.ec_transfer_config
-        self.is_producer = (transfer_config.ec_role == 'ec_producer')
         self._storage_path = transfer_config.get_from_extra_config("shared_storage_path", "/tmp")
         logger.debug(transfer_config)
         logger.debug("Shared storage path is %s", self._storage_path)
@@ -80,9 +79,8 @@ class ECSharedStorageConnector(ECConnectorBase):
             return
         # Load the KV for each request each layer
         for mm_data in metadata.mm_datas:
-            # TODO: Only load it once
-            # if mm_data in self._mm_datas_need_loads:
-            #     continue
+            if mm_data.mm_hash in encoder_cache:
+                continue
             filename = self._generate_filename_debug(mm_data.mm_hash)
             ec_cache = safetensors.torch.load_file(filename)["ec_cache"].cuda()
             encoder_cache[mm_data.mm_hash] = ec_cache
@@ -137,17 +135,13 @@ class ECSharedStorageConnector(ECConnectorBase):
 
         If cache exist for mm_data, need to load it
         """
-        # Create the per-request mapping only if it does not exist.
-        loads_for_request = self._mm_datas_need_loads.setdefault(
-            request.request_id, {}
-        )
 
         for index, has_cache in enumerate(cache_exists):
             if has_cache:
                 mm_hash = request.mm_hashes[index]
                 num_encoder_token = request.get_num_encoder_tokens(index)
                 # Insert mm_hash only if this block has not been recorded yet.
-                loads_for_request.setdefault(index, MMMeta.make_meta(mm_hash,num_encoder_token))
+                self._mm_datas_need_loads[mm_hash] = num_encoder_token
 
     def build_connector_meta(
         self,
@@ -162,12 +156,8 @@ class ECSharedStorageConnector(ECConnectorBase):
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
         meta = ECSharedStorageConnectorMetadata()
-        scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
-        for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
-            for mm_input_id in encoder_input_ids:
-                if req_id in self._mm_datas_need_loads and mm_input_id in self._mm_datas_need_loads[req_id]:
-                    mm_data = self._mm_datas_need_loads[req_id][mm_input_id]
-                    meta.add_mm_data(mm_data)
+        for mm_hash, num_encoder_token in self._mm_datas_need_loads.items():
+            meta.add_mm_data(MMMeta.make_meta(mm_hash, num_encoder_token))
         self._mm_datas_need_loads.clear()
         return meta
 

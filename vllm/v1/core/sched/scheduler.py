@@ -96,13 +96,15 @@ class Scheduler(SchedulerInterface):
             self.kv_events_config,
             self.parallel_config.data_parallel_rank,
         )
-        self.is_encoder_instance = False
         self.ec_connector = None
         if self.vllm_config.ec_transfer_config is not None:
             self.ec_connector = ECConnectorFactory.create_connector(
                 config=self.vllm_config, role=ECConnectorRole.SCHEDULER
             )
-            self.is_encoder_instance = (self.vllm_config.ec_transfer_config.ec_role=="ec_producer")
+            if self.ec_connector.is_producer:
+                # TODO(Long) Set this when set up
+                self.cache_config.enable_prefix_caching=False
+                self.max_model_len = 0
         
 
         num_gpu_blocks = self.cache_config.num_gpu_blocks
@@ -185,8 +187,6 @@ class Scheduler(SchedulerInterface):
         # num_tokens_with_spec. This is general enough to cover
         # chunked prefills, prefix caching, speculative decoding,
         # and the "jump decoding" optimization in the future.
-        if self.is_encoder_instance:
-            return self.scheduler_encoder_only()
 
         scheduled_new_reqs: list[Request] = []
         scheduled_resumed_reqs: list[Request] = []
@@ -204,6 +204,9 @@ class Scheduler(SchedulerInterface):
 
         # For logging.
         scheduled_timestamp = time.monotonic()
+
+        # self.external_load_encoder_cache: dict[str, list[int]] = {}
+        # self.external_load_encoder_cache.clear()
 
         # First, schedule the RUNNING requests.
         req_index = 0
@@ -230,7 +233,7 @@ class Scheduler(SchedulerInterface):
             new_encoder_compute_budget = encoder_compute_budget
             if request.has_encoder_inputs:
                 (encoder_inputs_to_schedule, num_new_tokens,
-                 new_encoder_compute_budget
+                 new_encoder_compute_budget, external_load_encoder_input
                  ) = self._try_schedule_encoder_inputs(
                      request, request.num_computed_tokens, num_new_tokens,
                      encoder_compute_budget)
@@ -318,6 +321,9 @@ class Scheduler(SchedulerInterface):
                 for i in encoder_inputs_to_schedule:
                     self.encoder_cache_manager.allocate(request, i)
                 encoder_compute_budget = new_encoder_compute_budget
+            if external_load_encoder_input:
+                for i in external_load_encoder_input:
+                    self.encoder_cache_manager.allocate(request, i)
 
         # Record the LoRAs in scheduled_running_reqs
         scheduled_loras: set[int] = set()
@@ -432,7 +438,7 @@ class Scheduler(SchedulerInterface):
                     # Schedule encoder inputs.
                     if request.has_encoder_inputs:
                         (encoder_inputs_to_schedule, num_new_tokens,
-                         new_encoder_compute_budget
+                         new_encoder_compute_budget, external_load_encoder_input
                          ) = self._try_schedule_encoder_inputs(
                              request, num_computed_tokens, num_new_tokens,
                              encoder_compute_budget)
@@ -532,7 +538,10 @@ class Scheduler(SchedulerInterface):
                     for i in encoder_inputs_to_schedule:
                         self.encoder_cache_manager.allocate(request, i)
                     encoder_compute_budget = new_encoder_compute_budget
-
+                # Allocate for external load encoder cache
+                if external_load_encoder_input:
+                    for i in external_load_encoder_input:
+                        self.encoder_cache_manager.allocate(request, i)
         # Put back any skipped requests at the head of the waiting queue
         if skipped_waiting_requests:
             self.waiting.prepend_requests(skipped_waiting_requests)
@@ -611,110 +620,6 @@ class Scheduler(SchedulerInterface):
             scheduler_output.ec_connector_metadata = meta
 
         self._update_after_schedule(scheduler_output)
-        return scheduler_output
-
-    def _try_schedule_encoder_inputs_only(self, request, encoder_compute_budget):
-        encoder_inputs_to_schedule: list[int] = []
-        mm_positions = request.mm_positions
-        assert mm_positions is not None
-        assert len(mm_positions) > 0
-
-        # NOTE: since scheduler operates on the request level (possibly with
-        # multiple encoder inputs per request), we need to create temporary
-        # trackers for accounting at the encoder input level.
-        success = True
-        mm_hashes_to_schedule = set()
-        num_tokens_to_schedule = 0
-        for i, pos_info in enumerate(mm_positions):
-            num_encoder_tokens = pos_info.length
-            if request.mm_hashes[i] in mm_hashes_to_schedule:
-                continue
-
-            if self.encoder_cache_manager.check_and_update_cache(request, i):
-                # The encoder input is already computed and cached from a
-                # previous step.
-                continue
-
-            if not self.encoder_cache_manager.can_allocate(
-                    request, i, encoder_compute_budget,
-                    num_tokens_to_schedule):
-                success = False
-                break
-
-            num_tokens_to_schedule += num_encoder_tokens
-            encoder_compute_budget -= num_encoder_tokens
-            mm_hashes_to_schedule.add(request.mm_hashes[i])
-            encoder_inputs_to_schedule.append(i)
-
-        if not success:
-            encoder_compute_budget += num_tokens_to_schedule
-        return (
-            encoder_inputs_to_schedule,
-            success,
-            encoder_compute_budget,
-        )
-    def scheduler_encoder_only(self):
-        scheduled_encoder_inputs: dict[str, list[int]] = {}
-        scheduled_new_reqs: list[Request] = []
-        encoder_compute_budget = self.max_num_encoder_input_tokens
-        
-        while self.waiting:
-            request = self.waiting.peek_request()
-            encoder_inputs_to_schedule = None
-            new_encoder_compute_budget = encoder_compute_budget
-
-            if not request.has_encoder_inputs:
-                self.waiting.pop_request()
-                continue
-            (encoder_inputs_to_schedule, success,
-                new_encoder_compute_budget
-                ) = self._try_schedule_encoder_inputs_only(
-                    request, encoder_compute_budget)
-
-            if not success:
-                break
-            # Request was already popped from self.waiting
-            # unless it was re-added above due to new_blocks being None.
-            request = self.waiting.pop_request()
-            self.running.append(request)
-            if request.status == RequestStatus.WAITING:
-                scheduled_new_reqs.append(request)
-
-            request.status = RequestStatus.RUNNING
-            scheduled_encoder_inputs[request.request_id] = (
-                encoder_inputs_to_schedule)
-            # Allocate the encoder cache.
-            for i in encoder_inputs_to_schedule:
-                self.encoder_cache_manager.allocate(request, i)
-            encoder_compute_budget = new_encoder_compute_budget
-        
-        new_reqs_data = [
-            NewRequestData.from_request(req, ([],))
-            for req in scheduled_new_reqs
-        ]
-
-        scheduler_output = SchedulerOutput(
-            scheduled_new_reqs=new_reqs_data,
-            scheduled_cached_reqs=CachedRequestData.make_empty(),
-            num_scheduled_tokens={},
-            total_num_scheduled_tokens=0,
-            scheduled_spec_decode_tokens={},
-            scheduled_encoder_inputs=scheduled_encoder_inputs,
-            num_common_prefix_blocks=[],
-            # finished_req_ids is an existing state in the scheduler,
-            # instead of being newly scheduled in this step.
-            # It contains the request IDs that are finished in between
-            # the previous and the current steps.
-            finished_req_ids=self.finished_req_ids,
-            free_encoder_mm_hashes=self.encoder_cache_manager.
-            get_freed_mm_hashes(),
-            structured_output_request_ids=None,
-            grammar_bitmask=None,
-        )
-        if self.ec_connector is not None:
-            meta = self.ec_connector.build_connector_meta(scheduler_output)
-            scheduler_output.ec_connector_metadata = meta
-        self.finished_req_ids = set()
         return scheduler_output
     
     def _update_after_schedule(
@@ -829,11 +734,11 @@ class Scheduler(SchedulerInterface):
         mm_positions = request.mm_positions
         assert mm_positions is not None
         assert len(mm_positions) > 0
+        external_load_encoder_input = []
 
         # Check remote cache first
         if self.ec_connector is not None:
             remote_cache_bools = self.ec_connector.check_caches_exist(request)
-            load_cache_bools = [0] * len(remote_cache_bools)
         # NOTE: since scheduler operates on the request level (possibly with
         # multiple encoder inputs per request), we need to create temporary
         # trackers for accounting at the encoder input level.
@@ -874,13 +779,6 @@ class Scheduler(SchedulerInterface):
             if request.mm_hashes[i] in mm_hashes_to_schedule:
                 continue
 
-            if self.ec_connector is not None:
-                if remote_cache_bools[i]:
-                    mm_hashes_to_schedule.add(request.mm_hashes[i])
-                    encoder_inputs_to_schedule.append(i)
-                    num_tokens_to_schedule += num_encoder_tokens
-                    continue
-
             if self.encoder_cache_manager.check_and_update_cache(request, i):
                 # The encoder input is already computed and cached from a
                 # previous step.
@@ -915,6 +813,12 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens = 0
                 break
 
+            if self.ec_connector is not None:
+                if remote_cache_bools[i]:
+                    mm_hashes_to_schedule.add(request.mm_hashes[i])
+                    external_load_encoder_input.append(i)
+                    continue
+
             num_tokens_to_schedule += num_encoder_tokens
             encoder_compute_budget -= num_encoder_tokens
             mm_hashes_to_schedule.add(request.mm_hashes[i])
@@ -926,6 +830,7 @@ class Scheduler(SchedulerInterface):
             encoder_inputs_to_schedule,
             num_new_tokens,
             encoder_compute_budget,
+            external_load_encoder_input
         )
 
     def get_grammar_bitmask(
@@ -958,52 +863,12 @@ class Scheduler(SchedulerInterface):
             )
         return structured_output_request_ids, bitmask
 
-    def update_from_output_encoder_only(
-        self,
-        scheduler_output: SchedulerOutput,
-        model_runner_output: ModelRunnerOutput,
-    ) -> dict[int, EngineCoreOutputs]:
-
-        outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
-
-        # stop all requests from the current batch
-        model_finished = []
-        for request in self.running:
-            req_id = request.request_id
-            model_finished.append(req_id)
-            outputs[request.client_index].append(
-                EngineCoreOutput(request_id=req_id,
-                    new_token_ids=[],
-                    finish_reason=RequestStatus.get_finished_reason(
-                        RequestStatus.FINISHED_STOPPED
-                    ),
-                    stop_reason="stop",
-                    kv_transfer_params={}
-                )
-            )
-        self.finish_requests(model_finished, RequestStatus.FINISHED_STOPPED)
-        # Create EngineCoreOutputs for all clients that have requests with
-        # outputs in this step.
-        engine_core_outputs = {
-            client_index: EngineCoreOutputs(outputs=outs)
-            for client_index, outs in outputs.items()
-        }
-
-        if engine_core_outputs:
-            # Return stats to only one of the front-ends.
-            next(iter(engine_core_outputs.values())).scheduler_stats = (
-                self.make_stats(None))
-
-        return engine_core_outputs
-
     def update_from_output(
         self,
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:
 
-        if self.is_encoder_instance:
-            return self.update_from_output_encoder_only(scheduler_output, model_runner_output)
         sampled_token_ids = model_runner_output.sampled_token_ids
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
@@ -1020,7 +885,7 @@ class Scheduler(SchedulerInterface):
         stopped_running_reqs: set[Request] = set()
         stopped_preempted_reqs: set[Request] = set()
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
-            assert num_tokens_scheduled > 0
+            #assert num_tokens_scheduled > 0
             request = self.requests.get(req_id)
             if request is None:
                 # The request is already finished. This can happen if the

@@ -10,7 +10,7 @@ wait_for_server() {
     ' && return 0 || return 1
 }
 
-MODEL="/home/n00909098/Qwen2.5-VL-3B-Instruct"
+MODEL="/path/to/model/Qwen2.5-VL-3B-Instruct"
 
 LOG_PATH=${LOG_PATH:-./logs}
 mkdir -p "$LOG_PATH"
@@ -19,8 +19,8 @@ ENCODE_PORT=19534
 PREFILL_DECODE_PORT=19535
 PROXY_PORT=10001
 
-GPU_E=0
-GPU_PD=1
+GPU_E=1
+GPU_PD=7
 
 START_TIME=$(date +"%Y%m%d_%H%M%S")
 ENC_LOG="$LOG_PATH/encoder.log"
@@ -28,7 +28,7 @@ PD_LOG="$LOG_PATH/pd.log"
 PROXY_LOG="$LOG_PATH/proxy.log"
 PID_FILE="./pid.txt"
 
-SHARED_STORAGE_PATH="/home/n00909098/EPD/refactor/vllm/draft/test_save"
+SHARED_STORAGE_PATH="/path/to/your/share/storage"
 
 ###############################################################################
 # Encoder worker
@@ -77,7 +77,7 @@ wait_for_server "$PREFILL_DECODE_PORT"
 ###############################################################################
 # Proxy
 ###############################################################################
-python /home/n00909098/EPD/refactor/vllm/draft/proxy.py \
+python /path/to/vllm/vllm/draft/proxy.py \
     --host "127.0.0.1" \
     --port "$PROXY_PORT" \
     --encode-servers-urls "http://localhost:$ENCODE_PORT" \
