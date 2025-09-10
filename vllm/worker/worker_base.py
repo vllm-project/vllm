@@ -129,6 +129,10 @@ class WorkerBase:
         """Get vocabulary size from model configuration."""
         return self.model_config.get_vocab_size()
 
+    def shutdown(self) -> None:
+        """Clean up resources held by the worker."""
+        return
+
 
 class DelegateWorkerBase(WorkerBase):
     """
@@ -519,6 +523,10 @@ class WorkerWrapperBase:
                 from vllm.utils import init_cached_hf_modules
                 init_cached_hf_modules()
 
+    def shutdown(self) -> None:
+        if self.worker is not None:
+            self.worker.shutdown()
+
     def adjust_rank(self, rank_mapping: Dict[int, int]) -> None:
         """
         Adjust the rpc_rank based on the given mapping.
@@ -544,7 +552,7 @@ class WorkerWrapperBase:
         Arguments are passed to the worker class constructor.
         """
         kwargs = all_kwargs[self.rpc_rank]
-        self.vllm_config = kwargs.get("vllm_config", None)
+        self.vllm_config = kwargs.get("vllm_config")
         assert self.vllm_config is not None, (
             "vllm_config is required to initialize the worker")
         enable_trace_function_call_for_thread(self.vllm_config)

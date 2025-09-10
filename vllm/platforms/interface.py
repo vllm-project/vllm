@@ -7,7 +7,7 @@ import random
 import sys
 from datetime import timedelta
 from platform import uname
-from typing import TYPE_CHECKING, NamedTuple, Optional, Union
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
 
 import numpy as np
 import torch
@@ -48,13 +48,15 @@ class _Backend(enum.Enum):
     ROCM_AITER_MLA_VLLM_V1 = enum.auto()
     ROCM_AITER_FA = enum.auto()  # used for ViT attn backend
     TORCH_SDPA = enum.auto()
+    TORCH_SDPA_VLLM_V1 = enum.auto()
     FLASHINFER = enum.auto()
     FLASHINFER_VLLM_V1 = enum.auto()
     TRITON_MLA = enum.auto()  # Supported by V1
     TRITON_MLA_VLLM_V1 = enum.auto()
-    FLASHMLA_VLLM_V1 = enum.auto()
-    FLASHMLA = enum.auto()  # Supported by V1
     CUTLASS_MLA = enum.auto()
+    FLASHMLA = enum.auto()  # Supported by V1
+    FLASHMLA_VLLM_V1 = enum.auto()
+    FLASH_ATTN_MLA = enum.auto()  # Supported by V1
     PALLAS = enum.auto()
     PALLAS_VLLM_V1 = enum.auto()
     IPEX = enum.auto()
@@ -72,7 +74,6 @@ class PlatformEnum(enum.Enum):
     TPU = enum.auto()
     XPU = enum.auto()
     CPU = enum.auto()
-    NEURON = enum.auto()
     OOT = enum.auto()
     UNSPECIFIED = enum.auto()
 
@@ -81,6 +82,7 @@ class CpuArchEnum(enum.Enum):
     X86 = enum.auto()
     ARM = enum.auto()
     POWERPC = enum.auto()
+    S390X = enum.auto()
     OTHER = enum.auto()
     UNKNOWN = enum.auto()
 
@@ -137,6 +139,8 @@ class Platform:
 
     additional_env_vars: list[str] = []
 
+    _global_graph_pool: Optional[Any] = None
+
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
         """Returns the supported dtypes for the current platform."""
@@ -159,9 +163,6 @@ class Platform:
 
     def is_cpu(self) -> bool:
         return self._enum == PlatformEnum.CPU
-
-    def is_neuron(self) -> bool:
-        return self._enum == PlatformEnum.NEURON
 
     def is_out_of_tree(self) -> bool:
         return self._enum == PlatformEnum.OOT
@@ -375,6 +376,8 @@ class Platform:
             return CpuArchEnum.ARM
         elif machine.startswith("ppc"):
             return CpuArchEnum.POWERPC
+        elif machine == "s390x":
+            return CpuArchEnum.S390X
 
         return CpuArchEnum.OTHER if machine else CpuArchEnum.UNKNOWN
 
@@ -505,6 +508,14 @@ class Platform:
         return False
 
     @classmethod
+    def opaque_attention_op(cls) -> bool:
+        """
+        Returns True if we register attention as one giant opaque custom op
+        on the current platform
+        """
+        return False
+
+    @classmethod
     def validate_request(
         cls,
         prompt: PromptType,
@@ -522,6 +533,15 @@ class Platform:
             " attribute.", self.device_type, key)
             return None
 
+    def get_global_graph_pool(self) -> Any:
+        """
+        Return the global graph pool for this platform.
+        """
+        cls = self.__class__
+        if cls._global_graph_pool is None:
+            cls._global_graph_pool = self.graph_pool_handle()
+        return cls._global_graph_pool
+
     @classmethod
     def get_cu_count(cls, device_id: int = 0) -> int:
         """
@@ -530,11 +550,11 @@ class Platform:
         raise NotImplementedError
 
     @classmethod
-    def get_piecewise_backend_cls(cls) -> str:
+    def get_static_graph_wrapper_cls(cls) -> str:
         """
-        Get piecewise backend class for piecewise graph.
+        Get static graph wrapper class for static graph.
         """
-        return "vllm.compilation.base_piecewise_backend.AbstractPiecewiseBackend"  # noqa
+        return "vllm.compilation.base_static_graph.AbstractStaticGraphWrapper"
 
     @classmethod
     def stateless_init_device_torch_dist_pg(
@@ -551,11 +571,19 @@ class Platform:
         raise RuntimeError(f"Unsupported torch distributed backend: {backend}")
 
     @classmethod
-    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str) -> bool:
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
+                                    model_config: "ModelConfig") -> bool:
         """
         Returns if the kv_cache_dtype is supported by the current platform.
         """
         return False
+
+    @classmethod
+    def check_if_supports_dtype(cls, torch_dtype: torch.dtype):
+        """
+        Check if the dtype is supported by the current platform.
+        """
+        raise NotImplementedError
 
 
 class UnspecifiedPlatform(Platform):

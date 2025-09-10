@@ -107,6 +107,7 @@ class RequestState:
         self.max_tokens_param = max_tokens_param
         self.is_prefilling = True
         self.queue = queue
+        self.num_cached_tokens = 0
 
         self.stats = RequestStateStats(
             arrival_time=arrival_time) if log_stats else None
@@ -167,7 +168,6 @@ class RequestState:
         finish_reason: Optional[FinishReason],
         stop_reason: Union[int, str, None],
         kv_transfer_params: Optional[dict[str, Any]] = None,
-        num_cached_tokens: int = 0,
     ) -> Optional[Union[RequestOutput, PoolingRequestOutput]]:
 
         finished = finish_reason is not None
@@ -195,7 +195,7 @@ class RequestState:
                 return None
 
         return self._new_request_output(request_id, outputs, finished,
-                                        kv_transfer_params, num_cached_tokens)
+                                        kv_transfer_params)
 
     def _new_request_output(
         self,
@@ -203,14 +203,14 @@ class RequestState:
         outputs: Union[list[CompletionOutput], list[PoolingOutput]],
         finished: bool,
         kv_transfer_params: Optional[dict[str, Any]] = None,
-        num_cached_tokens: int = 0,
     ) -> Union[RequestOutput, PoolingRequestOutput]:
 
-        if isinstance(outputs[0], PoolingOutput):
+        first_output = outputs[0]
+        if isinstance(first_output, PoolingOutput):
             assert len(outputs) == 1
             return PoolingRequestOutput(
                 request_id=request_id,
-                outputs=outputs[0],
+                outputs=first_output,
                 prompt_token_ids=self.prompt_token_ids,
                 finished=finished,
             )
@@ -229,7 +229,7 @@ class RequestState:
             outputs=cast(list[CompletionOutput], outputs),
             finished=finished,
             kv_transfer_params=kv_transfer_params,
-            num_cached_tokens=num_cached_tokens,
+            num_cached_tokens=self.num_cached_tokens,
         )
 
     def _new_completion_output(
@@ -308,11 +308,18 @@ class OutputProcessor:
             if req_state is not None:
                 self.lora_states.abort_request(req_state)
                 request_ids_to_abort.append(request_id)
-            else:
-                parent = self.parent_requests.pop(request_id, None)
-                if parent and parent.child_requests:
-                    self.abort_requests(parent.child_requests)
-                    request_ids_to_abort.extend(parent.child_requests)
+                # Produce final abort output.
+                if req_state.queue is not None and (
+                        request_output := req_state.make_request_output(
+                            [], None, FinishReason.ABORT, None, None)):
+                    req_state.queue.put(request_output)
+            elif parent := self.parent_requests.get(request_id):
+                # Abort children prior to removing the parent.
+                if parent.child_requests:
+                    child_reqs = list(parent.child_requests)
+                    child_reqs = self.abort_requests(child_reqs)
+                    request_ids_to_abort.extend(child_reqs)
+                self.parent_requests.pop(request_id, None)
         return request_ids_to_abort
 
     def add_request(
@@ -390,7 +397,7 @@ class OutputProcessor:
             finish_reason = engine_core_output.finish_reason
             stop_reason = engine_core_output.stop_reason
             kv_transfer_params = engine_core_output.kv_transfer_params
-            num_cached_tokens = engine_core_output.num_cached_tokens
+            req_state.num_cached_tokens = engine_core_output.num_cached_tokens
             req_state.is_prefilling = False
 
             if pooling_output is None:
@@ -411,7 +418,7 @@ class OutputProcessor:
             # 4) Create and handle RequestOutput objects.
             if request_output := req_state.make_request_output(
                     new_token_ids, pooling_output, finish_reason, stop_reason,
-                    kv_transfer_params, num_cached_tokens):
+                    kv_transfer_params):
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().
                     req_state.queue.put(request_output)
