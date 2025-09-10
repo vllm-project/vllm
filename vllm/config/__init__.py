@@ -1170,9 +1170,6 @@ class ModelConfig:
 
             # Detect which checkpoint is it
             for name in quantization_methods:
-                # Skip empty quantization method names
-                if not name or name.strip() == "":
-                    continue
                 method = me_quant.get_quantization_config(name)
                 quantization_override = method.override_quantization_method(
                     quant_cfg, self.quantization)
@@ -1193,9 +1190,7 @@ class ModelConfig:
 
             # Verify quantization configurations.
             if self.quantization is None:
-                # Only set quantization if quant_method is not empty
-                if quant_method and quant_method != "":
-                    self.quantization = quant_method
+                self.quantization = quant_method
             elif self.quantization != quant_method:
                 raise ValueError(
                     "Quantization method specified in the model config "
@@ -2094,9 +2089,6 @@ class SpeculativeConfig:
         return hf_config
 
     def __post_init__(self):
-        # Handle empty quantization method string
-        if self.quantization == "":
-            self.quantization = None
 
         # Note: "method" is a new parameter that helps to extend the
         # configuration of non-model-based proposers, and the "model" parameter
