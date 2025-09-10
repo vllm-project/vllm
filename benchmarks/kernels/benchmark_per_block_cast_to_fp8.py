@@ -60,7 +60,7 @@ def _time_it(fn, warmup: int, iters: int):
 
 def run_case(
     m: int, n: int, dtype: torch.dtype, block_m: int, block_n: int, use_ue8m0: bool
-) -> tuple[float, float, bool, float, bool]:
+) -> tuple[float, float, bool, float, bool, float]:
     x = torch.randn((m, n), dtype=dtype, device="cuda")
     block_size = [block_m, block_n]
 

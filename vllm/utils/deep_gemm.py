@@ -165,9 +165,7 @@ def _per_block_cast_to_fp8_kernel(x_ptr, y_ptr, scales_ptr, M, N, stride_xm,
     x_vals = tl.load(x_block_ptrs, mask=mask, other=0.0)
     x_vals_f32 = x_vals.to(tl.float32)
     x_abs = tl.abs(x_vals_f32)
-
-    # reduce max over both axes
-    amax = tl.max(tl.max(x_abs, axis=0), axis=0)
+    amax = tl.max(x_abs)
 
     # clamp then form scale
     scale = tl.maximum(amax, 1e-4) / 448.0
