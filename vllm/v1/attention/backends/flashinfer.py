@@ -59,6 +59,7 @@ def _trtllm_prefill_attn_kvfp8_dequant(
     v_scale_ptr,
     K_CACHE_STRIDE: tl.constexpr,
     KV_CACHE_STRIDE: tl.constexpr,
+    dequant_to_bf16: tl.constexpr,
 ):
     batch_idx = tl.program_id(0).to(tl.int64)
     mock_block_table_idx = tl.program_id(1).to(tl.int64)
@@ -75,8 +76,11 @@ def _trtllm_prefill_attn_kvfp8_dequant(
     dequantized_vals = fp8_vals.to(tl.float32) * k_scale_val
     mock_cache_offset = (batch_idx * block_table_stride + mock_block_table_idx
                          + 1) * KV_CACHE_STRIDE + tl.arange(0, K_CACHE_STRIDE)
-    tl.store(mock_kv_cache_ptr + mock_cache_offset,
-             dequantized_vals.to(tl.bfloat16))
+    if dequant_to_bf16:
+        dequantized_vals = dequantized_vals.to(tl.bfloat16)
+    else:
+        dequantized_vals = dequantized_vals.to(tl.float16)
+    tl.store(mock_kv_cache_ptr + mock_cache_offset, dequantized_vals)
 
     # Dequantize V
     v_scale_val = tl.load(v_scale_ptr)
@@ -87,8 +91,11 @@ def _trtllm_prefill_attn_kvfp8_dequant(
     mock_cache_offset = (
         (batch_idx * block_table_stride + mock_block_table_idx + 1) *
         KV_CACHE_STRIDE + K_CACHE_STRIDE + tl.arange(0, K_CACHE_STRIDE))
-    tl.store(mock_kv_cache_ptr + mock_cache_offset,
-             dequantized_vals.to(tl.bfloat16))
+    if dequant_to_bf16:
+        dequantized_vals = dequantized_vals.to(tl.bfloat16)
+    else:
+        dequantized_vals = dequantized_vals.to(tl.float16)
+    tl.store(mock_kv_cache_ptr + mock_cache_offset, dequantized_vals)
 
 
 def trtllm_prefill_attn_kvfp8_dequant(
@@ -96,16 +103,18 @@ def trtllm_prefill_attn_kvfp8_dequant(
     block_tables_prefill: torch.Tensor,
     k_scale: torch.Tensor,
     v_scale: torch.Tensor,
+    dequant_dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     batch_size, num_of_page_per_token = block_tables_prefill.shape
     s = kv_cache.shape
     assert s[1] == 2
+    assert dequant_dtype in (torch.bfloat16, torch.float16)
     k_cache_stride = s[2] * s[3] * s[4]
     kv_cache_stride = k_cache_stride * s[1]
     new_s = (batch_size * num_of_page_per_token + 1, s[1], s[2], s[3], s[4])
     # mock kv cache contains just the pages needed by this prefill
     mock_kv_cache = torch.empty(new_s,
-                                dtype=torch.bfloat16,
+                                dtype=dequant_dtype,
                                 device=kv_cache.device)
     # we simply sequentially index the pages needed by this prefill
     mock_block_table = torch.arange(
@@ -124,6 +133,7 @@ def trtllm_prefill_attn_kvfp8_dequant(
         v_scale,
         k_cache_stride,
         kv_cache_stride,
+        dequant_dtype is torch.bfloat16,
     )
     return mock_kv_cache, mock_block_table
 
@@ -896,6 +906,7 @@ class FlashInferImpl(AttentionImpl):
                             block_tables_prefill,
                             layer._k_scale,
                             layer._v_scale,
+                            attn_metadata.q_data_type,
                         ))
                 else:
                     mock_kv_cache = kv_cache_permute
