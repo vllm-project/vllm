@@ -590,11 +590,10 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> Union[torch.Tensor, IntermediateTensors, tuple[torch.Tensor, list[torch.Tensor]]]:
         model_output = self.model(input_ids, positions, intermediate_tensors,
                                   inputs_embeds)
         
-        # Check if aux hidden states are returned (consistent with LLaMA's handling approach)
         if isinstance(model_output, tuple) and len(model_output) == 2:
             # Aux hidden states are present.
             hidden_states, aux_hidden_states = model_output
