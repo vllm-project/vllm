@@ -45,7 +45,8 @@ def normalize_value(x):
     if x is None or isinstance(x, (bool, int, float, str)):
         return x
 
-    # Enums tagged by enum class to avoid collisions with primitives
+    # Enums: tag with FQN to avoid primitive collisions.
+    # Ex: Enum(1) vs int(1) -> ("module.QualName", value).
     if isinstance(x, enum.Enum):
         enum_type = f"{x.__class__.__module__}.{x.__class__.__qualname__}"
         return (enum_type, normalize_value(x.value))
@@ -55,7 +56,8 @@ def normalize_value(x):
     # Instances are only accepted if they expose uuid(); otherwise they are
     # rejected to avoid under-hashing object state.
 
-    # Callables: allow classes (types) only; reject functions/lambdas/methods
+    # Callables: accept classes only; reject funcs/lambdas/methods.
+    # Used by LogitsProcessor types and ModelConfig.hf_overrides.
     if isinstance(x, type):
         module = getattr(x, "__module__", "")
         qual = getattr(x, "__qualname__", getattr(x, "__name__", ""))
@@ -64,7 +66,8 @@ def normalize_value(x):
         raise TypeError(
             "normalize_value: function or callable instance unsupported")
 
-    # Torch dtype without import (identify by type module/name)
+    # Torch dtype: stringify (torch.float64 -> "torch.float64").
+    # Collisions with same literal ok; tag as ("torch.dtype", str(x)).
     t = type(x)
     if getattr(t, "__module__", "") == "torch" and getattr(t, "__name__",
                                                            "") == "dtype":

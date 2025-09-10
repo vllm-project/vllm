@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import enum
 from dataclasses import dataclass
+from typing import Optional
 from vllm.config.utils import normalize_value, get_hash_factors, hash_factors
 from vllm.config import LogprobsMode
 
@@ -9,6 +10,8 @@ import pytest
 # Helpers
 
 def _endswith_fqname(obj, suffix: str) -> bool:
+    # normalize_value(type) returns fully-qualified name
+    # Compare suffix to avoid brittle import paths.
     out = normalize_value(obj)
     return isinstance(out, str) and out.endswith(suffix)
 
@@ -19,10 +22,12 @@ def _expected_path(p_str: str = ".") -> str:
     return str(p.expanduser().resolve())
 
 
+# Minimal dataclass to test get_hash_factors.
+# Avoid importing heavy vLLM configs.
 @dataclass
 class SimpleConfig:
     a: object
-    b: object | None = None
+    b: Optional[object] = None
 
 
 def test_hash_factors_deterministic():
@@ -56,23 +61,29 @@ def test_normalize_value_matrix(inp, expected):
 
 
 def test_normalize_value_enum():
+    # Enums normalize to (module.QualName, value).
+    # LogprobsMode uses a string payload.
     out = normalize_value(LogprobsMode.RAW_LOGITS)
     assert isinstance(out, tuple)
     assert out[0].endswith("LogprobsMode")
-    # vLLM enums may carry string payloads; verify normalized value matches
+    # Expect string payload 'raw_logits'.
     assert out[1] == "raw_logits"
 
 
 def test_normalize_value_set_order_insensitive():
+    # Sets are unordered; normalize_value sorts elements for determinism.
     assert normalize_value({3, 1, 2}) == normalize_value({1, 2, 3})
 
 
 def test_normalize_value_path_normalization():
     from pathlib import Path  # local import to avoid global dependency
+    # Paths expand/resolve to absolute strings.
+    # Stabilizes hashing across working dirs.
     assert normalize_value(Path(".")) == _expected_path(".")
 
 
 def test_normalize_value_uuid_and_to_json():
+    # Objects may normalize via uuid() or to_json_string().
     class HasUUID:
         def uuid(self):
             return "test-uuid"
@@ -95,6 +106,8 @@ def test_normalize_value_uuid_and_to_json():
 )
 def test_error_cases(bad):
     """Inputs expected to raise TypeError."""
+    # Reject functions/lambdas/callable instances
+    # to avoid under-hashing.
     with pytest.raises(TypeError):
         normalize_value(bad)
 
@@ -118,7 +131,7 @@ def test_enum_vs_int_disambiguation():
     assert f_int["a"] == 1
     # The enum case becomes a tagged tuple ("module.QualName", "raw_logits")
     assert isinstance(f_enum["a"], tuple) and f_enum["a"][1] == "raw_logits"
-    # Factor dicts must differ so that we don't collide int(1) with Enum(1)
+    # Factor dicts must differ so we don't collide primitives with Enums.
     assert f_int != f_enum
     # Hash digests must differ correspondingly
     assert hash_factors(f_int) != hash_factors(f_enum)
@@ -131,7 +144,9 @@ def test_enum_vs_int_disambiguation():
 
 
 def test_classes_are_types():
-    """Classes (types) canonicalize to fully-qualified names; real vLLM types included."""
+    """Types normalize to FQNs; include real vLLM types."""
+    # Only classes allowed; functions/lambdas are rejected.
+    # Canonical form is the fully-qualified name.
     assert isinstance(normalize_value(str), str)
 
     class LocalDummy:
