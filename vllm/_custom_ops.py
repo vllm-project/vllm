@@ -117,7 +117,7 @@ def paged_attention_rocm(
     k_scale: torch.Tensor,
     v_scale: torch.Tensor,
     fp8_out_scale: Optional[torch.Tensor] = None,
-    mfma_type: str = "fp8" if (envs.is_set("VLLM_ROCM_FP8_MFMA_PAGE_ATTN") and envs.VLLM_ROCM_FP8_MFMA_PAGE_ATTN) else "f16",
+    mfma_type: str = "fp8" if envs.VLLM_ROCM_FP8_MFMA_PAGE_ATTN else "f16",
 ) -> None:
     torch.ops._rocm_C.paged_attention(out, exp_sum, max_logits, tmp_out, query,
                                       key_cache, value_cache, num_kv_heads,
