@@ -405,7 +405,7 @@ class Processor:
                 sampling_params.update_from_tokenizer(
                     self.tokenizer.get_lora_tokenizer(lora_request))
             if self.vllm_config.speculative_config is not None\
-                and self.vllm_config.speculative_config.predicted_output \
+                and self.vllm_config.speculative_config.predicted_outputs \
                 and isinstance(sampling_params.prediction, str):
                 sampling_params.prediction = self.tokenizer.get_lora_tokenizer(
                     lora_request).encode(

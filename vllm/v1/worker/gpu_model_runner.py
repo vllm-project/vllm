@@ -2153,16 +2153,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 continue
             req_state = self.requests[req_id]
             # Prepare context for drafter.
-            # If predicted_output is set, use the predicted tokens + output tokens as context.
+            # If predicted_outputs is set, use the predicted tokens + output tokens as context.
             # Otherwise, use the input tokens + output tokens as context as before
-            # if predicted_output is set and no predicted tokens are provided,
+            # if predicted_outputs is set and no predicted tokens are provided,
             # skip speculative decoding for the request.
-            if self.speculative_config.predicted_output and isinstance(req_state.sampling_params.prediction, list):
+            if self.speculative_config.predicted_outputs and isinstance(req_state.sampling_params.prediction, list):
                 context_token_ids = req_state.sampling_params.prediction.copy()
                 output_token_ids = self.input_batch.token_ids_cpu[i, self.input_batch.num_prompt_tokens[i]:num_tokens]
                 context_token_ids.extend(output_token_ids)
                 context_token_ids = np.array(context_token_ids)
-            elif not self.speculative_config.predicted_output:
+            elif not self.speculative_config.predicted_outputs:
                 context_token_ids = self.input_batch.token_ids_cpu[i, :num_tokens]
             else:
                 context_token_ids = None
