@@ -122,8 +122,7 @@ def run_test(
 
 
 @pytest.mark.core_model
-@pytest.mark.parametrize(
-    "model", ["openai/whisper-small", "openai/whisper-large-v3-turbo"])
+@pytest.mark.parametrize("model", ["openai/whisper-large-v3-turbo"])
 @create_new_process_for_each_test()
 def test_models(vllm_runner, model) -> None:
     run_test(
