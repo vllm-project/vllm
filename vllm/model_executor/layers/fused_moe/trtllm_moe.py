@@ -102,8 +102,6 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         activation: str,
         global_num_experts: int,
         expert_map: Optional[torch.Tensor],
-        w1_scale: Optional[torch.Tensor],
-        w2_scale: Optional[torch.Tensor],
         a1q_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
@@ -124,8 +122,8 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         packed_tensor = (topk_ids.to(torch.int32) << 16) | topk_weights.to(
             torch.bfloat16).view(torch.int16)
 
-        assert w1_scale is not None
-        assert w2_scale is not None
+        assert self.w1_scale is not None
+        assert self.w2_scale is not None
         kwargs = {
             "topk_ids":
             packed_tensor,
@@ -138,7 +136,7 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
             "gemm1_weights":
             w1,
             "gemm1_weights_scale":
-            w1_scale,
+            self.w1_scale,
             "gemm1_bias":
             self.w1_bias,
             "gemm1_alpha":
@@ -150,7 +148,7 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
             "gemm2_weights":
             w2,
             "gemm2_weights_scale":
-            w2_scale,
+            self.w2_scale,
             "gemm2_bias":
             self.w2_bias,
             "output1_scale_scalar":
