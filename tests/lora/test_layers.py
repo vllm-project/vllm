@@ -15,18 +15,18 @@ from vllm.config import LoRAConfig
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
+                              ColumnParallelLinearWithShardedLoRA,
                               LogitsProcessorWithLoRA, LoRAMapping,
                               MergedColumnParallelLinearWithLoRA,
+                              MergedColumnParallelLinearWithShardedLoRA,
                               MergedQKVParallelLinearWithLoRA,
+                              MergedQKVParallelLinearWithShardedLoRA,
                               QKVParallelLinearWithLoRA,
+                              QKVParallelLinearWithShardedLoRA,
                               ReplicatedLinearWithLoRA,
                               RowParallelLinearWithLoRA,
+                              RowParallelLinearWithShardedLoRA,
                               VocabParallelEmbeddingWithLoRA)
-from vllm.lora.layers.fully_sharded_layers import (
-    ColumnParallelLinearWithShardedLoRA,
-    MergedColumnParallelLinearWithShardedLoRA,
-    MergedQKVParallelLinearWithShardedLoRA, QKVParallelLinearWithShardedLoRA,
-    RowParallelLinearWithShardedLoRA)
 # yapf: enable
 from vllm.lora.models import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.punica_wrapper import get_punica_wrapper

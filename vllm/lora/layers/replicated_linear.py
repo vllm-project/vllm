@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
 from typing import Optional, Union
+
 import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
+
 from vllm.config import LoRAConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
+
 from .base_linear import BaseLinearLayerWithLoRA
+
 
 class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
 
@@ -56,6 +59,3 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
         model_config: Optional[PretrainedConfig],
     ) -> bool:
         return type(source_layer) is ReplicatedLinear
-
-
-

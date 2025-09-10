@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
 from typing import Optional
 
 import torch
@@ -15,6 +14,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.platforms import current_platform
 
 from .base import BaseLayerWithLoRA
+
 
 class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
 
@@ -170,5 +170,3 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
     @property
     def weight(self):
         return self.base_layer.weight
-
-

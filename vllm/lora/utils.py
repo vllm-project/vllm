@@ -23,12 +23,13 @@ from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
                               QKVParallelLinearWithLoRA,
                               ReplicatedLinearWithLoRA,
                               RowParallelLinearWithLoRA,
-                              VocabParallelEmbeddingWithLoRA)
-from vllm.lora.layers.fully_sharded_layers import (
-    ColumnParallelLinearWithShardedLoRA,
-    MergedColumnParallelLinearWithShardedLoRA,
-    MergedQKVParallelLinearWithShardedLoRA, QKVParallelLinearWithShardedLoRA,
-    RowParallelLinearWithShardedLoRA)
+                              VocabParallelEmbeddingWithLoRA,
+                              ColumnParallelLinearWithShardedLoRA,
+                              MergedColumnParallelLinearWithShardedLoRA,
+                              MergedQKVParallelLinearWithShardedLoRA, 
+                              QKVParallelLinearWithShardedLoRA,
+                            RowParallelLinearWithShardedLoRA)
+
 from vllm.model_executor.layers.linear import LinearBase
 
 # yapf: enable

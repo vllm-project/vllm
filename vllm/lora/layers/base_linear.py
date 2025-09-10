@@ -4,24 +4,18 @@
 from typing import Optional, cast
 
 import torch
-
 from transformers import PretrainedConfig
 
 from vllm.config import LoRAConfig
-
 from vllm.distributed.utils import divide
 # yapf: disable
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               LinearBase,
-                                               ReplicatedLinear,
+                                               LinearBase, ReplicatedLinear,
                                                RowParallelLinear)
-
 from vllm.platforms import current_platform
 
-from .utils import _get_lora_device
 from .base import BaseLayerWithLoRA
-
-
+from .utils import _get_lora_device
 
 
 class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
@@ -188,5 +182,3 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             return self.base_layer.bias
         else:
             return None
-
-

@@ -8,16 +8,16 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-
 from vllm.config import LoRAConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size,)
+                              get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.platforms import current_platform
 
 from .base import BaseLayerWithLoRA
+
 
 class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
     """

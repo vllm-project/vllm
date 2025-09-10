@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import  Optional, Union, cast
+from typing import Optional, Union, cast
+
 import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
@@ -14,9 +15,59 @@ from vllm.distributed.utils import divide
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear)
+from vllm.platforms import current_platform
 
 from .base_linear import BaseLinearLayerWithLoRA
-from .utils import _not_fully_sharded_can_replace
+from .utils import _fully_sharded_can_replace, _not_fully_sharded_can_replace
+
+
+def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
+    """ 
+    For `ColumnParallelLinearWithLoRA` or classes that inherit from 
+    `ColumnParallelLinearWithLoRA`, they share the same `apply` logic.
+    """
+    assert (layer.n_slices == len(layer.lora_a_stacked) == len(
+        layer.lora_b_stacked) == len(layer.output_slices))
+    if layer.lora_bias_stacked is not None:
+        assert layer.n_slices == len(layer.lora_bias_stacked)
+
+    output = layer.base_layer.quant_method.apply(layer.base_layer, x, bias)
+
+    x = x.view(-1, x.shape[-1])
+    output, out_orig_shape = output.view(-1, output.shape[-1]), output.shape
+
+    # Since communication is needed, the buffer is directly initialized as a
+    # tensor rather than a tuple of tensor.
+    buffers = torch.zeros(
+        (layer.n_slices, x.shape[0], layer.lora_a_stacked[0].shape[2]),
+        dtype=torch.float32,
+        device=x.device,
+    )
+
+    shrunk_buffers: Optional[torch.Tensor] = layer.punica_wrapper.add_shrink(
+        buffers, x, layer.lora_a_stacked, 1.0)
+
+    if not current_platform.can_update_inplace():
+        buffers = shrunk_buffers
+
+    buffers = tensor_model_parallel_all_gather(buffers)
+
+    lora_output: Optional[torch.Tensor] = layer.punica_wrapper.add_expand(
+        output,
+        buffers,
+        layer.lora_b_stacked,
+        layer.lora_bias_stacked,
+        layer.output_slices,
+        offset_start=0,
+        add_input=True)
+
+    if not current_platform.can_update_inplace():
+        output = lora_output
+
+    output = output.view(*out_orig_shape)
+    # now have column partitioned and packed output
+    return output
+
 
 class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
     """
@@ -393,4 +444,179 @@ class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
                 and len(packed_modules_list) == 3)
 
 
+# These following layers are based on the tensor parallelism strategy given in
+# Y. Sheng et al., S-LoRA: Serving Thousands of Concurrent LoRA Adapters. 2023,
+# https://arxiv.org/abs/2311.03285.
 
+
+class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
+    """
+    Differs from ColumnParallelLinearWithLoRA by slicing LoRA A also.
+
+    Based on S-LoRA, slicing happens along the rank dim.
+    """
+
+    # For all LoRA layers where the `base_layer` is `ColumnParallelLinear`,
+    # their `lora_a` and `lora_b` have different sharding patterns. After
+    # completing the `lora_a` GEMM , a gather operation is performed.
+    # Therefore, the sharding of `lora_a` only needs to correspond with the
+    # gather operation.
+    def slice_lora_a(self, lora_a: torch.Tensor) -> torch.Tensor:
+        tp_rank = get_tensor_model_parallel_rank()
+        shard_size = self.lora_a_stacked[0].shape[2]
+        start_idx = tp_rank * shard_size
+        lora_a = lora_a[:, start_idx:start_idx + shard_size]
+        return lora_a
+
+    def apply(self,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        return _mcp_apply(x, bias, self)
+
+    @classmethod
+    @_fully_sharded_can_replace
+    def can_replace_layer(
+        cls,
+        source_layer: nn.Module,
+        lora_config: LoRAConfig,
+        packed_modules_list: list,
+        model_config: Optional[PretrainedConfig],
+    ) -> bool:
+        # specifying kwargs so they can be easily accessed in decorator
+        return super().can_replace_layer(
+            source_layer=source_layer,
+            lora_config=lora_config,
+            packed_modules_list=packed_modules_list,
+            model_config=model_config,
+            decorate=False,
+        )
+
+
+class MergedColumnParallelLinearWithShardedLoRA(
+        MergedColumnParallelLinearWithLoRA):
+    """
+    Differs from MergedColumnParallelLinearWithLoRA by slicing the
+    LoRA A's also.
+
+    Based on S-LoRA, slicing happens along the rank dim.
+    """
+
+    def slice_lora_a(
+        self, lora_a: list[Union[torch.Tensor, None]]
+    ) -> list[Union[torch.Tensor, None]]:
+        #NOTE: lora_a contains 2 subloras, and each sublora could be None.
+        output_shard_size = self.lora_a_stacked[0].shape[2]
+        output_start_idx = self.tp_rank * output_shard_size
+        lora_a = [
+            lora_a[0][:, output_start_idx:output_start_idx +
+                      output_shard_size] if lora_a[0] is not None else None,
+            lora_a[1][:, output_start_idx:output_start_idx +
+                      output_shard_size] if lora_a[1] is not None else None,
+        ]
+        return lora_a
+
+    def apply(self,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        return _mcp_apply(x, bias, self)
+
+    @classmethod
+    @_fully_sharded_can_replace
+    def can_replace_layer(
+        cls,
+        source_layer: nn.Module,
+        lora_config: LoRAConfig,
+        packed_modules_list: list,
+        model_config: Optional[PretrainedConfig],
+    ) -> bool:
+        # specifying kwargs so they can be easily accessed in decorator
+        return super().can_replace_layer(
+            source_layer=source_layer,
+            lora_config=lora_config,
+            packed_modules_list=packed_modules_list,
+            model_config=model_config,
+            decorate=False,
+        )
+
+
+class QKVParallelLinearWithShardedLoRA(QKVParallelLinearWithLoRA):
+    """
+    Differs from QKVParallelLinearWithLoRA by slicing the
+    LoRA A's also.
+
+    Based on S-LoRA, slicing happens along the rank dim.
+    """
+
+    def slice_lora_a(self, lora_a: torch.Tensor) -> torch.Tensor:
+        tp_rank = get_tensor_model_parallel_rank()
+        shard_size = self.lora_a_stacked[0].shape[2]
+        start_idx = tp_rank * shard_size
+        lora_a = lora_a[:, start_idx:start_idx + shard_size]
+        return lora_a
+
+    def apply(self,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        return _mcp_apply(x, bias, self)
+
+    @classmethod
+    @_fully_sharded_can_replace
+    def can_replace_layer(cls, source_layer: nn.Module,
+                          lora_config: LoRAConfig, packed_modules_list: list,
+                          model_config: Optional[PretrainedConfig]) -> bool:
+        # specifying kwargs so they can be easily accessed in decorator
+        return super().can_replace_layer(
+            source_layer=source_layer,
+            lora_config=lora_config,
+            packed_modules_list=packed_modules_list,
+            model_config=model_config,
+            decorate=False,
+        )
+
+
+class MergedQKVParallelLinearWithShardedLoRA(MergedQKVParallelLinearWithLoRA):
+    """
+    Differs from MergedQKVParallelLinearWithLoRA by slicing the 
+    LoRA A's also.
+
+    Based on S-LoRA, slicing happens along the rank dim.
+    """
+
+    def slice_lora_a(
+        self, lora_a: list[Union[torch.Tensor, None]]
+    ) -> list[Union[torch.Tensor, None]]:
+        # NOTE: lora_a contains 3 subloras, and each sublora could be None.
+        shard_size = [self.lora_a_stacked[i].shape[2] for i in range(3)]
+        start_idx = [self.tp_rank * shard_size[i] for i in range(3)]
+        lora_a = [
+            lora_a[0][:, start_idx[0]:start_idx[0] +
+                      shard_size[0]] if lora_a[0] is not None else None,
+            lora_a[1][:, start_idx[1]:start_idx[1] +
+                      shard_size[1]] if lora_a[1] is not None else None,
+            lora_a[2][:, start_idx[2]:start_idx[2] +
+                      shard_size[2]] if lora_a[2] is not None else None,
+        ]
+        return lora_a
+
+    def apply(self,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        return _mcp_apply(x, bias, self)
+
+    @classmethod
+    @_fully_sharded_can_replace
+    def can_replace_layer(
+        cls,
+        source_layer: nn.Module,
+        lora_config: LoRAConfig,
+        packed_modules_list: list,
+        model_config: Optional[PretrainedConfig],
+    ) -> bool:
+        # specifying kwargs so they can be easily accessed in decorator
+        return super().can_replace_layer(
+            source_layer=source_layer,
+            lora_config=lora_config,
+            packed_modules_list=packed_modules_list,
+            model_config=model_config,
+            decorate=False,
+        )

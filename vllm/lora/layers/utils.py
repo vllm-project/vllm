@@ -1,7 +1,12 @@
-import torch.nn as nn
-import torch
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+
+import torch
+import torch.nn as nn
+
 from vllm.adapter_commons.layers import AdapterMapping
+
 
 @dataclass
 class LoRAMapping(AdapterMapping):
@@ -38,5 +43,18 @@ def _not_fully_sharded_can_replace(can_replace):
         condition = (not kwargs["lora_config"].fully_sharded_loras
                      if decorate else True)
         return can_replace(*args, **kwargs) and condition
+
+    return dec
+
+
+def _fully_sharded_can_replace(can_replace):
+    """
+    decorator which adds the condition of fully sharded loras
+    intended to wrap can_replace_layer()
+    """
+
+    def dec(*args, **kwargs):
+        return (can_replace(*args, **kwargs)
+                and kwargs["lora_config"].fully_sharded_loras)
 
     return dec
