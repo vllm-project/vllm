@@ -22,6 +22,7 @@ from vllm.entrypoints.openai.protocol import (DetokenizeRequest,
 # yapf: enable
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.renderer import RenderConfig
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
@@ -72,7 +73,7 @@ class OpenAIServingTokenization(OpenAIServing):
                               [tool.model_dump() for tool in request.tools])
                 (
                     _,
-                    request_prompts,
+                    _,
                     engine_prompts,
                 ) = await self._preprocess_chat(
                     request,
@@ -90,15 +91,14 @@ class OpenAIServingTokenization(OpenAIServing):
             else:
                 engine_prompts = await renderer.render_prompt(
                     prompt_or_prompts=request.prompt,
-                    add_special_tokens=request.add_special_tokens,
-                    cache_salt=getattr(request, 'cache_salt', None),
+                    config=self._build_render_config(request),
                 )
         except (ValueError, TypeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(f"{e} {e.__cause__}")
 
         input_ids: list[int] = []
-        for i, engine_prompt in enumerate(engine_prompts):
+        for engine_prompt in engine_prompts:
             self._log_inputs(request_id,
                              engine_prompt,
                              params=None,
@@ -156,6 +156,9 @@ class OpenAIServingTokenization(OpenAIServing):
         except Exception as e:
             return self.create_error_response(
                 f"Failed to get tokenizer info: {str(e)}")
+
+    def _build_render_config(self, request: TokenizeRequest) -> RenderConfig:
+        return RenderConfig(add_special_tokens=request.add_special_tokens)
 
 
 @dataclass
