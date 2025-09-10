@@ -45,9 +45,11 @@ def get_dp_padding_ubatch(
 
     Returns: tuple[
         should_ubatch: Are all DP ranks going to microbatch
-        num_pad_tokens: The number of tokens that will be added to the full batch
+        num_pad_tokens: The number of tokens that will be added to the full batch.
+        Will be zero if should_ubatch is False
         num_tokens_after_padding: A tensor containing the total number of
-        tokens per-microbatch for each DP rank including padding
+        tokens per-microbatch for each DP rank including padding. Will be
+        None if should_ubatch if False
     ]
 
     """
@@ -103,6 +105,20 @@ def ubatch_split(max_num_scheduled_tokens: int,
         num_tokens_padded: int,
         vllm_config: VllmConfig,
     ) -> tuple[Optional[UBatchSlices], int, Optional[torch.Tensor]]:
+    """
+    Coordinates amongst all DP ranks to determine if and how the full batch should
+    be split into microbatches.
+
+    Returns: tuple[
+        ubatch_slices: if this is set then all DP ranks have agreed to microbatch
+        num_pad_tokens: The number of tokens that will be added to the full batch.
+        Will be zero if ubatch_slices is None
+        num_tokens_after_padding: A tensor containing the total number of
+        tokens per-microbatch for each DP rank including padding. Will be
+        None if ubatch_slices is None
+    ]
+
+    """
     parallel_config = vllm_config.parallel_config
     # Don't bother with the should_ubatch handshaking unless microbatching
     # is enabled
