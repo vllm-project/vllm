@@ -281,10 +281,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             assert self.kv_cache_spec.dtype == self.model_config.dtype
             self.kv_cache_dtype = self.kv_cache_spec.dtype
 
-        if flashinfer_disable_q_quantization():
-            self.q_data_type = self.model_config.dtype
-        else:
+        if supports_trtllm_attention()[0] and \
+            not flashinfer_disable_q_quantization():
             self.q_data_type = self.kv_cache_dtype
+        else:
+            self.q_data_type = self.model_config.dtype
 
         self._cascade_wrapper = None  # Wrapper for cascade attention
 
