@@ -504,8 +504,6 @@ class SharedResizableBuffer:
     def __init__(self):
         self.buffer = None
   
-    # NOTE: Assumes the first call to get() is the largest shape,
-    #  this is usually true due to the profile run.
     def get(self, shape: tuple[int, ...], device: torch.device, dtype: torch.dtype):
         shape_numel = prod(shape)
         if self.buffer is None or self.buffer.numel() < shape_numel:
