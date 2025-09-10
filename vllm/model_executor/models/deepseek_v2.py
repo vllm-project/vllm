@@ -610,17 +610,13 @@ class DeepseekV2MLAAttention(nn.Module):
         k_pe = k_pe.unsqueeze(1)
 
         if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE:
-            # cos_sin_cache = self.rotary_emb.cos_sin_cache
-            # is_neox = self.rotary_emb.is_neox_style
             attn_out = self.mla_attn(
                 q,
                 kv_c_normed,
                 k_pe,
                 output_shape=(hidden_states.shape[0],
                             self.num_local_heads * self.v_head_dim),
-                positions=positions)#,
-                # cos_sin_cache=cos_sin_cache,
-                # is_neox=is_neox)
+                positions=positions)
         else:
             q[..., self.qk_nope_head_dim:], k_pe = self.rotary_emb(
                 positions, q[..., self.qk_nope_head_dim:], k_pe)
@@ -724,7 +720,6 @@ class DeepseekV2DecoderLayer(nn.Module):
                                                             group_size=rocm_aiter_fp8_quant_group_size,
                                                             dtype_quant=rocm_aiter_fp8_dtype, 
                                                             res1=residual)
-            # hidden_states is a tuple that contains (hidden_states_quant, hidden_states_quant_scales)
             hidden_states = (hidden_states_quant, hidden_states_quant_scales)
         else:
             if residual is None:
