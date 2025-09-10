@@ -291,7 +291,7 @@ class MambaMixer2(MambaBase, CustomOp):
         self.groups_ssm_state_size = self.n_groups * self.ssm_state_size
         self.conv_dim = intermediate_size + 2 * self.groups_ssm_state_size
 
-        if self.n_groups % self.tp_size == 0:
+        if n_groups % self.tp_size == 0:
             self.conv1d = MergedColumnParallelLinear(
                 input_size=conv_kernel_size,
                 output_sizes=[
