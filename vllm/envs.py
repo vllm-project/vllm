@@ -181,7 +181,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT: bool = True
     VLLM_ROCM_USE_AITER_TRITON_FUSED_ADD_RMSNORM_PAD: bool = True
     VLLM_ROCM_USE_AITER_TRITON_BF16_GEMM: bool = True
-    TRITON_HIP_PRESHUFFLE_SCALES: bool = False
+    TRITON_HIP_PRESHUFFLE_SCALES: bool = True
 def get_default_cache_root():
     return os.getenv(
         "XDG_CACHE_HOME",
