@@ -165,7 +165,8 @@ class TreeAttentionMetadataBuilder(
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        self.kv_cache_spec = kv_cache_spec
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+
         self.block_size = kv_cache_spec.block_size
 
         spec_config = vllm_config.speculative_config
