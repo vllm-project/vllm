@@ -320,7 +320,7 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         super().__init__()
         self.tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
 
-        # update quant config to so that ignored module and targer module names
+        # update quant config to so that ignored module and target module names
         # match the vLLM model names
         if hasattr(vllm_config, "quant_config"):
             vllm_config.quant_config = self.maybe_update_quant_config(
