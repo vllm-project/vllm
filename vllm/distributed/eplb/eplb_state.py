@@ -476,6 +476,7 @@ class EplbState:
         # rearrangement step and perform rearrangement to ensure all ranks are
         # performing collective communication.
         self.expert_rearrangement_step += 1
+        logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: step: expert_rearrangement_step={self.expert_rearrangement_step}, interval={self.expert_rearrangement_step_interval}, is_async={self.is_async}, ep_buffer_ready={self.ep_buffer_ready}")
 
         if self.is_async and self.ep_buffer_ready:
             logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Calling move_to_workspace from step()")
@@ -595,6 +596,7 @@ class EplbState:
             num_nodes,
             num_gpus,
         ))
+        logger.info(f"[EPLB Debug] Rank {ep_rank}: rebalance_experts completed")
         if not self.is_async:
             logger.info(f"[EPLB Debug] Rank {ep_rank}: Non-async mode, calling rearrange_expert_weights_inplace")
             # Update expert weights
@@ -689,12 +691,12 @@ class EplbState:
                         rank_mapping=rank_mapping,
                     )
                     logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: transfer_layer completed for layer {self.layer_to_transfer}")
-                    # 每层 move_to_buffer 完成后，先做一次全局对齐，确保所有 rank 都完成了本层的 move_to_buffer
+                    # After move_to_buffer of each layer, perform a global synchronization to ensure all ranks have completed move_to_buffer for this layer
                     logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: starting _synchronize_rearrange_completion for layer {self.layer_to_transfer}")
                     self.ep_buffer_ready = 1
                     await self._synchronize_rearrange_completion(ep_group)
                     logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: per-layer _synchronize_rearrange_completion done for layer {self.layer_to_transfer}")
-                    # 不在这里推进 layer_to_transfer，等待主线程消费后再推进
+                    # Do not advance layer_to_transfer here, wait for main thread consumption before advancing
                 finally:
                     logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Releasing buffer lock for layer {self.layer_to_transfer}")
                     self.buffer_lock.release()
@@ -711,8 +713,8 @@ class EplbState:
 
     async def _synchronize_rearrange_completion(self, ep_group: ProcessGroup):
         """
-        等待所有 rank 都完成 ep_buffer_ready=1（使用 CPU Gloo 组做同步）。
-        只有当每个 rank 的 completion_flag=1 时（all_reduce 求和等于 world_size），所有 rank 才一起通过。
+        Wait for all ranks to complete ep_buffer_ready=1 (use CPU Gloo group for synchronization).
+        Only when every rank's completion_flag=1 (all_reduce sum equals world_size), will all ranks pass together.
         """
         from vllm.distributed.parallel_state import get_ep_group as _get_epg
         cpu_group = _get_epg().cpu_group
@@ -720,15 +722,15 @@ class EplbState:
         world = cpu_group.size()
         logger.info(f"[EPLB Debug] Rank {rank}: _synchronize_rearrange_completion started on CPU group (world={world})")
 
-        # 持续等待直到所有 rank 都设置为 1
+        # Continuously wait until all ranks are set to 1
         while True:
             flag = torch.tensor((int(self.ep_buffer_ready),), dtype=torch.int32, device="cpu")
-            await asyncio.to_thread(all_reduce, flag, group=cpu_group)
+            all_reduce(flag, group=cpu_group)
             total = int(flag.item())
             logger.info(f"[EPLB Debug] Rank {rank}: CPU all_reduce total={total}, expected={world}")
             if total == world:
                 logger.info(f"[EPLB Debug] Rank {rank}: all ranks ready, synchronization passed")
-                break
+                return
             await asyncio.sleep(0.1)
 
     def move_to_workspace(self,
@@ -752,7 +754,7 @@ class EplbState:
                 ep_group=ep_group
             )
             logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: move_from_buffer completed for layer {self.layer_to_transfer}")
-            # 主线程消费完成后推进 layer_to_transfer
+            # After the main thread consumes, advance layer_to_transfer
             self.layer_to_transfer += 1
             self.ep_buffer_ready = 0
             logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Updated state - layer_to_transfer={self.layer_to_transfer}, ep_buffer_ready={self.ep_buffer_ready}")
