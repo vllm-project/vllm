@@ -1427,6 +1427,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def get_dp_padding(self,
                        num_tokens: int) -> tuple[int, Optional[torch.Tensor]]:
+        """
+        Determines the total number of tokens that each rank will run.
+        All ranks will be padded out so that the run with the same number
+        of tokens
+
+        Returns: tuple[
+            num_pad_tokens: The number of tokens that will be added to the batch
+            num_tokens_after_padding: A tensor containing the total number of
+            tokens for each DP rank including padding.
+        ]
+        """
         dp_size = self.vllm_config.parallel_config.data_parallel_size
         dp_rank = self.vllm_config.parallel_config.data_parallel_rank
 
