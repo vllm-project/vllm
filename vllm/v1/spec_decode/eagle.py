@@ -21,6 +21,8 @@ from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.v1.attention.backends.flashinfer import (FlashInferMetadata,
+                                                   FlashInferMetadataBuilder)
 from vllm.v1.attention.backends.tree_attn import (TreeAttentionMetadata,
                                                   TreeAttentionMetadataBuilder)
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
@@ -119,7 +121,8 @@ class EagleProposer:
             self.allowed_attn_types = tuple(rocm_types)
         else:
             self.allowed_attn_types = (FlashAttentionMetadata,
-                                       TreeAttentionMetadata)
+                                       TreeAttentionMetadata,
+                                       FlashInferMetadata)
 
         # Parse the speculative token tree.
         spec_token_tree = self.speculative_config.speculative_token_tree
@@ -159,6 +162,8 @@ class EagleProposer:
         sampling_metadata: SamplingMetadata,
         mm_embeds: Optional[list[torch.Tensor]] = None,
     ) -> torch.Tensor:
+        # Ensure locals are always initialized to avoid UnboundLocalError
+        inputs_embeds = None
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
         last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
@@ -178,10 +183,25 @@ class EagleProposer:
 
         assert self.runner is not None
 
-        # FIXME: need to consider multiple kv_cache_groups
-        attn_metadata = self.runner.attn_groups[0][0].metadata_builder\
-            .build_for_drafting(common_attn_metadata=common_attn_metadata,
-                                draft_index=0)
+        # Select the correct attention metadata builder for EAGLE layers.
+        builder = self._get_attention_metadata_builder()
+        new_common_attn_metadata = None
+        # For FlashInfer first pass, reorder to decode-first contiguous layout
+        # so that prefill slice matches num_prefill_tokens.
+        if isinstance(builder, FlashInferMetadataBuilder):
+            reorder_result = self._reorder_for_flashinfer(
+                common_attn_metadata, next_token_ids, num_tokens, target_positions.device)
+            
+            if reorder_result is not None:
+                new_common_attn_metadata, token_perm, req_order = reorder_result
+                
+                # Apply new order to inputs
+                target_positions = target_positions[token_perm]
+                target_hidden_states = target_hidden_states[token_perm]
+
+        base_common = new_common_attn_metadata if new_common_attn_metadata is not None else common_attn_metadata
+        attn_metadata = builder.build_for_drafting(
+            common_attn_metadata=base_common, draft_index=0)
 
         # At this moment, we assume all eagle layers belong to the same KV
         # cache group, thus using the same attention metadata.
@@ -263,6 +283,14 @@ class EagleProposer:
         attn_metadata.num_actual_tokens = batch_size
         attn_metadata.max_query_len = 1
         attn_metadata.query_start_loc = self.arange[:batch_size + 1]
+
+        # After the first draft forward, switch FlashInfer to decode-only (len=1)
+        if isinstance(builder, FlashInferMetadataBuilder):
+            attn_metadata = self._create_decode_only_metadata(
+                builder, attn_metadata, batch_size)
+            
+            for layer_name in self.attn_layer_names:
+                per_layer_attn_metadata[layer_name] = attn_metadata
         for _ in range(self.num_speculative_tokens - 1):
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
@@ -309,6 +337,7 @@ class EagleProposer:
             self.input_ids[:batch_size] = input_ids
             self.positions[:batch_size] = clamped_positions
             self.hidden_states[:batch_size] = hidden_states
+
             if self.is_multimodal_model:
                 inputs_embeds = self.model.get_input_embeddings(input_ids)
                 self.inputs_embeds[:batch_size] = inputs_embeds
@@ -642,13 +671,15 @@ class EagleProposer:
                 "The EAGLE head's vocab embedding will be loaded separately"
                 " from the target model.")
 
-        # share lm_head with the target model if needed
-        # some model definition do not define lm_head explicitly
-        # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
-        if self.vllm_config.speculative_config.method != "eagle3" and \
-                hasattr(target_language_model, "lm_head"):
-            logger.info("Loading EAGLE LM head weights from the target model.")
+        if (get_pp_group().world_size == 1 and self.model.lm_head.weight.shape
+                == target_language_model.lm_head.weight.shape):
+            logger.info("Assuming the EAGLE head shares the same lm_head"
+                        " with the target model.")
+            del self.model.lm_head
             self.model.lm_head = target_language_model.lm_head
+        else:
+            logger.info("The EAGLE head's lm_head will be loaded separately"
+                        " from the target model.")
 
     @torch.inference_mode()
     def dummy_run(
@@ -689,6 +720,175 @@ class EagleProposer:
                 for layer_name in self.attn_layer_names
             ])
         ) == 1, "All eagle layers should belong to the same kv cache group"
+    
+    def _get_attention_metadata_builder(self):
+        """Find and return the attention metadata builder for EAGLE layers.
+        
+        This helper method extracts the builder selection logic to improve readability.
+        The builder is found by looking up the first EAGLE layer in the attention groups.
+        
+        Returns:
+            The metadata builder for EAGLE layers.
+            
+        Raises:
+            AssertionError: If no metadata builder is found for EAGLE layers.
+        """
+        builder = None
+        chosen_layer = self.attn_layer_names[0]
+
+        for kv_cache_group in self.runner.attn_groups:
+            for attn_group in kv_cache_group:
+                if chosen_layer in attn_group.layer_names:
+                    builder = attn_group.metadata_builder
+                    break
+            if builder is not None:
+                break
+        
+        assert builder is not None, (
+            "Failed to find attention metadata builder for EAGLE layers.")
+        return builder
+    
+    def _reorder_for_flashinfer(self, common_attn_metadata, next_token_ids, 
+                                num_tokens, device):
+        """Reorder requests for FlashInfer decode-first contiguous layout.
+        
+        FlashInfer requires decode requests to come before prefill requests in memory
+        for optimal performance. This method reorders the requests and creates the
+        necessary token permutation and metadata.
+        
+        Args:
+            common_attn_metadata: The current attention metadata
+            next_token_ids: The next token IDs for each request
+            num_tokens: Total number of tokens
+            device: Target device for tensors
+            
+        Returns:
+            Tuple of (new_metadata, token_perm, req_order) if reordering is needed,
+            None otherwise.
+        """
+        qsl_cpu = common_attn_metadata.query_start_loc_cpu
+        query_lens_cpu = qsl_cpu[1:] - qsl_cpu[:-1]
+        decode_req_idxs = torch.nonzero(query_lens_cpu <= 1,
+                                        as_tuple=False).view(-1)
+        prefill_req_idxs = torch.nonzero(query_lens_cpu > 1,
+                                         as_tuple=False).view(-1)
+        
+        # Only reorder if we have both decode and prefill requests
+        if decode_req_idxs.numel() == 0 or prefill_req_idxs.numel() == 0:
+            return None
+            
+        req_order = torch.cat([decode_req_idxs, prefill_req_idxs], 0)
+
+        # Build token permutation by concatenating per-request spans
+        spans_start = qsl_cpu[:-1]
+        spans_end = qsl_cpu[1:]
+        token_indices = []
+        for r in req_order.tolist():
+            start = int(spans_start[r].item())
+            end = int(spans_end[r].item())
+            if end > start:
+                token_indices.append(
+                    torch.arange(start, end, dtype=torch.int64))
+        if token_indices:
+            token_perm_cpu = torch.cat(token_indices, dim=0)
+        else:
+            token_perm_cpu = torch.arange(
+                0,
+                common_attn_metadata.num_actual_tokens,
+                dtype=torch.int64)
+
+        # Build reordered CommonAttentionMetadata
+        reordered_query_lens = query_lens_cpu[req_order]
+        new_qsl_cpu = torch.zeros_like(qsl_cpu)
+        new_qsl_cpu[1:] = torch.cumsum(reordered_query_lens,
+                                       dim=0,
+                                       dtype=qsl_cpu.dtype)
+        new_max_q_len = int(reordered_query_lens.max().item())
+        new_seq_lens = common_attn_metadata.seq_lens[req_order].to(
+            device=common_attn_metadata.seq_lens.device,
+            non_blocking=True)
+        new_max_seq_len = int(new_seq_lens.max().item())
+        new_common_attn_metadata = CommonAttentionMetadata(
+            query_start_loc=new_qsl_cpu.to(
+                device=common_attn_metadata.query_start_loc.device,
+                non_blocking=True),
+            query_start_loc_cpu=new_qsl_cpu,
+            seq_lens=new_seq_lens,
+            seq_lens_cpu=common_attn_metadata.seq_lens_cpu[req_order],
+            num_computed_tokens_cpu=common_attn_metadata.
+            num_computed_tokens_cpu[req_order],
+            num_reqs=common_attn_metadata.num_reqs,
+            num_actual_tokens=common_attn_metadata.num_actual_tokens,
+            max_query_len=new_max_q_len,
+            max_seq_len=new_max_seq_len,
+            block_table_tensor=common_attn_metadata.
+            block_table_tensor[req_order],
+            slot_mapping=common_attn_metadata.slot_mapping[
+                token_perm_cpu.to(
+                    device=common_attn_metadata.slot_mapping.device)],
+            causal=True,
+        )
+        
+        # Convert token permutation to target device
+        token_perm = token_perm_cpu.to(device=device, dtype=torch.int64)
+        
+        # Rebuild input_ids for new order: start from existing shifted
+        # view, then set last tokens per reordered request
+        permuted_input_ids = self.input_ids[:num_tokens][token_perm]
+        last_token_indices = (
+            new_common_attn_metadata.query_start_loc[1:].to(
+                device=device, dtype=torch.int64) - 1)
+        next_token_ids_reordered = next_token_ids[req_order.to(
+            device=next_token_ids.device)]
+        permuted_input_ids[last_token_indices] = (
+            next_token_ids_reordered)
+        self.input_ids[:num_tokens] = permuted_input_ids
+        
+        return new_common_attn_metadata, token_perm, req_order
+    
+    def _create_decode_only_metadata(self, builder, attn_metadata, batch_size):
+        """Create decode-only metadata for FlashInfer after first draft forward.
+        
+        This switches FlashInfer to decode-only mode (query length = 1) for
+        better performance during subsequent draft token generation.
+        
+        Args:
+            builder: The FlashInferMetadataBuilder instance
+            attn_metadata: Current attention metadata
+            batch_size: Number of sequences in the batch
+            
+        Returns:
+            Updated attention metadata configured for decode-only mode
+        """
+        qsl_gpu = self.arange[:batch_size + 1]
+        qsl_cpu = qsl_gpu.cpu().to(torch.int32)
+        seq_lens_gpu = attn_metadata.seq_lens[:batch_size]
+        seq_lens_cpu = seq_lens_gpu.detach().cpu().to(torch.int32)
+        
+        # Handle different attribute names for block table tensor
+        block_table_tensor = getattr(attn_metadata, 'block_table_tensor',
+                                     None)
+        if block_table_tensor is None:
+            block_table_tensor = attn_metadata.block_table
+
+        new_common_attn_metadata = CommonAttentionMetadata(
+            query_start_loc=qsl_gpu,
+            query_start_loc_cpu=qsl_cpu,
+            seq_lens=seq_lens_gpu,
+            seq_lens_cpu=seq_lens_cpu,
+            num_computed_tokens_cpu=torch.zeros(batch_size,
+                                                dtype=torch.int32),
+            num_reqs=batch_size,
+            num_actual_tokens=batch_size,
+            max_query_len=attn_metadata.max_query_len,
+            max_seq_len=attn_metadata.max_seq_len,
+            block_table_tensor=block_table_tensor[:batch_size],
+            slot_mapping=attn_metadata.slot_mapping,
+            causal=True,
+        )
+
+        return builder.build_for_drafting(
+            common_attn_metadata=new_common_attn_metadata, draft_index=0)
 
 
 # NOTE(woosuk): Currently, the below code is not used and we always use argmax
