@@ -19,8 +19,8 @@ if has_triton_kernels():
         import triton_kernels.swiglu
         from triton_kernels.matmul_ogs import (FnSpecs, FusedActivation,
                                                matmul_ogs)
-        from triton_kernels.routing import (RoutingData, routing,
-                                            routing_from_bitmatrix)
+        from triton_kernels.routing import (RoutingData, prune_routing,
+                                            routing, routing_from_bitmatrix)
         from triton_kernels.tensor import Bitmatrix
     except ModuleNotFoundError:
         logger.error(
@@ -29,45 +29,43 @@ if has_triton_kernels():
 
 if TYPE_CHECKING:
     from triton_kernels.matmul_ogs import PrecisionConfig
+"""
+code reference:
+https://github.com/triton-lang/triton/blob/dd1bbc52b34d202dfe5ffea1e04fb16166c5c04e/python/triton_kernels/bench/distributed.py#L264
+"""
 
 
 @triton.jit
-def populate_bitmatrix_kernel(
-        topk_ids,
-        topk_row_stride,
-        topk_col_stride,
-        bm,  # bitmatrix
-        bm_row_stride,
-        bm_col_stride,
-        num_rows,  # topk_ids rows 
-        num_cols: tl.constexpr,  # topk_ids cols
-        BLOCK_M: tl.constexpr,
-        BLOCK_N: tl.constexpr):
-
-    pid = tl.program_id(0)
-    m_start = pid * BLOCK_M
-
-    offsets = tl.arange(0, BLOCK_M)
-    mask = offsets < (num_rows - m_start)
-
-    topk_ptrs = topk_ids + m_start * topk_row_stride + offsets * topk_row_stride
-    bm_ptrs = bm + m_start * bm_row_stride + offsets * bm_row_stride
-
-    one = tl.cast(1, dtype=tl.uint32)
-
-    for i in tl.range(num_cols):
-        topk = tl.load(topk_ptrs, mask=mask, other=-1)
-        bm_mask = topk != -1
-        bm_offset = topk // 32
-        rem = topk % 32
-        bits = tl.where(topk == -1, 0, one << rem)
-        bm_load_store_ptrs = bm_ptrs + bm_offset * bm_col_stride
-
-        existing_bits = tl.load(bm_load_store_ptrs, mask=bm_mask, other=0)
-        bits |= existing_bits
-
-        tl.store(bm_load_store_ptrs, bits, mask=bm_mask)
-        topk_ptrs += topk_col_stride
+def pack_bitmatrix(
+    bitmatrix,
+    expt_indx,
+    n_rows,
+    n_cols,
+    n_expts_act,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    sentinel: tl.constexpr,
+):
+    """
+    Packs expt_indx into a bitmatrix.
+    """
+    pid_m = tl.program_id(0)
+    offsets_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offsets_k = tl.arange(0, BLOCK_SIZE_K)
+    offsets = offsets_m[:, None] * n_expts_act + offsets_k[None, :]
+    mask = (offsets_m < n_rows)[:, None] & (offsets_k < n_expts_act)[None, :]
+    indices = tl.load(expt_indx + offsets, mask=mask, other=sentinel)
+    div = indices // 32
+    rem = indices % 32
+    iters = tl.cdiv(sentinel, BLOCK_SIZE_K)
+    for i in range(iters):
+        offs = tl.arange(0, BLOCK_SIZE_K // 32) + i * (BLOCK_SIZE_K // 32)
+        x = tl.where(div[:, :, None] == offs[None, None, :],
+                     (1 << rem)[:, :, None], 0)
+        y = tl.reduce_or(x, axis=1)
+        bitmatrix_ptrs = bitmatrix + offsets_m[:,
+                                               None] * n_cols + offs[None, :]
+        tl.store(bitmatrix_ptrs, y, mask=offsets_m[:, None] < n_rows)
 
 
 def triton_kernel_moe_forward(
@@ -213,66 +211,61 @@ class BaseOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # Let PrepareAndFinalize::finalize() decide the impl.
         return TopKWeightAndReduceNoOP()
 
-    def _make_bitmatrix(self, topk_ids: torch.Tensor, num_local_experts: int):
-
-        # Following code from the topk_forward function at,
-        # https://github.com/triton-lang/triton/blob/7871be232696d2112f7030e467ec35f47db543b9/python/triton_kernels/triton_kernels/topk.py#L9
-        cdiv = lambda a, b: (a + b - 1) // b
-        BLOCK_M = 32
-        BLOCK_N = 32
-        BLOCK_S = 128
-
-        n_rows, _ = topk_ids.size()
-        n_cols = num_local_experts
-        n_cols_pad = cdiv(n_cols, BLOCK_N) * BLOCK_N
-        n_cols_words = n_cols_pad // 32
-        bitmatrix = torch.empty((n_cols_words, cdiv(n_rows, 32) * 32),
-                                dtype=torch.uint32,
-                                device=topk_ids.device)
-        bitmatrix = torch.transpose(bitmatrix, 0, 1)[:n_rows]
-
-        grid = [cdiv(n_rows, BLOCK_M)]
-        populate_bitmatrix_kernel[grid](topk_ids, topk_ids.stride(0),
-                                        topk_ids.stride(1), bitmatrix,
-                                        bitmatrix.stride(0),
-                                        bitmatrix.stride(1), topk_ids.size(0),
-                                        topk_ids.size(1), BLOCK_M, BLOCK_N)
-
-        s_blocks = cdiv(n_cols, BLOCK_S)
-        s_cols = s_blocks * BLOCK_S
-        scratchpad = torch.zeros((s_cols, ),
-                                 dtype=torch.int32,
-                                 device=topk_ids.device)
-
-        bitmatrix_shape = [n_rows, n_cols_words * 32]
-        bitmatrix_shape_max = [n_rows, None]
-        return Bitmatrix(bitmatrix,
-                         shape=bitmatrix_shape,
-                         shape_max=bitmatrix_shape_max,
-                         scratchpad=scratchpad)
-
     def _make_routing_data(
-        self, topk_ids: torch.Tensor, topk_weights: torch.Tensor,
-        num_local_experts: int
+        self,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        num_local_experts: int,
+        num_global_experts: int,
     ) -> tuple[RoutingData, torch.Tensor, torch.Tensor]:
-        """
-        Return RoutingData, GatherIndx and ScatterIndx required for
-        matmul_ogs.
-        """
+
+        topk_ids = torch.where(topk_ids == -1, num_local_experts, topk_ids)
+
         topk_ids = topk_ids.to(torch.int16)
         topk_weights = topk_weights.to(torch.bfloat16)
+        ep_size = num_global_experts // num_local_experts
 
-        bitmatrix: Bitmatrix = self._make_bitmatrix(topk_ids,
-                                                    num_local_experts)
+        # Recover bitmatrix for local experts
+        BLOCK_SIZE_M = 512
+        BLOCK_SIZE_K = 32
+        # The sentinel value is chunk_size + 1 instead of chunk_size to ensure
+        # the bitmatrix buffer doesn't overflow. For example, cdiv(32, 32) is
+        # 1, while the 32th bit is on the second column.
+        sentinel = num_local_experts + 1
+        n_cols = triton.cdiv(sentinel, BLOCK_SIZE_K)
+        n_rows, num_topk = topk_ids.size()
 
-        num_topk = topk_ids.size(1)
-        routing_data, gather_indx, scatter_indx = routing_from_bitmatrix(
+        bitmatrix = torch.zeros((n_rows, n_cols),
+                                dtype=torch.uint32,
+                                device=topk_ids.device)
+        grid = (triton.cdiv(n_rows, BLOCK_SIZE_M), )
+
+        pack_bitmatrix[grid](
             bitmatrix,
-            topk_weights,
             topk_ids,
-            n_expts_tot=num_local_experts,
-            n_expts_act=num_topk)
-        return (routing_data, gather_indx, scatter_indx)
+            n_rows,
+            n_cols,
+            num_topk,
+            BLOCK_SIZE_M=BLOCK_SIZE_M,
+            BLOCK_SIZE_K=BLOCK_SIZE_K,
+            sentinel=sentinel,
+        )
+
+        bitmatrix_shape = [
+            n_rows, triton.cdiv(num_local_experts, BLOCK_SIZE_K) * 32
+        ]
+        bitmatrix_shape_max = [n_rows, None]
+        bitmatrix = Bitmatrix(bitmatrix,
+                              shape=bitmatrix_shape,
+                              shape_max=bitmatrix_shape_max,
+                              scratchpad=None)
+        expt_scal, expt_indx, bitmatrix = prune_routing(
+            topk_weights, topk_ids, bitmatrix, num_global_experts, ep_size)
+        routing_data, gather_indx, scatter_indx = routing_from_bitmatrix(
+            bitmatrix, expt_scal, expt_indx, num_global_experts // ep_size,
+            num_topk)
+
+        return routing_data, gather_indx, scatter_indx
 
 
 class OAITritonExperts(BaseOAITritonExperts):
@@ -337,10 +330,9 @@ class OAITritonExperts(BaseOAITritonExperts):
 
         num_local_experts = w1.size(0)
         routing_data, gather_indx, scatter_indx = self._make_routing_data(
-            topk_ids, topk_weights, num_local_experts)
+            topk_ids, topk_weights, num_local_experts, global_num_experts)
 
         # Make bitmatrix and RoutingData
-        print("In OAITritonExperts ...")
         experts_output = triton_kernel_fused_experts(
             None,
             hidden_states,
@@ -364,12 +356,7 @@ class OAITritonExperts(BaseOAITritonExperts):
             a1_scale=a1q_scale,
             a2_scale=a2_scale)
 
-        print(
-            f"experts output : {experts_output.shape} | output : {output.shape}"
-        )
         output.copy_(experts_output, non_blocking=True)
-        torch.cuda.synchronize()
-        assert not torch.isnan(output).any()
 
 
 class BatchedOAITritonExperts(BaseOAITritonExperts):
