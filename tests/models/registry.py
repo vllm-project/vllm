@@ -158,7 +158,7 @@ class _HfExamplesInfo:
 # yapf: disable
 _TEXT_GENERATION_EXAMPLE_MODELS = {
     # [Decoder-only]
-    "ApertusForCausalLM": _HfExamplesInfo("swiss-ai/Apertus-8B",
+    "ApertusForCausalLM": _HfExamplesInfo("swiss-ai/Apertus-8B-2509",
                                           min_transformers_version="4.56.0",
                                           trust_remote_code=True),
     "AquilaModel": _HfExamplesInfo("BAAI/AquilaChat-7B",
@@ -515,6 +515,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                               trust_remote_code=True),
     "Llama_Nemotron_Nano_VL" : _HfExamplesInfo("nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1", # noqa: E501
                                                      trust_remote_code=True),
+    "NemotronH_Nano_VL": _HfExamplesInfo("nano_vl_dummy",
+                                          is_available_online=False,
+                                          trust_remote_code=True),
     "Ovis": _HfExamplesInfo("AIDC-AI/Ovis2-1B", trust_remote_code=True,
                             max_transformers_version="4.53",
                             transformers_version_reason="HF model is not compatible",  # noqa: E501
@@ -602,11 +605,10 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
                                             trust_remote_code=True,
                                             speculative_model="yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
                                             tokenizer="meta-llama/Llama-3.1-8B-Instruct"),
-    # TODO: Re-enable this once tests/models/test_initialization.py is fixed, see PR #22333 #22611   # noqa: E501
-    # "LlamaForCausalLMEagle3": _HfExamplesInfo("AngelSlim/Qwen3-8B_eagle3",  # noqa: E501
-    #                                         trust_remote_code=True,
-    #                                         speculative_model="AngelSlim/Qwen3-8B_eagle3",   # noqa: E501
-    #                                         tokenizer="Qwen/Qwen3-8B"),
+    "LlamaForCausalLMEagle3": _HfExamplesInfo("AngelSlim/Qwen3-8B_eagle3",  # noqa: E501
+                                            trust_remote_code=True,
+                                            speculative_model="AngelSlim/Qwen3-8B_eagle3",   # noqa: E501
+                                            tokenizer="Qwen/Qwen3-8B"),
     "EagleLlama4ForCausalLM": _HfExamplesInfo(
         "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct",
         trust_remote_code=True,
