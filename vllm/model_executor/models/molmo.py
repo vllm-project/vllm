@@ -76,8 +76,8 @@ class MolmoImageInputs(TensorSchema):
     """
     Dimensions:
         - bn: Batch size * number of images
-        - nc: Number of crops
-        - np: Number of patches (dynamic)
+        - nc: Number of crops (dynamic)
+        - np: Number of patches
         - tp: Token sequence positions
         - pd: Patch dimension
     """
