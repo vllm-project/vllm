@@ -160,7 +160,7 @@ class HarmonyContext(ConversationContext):
 
         # HACK
         if len(output.outputs) > 0 and output.outputs[-1].finish_reason:
-            self.finish_reason = output.finish_reason
+            self.finish_reason = output.outputs[-1].finish_reason
 
     def _update_prefill_token_usage(self, output: RequestOutput) -> None:
         """Update token usage statistics for the prefill phase of generation.

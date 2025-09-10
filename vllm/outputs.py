@@ -145,9 +145,9 @@ class RequestOutput:
     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
         """Merge subsequent RequestOutput into this one"""
 
-        # self.finish_reason |= next_output.finish_reason
-        if self.finish_reason is None:
-            self.finish_reason = next_output.finish_reason
+        self.finish_reason |= next_output.finish_reason
+        # if self.finish_reason is None:
+        #     self.finish_reason = next_output.finish_reason
         self.kv_transfer_params = next_output.kv_transfer_params
 
         for next_completion in next_output.outputs:

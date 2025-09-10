@@ -6,7 +6,6 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, Optional, Union, cast
 
-import fbvscode
 import torch
 
 from vllm.logger import init_logger
@@ -191,7 +190,7 @@ class RequestState:
 
         output = self._new_completion_output(new_token_ids, finish_reason,
                                              stop_reason)
-        fbvscode.set_trace()
+        # fbvscode.set_trace()
         if self.parent_req is None:
             outputs = [output]
         else:
