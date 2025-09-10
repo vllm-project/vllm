@@ -241,13 +241,13 @@ def env_with_choices(
         case_sensitive: bool = True) -> Callable[[], Optional[str]]:
     """
     Create a lambda that validates environment variable against allowed choices
-    
+
     Args:
         env_name: Name of the environment variable
         default: Default value if not set (can be None)
         choices: List of valid string options or callable that returns list
         case_sensitive: Whether validation should be case sensitive
-        
+
     Returns:
         Lambda function for environment_variables dict
     """
@@ -282,15 +282,15 @@ def env_list_with_choices(
         choices: Union[list[str], Callable[[], list[str]]],
         case_sensitive: bool = True) -> Callable[[], list[str]]:
     """
-    Create a lambda that validates environment variable 
+    Create a lambda that validates environment variable
     containing comma-separated values against allowed choices
-    
+
     Args:
         env_name: Name of the environment variable
         default: Default list of values if not set
         choices: List of valid string options or callable that returns list
         case_sensitive: Whether validation should be case sensitive
-        
+
     Returns:
         Lambda function for environment_variables
         dict that returns list of strings
@@ -519,6 +519,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # It will override CompilationConfig.debug_dump_path if set.
     "VLLM_DEBUG_DUMP_PATH":
     lambda: os.environ.get("VLLM_DEBUG_DUMP_PATH", None),
+
+    # Feature flag to enable/disable AOT compilation. This will ensure
+    # compilation is done in warmup phase and the compilation will be
+    # reused in subsequent calls.
+    "VLLM_USE_AOT_COMPILE":
+    lambda: os.environ.get("VLLM_USE_AOT_COMPILE", "0") == "1",
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
