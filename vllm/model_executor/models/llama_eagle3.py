@@ -295,6 +295,8 @@ class LlamaForCausalLMEagle3(Eagle3LlamaForCausalLM):
     """
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        # Store vllm_config for later use
+        self.vllm_config = vllm_config
         # Ensure draft_vocab_size is set before calling parent constructor
         self._ensure_draft_vocab_size(vllm_config)
         super().__init__(vllm_config=vllm_config, prefix=prefix)
@@ -319,5 +321,16 @@ class LlamaForCausalLMEagle3(Eagle3LlamaForCausalLM):
 
     def _setup_model_specific_config(self):
         """Setup model-specific configurations if needed."""
-        # This method can be extended to handle model-specific requirements
-        pass
+        # For GPT-OSS models, we need to ensure the fc layer has the correct
+        # input dimensions to match the target model's hidden size
+        if hasattr(self.vllm_config, 'model_config'):
+            target_hidden_size = self.vllm_config.model_config.get_hidden_size(
+            )
+            # Check if the fc layer input size matches the target model's
+            # hidden size
+            if (hasattr(self.model, 'fc')
+                    and self.model.fc.in_features != target_hidden_size * 3):
+                # Recreate the fc layer with the correct input size
+                self.model.fc = torch.nn.Linear(target_hidden_size * 3,
+                                                self.config.hidden_size,
+                                                bias=False)
