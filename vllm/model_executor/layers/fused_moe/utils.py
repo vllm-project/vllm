@@ -12,6 +12,8 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_group_quant_int8, per_token_quant_int8)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     quant_dequant_mxfp4)
+from vllm.model_executor.layers.quantization.utils.mxfp6_utils import (
+    quant_dequant_mxfp6)
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_quantize)
 from vllm.platforms import current_platform
@@ -191,6 +193,24 @@ def _mxfp8_quantize(
     return mxfp8_quantize(A)
 
 
+def _mxfp6_quantize(
+    A: torch.Tensor,
+    quant_dtype: str,
+    A_scale: Optional[torch.Tensor],
+    per_act_token_quant: bool,
+    block_shape: Optional[list[int]] = None,
+) -> tuple[torch.Tensor, None]:
+    assert block_shape is None
+
+    # TODO: native mxfp6 is currently not integrated in vllm,
+    # so simulating even on devices supporting this data type natively.
+    # Eventually, there should be a check based on
+    # `current_platform.supports_mx()` here.
+    A = quant_dequant_mxfp6(A, quant_dtype=quant_dtype)
+
+    return A, None
+
+
 def moe_kernel_quantize_input(
     A: torch.Tensor,
     A_scale: Optional[torch.Tensor],
@@ -211,6 +231,9 @@ def moe_kernel_quantize_input(
         return _mxfp4_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == "mxfp8":
         return _mxfp8_quantize(A, A_scale, per_act_token_quant, block_shape)
+    elif quant_dtype in ["mxfp6_e3m2", "mxfp6_e2m3"]:
+        return _mxfp6_quantize(A, quant_dtype, A_scale, per_act_token_quant,
+                               block_shape)
     else:
         return A, A_scale
 
