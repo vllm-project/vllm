@@ -31,7 +31,7 @@ def main(client):
     payload = {
         "model": MODEL_NAME,
         "token_ids": token_ids,
-        "sampling_params": {"max_tokens": 24, "temperature": 0.2},
+        "sampling_params": {"max_tokens": 24, "temperature": 0.2, "detokenize": False},
         "stream": False,
     }
     resp = client.post(GEN_ENDPOINT, json=payload)
