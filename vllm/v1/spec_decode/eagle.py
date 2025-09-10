@@ -380,7 +380,7 @@ class EagleProposer:
                                          dim=-1).indices.view(batch_size, -1)
 
         if self.vllm_config.speculative_config.draft_vocab_pruned is not None:
-                draft_token_ids_list = self.pruned_token_ids[draft_token_ids_list]
+            draft_token_ids = self.pruned_token_ids[draft_token_ids]
 
         draft_token_ids_list = [draft_token_ids]
         draft_hidden_states = hidden_states.view(batch_size, 1, -1)
@@ -518,9 +518,11 @@ class EagleProposer:
                 draft_token_ids = torch.topk(logits, num_children,
                                              dim=-1).indices.view(
                                                  batch_size, -1)
-
+            ic(draft_token_ids)
             if self.vllm_config.speculative_config.draft_vocab_pruned is not None:
-                draft_token_ids_list = self.pruned_token_ids[draft_token_ids_list]
+                draft_token_ids = self.pruned_token_ids[draft_token_ids]
+            ic(draft_token_ids)
+
             draft_token_ids_list.append(draft_token_ids)
 
             # Update the # drafts counters for the next tree level.

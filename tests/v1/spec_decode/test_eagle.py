@@ -299,12 +299,11 @@ def test_propose(method, attn_backend, num_speculative_tokens, prune_vocab, monk
     hidden_size = proposer.hidden_size
 
     # Helper to create deterministic logits that will produce specific tokens
-    def create_deterministic_logits(token_ids, vocab_size):
+    def create_deterministic_logits(token_ids:list[int], vocab_size:int):
         logits = torch.full((batch_size, vocab_size), -100.0, device=device)
-        ic(token_ids)
+        # simulate pruning the vocabulary of the draft model
         if prune_vocab:
             token_ids = [pruned_token_ids.index(token_id) for token_id in token_ids]
-        ic(token_ids)
         for i, token_id in enumerate(token_ids):
             logits[i, token_id] = 100.0
         return logits
@@ -316,10 +315,9 @@ def test_propose(method, attn_backend, num_speculative_tokens, prune_vocab, monk
 
     # prune the vocab of the draft model
     if prune_vocab:
-        # make sure our pruned vocab is larger enough to cover all base tokens and the `num_speculative_tokens` we will use
+        # make sure our pruned vocab is larger enough to cover all base tokens and the `num_speculative_tokens` we will generate
         pruned_token_ids = [i for base in base_token_ids for i in range(base, base + num_speculative_tokens + 1)]
         pruned_vocab_size = len(pruned_token_ids)
-        ic(pruned_token_ids)
 
     # Set up the mock model with a custom class so that
     # isinstance() checks match the expected type.
@@ -353,10 +351,10 @@ def test_propose(method, attn_backend, num_speculative_tokens, prune_vocab, monk
 
     # Setup for compute_logits calls
     logits_returns = []
+    logit_vocab_size = pruned_vocab_size if prune_vocab else vocab_size
     for i in range(num_speculative_tokens):
         # For each call, increment the base token IDs
         current_tokens = [base_id + i for base_id in base_token_ids]
-        logit_vocab_size = pruned_vocab_size if prune_vocab else vocab_size
         logits_returns.append(create_deterministic_logits(current_tokens, logit_vocab_size))
     ic(logits_returns)
 
@@ -371,7 +369,7 @@ def test_propose(method, attn_backend, num_speculative_tokens, prune_vocab, monk
     # Assign draft attn_layer_names since load_model is not invoked
     proposer.attn_layer_names = ["layer.0"]
 
-     # Assign pruned token ids to the proposer
+    # Assign pruned token ids to the proposer
     if prune_vocab:
         proposer.pruned_token_ids = torch.tensor(pruned_token_ids, device=device)
 
@@ -453,14 +451,44 @@ def test_propose(method, attn_backend, num_speculative_tokens, prune_vocab, monk
                 expected_tokens[i, j] = base_token_ids[i] + j
 
     # Verify all tokens match our expectations
-    ic(result, expected_tokens)
     assert torch.equal(result, expected_tokens)
 
+@pytest.mark.parametrize(
+    "spec_token_tree",
+    [
+        [(0, )],  # A single token
+        [(0, ), (0, 0), (0, 0, 0)],  # Chain
+        [(0, ), (1, ), (2, )],  # Parallel
+        [(0, ), (1, ), (2, ), (0, 0), (0, 1), (1, 0), (1, 1), (2, 0),
+         (2, 1)],  # Tree
+    ])
+@pytest.mark.parametrize("prune_vocab", [True, False])
+def test_propose_tree(spec_token_tree, prune_vocab):
+    # Get GPU device.
+    device = torch.device(current_platform.device_type)
 
-def _get_propose_args(batch_size, vocab_size, hidden_size, total_tokens, seq_len_1, seq_len_2, seq_lens, device, proposer):
+    # Setup test parameters.
+    batch_size = 2
+    seq_len_1 = 5
+    seq_len_2 = 3
+    total_tokens = seq_len_1 + seq_len_2
+    vocab_size = 100
+    seq_lens = [seq_len_1, seq_len_2]
+    num_speculative_tokens = len(spec_token_tree)
+
+    # Create proposer first so we can use its actual hidden_size.
+    proposer = _create_proposer("eagle",
+                                num_speculative_tokens,
+                                speculative_token_tree=spec_token_tree,
+                                prune_vocab=prune_vocab)
+    # Get the hidden_size from the proposer to ensure consistency.
+    hidden_size = proposer.hidden_size
+
     # Helper to create deterministic logits that will produce specific tokens
-    def create_deterministic_logits(token_ids, k: int):
+    def create_deterministic_logits(token_ids:list[int], vocab_size:int, k: int):
         logits = torch.full((batch_size, vocab_size), -100.0, device=device)
+        if prune_vocab:
+            token_ids = [pruned_token_ids.index(token_id) for token_id in token_ids]
         for i, token_id in enumerate(token_ids):
             # Assign decreasing values to the k, consecutive, tokens.
             for j in range(k):
@@ -469,6 +497,12 @@ def _get_propose_args(batch_size, vocab_size, hidden_size, total_tokens, seq_len
 
     # Mock a model that returns deterministic logits.
     base_token_ids = torch.tensor([42, 60], dtype=torch.int64, device=device)
+
+    # prune the vocab of the draft model
+    if prune_vocab:
+        # make sure our pruned vocab is larger enough to cover all base tokens and the `num_speculative_tokens` we will generate
+        pruned_token_ids = [i for base in base_token_ids for i in range(base, base + num_speculative_tokens + 1)]
+        pruned_vocab_size = len(pruned_token_ids)
 
     # Skip loading the model and replace it with a mock that returns
     # deterministic outputs.
@@ -492,6 +526,7 @@ def _get_propose_args(batch_size, vocab_size, hidden_size, total_tokens, seq_len
                                         dtype=torch.int32,
                                         device=device)
     logits_returns = []
+    logit_vocab_size = pruned_vocab_size if prune_vocab else vocab_size
     for level, num_children in enumerate(proposer.child_drafts_per_level):
         token_ids = base_token_ids + cu_num_drafts_tensor[level]
         level_num_drafts = cu_num_drafts_tensor[
@@ -500,6 +535,7 @@ def _get_propose_args(batch_size, vocab_size, hidden_size, total_tokens, seq_len
         for i in range(level_num_drafts // num_children):
             level_logits.append(
                 create_deterministic_logits(token_ids + i * num_children,
+                                            logit_vocab_size,
                                             num_children))
         logits_returns.append(torch.stack(level_logits, dim=1))
     model_mock.compute_logits.side_effect = logits_returns
@@ -509,6 +545,10 @@ def _get_propose_args(batch_size, vocab_size, hidden_size, total_tokens, seq_len
 
     # Assign draft attn_layer_names since load_model is not invoked
     proposer.attn_layer_names = ["layer.0"]
+
+    # Assign pruned token ids to the proposer
+    if prune_vocab:
+        proposer.pruned_token_ids = torch.tensor(pruned_token_ids, device=device)
 
     # Get the tree attention metadata builder.
     attn_metadata_builder_cls, _ = get_attention_backend(_Backend.TREE_ATTN)
@@ -549,42 +589,6 @@ def _get_propose_args(batch_size, vocab_size, hidden_size, total_tokens, seq_len
         device=device,
     )
     sampling_metadata = mock.MagicMock()
-
-    ret = (target_token_ids, target_positions,target_hidden_states, next_token_ids, common_attn_metadata, sampling_metadata, base_token_ids)
-    return ret
-
-
-@pytest.mark.parametrize(
-    "spec_token_tree",
-    [
-        [(0, )],  # A single token
-        [(0, ), (0, 0), (0, 0, 0)],  # Chain
-        [(0, ), (1, ), (2, )],  # Parallel
-        [(0, ), (1, ), (2, ), (0, 0), (0, 1), (1, 0), (1, 1), (2, 0),
-         (2, 1)],  # Tree
-    ])
-def test_propose_tree(spec_token_tree):
-    # Get GPU device.
-    device = torch.device(current_platform.device_type)
-
-    # Setup test parameters.
-    batch_size = 2
-    seq_len_1 = 5
-    seq_len_2 = 3
-    total_tokens = seq_len_1 + seq_len_2
-    vocab_size = 100
-    seq_lens = [seq_len_1, seq_len_2]
-    num_speculative_tokens = len(spec_token_tree)
-
-    # Create proposer first so we can use its actual hidden_size.
-    proposer = _create_proposer("eagle",
-                                num_speculative_tokens,
-                                speculative_token_tree=spec_token_tree)
-    # Get the hidden_size from the proposer to ensure consistency.
-    hidden_size = proposer.hidden_size
-
-    ret = _get_propose_args(batch_size, vocab_size, hidden_size, total_tokens, seq_len_1, seq_len_2, seq_lens, device, proposer)
-    target_token_ids, target_positions,target_hidden_states, next_token_ids, common_attn_metadata, sampling_metadata, base_token_ids = ret
 
     # Propose draft tokens.
     result = proposer.propose(target_token_ids=target_token_ids,
