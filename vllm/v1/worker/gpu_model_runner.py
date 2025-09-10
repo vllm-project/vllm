@@ -3527,9 +3527,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """
         Add encoder-only layers to the KV cache config.
-        
-        This handles:
-        - ENCODER_ONLY layers (standalone encoder models)
         """
         block_size = self.vllm_config.cache_config.block_size
         use_mla = self.vllm_config.model_config.use_mla
