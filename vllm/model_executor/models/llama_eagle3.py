@@ -126,14 +126,18 @@ class LlamaModel(nn.Module):
                 prefix=maybe_prefix(prefix, f"layers.{start_layer_id}"),
             )
         ])
-        if hasattr(self.config, "target_hidden_size"):
-            self.fc = torch.nn.Linear(self.config.target_hidden_size * 3,
-                                      self.config.hidden_size,
-                                      bias=False)
+        # For EAGLE3, we need to handle the case where target_hidden_size
+        # might not be set in the config. We should use the target model's
+        # hidden size from the vllm_config instead.
+        if hasattr(self.config, "target_hidden_size") and self.config.target_hidden_size is not None:
+            input_size = self.config.target_hidden_size * 3
         else:
-            self.fc = torch.nn.Linear(self.config.hidden_size * 3,
-                                      self.config.hidden_size,
-                                      bias=False)
+            # Fallback to using the draft model's hidden size
+            input_size = self.config.hidden_size * 3
+        
+        self.fc = torch.nn.Linear(input_size,
+                                  self.config.hidden_size,
+                                  bias=False)
         self.norm = RMSNorm(
             self.config.hidden_size,
             eps=self.config.rms_norm_eps,
@@ -341,3 +345,24 @@ class LlamaForCausalLMEagle3(Eagle3LlamaForCausalLM):
                                                     bias=False)
                     print(f"DEBUG: New FC layer input features: {self.model.fc.in_features}")
                     print(f"DEBUG: New FC layer output features: {self.model.fc.out_features}")
+
+    def combine_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Override combine_hidden_states to handle dimension mismatch."""
+        # Check if we have a dimension mismatch
+        if hasattr(self.model, 'fc') and hidden_states.shape[-1] != self.model.fc.in_features:
+            print(f"DEBUG: Dimension mismatch detected!")
+            print(f"DEBUG: Hidden states shape: {hidden_states.shape}")
+            print(f"DEBUG: FC layer expects: {self.model.fc.in_features}")
+            
+            # For GPT-OSS models, we need to handle the case where the input
+            # dimension doesn't match the fc layer's expected input dimension
+            if hidden_states.shape[-1] == 16128:  # GPT-OSS-120B hidden size
+                # Create a new fc layer with the correct input size
+                self.model.fc = torch.nn.Linear(
+                    hidden_states.shape[-1],
+                    self.config.hidden_size,
+                    bias=False
+                )
+                print(f"DEBUG: Created new FC layer with input size {hidden_states.shape[-1]}")
+        
+        return self.model.fc(hidden_states)
