@@ -16,6 +16,7 @@ from vllm.attention.selector import get_attn_backend
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.utils import cdiv
 from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
                                               subclass_attention_backend)
 from vllm.v1.kv_cache_interface import CrossAttentionSpec
@@ -43,11 +44,10 @@ def _get_cross_slot_mapping(encoder_seq_lens: np.ndarray,
     active_indices = np.nonzero(encoder_seq_lens)[0]
 
     for req_index in active_indices:
-        encoder_seq_len = encoder_seq_lens[req_index]
+        encoder_seq_len = encoder_seq_lens[req_index].item()
 
         # Calculate the number of blocks needed for this request
-        num_blocks_needed = (encoder_seq_len + block_size -
-                             1) // block_size  # Ceiling division
+        num_blocks_needed = cdiv(encoder_seq_len, block_size)
 
         # Get the block IDs for this request from the tensor
         req_block_ids = block_table_tensor[req_index]
