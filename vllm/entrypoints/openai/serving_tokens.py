@@ -253,7 +253,6 @@ class OpenAIServingTokens(OpenAIServing):
                     ChatCompletionLogProbsContent(token=token, ))
             else:
                 step_token = step_top_logprobs[token_id]
-                # step_decoded = step_token.decoded_token
 
                 logprobs_content.append(
                     ChatCompletionLogProbsContent(
