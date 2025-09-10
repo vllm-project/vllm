@@ -1960,8 +1960,8 @@ class SpeculativeConfig:
     num_speculative_tokens: SkipValidation[int] = None  # type: ignore
     """The number of speculative tokens, if provided. It will default to the
     number in the draft model config if present, otherwise, it is required."""
-    num_speculative_tokens_per_method: Optional[dict[str, int]] = None
-    """The number of speculative tokens for each method, if provided. Max of 
+    num_speculative_tokens_per_method: Optional[Union[str, dict[str, int]]] = None
+    """The number of speculative tokens for each method, if provided. Max of
     the values will be used if `num_speculative_tokens` is not provided."""
     model: Optional[str] = None
     """The name of the draft model, eagle head, or additional weights, if
@@ -2125,6 +2125,17 @@ class SpeculativeConfig:
         # set num_speculative_tokens from num_speculative_tokens_per_method
         # for methods like ngram-eagle
         if self.num_speculative_tokens_per_method is not None:
+            if isinstance(self.num_speculative_tokens_per_method, str):
+                self.num_speculative_tokens_per_method = json.loads(
+                    self.num_speculative_tokens_per_method)
+            assert isinstance(self.num_speculative_tokens_per_method, dict), (
+                "num_speculative_tokens_per_method must be a dict or a json "
+                "string that can be converted to a dict.")
+            assert all(
+                isinstance(v, int)
+                and v > 0 for v in self.num_speculative_tokens_per_method.values()
+            ), ("All values in num_speculative_tokens_per_method must be "
+                "positive integers.")
             max_num_speculative_tokens = max(
                 self.num_speculative_tokens_per_method.values())
             if self.num_speculative_tokens is None:
