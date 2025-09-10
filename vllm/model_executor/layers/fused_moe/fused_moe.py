@@ -1079,7 +1079,8 @@ def eplb_map_to_physical_and_record(
                                   index=topk_ids_flatten.long(),
                                   src=torch.ones_like(topk_ids_flatten).to(expert_load_view))
 
-    topk_ids = topk_ids.to(dtype=indices_type)
+    if indices_type is not None:
+        topk_ids = topk_ids.to(dtype=indices_type)
     return topk_ids
 
 
