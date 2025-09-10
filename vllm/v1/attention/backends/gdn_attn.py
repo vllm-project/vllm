@@ -33,7 +33,6 @@ class GDNAttentionMetadata:
     num_spec_decode_tokens: int
 
     has_initial_state: Optional[torch.Tensor] = None
-    blocks_to_clear: Optional[torch.Tensor] = None  # shape: [num_blocks,]
 
     spec_query_start_loc: Optional[
         torch.Tensor] = None  # shape: [num_spec_decodes + 1,]
@@ -208,17 +207,6 @@ class GDNAttentionMetadataBuilder(
         else:
             has_initial_state = None
 
-        blocks_to_clear = []
-        for prefill_idx in range(num_prefills):
-            context_len = context_lens[num_decode_tokens + num_spec_decodes +
-                                       prefill_idx].item()
-            if context_len == 0:
-                blocks_to_clear.append(
-                    non_spec_state_indices_tensor[num_decode_tokens +
-                                                  prefill_idx])
-        blocks_to_clear = torch.stack(
-            blocks_to_clear) if blocks_to_clear else None
-
         # prepare tensors for cudagraph
         if (self.use_full_cuda_graph and num_prefills == 0 and num_decodes == 0
                 and num_spec_decodes <= self.decode_cudagraph_max_bs):
@@ -271,10 +259,12 @@ class GDNAttentionMetadataBuilder(
 
             self.non_spec_query_start_loc[:num_decodes + 1].copy_(
                 non_spec_query_start_loc, non_blocking=True)
+            non_spec_num_query_tokens = non_spec_query_start_loc[
+                -1]  # type: ignore[index]
             non_spec_query_start_loc = \
                 self.non_spec_query_start_loc[:batch_size + 1]
-            non_spec_query_start_loc[num_decodes + 1:].fill_(
-                non_spec_query_start_loc[-1])
+            non_spec_query_start_loc[num_decodes +
+                                     1:].fill_(non_spec_num_query_tokens)
 
         attn_metadata = GDNAttentionMetadata(
             num_prefills=num_prefills,
@@ -283,7 +273,6 @@ class GDNAttentionMetadataBuilder(
             num_decode_tokens=num_decode_tokens,
             num_spec_decodes=num_spec_decodes,
             num_spec_decode_tokens=num_spec_decode_tokens,
-            blocks_to_clear=blocks_to_clear,
             has_initial_state=has_initial_state,
             spec_query_start_loc=spec_query_start_loc,
             non_spec_query_start_loc=non_spec_query_start_loc,

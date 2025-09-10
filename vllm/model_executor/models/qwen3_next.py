@@ -421,12 +421,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                              attn_metadata.num_spec_decode_tokens)
         num_accepted_tokens = attn_metadata.num_accepted_tokens
 
-        # Clear the initial state for chunked prefill.
-        blocks_to_clear = attn_metadata.blocks_to_clear
-        if blocks_to_clear is not None:
-            self_kv_cache[0][blocks_to_clear, ...] = 0
-            self_kv_cache[1][blocks_to_clear, ...] = 0
-
         # 1. Set up dimensions for reshapes later
         projected_states, _ = self.in_proj(hidden_states[:num_actual_tokens])
         if spec_token_masks is not None:
@@ -472,7 +466,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 conv_weights,
                 self.conv1d.bias,
                 self.activation,
-                conv_state_indices=spec_state_indices_tensor[:, 0],
+                conv_state_indices=spec_state_indices_tensor[:, 0]
+                [:attn_metadata.num_spec_decodes],
                 num_accepted_tokens=num_accepted_tokens,
                 validate_data=False,
             )
@@ -499,7 +494,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 conv_weights,
                 self.conv1d.bias,
                 self.activation,
-                conv_state_indices=non_spec_state_indices_tensor,
+                conv_state_indices=non_spec_state_indices_tensor[:attn_metadata
+                                                                 .num_decodes],
                 validate_data=True,
             )
         else:
@@ -546,7 +542,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     beta=beta_spec,
                     initial_state=ssm_state,
                     inplace_final_state=True,
-                    cu_seqlens=spec_query_start_loc,
+                    cu_seqlens=spec_query_start_loc[:attn_metadata.
+                                                    num_spec_decodes + 1],
                     ssm_state_indices=spec_state_indices_tensor,
                     num_accepted_tokens=num_accepted_tokens,
                     use_qk_l2norm_in_kernel=True,
@@ -556,6 +553,9 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
 
         # 3.2: process the remaining part
         if attn_metadata.num_prefills > 0:
+            initial_state = ssm_state[
+                non_spec_state_indices_tensor].contiguous()
+            initial_state[~has_initial_state, ...] = 0
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,
@@ -565,8 +565,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 v=value_non_spec,
                 g=g_non_spec,
                 beta=beta_non_spec,
-                initial_state=ssm_state[non_spec_state_indices_tensor].
-                contiguous(),
+                initial_state=initial_state,
                 output_final_state=True,
                 cu_seqlens=non_spec_query_start_loc,
                 head_first=False,
@@ -585,7 +584,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     beta=beta_non_spec,
                     initial_state=ssm_state,
                     inplace_final_state=True,
-                    cu_seqlens=non_spec_query_start_loc,
+                    cu_seqlens=non_spec_query_start_loc[:attn_metadata.
+                                                        num_decodes + 1],
                     ssm_state_indices=non_spec_state_indices_tensor,
                     use_qk_l2norm_in_kernel=True,
                 ))
