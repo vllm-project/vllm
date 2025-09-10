@@ -22,9 +22,9 @@ from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
 from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
-                         ConfigFormat, ConfigType, ConvertOption,
-                         DecodingConfig, DetailedTraceModules, Device,
-                         DeviceConfig, DistributedExecutorBackend, EPLBConfig,
+                         ConfigType, ConvertOption, DecodingConfig,
+                         DetailedTraceModules, Device, DeviceConfig,
+                         DistributedExecutorBackend, EPLBConfig,
                          GuidedDecodingBackend, HfOverrides, KVEventsConfig,
                          KVTransferConfig, LoadConfig, LogprobsMode,
                          LoRAConfig, MambaDType, MMEncoderTPMode, ModelConfig,
@@ -547,7 +547,6 @@ class EngineArgs:
             help="Disable async output processing. This may result in "
             "lower performance.")
         model_group.add_argument("--config-format",
-                                 choices=[f.value for f in ConfigFormat],
                                  **model_kwargs["config_format"])
         # This one is a special case because it can bool
         # or str. TODO: Handle this in get_kwargs
@@ -1505,6 +1504,7 @@ class EngineArgs:
             "FLASH_ATTN_MLA",
             "FLASHINFER",
             "FLASHINFER_VLLM_V1",
+            "FLASHINFER_MLA",
             "ROCM_AITER_MLA",
             "TORCH_SDPA_VLLM_V1",
             "FLEX_ATTENTION",
