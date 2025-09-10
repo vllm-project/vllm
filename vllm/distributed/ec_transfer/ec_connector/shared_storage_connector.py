@@ -166,8 +166,8 @@ class ECSharedStorageConnector(ECConnectorBase):
     ) -> bool:
         """Check if the cache is hit for the request.
         """
-        foldername = self._generate_foldername_debug(mm_hash,create_folder=False)
-        return os.path.exists(foldername)
+        filename = self._generate_filename_debug(mm_hash)
+        return os.path.exists(filename)
 
     def _generate_foldername_debug(
         self,
