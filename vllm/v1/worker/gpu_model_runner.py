@@ -1288,14 +1288,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             scheduler_output: The scheduler output containing scheduled encoder
               inputs.
 
-            include_positions: Whether to also return position information for
-              each item.
-
         Returns:
             A tuple of (mm_kwargs, req_ids_pos) where:
             - mm_kwargs: List of multimodal kwargs items to be batched
-            - req_ids_pos: List of (req_id, input_id, position_info) tuples if
-              include_positions=True, else None """
+            - mm_hashes_pos: List of (mm_hash, position_info) tuples
+        """
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
         if not scheduled_encoder_inputs:
             return [], []
