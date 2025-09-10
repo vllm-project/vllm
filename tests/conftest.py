@@ -1,5 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# ruff: noqa
+
+from tblib import pickling_support
+
+# Install support for pickling exceptions so that we can nicely propagate
+# failures from tests running in a subprocess.
+# This should be run before any custom exception subclasses are defined.
+pickling_support.install()
+
 import http.server
 import json
 import math
