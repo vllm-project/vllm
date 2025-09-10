@@ -389,9 +389,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # KVCacheConfig of the scheduler.
         self.runner_only_attn_layers: set[str] = set()
 
-        # Cache for cross-attention group index
-        self._cross_attn_group_idx: Optional[int] = None
-
         # Cached outputs.
         self._draft_token_ids: Optional[Union[list[list[int]],
                                               torch.Tensor]] = None
@@ -3492,8 +3489,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         """
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
-        # Invalidate cached cross-attention group index
-        self._cross_attn_group_idx = None
         self.may_reinitialize_input_batch(kv_cache_config)
         self.may_add_encoder_only_layers_to_kv_cache_config()
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
