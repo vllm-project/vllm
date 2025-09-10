@@ -58,7 +58,8 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               TranslationRequest)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser
-from vllm.entrypoints.renderer import BaseRenderer, CompletionRenderer
+from vllm.entrypoints.renderer import (BaseRenderer, CompletionRenderer,
+                                       RenderConfig)
 # yapf: enable
 from vllm.inputs.data import PromptType
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
@@ -247,6 +248,19 @@ class OpenAIServing:
             model_config=self.model_config,
             tokenizer=tokenizer,
             async_tokenizer_pool=self._async_tokenizer_pool)
+
+    def _build_render_config(
+        self,
+        request: Any,
+    ) -> RenderConfig:
+        """
+        Build and return a `RenderConfig` for an endpoint.
+
+        Used by the renderer to control how prompts are prepared
+        (e.g., tokenization and length handling). Endpoints should
+        implement this with logic appropriate to their request type.
+        """
+        raise NotImplementedError
 
     def _get_async_tokenizer(self, tokenizer) -> AsyncMicrobatchTokenizer:
         """
