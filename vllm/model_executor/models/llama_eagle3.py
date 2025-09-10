@@ -129,15 +129,16 @@ class LlamaModel(nn.Module):
         # For EAGLE3, we need to handle the case where target_hidden_size
         # might not be set in the config. We should use the target model's
         # hidden size from the vllm_config instead.
-        if hasattr(self.config, "target_hidden_size") and self.config.target_hidden_size is not None:
+        if (hasattr(self.config, "target_hidden_size")
+                and self.config.target_hidden_size is not None):
             input_size = self.config.target_hidden_size * 3
         else:
             # Fallback to using the draft model's hidden size
             input_size = self.config.hidden_size * 3
-        
+
         self.fc = torch.nn.Linear(input_size,
-                                      self.config.hidden_size,
-                                      bias=False)
+                                  self.config.hidden_size,
+                                  bias=False)
         self.norm = RMSNorm(
             self.config.hidden_size,
             eps=self.config.rms_norm_eps,
@@ -321,18 +322,17 @@ class LlamaForCausalLMEagle3(Eagle3LlamaForCausalLM):
                 target_vocab_size = vllm_config.model_config.get_vocab_size()
                 hf_config.draft_vocab_size = target_vocab_size
 
-
-    def combine_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def combine_hidden_states(self,
+                              hidden_states: torch.Tensor) -> torch.Tensor:
         """Override combine_hidden_states to handle dimension mismatch."""
         # Check if we have a dimension mismatch and fix it dynamically
-        if hasattr(self.model, 'fc') and hidden_states.shape[-1] != self.model.fc.in_features:
+        if (hasattr(self.model, 'fc')
+                and hidden_states.shape[-1] != self.model.fc.in_features):
             # Create a new fc layer with the correct input size
             # Ensure it's on the same device as hidden_states
             device = hidden_states.device
-            self.model.fc = torch.nn.Linear(
-                hidden_states.shape[-1],
-                self.config.hidden_size,
-                bias=False
-            ).to(device)
-        
+            self.model.fc = torch.nn.Linear(hidden_states.shape[-1],
+                                            self.config.hidden_size,
+                                            bias=False).to(device)
+
         return self.model.fc(hidden_states)
