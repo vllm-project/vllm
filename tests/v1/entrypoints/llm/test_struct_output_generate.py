@@ -51,7 +51,7 @@ PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
     ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto",
      NGRAM_SPEC_CONFIG),
     ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", NGRAM_SPEC_CONFIG),
-    ("meta-llama/Meta-Llama-3.1-8B-Instruct", "xgrammar", "auto",
+    ("meta-llama/Llama-3.2-1B-Instruct", "xgrammar", "auto",
      EAGLE_SPEC_CONFIG)
 ]
 
