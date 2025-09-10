@@ -168,6 +168,7 @@ if TYPE_CHECKING:
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = False
     VLLM_TUNED_CONFIG_FOLDER: Optional[str] = None
     VLLM_DISABLE_PAD_FOR_CUDAGRAPH: bool = False
+    VLLM_DEEPEP_BUFFER_SIZE_MB: int = 1024
 
 
 def get_default_cache_root():
@@ -1199,6 +1200,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Allows vllm to find tuned config under customized folder
     "VLLM_TUNED_CONFIG_FOLDER":
     lambda: os.getenv("VLLM_TUNED_CONFIG_FOLDER", None),
+    
+    # The size in MB of the buffers (NVL and RDMA) used by DeepEP
+    "VLLM_DEEPEP_BUFFER_SIZE_MB":
+    lambda: int(os.getenv("VLLM_DEEPEP_BUFFER_SIZE_MB", "1024")),
 
 }
 

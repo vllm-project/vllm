@@ -5,7 +5,6 @@ from typing import TypeAlias
 
 import numpy as np
 
-
 @dataclass
 class UbatchSlice:
     request_slice: slice
@@ -45,3 +44,4 @@ def create_ubatch_slices(num_scheduled_tokens: np.ndarray, split_point: int) -> 
         UbatchSlice(first_ubatch_req_slice, first_ubatch_token_slice),
         UbatchSlice(second_ubatch_req_slice, second_ubatch_token_slice)
     ]
+

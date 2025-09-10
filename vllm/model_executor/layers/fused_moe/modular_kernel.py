@@ -13,7 +13,8 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import (  # yapf: disable
     _resize_cache, count_expert_num_tokens)
 from vllm.utils import cdiv
-from vllm.v1.worker.ubatching import (dbo_enabled, dbo_maybe_run_recv_hook,
+from vllm.v1.worker.ubatching import (dbo_current_ubatch_id, dbo_enabled,
+                                      dbo_maybe_run_recv_hook,
                                       dbo_register_recv_hook, dbo_yield)
 
 #
@@ -530,9 +531,13 @@ class FusedMoEModularKernel(torch.nn.Module):
     layer due to any layer specific state that may be used by the component
     objects.
     """
-    fused_out_buffer = SharedResizableBuffer()
-    workspace13_buffer = SharedResizableBuffer()
-    workspace2_buffer = SharedResizableBuffer()
+    
+    class SharedBuffers:
+        fused_out = SharedResizableBuffer()
+        workspace13 = SharedResizableBuffer()
+        workspace2 = SharedResizableBuffer()
+
+    shared_buffers: list[SharedBuffers] = [SharedBuffers(), SharedBuffers()]
 
     def __init__(
         self,
@@ -581,14 +586,18 @@ class FusedMoEModularKernel(torch.nn.Module):
              a1, a1q, M, N, K, top_k, global_num_experts, local_num_experts,
              expert_tokens_meta)
 
+        # select per-ubatch buffers to avoid cross-ubatch reuse under DBO
+        ubatch_idx = dbo_current_ubatch_id()
+        buffers = self.shared_buffers[ubatch_idx]
+
         # We can reuse the memory between cache1 and cache3 because by the
         # time we need cache3, we're done with cache1.
-        workspace13 = self.workspace13_buffer.get(workspace13_shape,
-                                                  device=a1.device,
-                                                  dtype=workspace_dtype)
-        workspace2 = self.workspace2_buffer.get(workspace2_shape,
-                                                device=a1.device,
-                                                dtype=workspace_dtype)
+        workspace13 = buffers.workspace13.get(workspace13_shape,
+                                              device=a1.device,
+                                              dtype=workspace_dtype)
+        workspace2 = buffers.workspace2.get(workspace2_shape,
+                                            device=a1.device,
+                                            dtype=workspace_dtype)
 
         assert fused_out is None or fused_out.shape == fused_out_shape, (
             f"fused_out {fused_out.shape} but expected {fused_out_shape}")
@@ -680,9 +689,11 @@ class FusedMoEModularKernel(torch.nn.Module):
         (_, _, fused_out_shape, _) = self.fused_experts.workspace_shapes(
             a1, a1q, M, N, K, top_k, global_num_experts, local_num_experts,
             expert_tokens_meta)
-        fused_out = self.fused_out_buffer.get(fused_out_shape,
-                                              device=a1q.device,
-                                              dtype=a1.dtype)
+        ubatch_idx = dbo_current_ubatch_id()
+        buffers = self.shared_buffers[ubatch_idx]
+        fused_out = buffers.fused_out.get(fused_out_shape,
+                                          device=a1q.device,
+                                          dtype=a1.dtype)
 
         def slice_input_tensors(
             chunk_idx: int

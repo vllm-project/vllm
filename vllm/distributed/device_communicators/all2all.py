@@ -5,6 +5,7 @@ from typing import Any
 import torch
 import torch.distributed as dist
 
+import vllm.envs as envs
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.utils import has_deep_ep, has_deep_gemm, has_pplx
@@ -162,12 +163,12 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
 
     def _make_all2all_kwargs(self) -> dict[Any, Any]:
         # Defaults for internode and intranode are taken from DeepEP tests.
-        num_nvl_bytes = 1024 * 1024 * 1024
+        num_nvl_bytes = envs.VLLM_DEEPEP_BUFFER_SIZE_MB * 1024 * 1024
         num_rdma_bytes = None
         num_qps_per_rank = None
 
         if self.internode:
-            num_rdma_bytes = 1024 * 1024 * 1024
+            num_rdma_bytes = envs.VLLM_DEEPEP_BUFFER_SIZE_MB * 1024 * 1024
             num_qps_per_rank = self.num_sms // 2
         else:
             num_rdma_bytes = 0
@@ -238,7 +239,7 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         import deep_ep
 
         # Defaults for internode and intranode are taken from DeepEP tests.
-        num_nvl_bytes = 1024 * 1024 * 1024
+        num_nvl_bytes = envs.VLLM_DEEPEP_BUFFER_SIZE_MB * 1024 * 1024
         num_qps_per_rank = num_local_experts
         num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
             num_max_dispatch_tokens_per_rank=max_num_tokens_per_dp_rank,
