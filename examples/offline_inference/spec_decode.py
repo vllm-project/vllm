@@ -56,7 +56,7 @@ def parse_args():
         choices=["ngram", "eagle", "eagle3", "mtp", "ngram-eagle"],
     )
     parser.add_argument("--num-spec-tokens", type=int, default=2)
-    parser.add_argument("--num-speculative-tokens-per-method", type=str, default='{\"ngram\": 2, \"eagle\": 2}')
+    parser.add_argument("--num-speculative-tokens-per-method", type=str, default="{\"ngram\": 2, \"eagle\": 2}")
     parser.add_argument("--prompt-lookup-max", type=int, default=5)
     parser.add_argument("--prompt-lookup-min", type=int, default=2)
     parser.add_argument("--tp", type=int, default=1)
