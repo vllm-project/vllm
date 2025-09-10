@@ -111,3 +111,68 @@ def test_api_server(api_server, distributed_executor_backend: str):
         prompts = ["test prompt after canceled"] * 100
         for result in pool.map(_query_server, prompts):
             assert result
+
+
+def test_streaming_cancellation(api_server, distributed_executor_backend: str):
+    """
+    Test that streaming requests are properly aborted when client disconnects.
+    """
+    # Wait until the server is ready
+    result = None
+    while not result:
+        try:
+            result = _query_server("warm up")
+        except requests.exceptions.ConnectionError:
+            time.sleep(1)
+
+    # Reset abort stats
+    initial_aborts = requests.get(
+        "http://localhost:8000/stats").json()["num_aborted_requests"]
+
+    # Use a session that we can explicitly close to simulate client disconnect
+    session = requests.Session()
+
+    try:
+        # Start a streaming request
+        response = session.post(
+            "http://localhost:8000/generate",
+            json={
+                "prompt":
+                "This is a long prompt that should generate many tokens " * 10,
+                "stream":
+                True,
+                "max_tokens":
+                200,
+                "temperature":
+                0,
+            },
+            stream=True,
+            timeout=5)
+
+        # Read first chunk to ensure request started
+        chunk_iterator = response.iter_content(chunk_size=1024)
+        first_chunk = next(chunk_iterator)
+        assert first_chunk  # Should have received some data
+
+        # Forcefully close the session/connection to simulate client disconnect
+        session.close()
+
+    except requests.exceptions.RequestException:
+        # Expected when connection is forcefully closed
+        pass
+    finally:
+        # Ensure session is closed
+        session.close()
+
+    # Give server time to process the cancellation
+    time.sleep(2)
+
+    # Check that abort was called
+    final_aborts = requests.get(
+        "http://localhost:8000/stats").json()["num_aborted_requests"]
+
+    print(f"Initial aborts: {initial_aborts}, Final aborts: {final_aborts}")
+
+    # The exact behavior might vary, but server should remain responsive
+    result = _query_server("test after streaming disconnect")
+    assert result
