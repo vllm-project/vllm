@@ -368,8 +368,10 @@ class ParallelConfig:
         else:
             if self.eplb_config.num_redundant_experts != 0:
                 raise ValueError(
-                    "num_redundant_experts should be used with EPLB."
-                    f"{self.eplb_config.num_redundant_experts}.")
+                    "num_redundant_experts is set to "
+                    f"{self.eplb_config.num_redundant_experts} but EPLB is not "
+                    "enabled. Either enable EPLB or unset "
+                    "num_redundant_experts.")
         if self.distributed_executor_backend is None and self.world_size > 1:
             # We use multiprocessing by default if world_size fits on the
             # current node and we aren't in a ray placement group.
