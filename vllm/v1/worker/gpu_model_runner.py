@@ -1789,7 +1789,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_state.output_token_ids.extend(sampled_ids)
 
         if self.speculative_config:
-            assert not ubatch_slices
+            assert not ubatch_slices,  "DBO is not currently supported with seculative decoding"
             assert isinstance(attn_metadata, dict)
             assert spec_decode_common_attn_metadata is not None
             self._draft_token_ids = self.propose_draft_token_ids(
@@ -2417,13 +2417,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     slot_mapping=self.input_batch.
                     block_table[kv_cache_group_id].slot_mapping[:num_tokens],
                     causal=True)
-                assert common_attn_metadata.max_query_len == 1
                 for attn_group in self.attn_groups[kv_cache_group_id]:
                     if ubatch_slices is not None:
                         common_attn_metadata_list = split_attn_metadata(
                             ubatch_slices, common_attn_metadata)
                         for ubid, common_attn_metadata in enumerate(
                                 common_attn_metadata_list):
+                            assert common_attn_metadata.max_query_len == 1
                             attn_metadata_i = (attn_group\
                                                .get_metadata_builder(ubatch_id=ubid)\
                                                .build_for_cudagraph_capture(common_attn_metadata))
