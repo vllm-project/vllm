@@ -123,7 +123,7 @@ def wikitext_ppl_test(hf_runner,
     print("Model:", model_info.name)
     print("VLLM:", vllm_dtype, vllm_ppl)
     print("Transformers:", hf_dtype, hf_ppl)
-    print("Difference (%):", differ)
+    print("Difference (%):", differ * 100)
 
     # PPL the smaller, the better
     # We are not concerned that the vllm PPL is less than Transformers,
