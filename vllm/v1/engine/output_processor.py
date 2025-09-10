@@ -6,8 +6,10 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, Optional, Union, cast
 
+import fbvscode
 import torch
 
+from vllm.logger import init_logger
 from vllm.outputs import (CompletionOutput, PoolingOutput,
                           PoolingRequestOutput, RequestOutput)
 from vllm.sampling_params import RequestOutputKind
@@ -19,6 +21,8 @@ from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.stats import (IterationStats, LoRARequestStates,
                                    RequestStateStats)
+
+logger = init_logger(__name__)
 
 
 class RequestOutputCollector:
@@ -57,6 +61,7 @@ class RequestOutputCollector:
             raise output
         return output
 
+    # async_llm collects from here
     def get_nowait(
             self) -> Optional[Union[RequestOutput, PoolingRequestOutput]]:
         """Non-blocking get operation."""
@@ -161,6 +166,7 @@ class RequestState:
             log_stats=log_stats,
         )
 
+    # this converts from CompletionOutput to RequestOutput
     def make_request_output(
         self,
         new_token_ids: list[int],
@@ -181,11 +187,11 @@ class RequestState:
         if pooling_output is not None:
             return self._new_request_output(
                 request_id, [self._new_pooling_output(pooling_output)],
-                finished)
+                finish_reason)
 
         output = self._new_completion_output(new_token_ids, finish_reason,
                                              stop_reason)
-
+        fbvscode.set_trace()
         if self.parent_req is None:
             outputs = [output]
         else:
@@ -194,14 +200,14 @@ class RequestState:
             if not outputs:
                 return None
 
-        return self._new_request_output(request_id, outputs, finished,
+        return self._new_request_output(request_id, outputs, finish_reason,
                                         kv_transfer_params)
 
     def _new_request_output(
         self,
         request_id: str,
         outputs: Union[list[CompletionOutput], list[PoolingOutput]],
-        finished: bool,
+        finish_reason: Optional[FinishReason],
         kv_transfer_params: Optional[dict[str, Any]] = None,
     ) -> Union[RequestOutput, PoolingRequestOutput]:
 
@@ -212,7 +218,7 @@ class RequestState:
                 request_id=request_id,
                 outputs=first_output,
                 prompt_token_ids=self.prompt_token_ids,
-                finished=finished,
+                finished=finish_reason is not None,
             )
         assert self.logprobs_processor is not None
         if self.output_kind == RequestOutputKind.DELTA:
@@ -227,7 +233,8 @@ class RequestState:
             prompt_token_ids=self.prompt_token_ids,
             prompt_logprobs=prompt_logprobs,
             outputs=cast(list[CompletionOutput], outputs),
-            finished=finished,
+            finished=finish_reason is not None,
+            # finish_reason=finish_reason,
             kv_transfer_params=kv_transfer_params,
             num_cached_tokens=self.num_cached_tokens,
         )
@@ -254,6 +261,8 @@ class RequestState:
         if delta and logprobs:
             logprobs = logprobs[-len(token_ids):]
 
+        logger.info(f'COMPETION OUTPUT {stop_reason} {finish_reason}')
+
         return CompletionOutput(
             index=self.request_index,
             text=text,
@@ -261,6 +270,7 @@ class RequestState:
             logprobs=logprobs,
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
             finish_reason=str(finish_reason) if finished else None,
+            # NOTE the stop reason here
             stop_reason=stop_reason if finished else None)
 
     def _new_pooling_output(
@@ -360,17 +370,17 @@ class OutputProcessor:
         1) Compute stats for logging
         2) Detokenize
         3) Create and handle RequestOutput objects:
-            * If there is a queue (for usage with AsyncLLM), 
+            * If there is a queue (for usage with AsyncLLM),
               put the RequestOutput objects into the queue for
               handling by the per-request generate() tasks.
 
-            * If there is no queue (for usage with LLMEngine), 
+            * If there is no queue (for usage with LLMEngine),
               return a list of RequestOutput objects.
 
         NOTE FOR DEVELOPERS
 
         vLLM V1 minimizes the number of python loops over the full
-        batch to ensure system overheads are minimized. This is the 
+        batch to ensure system overheads are minimized. This is the
         only function that should loop over EngineCoreOutputs.
 
         If you need to touch every element of the batch, do it from
@@ -395,7 +405,7 @@ class OutputProcessor:
             new_token_ids = engine_core_output.new_token_ids
             pooling_output = engine_core_output.pooling_output
             finish_reason = engine_core_output.finish_reason
-            stop_reason = engine_core_output.stop_reason
+            stop_reason = engine_core_output.stop_reason  # maybe we hit length here?
             kv_transfer_params = engine_core_output.kv_transfer_params
             req_state.num_cached_tokens = engine_core_output.num_cached_tokens
             req_state.is_prefilling = False

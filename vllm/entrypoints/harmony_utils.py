@@ -387,7 +387,7 @@ def parse_remaining_state(
             id=f"msg_{random_uuid()}",
             content=[output_text],
             role="assistant",
-            status="completed",
+            status="completed",  # TODO: this shouldn't be completed?
             type="message",
         )
         return [text_item]

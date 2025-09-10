@@ -10,7 +10,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from contextlib import AsyncExitStack
 from copy import copy
 from http import HTTPStatus
-from typing import Callable, Final, Optional, Union
+from typing import Callable, Final, List, Optional, Union
 
 import jinja2
 import openai.types.responses as openai_responses_types
@@ -461,10 +461,17 @@ class OpenAIServingResponses(OpenAIServing):
                 # TODO: Use a vllm-specific Validation Error
                 return self.create_error_response(str(e))
 
+        status = 'completed'
+
         if self.use_harmony:
             assert isinstance(context, HarmonyContext)
             output = self._make_response_output_items_with_harmony(context)
             num_tool_output_tokens = context.num_tool_output_tokens
+            if len(output) > 0:
+                if context.finish_reason == "length":
+                    status = 'incomplete'
+            else:
+                status = 'incomplete'
         else:
             assert isinstance(context, SimpleContext)
             final_res = context.last_output
@@ -501,7 +508,7 @@ class OpenAIServingResponses(OpenAIServing):
             model_name=model_name,
             created_time=created_time,
             output=output,
-            status="completed",
+            status=status,
             usage=usage,
         )
 
@@ -658,7 +665,7 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         context: HarmonyContext,
     ) -> list[ResponseOutputItem]:
-        output_items = []
+        output_items: List[ResponseOutputItem] = []
         num_init_messages = context.num_init_messages
         for msg in context.messages[num_init_messages:]:
             output_items.extend(parse_output_message(msg))

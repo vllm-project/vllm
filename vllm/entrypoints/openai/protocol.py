@@ -30,7 +30,7 @@ except ImportError:  # For newer openai versions (>= 1.100.0)
     from openai.types.responses import (ResponseFormatTextConfig as
                                         ResponseTextConfig)
 
-from openai.types.responses.response import ToolChoice
+from openai.types.responses.response import IncompleteDetails, ToolChoice
 from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
 from pydantic import (BaseModel, ConfigDict, Field, TypeAdapter,
@@ -1853,10 +1853,6 @@ class ResponseUsage(OpenAIBaseModel):
     total_tokens: int
 
 
-class IncompleteDetails(OpenAIBaseModel):
-    reason: str
-
-
 class ResponsesResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"resp_{random_uuid()}")
     created_at: int = Field(default_factory=lambda: int(time.time()))
@@ -1897,9 +1893,15 @@ class ResponsesResponse(OpenAIBaseModel):
         status: ResponseStatus,
         usage: Optional[ResponseUsage] = None,
     ) -> "ResponsesResponse":
+
+        incomplete_details: Optional[IncompleteDetails] = None
+        if status == 'incomplete':
+            incomplete_details = IncompleteDetails(reason='max_output_tokens')
+
         return cls(
             id=request.request_id,
             created_at=created_time,
+            incomplete_details=incomplete_details,
             instructions=request.instructions,
             metadata=request.metadata,
             model=model_name,

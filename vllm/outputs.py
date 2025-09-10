@@ -92,7 +92,7 @@ class RequestOutput:
                           decoder input prompt token ids.
         prompt_logprobs: The log probabilities to return per prompt token.
         outputs: The output sequences of the request.
-        finished: Whether the whole request is finished.
+        finish_reason: The reasony why the whole request is finished, if not empty.
         metrics: Metrics associated with the request.
         lora_request: The LoRA request that was used to generate the output.
         encoder_prompt: The encoder prompt string of the request.
@@ -111,6 +111,7 @@ class RequestOutput:
         prompt_logprobs: Optional[PromptLogprobs],
         outputs: list[CompletionOutput],
         finished: bool,
+        # finish_reason: Optional[FinishReason] = None,
         metrics: Optional[RequestMetrics] = None,
         lora_request: Optional[LoRARequest] = None,
         encoder_prompt: Optional[str] = None,
@@ -133,6 +134,7 @@ class RequestOutput:
         self.prompt_logprobs = prompt_logprobs
         self.outputs = outputs
         self.finished = finished
+        # self.finish_reason = finish_reason
         self.metrics = metrics
         self.lora_request = lora_request
         self.encoder_prompt = encoder_prompt
@@ -143,7 +145,9 @@ class RequestOutput:
     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
         """Merge subsequent RequestOutput into this one"""
 
-        self.finished |= next_output.finished
+        # self.finish_reason |= next_output.finish_reason
+        if self.finish_reason is None:
+            self.finish_reason = next_output.finish_reason
         self.kv_transfer_params = next_output.kv_transfer_params
 
         for next_completion in next_output.outputs:
