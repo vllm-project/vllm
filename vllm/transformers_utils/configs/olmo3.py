@@ -34,8 +34,13 @@ class Olmo3Config(PretrainedConfig):
         layer_types=None,
         **kwargs,
     ):
+        # This model uses Olmo3ForCausalLM in transformers but Olmo2ForCausalLM
+        # in vLLM.
         if "architectures" not in kwargs:
-            kwargs["architectures"] = ["Olmo3ForCausalLM"]
+            kwargs["architectures"] = ["Olmo2ForCausalLM"]
+        elif "Olmo3ForCausalLM" in kwargs["architectures"]:
+            kwargs["architectures"].remove("Olmo3ForCausalLM")
+            kwargs["architectures"].append("Olmo2ForCausalLM")
 
         super().__init__(
             pad_token_id=pad_token_id,
