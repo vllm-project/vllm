@@ -21,7 +21,7 @@ ARG BUILD_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04
 # docker build --build-arg FLASHINFER_AOT_COMPILE=true ...
 ARG FLASHINFER_AOT_COMPILE
 
-ARG BASE_IMAGE_FLAVOUR=devel
+ARG FINAL_BASE_IMAGE_FLAVOUR=devel
 ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-${BASE_IMAGE_FLAVOUR}-ubuntu22.04
 
 # By parameterizing the Deadsnakes repository URL, we allow third-party to use
