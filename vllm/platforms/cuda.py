@@ -228,6 +228,8 @@ class CudaPlatformBase(Platform):
             use_cutlassmla = selected_backend == _Backend.CUTLASS_MLA or (
                 selected_backend is None and cls.is_device_capability(100)
                 and block_size == 128)
+            use_flashinfermla = (selected_backend == _Backend.FLASHINFER_MLA
+                                 and cls.has_device_capability(100))
             use_flashmla = selected_backend in [
                 _Backend.FLASHMLA, _Backend.FLASHMLA_VLLM_V1
             ] or (selected_backend is None and is_flashmla_supported()[0])
@@ -252,6 +254,19 @@ class CudaPlatformBase(Platform):
                 else:
                     logger.warning(
                         "Cutlass MLA backend is only supported on V1 engine")
+            if use_flashinfermla:
+                if use_v1:
+                    from vllm.v1.attention.backends.utils import (
+                        set_kv_cache_layout)
+                    set_kv_cache_layout("HND")
+                    logger.info_once(
+                        "Using FlashInfer MLA backend on V1 engine.")
+                    return ("vllm.v1.attention.backends.mla."
+                            "flashinfer_mla.FlashInferMLABackend")
+                else:
+                    logger.warning(
+                        "FlashInfer MLA backend is only supported on V1 engine"
+                    )
             if use_flashmla:
                 if block_size != 64:
                     logger.warning(
