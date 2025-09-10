@@ -756,7 +756,8 @@ def is_kv_cache_type_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
 
     try:
         kv_cache_spec_values = list(kv_cache_spec.values())
-        _ = kv_cache_spec_values[0].merge(kv_cache_spec_values)
+        if kv_cache_spec_values:
+            _ = kv_cache_spec_values[0].merge(kv_cache_spec_values)
     except AssertionError:
         return False
     return True
