@@ -114,7 +114,12 @@ class EplbUpdator(BaseUpdator):
             - `max_tokens`: The maximum load across ranks.
             - `balancedness`: The ratio of average load to maximum load.
         """
+        if is_dummy:
+            self.dummy(model)
 
+        if is_profile:
+            self.profile(model, is_profile)
+        
         if log_stats:
             # total_expert_load_pass: (num_moe_layers, num_physical_experts)
             total_expert_load_pass = self.eplb_data.expert_load_pass.clone()
