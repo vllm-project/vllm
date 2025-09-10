@@ -356,11 +356,9 @@ async def test_web_search(client: OpenAI, model_name: str):
 async def test_code_interpreter(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
-        input=("Sort 3 variables in ascending order: "
-               "`var_a=9999999967*9999999769` "
-               "`var_b=9999999943*9999999781` "
-               "`var_c=9999999929*9999999787`. "
-               "Show only the sorted variable names with `<` using ascii."),
+        input=("What's the first 4 digits after the decimal point of "
+               "cube root of `19910212 * 20250910`? "
+               "Show only the results of 4 digits."),
         tools=[{
             "type": "code_interpreter",
             "container": {
@@ -372,10 +370,9 @@ async def test_code_interpreter(client: OpenAI, model_name: str):
     assert response.status == "completed"
     for item in response.output:
         if item.type == "message":
-            output_string = item.content[0].text.replace(" ",
-                                                         "").replace("\n", "")
+            output_string = item.content[0].text
             print("output_string: ", output_string, flush=True)
-            assert "var_c<var_b<var_a" in output_string
+            assert "5846" in output_string
 
 
 def get_weather(latitude, longitude):
