@@ -307,7 +307,8 @@ class LlamaForCausalLMEagle3(Eagle3LlamaForCausalLM):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
     def _ensure_draft_vocab_size(self, vllm_config: VllmConfig):
-        """Ensure draft_vocab_size is set in the draft model config."""
+        """Ensure draft_vocab_size and target_hidden_size are set in draft 
+        model config."""
         if (vllm_config.speculative_config
                 and vllm_config.speculative_config.draft_model_config
                 and hasattr(vllm_config.speculative_config.draft_model_config,
@@ -322,17 +323,8 @@ class LlamaForCausalLMEagle3(Eagle3LlamaForCausalLM):
                 target_vocab_size = vllm_config.model_config.get_vocab_size()
                 hf_config.draft_vocab_size = target_vocab_size
 
-    def combine_hidden_states(self,
-                              hidden_states: torch.Tensor) -> torch.Tensor:
-        """Override combine_hidden_states to handle dimension mismatch."""
-        # Check if we have a dimension mismatch and fix it dynamically
-        if (hasattr(self.model, 'fc')
-                and hidden_states.shape[-1] != self.model.fc.in_features):
-            # Create a new fc layer with the correct input size
-            # Ensure it's on the same device as hidden_states
-            device = hidden_states.device
-            self.model.fc = torch.nn.Linear(hidden_states.shape[-1],
-                                            self.config.hidden_size,
-                                            bias=False).to(device)
-
-        return self.model.fc(hidden_states)
+            # If target_hidden_size is not set, use target model's hidden_size
+            if (not hasattr(hf_config, 'target_hidden_size')
+                    or hf_config.target_hidden_size is None):
+                target_hidden_size = vllm_config.model_config.get_hidden_size()
+                hf_config.target_hidden_size = target_hidden_size
