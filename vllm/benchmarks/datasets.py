@@ -334,7 +334,7 @@ def process_image(image: Any) -> Mapping[str, Any]:
 
     if isinstance(image, str):
         image_url = (image if image.startswith(
-            ("http://", "file://")) else f"file://{image}")
+            ("http://", "https://", "file://")) else f"file://{image}")
         return {"type": "image_url", "image_url": {"url": image_url}}
 
     raise ValueError(f"Invalid image input {image}. Must be a PIL.Image.Image"
@@ -369,7 +369,7 @@ def process_video(video: Any) -> Mapping[str, Any]:
 
     if isinstance(video, str):
         video_url = (video if video.startswith(
-            ("http://", "file://")) else f"file://{video}")
+            ("http://", "https://", "file://")) else f"file://{video}")
         return {"type": "video_url", "video_url": {"url": video_url}}
 
     raise ValueError(
@@ -1382,6 +1382,13 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
         ):
             dataset_class = VisionArenaDataset
             args.hf_split = "train"
+            args.hf_subset = None
+        elif (
+            args.dataset_path in MMVUDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in MMVUDataset.SUPPORTED_DATASET_PATHS
+        ):
+            dataset_class = MMVUDataset
+            args.hf_split = "validation"
             args.hf_subset = None
         elif (
             args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS
