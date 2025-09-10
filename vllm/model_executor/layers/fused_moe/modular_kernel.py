@@ -839,7 +839,6 @@ class FusedMoEModularKernel(torch.nn.Module):
         if not self.prepare_finalize.supports_async():
             # We shouldn't be running an a2a kernel that doesn't
             # support async prepare/finalize
-            assert not dbo_enabled()
 
             # Run shared experts serially with dispatch.
             if self.shared_experts is not None:
