@@ -128,20 +128,15 @@ class ECSharedStorageConnector(ECConnectorBase):
 
     def update_state_after_alloc(self, 
                                  request: "Request",
-                                 cache_exists: list[bool],
+                                 index: int,
                                 ) -> None:
         """
-        Update ECConnector state after block allocation.
-
-        If cache exist for mm_data, need to load it
+        Update ECConnector state after encoder cache allocation.
         """
-
-        for index, has_cache in enumerate(cache_exists):
-            if has_cache:
-                mm_hash = request.mm_hashes[index]
-                num_encoder_token = request.get_num_encoder_tokens(index)
-                # Insert mm_hash only if this block has not been recorded yet.
-                self._mm_datas_need_loads[mm_hash] = num_encoder_token
+        mm_hash = request.mm_hashes[index]
+        num_encoder_token = request.get_num_encoder_tokens(index)
+        # Insert mm_hash only if this block has not been recorded yet.
+        self._mm_datas_need_loads[mm_hash] = num_encoder_token
 
     def build_connector_meta(
         self,
