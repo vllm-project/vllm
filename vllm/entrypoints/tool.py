@@ -4,6 +4,8 @@ import os
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
+from openai_harmony import Author, Message, Role, TextContent
+
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -99,6 +101,28 @@ class HarmonyPythonTool(Tool):
             return
 
         self.python_tool = PythonTool()
+
+    async def validate(self):
+        if not self.enabled:
+            return
+        try:
+            message = Message(
+                author=Author(role=Role.ASSISTANT),
+                content=[TextContent(text="print('Hello, world!')")],
+                channel="analysis",
+                recipient="python",
+                content_type="code",
+            )
+            msgs = []
+            async for msg in self.python_tool.process(message):
+                msgs.append(msg)
+            assert msgs[0].content[0].text == "Hello, world!\n"
+        except Exception as e:
+            self.enabled = False
+            logger.warning_once(
+                "Code interpreter tool failed to initialize (%s), code "
+                "interpreter is disabled", e)
+            return
         logger.info_once("Code interpreter tool initialized")
 
     async def get_result(self, context: "ConversationContext") -> Any:
