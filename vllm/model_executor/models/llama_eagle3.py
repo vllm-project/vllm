@@ -199,6 +199,10 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             speculative_config.draft_model_config.hf_config
         target_layer_num = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config)
+
+        # Store target layer count in draft config for
+        # proper layer_types indexing in draft models
+        self.config.target_layer_count = target_layer_num
         self.model = LlamaModel(vllm_config=vllm_config,
                                 prefix="model",
                                 start_layer_id=target_layer_num)
