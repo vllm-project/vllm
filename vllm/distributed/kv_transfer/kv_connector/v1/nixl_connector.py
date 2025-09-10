@@ -162,7 +162,7 @@ class NixlConnector(KVConnectorBase_V1):
 
     def get_num_new_matched_tokens(
             self, request: "Request",
-            num_computed_tokens: int) -> tuple[int, bool]:
+            num_computed_tokens: int) -> tuple[Optional[int], bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(
             request, num_computed_tokens)

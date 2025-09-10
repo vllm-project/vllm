@@ -143,11 +143,15 @@ class MultiConnector(KVConnectorBase_V1):
         self,
         request: "Request",
         num_computed_tokens: int,
-    ) -> tuple[int, bool]:
+    ) -> tuple[Optional[int], bool]:
         to_return = (0, False)
         for i, c in enumerate(self._connectors):
             toks, load_async = c.get_num_new_matched_tokens(
                 request, num_computed_tokens)
+            # If there is a connector still looking up the matches,
+            # we return None to indicate that we are not done yet.
+            if toks is None:
+                return (None, False)
             # The first connector that has new matched tokens will be assigned
             # to this request.
             if to_return[0] == 0 and toks > 0:
