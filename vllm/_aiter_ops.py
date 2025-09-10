@@ -383,7 +383,7 @@ class rocm_aiter_ops:
             if is_torch_equal_or_newer("2.7.0"):
                 tags = ()
             else:
-                tags = (torch.Tag.needs_fixed_stride_order, ),
+                tags = (torch.Tag.needs_fixed_stride_order, )
 
             # register all the custom ops here
             direct_register_custom_op(
