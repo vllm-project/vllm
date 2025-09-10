@@ -638,7 +638,7 @@ async def benchmark(
                                     metrics.total_token_throughput))
     print("{:<40} {:<10.2f}".format("Total Accepted tokens:",
                                     metrics.total_accepted_tokens))
-    print("{:<40} {:<10.2f}".format("Total rejected tokens:",
+    print("{:<40} {:<10.2f}".format("Total Rejected tokens:",
                                     metrics.total_rejected_tokens))
 
     if isinstance(metrics, BenchmarkMetrics):
