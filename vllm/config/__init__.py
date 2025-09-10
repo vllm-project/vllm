@@ -9,7 +9,6 @@ import hashlib
 import inspect
 import json
 import textwrap
-import uuid
 import warnings
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -33,6 +32,8 @@ from vllm.config.cache import (BlockSize, CacheConfig, CacheDType, MambaDType,
                                PrefixCachingHashAlgo)
 from vllm.config.compilation import (CompilationConfig, CompilationLevel,
                                      CUDAGraphMode, PassConfig)
+from vllm.config.kv_events import KVEventsConfig
+from vllm.config.kv_transfer import KVTransferConfig
 from vllm.config.parallel import (DistributedExecutorBackend, EPLBConfig,
                                   ParallelConfig)
 from vllm.config.scheduler import SchedulerConfig, SchedulerPolicy
@@ -47,8 +48,9 @@ from vllm.transformers_utils.config import (
     is_interleaved, maybe_override_with_speculators_target_model,
     try_get_generation_config, try_get_safetensors_metadata,
     try_get_tokenizer_config, uses_mrope)
-from vllm.transformers_utils.s3_utils import S3Model
-from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
+from vllm.transformers_utils.runai_utils import (ObjectStorageModel,
+                                                 is_runai_obj_uri)
+from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
                         STR_DUAL_CHUNK_FLASH_ATTN_VAL, LayerBlockType,
                         LazyLoader, common_broadcastable_dtype, random_uuid)
@@ -555,15 +557,6 @@ class ModelConfig:
                     "affect the random state of the Python process that "
                     "launched vLLM.", self.seed)
 
-        if self.runner != "draft":
-            # If we're not running the draft model, check for speculators config
-            # If speculators config, set model / tokenizer to be target model
-            self.model, self.tokenizer = maybe_override_with_speculators_target_model(  # noqa: E501
-                model=self.model,
-                tokenizer=self.tokenizer,
-                revision=self.revision,
-                trust_remote_code=self.trust_remote_code)
-
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(self.model,
                                                        self.served_model_name)
@@ -602,7 +595,16 @@ class ModelConfig:
                 f"'Please instead use `--hf-overrides '{hf_overrides_str}'`")
             warnings.warn(DeprecationWarning(msg), stacklevel=2)
 
-        self.maybe_pull_model_tokenizer_for_s3(self.model, self.tokenizer)
+        self.maybe_pull_model_tokenizer_for_runai(self.model, self.tokenizer)
+
+        if self.runner != "draft":
+            # If we're not running the draft model, check for speculators config
+            # If speculators config, set model / tokenizer to be target model
+            self.model, self.tokenizer = maybe_override_with_speculators_target_model(  # noqa: E501
+                model=self.model,
+                tokenizer=self.tokenizer,
+                revision=self.revision,
+                trust_remote_code=self.trust_remote_code)
 
         if (backend := envs.VLLM_ATTENTION_BACKEND
             ) and backend == "FLASHINFER" and find_spec("flashinfer") is None:
@@ -744,7 +746,7 @@ class ModelConfig:
 
         self.pooler_config = self._init_pooler_config()
 
-        self.dtype = _get_and_verify_dtype(
+        self.dtype: torch.dtype = _get_and_verify_dtype(
             self.model,
             self.hf_config,
             self.dtype,
@@ -831,41 +833,42 @@ class ModelConfig:
         """The architecture vllm actually used."""
         return self._architecture
 
-    def maybe_pull_model_tokenizer_for_s3(self, model: str,
-                                          tokenizer: str) -> None:
-        """Pull model/tokenizer from S3 to temporary directory when needed.
+    def maybe_pull_model_tokenizer_for_runai(self, model: str,
+                                             tokenizer: str) -> None:
+        """Pull model/tokenizer from Object Storage to temporary
+        directory when needed.
 
         Args:
             model: Model name or path
             tokenizer: Tokenizer name or path
         """
-        if not (is_s3(model) or is_s3(tokenizer)):
+        if not (is_runai_obj_uri(model) or is_runai_obj_uri(tokenizer)):
             return
 
-        if is_s3(model):
-            s3_model = S3Model()
-            s3_model.pull_files(model,
-                                allow_pattern=["*.model", "*.py", "*.json"])
+        if is_runai_obj_uri(model):
+            object_storage_model = ObjectStorageModel()
+            object_storage_model.pull_files(
+                model, allow_pattern=["*.model", "*.py", "*.json"])
             self.model_weights = model
-            self.model = s3_model.dir
+            self.model = object_storage_model.dir
 
             # If tokenizer is same as model, download to same directory
             if model == tokenizer:
-                s3_model.pull_files(model,
-                                    ignore_pattern=[
-                                        "*.pt", "*.safetensors", "*.bin",
-                                        "*.tensors"
-                                    ])
-                self.tokenizer = s3_model.dir
+                object_storage_model.pull_files(model,
+                                                ignore_pattern=[
+                                                    "*.pt", "*.safetensors",
+                                                    "*.bin", "*.tensors"
+                                                ])
+                self.tokenizer = object_storage_model.dir
                 return
 
         # Only download tokenizer if needed and not already handled
-        if is_s3(tokenizer):
-            s3_tokenizer = S3Model()
-            s3_tokenizer.pull_files(
+        if is_runai_obj_uri(tokenizer):
+            object_storage_tokenizer = ObjectStorageModel()
+            object_storage_tokenizer.pull_files(
                 model,
                 ignore_pattern=["*.pt", "*.safetensors", "*.bin", "*.tensors"])
-            self.tokenizer = s3_tokenizer.dir
+            self.tokenizer = object_storage_tokenizer.dir
 
     def _init_multimodal_config(self) -> Optional["MultiModalConfig"]:
         if self._model_info.supports_multimodal:
@@ -1169,7 +1172,7 @@ class ModelConfig:
             ]
             # Any custom overrides will be in quantization_methods so we place
             # them at the start of the list so custom overrides have preference
-            # over the built in ones.
+            # over the built-in ones.
             quantization_methods = quantization_methods + overrides
 
             # Detect which checkpoint is it
@@ -1750,6 +1753,32 @@ class ModelConfig:
         # `llm as reranker` models defaults to not using pad_token.
         return getattr(self.hf_config, "use_pad_token", True)
 
+    @property
+    def head_dtype(self) -> torch.dtype:
+        """
+        "head" refers to the last Linear layer(s) of an LLM,
+        such as the lm_head in a generation model,
+        or the score or classifier in a classification model.
+
+        The default head_dtype based on runner_type.\n
+        - The pooling model defaults to using fp32 head,
+        you can use --hf-overrides '{"head_dtype": "model"}' to disable it.\n
+        - The generate model defaults to not using fp32 head,
+        you can use --hf-overrides '{"head_dtype": "float32"}' to enable it.
+        """
+        head_dtype = _get_head_dtype(config=self.hf_config,
+                                     dtype=self.dtype,
+                                     runner_type=self.runner_type)
+
+        if head_dtype not in current_platform.supported_dtypes:
+            logger.warning_once(
+                "The current platform does not support [%s] head dtype, "
+                "fallback to model dtype [%s].", head_dtype, self.dtype)
+            return self.dtype
+
+        logger.debug_once("head dtype: %s", head_dtype)
+        return head_dtype
+
     def get_and_verify_max_len(self, max_model_len: int):
         # Consider max_model_len in tokenizer_config only when
         # pooling models use absolute position_embedding.
@@ -2164,9 +2193,14 @@ class SpeculativeConfig:
                 # Automatically detect the method
                 if self.method in ('eagle', 'eagle3'):
                     pass
-                elif "eagle-" in self.draft_model_config.model.lower() or \
-                        "eagle3-" in self.draft_model_config.model.lower():
+                # examples:
+                # yuhuili/EAGLE-LLaMA3-Instruct-8B
+                # yuhuili/EAGLE3-LLaMA3.1-Instruct-8B
+                # AngelSlim/Qwen3-8B_eagle3
+                elif "eagle-" in self.draft_model_config.model.lower():
                     self.method = "eagle"
+                elif "eagle3" in self.draft_model_config.model.lower():
+                    self.method = "eagle3"
                 elif self.draft_model_config.hf_config.model_type == "medusa":
                     self.method = "medusa"
                 elif (self.draft_model_config.hf_config.model_type ==
@@ -2892,6 +2926,31 @@ def _get_and_verify_dtype(
     return torch_dtype
 
 
+def _get_head_dtype(config: PretrainedConfig, dtype: torch.dtype,
+                    runner_type: str) -> torch.dtype:
+    head_dtype: Optional[Union[str,
+                               torch.dtype]] = getattr(config, "head_dtype",
+                                                       None)
+
+    if head_dtype == "model":
+        return dtype
+    elif isinstance(head_dtype, str):
+        head_dtype = head_dtype.lower()
+        if head_dtype not in _STR_DTYPE_TO_TORCH_DTYPE:
+            raise ValueError(f"Unknown dtype: {head_dtype!r}")
+        return _STR_DTYPE_TO_TORCH_DTYPE[head_dtype]
+    elif isinstance(head_dtype, torch.dtype):
+        return head_dtype
+    elif head_dtype is None:
+        if torch.float32 not in current_platform.supported_dtypes:
+            return dtype
+        if runner_type == "pooling":
+            return torch.float32
+        return dtype
+    else:
+        raise ValueError(f"Unknown dtype: {head_dtype}")
+
+
 def _get_and_verify_max_len(
     hf_config: PretrainedConfig,
     tokenizer_config: Optional[dict],
@@ -3207,149 +3266,6 @@ class ObservabilityConfig:
         self.collect_detailed_traces = cast(
             list[DetailedTraceModules],
             self.collect_detailed_traces[0].split(","))
-
-
-KVProducer = Literal["kv_producer", "kv_both"]
-KVConsumer = Literal["kv_consumer", "kv_both"]
-KVRole = Literal[KVProducer, KVConsumer]
-
-
-@config
-@dataclass
-class KVTransferConfig:
-    """Configuration for distributed KV cache transfer."""
-
-    kv_connector: Optional[str] = None
-    """The KV connector for vLLM to transmit KV caches between vLLM instances.
-    """
-
-    engine_id: Optional[str] = None
-    """The engine id for KV transfers."""
-
-    kv_buffer_device: Optional[str] = "cuda"
-    """The device used by kv connector to buffer the KV cache.
-    Currently only support 'cuda'."""
-
-    kv_buffer_size: float = 1e9
-    """The buffer size for TorchDistributedConnector. Measured in number of
-    bytes. Recommended value: 1e9 (about 1GB)."""
-
-    kv_role: Optional[KVRole] = None
-    """Whether this vLLM instance produces, consumes KV cache, or both. Choices
-    are 'kv_producer', 'kv_consumer', and 'kv_both'."""
-
-    kv_rank: Optional[int] = None
-    """The rank of this vLLM instance in the KV cache transfer. Typical value:
-    0 for prefill instance, 1 for decode instance.
-    Currently only 1P1D is supported."""
-
-    kv_parallel_size: int = 1
-    """The number of parallel instances for KV cache transfer. For
-    P2pNcclConnector, this should be 2."""
-
-    kv_ip: str = "127.0.0.1"
-    """The KV connector ip, used to build distributed connection."""
-
-    kv_port: int = 14579
-    """The KV connector port, used to build distributed connection."""
-
-    kv_connector_extra_config: dict[str, Any] = field(default_factory=dict)
-    """any extra config that the connector may need."""
-
-    kv_connector_module_path: Optional[str] = None
-    """The Python module path to dynamically load the KV connector from.
-    Only supported in V1."""
-
-    def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
-
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
-        """
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode(),
-                               usedforsecurity=False).hexdigest()
-        return hash_str
-
-    def __post_init__(self) -> None:
-        if self.engine_id is None:
-            self.engine_id = str(uuid.uuid4())
-
-        if self.kv_role is not None and self.kv_role not in get_args(KVRole):
-            raise ValueError(f"Unsupported kv_role: {self.kv_role}. "
-                             f"Supported roles are {get_args(KVRole)}")
-
-        if self.kv_connector is not None and self.kv_role is None:
-            raise ValueError("Please specify kv_disagg_role when kv_connector "
-                             f"is set, supported roles are {get_args(KVRole)}")
-
-    @property
-    def is_kv_transfer_instance(self) -> bool:
-        return self.kv_connector is not None and \
-            self.kv_role in get_args(KVRole)
-
-    @property
-    def is_kv_producer(self) -> bool:
-        return self.kv_connector is not None and \
-            self.kv_role in get_args(KVProducer)
-
-    @property
-    def is_kv_consumer(self) -> bool:
-        return self.kv_connector is not None and \
-            self.kv_role in get_args(KVConsumer)
-
-    def get_from_extra_config(self, key, default) -> Any:
-        return self.kv_connector_extra_config.get(key, default)
-
-
-@config
-@dataclass
-class KVEventsConfig:
-    """Configuration for KV event publishing."""
-
-    enable_kv_cache_events: bool = False
-    """If True, enable KV cache events for tracking block storage and removal.
-    Events can be published externally by zmq using the event publisher config.
-    """
-
-    publisher: str = "null"
-    """The publisher to use for publishing kv events. Can be "null", "zmq".
-    """
-
-    endpoint: str = "tcp://*:5557"
-    """The zmq endpoint to use for publishing kv events.
-    """
-
-    replay_endpoint: Optional[str] = None
-    """The zmq endpoint to use for replaying kv events.
-    """
-
-    buffer_steps: int = 10_000
-    """The number of steps to cache for replay endpoint. Will only save
-    events from the last N steps for the replay endpoint.
-    """
-
-    hwm: int = 100_000
-    """The zmq high water mark for the event publisher. After queueing N events,
-    events will start dropping if the consumer is not keeping up.
-    """
-
-    max_queue_size: int = 100_000
-    """The maximum number of events to queue while waiting for publishing.
-    """
-
-    topic: str = ""
-    """The topic to use for the event publisher. Consumers can subscribe to
-    this topic to receive events.
-    """
 
 
 @config
@@ -3749,7 +3665,8 @@ class VllmConfig:
             # logger should only print warning message for hybrid models. As we
             # can't know whether the model is hybrid or not now, so we don't log
             # warning message here and will log it later.
-            if not (current_platform.is_cuda() or current_platform.is_rocm()):
+            if not (current_platform.is_cuda() or current_platform.is_rocm()
+                    or current_platform.is_cpu()):
                 # Hybrid KV cache manager is not supported on non-GPU platforms.
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True
             if self.kv_transfer_config is not None:
@@ -3932,6 +3849,7 @@ class VllmConfig:
             f"load_format={self.load_config.load_format}, "
             f"tensor_parallel_size={self.parallel_config.tensor_parallel_size}, "  # noqa
             f"pipeline_parallel_size={self.parallel_config.pipeline_parallel_size}, "  # noqa
+            f"data_parallel_size={self.parallel_config.data_parallel_size}, "  # noqa
             f"disable_custom_all_reduce={self.parallel_config.disable_custom_all_reduce}, "  # noqa
             f"quantization={self.model_config.quantization}, "
             f"enforce_eager={self.model_config.enforce_eager}, "
