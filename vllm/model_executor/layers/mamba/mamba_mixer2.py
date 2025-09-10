@@ -262,7 +262,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 ), "Tensor parallel world size must divide num heads."
 
         assert (n_groups % self.tp_size) == 0 or n_groups == 1, (
-            "If tensor parallel world size does not divide num_heads, "
+            "If tensor parallel world size does not divide num_groups, "
             "then num_groups must equal 1.")
 
         assert (n_groups % self.tp_size == 0) or self.tp_size == 1 or \
@@ -416,11 +416,6 @@ class MambaMixer2(MambaBase, CustomOp):
         # `ColumnParallelLinear` and `MergedColumnParallelLinear`,
         # and `set_weight_attrs` doesn't allow to override it
         self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
-
-        # fmt: off
-        print(f"AAAAAAAAAAAAAAAA############################# MambaMixer2 __init__: {type(self.conv1d)=}", flush=True) # noqa: E501
-        print(f"AAAAAAAAAAAAAAAA############################# MambaMixer2 __init__: {type(self.in_proj)=}", flush=True) # noqa: E501
-        # fmt: on
 
         # - these are TPed by heads to reduce the size of the
         #   temporal shape
