@@ -11,7 +11,8 @@ from typing import TYPE_CHECKING, Optional, Union
 from openai_harmony import Author, Message, Role, StreamState, TextContent
 
 from vllm.entrypoints.harmony_utils import (
-    get_encoding, get_streamable_parser_for_assistant, render_for_completion)
+    get_encoding, get_streamable_parser_for_assistant, is_reasoning_token,
+    render_for_completion)
 from vllm.entrypoints.tool import Tool
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.outputs import RequestOutput
@@ -133,7 +134,7 @@ class HarmonyContext(ConversationContext):
 
     def _update_num_reasoning_tokens(self):
         # Count all analysis and commentary channels as reasoning tokens
-        if self.parser.current_channel in {"analysis", "commentary"}:
+        if is_reasoning_token(self.parser):
             self.num_reasoning_tokens += 1
 
     def append_output(self, output: Union[RequestOutput,
@@ -407,19 +408,14 @@ class StreamingHarmonyContext(HarmonyContext):
             self.first_tok_of_message = output.finished
             for tok in output.outputs[0].token_ids:
                 self.parser.process(tok)
+                # Check if the current token is part of reasoning content
+                self._update_num_reasoning_tokens()
+                self.last_tok = tok
             self._update_decode_token_usage(output)
 
             # For streaming, update previous turn when message is complete
             if output.finished:
                 self.previous_turn = self.current_turn.copy()
-            # Check if the current token is part of reasoning content
-            self._update_num_reasoning_tokens()
-            self.last_tok = tok
-            if len(self._messages) - self.num_init_messages < len(
-                    self.parser.messages):
-                self._messages.extend(
-                    self.parser.messages[len(self._messages) -
-                                         self.num_init_messages:])
         else:
             # Handle the case of tool output in direct message format
             assert len(output) == 1, "Tool output should be a single message"
