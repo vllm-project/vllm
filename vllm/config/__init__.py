@@ -1552,7 +1552,7 @@ class ModelConfig:
                        for bc in block_configs[start:end])
         else:
             # Hybrid model Jamba
-            layers_block_type_value = getattr(self.hf_config,
+            layers_block_type_value = getattr(self.hf_text_config,
                                               "layers_block_type", None)
             if layers_block_type_value is not None:
                 if hasattr(self.hf_text_config,
