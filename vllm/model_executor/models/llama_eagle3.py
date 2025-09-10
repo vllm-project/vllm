@@ -199,6 +199,7 @@ class LlamaModel(nn.Module):
 class Eagle3LlamaForCausalLM(LlamaForCausalLM):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        print("DEBUG: Eagle3LlamaForCausalLM.__init__ called")
         nn.Module.__init__(self)
         self.config = vllm_config. \
             speculative_config.draft_model_config.hf_config
@@ -300,6 +301,7 @@ class LlamaForCausalLMEagle3(Eagle3LlamaForCausalLM):
     """
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        print("DEBUG: LlamaForCausalLMEagle3.__init__ called")
         # Store vllm_config for later use
         self.vllm_config = vllm_config
         # Ensure draft_vocab_size is set before calling parent constructor
