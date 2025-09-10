@@ -14,6 +14,7 @@ from .mteb_utils import VllmMtebEncoder, mteb_test_rerank_models
 RERANK_MODELS = [
     LASTPoolingRerankModelInfo("BAAI/bge-reranker-v2-gemma",
                                architecture="GemmaForSequenceClassification",
+                               mteb_score=0.33757,
                                hf_overrides={
                                    "architectures":
                                    ["GemmaForSequenceClassification"],
@@ -104,7 +105,6 @@ class GemmaMtebEncoder(VllmMtebEncoder):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.prompt = PROMPT
         self.query_template = "A: {query}\n"
         self.document_template = "B: {doc}\n{prompt}"
 
@@ -119,7 +119,7 @@ class GemmaMtebEncoder(VllmMtebEncoder):
         _sentences = []
         for query, corpus, prompt in sentences:
             query = self.query_template.format(query=query)
-            corpus = self.document_template.format(doc=corpus, prompt=prompt)
+            corpus = self.document_template.format(doc=corpus, prompt=PROMPT)
             _sentences.append((query, corpus, prompt))
 
         return super().predict(_sentences, *args, **kwargs)
