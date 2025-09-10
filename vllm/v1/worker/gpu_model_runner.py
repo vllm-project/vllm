@@ -326,6 +326,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.mrope_positions = self._make_buffer(
                 (3, self.max_num_tokens + 1), dtype=torch.int64)
 
+        # CUDA event to synchronize use of reused CPU tensors between steps
+        # when async scheduling is enabled.
+        self.prepare_inputs_event: Optional[torch.cuda.Event] = None
+        if self.use_async_scheduling:
+            self.prepare_inputs_event = torch.cuda.Event()
+            # Start in a completed state.
+            self.prepare_inputs_event.record(torch.cuda.default_stream())
+
         # None in the first PP rank. The rest are set after load_model.
         self.intermediate_tensors: Optional[IntermediateTensors] = None
 
@@ -354,11 +362,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Cudagraph dispatcher for runtime cudagraph dispatching.
         self.cudagraph_dispatcher = CudagraphDispatcher(self.vllm_config)
 
-        self.mm_budget = (MultiModalBudget(
+        self.mm_budget = MultiModalBudget(
             self.model_config,
             self.scheduler_config,
             self.mm_registry,
-        ) if self.supports_mm_inputs else None)
+        ) if self.supports_mm_inputs else None
 
         self.reorder_batch_threshold: Optional[int] = None
 
@@ -991,10 +999,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         builder,
                     )
 
-                attn_metadata_i = (builder.build(
+                attn_metadata_i = builder.build(
                     common_prefix_len=common_prefix_len,
                     common_attn_metadata=common_attn_metadata,
-                ))
+                )
 
                 for layer_name in attn_group.layer_names:
                     attn_metadata[layer_name] = attn_metadata_i
@@ -1866,10 +1874,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     "prompt tokens, tokens, please disable it when the requests"
                     " need prompt logprobs")
 
-            # Prepare the decoder inputs.
-            (attn_metadata, logits_indices, spec_decode_metadata,
-             num_scheduled_tokens_np, spec_decode_common_attn_metadata,
-             max_query_len) = self._prepare_inputs(scheduler_output)
+            if self.prepare_inputs_event is not None:
+                # Ensure prior step has finished with reused CPU tensors.
+                self.prepare_inputs_event.synchronize()
+            try:
+                # Prepare the decoder inputs.
+                (attn_metadata, logits_indices, spec_decode_metadata,
+                 num_scheduled_tokens_np, spec_decode_common_attn_metadata,
+                 max_query_len) = self._prepare_inputs(scheduler_output)
+
+            finally:
+                if self.prepare_inputs_event is not None:
+                    self.prepare_inputs_event.record()
 
             (
                 num_scheduled_tokens,
