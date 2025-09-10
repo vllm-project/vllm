@@ -770,6 +770,49 @@ def test_get_kv_cache_configs_multiple_workers():
         ),
     ]
 
+    # When divided into multiple KVCacheGroups, need to ensure the number of
+    # layers per group is similar.
+    different_type_layer_specs = [{
+        "layer1": new_kv_cache_spec(),
+        "layer2": new_sliding_window_spec(),
+        "layer3": new_sliding_window_spec(),
+    }, {
+        "layer4": new_kv_cache_spec(),
+        "layer5": new_sliding_window_spec(),
+        "layer6": new_sliding_window_spec(),
+    }]
+    kv_cache_configs = get_kv_cache_configs(
+        vllm_config, different_type_layer_specs, [
+            ref_kv_cache_spec.page_size_bytes * 10,
+            ref_kv_cache_spec.page_size_bytes * 10,
+        ])
+    assert kv_cache_configs == [
+        KVCacheConfig(
+            num_blocks=10,
+            kv_cache_tensors=[
+                KVCacheTensor(size=ref_kv_cache_spec.page_size_bytes * 10,
+                              shared_by=["layer1", "layer2", "layer3"]),
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(["layer1"], ref_kv_cache_spec),
+                KVCacheGroupSpec(["layer2"], new_sliding_window_spec()),
+                KVCacheGroupSpec(["layer3"], new_sliding_window_spec()),
+            ],
+        ),
+        KVCacheConfig(
+            num_blocks=10,
+            kv_cache_tensors=[
+                KVCacheTensor(size=ref_kv_cache_spec.page_size_bytes * 10,
+                              shared_by=["layer4", "layer5", "layer6"]),
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(["layer4"], ref_kv_cache_spec),
+                KVCacheGroupSpec(["layer5"], new_sliding_window_spec()),
+                KVCacheGroupSpec(["layer6"], new_sliding_window_spec()),
+            ],
+        ),
+    ]
+
     # Have conflicting layers. Need to raise an error.
     conflicting_layer_specs = [{
         "layer1": new_kv_cache_spec(),
@@ -1151,15 +1194,15 @@ def test_get_kv_cache_config_one_worker():
         num_blocks=32,
         kv_cache_tensors=[
             KVCacheTensor(size=mem_per_block_per_layer * 32,
-                          shared_by=["layer_1", "layer_3", "layer_5"]),
+                          shared_by=["layer_1", "layer_3", "layer_4"]),
             KVCacheTensor(size=mem_per_block_per_layer * 32,
-                          shared_by=["layer_2", "layer_4", "layer_6"]),
+                          shared_by=["layer_2", "layer_5", "layer_6"]),
         ],
         kv_cache_groups=[
             KVCacheGroupSpec(["layer_1", "layer_2"], new_kv_cache_spec()),
-            KVCacheGroupSpec(["layer_3", "layer_4"],
+            KVCacheGroupSpec(["layer_3", "layer_5"],
                              new_sliding_window_spec()),
-            KVCacheGroupSpec(["layer_5", "layer_6"],
+            KVCacheGroupSpec(["layer_4", "layer_6"],
                              new_sliding_window_spec()),
         ],
     )
@@ -1185,20 +1228,22 @@ def test_get_kv_cache_config_one_worker():
         kv_cache_tensors=[
             KVCacheTensor(
                 size=mem_per_block_per_layer * 32,
-                shared_by=["layer_1", "layer_4", "layer_7", "layer_10"]),
+                shared_by=["layer_1", "layer_4", "layer_5", "layer_6"]),
+            KVCacheTensor(
+                size=mem_per_block_per_layer * 32,
+                shared_by=["layer_2", "layer_7", "layer_8", "layer_9"]),
             KVCacheTensor(size=mem_per_block_per_layer * 32,
-                          shared_by=["layer_2", "layer_5", "layer_8"]),
-            KVCacheTensor(size=mem_per_block_per_layer * 32,
-                          shared_by=["layer_3", "layer_6", "layer_9"]),
+                          shared_by=["layer_3", "layer_10"]),
         ],
         kv_cache_groups=[
             KVCacheGroupSpec(["layer_1", "layer_2", "layer_3"],
                              new_kv_cache_spec()),
-            KVCacheGroupSpec(["layer_4", "layer_5", "layer_6"],
+            KVCacheGroupSpec(["layer_4", "layer_7", "layer_10"],
                              new_sliding_window_spec()),
-            KVCacheGroupSpec(["layer_7", "layer_8", "layer_9"],
+            KVCacheGroupSpec(["layer_5", "layer_8"],
                              new_sliding_window_spec()),
-            KVCacheGroupSpec(["layer_10"], new_sliding_window_spec()),
+            KVCacheGroupSpec(["layer_6", "layer_9"],
+                             new_sliding_window_spec()),
         ],
     )
 

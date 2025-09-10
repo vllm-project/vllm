@@ -921,7 +921,7 @@ def _get_kv_cache_groups_uniform_page_size(
     # group identical. Add padding to the last group of each type if necessary.
     # E.g., (full.0, full.1), (sw.0, sw.1, sw.2)
     # split to 3 groups with 2 layers each:
-    # (full.0, full.1), (sw.0, sw.1), (sw.2, padding).
+    # (full.0, full.1), (sw.0, sw.2), (sw.1, padding).
     # FIXME(Chen): At the moment of writing this code (2025-06-02), all
     # open-source hybrid model follows a n:1 pattern between different attention
     # types (e.g., Gemma3 5:1 between sw and full, LLaMA4 3:1 between local and
@@ -939,8 +939,20 @@ def _get_kv_cache_groups_uniform_page_size(
                 num_padding_layers,
                 num_padding_layers / len(layers) * 100,
             )
-        for i in range(0, len(layers), group_size):
-            grouped_layers.append(layers[i:i + group_size])
+        num_groups = cdiv(len(layers), group_size)
+        # In PP case, say if we have
+        # - stage 0: full.0, sw.0, sw.1
+        # - stage 1: full.1, sw.2, sw.3
+        # We should have 3 groups: (full.0, full.1), (sw.0, sw.2), (sw.1, sw.3)
+        # It can't be (full.0, full.1), (sw.0, sw.1), (sw.2, sw.3) because
+        # the 3 groups in stage 0 will be (full.0), (sw.0, sw.1), (empty group)
+        # and it will be padded to (full.0, padding), (sw.0, sw.1),
+        # (padding, padding) to ensure the number of layers in each group is
+        # the same and will cause memory waste.
+        # To avoid this, we assign layers[i::num_groups] to the i-th group
+        # instead of layers[i * group_size: (i + 1) * group_size]
+        for i in range(num_groups):
+            grouped_layers.append(layers[i::num_groups])
     return create_kv_cache_group_specs(kv_cache_spec, grouped_layers)
 
 
@@ -973,10 +985,10 @@ def get_kv_cache_config_from_groups(vllm_config: VllmConfig,
     # We will have group_size memory pools, each is shared by one layer from
     # each group. As layers of different groups have different block table,
     # they will use different parts of the shared Tensor.
-    # The memory layout for 3 groups (full.0, full.1), (sw.0, sw.1),
-    # (sw.2, padding) will be: (group_size = 2)
-    # full.0, sw.0, sw.2: share a Tensor with size=available_memory//2
-    # full.1, sw.1: share another Tensor with size=available_memory//2
+    # The memory layout for 3 groups (full.0, full.1), (sw.0, sw.2),
+    # (sw.1, padding) will be: (group_size = 2)
+    # full.0, sw.0, sw.1: share a Tensor with size=available_memory//2
+    # full.1, sw.2: share another Tensor with size=available_memory//2
     group_size = max(len(group.layer_names) for group in kv_cache_groups)
 
     page_size = get_uniform_page_size(kv_cache_specs)
