@@ -262,8 +262,7 @@ class BaseOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expt_scal, expt_indx, bitmatrix = prune_routing(
             topk_weights, topk_ids, bitmatrix, num_global_experts, ep_size)
         routing_data, gather_indx, scatter_indx = routing_from_bitmatrix(
-            bitmatrix, expt_scal, expt_indx, num_global_experts // ep_size,
-            num_topk)
+            bitmatrix, expt_scal, expt_indx, num_local_experts, num_topk)
 
         return routing_data, gather_indx, scatter_indx
 
@@ -328,11 +327,12 @@ class OAITritonExperts(BaseOAITritonExperts):
         if expert_map is not None:
             topk_ids = expert_map[topk_ids]
 
-        num_local_experts = w1.size(0)
+        local_num_experts = w1.size(0)
+        if global_num_experts == -1:
+            global_num_experts = local_num_experts
         routing_data, gather_indx, scatter_indx = self._make_routing_data(
-            topk_ids, topk_weights, num_local_experts, global_num_experts)
+            topk_ids, topk_weights, local_num_experts, global_num_experts)
 
-        # Make bitmatrix and RoutingData
         experts_output = triton_kernel_fused_experts(
             None,
             hidden_states,
@@ -345,7 +345,7 @@ class OAITritonExperts(BaseOAITritonExperts):
             apply_router_weight_on_input=False,
             use_fp8_w8a8=False,
             per_channel_quant=False,
-            global_num_experts=num_local_experts,
+            global_num_experts=local_num_experts,
             expert_map=None,  # applied already
             w1_scale=w1_scale,
             w2_scale=w2_scale,
