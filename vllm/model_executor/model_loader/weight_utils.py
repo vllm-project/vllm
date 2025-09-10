@@ -519,20 +519,20 @@ def np_cache_weights_iterator(
 def safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
-    map_location: Optional[str] = "mmap",
+    safetensors_load_strategy: Optional[str] = "lazy",
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
-    desc = "Loading safetensors checkpoint shards"
-    if map_location == "cpu":
-        desc += " (cpu)"
+    loading_desc = "Loading safetensors checkpoint shards"
+    if safetensors_load_strategy == "eager":
+        loading_desc += " (eager)"
 
     for st_file in tqdm(
             hf_weights_files,
-            desc=desc,
+            desc=loading_desc,
             disable=not enable_tqdm(use_tqdm_on_load),
             bar_format=_BAR_FORMAT,
     ):
-        if map_location == "cpu":
+        if safetensors_load_strategy == "eager":
             with open(st_file, "rb") as f:
                 state_dict = load(f.read())
             yield from state_dict.items()
