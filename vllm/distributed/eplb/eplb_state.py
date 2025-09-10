@@ -180,9 +180,10 @@ class EplbState:
     """
     The layer index to transfer in async mode.
     """
-    ep_buffer_ready: bool = False
+    ep_buffer_ready: int = 0
     """
     The flag indicates whether the expert buffer is ready for transfer.
+    0 or 1.
     """
     buffer_lock: threading.Lock = field(default_factory=threading.Lock)
     """
@@ -688,24 +689,20 @@ class EplbState:
                         rank_mapping=rank_mapping,
                     )
                     logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: transfer_layer completed for layer {self.layer_to_transfer}")
-                    self.ep_buffer_ready = True
-                    logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Flags set, ep_buffer_ready={self.ep_buffer_ready}")
-
+                    # 每层 move_to_buffer 完成后，先做一次全局对齐，确保所有 rank 都完成了本层的 move_to_buffer
+                    logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: starting _synchronize_rearrange_completion for layer {self.layer_to_transfer}")
+                    self.ep_buffer_ready = 1
+                    await self._synchronize_rearrange_completion(ep_group)
+                    logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: per-layer _synchronize_rearrange_completion done for layer {self.layer_to_transfer}")
+                    # 不在这里推进 layer_to_transfer，等待主线程消费后再推进
                 finally:
-                    # release lock
                     logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Releasing buffer lock for layer {self.layer_to_transfer}")
                     self.buffer_lock.release()
+                    logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Releasing buffer lock for layer {self.layer_to_transfer} successful")
             else:
                 await asyncio.sleep(0.5) 
         
         logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: All layers processed, exiting loop")
-        # After all layers are processed, synchronize all ranks to ensure 
-        # everyone has completed the rearrange process
-        if self.rebalanced:
-            logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Starting synchronize_rearrange_completion")
-            await self._synchronize_rearrange_completion(ep_group)
-            
-        logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Resetting state - rebalanced=False, layer_to_transfer=0")
         self.rebalanced = False
         self.layer_to_transfer = 0
         logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Calling post_eplb")
@@ -714,27 +711,25 @@ class EplbState:
 
     async def _synchronize_rearrange_completion(self, ep_group: ProcessGroup):
         """
-        Synchronize all ranks to ensure everyone has completed the rearrange process.
-        This should only be called during the rearrange period, not in every step.
+        等待所有 rank 都完成 ep_buffer_ready=1（使用 CPU Gloo 组做同步）。
+        只有当每个 rank 的 completion_flag=1 时（all_reduce 求和等于 world_size），所有 rank 才一起通过。
         """
-        logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: _synchronize_rearrange_completion started")
-        # Use a completion flag to check if all ranks have finished their layers
-        device = next(iter(self.expert_buffer)).device if self.expert_buffer else torch.cuda.current_device()
-        completion_flag = torch.tensor(
-            1, # All layers are done at this point
-            dtype=torch.int32, 
-            device=device
-        )
-        
-        logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Starting all_reduce for synchronization")
-        # Run the allreduce in a thread to avoid blocking the async loop
-        await asyncio.to_thread(all_reduce, completion_flag, group=ep_group)
-        
-        # Verify all ranks have completed
-        expected_total = ep_group.size()
-        logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: all_reduce completed, completion_flag={completion_flag.item()}, expected_total={expected_total}")
-        if completion_flag.item() != expected_total:
-            logger.warning("Rearrange synchronization failed: not all ranks completed")
+        from vllm.distributed.parallel_state import get_ep_group as _get_epg
+        cpu_group = _get_epg().cpu_group
+        rank = cpu_group.rank()
+        world = cpu_group.size()
+        logger.info(f"[EPLB Debug] Rank {rank}: _synchronize_rearrange_completion started on CPU group (world={world})")
+
+        # 持续等待直到所有 rank 都设置为 1
+        while True:
+            flag = torch.tensor((int(self.ep_buffer_ready),), dtype=torch.int32, device="cpu")
+            await asyncio.to_thread(all_reduce, flag, group=cpu_group)
+            total = int(flag.item())
+            logger.info(f"[EPLB Debug] Rank {rank}: CPU all_reduce total={total}, expected={world}")
+            if total == world:
+                logger.info(f"[EPLB Debug] Rank {rank}: all ranks ready, synchronization passed")
+                break
+            await asyncio.sleep(0.1)
 
     def move_to_workspace(self,
                           model: MixtureOfExperts,
@@ -757,12 +752,17 @@ class EplbState:
                 ep_group=ep_group
             )
             logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: move_from_buffer completed for layer {self.layer_to_transfer}")
+            # 主线程消费完成后推进 layer_to_transfer
             self.layer_to_transfer += 1
-            self.ep_buffer_ready = False
+            self.ep_buffer_ready = 0
             logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Updated state - layer_to_transfer={self.layer_to_transfer}, ep_buffer_ready={self.ep_buffer_ready}")
         finally:
             logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Releasing buffer lock in move_to_workspace")
-            self.buffer_lock.release()
+            try:
+                self.buffer_lock.release()
+                logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Releasing buffer lock okkkk in move_to_workspace")
+            except Exception as e:
+                logger.error(f"[EPLB Debug] Rank {ep_group.rank()}: buffer_lock release failed in move_to_workspace: {e}")
 
     def post_eplb(self,
                   model: MixtureOfExperts,
