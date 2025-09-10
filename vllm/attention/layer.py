@@ -360,13 +360,13 @@ class MultiHeadAttention(nn.Module):
             # currently, only torch_sdpa is supported on rocm
             self.attn_backend = _Backend.TORCH_SDPA
         else:
-            if backend in (_Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1,
-                           _Backend.FLEX_ATTENTION):
-                backend = _Backend.XFORMERS
-
             self.attn_backend = backend if backend in {
-                _Backend.TORCH_SDPA, _Backend.XFORMERS, _Backend.PALLAS_VLLM_V1
-            } else _Backend.TORCH_SDPA
+                _Backend.TORCH_SDPA,
+                _Backend.TORCH_SDPA_VLLM_V1,
+                _Backend.XFORMERS,
+                _Backend.PALLAS_VLLM_V1,
+                _Backend.ROCM_AITER_FA,
+            } else current_platform.get_vit_attn_backend()
 
         if (self.attn_backend == _Backend.XFORMERS
                 and not check_xformers_availability()):
@@ -413,6 +413,19 @@ class MultiHeadAttention(nn.Module):
             from torch_xla.experimental.custom_kernel import flash_attention
             out = flash_attention(query, key, value, sm_scale=self.scale)
             out = out.transpose(1, 2)
+        elif self.attn_backend == _Backend.ROCM_AITER_FA:
+            from aiter import flash_attn_varlen_func
+
+            # ROCm Flash Attention expects (batch, seq, heads, head_dim)
+            out = flash_attn_varlen_func(query,
+                                         key,
+                                         value,
+                                         softmax_scale=self.scale)
+        else:
+            # ViT attention hasn't supported this backend yet
+            raise NotImplementedError(
+                f"ViT attention hasn't supported {self.attn_backend} "
+                f"backend yet.")
 
         return out.reshape(bsz, q_len, -1)
 

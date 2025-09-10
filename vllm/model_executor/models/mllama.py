@@ -35,6 +35,7 @@ from transformers.models.mllama.processing_mllama import (
 
 import vllm.distributed.parallel_state as ps
 from vllm.attention import Attention, AttentionMetadata, AttentionType
+from vllm.attention.layer import MultiHeadAttention
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.attention.selector import _Backend
 from vllm.config import VllmConfig
@@ -517,6 +518,10 @@ class MllamaVisionSdpaAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
+        # Use unified MultiHeadAttention with automatic backend selection
+        self.attn = MultiHeadAttention(self.num_local_heads, self.head_dim,
+                                       1.0 / math.sqrt(self.head_dim))
+
     def forward(
         self,
         hidden_state: torch.Tensor,
@@ -524,21 +529,10 @@ class MllamaVisionSdpaAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_state)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q = q.view(q.shape[0], q.shape[1], self.num_local_heads,
-                   self.head_dim).transpose(1, 2)
-        k = k.view(k.shape[0], k.shape[1], self.num_local_heads,
-                   self.head_dim).transpose(1, 2)
-        v = v.view(v.shape[0], v.shape[1], self.num_local_heads,
-                   self.head_dim).transpose(1, 2)
 
-        # TODO: remove padding in image encoder
-        attn_output = F.scaled_dot_product_attention(q,
-                                                     k,
-                                                     v,
-                                                     attn_mask=attention_mask,
-                                                     dropout_p=0.0)
+        # Use unified MultiHeadAttention with automatic backend selection
+        attn_output = self.attn(q, k, v)
 
-        attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(attn_output.shape[0],
                                           attn_output.shape[1], -1)
         output, _ = self.o_proj(attn_output)
