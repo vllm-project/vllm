@@ -36,7 +36,7 @@ from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import (ImageItem, ModalityData,
                                     MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalInputs, MultiModalKwargsItems,
-                                    PlaceholderRange)
+                                    MultiModalUUIDDict, PlaceholderRange)
 from vllm.multimodal.parse import (DictEmbeddingItems, ModalityDataItems,
                                    MultiModalDataItems, MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -164,7 +164,7 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor):
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Optional[Mapping[str, object]] = None,
-        mm_hash_overrides: Optional[dict[str, list[str]]] = None,
+        mm_uuids: Optional[MultiModalUUIDDict] = None,
     ) -> MultiModalInputs:
         if "image" in mm_data:
             image_data = mm_data["image"]
@@ -177,7 +177,7 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor):
         mm_hashes = self._hash_mm_items(mm_items,
                                         hf_processor_mm_kwargs,
                                         tokenization_kwargs,
-                                        mm_hash_overrides=mm_hash_overrides)
+                                        mm_uuids=mm_uuids)
         mm_placeholders = {"image": [PlaceholderRange(offset=0, length=0)]}
 
         mm_processed_data = BatchFeature(image_data)
