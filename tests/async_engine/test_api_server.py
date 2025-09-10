@@ -173,6 +173,10 @@ def test_streaming_cancellation(api_server, distributed_executor_backend: str):
 
     print(f"Initial aborts: {initial_aborts}, Final aborts: {final_aborts}")
 
-    # The exact behavior might vary, but server should remain responsive
+    # Assert that the abort count has increased, indicating proper cancellation
+    assert final_aborts > initial_aborts, \
+        f"Expected abort count to increase from {initial_aborts} to more than {initial_aborts}, but got {final_aborts}"
+
+    # The server should remain responsive after cancellation
     result = _query_server("test after streaming disconnect")
     assert result

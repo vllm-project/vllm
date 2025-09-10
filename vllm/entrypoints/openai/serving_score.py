@@ -356,6 +356,8 @@ class ServingScores(OpenAIServing):
                 self._get_model_name(request.model),
             )
         except asyncio.CancelledError:
+            # Cancel the backend request as well
+            await self.engine_client.abort(request_id)
             return self.create_error_response("Client disconnected")
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
@@ -404,6 +406,8 @@ class ServingScores(OpenAIServing):
                 top_n,
             )
         except asyncio.CancelledError:
+            # Cancel the backend request as well
+            await self.engine_client.abort(request_id)
             return self.create_error_response("Client disconnected")
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
