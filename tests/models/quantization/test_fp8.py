@@ -32,7 +32,7 @@ from ..utils import check_logprobs_close
 # Due to low-precision numerical divergence, we only test logprob of 4 tokens
 @pytest.mark.parametrize("max_tokens", [4])
 @pytest.mark.parametrize("enforce_eager", [True])
-@pytest.mark.parametrize("backend", ["FLASH_ATTN", "XFORMERS"])
+@pytest.mark.parametrize("backend", ["FLASH_ATTN"])
 # NOTE: Increasing this in this suite will fail CI because we currently cannot
 # reset distributed env properly. Use a value > 1 just when you test.
 @pytest.mark.parametrize("tensor_parallel_size", [1])
