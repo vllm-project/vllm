@@ -165,6 +165,7 @@ class InternParallelAttention(nn.Module):
 
         self.scale = self.head_dim**-0.5
         if use_data_parallel:
+            print("*******Using data parallel for attention")
             self.qkv = ReplicatedLinear(
                 self.embed_dim,
                 3 * self.head_dim * self.num_heads,
