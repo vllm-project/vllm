@@ -16,6 +16,7 @@ import torch
 import vllm.envs as envs
 from vllm.logger import logger
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv, has_deep_gemm
 
 
@@ -145,19 +146,47 @@ def fp8_m_grouped_gemm_nt_masked(*args, **kwargs):
         *args, disable_ue8m0_cast=not is_deep_gemm_e8m0_used(), **kwargs)
 
 
-def _ceil_to_ue8m0(x: torch.Tensor):
-    return torch.pow(2.0, torch.ceil(torch.log2(x.abs())))
+@triton.jit
+def _per_block_cast_to_fp8_kernel(x_ptr, y_ptr, scales_ptr, M, N, stride_xm,
+                                  stride_xn, stride_ym, stride_yn, stride_sm,
+                                  stride_sn, BLOCK_M: tl.constexpr,
+                                  BLOCK_N: tl.constexpr,
+                                  USE_UE8M0: tl.constexpr):
+    pid_m = tl.program_id(axis=0)
+    pid_n = tl.program_id(axis=1)
 
+    m_idx = (pid_m * BLOCK_M + tl.arange(0, BLOCK_M))[:, None]
+    n_idx = (pid_n * BLOCK_N + tl.arange(0, BLOCK_N))[None, :]
+    x_block_ptrs = x_ptr + m_idx * stride_xm + n_idx * stride_xn
+    y_block_ptrs = y_ptr + m_idx * stride_ym + n_idx * stride_yn
+    mask = (m_idx < M) & (n_idx < N)
 
-def _align(x: int, y: int) -> int:
-    return cdiv(x, y) * y
+    # load tile once
+    x_vals = tl.load(x_block_ptrs, mask=mask, other=0.0)
+    x_vals_f32 = x_vals.to(tl.float32)
+    x_abs = tl.abs(x_vals_f32)
+
+    # reduce max over both axes
+    amax = tl.max(tl.max(x_abs, axis=0), axis=0)
+
+    # clamp then form scale
+    scale = tl.maximum(amax, 1e-4) / 448.0
+    if USE_UE8M0:
+        # round scale up to nearest power-of-two (E8M0)
+        scale = tl.exp2(tl.ceil(tl.log2(scale)))
+
+    # store per-tile scale
+    tl.store(scales_ptr + pid_m * stride_sm + pid_n * stride_sn, scale)
+
+    # scale and store output
+    inv_scale = 1.0 / scale
+    y_vals = x_vals_f32 * inv_scale
+    tl.store(y_block_ptrs, y_vals, mask=mask)
 
 
 DEFAULT_BLOCK_SIZE = [128, 128]
 
 
-# Taken from https://github.com/deepseek-ai/DeepGEMM/blob/dd6ed14acbc7445dcef224248a77ab4d22b5f240/deep_gemm/utils/math.py#L38
-# TODO(wentao): optimize this function, using triton or cuda kernel
 def per_block_cast_to_fp8(
         x: torch.Tensor,
         block_size: list[int] = DEFAULT_BLOCK_SIZE,
@@ -165,17 +194,31 @@ def per_block_cast_to_fp8(
     assert x.dim() == 2
     m, n = x.shape
     block_m, block_n = block_size
-    x_padded = torch.zeros((_align(m, block_m), _align(n, block_n)),
-                           dtype=x.dtype,
-                           device=x.device)
-    x_padded[:m, :n] = x
-    x_view = x_padded.view(-1, block_m, x_padded.size(1) // block_n, block_n)
-    x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
-    sf = x_amax / 448.0
-    sf = _ceil_to_ue8m0(sf) if use_ue8m0 else sf
-    x_scaled = (x_view * (1.0 / sf)).to(torch.float8_e4m3fn)
-    return x_scaled.view_as(x_padded)[:m, :n].contiguous(), sf.view(
-        x_view.size(0), x_view.size(2))
+    grid_m, grid_n = cdiv(m, block_m), cdiv(n, block_n)
+
+    scales = torch.empty((grid_m, grid_n),
+                         dtype=torch.float32,
+                         device=x.device)
+    y_tmp = torch.empty_like(x, dtype=torch.float32)
+    _per_block_cast_to_fp8_kernel[(grid_m, grid_n)](
+        x,
+        y_tmp,
+        scales,
+        m,
+        n,
+        x.stride(0),
+        x.stride(1),
+        y_tmp.stride(0),
+        y_tmp.stride(1),
+        scales.stride(0),
+        scales.stride(1),
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        USE_UE8M0=use_ue8m0,
+        num_warps=4,
+        num_stages=1,
+    )
+    return y_tmp.to(torch.float8_e4m3fn), scales
 
 
 def calc_diff(x: torch.Tensor, y: torch.Tensor):
