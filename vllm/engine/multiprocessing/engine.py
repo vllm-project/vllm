@@ -38,8 +38,8 @@ from vllm.worker.model_runner_base import InputProcessingError
 
 logger = init_logger(__name__)
 
-POLLING_TIMEOUT_MS = 10000
-POLLING_TIMEOUT_MS_PD_DP = 1000
+POLLING_TIMEOUT_MS = 100000
+POLLING_TIMEOUT_MS_PD_DP = 10000
 HEALTHY_RESPONSE = (pickle.dumps(VLLM_RPC_SUCCESS_STR), )
 
 

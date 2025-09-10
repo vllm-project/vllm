@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pickle
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -22,6 +23,7 @@ from vllm.distributed.utils import StatelessProcessGroup, sched_yield
 from vllm.logger import init_logger
 from vllm.utils import (get_ip, get_open_port, get_open_zmq_ipc_path,
                         is_valid_ipv6_address)
+from vllm.worker.zerocopy_utils import SharedTensorPool
 
 VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
 
@@ -206,14 +208,15 @@ class Handle:
 class MessageQueue:
 
     def __init__(
-        self,
-        n_reader,  # number of all readers
-        n_local_reader,  # number of local readers through shared memory
-        local_reader_ranks: Optional[list[int]] = None,
-        max_chunk_bytes: int = 1024 * 1024 * 10,
-        max_chunks: int = 10,
-        connect_ip: Optional[str] = None,
-    ):
+            self,
+            n_reader,  # number of all readers
+            n_local_reader,  # number of local readers through shared memory
+            local_reader_ranks: Optional[list[int]] = None,
+            max_chunk_bytes: int = 1024 * 1024 * 10,
+            max_chunks: int = 10,
+            connect_ip: Optional[str] = None,
+            enable_zero_copy: bool = True,
+            zero_copy_threshold: int = 1024 * 1024):
         if local_reader_ranks is None:
             local_reader_ranks = list(range(n_local_reader))
         else:
@@ -285,8 +288,47 @@ class MessageQueue:
             remote_subscribe_addr=remote_subscribe_addr,
             remote_addr_ipv6=remote_addr_ipv6,
         )
+        self.enable_zero_copy = enable_zero_copy and n_local_reader > 0
+        self.zero_copy_threshold = zero_copy_threshold
+        if self.enable_zero_copy:
+            self.tensor_pool = SharedTensorPool()
+            self.tensor_ref_counts = {}
+            self.tensor_ref_lock = threading.Lock()
 
         logger.info("vLLM message queue communication handle: %s", self.handle)
+
+    def _process_for_zero_copy(self, obj):
+        if not self.enable_zero_copy:
+            return obj, {}
+
+        tensor_metadata = {}
+
+        if hasattr(obj, 'multi_modal_kwargs') and obj.multi_modal_kwargs:
+            mm_kwargs = obj.multi_modal_kwargs
+            for key, value in mm_kwargs.items():
+                tensor_size = value.numel() * value.element_size()
+                if (isinstance(value, torch.Tensor)
+                        and tensor_size > self.zero_copy_threshold):
+                    tensor_id, metadata = self.tensor_pool.put_tensor(value)
+                    mm_kwargs[key] = ('__shm__', tensor_id)
+                    tensor_metadata[tensor_id] = metadata
+
+                    with self.tensor_ref_lock:
+                        self.tensor_ref_counts[tensor_id] = self.n_local_reader
+
+        return obj, tensor_metadata
+
+    def release_tensor(self, tensor_id: str):
+        if not self.enable_zero_copy:
+            return
+
+        with self.tensor_ref_lock:
+            if tensor_id in self.tensor_ref_counts:
+                self.tensor_ref_counts[tensor_id] -= 1
+                if self.tensor_ref_counts[tensor_id] <= 0:
+                    # All readers have released this tensor
+                    self.tensor_pool.release(tensor_id)
+                    del self.tensor_ref_counts[tensor_id]
 
     def export_handle(self) -> Handle:
         return self.handle
@@ -486,7 +528,20 @@ class MessageQueue:
     def enqueue(self, obj, timeout: Optional[float] = None):
         """ Write to message queue with optional timeout (in seconds) """
         assert self._is_writer, "Only writers can enqueue"
-        serialized_obj = pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
+
+        processed_obj, tensor_metadata = self._process_for_zero_copy(obj)
+        if tensor_metadata:
+            message = {
+                '__zero_copy__': True,
+                'data': processed_obj,
+                'tensors': tensor_metadata
+            }
+            serialized_obj = pickle.dumps(message,
+                                          protocol=pickle.HIGHEST_PROTOCOL)
+        else:
+            serialized_obj = pickle.dumps(obj,
+                                          protocol=pickle.HIGHEST_PROTOCOL)
+
         if self.n_local_reader > 0:
             if len(serialized_obj) >= self.buffer.max_chunk_bytes:
                 with self.acquire_write(timeout) as buf:
@@ -497,7 +552,12 @@ class MessageQueue:
                     buf[0] = 0  # not overflow
                     buf[1:len(serialized_obj) + 1] = serialized_obj
         if self.n_remote_reader > 0:
-            self.remote_socket.send(serialized_obj)
+            # Send original for remote readers
+            if tensor_metadata:
+                self.remote_socket.send(
+                    pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL))
+            else:
+                self.remote_socket.send(serialized_obj)
 
     def dequeue(self,
                 timeout: Optional[float] = None,
@@ -517,6 +577,23 @@ class MessageQueue:
             obj = MessageQueue.recv(self.remote_socket, timeout)
         else:
             raise RuntimeError("Only readers can dequeue")
+
+        # Zero copy
+        if isinstance(obj, dict) and obj.get('__zero_copy__'):
+            if not hasattr(self, 'tensor_pool'):
+                self.tensor_pool = SharedTensorPool()
+
+            data = obj['data']
+            if hasattr(data, 'multi_modal_kwargs') and data.multi_modal_kwargs:
+                for key, value in data.multi_modal_kwargs.items():
+                    if isinstance(value, tuple) and len(
+                            value) == 2 and value[0] == '__shm__':
+                        tensor_id = value[1]
+                        metadata = obj['tensors'][tensor_id]
+                        data.multi_modal_kwargs[
+                            key] = self.tensor_pool.get_tensor(
+                                tensor_id, metadata)
+            return data
         return obj
 
     @staticmethod
