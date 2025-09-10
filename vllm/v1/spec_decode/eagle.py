@@ -75,7 +75,7 @@ class EagleProposer:
         self.hidden_size = self.draft_model_config.get_hidden_size()
 
         # for pruning the draft model vocabulary
-        self.pruned_token_ids = None
+        self.pruned_vocab = None
 
         self.is_multimodal_model = vllm_config.model_config \
             .is_multimodal_model
@@ -250,8 +250,8 @@ class EagleProposer:
 
         draft_token_ids = logits.argmax(dim=-1)
 
-        if self.vllm_config.speculative_config.draft_vocab_pruned is not None:
-            draft_token_ids = self.pruned_token_ids[draft_token_ids]
+        if self.vllm_config.speculative_config.draft_vocab_frequency_path is not None:
+            draft_token_ids = self.pruned_vocab[draft_token_ids]
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1:
@@ -343,8 +343,8 @@ class EagleProposer:
             logits = self.model.compute_logits(last_hidden_states[:batch_size],
                                                None)
             draft_token_ids = logits.argmax(dim=-1)
-            if self.vllm_config.speculative_config.draft_vocab_pruned is not None:
-                draft_token_ids = self.pruned_token_ids[draft_token_ids]
+            if self.vllm_config.speculative_config.draft_vocab_frequency_path is not None:
+                draft_token_ids = self.pruned_vocab[draft_token_ids]
             draft_token_ids_list.append(draft_token_ids)
 
         # [batch_size, num_speculative_tokens]
@@ -377,8 +377,8 @@ class EagleProposer:
             draft_token_ids = torch.topk(logits, num_children,
                                          dim=-1).indices.view(batch_size, -1)
 
-        if self.vllm_config.speculative_config.draft_vocab_pruned is not None:
-            draft_token_ids = self.pruned_token_ids[draft_token_ids]
+        if self.vllm_config.speculative_config.draft_vocab_frequency_path is not None:
+            draft_token_ids = self.pruned_vocab[draft_token_ids]
 
         draft_token_ids_list = [draft_token_ids]
         draft_hidden_states = hidden_states.view(batch_size, 1, -1)
@@ -516,8 +516,8 @@ class EagleProposer:
                 draft_token_ids = torch.topk(logits, num_children,
                                              dim=-1).indices.view(
                                                  batch_size, -1)
-            if self.vllm_config.speculative_config.draft_vocab_pruned is not None:
-                draft_token_ids = self.pruned_token_ids[draft_token_ids]
+            if self.vllm_config.speculative_config.draft_vocab_frequency_path is not None:
+                draft_token_ids = self.pruned_vocab[draft_token_ids]
 
             draft_token_ids_list.append(draft_token_ids)
 
@@ -669,19 +669,22 @@ class EagleProposer:
                 hasattr(target_language_model, "lm_head"):
             logger.info("Loading EAGLE LM head weights from the target model.")
 
-            if self.vllm_config.speculative_config.draft_vocab_pruned is not None:
+            if self.vllm_config.speculative_config.draft_vocab_frequency_path is not None:
                 self.model.lm_head = copy.deepcopy(target_language_model.lm_head)
             else:
                 self.model.lm_head = target_language_model.lm_head
 
         # optionally prune the draft model vocabulary
-        if self.vllm_config.speculative_config.draft_vocab_pruned is not None:
-            logger.info(f"Loading pruned draft model vocabulary from {self.vllm_config.speculative_config.draft_vocab_pruned}")
-            self.pruned_token_ids = load_draft_vocab_pruned(self.vllm_config.speculative_config.draft_vocab_pruned)
-            self.pruned_token_ids = self.pruned_token_ids.to(self.model.lm_head.data.device)
+        if self.vllm_config.speculative_config.draft_vocab_frequency_path is not None:
+            logger.info(f"Loading pruned draft model vocabulary from {self.vllm_config.speculative_config.draft_vocab_frequency_path}")
+            self.pruned_vocab = load_pruned_draft_vocab(
+                self.vllm_config.speculative_config.draft_vocab_frequency_path,
+                self.vllm_config.speculative_config.draft_vocab_frequency_prune_ratio,
+                )
+            self.pruned_vocab = self.pruned_vocab.to(self.model.lm_head.data.device)
 
             if hasattr(self.model, "lm_head"):
-                self.model.lm_head.data = self.model.lm_head.data[self.pruned_token_ids]
+                self.model.lm_head.data = self.model.lm_head.data[self.pruned_vocab]
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
             elif hasattr(self.model.model, "embed_tokens"):
@@ -729,21 +732,34 @@ class EagleProposer:
         ) == 1, "All eagle layers should belong to the same kv cache group"
 
 
-def load_draft_vocab_pruned(draft_vocab_pruned_path: str) -> torch.Tensor:
+def load_pruned_draft_vocab(draft_vocab_frequency_path_path: Optional[str], prune_ratio: Optional[float]) -> torch.Tensor:
 
     # parse the path
-    parts = draft_vocab_pruned_path.split("/")
+    parts = draft_vocab_frequency_path_path.split("/")
     if len(parts) < 3:
         raise ValueError("HF path must be at least 'username/repo/file.pt'")
     repo_id = "/".join(parts[:2])
     file_path_in_repo = "/".join(parts[2:])
 
     # download the file
-    draft_vocab_pruned_path = hf_hub_download(repo_id=repo_id, filename=file_path_in_repo, repo_type="dataset")
+    draft_vocab_frequency_path_path = hf_hub_download(repo_id=repo_id, filename=file_path_in_repo, repo_type="dataset")
 
     # make it a tensor of integers
-    pruned_vocab = torch.load(draft_vocab_pruned_path, weights_only=True)
-    pruned_vocab = pruned_vocab.to(torch.int64)
+    draft_vocab_freq = torch.load(draft_vocab_frequency_path_path, weights_only=True)
+    draft_vocab_freq = draft_vocab_freq.to(torch.int64)
+
+    if not (0 < prune_ratio < 1):
+        raise ValueError(f'Expected draft_vocab_frequency_prune_ratio to be in (0, 1) but got {prune_ratio}')
+
+    # compute the relative cumulative frequencies
+    sorted_freq, sorted_indices = torch.sort(draft_vocab_freq, descending=True)
+    cumulative_mass = torch.cumsum(sorted_freq, dim=0)
+    relative_cumulative_mass = cumulative_mass / cumulative_mass[-1]
+    cutoff = relative_cumulative_mass < prune_ratio
+    cutoff_idx = cutoff.sum().item() + 1
+    assert isinstance(cutoff_idx, int)
+    pruned_vocab = sorted_indices[:cutoff_idx]
+
     return pruned_vocab
 
 # NOTE(woosuk): Currently, the below code is not used and we always use argmax
@@ -788,4 +804,4 @@ def compute_probs_and_sample_next_token(
         )
     return next_token_ids, probs
 
-load_draft_vocab_pruned("eturok/llama-3.1-8b-instruct-vocab-freq/vocab_freq.pt")
+load_pruned_draft_vocab("eturok/llama-3.1-8b-instruct-vocab-freq/vocab_freq.pt")

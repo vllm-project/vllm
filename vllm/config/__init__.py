@@ -1999,13 +1999,12 @@ class SpeculativeConfig:
     # Draft model vocabulary
     draft_vocab_pruned: Optional[str] = None
     """The path to the pruned draft model vocabulary."""
-    draft_vocab_freq: Optional[str] = None
+    draft_vocab_frequency_path: Optional[str] = None
     """The path to token frequencies for the draft model vocabulary."""
-    draft_vocab_freq_threshold: Optional[float] = None
-    """The frequency threshold for the draft model vocabulary.
-    If `None`, do not prune the vocabulary. If >= 1, prune to top N most
-    frequent tokens. If < 1, prune tokens until cumulative relative frequency
-    mass reaches threshold"""
+    draft_vocab_frequency_prune_ratio: Optional[float] = None
+    """The pruning ratio for the draft model vocabulary. Must be <1.
+    If `None`, do not prune the vocabulary. Otherwise, prune tokens
+    until cumulative relative frequency mass reaches the threshold."""
 
     # Advanced control
     disable_by_batch_size: Optional[int] = None
