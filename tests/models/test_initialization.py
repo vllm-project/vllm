@@ -22,7 +22,7 @@ MINIMAL_MODEL_ARCH_LIST = [
     "LlavaForConditionalGeneration", "Llama4ForConditionalGeneration",
     "BertForSequenceClassification", "Gemma3nForCausalLM", "JinaVLForRanking",
     "InternVLChatModel", "InternLM2ForRewardModel",
-    "TransformersForMultimodalLM", "PrithviGeoSpatialMAE", "UltravoxModel,"
+    "TransformersForMultimodalLM", "PrithviGeoSpatialMAE", "UltravoxModel",
     "DeepSeekMTPModel", "MedusaModel", "TransformersModel", "MiDashengLMModel",
     "XLMRobertaModel"
 ]
