@@ -141,7 +141,7 @@ def _bmm_chunk_fwd_kernel(
     chunk_seqlen_end = tl.load(cu_chunk_seqlens_ptr + pid_c + 1)
 
     a_ptr += pid_b * stride_a_batch + chunk_seqlen_start * stride_a_seqlen + pid_h * stride_a_head
-    b_ptr += pid_b * stride_b_batch + chunk_seqlen_start * chunk_size * stride_b_seqlen + pid_h * stride_b_head
+    b_ptr += pid_b * stride_b_batch + chunk_seqlen_start * stride_b_seqlen + pid_h * stride_b_head
     if HAS_SEQ_IDX:
         seq_idx_ptr += pid_b * stride_seq_idx_batch + pid_c * chunk_size * stride_seq_idx_seqlen
 
