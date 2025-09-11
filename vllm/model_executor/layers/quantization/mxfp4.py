@@ -82,7 +82,7 @@ def get_mxfp4_backend():
                or current_platform.is_device_capability(90))
               and not has_flashinfer()):
             logger.warning_once(
-                "MXFP4 MoE is enabled on Blackwell but FlashInfer "
+                "MXFP4 MoE is enabled on Hopper/Blackwell but FlashInfer "
                 "is not available. This may result in degraded performance. "
                 "Please `pip install vllm[flashinfer]` for best results.")
 
@@ -158,9 +158,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         ).compilation_config.max_capture_size
 
         assert self.mxfp4_backend != Mxfp4Backend.NONE, (
-            f"No FlashInfer or Marlin/Triton backend available. "
-            f"MXFP4 MoE will be disabled. "
-            f"Current backend: {self.mxfp4_backend}")
+            "No MXFP4 MoE backend (FlashInfer/Marlin/Triton) available."
+            "Please check your environment and try again.")
         self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
