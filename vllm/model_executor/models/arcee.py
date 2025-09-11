@@ -342,7 +342,7 @@ class ArceeModel(nn.Module):
 class ArceeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     """Arcee Model for causal language modeling, integrated with vLLM
     runtime."""
-    # Map fused module names to their sub-module components
+    # Map fused module names to their submodule components
     # (for quantization and LoRA)
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
