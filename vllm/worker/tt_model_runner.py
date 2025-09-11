@@ -139,9 +139,15 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         self.cached_step_outputs: List[torch.Tensor] = [
         ]  # Only used for multi-step execution
 
-        if self.model_config.is_encoder_decoder:
-            self.cached_enc_dec_data: Optional[Dict[int, Dict[
-                str, Any]]] = None  # seq_id -> enc_dec_data
+        self.request_specific_rope = 'Qwen2.5-VL' in self.model_config.model
+        if self.model_config.is_encoder_decoder or self.request_specific_rope:
+            assert (
+                self.model_config.is_encoder_decoder
+                and self.request_specific_rope
+            ) is False, (
+                "a model cannot be encoder-decoder and request-specific rope")
+            # seq_id -> cached_req_data
+            self.cached_req_data: Dict[int, Dict[str, Any]] = {}
 
         # Detect if the model has "mrope" rope_scaling type.
         # mrope requires keep "rope_deltas" between prompt and decoding phases.
@@ -172,22 +178,13 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         # TODO: Extend this to support other DP models
 
         if ("Llama" in self.model_config.model
-                and "70B" in self.model_config.model
-                and self.device_config.device.get_num_devices() == 32
-                and not is_dp):
-            self.llama_tg = True
-        else:
-            self.llama_tg = False
-
-        if self.llama_tg or is_dp:
+                and "70B" in self.model_config.model and
+                self.device_config.device.get_num_devices() == 32) or is_dp:
             self.dp_kv_cache = True
         else:
             self.dp_kv_cache = False
 
-        if self.llama_tg:
-            self.async_torch_proc = True
-        else:
-            self.async_torch_proc = False
+        self.async_torch_proc = self.sample_on_device_mode is not None
 
         if self.dp_kv_cache:
             # Map request id strs to seq group ids
@@ -195,7 +192,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             self.empty_slots = list(range(self.scheduler_config.max_num_seqs))
             self.seq_groups_to_batch_slot: Dict[int, int] = {}
             if self.async_torch_proc:
-                self.cached_read_events: List[Any] = [
+                self.cached_read_events: List[List[Any]] = [
                 ]  # Only used for multi-step execution
                 self.perm_table_tensor: List[torch.Tensor] = []
 
@@ -333,14 +330,15 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         # Remove cached encoder-decoder data
         # for any seq ids that are not in the current batch
         # (assume they were either finished or preempted)
-        if (self.model_config.is_encoder_decoder and not is_prompt
-                and self.cached_enc_dec_data):
+        if ((self.model_config.is_encoder_decoder
+             or self.request_specific_rope) and not is_prompt
+                and self.cached_req_data):
             seq_ids_to_del = []
-            for seq_id in self.cached_enc_dec_data:
+            for seq_id in self.cached_req_data:
                 if seq_id not in seq_groups_list:
                     seq_ids_to_del.append(seq_id)
             for seq_id in seq_ids_to_del:
-                del self.cached_enc_dec_data[seq_id]
+                del self.cached_req_data[seq_id]
 
         # Convert lists to tensors and add padding
 
@@ -494,8 +492,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                     next_token_ids, read_event = next_token_ids
                     self.cached_read_events.append(read_event)
                 self.cached_step_outputs.append(next_token_ids)
-                if (not self.llama_tg and i < num_steps - 1
-                        and not self.sample_on_device_mode):
+                if (i < num_steps - 1 and not self.sample_on_device_mode):
                     # Prepare the inputs for the next step
                     new_input_tokens = next_token_ids.unsqueeze(dim=1).int()
                     if new_input_tokens.shape[
@@ -539,10 +536,12 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             for i in range(num_outputs):
                 next_token_ids = self.cached_step_outputs.pop(0)
                 if is_decode and self.async_torch_proc:
-                    read_event = self.cached_read_events.pop(0)
-                    ttnn.event_synchronize(read_event)
-                    next_token_ids = ttnn.to_torch(
-                        ttnn.get_device_tensors(next_token_ids)[0])[0, 0, 0, :]
+                    read_events = self.cached_read_events.pop(0)
+                    for event in read_events:
+                        ttnn.event_synchronize(event)
+                    next_token_ids = self.model.process_decode_output_host(
+                        next_token_ids,
+                        is_tokens=(self.sample_on_device_mode is not None))
                     if self.dp_kv_cache:
                         # permute the tt_out
                         next_token_ids = next_token_ids[
@@ -591,10 +590,12 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         if step_idx > 0:
             next_token_ids = self.cached_step_outputs.pop(0)
             if self.async_torch_proc:
-                read_event = self.cached_read_events.pop(0)
-                ttnn.event_synchronize(read_event)
-                next_token_ids = ttnn.to_torch(
-                    ttnn.get_device_tensors(next_token_ids)[0])[0, 0, 0, :]
+                read_events = self.cached_read_events.pop(0)
+                for event in read_events:
+                    ttnn.event_synchronize(event)
+                next_token_ids = self.model.process_decode_output_host(
+                    next_token_ids,
+                    is_tokens=(self.sample_on_device_mode is not None))
                 if self.dp_kv_cache:
                     # permute the tt_out
                     next_token_ids = next_token_ids[self.perm_table_tensor.pop(
@@ -663,8 +664,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                 prefill_full_text_row_masked_out_mask, \
                 decode_cross_attention_masks, \
                  decode_full_text_row_masked_out_mask = outputs
-                if self.cached_enc_dec_data is None:
-                    self.cached_enc_dec_data = {}
+
                 for i, seq_id in enumerate(model_input.seq_groups):
                     enc_dec_data = {
                         "prefill_cross_attention_masks":
@@ -676,31 +676,48 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                         "decode_full_text_row_masked_out_mask":
                         decode_full_text_row_masked_out_mask[i]
                     }
-                    self.cached_enc_dec_data[seq_id] = enc_dec_data
+                    self.cached_req_data[seq_id] = enc_dec_data
+            elif self.request_specific_rope:
+                tt_out, rot_mats = outputs
+                # tt_out: [batch_size, seq_len, vocab_size];
+                # rot_mats: List[[batch_size, 1, seq_len, head_dim]]
+                for i, seq_id in enumerate(model_input.seq_groups):
+                    self.cached_req_data[seq_id] = {
+                        "rot_mats": (
+                            # cos: [1, 1, seq_len, head_dim]
+                            rot_mats[0][i:i + 1],
+                            # sin: [1, 1, seq_len, head_dim]
+                            rot_mats[1][i:i + 1],
+                        )
+                    }
             else:
-                tt_out = outputs  # [batch_size, seq_len, vocab_size]
+                # [ batch_size] if sampling on device
+                # [ batch_size, len, vocab_size] if not sampling on device
+                # the logits are not guaranteed to be for the whole sequence,
+                # usually only last token.
+                tt_out = outputs
         else:
             if self.model_config.is_encoder_decoder:
-                assert self.cached_enc_dec_data is not None
+                assert self.cached_req_data
 
                 # Use encoder-decoder data from prefill step
                 prefill_cross_attention_masks = [
-                    self.cached_enc_dec_data[seq_id]
+                    self.cached_req_data[seq_id]
                     ["prefill_cross_attention_masks"]
                     for seq_id in model_input.seq_groups
                 ]
                 prefill_full_text_row_masked_out_mask = [
-                    self.cached_enc_dec_data[seq_id]
+                    self.cached_req_data[seq_id]
                     ["prefill_full_text_row_masked_out_mask"]
                     for seq_id in model_input.seq_groups
                 ]
                 decode_cross_attention_masks = [
-                    self.cached_enc_dec_data[seq_id]
+                    self.cached_req_data[seq_id]
                     ["decode_cross_attention_masks"]
                     for seq_id in model_input.seq_groups
                 ]
                 decode_full_text_row_masked_out_mask = [
-                    self.cached_enc_dec_data[seq_id]
+                    self.cached_req_data[seq_id]
                     ["decode_full_text_row_masked_out_mask"]
                     for seq_id in model_input.seq_groups
                 ]
@@ -713,6 +730,13 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                     decode_cross_attention_masks,
                     "decode_full_text_row_masked_out_mask":
                     decode_full_text_row_masked_out_mask
+                }
+            elif self.request_specific_rope:
+                enc_dec_kwargs = {
+                    "rot_mats_all_users": [
+                        self.cached_req_data[seq_id]["rot_mats"]
+                        for seq_id in model_input.seq_groups
+                    ]
                 }
             else:
                 enc_dec_kwargs = {}
@@ -756,12 +780,15 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                 # trigger output processor on host while device is executing
                 # next step
                 self._send_prev_step_async_out(model_input, step_idx)
-            tt_out = self.model.read_decode_output(
-                tt_out,
-                model_input.unpadded_batch_size,
-                is_tokens=(self.sample_on_device_mode is not None))
             if self.async_torch_proc:
-                tt_out, read_event = tt_out
+                tt_out, read_event = self.model.read_decode_output(
+                    tt_out, async_read=True)
+            else:
+                # outputs ttnn host tensors
+                tt_out = self.model.read_decode_output(tt_out)
+                # outputs torch tensor
+                tt_out = self.model.process_decode_output_host(
+                    tt_out, is_tokens=(self.sample_on_device_mode is not None))
             if self.dp_kv_cache and not self.async_torch_proc:
                 tt_out = tt_out[perm_table_tensor]
 
@@ -778,15 +805,17 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                                  -1, :]  # unpadded batch, vocab of last token
             next_token_ids = self._sample_tokens(
                 next_logits, model_input.tt_sampling_params)
-        else:
-            if self.llama_tg:
+        else:  # sample on device
+            if self.async_torch_proc:
+                # do not slice as this may be mid-transfer to host
                 next_token_ids = tt_out
             else:
                 next_token_ids = tt_out[:model_input.unpadded_batch_size]
-        if not is_decode or not self.async_torch_proc:
-            return next_token_ids
-        else:
+        if is_decode and self.async_torch_proc:
+            # async torch proc only works in decode
             return tt_out, read_event
+        else:
+            return next_token_ids
 
     def _sample_tokens(self, logits, tt_sampling_params: TTSamplingParams):
         if tt_sampling_params.temperature == 0:  # greedy decoding
