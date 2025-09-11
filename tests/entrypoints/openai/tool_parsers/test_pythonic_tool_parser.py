@@ -35,7 +35,7 @@ MORE_TYPES_FUNCTION_CALL = FunctionCall(
 PARAMETERLESS_FUNCTION_OUTPUT = "get_weather()"
 PARAMETERLESS_FUNCTION_CALL = FunctionCall(
     name="get_weather",
-    arguments='{}',
+    arguments="{}",
 )
 EMPTY_DICT_FUNCTION_OUTPUT = "do_something_cool(additional_data={})"
 EMPTY_DICT_FUNCTION_CALL = FunctionCall(
@@ -71,54 +71,90 @@ def test_no_tool_call(streaming: bool):
 
 
 TEST_CASES = [
-    pytest.param(True,
-                 f"[{SIMPLE_FUNCTION_OUTPUT}]", [SIMPLE_FUNCTION_CALL],
-                 id="simple_streaming"),
-    pytest.param(False,
-                 f"[{SIMPLE_FUNCTION_OUTPUT}]", [SIMPLE_FUNCTION_CALL],
-                 id="simple_nonstreaming"),
-    pytest.param(True,
-                 f"[{MORE_TYPES_FUNCTION_OUTPUT}]", [MORE_TYPES_FUNCTION_CALL],
-                 id="more_types_streaming"),
-    pytest.param(False,
-                 f"[{MORE_TYPES_FUNCTION_OUTPUT}]", [MORE_TYPES_FUNCTION_CALL],
-                 id="more_types_nonstreaming"),
-    pytest.param(True,
-                 f"[{PARAMETERLESS_FUNCTION_OUTPUT}]",
-                 [PARAMETERLESS_FUNCTION_CALL],
-                 id="parameterless_streaming"),
-    pytest.param(False,
-                 f"[{PARAMETERLESS_FUNCTION_OUTPUT}]",
-                 [PARAMETERLESS_FUNCTION_CALL],
-                 id="parameterless_nonstreaming"),
-    pytest.param(True,
-                 f"[{EMPTY_DICT_FUNCTION_OUTPUT}]", [EMPTY_DICT_FUNCTION_CALL],
-                 id="empty_dict_streaming"),
-    pytest.param(False,
-                 f"[{EMPTY_DICT_FUNCTION_OUTPUT}]", [EMPTY_DICT_FUNCTION_CALL],
-                 id="empty_dict_nonstreaming"),
-    pytest.param(True,
-                 f"[{EMPTY_LIST_FUNCTION_OUTPUT}]", [EMPTY_LIST_FUNCTION_CALL],
-                 id="empty_list_streaming"),
-    pytest.param(False,
-                 f"[{EMPTY_LIST_FUNCTION_OUTPUT}]", [EMPTY_LIST_FUNCTION_CALL],
-                 id="empty_list_nonstreaming"),
-    pytest.param(True,
-                 f"[{ESCAPED_STRING_FUNCTION_OUTPUT}]",
-                 [ESCAPED_STRING_FUNCTION_CALL],
-                 id="escaped_string_streaming"),
-    pytest.param(False,
-                 f"[{ESCAPED_STRING_FUNCTION_OUTPUT}]",
-                 [ESCAPED_STRING_FUNCTION_CALL],
-                 id="escaped_string_nonstreaming"),
-    pytest.param(True,
-                 f"[{SIMPLE_FUNCTION_OUTPUT}, {MORE_TYPES_FUNCTION_OUTPUT}]",
-                 [SIMPLE_FUNCTION_CALL, MORE_TYPES_FUNCTION_CALL],
-                 id="parallel_calls_streaming"),
-    pytest.param(False,
-                 f"[{SIMPLE_FUNCTION_OUTPUT}, {MORE_TYPES_FUNCTION_OUTPUT}]",
-                 [SIMPLE_FUNCTION_CALL, MORE_TYPES_FUNCTION_CALL],
-                 id="parallel_calls_nonstreaming"),
+    pytest.param(
+        True,
+        f"[{SIMPLE_FUNCTION_OUTPUT}]",
+        [SIMPLE_FUNCTION_CALL],
+        id="simple_streaming",
+    ),
+    pytest.param(
+        False,
+        f"[{SIMPLE_FUNCTION_OUTPUT}]",
+        [SIMPLE_FUNCTION_CALL],
+        id="simple_nonstreaming",
+    ),
+    pytest.param(
+        True,
+        f"[{MORE_TYPES_FUNCTION_OUTPUT}]",
+        [MORE_TYPES_FUNCTION_CALL],
+        id="more_types_streaming",
+    ),
+    pytest.param(
+        False,
+        f"[{MORE_TYPES_FUNCTION_OUTPUT}]",
+        [MORE_TYPES_FUNCTION_CALL],
+        id="more_types_nonstreaming",
+    ),
+    pytest.param(
+        True,
+        f"[{PARAMETERLESS_FUNCTION_OUTPUT}]",
+        [PARAMETERLESS_FUNCTION_CALL],
+        id="parameterless_streaming",
+    ),
+    pytest.param(
+        False,
+        f"[{PARAMETERLESS_FUNCTION_OUTPUT}]",
+        [PARAMETERLESS_FUNCTION_CALL],
+        id="parameterless_nonstreaming",
+    ),
+    pytest.param(
+        True,
+        f"[{EMPTY_DICT_FUNCTION_OUTPUT}]",
+        [EMPTY_DICT_FUNCTION_CALL],
+        id="empty_dict_streaming",
+    ),
+    pytest.param(
+        False,
+        f"[{EMPTY_DICT_FUNCTION_OUTPUT}]",
+        [EMPTY_DICT_FUNCTION_CALL],
+        id="empty_dict_nonstreaming",
+    ),
+    pytest.param(
+        True,
+        f"[{EMPTY_LIST_FUNCTION_OUTPUT}]",
+        [EMPTY_LIST_FUNCTION_CALL],
+        id="empty_list_streaming",
+    ),
+    pytest.param(
+        False,
+        f"[{EMPTY_LIST_FUNCTION_OUTPUT}]",
+        [EMPTY_LIST_FUNCTION_CALL],
+        id="empty_list_nonstreaming",
+    ),
+    pytest.param(
+        True,
+        f"[{ESCAPED_STRING_FUNCTION_OUTPUT}]",
+        [ESCAPED_STRING_FUNCTION_CALL],
+        id="escaped_string_streaming",
+    ),
+    pytest.param(
+        False,
+        f"[{ESCAPED_STRING_FUNCTION_OUTPUT}]",
+        [ESCAPED_STRING_FUNCTION_CALL],
+        id="escaped_string_nonstreaming",
+    ),
+    pytest.param(
+        True,
+        f"[{SIMPLE_FUNCTION_OUTPUT}, {MORE_TYPES_FUNCTION_OUTPUT}]",
+        [SIMPLE_FUNCTION_CALL, MORE_TYPES_FUNCTION_CALL],
+        id="parallel_calls_streaming",
+    ),
+    pytest.param(
+        False,
+        f"[{SIMPLE_FUNCTION_OUTPUT}, {MORE_TYPES_FUNCTION_OUTPUT}]",
+        [SIMPLE_FUNCTION_CALL, MORE_TYPES_FUNCTION_CALL],
+        id="parallel_calls_nonstreaming",
+    ),
 ]
 
 
@@ -175,7 +211,7 @@ def test_regex_timeout_handling(streaming: bool):
     mock_regex = MagicMock()
     mock_regex.match.side_effect = TimeoutError("Regex timeout")
 
-    with patch.object(tool_parser, 'TOOL_CALL_REGEX', mock_regex):
+    with patch.object(tool_parser, "TOOL_CALL_REGEX", mock_regex):
         content, tool_calls = run_tool_extraction(tool_parser,
                                                   fake_problematic_input,
                                                   streaming=streaming)
@@ -184,3 +220,118 @@ def test_regex_timeout_handling(streaming: bool):
         assert content == fake_problematic_input
         assert len(tool_calls) == 0
         mock_regex.match.assert_called_once()
+
+
+# Test cases for mixed content (text + tools) functionality
+MIXED_CONTENT_TEST_CASES = [
+    pytest.param(
+        True,
+        (f"Here's the weather information.<|python_tag|>"
+         f"[{SIMPLE_FUNCTION_OUTPUT}]"),
+        "Here's the weather information.",
+        [SIMPLE_FUNCTION_CALL],
+        id="python_tag_separator_streaming",
+    ),
+    pytest.param(
+        False,
+        (f"Here's the weather information.<|python_tag|>"
+         f"[{SIMPLE_FUNCTION_OUTPUT}]"),
+        "Here's the weather information.",
+        [SIMPLE_FUNCTION_CALL],
+        id="python_tag_separator_nonstreaming",
+    ),
+    pytest.param(
+        True,
+        f"Let me search for that information.\n\n[{SIMPLE_FUNCTION_OUTPUT}]",
+        "Let me search for that information.",
+        [SIMPLE_FUNCTION_CALL],
+        id="double_newline_separator_streaming",
+    ),
+    pytest.param(
+        False,
+        f"Let me search for that information.\n\n[{SIMPLE_FUNCTION_OUTPUT}]",
+        "Let me search for that information.",
+        [SIMPLE_FUNCTION_CALL],
+        id="double_newline_separator_nonstreaming",
+    ),
+    pytest.param(
+        True,
+        f"I'll help you with that request.\n\n"
+        f"This might take a moment.\n\n"
+        f"[{SIMPLE_FUNCTION_OUTPUT}, {MORE_TYPES_FUNCTION_OUTPUT}]",
+        "I'll help you with that request.\n\nThis might take a moment.",
+        [SIMPLE_FUNCTION_CALL, MORE_TYPES_FUNCTION_CALL],
+        id="complex_mixed_content_streaming",
+    ),
+    pytest.param(
+        False,
+        f"I'll help you with that request.\n\n"
+        f"This might take a moment.\n\n"
+        f"[{SIMPLE_FUNCTION_OUTPUT}, {MORE_TYPES_FUNCTION_OUTPUT}]",
+        "I'll help you with that request.\n\nThis might take a moment.",
+        [SIMPLE_FUNCTION_CALL, MORE_TYPES_FUNCTION_CALL],
+        id="complex_mixed_content_nonstreaming",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "streaming, model_output, expected_content, expected_tool_calls",
+    MIXED_CONTENT_TEST_CASES,
+)
+def test_mixed_content_tool_calls(
+    streaming: bool,
+    model_output: str,
+    expected_content: str,
+    expected_tool_calls: list[FunctionCall],
+):
+    """Test mixed content functionality (text + tools separated by
+    <|python_tag|> or \\n\\n)"""
+    mock_tokenizer = MagicMock()
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("pythonic")(
+        mock_tokenizer)
+
+    content, tool_calls = run_tool_extraction(tool_parser,
+                                              model_output,
+                                              streaming=streaming)
+
+    assert content == expected_content
+    assert len(tool_calls) == len(expected_tool_calls)
+    for actual, expected in zip(tool_calls, expected_tool_calls):
+        assert actual.type == "function"
+        assert actual.function == expected
+
+
+@pytest.mark.parametrize("streaming", [True, False])
+def test_mixed_content_edge_cases(streaming: bool):
+    """Test edge cases for mixed content functionality"""
+    mock_tokenizer = MagicMock()
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("pythonic")(
+        mock_tokenizer)
+
+    # Test case: text that looks like tools but isn't valid
+    fake_tools_output = (
+        "I need to call [some_function(param='value')] but this isn't a real "
+        "tool call.")
+    content, tool_calls = run_tool_extraction(tool_parser,
+                                              fake_tools_output,
+                                              streaming=streaming)
+    assert content == fake_tools_output
+    assert len(tool_calls) == 0
+
+    # Test case: empty text with separator
+    empty_text_output = f"<|python_tag|>[{SIMPLE_FUNCTION_OUTPUT}]"
+    content, tool_calls = run_tool_extraction(tool_parser,
+                                              empty_text_output,
+                                              streaming=streaming)
+    assert content is None
+    assert len(tool_calls) == 1
+    assert tool_calls[0].function == SIMPLE_FUNCTION_CALL
+
+    # Test case: text with separator but no valid tools
+    no_tools_output = "Here's some text.<|python_tag|>This is not a tool call."
+    content, tool_calls = run_tool_extraction(tool_parser,
+                                              no_tools_output,
+                                              streaming=streaming)
+    assert content == no_tools_output
+    assert len(tool_calls) == 0

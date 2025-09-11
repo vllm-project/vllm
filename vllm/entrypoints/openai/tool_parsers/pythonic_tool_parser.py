@@ -34,8 +34,8 @@ class PythonicToolParser(ToolParser):
 
     Used when --enable-auto-tool-choice --tool-call-parser pythonic are all set
     """
+
     # TODO(mdepinet): Possible future improvements:
-    #   1. Support text + tools separated by either <|python_tag|> or \n\n
     #   2. Support tools outside of a list (or separated by a semicolon).
     #      This depends on item 1 for consistent streaming.
     # Neither of these are necessary for e.g. ToolACE, but both would help make
@@ -43,10 +43,51 @@ class PythonicToolParser(ToolParser):
 
     TOOL_CALL_REGEX = re.compile(
         r"\[([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*,\s*)*([a-zA-Z]+\w*=.*\s)?\),\s*)*([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*,\s*)*([a-zA-Z]+\w*=.*\s*)?\)\s*)+\]",
-        re.DOTALL)
+        re.DOTALL,
+    )
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase):
         super().__init__(tokenizer)
+
+    def _split_text_and_tools(self, model_output: str) -> tuple[str, str]:
+        """
+        Split model output into text content and tool calls section.
+        Returns (text_content, tools_section).
+        """
+        # Check for <|python_tag|> separator
+        if "<|python_tag|>" in model_output:
+            parts = model_output.split("<|python_tag|>", 1)
+            return parts[0].strip(), parts[1].strip()
+
+        # Check for double newline separator
+        if "\n\n" in model_output:
+            # Look for the pattern where text is followed by tool calls
+            parts = model_output.split("\n\n")
+            for i in range(len(parts) - 1):
+                text_part = "\n\n".join(parts[:i + 1]).strip()
+                tools_part = "\n\n".join(parts[i + 1:]).strip()
+
+                # Check if the remaining part looks like tool calls
+                if self._looks_like_tool_calls(tools_part):
+                    return text_part, tools_part
+
+        # No separator found, return as-is
+        return "", model_output
+
+    def _looks_like_tool_calls(self, text: str) -> bool:
+        """
+        Check if text looks like tool calls (starts with [ and matches pattern).
+        """
+        text = text.strip()
+        if not text.startswith("["):
+            return False
+
+        try:
+            return (self.TOOL_CALL_REGEX.match(
+                text, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS)
+                    is not None)
+        except TimeoutError:
+            return False
 
     # Rename for readability. This is NOT a tool id.
     @property
@@ -62,35 +103,33 @@ class PythonicToolParser(ToolParser):
             request: ChatCompletionRequest) -> ExtractedToolCallInformation:
         """
         Extract the tool calls from a complete model response.
+        Supports both pure tool calls and mixed text + tool calls.
         """
-        is_tool_call_pattern = False
-        try:
-            is_tool_call_pattern = self.TOOL_CALL_REGEX.match(
-                model_output,
-                timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS) is not None
-        except TimeoutError:
-            logger.warning(
-                "Regex timeout occurred when matching tool call pattern.")
-            logger.debug("Regex timeout occurred when matching user input: %s",
-                         model_output)
+        # First, try to split text and tools
+        text_content, tools_section = self._split_text_and_tools(model_output)
 
-        if not is_tool_call_pattern:
+        # Check if we have tool calls to parse
+        if not tools_section or not self._looks_like_tool_calls(tools_section):
+            # No valid tool calls found, return as regular content
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
                                                 content=model_output)
 
         try:
-            module = ast.parse(model_output)
+            module = ast.parse(tools_section)
             parsed = getattr(module.body[0], "value", None)
             if isinstance(parsed, ast.List) and all(
                     isinstance(e, ast.Call) for e in parsed.elts):
+                # Return both text content and tool calls
+                content = text_content if text_content else None
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=[
-                        _handle_single_tool(e)  # type: ignore
-                        for e in parsed.elts
+                        _handle_single_tool(e)
+                        for e in parsed.elts  # type: ignore
                     ],
-                    content=None)
+                    content=content,
+                )
             else:
                 raise _UnexpectedAstError(
                     "Tool output must be a list of function calls")
@@ -112,9 +151,101 @@ class PythonicToolParser(ToolParser):
         request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
 
+        # Check if we have mixed content (text + tools)
+        text_content, tools_section = self._split_text_and_tools(current_text)
+
+        # If we have text content and no tools section yet, stream the text
+        if text_content and not tools_section:
+            return DeltaMessage(content=delta_text)
+
+        # If we have tools section, check if it looks like tool calls
+        if tools_section and self._looks_like_tool_calls(tools_section):
+            # We're in the tools section, process tool calls
+            try:
+                valid_and_added_text = _make_valid_python(tools_section)
+                if valid_and_added_text is None:
+                    return None
+                valid_text, added_text = valid_and_added_text
+
+                module = ast.parse(valid_text)
+                parsed = getattr(module.body[0], "value", None)
+                if not isinstance(parsed, ast.List) or not all(
+                        isinstance(e, ast.Call) for e in parsed.elts):
+                    raise _UnexpectedAstError(
+                        "Tool output must be a list of function calls")
+                tool_calls = [_handle_single_tool(e)
+                              for e in parsed.elts]  # type: ignore
+
+                tool_deltas = []
+                for index, new_call in enumerate(tool_calls):
+                    if index < self.current_tool_index:
+                        continue
+
+                    self.current_tool_index = index
+                    if len(self.streamed_args_for_tool) == index:
+                        self.streamed_args_for_tool.append("")
+
+                    new_call_complete = (index < len(tool_calls) - 1
+                                         or ")]" not in added_text)
+                    if new_call_complete:
+                        self.current_tool_index += 1
+
+                    if not new_call_complete:
+                        withheld_suffix = added_text[:-2]
+                    else:
+                        withheld_suffix = ""
+
+                    if not new_call_complete and added_text[-2] == ")":
+                        # Function call is incomplete. Withhold the closing
+                        # bracket.
+                        withheld_suffix = withheld_suffix + "}"
+                    # Strings get single quotes in the model-produced string.
+                    # JSON requires double quotes.
+                    withheld_suffix = withheld_suffix.replace("'", '"')
+                    delta = _compute_tool_delta(
+                        self.streamed_args_for_tool[index],
+                        new_call,
+                        index,
+                        withheld_suffix,
+                    )
+
+                    if delta is not None:
+                        tool_deltas.append(delta)
+                        if (delta.function is not None
+                                and delta.function.arguments is not None):
+                            self.streamed_args_for_tool[
+                                index] += delta.function.arguments
+
+                # HACK: serving_chat.py inspects the internal state of tool
+                # parsers when determining its final streaming delta,
+                # automatically adding autocompleted JSON.
+                # These two lines avoid that nonsense while ensuring
+                # finish_reason is set to tool_calls when at least one tool is
+                # called.
+                if tool_deltas and not self.prev_tool_call_arr:
+                    self.prev_tool_call_arr = [{"arguments": {}}]
+
+                if tool_deltas:
+                    return DeltaMessage(tool_calls=tool_deltas)
+                elif not added_text and self.current_tool_id > 0:
+                    # Return an empty DeltaMessage once the tool calls are
+                    # all done so that finish_reason gets set.
+                    return DeltaMessage(content="")
+                else:
+                    return None
+            except Exception:
+                logger.exception("Error trying to handle streaming tool call.")
+                logger.debug(
+                    "Skipping chunk as a result of tool streaming extraction "
+                    "error")
+                return None
+
+        # Fallback: if current text doesn't start with [ and no mixed
+        # content detected, treat as regular text
         if not current_text.startswith("["):
             return DeltaMessage(content=delta_text)
 
+        # Legacy path for pure tool calls (no mixed content)
         try:
             valid_and_added_text = _make_valid_python(current_text)
             if valid_and_added_text is None:
@@ -127,10 +258,8 @@ class PythonicToolParser(ToolParser):
                     isinstance(e, ast.Call) for e in parsed.elts):
                 raise _UnexpectedAstError(
                     "Tool output must be a list of function calls")
-            tool_calls = [
-                _handle_single_tool(e)  # type: ignore
-                for e in parsed.elts
-            ]
+            tool_calls = [_handle_single_tool(e)
+                          for e in parsed.elts]  # type: ignore
 
             tool_deltas = []
             for index, new_call in enumerate(tool_calls):
@@ -141,13 +270,15 @@ class PythonicToolParser(ToolParser):
                 if len(self.streamed_args_for_tool) == index:
                     self.streamed_args_for_tool.append("")
 
-                new_call_complete = index < len(
-                    tool_calls) - 1 or ")]" not in added_text
+                new_call_complete = (index < len(tool_calls) - 1
+                                     or ")]" not in added_text)
                 if new_call_complete:
                     self.current_tool_index += 1
 
-                withheld_suffix = (added_text[:-2]
-                                   if not new_call_complete else "")
+                if not new_call_complete:
+                    withheld_suffix = added_text[:-2]
+                else:
+                    withheld_suffix = ""
                 if not new_call_complete and added_text[-2] == ")":
                     # Function call is incomplete. Withhold the closing bracket.
                     withheld_suffix = withheld_suffix + "}"
@@ -161,8 +292,8 @@ class PythonicToolParser(ToolParser):
                     tool_deltas.append(delta)
                     if (delta.function is not None
                             and delta.function.arguments is not None):
-                        self.streamed_args_for_tool[
-                            index] += delta.function.arguments
+                        self.streamed_args_for_tool[index] += \
+                            delta.function.arguments
 
             # HACK: serving_chat.py inspects the internal state of tool parsers
             # when determining its final streaming delta, automatically
@@ -177,7 +308,7 @@ class PythonicToolParser(ToolParser):
             elif not added_text and self.current_tool_id > 0:
                 # Return an empty DeltaMessage once the tool calls are all done
                 # so that finish_reason gets set.
-                return DeltaMessage(content='')
+                return DeltaMessage(content="")
             else:
                 return None
         except Exception:
@@ -193,8 +324,8 @@ def _get_parameter_value(val: ast.expr) -> Any:
         return val.value
     elif isinstance(val, ast.Dict):
         if not all(isinstance(k, ast.Constant) for k in val.keys):
-            raise _UnexpectedAstError(
-                "Dict tool call arguments must have literal keys")
+            raise _UnexpectedAstError("Dict tool call arguments"
+                                      "must have literal keys")
         return {
             k.value: _get_parameter_value(v)  # type: ignore
             for k, v in zip(val.keys, val.values)
@@ -266,8 +397,8 @@ def _make_valid_python(text: str) -> Union[tuple[str, str], None]:
             return None  # Incomplete parameter name
     if text.endswith(","):
         text = text[:-1]
-    if bracket_stack and bracket_stack[-1] == "[" and not text.endswith(
-            "[") and not text.endswith(")"):
+    if (bracket_stack and bracket_stack[-1] == "[" and not text.endswith("[")
+            and not text.endswith(")")):
         return None  # Incomplete function name
 
     added_text = ""
@@ -294,15 +425,17 @@ def _compute_tool_delta(previously_sent_args: str, new_call: ToolCall,
         assert new_call_args.endswith(withheld_suffix)
         new_call_args = new_call_args[:-len(withheld_suffix)]
     if not previously_sent_args:
-        return DeltaToolCall(id=new_call.id,
-                             type="function",
-                             index=index,
-                             function=DeltaFunctionCall(
-                                 name=new_call.function.name,
-                                 arguments=new_call_args,
-                             ))
+        return DeltaToolCall(
+            id=new_call.id,
+            type="function",
+            index=index,
+            function=DeltaFunctionCall(
+                name=new_call.function.name,
+                arguments=new_call_args,
+            ),
+        )
 
     arg_diff = new_call_args[len(previously_sent_args):]
-    return DeltaToolCall(
+    return (DeltaToolCall(
         id=None, index=index, function=DeltaFunctionCall(
-            arguments=arg_diff)) if arg_diff else None
+            arguments=arg_diff)) if arg_diff else None)
