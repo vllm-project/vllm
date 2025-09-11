@@ -20,7 +20,7 @@ Declare supported languages and capabilities:
     import numpy as np
     import torch
     from torch import nn
-    
+
     from vllm.config import ModelConfig, SpeechToTextConfig
     from vllm.inputs.data import PromptType
     from vllm.model_executor.models.interfaces import SupportsTranscription
