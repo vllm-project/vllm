@@ -78,7 +78,8 @@ class Worker(LocalOrDistributedWorkerBase):
                         "deepseek_mtp",
                         "glm4_moe_mtp",
                         "mimo_mtp",
-                        "ernie_mtp")) \
+                        "ernie_mtp",
+                        "qwen3_next_mtp")) \
                     else {"return_hidden_states": True}
 
         ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
@@ -539,8 +540,10 @@ def init_worker_distributed_environment(
     init_distributed_environment(parallel_config.world_size, rank,
                                  distributed_init_method, local_rank,
                                  current_platform.dist_backend)
-    ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
-                                      parallel_config.pipeline_parallel_size)
+    ensure_model_parallel_initialized(
+        parallel_config.tensor_parallel_size,
+        parallel_config.pipeline_parallel_size,
+        parallel_config.decode_context_parallel_size)
 
     ensure_kv_transfer_initialized(vllm_config)
 

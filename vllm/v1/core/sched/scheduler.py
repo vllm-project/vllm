@@ -100,6 +100,15 @@ class Scheduler(SchedulerInterface):
 
         self.block_size = self.cache_config.block_size
 
+        self.dcp_world_size = \
+            vllm_config.parallel_config.decode_context_parallel_size
+        # Note(hc): The scheduler’s block_size must be multiplied
+        # by dcp_world_size, since block hashes are computed on the
+        # original full token sequence at a granularity of
+        # original_block_size × dcp_world_size.
+        if self.dcp_world_size > 1:
+            self.block_size *= self.dcp_world_size
+
         # req_id -> Request
         self.requests: dict[str, Request] = {}
         # Scheduling policy
@@ -135,8 +144,8 @@ class Scheduler(SchedulerInterface):
         )
 
         # NOTE(woosuk): Here, "encoder" includes the vision encoder (and
-        # projector if needed). Currently, we assume that the encoder also
-        # has the Transformer architecture (e.g., ViT).
+        # projector if needed) for MM models as well as encoder-decoder
+        # transformers.
         self.max_num_encoder_input_tokens = encoder_compute_budget
         # NOTE: For the models without encoder (e.g., text-only models),
         # the encoder cache will not be initialized because cache size is 0
@@ -161,6 +170,7 @@ class Scheduler(SchedulerInterface):
             use_eagle=self.use_eagle,
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
+            dcp_world_size=self.dcp_world_size,
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
 
@@ -376,6 +386,14 @@ class Scheduler(SchedulerInterface):
                         num_external_computed_tokens, load_kv_async = (
                             self.connector.get_num_new_matched_tokens(
                                 request, num_new_local_computed_tokens))
+
+                        if num_external_computed_tokens is None:
+                            # The request cannot be scheduled because
+                            # the KVConnector couldn't determine
+                            # the number of matched tokens.
+                            self.waiting.pop_request()
+                            skipped_waiting_requests.prepend_request(request)
+                            continue
 
                     # Total computed tokens (local + external).
                     num_computed_tokens = (num_new_local_computed_tokens +
@@ -757,15 +775,19 @@ class Scheduler(SchedulerInterface):
                 # in the decoder's KV cache.
                 continue
 
-            # The same encoder input has already been scheduled in the current
-            # step.
-            if request.mm_hashes[i] in mm_hashes_to_schedule:
-                continue
+            if not self.is_encoder_decoder:
+                # We are not using the encoder cache for encoder-decoder models,
+                # yet.
+                if request.mm_hashes[i] in mm_hashes_to_schedule:
+                    # The same encoder input has already been scheduled in the
+                    # current step.
+                    continue
 
-            if self.encoder_cache_manager.check_and_update_cache(request, i):
-                # The encoder input is already computed and cached from a
-                # previous step.
-                continue
+                if self.encoder_cache_manager.check_and_update_cache(
+                        request, i):
+                    # The encoder input is already computed and cached from a
+                    # previous step.
+                    continue
 
             # If no encoder input chunking is allowed, we do not want to
             # partially schedule a multimodal item. If the scheduled range would
@@ -1029,7 +1051,13 @@ class Scheduler(SchedulerInterface):
             mm_positions = request.mm_positions[input_id]
             start_pos = mm_positions.offset
             num_tokens = mm_positions.length
-            if start_pos + num_tokens <= request.num_computed_tokens:
+            if self.is_encoder_decoder and request.num_computed_tokens > 0:
+                # With Whisper, as soon as we've generated a single token,
+                # we know we're done with the encoder input. Cross Attention
+                # KVs have been calculated and cached already.
+                self.encoder_cache_manager.free_encoder_input(
+                    request, input_id)
+            elif start_pos + num_tokens <= request.num_computed_tokens:
                 # The encoder output is already processed and stored
                 # in the decoder's KV cache.
                 self.encoder_cache_manager.free_encoder_input(
@@ -1178,6 +1206,8 @@ class Scheduler(SchedulerInterface):
     def shutdown(self) -> None:
         if self.kv_event_publisher:
             self.kv_event_publisher.shutdown()
+        if self.connector is not None:
+            self.connector.shutdown()
 
     ########################################################################
     # KV Connector Related Methods
