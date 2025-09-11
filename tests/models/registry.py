@@ -326,6 +326,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Qwen2MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen1.5-MoE-A2.7B-Chat"),
     "Qwen3ForCausalLM": _HfExamplesInfo("Qwen/Qwen3-8B"),
     "Qwen3MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen3-30B-A3B"),
+    "Qwen3NextForCausalLM": _HfExamplesInfo("Qwen/Qwen3-Next-80B-A3B-Instruct",
+                                            min_transformers_version="4.56.2"),
     "RWForCausalLM": _HfExamplesInfo("tiiuae/falcon-40b"),
     "SeedOssForCausalLM": _HfExamplesInfo("ByteDance-Seed/Seed-OSS-36B-Instruct", # noqa: E501
                                           trust_remote_code=True,
@@ -640,7 +642,9 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
                                         is_available_online=False),
     "MiMoMTPModel": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL",
                                     trust_remote_code=True,
-                                    speculative_model="XiaomiMiMo/MiMo-7B-RL")
+                                    speculative_model="XiaomiMiMo/MiMo-7B-RL"),
+    "Qwen3NextMTP": _HfExamplesInfo("Qwen/Qwen3-Next-80B-A3B-Instruct",
+                                     min_transformers_version="4.56.2"),
 }
 
 _TRANSFORMERS_BACKEND_MODELS = {
