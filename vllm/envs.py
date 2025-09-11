@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     VLLM_CONFIGURE_LOGGING: int = 1
     VLLM_LOGGING_LEVEL: str = "INFO"
     VLLM_LOGGING_PREFIX: str = ""
+    VLLM_LOGGING_STREAM: str = "ext://sys.stdout"
     VLLM_LOGGING_CONFIG_PATH: Optional[str] = None
     VLLM_LOGITS_PROCESSOR_THREADS: Optional[int] = None
     VLLM_LOG_STATS_INTERVAL: float = 10.
@@ -165,7 +166,7 @@ if TYPE_CHECKING:
     VLLM_HAS_FLASHINFER_CUBIN: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
-    VLLM_ALLREDUCE_USE_SYMM_MEM: bool = False
+    VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_TUNED_CONFIG_FOLDER: Optional[str] = None
     VLLM_DISABLE_PAD_FOR_CUDAGRAPH: bool = False
     VLLM_GPT_OSS_USE_CONTAINER_TOOL: bool = False
@@ -434,6 +435,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # this is used for configuring the default logging level
     "VLLM_LOGGING_LEVEL":
     lambda: os.getenv("VLLM_LOGGING_LEVEL", "INFO").upper(),
+
+    # this is used for configuring the default logging stream
+    "VLLM_LOGGING_STREAM":
+    lambda: os.getenv("VLLM_LOGGING_STREAM", "ext://sys.stdout"),
 
     # if set, VLLM_LOGGING_PREFIX will be prepended to all log messages
     "VLLM_LOGGING_PREFIX":
@@ -1198,7 +1203,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Whether to use pytorch symmetric memory for allreduce
     "VLLM_ALLREDUCE_USE_SYMM_MEM":
-    lambda: bool(int(os.getenv("VLLM_ALLREDUCE_USE_SYMM_MEM", "0"))),
+    lambda: bool(int(os.getenv("VLLM_ALLREDUCE_USE_SYMM_MEM", "1"))),
 
     # Allows vllm to find tuned config under customized folder
     "VLLM_TUNED_CONFIG_FOLDER":

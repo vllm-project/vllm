@@ -78,6 +78,7 @@ if TYPE_CHECKING:
     from argparse import Namespace
 
     from vllm.config import ModelConfig, VllmConfig
+    from vllm.sequence import IntermediateTensors
 
 logger = init_logger(__name__)
 
@@ -1472,7 +1473,8 @@ def current_stream() -> torch.cuda.Stream:
         # is hurting performance. Therefore creating a dedicated stream
         # per process
         if current_platform.is_rocm():
-            _current_stream_tls.value = torch.cuda.Stream()
+            # torch.cuda.set_stream here is the alias of _pathed_set_stream
+            torch.cuda.set_stream(torch.cuda.Stream())
         elif current_platform.is_cpu():
             _current_stream_tls.value = _StreamPlaceholder()
         else:
@@ -2278,7 +2280,8 @@ def weak_ref_tensor(tensor: Any) -> Any:
 
 
 def weak_ref_tensors(
-    tensors: Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]
+    tensors: Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor],
+                   IntermediateTensors]
 ) -> Union[torch.Tensor, list[Any], tuple[Any], Any]:
     """
     Convenience function to create weak references to tensors,
@@ -2290,6 +2293,15 @@ def weak_ref_tensors(
         return [weak_ref_tensor(t) for t in tensors]
     if isinstance(tensors, tuple):
         return tuple(weak_ref_tensor(t) for t in tensors)
+
+    # For IntermediateTensors used in pipeline parallelism
+    from vllm.sequence import IntermediateTensors
+    if isinstance(tensors, IntermediateTensors):
+        ret = IntermediateTensors({
+            key: weak_ref_tensor(val)
+            for key, val in tensors.tensors.items()
+        })
+        return ret
     raise ValueError("Invalid type for tensors")
 
 
@@ -2779,7 +2791,10 @@ def memory_profiling(
     result.torch_peak_increase = diff_profile.torch_peak
     result.non_torch_increase = diff_from_create.non_torch_memory
     result.profile_time = diff_profile.timestamp
-    result.non_kv_cache_memory = result.non_torch_increase + result.torch_peak_increase + result.weights_memory  # noqa
+
+    non_torch_memory = result.non_torch_increase
+    peak_activation_memory = result.torch_peak_increase
+    result.non_kv_cache_memory = non_torch_memory + peak_activation_memory + result.weights_memory  # noqa
 
 
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L630 # noqa: E501
