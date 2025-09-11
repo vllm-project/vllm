@@ -387,7 +387,7 @@ class Scheduler(SchedulerInterface):
                             self.connector.get_num_new_matched_tokens(
                                 request, num_new_local_computed_tokens))
 
-                        if num_external_computed_tokens is None:
+                        if num_extra_tokens_from_connector is None:
                             # The request cannot be scheduled because
                             # the KVConnector couldn't determine
                             # the number of matched tokens.
