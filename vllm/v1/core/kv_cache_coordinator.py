@@ -98,6 +98,12 @@ class KVCacheCoordinator(ABC):
             manager.save_new_computed_blocks(request_id,
                                              new_computed_blocks[i])
 
+    def free_blocks_outside_attention_window(
+            self, request_id: str, total_computed_tokens: int) -> None:
+        for manager in self.single_type_managers:
+            manager.free_blocks_outside_attention_window(
+                request_id, total_computed_tokens)
+
     def allocate_new_blocks(
             self,
             request_id: str,
@@ -167,41 +173,6 @@ class KVCacheCoordinator(ABC):
             for manager in self.single_type_managers
         ]
         return num_blocks_per_group
-
-    def remove_skipped_and_allocate_necessary(
-        self,
-        request_id: str,
-        num_computed_tokens: int,
-        num_extra_tokens_from_connector: int,
-        num_encoder_tokens: int,
-    ) -> tuple[list[KVCacheBlock], ...]:
-        """
-        Remove the blocks that are no longer needed from `blocks` and replace 
-        the removed blocks with null_block.
-
-        Args:
-            request_id: The request ID.
-            num_computed_tokens: The number of tokens that have been computed.
-        """
-        return tuple(
-            manager.remove_skipped_and_allocate_necessary(
-                request_id,
-                num_encoder_tokens if isinstance(manager, CrossAttentionManager
-                                                 ) else num_computed_tokens,
-                num_extra_tokens_from_connector,
-            ) for manager in self.single_type_managers)
-
-    def remove_skipped_blocks(
-        self,
-        request_id: str,
-        num_computed_tokens: int,
-    ) -> None:
-        """
-        Remove the blocks that are no longer needed from `blocks` and replace 
-        the removed blocks with null_block.
-        """
-        for manager in self.single_type_managers:
-            manager.remove_skipped_blocks(request_id, num_computed_tokens)
 
     def get_blocks(self, request_id: str) -> tuple[list[KVCacheBlock], ...]:
         """

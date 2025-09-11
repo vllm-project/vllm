@@ -114,6 +114,12 @@ class SingleTypeKVCacheManager(ABC):
             # A running request. Should not have new computed blocks.
             assert len(new_computed_blocks) == 0
 
+    @abstractmethod
+    def free_blocks_outside_attention_window(
+            self, request_id: str, total_computed_tokens: int) -> None:
+
+        raise NotImplementedError
+
     def allocate_new_blocks(self, request_id: str,
                             num_tokens: int) -> list[KVCacheBlock]:
         """
@@ -239,32 +245,6 @@ class SingleTypeKVCacheManager(ABC):
 
         raise NotImplementedError
 
-    def remove_skipped_blocks(
-        self,
-        request_id: str,
-        num_computed_tokens: int,
-    ) -> None:
-
-        self.remove_skipped_and_allocate_necessary(request_id,
-                                                   num_computed_tokens, 0)
-
-    def remove_skipped_and_allocate_necessary(
-        self,
-        request_id: str,
-        num_computed_tokens: int,
-        num_extra_tokens_from_connector: int,
-    ) -> list[KVCacheBlock]:
-        """
-        Remove the blocks that are no longer needed from `blocks` and free the 
-        blocks. The removed blocks should be replaced by null_block.
-        Need to be customized for each attention type.
-
-        Args:
-            request_id: The request ID.
-            num_computed_tokens: The number of tokens that have been computed.
-        """
-        raise NotImplementedError
-
 
 class FullAttentionManager(SingleTypeKVCacheManager):
 
@@ -304,19 +284,6 @@ class FullAttentionManager(SingleTypeKVCacheManager):
                 computed.pop()
         return computed_blocks
 
-    def remove_skipped_and_allocate_necessary(
-        self,
-        request_id: str,
-        num_computed_tokens: int,
-        num_extra_tokens_from_connector: int,
-    ) -> list[KVCacheBlock]:
-        # The `allocate_new_blocks` API require us to specify
-        # ALL tokens for this request.
-        # In this case it is vllm-computed tokens (`num_computed_tokens`)
-        # plus extra tokens from connector (`num_extra_tokens_from_connector`).
-        return self.allocate_new_blocks(
-            request_id, num_computed_tokens + num_extra_tokens_from_connector)
-
     def get_num_common_prefix_blocks(self, request_id: str,
                                      num_running_requests: int) -> int:
         blocks = self.req_to_blocks[request_id]
@@ -327,6 +294,10 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             else:
                 break
         return num_common_blocks
+
+    def free_blocks_outside_attention_window(
+            self, request_id: str, total_computed_tokens: int) -> None:
+        pass
 
 
 class SlidingWindowManager(SingleTypeKVCacheManager):
@@ -400,16 +371,14 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                 computed.pop()
         return computed_blocks
 
-    def remove_skipped_and_allocate_necessary(
+    def free_blocks_outside_attention_window(
         self,
         request_id: str,
-        num_computed_tokens: int,
-        num_extra_tokens_from_connector: int = 0,
-    ) -> list[KVCacheBlock]:
+        total_computed_tokens: int,
+    ) -> None:
         # Free the blocks that are outside sliding window, and pad
         # with null blocks.
-        last_useful_token = num_computed_tokens +\
-            num_extra_tokens_from_connector - self.sliding_window + 1
+        last_useful_token = total_computed_tokens - self.sliding_window + 1
         last_useful_token = max(last_useful_token, 0)
         last_useful_block = last_useful_token // self.block_size
         blocks = self.req_to_blocks[request_id]
@@ -428,11 +397,6 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         if last_useful_block - 1 > len(blocks):
             self.req_to_blocks[request_id].extend(
                 [self._null_block] * (last_useful_block - 1 - len(blocks)))
-
-        # allocate for new tokens from the connector.
-        # TODO(Kuntai): cap this value to max model len.
-        return self.allocate_new_blocks(
-            request_id, num_computed_tokens + num_extra_tokens_from_connector)
 
     def get_num_common_prefix_blocks(self, request_id: str,
                                      num_running_requests: int) -> int:
@@ -554,12 +518,11 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
                 break
         return computed_blocks
 
-    def remove_skipped_and_allocate_necessary(
+    def free_blocks_outside_attention_window(
         self,
         request_id: str,
-        num_computed_tokens: int,
-        num_extra_tokens_from_connector: int = 0,
-    ) -> list[KVCacheBlock]:
+        total_computed_tokens: int,
+    ) -> None:
         # Remove the blocks that are no longer be in the chunked attention
         # window and skipped during the attention computation.
 
@@ -570,9 +533,8 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         # is in the second chunk, there are 1 prev chunk, the start idx
         # is 1024. for 1023, it will be 0.
         num_cached_block = self.num_cached_block.get(request_id, 0)
-        local_attention_start_idx = (
-            num_computed_tokens + num_extra_tokens_from_connector
-        ) // self.attention_chunk_size * self.attention_chunk_size
+        local_attention_start_idx = total_computed_tokens //\
+            self.attention_chunk_size * self.attention_chunk_size
         first_useful_block_idx = local_attention_start_idx // self.block_size
         if num_cached_block > 0:
             # Make sure we don't delete the last cached block
@@ -599,10 +561,6 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
             self.req_to_blocks[request_id].extend(
                 [self._null_block] *
                 (first_useful_block_idx - 1 - len(blocks)))
-
-        # allocate for new tokens from the connector.
-        return self.allocate_new_blocks(
-            request_id, num_computed_tokens + num_extra_tokens_from_connector)
 
     def get_num_blocks_to_allocate(
         self,
@@ -662,14 +620,12 @@ class MambaManager(SingleTypeKVCacheManager):
             [] for _ in range(len(kv_cache_group_ids)))
         return computed_blocks
 
-    def remove_skipped_and_allocate_necessary(
+    def free_blocks_outside_attention_window(
         self,
         request_id: str,
-        num_computed_tokens: int,
-        num_extra_tokens_from_connector: int = 0,
-    ) -> list[KVCacheBlock]:
-        return self.allocate_new_blocks(
-            request_id, num_computed_tokens + num_extra_tokens_from_connector)
+        total_computed_tokens: int,
+    ) -> None:
+        pass
 
     def get_num_common_prefix_blocks(self, request_id: str,
                                      num_running_requests: int) -> int:
@@ -710,6 +666,10 @@ class MambaManager(SingleTypeKVCacheManager):
 
 class CrossAttentionManager(SingleTypeKVCacheManager):
     """Manager for cross-attention KV cache in encoder-decoder models."""
+
+    def free_blocks_outside_attention_window(
+            self, request_id: str, total_computed_tokens: int) -> None:
+        pass
 
     def save_new_computed_blocks(
             self, request_id: str,
@@ -752,20 +712,9 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         raise NotImplementedError(
             "CrossAttentionManager does not support caching")
 
-    def remove_skipped_and_allocate_necessary(
-        self,
-        request_id: str,
-        num_computed_tokens: int,
-        num_extra_tokens_from_connector: int = 0,
-    ) -> list[KVCacheBlock]:
-        # Cross-attention blocks represent encoder states which are needed
-        # for the entire decoding process, so no blocks should be skipped
-        return self.allocate_new_blocks(
-            request_id, num_computed_tokens + num_extra_tokens_from_connector)
-
 
 spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
-    FullAttentionSpec: FullAttentionManager,
+    # FullAttentionSpec: FullAttentionManager,
     SlidingWindowSpec: SlidingWindowManager,
     ChunkedLocalAttentionSpec: ChunkedLocalAttentionManager,
     MambaSpec: MambaManager,
