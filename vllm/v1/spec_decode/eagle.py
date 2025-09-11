@@ -678,19 +678,19 @@ class EagleProposer:
         if self.vllm_config.speculative_config.draft_vocab_frequency_path is not None:
 
             vocab_freq_path = self.vllm_config.speculative_config.draft_vocab_frequency_path
-            prune_ratio = self.vllm_config.speculative_config.draft_vocab_frequency_prune_ratio
+            keep_threshold = self.vllm_config.speculative_config.draft_vocab_frequency_keep_threshold
 
-            if prune_ratio is None:
+            if keep_threshold is None:
                 raise ValueError(
                     "When `draft_vocab_frequency_path` is set, "
-                    "`draft_vocab_frequency_prune_ratio` cannot be None."
+                    "`draft_vocab_frequency_keep_threshold` cannot be None."
                 )
 
             logger.info(f"Loading draft model vocabulary from {vocab_freq_path}")
             vocab_freq = load_vocab_freq(vocab_freq_path)
 
-            logger.info(f"Pruning draft vocabulary with ratio {prune_ratio}")
-            self.pruned_vocab = prune_draft_vocab(vocab_freq, prune_ratio)
+            logger.info(f"Pruning draft vocabulary with ratio {keep_threshold}")
+            self.pruned_vocab = prune_draft_vocab(vocab_freq, keep_threshold)
             self.pruned_vocab = self.pruned_vocab.to(self.model.lm_head.weight.device)
 
             # Update lm_head weights with pruned vocabulary
@@ -775,33 +775,25 @@ def load_vocab_freq(vocab_frequency_path: str) -> torch.Tensor:
     return vocab_freq
 
 
-def prune_draft_vocab(vocab_freq: torch.Tensor, prune_ratio: float) -> torch.Tensor:
+def prune_draft_vocab(vocab_freq: torch.Tensor, keep_threshold: float) -> torch.Tensor:
     """
     Prune a draft vocabulary based on cumulative frequency mass.
 
     Args:
         vocab_freq: Tensor of vocabulary frequencies.
-        prune_ratio: Fraction of cumulative mass to retain (0 < prune_ratio < 1).
+        keep_threshold: Fraction of cumulative mass to retain (0 < keep_threshold < 1).
 
     Returns:
         Tensor of indices representing the pruned vocabulary.
     """
     if not isinstance(vocab_freq, torch.Tensor):
         raise TypeError("`vocab_freq` must be a torch.Tensor.")
-    if not (0 < prune_ratio < 1):
-        raise ValueError(f"`prune_ratio` must be in (0, 1), got {prune_ratio}")
+    if not (0 < keep_threshold < 1):
+        raise ValueError(f"`keep_threshold` must be in (0, 1), got {keep_threshold}")
 
     # Sort frequencies descending
-    sorted_freq, sorted_indices = torch.sort(vocab_freq, descending=True)
-
-    # Compute relative cumulative mass
-    cumulative_mass = torch.cumsum(sorted_freq, dim=0)
-    relative_cumulative_mass = cumulative_mass / cumulative_mass[-1]
-
-    # Determine cutoff index
-    cutoff_mask = relative_cumulative_mass < prune_ratio
-    cutoff_idx = int(cutoff_mask.sum().item()) + 1
-
+    _, sorted_indices = torch.sort(vocab_freq, descending=True)
+    cutoff_idx = int(keep_threshold * len(sorted_indices))
     pruned_vocab = sorted_indices[:cutoff_idx]
     return pruned_vocab
 

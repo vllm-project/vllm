@@ -23,7 +23,7 @@ model_dir = "meta-llama/Llama-3.1-8B-Instruct"
 eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
 eagle3_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
 vocab_freq_dir = "eturok/llama-3.1-8b-instruct-vocab-freq/vocab_freq.pt"
-draft_vocab_frequency_prune_ratio = 0.5
+draft_vocab_frequency_keep_threshold = 0.5
 
 def _create_proposer(
     method: str,
@@ -55,7 +55,7 @@ def _create_proposer(
         num_speculative_tokens=num_speculative_tokens,
         speculative_token_tree=spec_token_tree_str,
         draft_vocab_frequency_path=draft_vocab_frequency_path,
-        draft_vocab_frequency_prune_ratio=draft_vocab_frequency_prune_ratio,
+        draft_vocab_frequency_keep_threshold=draft_vocab_frequency_keep_threshold,
     )
 
     vllm_config = VllmConfig(
