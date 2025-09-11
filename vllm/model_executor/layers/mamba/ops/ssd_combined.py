@@ -174,7 +174,7 @@ def _mamba_chunk_scan_combined_fwd(x,
         print(states.shape)
         varlen_states = states[last_chunk]
         print(varlen_states.shape)
-        return out_x, dt, dA_cumsum, states, final_states, states
+        return out_x, dt, dA_cumsum, states, final_states, varlen_states
 
 
 def mamba_chunk_scan_combined(x,
