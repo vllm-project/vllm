@@ -24,7 +24,7 @@ def parse_all_configs():
         name = filename[:-5]  # remove .json
         parts = name.split(',')
 
-        config_info = {}
+        config_info: dict[str, any] = {}
         for part in parts:
             if part.startswith('E='):
                 config_info['E'] = int(part[2:])
@@ -164,7 +164,7 @@ def analyze_block_sizes(configs):
         f"most_common={max(set(block_k_values), key=block_k_values.count)}")
 
     # Look at combinations
-    combinations = defaultdict(int)
+    combinations: dict[tuple[int, int, int], int] = defaultdict(int)
     for c in configs:
         combo = (c['BLOCK_SIZE_M'], c['BLOCK_SIZE_N'], c['BLOCK_SIZE_K'])
         combinations[combo] += 1
