@@ -213,7 +213,7 @@ def per_block_cast_to_fp8(
         BLOCK_M=block_m,
         BLOCK_N=block_n,
         USE_UE8M0=use_ue8m0,
-        num_warps=4,
+        num_warps=8,
         num_stages=1,
     )
     return y_tmp.to(torch.float8_e4m3fn), scales
