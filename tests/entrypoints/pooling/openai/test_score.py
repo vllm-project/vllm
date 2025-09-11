@@ -8,9 +8,8 @@ import torch
 import torch.nn.functional as F
 from torch import tensor
 
+from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.openai.protocol import ScoreResponse
-
-from ...utils import RemoteOpenAIServer
 
 MODELS = [
     {
