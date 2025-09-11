@@ -507,6 +507,10 @@ steps:
   commands:
   # temporary install here since we need nightly, will move to requirements/test.in
   # after torchao 0.12 release, and pin a working version of torchao nightly here
+
+  # since torchao nightly is only compatible with torch nightly currently
+  # https://github.com/pytorch/ao/issues/2919, we'll have to skip new torchao tests for now
+  # we can only upgrade after this is resolved
   - pip install --pre torchao==0.13.0.dev20250814 --index-url https://download.pytorch.org/whl/nightly/cu128
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization
 
