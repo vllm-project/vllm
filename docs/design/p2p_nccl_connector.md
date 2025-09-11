@@ -268,6 +268,67 @@ python3 disagg_proxy_p2p_nccl_xpyd.py &
         --kv-transfer-config \
         '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_buffer_size":"8e9","kv_port":"24001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20004"}}' > /var/vllm.log 2>&1 &
     ```
+### Run 1P1D (Asymmetric TP/PP)
+
+#### Instructions
+
+You can enable asymmetric tensor-parallel (TP) and pipeline-parallel (PP) strategies by setting `enable_asymmetric_p2p` in `kv_connector_extra_config`.
+
+- When `enable_asymmetric_p2p` is true, you can configure `remote_tp_size` and `remote_pp_size` to define how KV cache transfer is partitioned between Prefill and Decode workers. This allows different parallelism strategies across Prefill and Decode.
+
+Notes and constraints:
+
+- For `send_type = PUT` or `PUT_ASYNC`, the Prefill TP size must be less than or equal to the Decode TP size, i.e. `prefill_tp_size <= decode_tp_size`.
+- For `send_type = GET`, asymmetric TP size is currently not supported. Support for this mode may be added in the future.
+
+#### Proxy (e.g. 10.0.1.1)
+
+```shell
+cd {your vllm directory}/examples/online_serving/disaggregated_serving_p2p_nccl_xpyd/
+python3 disagg_proxy_p2p_nccl_xpyd.py &
+```
+
+#### Prefill1 - TP1 (e.g., 10.0.1.2 or 10.0.1.1)
+
+??? console "Command"
+
+    ```shell
+    VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=0 vllm serve {your model directory} \
+        --host 0.0.0.0 \
+        --port 20001 \
+        --tensor-parallel-size 1 \
+        --seed 1024 \
+        --served-model-name base_model \
+        --dtype float16 \
+        --max-model-len 10000 \
+        --max-num-batched-tokens 10000 \
+        --max-num-seqs 256 \
+        --trust-remote-code \
+        --gpu-memory-utilization 0.9 \
+        --kv-transfer-config \
+        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_buffer_size":"1e1","kv_port":"21001","kv_connector_extra_config":{"enable_asymmetric_p2p":true,"remote_tp_size":2,"remote_pp_size":1,"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20001"}}' > /var/vllm.log 2>&1 &
+    ```
+
+#### Decode1 - TP2 (e.g., 10.0.1.3 or 10.0.1.1)
+
+??? console "Command"
+
+    ```shell
+    VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=1 vllm serve {your model directory} \
+        --host 0.0.0.0 \
+        --port 20002 \
+        --tensor-parallel-size 2 \
+        --seed 1024 \
+        --served-model-name base_model \
+        --dtype float16 \
+        --max-model-len 10000 \
+        --max-num-batched-tokens 10000 \
+        --max-num-seqs 256 \
+        --trust-remote-code \
+        --gpu-memory-utilization 0.7 \
+        --kv-transfer-config \
+        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_buffer_size":"8e9","kv_port":"22001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20002"}}' > /var/vllm.log 2>&1 &
+    ```
 
 ## Single request
 

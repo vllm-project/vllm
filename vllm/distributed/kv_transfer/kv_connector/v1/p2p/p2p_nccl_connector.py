@@ -4,7 +4,6 @@
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
-import regex as re
 import torch
 
 from vllm.config import VllmConfig
@@ -36,8 +35,8 @@ class ReqMeta:
     num_tokens: int
 
     @staticmethod
-    def make_meta(request_id: str, token_ids: list[int], block_ids: list[int],
-                  block_size: int) -> "ReqMeta":
+    def make_meta(request_id: str, token_ids: list[int],
+                  block_ids: list[int]) -> "ReqMeta":
         block_ids_tensor = torch.tensor(block_ids)
         return ReqMeta(
             request_id=request_id,
@@ -58,17 +57,15 @@ class P2pNcclConnectorMetadata(KVConnectorMetadata):
         request_id: str,
         token_ids: list[int],
         block_ids: list[int],
-        block_size: int,
     ) -> None:
         self.requests.append(
-            ReqMeta.make_meta(request_id, token_ids, block_ids, block_size))
+            ReqMeta.make_meta(request_id, token_ids, block_ids))
 
 
 class P2pNcclConnector(KVConnectorBase_V1):
 
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
         super().__init__(vllm_config=vllm_config, role=role)
-        self._block_size = vllm_config.cache_config.block_size
         self._requests_need_load: dict[str, Any] = {}
         self.config = vllm_config.kv_transfer_config
         self.is_producer = self.config.is_kv_producer
@@ -80,10 +77,10 @@ class P2pNcclConnector(KVConnectorBase_V1):
             if role == KVConnectorRole.WORKER else 0
 
         self.p2p_nccl_engine = P2pNcclEngine(
+            rank=self._rank,
             local_rank=self._local_rank,
             config=self.config,
-            hostname="",
-            port_offset=self._rank,
+            model_config=vllm_config.model_config,
         ) if role == KVConnectorRole.WORKER else None
 
     # ==============================
@@ -191,7 +188,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 layer = kv_cache[forward_context.virtual_engine]
 
                 kv_cache = self.p2p_nccl_engine.recv_tensor(
-                    request.request_id + "#" + layer_name)
+                    request.request_id, layer_name)
 
                 if kv_cache is None:
                     logger.warning("🚧kv_cache is None, %s", request.request_id)
@@ -230,6 +227,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         assert self.p2p_nccl_engine is not None
 
+        is_mla = isinstance(attn_metadata, MLACommonMetadata)
+
         def extract_kv_from_layer(
             layer: torch.Tensor,
             block_ids: torch.Tensor,
@@ -251,8 +250,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 torch.Tensor: A tensor containing the extracted KV slices.
                 Returns None if the layout is unsupported.
             """
-            if (isinstance(attn_metadata, MLACommonMetadata)
-                    or layer.shape[1] == 2):  # MLA or FlashInfer
+            if (is_mla or layer.shape[1] == 2):  # MLA or FlashInfer
                 return layer[block_ids, ...]
 
             if layer.shape[0] == 2:  # FlashAttention
@@ -264,12 +262,10 @@ class P2pNcclConnector(KVConnectorBase_V1):
         assert isinstance(connector_metadata, P2pNcclConnectorMetadata)
         for request in connector_metadata.requests:
             request_id = request.request_id
-            ip, port = self.parse_request_id(request_id, True)
-            remote_address = ip + ":" + str(port + self._rank)
 
             kv_cache = extract_kv_from_layer(kv_layer, request.block_ids)
-            self.p2p_nccl_engine.send_tensor(request_id + "#" + layer_name,
-                                             kv_cache, remote_address)
+            self.p2p_nccl_engine.send_tensor(request_id, layer_name, kv_cache,
+                                             is_mla)
 
     def wait_for_save(self):
         if self.is_producer:
@@ -369,14 +365,12 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 # the request's prompt is not chunked prefill
                 meta.add_request(request_id=new_req.req_id,
                                  token_ids=new_req.prompt_token_ids,
-                                 block_ids=new_req.block_ids[0],
-                                 block_size=self._block_size)
+                                 block_ids=new_req.block_ids[0])
                 continue
             if new_req.req_id in self._requests_need_load:
                 meta.add_request(request_id=new_req.req_id,
                                  token_ids=new_req.prompt_token_ids,
-                                 block_ids=new_req.block_ids[0],
-                                 block_size=self._block_size)
+                                 block_ids=new_req.block_ids[0])
                 self._requests_need_load.pop(new_req.req_id)
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
@@ -402,8 +396,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 # the request's prompt is all prefilled finally
                 meta.add_request(request_id=req_id,
                                  token_ids=prompt_token_ids,
-                                 block_ids=block_ids,
-                                 block_size=self._block_size)
+                                 block_ids=block_ids)
                 self.chunked_prefill.pop(req_id, None)
                 continue
 
@@ -422,8 +415,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
                 meta.add_request(request_id=req_id,
                                  token_ids=token_ids,
-                                 block_ids=block_ids,
-                                 block_size=self._block_size)
+                                 block_ids=block_ids)
 
         self._requests_need_load.clear()
         return meta
@@ -453,25 +445,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
     # ==============================
 
     @staticmethod
-    def parse_request_id(request_id: str, is_prefill=True) -> tuple[str, int]:
-        # Regular expression to match the string hostname and integer port
-        if is_prefill:
-            pattern = r"___decode_addr_(.*):(\d+)"
-        else:
-            pattern = r"___prefill_addr_(.*):(\d+)___"
-
-        # Use re.search to find the pattern in the request_id
-        match = re.search(pattern, request_id)
-        if match:
-            # Extract the ranks
-            ip = match.group(1)
-            port = int(match.group(2))
-
-            return ip, port
-        raise ValueError(
-            f"Request id {request_id} does not contain hostname and port")
-
-    @staticmethod
     def check_tensors_except_dim(tensor1, tensor2, dim):
         shape1 = tensor1.size()
         shape2 = tensor2.size()
@@ -479,6 +452,5 @@ class P2pNcclConnector(KVConnectorBase_V1):
         if len(shape1) != len(shape2) or not all(
                 s1 == s2
                 for i, (s1, s2) in enumerate(zip(shape1, shape2)) if i != dim):
-            raise NotImplementedError(
-                "Currently, only symmetric TP is supported. Asymmetric TP, PP,"
-                "and others will be supported in future PRs.")
+            raise ValueError("The shapes of the two tensors are not the same "
+                             "except for the specified dimension.")
