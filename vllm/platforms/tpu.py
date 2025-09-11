@@ -24,6 +24,8 @@ else:
 
 logger = init_logger(__name__)
 
+USE_TPU_COMMONS = False
+
 
 class TpuPlatform(Platform):
     _enum = PlatformEnum.TPU
@@ -99,7 +101,7 @@ class TpuPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        from vllm.config import CompilationLevel
+        from vllm.config import CompilationLevel, CUDAGraphMode
 
         cache_config = vllm_config.cache_config
         # For v0, the default block size is 16.
@@ -109,8 +111,16 @@ class TpuPlatform(Platform):
 
         # TPU only supports DYNAMO_ONCE compilation level
         if compilation_config.level != CompilationLevel.DYNAMO_ONCE:
-            logger.info("[TPU] Forcing DYNAMO_ONCE compilation level")
+            logger.info("[TPU] Forcing DYNAMO_ONCE compilation level, and "
+                        "disabling cudagraph.")
             compilation_config.level = CompilationLevel.DYNAMO_ONCE
+
+        if compilation_config.cudagraph_mode is None or \
+                compilation_config.cudagraph_mode.max_cudagraph_mode() \
+                    != CUDAGraphMode.NONE:
+            logger.info("[TPU] CUDA graph is not supported on TPU, "
+                        "disabling cudagraphs.")
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         if compilation_config.backend == "":
             compilation_config.backend = "openxla"
@@ -186,13 +196,41 @@ class TpuPlatform(Platform):
             raise ValueError("Torch XLA does not support per-request seed.")
 
     @classmethod
-    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str) -> bool:
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
+                                    model_config: "ModelConfig") -> bool:
         return True
+
+    @classmethod
+    @torch.compile(backend="openxla")
+    def insert_blocks_to_device(
+        cls,
+        src_cache: torch.Tensor,
+        dst_cache: torch.Tensor,
+        src_block_indices: torch.Tensor,
+        dst_block_indices: torch.Tensor,
+    ) -> None:
+        torch.ops.xla.dynamo_set_buffer_donor_(dst_cache, True)
+        dst_cache[dst_block_indices] = src_cache[src_block_indices].to(
+            dst_cache.device)
+
+    @classmethod
+    @torch.compile(backend="openxla")
+    def swap_out_blocks_to_host(
+        cls,
+        src_cache: torch.Tensor,
+        dst_cache: torch.Tensor,
+        src_block_indices: torch.Tensor,
+        dst_block_indices: torch.Tensor,
+    ) -> None:
+        """ tpu blocks to cpu blocks"""
+        torch.ops.xla.dynamo_set_buffer_donor_(src_cache, True)
+        dst_cache[dst_block_indices] = src_cache[src_block_indices].cpu()
 
 
 try:
     from tpu_commons.platforms import TpuPlatform as TpuCommonsPlatform
     TpuPlatform = TpuCommonsPlatform  # type: ignore
+    USE_TPU_COMMONS = True
 except ImportError:
     logger.info("tpu_commons not found, using vLLM's TpuPlatform")
     pass

@@ -4,7 +4,7 @@
 # vllm-flash-attn built from source
 vllm/vllm_flash_attn/*
 
-# triton jit 
+# triton jit
 .triton
 
 # Byte-compiled / optimized / DLL files
@@ -177,6 +177,14 @@ cython_debug/
 # VSCode
 .vscode/
 
+# Claude
+CLAUDE.md
+.claude/
+
+# Codex
+AGENTS.md
+.codex/
+
 # DS Store
 .DS_Store
 
@@ -207,3 +215,6 @@ shellcheck*/
 
 # Ignore moe/marlin_moe gen code
 csrc/moe/marlin_moe_wna16/kernel_*
+
+# Ignore ep_kernels_workspace folder
+ep_kernels_workspace/

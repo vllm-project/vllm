@@ -10,7 +10,7 @@ import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported,
+    FusedMoE, FusedMoEConfig, FusedMoEMethodBase, FusedMoeWeightScaleSupported,
     UnquantizedFusedMoEMethod)
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                set_weight_attrs)
@@ -59,7 +59,7 @@ def get_moe_quant_method(
             # Dynamic per module/layer rules may override base config
             override_config(cloned_config, prefix=prefix)
 
-        return moe_method_cls(cloned_config)
+        return moe_method_cls(cloned_config, layer.moe_config)
     return None
 
 
@@ -121,6 +121,9 @@ class GPTQMarlinConfig(QuantizationConfig):
                              f"bits={weight_bits}, sym={is_sym}")
 
         self.quant_type = self.TYPE_MAP[(weight_bits, is_sym)]
+
+        # used to identify GPTQ model quantized by autoround
+        self.autoround_version = full_config.get("autoround_version", "")
 
     def __repr__(self) -> str:
         return (f"GPTQMarlinConfig(quant_type={self.quant_type}, "
@@ -390,8 +393,12 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
 class GPTQMarlinMoEMethod(FusedMoEMethodBase):
     """MoE Marlin method with quantization."""
 
-    def __init__(self,
-                 quant_config: GPTQMarlinConfig) -> None:
+    def __init__(
+        self,
+        quant_config: GPTQMarlinConfig,
+        moe: FusedMoEConfig,
+    ) -> None:
+        super().__init__(moe)
         self.quant_config = quant_config
         if self.quant_config.quant_type.size_bits == 4:
             self.quant_type = scalar_types.uint4b8
@@ -489,7 +496,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         )
         layer.register_parameter("w2_scales", w2_scales)
         set_weight_attrs(w2_scales, extra_weight_attrs)
-        # dont shard the w2 scales when running act order
+        # don't shard the w2 scales when running act order
         set_weight_attrs(w2_scales,
                          {"load_full_w2": self.quant_config.desc_act})
         # up_proj scales
@@ -513,7 +520,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         )
         layer.register_parameter("w2_qzeros", w2_qzeros)
         set_weight_attrs(w2_qzeros, extra_weight_attrs)
-        # dont shard the w2 scales when running act order
+        # don't shard the w2 scales when running act order
         set_weight_attrs(w2_qzeros,
                          {"load_full_w2": self.quant_config.desc_act})
         w13_g_idx = torch.nn.Parameter(
@@ -699,6 +706,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
@@ -706,7 +714,9 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        assert self.fused_experts is None
+
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `GPTQMarlinMoEMethod` yet.")
@@ -724,7 +734,9 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias)
+            routed_scaling_factor=routed_scaling_factor,
+            e_score_correction_bias=e_score_correction_bias,
+            indices_type=self.topk_indices_dtype)
 
         return torch.ops.vllm.fused_marlin_moe(
             x,

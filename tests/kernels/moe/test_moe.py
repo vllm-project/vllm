@@ -110,6 +110,23 @@ MOE_MARLIN_QUANT_TEST_CONFIGS = [
     }
 ]
 
+FUSED_MOE_MNK_FACTORS = [
+    (1, 128, 128),
+    (1, 2048, 128),
+    (33, 2048, 128),
+    (222, 1024, 1024),
+    (32768, 128, 128),
+    (32768, 2048, 511),
+    (40000, 1024, 1024),
+]
+
+FUSED_MOE_WN16_MNK_FACTORS = [
+    (1, 128, 128),
+    (1, 1024, 1024),
+    (32, 2048, 128),
+    (32, 1024, 1024),
+    (222, 2048, 1024),
+]
 
 vllm_config = VllmConfig()
 vllm_config.scheduler_config.max_num_seqs = 128
@@ -185,14 +202,11 @@ def run_moe_test(
     return baseline_output
 
 
-@pytest.mark.skipif(True, reason="")
-@pytest.mark.parametrize("m", [1, 33, 64, 222, 32768, 40000])
-@pytest.mark.parametrize("n", [128, 1024, 2048])
-@pytest.mark.parametrize("k", [128, 511, 1024])
+@pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("ep_size", EP_SIZE)
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("padding", [True, False])
 @pytest.mark.parametrize("chunk_size", [8192])
 def test_fused_moe(
@@ -305,14 +319,11 @@ def test_fused_moe(
                use_cudagraph=use_cudagraph)
 
 
-@pytest.mark.skipif(True, reason="")
-@pytest.mark.parametrize("m", [1, 32, 222])
-@pytest.mark.parametrize("n", [128, 1024, 2048])
-@pytest.mark.parametrize("k", [128, 1024])
+@pytest.mark.parametrize("m,n,k", FUSED_MOE_WN16_MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("ep_size", EP_SIZE)
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("group_size", [64, 128])
 @pytest.mark.parametrize("has_zp", [True, False])
 @pytest.mark.parametrize("weight_bits", [4, 8])
@@ -423,15 +434,13 @@ def test_fused_moe_wn16(m: int, n: int, k: int, e: int, topk: int,
     torch.testing.assert_close(triton_output, torch_output, atol=2e-2, rtol=0)
 
 
-@pytest.mark.skipif(True, reason="")
-@pytest.mark.parametrize("dtype",
-                         [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("padding", [True, False])
 @pytest.mark.parametrize(
     "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False])
 @torch.inference_mode()
-def test_mixtral_moe(dtype: torch.dtype, padding: bool, use_rocm_aiter: bool,
-                     monkeypatch):
+def test_mixtral_moe(dist_init, dtype: torch.dtype, padding: bool,
+                     use_rocm_aiter: bool, monkeypatch):
     """Make sure our Mixtral MoE implementation agrees with the one from
     huggingface."""
 
@@ -488,11 +497,11 @@ def test_mixtral_moe(dtype: torch.dtype, padding: bool, use_rocm_aiter: bool,
                 vllm_moe.experts.w13_weight, (0, 128), "constant", 0)[...,
                                                                       0:-128],
                                                     requires_grad=False)
-            torch.cuda.empty_cache()
             vllm_moe.experts.w2_weight = Parameter(F.pad(
                 vllm_moe.experts.w2_weight, (0, 128), "constant", 0)[...,
                                                                      0:-128],
                                                    requires_grad=False)
+            torch.cuda.synchronize()
             torch.cuda.empty_cache()
 
         # Run forward passes for both MoE blocks

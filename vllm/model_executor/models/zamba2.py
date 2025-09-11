@@ -9,7 +9,7 @@ model alternates between state space model layers and attention-based layers.
 """
 from collections.abc import Iterable
 from itertools import cycle
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import torch
 from torch import nn
@@ -18,7 +18,7 @@ from transformers import Zamba2Config
 from vllm import envs
 from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import GeluAndMul
@@ -33,7 +33,7 @@ from vllm.model_executor.layers.mamba.mamba2_metadata import (
     Mamba2Metadata, prepare_mamba2_metadata)
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.layers.mamba.mamba_utils import (
-    MambaStateShapeCalculator)
+    MambaStateDtypeCalculator, MambaStateShapeCalculator)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -478,6 +478,8 @@ class Zamba2MambaDecoderLayer(nn.Module):
 
     def __init__(self,
                  config: Zamba2Config,
+                 model_config: Optional[ModelConfig] = None,
+                 cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = "") -> None:
         """Initialize the Mamba decoder layer.
@@ -502,6 +504,8 @@ class Zamba2MambaDecoderLayer(nn.Module):
                                  config.n_mamba_heads,
                                  rms_norm_eps=config.rms_norm_eps,
                                  activation="silu",
+                                 model_config=model_config,
+                                 cache_config=cache_config,
                                  quant_config=quant_config,
                                  prefix=f"{prefix}.mixer")
 
@@ -524,8 +528,6 @@ class Zamba2MambaDecoderLayer(nn.Module):
             hidden_states: Input tensor [batch_size, seq_len, hidden_size]
             mamba_cache_params: Parameters for Mamba's state caches 
                 (one for conv, one for ssm)
-            sequence_idx: Index tensor for identifying sequences in batch
-                Required for proper chunked processing in prefill
             transformer_hidden_states: Optional output from transformer path
                 Added to input if provided (used in hybrid architecture)
             positions: Optional position IDs (unused in Mamba)
@@ -578,6 +580,8 @@ class Zamba2HybridLayer(nn.Module):
         shared_transformer: Zamba2AttentionDecoderLayer,
         config: Zamba2Config,
         block_idx: int,
+        model_config: Optional[ModelConfig] = None,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
@@ -585,8 +589,6 @@ class Zamba2HybridLayer(nn.Module):
         
         Args:
             shared_transformer: Transformer decoder layer for attention pathway
-            linear: Linear projection for transformer output before Mamba
-            mamba: Mamba decoder layer for state space pathway
         """
         super().__init__()
         self.block_idx = block_idx
@@ -596,6 +598,8 @@ class Zamba2HybridLayer(nn.Module):
                                        bias=False,
                                        quant_config=quant_config)
         self.mamba_decoder = Zamba2MambaDecoderLayer(config,
+                                                     model_config=model_config,
+                                                     cache_config=cache_config,
                                                      quant_config=quant_config,
                                                      prefix=prefix)
 
@@ -622,8 +626,6 @@ class Zamba2HybridLayer(nn.Module):
             positions: Position IDs for positional embeddings
             mamba_cache_params: Parameters for Mamba's state caches 
                 (one for conv, one for ssm)
-            sequence_idx: Indices for identifying sequences in batch,
-                required for proper chunked processing in prefill
             
         Returns:
             Output tensor combining transformer and Mamba representations
@@ -669,6 +671,7 @@ class Zamba2Model(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
+        model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
@@ -718,11 +721,15 @@ class Zamba2Model(nn.Module):
                     Zamba2HybridLayer(block,
                                       config,
                                       block_idx,
-                                      quant_config,
+                                      model_config=model_config,
+                                      cache_config=cache_config,
+                                      quant_config=quant_config,
                                       prefix=prefix))
             else:
                 layers.append(
                     Zamba2MambaDecoderLayer(config,
+                                            model_config=model_config,
+                                            cache_config=cache_config,
                                             quant_config=quant_config,
                                             prefix=prefix))
         self.layers = nn.ModuleList(layers)
@@ -849,6 +856,18 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
     })
 
     @classmethod
+    def get_mamba_state_dtype_from_config(
+        cls,
+        vllm_config: "VllmConfig",
+    ) -> tuple[torch.dtype, torch.dtype]:
+
+        return MambaStateDtypeCalculator.mamba2_state_dtype(
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.cache_config.mamba_ssm_cache_dtype,
+        )
+
+    @classmethod
     def get_mamba_state_shape_from_config(
         cls,
         vllm_config: "VllmConfig",
@@ -890,8 +909,8 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
             prefix: Optional prefix for parameter names
         
         Raises:
-            AssertionError: If prefix caching is enabled (not supported by 
-            Mamba)
+            AssertionError: If prefix caching is enabled
+            (not supported by Mamba)
         """
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
@@ -946,7 +965,7 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
                 input_ids: torch.Tensor,
                 positions: torch.Tensor,
                 inputs_embeds: Optional[torch.Tensor] = None,
-                **kwargs) -> torch.Tensor:
+                **kwargs: Any) -> torch.Tensor:
         """Forward pass through the model.
         
         Args:
@@ -966,10 +985,13 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
                 mamba_state_shape = \
                     self.get_mamba_state_shape_from_config(
                         self.vllm_config, use_v1=False)
+                mamba_state_dtype = \
+                    self.get_mamba_state_dtype_from_config(
+                    self.vllm_config)
                 self.mamba_cache = MambaCacheManager(self.vllm_config,
-                                                     self.lm_head.weight.dtype,
                                                      num_mamba_layers,
-                                                     *mamba_state_shape)
+                                                     *mamba_state_shape,
+                                                     *mamba_state_dtype)
 
             # Get cache parameters for current run
             mamba_cache_params = self.mamba_cache.current_run_tensors(**kwargs)
@@ -984,9 +1006,9 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
 
         return hidden_states
 
-    def copy_inputs_before_cuda_graphs(self, input_buffers: dict[str,
-                                                                 torch.Tensor],
-                                       **kwargs) -> dict[str, torch.Tensor]:
+    def copy_inputs_before_cuda_graphs(
+            self, input_buffers: dict[str, torch.Tensor],
+            **kwargs: Any) -> dict[str, torch.Tensor]:
         """Copy inputs before CUDA graph capture.
         
         Args:

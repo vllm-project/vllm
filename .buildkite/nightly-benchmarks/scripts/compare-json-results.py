@@ -3,44 +3,129 @@
 import argparse
 import json
 import os
+from importlib import util
 
 import pandas as pd
+
+plotly_found = util.find_spec("plotly.express") is not None
 
 
 def compare_data_columns(
     files, name_column, data_column, info_cols, drop_column, debug=False
 ):
-    print("\ncompare_data_column: " + data_column)
+    """
+    Align concatenation by keys derived from info_cols instead of row order.
+    - Pick one canonical key list: subset of info_cols present in ALL files.
+    - For each file: set index to those keys, aggregate duplicates
+    - (mean for metric, first for names).
+    - Concat along axis=1 (indexes align), then reset_index so callers can
+    - group by columns.
+    - If --debug, add a <file_label>_name column per file.
+    """
+    print("\ncompare_data_column:", data_column)
+
     frames = []
     raw_data_cols = []
     compare_frames = []
+
+    # 1) choose a canonical key list from info_cols that exists in ALL files
+    cols_per_file = []
+    for f in files:
+        try:
+            df_tmp = pd.read_json(f, orient="records")
+        except Exception as err:
+            raise ValueError(f"Failed to read {f}") from err
+        cols_per_file.append(set(df_tmp.columns))
+
+    key_cols = [c for c in info_cols if all(c in cset for cset in cols_per_file)]
+    if not key_cols:
+        # soft fallback: use any info_cols present in the first file
+        key_cols = [c for c in info_cols if c in list(cols_per_file[0])]
+    if not key_cols:
+        raise ValueError(
+            "No common key columns found from info_cols across the input files."
+        )
+
+    # 2) build a single "meta" block (keys as columns) once, aligned by the key index
+    meta_added = False
+
     for file in files:
-        data_df = pd.read_json(file)
-        serving_df = data_df.dropna(subset=[drop_column], ignore_index=True)
-        # Show all info columns in the first couple columns
-        if not frames:
-            for col in info_cols:
-                if col not in serving_df.columns:
-                    print(f"Skipping missing column: {col}")
-                    continue
-                frames.append(serving_df[col])
-        # only show test name under debug mode
-        if debug is True:
-            serving_df = serving_df.rename(columns={name_column: file + "_name"})
-            frames.append(serving_df[file + "_name"])
+        df = pd.read_json(file, orient="records")
 
-        file = "/".join(file.split("/")[:-1])
-        serving_df = serving_df.rename(columns={data_column: file})
-        frames.append(serving_df[file])
-        raw_data_cols.append(file)
-        compare_frames.append(serving_df[file])
+        # Keep rows that actually have the compared metric (same as original behavior)
+        if drop_column in df.columns:
+            df = df.dropna(subset=[drop_column], ignore_index=True)
+
+        # Stabilize numeric key columns (harmless if missing)
+        for c in (
+            "Input Len",
+            "Output Len",
+            "TP Size",
+            "PP Size",
+            "# of max concurrency.",
+            "qps",
+        ):
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+
+        # Ensure all key columns exist
+        for c in key_cols:
+            if c not in df.columns:
+                df[c] = pd.NA
+
+        # Set index = key_cols and aggregate duplicates → unique MultiIndex
+        df_idx = df.set_index(key_cols, drop=False)
+
+        # meta (key columns), unique per key
+        meta = df_idx[key_cols]
+        if not meta.index.is_unique:
+            meta = meta.groupby(level=key_cols, dropna=False).first()
+
+        # metric series for this file, aggregated to one row per key
+        file_label = "/".join(file.split("/")[:-1]) or os.path.basename(file)
+        s = df_idx[data_column]
+        if not s.index.is_unique:
+            s = s.groupby(level=key_cols, dropna=False).mean()
+        s.name = file_label  # column label like original
+
+        # add meta once (from first file) so keys are the leftmost columns
+        if not meta_added:
+            frames.append(meta)
+            meta_added = True
+
+        # (NEW) debug: aligned test-name column per file
+        if debug and name_column in df_idx.columns:
+            name_s = df_idx[name_column]
+            if not name_s.index.is_unique:
+                name_s = name_s.groupby(level=key_cols, dropna=False).first()
+            name_s.name = f"{file_label}_name"
+            frames.append(name_s)
+
+        frames.append(s)
+        raw_data_cols.append(file_label)
+        compare_frames.append(s)
+
+        # Generalize ratio: for any file N>=2, add ratio (fileN / file1)
         if len(compare_frames) >= 2:
-            # Compare numbers among two files
-            ratio_df = compare_frames[1] / compare_frames[0]
-            frames.append(ratio_df)
-            compare_frames.pop(1)
+            base = compare_frames[0]
+            current = compare_frames[-1]
+            ratio = current / base
+            ratio = ratio.mask(base == 0)  # avoid inf when baseline is 0
+            ratio.name = f"Ratio 1 vs {len(compare_frames)}"
+            frames.append(ratio)
 
+    # 4) concat on columns with aligned MultiIndex;
+    # then reset_index to return keys as columns
     concat_df = pd.concat(frames, axis=1)
+    concat_df = concat_df.reset_index(drop=True).reset_index()
+    if "index" in concat_df.columns:
+        concat_df = concat_df.drop(columns=["index"])
+
+    # Ensure key/info columns appear first (in your info_cols order)
+    front = [c for c in info_cols if c in concat_df.columns]
+    rest = [c for c in concat_df.columns if c not in front]
+    concat_df = concat_df[front + rest]
+
     print(raw_data_cols)
     return concat_df, raw_data_cols
 
@@ -66,6 +151,15 @@ def split_json_by_tp_pp(
                 break
 
     df = pd.DataFrame(data)
+
+    # Keep only "serving" tests
+    name_col = next(
+        (c for c in ["Test name", "test_name", "Test Name"] if c in df.columns), None
+    )
+    if name_col:
+        df = df[
+            df[name_col].astype(str).str.contains(r"serving", case=False, na=False)
+        ].copy()
 
     # Handle alias column names
     rename_map = {
@@ -124,7 +218,7 @@ if __name__ == "__main__":
         "--xaxis",
         type=str,
         default="# of max concurrency.",
-        help="column name to use as X Axis in comparision graph",
+        help="column name to use as X Axis in comparison graph",
     )
     args = parser.parse_args()
 
@@ -181,7 +275,6 @@ if __name__ == "__main__":
                     f"Expected subset: {filtered_info_cols}, "
                     f"but DataFrame has: {list(output_df.columns)}"
                 )
-
             output_df_sorted = output_df.sort_values(by=existing_group_cols)
             output_groups = output_df_sorted.groupby(existing_group_cols, dropna=False)
             for name, group in output_groups:
@@ -189,8 +282,7 @@ if __name__ == "__main__":
                 text_file.write(html_msgs_for_data_cols[i])
                 text_file.write(html)
 
-                if plot is True:
-                    import pandas as pd
+                if plot and plotly_found:
                     import plotly.express as px
 
                     df = group[raw_data_cols]
