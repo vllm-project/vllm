@@ -29,8 +29,8 @@ class BlockTable:
         self.pin_memory = pin_memory
         self.device = device
         self.physical_block_size = block_size
-        # If kernel_sizes is [0], use physical block size (no splitting)
-        if kernel_sizes == [0]:
+        # If kernel_sizes is None or [0], use physical block size (no splitting)
+        if kernel_sizes is None or kernel_sizes == [0]:
             self.block_size = block_size
             self.logical_block_size = block_size
             self.blocks_per_phys_block = 1
@@ -105,10 +105,10 @@ class BlockTable:
         if self.use_hybrid_blocks:
             block_ids = self._convert_physical_to_logical_blocks(
                 np.array(block_ids))
-        
+
         num_blocks = len(block_ids)
         start = self.num_blocks_per_row[row_idx]
-        
+
         self.block_table_np[row_idx, start:start + num_blocks] = block_ids
         self.num_blocks_per_row[row_idx] += num_blocks
 
@@ -274,8 +274,7 @@ class MultiGroupBlockTable:
                 block_size, max_num_reqs,
                 max(cdiv(max_model_len, block_size * dcp_world_size),
                     1 + num_speculative_tokens), max_num_batched_tokens,
-                pin_memory, device,
-                       kernel_size_list)
+                pin_memory, device, kernel_size_list)
             for block_size, kernel_size_list in zip(block_sizes, kernel_sizes)
         ]
 
