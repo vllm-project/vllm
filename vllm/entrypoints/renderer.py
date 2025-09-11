@@ -182,8 +182,7 @@ class CompletionRenderer(BaseRenderer):
                                             AsyncMicrobatchTokenizer]] = None,
     ):
         super().__init__(model_config, tokenizer)
-        self.async_tokenizer_pool = async_tokenizer_pool if (
-            async_tokenizer_pool) is not None else {}
+        self.async_tokenizer_pool = async_tokenizer_pool
         self.async_tokenizer: Optional[AsyncMicrobatchTokenizer] = None
 
     async def render_prompt(
@@ -364,10 +363,13 @@ class CompletionRenderer(BaseRenderer):
             raise ValueError(
                 "No tokenizer available for text input processing")
 
-        async_tokenizer = self.async_tokenizer_pool.get(tokenizer)
-        if async_tokenizer is None:
+        if self.async_tokenizer_pool is None:
             async_tokenizer = AsyncMicrobatchTokenizer(tokenizer)
-            self.async_tokenizer_pool[tokenizer] = async_tokenizer
+        else:
+            async_tokenizer = self.async_tokenizer_pool.get(tokenizer)
+            if async_tokenizer is None:
+                async_tokenizer = AsyncMicrobatchTokenizer(tokenizer)
+                self.async_tokenizer_pool[tokenizer] = async_tokenizer
         self.async_tokenizer = async_tokenizer
         return async_tokenizer
 
