@@ -1,6 +1,0 @@
-model_name: "deepseek-ai/DeepSeek-V2-Lite-Chat"
-accuracy_threshold: 0.30
-num_questions: 100
-num_fewshot: 5
-max_model_len: 4096
-
