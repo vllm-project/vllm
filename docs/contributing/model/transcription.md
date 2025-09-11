@@ -37,7 +37,7 @@ It is assumed you have already implemented your model in vLLM according to the b
     - The `supported_languages` mapping is validated at init time.
     - Set `supports_transcription_only=True` if the model should not serve text generation (eg Whisper).
 
-- Provide an ASR configuration via [get_speech_to_text_config][vllm.model_executor.models.interfaces.SupportsTranscription.get_speech_to_text_config]. 
+- Provide an ASR configuration via [get_speech_to_text_config][vllm.model_executor.models.interfaces.SupportsTranscription.get_speech_to_text_config].
   This is for controlling general behavior of the API when serving your model:
 
     ??? code
@@ -65,7 +65,7 @@ It is assumed you have already implemented your model in vLLM according to the b
 
 - Implement the prompt construction via [get_generation_prompt][vllm.model_executor.models.interfaces.SupportsTranscription.get_generation_prompt]. The server passes you the resampled waveform and task parameters; you return a valid [PromptType][vllm.inputs.data.PromptType]. There are two common patterns:
   
-    #### A. Multimodal LLM with audio embeddings (e.g., Voxtral, Gemma3n)
+### A. Multimodal LLM with audio embeddings (e.g., Voxtral, Gemma3n)
 
     Return a dict containing `multi_modal_data` with the audio, and either a `prompt` string or `prompt_token_ids`:
 
@@ -102,7 +102,7 @@ It is assumed you have already implemented your model in vLLM according to the b
         
         For further clarification on multi modal inputs, please refer to [Multi-Modal Inputs](../../features/multimodal_inputs.md).
 
-    #### B. Encoder–decoder audio-only (e.g., Whisper)
+### B. Encoder–decoder audio-only (e.g., Whisper)
 
     Return a dict with separate `encoder_prompt` and `decoder_prompt` entries:
 
@@ -142,7 +142,6 @@ It is assumed you have already implemented your model in vLLM according to the b
                 return cast(PromptType, prompt)
         ```
 
-
 - (Optional) Language validation via [validate_language][vllm.model_executor.models.interfaces.SupportsTranscription.validate_language]
 
     If your model requires a language and you want a default, override this method (see Whisper):
@@ -176,7 +175,6 @@ It is assumed you have already implemented your model in vLLM according to the b
                 # Return None if unknown; otherwise return an estimate.
                 return int(audio_duration_s * stt_config.sample_rate // 320)  # example
         ```
-
 
 ## 2. Audio preprocessing and chunking
 
@@ -264,6 +262,7 @@ Once your model implements `SupportsTranscription`, you can test the endpoints (
       -F "model=$MODEL_ID" \
       http://localhost:8000/v1/audio/translations
     ```
+
 Or check out more examples in <gh-file:examples/online_serving>.
 
 !!! note
