@@ -443,14 +443,6 @@ class CompilationConfig:
             if KEY not in self.inductor_compile_config:
                 self.inductor_compile_config[KEY] = False
 
-        if self.use_inductor_graph_partition and not is_torch_equal_or_newer(
-                "2.9.0.dev"):
-            logger.warning_once(
-                "Inductor graph partition requires pytorch 2.9 which is "
-                "not available. Falling back to "
-                "use_inductor_graph_partition=False.")
-            self.use_inductor_graph_partition = False
-
         for k, v in self.inductor_passes.items():
             if not isinstance(v, str):
                 assert callable(v), (
