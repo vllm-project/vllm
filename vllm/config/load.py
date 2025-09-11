@@ -51,6 +51,15 @@ class LoadConfig:
     download_dir: Optional[str] = None
     """Directory to download and load the weights, default to the default
     cache directory of Hugging Face."""
+    safetensors_load_strategy: Optional[str] = "lazy"
+    """Specifies the loading strategy for safetensors weights.
+    - "lazy" (default): Weights are memory-mapped from the file. This enables
+      on-demand loading and is highly efficient for models on local storage.
+    - "eager": The entire file is read into CPU memory upfront before loading.
+      This is recommended for models on network filesystems (e.g., Lustre, NFS)
+      as it avoids inefficient random reads, significantly speeding up model
+      initialization. However, it uses more CPU RAM.
+    """
     model_loader_extra_config: Union[dict, TensorizerConfig] = field(
         default_factory=dict)
     """Extra config for model loader. This will be passed to the model loader
