@@ -1216,14 +1216,14 @@ def _parse_chat_message_content_mm_part(
             return "image_url", image_url
         if "image_pil" in part:
             # "image_pil" could be None if UUID is provided.
-            image_params = cast(
+            image_params = cast( # type: ignore 
                 CustomChatCompletionContentPILImageParam, part
             )
             image_pil = image_params.get("image_pil", None)
             return "image_pil", image_pil
         if "image_embeds" in part:
             # "image_embeds" could be None if UUID is provided.
-            image_params = cast(
+            image_params = cast( # type: ignore 
                 ChatCompletionContentPartImageEmbedsParam, part
             )
             image_embeds = image_params.get("image_embeds", None)

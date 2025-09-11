@@ -87,7 +87,8 @@ these are directly passed to the model without HF processing.
 
 ModalityData: TypeAlias = Union[_T, list[Optional[_T]], None]
 """
-Either a single data item, or a list of data items.
+Either a single data item, or a list of data items. Can only be None if UUID
+is provided.
 
 The number of data items allowed per modality is restricted by
 `--limit-mm-per-prompt`.

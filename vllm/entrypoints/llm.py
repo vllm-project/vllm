@@ -42,7 +42,6 @@ from vllm.inputs import (DataPrompt, PromptType, SingletonPrompt, TextPrompt,
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.quantization import QuantizationMethods
-from vllm.multimodal import MultiModalDataDict, MultiModalUUIDDict
 from vllm.outputs import (ClassificationRequestOutput, EmbeddingRequestOutput,
                           PoolingRequestOutput, RequestOutput,
                           ScoringRequestOutput)
@@ -1476,9 +1475,9 @@ class LLM:
             )
 
     def _validate_mm_data_and_uuids(
-        self,
-        multi_modal_data: Optional[MultiModalDataDict],
-        multi_modal_uuids: Optional[MultiModalUUIDDict],
+            self,
+            multi_modal_data: Optional[Any],  # MultiModalDataDict
+            multi_modal_uuids: Optional[Any],  # MultiModalUUIDDict
     ):
         """
         Validate that if any multi-modal data is skipped (i.e. None),
@@ -1494,22 +1493,22 @@ class LLM:
                         if multi_modal_uuids is None or modality not in multi_modal_uuids or multi_modal_uuids[  # noqa: E501
                                 modality] is None:
                             raise ValueError(
-                                f"Multi-modal data for {modality} is None but UUID is not provided"  # noqa: E501
-                            )
+                                f"Multi-modal data for {modality} is None "
+                                f"but UUID is not provided")
                         else:
                             if len(
                                     multi_modal_uuids[modality]
                             ) <= i or multi_modal_uuids[modality][i] is None:
                                 raise ValueError(
-                                    f"Multi-modal data for {modality} is None but UUID is not provided"  # noqa: E501
-                                )
+                                    f"Multi-modal data for {modality} is None "
+                                    f"but UUID is not provided")
             else:
-                if data is None:
-                    if multi_modal_uuids is None or modality not in multi_modal_uuids or multi_modal_uuids[  # noqa: E501
-                            modality] is None:
-                        raise ValueError(
-                            f"Multi-modal data for {modality} is None but UUID is not provided"  # noqa: E501
-                        )
+                if data is None and (multi_modal_uuids is None
+                                     or modality not in multi_modal_uuids
+                                     or multi_modal_uuids[
+                                         modality] is None):
+                    raise ValueError(f"Multi-modal data for {modality} is None"
+                                     f" but UUID is not provided")
 
     def _add_request(
         self,

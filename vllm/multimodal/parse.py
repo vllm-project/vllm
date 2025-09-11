@@ -33,10 +33,10 @@ class ModalityDataItems(ABC, Generic[_T, _I]):
     [`MultiModalDataItems`][vllm.multimodal.parse.MultiModalDataItems].
     """
 
-    def __init__(self, data: Optional[_T], modality: str) -> None:
+    def __init__(self, data: _T, modality: str) -> None:
         super().__init__()
 
-        self.data = data if data else [None]
+        self.data: _T = data
         self.modality = modality
 
     def __repr__(self) -> str:
@@ -178,6 +178,8 @@ class DictEmbeddingItems(ModalityDataItems[Mapping[str, torch.Tensor],
 class AudioProcessorItems(ProcessorBatchItems[HfAudioItem]):
 
     def __init__(self, data: Optional[Sequence[HfAudioItem]]) -> None:
+        if data is None:
+            data = [None]
         super().__init__(data, "audio")
 
     def get_audio_length(self, item_idx: int) -> int:
@@ -199,6 +201,8 @@ class ImageSize(NamedTuple):
 class ImageProcessorItems(ProcessorBatchItems[HfImageItem]):
 
     def __init__(self, data: Optional[Sequence[HfImageItem]]) -> None:
+        if data is None:
+            data = [None]
         super().__init__(data, "image")
 
     def get_image_size(self, item_idx: int) -> ImageSize:
@@ -227,6 +231,8 @@ class VideoProcessorItems(ProcessorBatchItems[HfVideoItem]):
         metadata: Optional[Union[dict[str, Any],
                                  list[Optional[dict[str, Any]]]]] = None,
     ) -> None:
+        if data is None:
+            data = [None]
         super().__init__(data, "video")
         self.metadata = metadata
 
@@ -497,6 +503,7 @@ class MultiModalDataParser:
         for k, v in mm_data.items():
             if k not in subparsers:
                 raise ValueError(f"Unsupported modality: {k}")
+
             # ignore empty embedding data
             if (parsed_data := subparsers[k](v)) is not None:
                 mm_items[k] = parsed_data
