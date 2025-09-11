@@ -120,6 +120,7 @@ __device__ __forceinline__ __nv_bfloat16 warp_max(__nv_bfloat16 v) {
 
 template <typename T, typename U>
 __device__ __forceinline__ void cp_async4(T* _smem_ptr, const U* _glob_ptr) {
+#if __CUDACC_VER_MAJOR__ >= 11 && __CUDA_ARCH__ >= 800
   auto smem_ptr = reinterpret_cast<void*>(_smem_ptr);
   auto glob_ptr = reinterpret_cast<const void*>(_glob_ptr);
   const int BYTES = 16;
@@ -129,24 +130,33 @@ __device__ __forceinline__ void cp_async4(T* _smem_ptr, const U* _glob_ptr) {
       "   cp.async.cg.shared.global [%0], [%1], %2;\n"
       "}\n" ::"r"(smem),
       "l"(glob_ptr), "n"(BYTES));
+#endif
 }
 
 __device__ __forceinline__ void cp_async_fence() {
+#if __CUDACC_VER_MAJOR__ >= 11 && __CUDA_ARCH__ >= 800
   asm volatile("cp.async.commit_group;\n" ::);
+#endif
 }
 
 template <int N>
 __device__ __forceinline__ void cp_async_wait() {
+#if __CUDACC_VER_MAJOR__ >= 11 && __CUDA_ARCH__ >= 800
   asm volatile("cp.async.wait_group %0;\n" ::"n"(N));
+#endif
 }
 
 template <>
 __device__ __forceinline__ void cp_async_wait<0>() {
+#if __CUDACC_VER_MAJOR__ >= 11 && __CUDA_ARCH__ >= 800
   asm volatile("cp.async.wait_all;\n" ::);
+#endif
 }
 
 __device__ __forceinline__ float clip(float v, float mmin, float mmax) {
+#if __CUDACC_VER_MAJOR__ >= 11 && __CUDA_ARCH__ >= 800
   return fminf(mmax, fmaxf(v, mmin));
+#endif
 }
 
 __device__ __forceinline__ __nv_bfloat16 clip(__nv_bfloat16 v,
