@@ -3881,7 +3881,7 @@ def contains_object_print(text):
     Check if the text looks like a printed Python object, e.g.
     contains any substring matching the pattern: "at 0xFFFFFFF>"
     We match against 0x followed by 2-16 hex chars (there's
-    a max of 16 on a 64 bit system).
+    a max of 16 on a 64-bit system).
 
     Args:
         text (str): The text to check
