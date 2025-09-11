@@ -112,9 +112,9 @@ class BlockTable:
             # tokens.
             virtual_block_offsets = positions % virtual_block_size
             mask = virtual_block_offsets % self.dcp_world_size == self.dcp_rank
-            # Calcuate local block_offsets
+            # Calculate local block_offsets
             block_offsets = virtual_block_offsets // self.dcp_world_size
-            # Calcuate slot_mapping
+            # Calculate slot_mapping
             slot_mapping = block_numbers * self.block_size + block_offsets
             # Write final slots, use -1 for not-local
             self.slot_mapping_np[:req_indices.shape[0]] = np.where(
