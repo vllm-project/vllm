@@ -3,149 +3,151 @@
 This document walks you through the steps to add support for speech-to-text (ASR) models to vLLM’s transcription and translation APIs by implementing [SupportsTranscription][vllm.model_executor.models.interfaces.SupportsTranscription].
 Please refer to the [supported models](../../models/supported_models.md#transcription) for further guidance.
 
-## 1. Update the base vLLM model
+## Update the base vLLM model
 
 It is assumed you have already implemented your model in vLLM according to the basic model guide. Extend your model with the [SupportsTranscription][vllm.model_executor.models.interfaces.SupportsTranscription] interface and implement the following class attributes and methods.
 
-- Declare supported languages and capabilities:
+### `supported_languages` and `supports_transcription_only`
 
-    ??? code
+Declare supported languages and capabilities:
 
-        ```python
-        from typing import ClassVar, Mapping, Optional, Literal
-        import numpy as np
-        import torch
-        from torch import nn
+- The `supported_languages` mapping is validated at init time.
+- Set `supports_transcription_only=True` if the model should not serve text generation (eg Whisper).
+
+??? code "supported_languages and supports_transcription_only"
+    ```python
+    from typing import ClassVar, Mapping, Optional, Literal
+    import numpy as np
+    import torch
+    from torch import nn
+
+    from vllm.config import ModelConfig, SpeechToTextConfig
+    from vllm.inputs.data import PromptType
+    from vllm.model_executor.models.interfaces import SupportsTranscription
+    
+    class YourASRModel(nn.Module, SupportsTranscription):
+        # Map of ISO 639-1 language codes to language names
+        supported_languages: ClassVar[Mapping[str, str]] = {
+            "en": "English",
+            "it": "Italian",
+            # ... add more as needed
+        }
         
-        from vllm.config import ModelConfig, SpeechToTextConfig
-        from vllm.inputs.data import PromptType
-        from vllm.model_executor.models.interfaces import SupportsTranscription
-        
-        class YourASRModel(nn.Module, SupportsTranscription):
-            # Map of ISO 639-1 language codes to language names
-            supported_languages: ClassVar[Mapping[str, str]] = {
-                "en": "English",
-                "it": "Italian",
-                # ... add more as needed
+        # If your model only supports audio-conditioned generation
+        # (no text-only generation), enable this flag.
+        supports_transcription_only: ClassVar[bool] = True
+    ```
+
+Provide an ASR configuration via [get_speech_to_text_config][vllm.model_executor.models.interfaces.SupportsTranscription.get_speech_to_text_config].
+
+This is for controlling general behavior of the API when serving your model:
+
+??? code "get_speech_to_text_config()"
+    ```python
+    class YourASRModel(nn.Module, SupportsTranscription):
+        ...
+
+        @classmethod
+        def get_speech_to_text_config(
+            cls,
+            model_config: ModelConfig,
+            task_type: Literal["transcribe", "translate"],
+        ) -> SpeechToTextConfig:
+            return SpeechToTextConfig(
+                sample_rate=16_000,
+                max_audio_clip_s=30,
+                # Set to None to disable server-side chunking if your
+                # model/processor handles it already
+                min_energy_split_window_size=None,
+            )
+    ```
+
+See [Audio preprocessing and chunking](#audio-preprocessing-and-chunking) for what each field controls.
+
+Implement the prompt construction via [get_generation_prompt][vllm.model_executor.models.interfaces.SupportsTranscription.get_generation_prompt]. The server passes you the resampled waveform and task parameters; you return a valid [PromptType][vllm.inputs.data.PromptType]. There are two common patterns:
+
+#### Multimodal LLM with audio embeddings (e.g., Voxtral, Gemma3n)
+
+Return a dict containing `multi_modal_data` with the audio, and either a `prompt` string or `prompt_token_ids`:
+
+??? code "get_generation_prompt()"
+    ```python
+    class YourASRModel(nn.Module, SupportsTranscription):
+        ...
+
+        @classmethod
+        def get_generation_prompt(
+            cls,
+            audio: np.ndarray,
+            stt_config: SpeechToTextConfig,
+            model_config: ModelConfig,
+            language: Optional[str],
+            task_type: Literal["transcribe", "translate"],
+            request_prompt: str,
+            to_language: Optional[str],
+        ) -> PromptType:
+            # Example with a free-form instruction prompt
+            task_word = "Transcribe" if task_type == "transcribe" else "Translate"
+            prompt = (
+                "<start_of_turn>user\n"
+                f"{task_word} this audio: <audio_soft_token>"
+                "<end_of_turn>\n<start_of_turn>model\n"
+            )
+
+            return {
+                "multi_modal_data": {"audio": (audio, stt_config.sample_rate)},
+                "prompt": prompt,
             }
-            
-            # If your model only supports audio-conditioned generation
-            # (no text-only generation), enable this flag.
-            supports_transcription_only: ClassVar[bool] = True
-        ```
+    ```
 
-    - The `supported_languages` mapping is validated at init time.
-    - Set `supports_transcription_only=True` if the model should not serve text generation (eg Whisper).
+    For further clarification on multi modal inputs, please refer to [Multi-Modal Inputs](../../features/multimodal_inputs.md).
 
-- Provide an ASR configuration via [get_speech_to_text_config][vllm.model_executor.models.interfaces.SupportsTranscription.get_speech_to_text_config].
-  This is for controlling general behavior of the API when serving your model:
+#### Encoder–decoder audio-only (e.g., Whisper)
 
-    ??? code
+Return a dict with separate `encoder_prompt` and `decoder_prompt` entries:
 
-        ```python
-        class YourASRModel(nn.Module, SupportsTranscription):
-            ...
+??? code "get_generation_prompt()"
+    ```python
+    class YourASRModel(nn.Module, SupportsTranscription):
+        ...
 
-            @classmethod
-            def get_speech_to_text_config(
-                cls,
-                model_config: ModelConfig,
-                task_type: Literal["transcribe", "translate"],
-            ) -> SpeechToTextConfig:
-                return SpeechToTextConfig(
-                    sample_rate=16_000,
-                    max_audio_clip_s=30,
-                    # Set to None to disable server-side chunking if your
-                    # model/processor handles it already
-                    min_energy_split_window_size=None,
-                )
-        ```
+        @classmethod
+        def get_generation_prompt(
+            cls,
+            audio: np.ndarray,
+            stt_config: SpeechToTextConfig,
+            model_config: ModelConfig,
+            language: Optional[str],
+            task_type: Literal["transcribe", "translate"],
+            request_prompt: str,
+            to_language: Optional[str],
+        ) -> PromptType:
+            if language is None:
+                raise ValueError("Language must be specified")
 
-    See the “Audio preprocessing and chunking” section for what each field controls.
-
-- Implement the prompt construction via [get_generation_prompt][vllm.model_executor.models.interfaces.SupportsTranscription.get_generation_prompt]. The server passes you the resampled waveform and task parameters; you return a valid [PromptType][vllm.inputs.data.PromptType]. There are two common patterns:
-  
-### A. Multimodal LLM with audio embeddings (e.g., Voxtral, Gemma3n)
-
-    Return a dict containing `multi_modal_data` with the audio, and either a `prompt` string or `prompt_token_ids`:
-
-    ??? code
-
-        ```python
-        class YourASRModel(nn.Module, SupportsTranscription):
-            ...
-
-            @classmethod
-            def get_generation_prompt(
-                cls,
-                audio: np.ndarray,
-                stt_config: SpeechToTextConfig,
-                model_config: ModelConfig,
-                language: Optional[str],
-                task_type: Literal["transcribe", "translate"],
-                request_prompt: str,
-                to_language: Optional[str],
-            ) -> PromptType:
-                # Example with a free-form instruction prompt
-                task_word = "Transcribe" if task_type == "transcribe" else "Translate"
-                prompt = (
-                    "<start_of_turn>user\n"
-                    f"{task_word} this audio: <audio_soft_token>"
-                    "<end_of_turn>\n<start_of_turn>model\n"
-                )
-
-                return {
-                    "multi_modal_data": {"audio": (audio, stt_config.sample_rate)},
-                    "prompt": prompt,
-                }
-        ```
-        
-        For further clarification on multi modal inputs, please refer to [Multi-Modal Inputs](../../features/multimodal_inputs.md).
-
-### B. Encoder–decoder audio-only (e.g., Whisper)
-
-    Return a dict with separate `encoder_prompt` and `decoder_prompt` entries:
-
-    ??? code
-
-        ```python
-        class YourASRModel(nn.Module, SupportsTranscription):
-            ...
-
-            @classmethod
-            def get_generation_prompt(
-                cls,
-                audio: np.ndarray,
-                stt_config: SpeechToTextConfig,
-                model_config: ModelConfig,
-                language: Optional[str],
-                task_type: Literal["transcribe", "translate"],
-                request_prompt: str,
-                to_language: Optional[str],
-            ) -> PromptType:
-                if language is None:
-                    raise ValueError("Language must be specified")
-
-                prompt = {
-                    "encoder_prompt": {
-                        "prompt": "",
-                        "multi_modal_data": {
-                            "audio": (audio, stt_config.sample_rate),
-                        },
+            prompt = {
+                "encoder_prompt": {
+                    "prompt": "",
+                    "multi_modal_data": {
+                        "audio": (audio, stt_config.sample_rate),
                     },
-                    "decoder_prompt": (
-                        (f"<|prev|>{request_prompt}" if request_prompt else "")
-                        + f"<|startoftranscript|><|{language}|>"
-                        + f"<|{task_type}|><|notimestamps|>"
-                    ),
-                }
-                return cast(PromptType, prompt)
-        ```
+                },
+                "decoder_prompt": (
+                    (f"<|prev|>{request_prompt}" if request_prompt else "")
+                    + f"<|startoftranscript|><|{language}|>"
+                    + f"<|{task_type}|><|notimestamps|>"
+                ),
+            }
+            return cast(PromptType, prompt)
+    ```
 
-- (Optional) Language validation via [validate_language][vllm.model_executor.models.interfaces.SupportsTranscription.validate_language]
+### `validate_language` (optional)
 
-    If your model requires a language and you want a default, override this method (see Whisper):
+Language validation via [validate_language][vllm.model_executor.models.interfaces.SupportsTranscription.validate_language]
 
+If your model requires a language and you want a default, override this method (see Whisper):
+
+??? code "validate_language()"
     ```python
     @classmethod
     def validate_language(cls, language: Optional[str]) -> Optional[str]:
@@ -156,27 +158,29 @@ It is assumed you have already implemented your model in vLLM according to the b
         return super().validate_language(language)
     ```
 
-- (Optional) Token accounting for streaming via [get_num_audio_tokens][vllm.model_executor.models.interfaces.SupportsTranscription.get_num_audio_tokens]
+### `get_num_audio_tokens` (optional)
 
-    Provide a fast duration→token estimate to improve streaming usage statistics:
+Token accounting for streaming via [get_num_audio_tokens][vllm.model_executor.models.interfaces.SupportsTranscription.get_num_audio_tokens]
 
-    ??? code
-        ```python
-        class YourASRModel(nn.Module, SupportsTranscription):
-            ...
+Provide a fast duration→token estimate to improve streaming usage statistics:
 
-            @classmethod
-            def get_num_audio_tokens(
-                cls,
-                audio_duration_s: float,
-                stt_config: SpeechToTextConfig,
-                model_config: ModelConfig,
-            ) -> Optional[int]:
-                # Return None if unknown; otherwise return an estimate.
-                return int(audio_duration_s * stt_config.sample_rate // 320)  # example
-        ```
+??? code "get_num_audio_tokens()"
+    ```python
+    class YourASRModel(nn.Module, SupportsTranscription):
+        ...
 
-## 2. Audio preprocessing and chunking
+        @classmethod
+        def get_num_audio_tokens(
+            cls,
+            audio_duration_s: float,
+            stt_config: SpeechToTextConfig,
+            model_config: ModelConfig,
+        ) -> Optional[int]:
+            # Return None if unknown; otherwise return an estimate.
+            return int(audio_duration_s * stt_config.sample_rate // 320)  # example
+    ```
+
+## Audio preprocessing and chunking
 
 The API server takes care of basic audio I/O and optional chunking before building prompts:
 
@@ -185,7 +189,8 @@ The API server takes care of basic audio I/O and optional chunking before buildi
 - Energy-aware splitting: When `min_energy_split_window_size` is set, the server finds low-energy regions to minimize cutting within words.
 
 Relevant server logic:
-??? code
+
+??? code "_preprocess_speech_to_text()"
     ```python
     # vllm/entrypoints/openai/speech_to_text.py
     async def _preprocess_speech_to_text(...):
@@ -211,9 +216,9 @@ Relevant server logic:
         return prompts, duration
     ```
 
-## 3. Exposing tasks automatically
+## Exposing tasks automatically
 
-- vLLM automatically advertises transcription support if your model implements the interface:
+vLLM automatically advertises transcription support if your model implements the interface:
 
 ```python
 if supports_transcription(model):
@@ -222,7 +227,7 @@ if supports_transcription(model):
     supported_tasks.append("transcription")
 ```
 
-- When enabled, the server initializes the transcription and translation handlers:
+When enabled, the server initializes the transcription and translation handlers:
 
 ```python
 state.openai_serving_transcription = OpenAIServingTranscription(...) if "transcription" in supported_tasks else None
@@ -231,13 +236,13 @@ state.openai_serving_translation = OpenAIServingTranslation(...) if "transcripti
 
 No extra registration is required beyond having your model class available via the model registry and implementing `SupportsTranscription`.
 
-## 4. Examples in-tree
+## Examples in-tree
 
 - Whisper encoder–decoder (audio-only): <gh-file:vllm/model_executor/models/whisper.py>
 - Voxtral decoder-only (audio embeddings + LLM): <gh-file:vllm/model_executor/models/voxtral.py>
 - Gemma3n decoder-only with fixed instruction prompt: <gh-file:vllm/model_executor/models/gemma3n_mm.py>
 
-## 5. Test with the API
+## Test with the API
 
 Once your model implements `SupportsTranscription`, you can test the endpoints (API mimics OpenAI):
 
@@ -266,7 +271,6 @@ Once your model implements `SupportsTranscription`, you can test the endpoints (
 Or check out more examples in <gh-file:examples/online_serving>.
 
 !!! note
-
-- If your model handles chunking internally (e.g., via its processor or encoder), set `min_energy_split_window_size=None` in the returned `SpeechToTextConfig` to disable server-side chunking.
-- Implementing `get_num_audio_tokens` improves accuracy of streaming usage metrics (`prompt_tokens`) without an extra forward pass.
-- For multilingual behavior, keep `supported_languages` aligned with actual model capabilities.
+    - If your model handles chunking internally (e.g., via its processor or encoder), set `min_energy_split_window_size=None` in the returned `SpeechToTextConfig` to disable server-side chunking.
+    - Implementing `get_num_audio_tokens` improves accuracy of streaming usage metrics (`prompt_tokens`) without an extra forward pass.
+    - For multilingual behavior, keep `supported_languages` aligned with actual model capabilities.
