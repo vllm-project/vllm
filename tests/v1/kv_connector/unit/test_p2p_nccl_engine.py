@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -81,10 +82,10 @@ class TestP2pNcclEngine:
 
     def make_engine(self,
                     *,
-                    send_type: str | None = None,
-                    enable_asymmetric_p2p: bool | None = None,
-                    remote_tp_size: int | None = None,
-                    remote_pp_size: int | None = None) -> P2pNcclEngine:
+                    send_type: Optional[str] = None,
+                    enable_asymmetric_p2p: Optional[bool] = None,
+                    remote_tp_size: Optional[int] = None,
+                    remote_pp_size: Optional[int] = None) -> P2pNcclEngine:
         """Unified helper to build a P2pNcclEngine for tests.
 
         Optional overrides are applied to `kv_connector_extra_config`.

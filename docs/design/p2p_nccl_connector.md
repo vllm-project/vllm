@@ -268,6 +268,7 @@ python3 disagg_proxy_p2p_nccl_xpyd.py &
         --kv-transfer-config \
         '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_buffer_size":"8e9","kv_port":"24001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20004"}}' > /var/vllm.log 2>&1 &
     ```
+
 ### Run 1P1D (Asymmetric TP/PP)
 
 #### Instructions
