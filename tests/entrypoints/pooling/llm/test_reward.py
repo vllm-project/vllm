@@ -6,10 +6,9 @@ import weakref
 import pytest
 import torch
 
+from tests.models.utils import softmax
 from vllm import LLM, PoolingParams
 from vllm.distributed import cleanup_dist_env_and_memory
-
-from ...models.utils import softmax
 
 MODEL_NAME = "internlm/internlm2-1_8b-reward"
 

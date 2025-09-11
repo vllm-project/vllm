@@ -113,7 +113,7 @@ steps:
   - tests/entrypoints/
   commands:
   - pytest -v -s entrypoints/openai/tool_parsers
-  - pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/openai --ignore=entrypoints/offline_mode --ignore=entrypoints/test_chat_utils.py
+  - pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/openai --ignore=entrypoints/offline_mode --ignore=entrypoints/test_chat_utils.py  --ignore=entrypoints/pooling
 
 - label: Entrypoints Integration Test (LLM) # 30min
   timeout_in_minutes: 40
@@ -147,6 +147,19 @@ steps:
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/openai/test_collective_rpc.py # PYTHONPATH is needed to import custom Worker extension
   - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/test_oot_registration.py --ignore=entrypoints/openai/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/test_collective_rpc.py --ignore=entrypoints/openai/tool_parsers/
   - pytest -v -s entrypoints/test_chat_utils.py
+
+- label: Entrypoints Integration Test (Pooling)
+  timeout_in_minutes: 50
+  mirror_hardwares: [amdexperimental]
+  working_dir: "/vllm-workspace/tests"
+  fast_check: true
+  torch_nightly: true
+  source_file_dependencies:
+  - vllm/
+  - tests/entrypoints/pooling
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s entrypoints/pooling
 
 - label: Distributed Tests (4 GPUs) # 35min
   timeout_in_minutes: 50

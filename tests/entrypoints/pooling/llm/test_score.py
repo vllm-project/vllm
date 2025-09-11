@@ -6,14 +6,11 @@ import weakref
 import pytest
 import torch
 
+from tests.models.utils import softmax
 from vllm import LLM, PoolingParams
 from vllm.distributed import cleanup_dist_env_and_memory
 
-from ...models.utils import softmax
-
-MODEL_NAME = "jason9693/Qwen2.5-1.5B-apeach"
-
-prompts = ["The chef prepared a delicious meal."]
+MODEL_NAME = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
 
 
 @pytest.fixture(scope="module")
@@ -38,11 +35,15 @@ def llm():
 def test_pooling_params(llm: LLM):
 
     def get_outputs(activation):
-        outputs = llm.classify(
-            prompts,
+        text_1 = "What is the capital of France?"
+        text_2 = "The capital of France is Paris."
+
+        outputs = llm.score(
+            text_1,
+            text_2,
             pooling_params=PoolingParams(activation=activation),
             use_tqdm=False)
-        return torch.tensor([x.outputs.probs for x in outputs])
+        return torch.tensor([x.outputs.score for x in outputs])
 
     default = get_outputs(activation=None)
     w_activation = get_outputs(activation=True)
@@ -56,15 +57,3 @@ def test_pooling_params(llm: LLM):
     assert torch.allclose(
         softmax(wo_activation), w_activation, atol=1e-2
     ), "w_activation should be close to activation(wo_activation)."
-
-
-def test_encode_api(llm: LLM):
-    err_msg = "pooling_task must be one of.+"
-    with pytest.raises(ValueError, match=err_msg):
-        llm.encode(prompts, use_tqdm=False)
-
-
-def test_score_api(llm: LLM):
-    err_msg = "Score API is only enabled for num_labels == 1."
-    with pytest.raises(ValueError, match=err_msg):
-        llm.score("ping", "pong", use_tqdm=False)
