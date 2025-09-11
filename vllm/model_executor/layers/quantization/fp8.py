@@ -452,8 +452,8 @@ class Fp8LinearMethod(LinearMethodBase):
         # On B200, if E8M0 for DeepGemm is used, we need to
         # requantize the weight and input to the specific scale
         # at the same time.
-        if is_deep_gemm_e8m0_used():
-            assert layer.weight_block_size is not None
+        # Only applicable to block-quantized weights.
+        if is_deep_gemm_e8m0_used() and layer.weight_block_size is not None:
             block_sz = tuple(layer.weight_block_size)
             requant_weight_ue8m0_inplace(
                 layer.weight.data,
@@ -896,8 +896,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             del layer.w13_input_scale
             del layer.w2_input_scale
 
-        if is_deep_gemm_e8m0_used():
-            assert layer.weight_block_size is not None
+        if is_deep_gemm_e8m0_used() and layer.weight_block_size is not None:
             # Re-quantise the expert weights so their scales are UE8M0.
             block_sz = tuple(layer.weight_block_size)
             requant_weight_ue8m0_inplace(
