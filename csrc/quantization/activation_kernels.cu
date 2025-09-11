@@ -9,13 +9,25 @@
 
 #include "quantization/fp8/common.cuh"
 
-#if __CUDACC_VER_MAJOR__ >= 11 && __CUDA_ARCH__ >= 800
+#include <c10/util/Float8_e4m3fn.h>
+
+#ifndef USE_ROCM
+  #include <cuda_bf16.h>
+  #include <cuda_fp16.h>
   #include <cuda_fp8.h>
-  #include <c10/util/Float8_e4m3fn.h>
+#else
+  #include <hip/hip_bf16.h>
+  #include <hip/hip_fp16.h>
+  #include <hip/hip_fp8.h>
+
+typedef __hip_bfloat162 __nv_bfloat162;
+typedef __hip_bfloat16 __nv_bfloat16;
+typedef __hip_bfloat16_raw __nv_bfloat16_raw;
+
+typedef __hip_fp8_e4m3 __nv_fp8_e4m3 typedef __hip_fp8x4_e4m3 __nv_fp8x4_e4m3
 #endif
 
 #include "core/registration.h"
-
 namespace vllm {
 
 template <typename T>
@@ -131,12 +143,15 @@ __device__ __forceinline__ void cp_async4(T* _smem_ptr, const U* _glob_ptr) {
       "   cp.async.cg.shared.global [%0], [%1], %2;\n"
       "}\n" ::"r"(smem),
       "l"(glob_ptr), "n"(BYTES));
+#else
+    _smem_ptr[0] = _glob_ptr[0];
 #endif
 }
 
 __device__ __forceinline__ void cp_async_fence() {
 #if __CUDACC_VER_MAJOR__ >= 11 && __CUDA_ARCH__ >= 800
   asm volatile("cp.async.commit_group;\n" ::);
+#else
 #endif
 }
 
@@ -144,6 +159,7 @@ template <int N>
 __device__ __forceinline__ void cp_async_wait() {
 #if __CUDACC_VER_MAJOR__ >= 11 && __CUDA_ARCH__ >= 800
   asm volatile("cp.async.wait_group %0;\n" ::"n"(N));
+#else
 #endif
 }
 
@@ -151,12 +167,14 @@ template <>
 __device__ __forceinline__ void cp_async_wait<0>() {
 #if __CUDACC_VER_MAJOR__ >= 11 && __CUDA_ARCH__ >= 800
   asm volatile("cp.async.wait_all;\n" ::);
+#else
 #endif
 }
 
 __device__ __forceinline__ float clip(float v, float mmin, float mmax) {
 #if __CUDACC_VER_MAJOR__ >= 11 && __CUDA_ARCH__ >= 800
   return fminf(mmax, fmaxf(v, mmin));
+#else
 #endif
 }
 
@@ -456,8 +474,7 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
     at::Tensor& y_q,           // (E, T, H) [OUT]
     at::Tensor& y_s,           // (E, T, H//group_size) [OUT]
     int64_t group_size, bool use_ue8m0, int64_t num_parallel_tokens) {
-// This kernel relies heavily on cp.async and fp8 support.
-#if __CUDACC_VER_MAJOR__ >= 11 && __CUDA_ARCH__ >= 800
+  // This kernel relies heavily on cp.async and fp8 support.
   // This kernel currently only supports H % 128 == 0 and assumes a
   // fixed GROUP_SIZE of 128.
   TORCH_CHECK(input.dtype() == torch::kBFloat16);
@@ -497,68 +514,67 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
     block = dim3(num_warps * WARP_SIZE);
   };
 
-  #define KERNEL_FN                                                         \
-    if (use_ue8m0) {                                                        \
-      vllm::silu_mul_fp8_quant_deep_gemm_kernel<fp8_t, NUM_WARPS, Idx_t,    \
-                                                NUM_PARALLEL_TOKENS, true>  \
-          <<<grid, block, 0, stream>>>(                                     \
-              reinterpret_cast<__nv_bfloat16*>(input.data_ptr()),           \
-              (fp8_t*)y_q.data_ptr(), y_s.data_ptr<float>(),                \
-              reinterpret_cast<int32_t*>(counts.data_ptr<int>()), H, G,     \
-              stride_i_e, stride_i_t, stride_i_h, stride_yq_e, stride_yq_t, \
-              stride_yq_h, stride_ys_e, stride_ys_t, stride_ys_g,           \
-              stride_counts_e);                                             \
-    } else {                                                                \
-      vllm::silu_mul_fp8_quant_deep_gemm_kernel<fp8_t, NUM_WARPS, Idx_t,    \
-                                                NUM_PARALLEL_TOKENS, false> \
-          <<<grid, block, 0, stream>>>(                                     \
-              reinterpret_cast<__nv_bfloat16*>(input.data_ptr()),           \
-              (fp8_t*)y_q.data_ptr(), y_s.data_ptr<float>(),                \
-              reinterpret_cast<int32_t*>(counts.data_ptr<int>()), H, G,     \
-              stride_i_e, stride_i_t, stride_i_h, stride_yq_e, stride_yq_t, \
-              stride_yq_h, stride_ys_e, stride_ys_t, stride_ys_g,           \
-              stride_counts_e);                                             \
-    }
+#define KERNEL_FN                                                         \
+  if (use_ue8m0) {                                                        \
+    vllm::silu_mul_fp8_quant_deep_gemm_kernel<fp8_t, NUM_WARPS, Idx_t,    \
+                                              NUM_PARALLEL_TOKENS, true>  \
+        <<<grid, block, 0, stream>>>(                                     \
+            reinterpret_cast<__nv_bfloat16*>(input.data_ptr()),           \
+            (fp8_t*)y_q.data_ptr(), y_s.data_ptr<float>(),                \
+            reinterpret_cast<int32_t*>(counts.data_ptr<int>()), H, G,     \
+            stride_i_e, stride_i_t, stride_i_h, stride_yq_e, stride_yq_t, \
+            stride_yq_h, stride_ys_e, stride_ys_t, stride_ys_g,           \
+            stride_counts_e);                                             \
+  } else {                                                                \
+    vllm::silu_mul_fp8_quant_deep_gemm_kernel<fp8_t, NUM_WARPS, Idx_t,    \
+                                              NUM_PARALLEL_TOKENS, false> \
+        <<<grid, block, 0, stream>>>(                                     \
+            reinterpret_cast<__nv_bfloat16*>(input.data_ptr()),           \
+            (fp8_t*)y_q.data_ptr(), y_s.data_ptr<float>(),                \
+            reinterpret_cast<int32_t*>(counts.data_ptr<int>()), H, G,     \
+            stride_i_e, stride_i_t, stride_i_h, stride_yq_e, stride_yq_t, \
+            stride_yq_h, stride_ys_e, stride_ys_t, stride_ys_g,           \
+            stride_counts_e);                                             \
+  }
 
-  #define KERNEL_CALL_H                                       \
-    if (H % (4 * GROUP_SIZE) == 0) {                          \
-      static constexpr int NUM_WARPS = 4;                     \
-      populate_launch_params(NUM_WARPS, NUM_PARALLEL_TOKENS); \
-      KERNEL_FN                                               \
-    } else {                                                  \
-      static constexpr int NUM_WARPS = 1;                     \
-      populate_launch_params(NUM_WARPS, NUM_PARALLEL_TOKENS); \
-      KERNEL_FN                                               \
-    }
+#define KERNEL_CALL_H                                       \
+  if (H % (4 * GROUP_SIZE) == 0) {                          \
+    static constexpr int NUM_WARPS = 4;                     \
+    populate_launch_params(NUM_WARPS, NUM_PARALLEL_TOKENS); \
+    KERNEL_FN                                               \
+  } else {                                                  \
+    static constexpr int NUM_WARPS = 1;                     \
+    populate_launch_params(NUM_WARPS, NUM_PARALLEL_TOKENS); \
+    KERNEL_FN                                               \
+  }
 
-  #define KERNEL_CALL_TOP_LEVEL                      \
-    if (num_parallel_tokens == 1) {                  \
-      static constexpr int NUM_PARALLEL_TOKENS = 1;  \
-      KERNEL_CALL_H                                  \
-    } else if (num_parallel_tokens == 2) {           \
-      static constexpr int NUM_PARALLEL_TOKENS = 2;  \
-      KERNEL_CALL_H                                  \
-    } else if (num_parallel_tokens == 4) {           \
-      static constexpr int NUM_PARALLEL_TOKENS = 4;  \
-      KERNEL_CALL_H                                  \
-    } else if (num_parallel_tokens == 8) {           \
-      static constexpr int NUM_PARALLEL_TOKENS = 8;  \
-      KERNEL_CALL_H                                  \
-    } else if (num_parallel_tokens == 16) {          \
-      static constexpr int NUM_PARALLEL_TOKENS = 16; \
-      KERNEL_CALL_H                                  \
-    } else if (num_parallel_tokens == 32) {          \
-      static constexpr int NUM_PARALLEL_TOKENS = 32; \
-      KERNEL_CALL_H                                  \
-    } else if (num_parallel_tokens == 64) {          \
-      static constexpr int NUM_PARALLEL_TOKENS = 64; \
-      KERNEL_CALL_H                                  \
-    }
+#define KERNEL_CALL_TOP_LEVEL                      \
+  if (num_parallel_tokens == 1) {                  \
+    static constexpr int NUM_PARALLEL_TOKENS = 1;  \
+    KERNEL_CALL_H                                  \
+  } else if (num_parallel_tokens == 2) {           \
+    static constexpr int NUM_PARALLEL_TOKENS = 2;  \
+    KERNEL_CALL_H                                  \
+  } else if (num_parallel_tokens == 4) {           \
+    static constexpr int NUM_PARALLEL_TOKENS = 4;  \
+    KERNEL_CALL_H                                  \
+  } else if (num_parallel_tokens == 8) {           \
+    static constexpr int NUM_PARALLEL_TOKENS = 8;  \
+    KERNEL_CALL_H                                  \
+  } else if (num_parallel_tokens == 16) {          \
+    static constexpr int NUM_PARALLEL_TOKENS = 16; \
+    KERNEL_CALL_H                                  \
+  } else if (num_parallel_tokens == 32) {          \
+    static constexpr int NUM_PARALLEL_TOKENS = 32; \
+    KERNEL_CALL_H                                  \
+  } else if (num_parallel_tokens == 64) {          \
+    static constexpr int NUM_PARALLEL_TOKENS = 64; \
+    KERNEL_CALL_H                                  \
+  }
 
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   VLLM_DISPATCH_FP8_TYPES(y_q.scalar_type(),
                           "silu_mul_fp8_quant_deep_gemm_kernel",
                           [&] { KERNEL_CALL_TOP_LEVEL });
-#endif
 }
