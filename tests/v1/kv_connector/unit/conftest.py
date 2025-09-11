@@ -67,6 +67,6 @@ def _mock_p2p_nccl_engine_send_sync(monkeypatch):
 
         monkeypatch.setattr(zmq, "Context", lambda *a, **k: _DummyContext())
         monkeypatch.setattr(zmq, "Poller", lambda *a, **k: _DummyPoller())
-    except Exception:
+    except ImportError:
         # If zmq is unavailable, safely ignore.
         pass

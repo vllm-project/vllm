@@ -16,11 +16,8 @@ import regex
 import torch
 import zmq
 
-<<<<<<< HEAD
-from vllm.config import KVTransferConfig, ModelConfig
-=======
+from vllm.config import ModelConfig
 from vllm.config.kv_transfer import KVTransferConfig
->>>>>>> upstream/main
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     NCCLLibrary, buffer_type, cudaStream_t, ncclComm_t, ncclDataTypeEnum)
 from vllm.distributed.kv_transfer.kv_connector.v1.p2p.tensor_memory_pool import (  # noqa: E501
@@ -669,6 +666,9 @@ class P2pNcclEngine:
         """
         current_layer_idx = extract_layer_index(layer_name)
         num_hidden_layers = self.model_config.hf_config.num_hidden_layers
+        assert num_hidden_layers % self.remote_pp_size == 0 (
+            f"num_hidden_layers {num_hidden_layers} must be divisible by "
+            f"remote_pp_size {self.remote_pp_size}")
         return current_layer_idx // (num_hidden_layers // self.remote_pp_size)
 
     # ==============================
