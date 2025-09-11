@@ -98,7 +98,7 @@ mkdocs.yaml @hmellor
 /vllm/model_executor/layers/fused_moe/rocm*.py @gshtras
 
 # TPU
-/vllm/v1/worker/^tpu @NickLucche
+/vllm/v1/worker/tpu* @NickLucche
 /vllm/platforms/tpu.py @NickLucche
 /vllm/v1/sample/tpu @NickLucche
 /vllm/tests/v1/tpu @NickLucche
