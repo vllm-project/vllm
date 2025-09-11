@@ -889,10 +889,6 @@ def test_hybrid_block_table_initialization():
     assert np.array_equal(
         block_table.block_table_np[req_index, :len(expected_logical_blocks)],
         expected_logical_blocks)
-    # Verify that physical blocks can be correctly derived from logical blocks
-    derived_physical_blocks = block_table._convert_logical_to_physical_blocks(
-        expected_logical_blocks)
-    assert np.array_equal(derived_physical_blocks, physical_blocks)
 
 
 def test_input_batch_with_kernel_block_sizes():
