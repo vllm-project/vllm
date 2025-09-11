@@ -185,13 +185,13 @@ def get_model_architecture(
 
     convert_type = model_config.convert_type
     if convert_type != "none" and supports_multimodal(model_cls):
-        logger.info_once("Detected conversion of Multi Modal model.")
+        logger.debug_once("Detected conversion of Multi Modal model.")
         converted = try_create_mm_pooling_model_cls(model_cls)
         if converted is not None:
-            logger.info_once("Creating wrapper class to forward pooler.")
+            logger.debug_once("Creating wrapper class to forward pooler.")
             return converted, arch
         else:
-            logger.info_once("Attempting direct conversion.")
+            logger.debug_once("Attempting direct conversion.")
 
     if convert_type == "none":
         pass
