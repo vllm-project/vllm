@@ -44,7 +44,10 @@ steps:
                    models/test_registry.py \
                    models/test_utils.py \
                    models/test_vision.py \
-                   models/test_initialization.py::test_can_initialize_subset \
+                   --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT \
+                   --shard-id=$$BUILDKITE_PARALLEL_JOB \
+                   --durations=100
+    - pytest -v -s models/test_initialization.py::test_can_initialize_subset \
                    --durations=100 \
                    --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT \
                    --shard-id=$$BUILDKITE_PARALLEL_JOB
@@ -118,4 +121,4 @@ steps:
                    --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT \
                    --shard-id=$$BUILDKITE_PARALLEL_JOB \
                    --durations=100
-  parallelism: 8
+  parallelism: 4
