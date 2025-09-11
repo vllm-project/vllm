@@ -210,18 +210,6 @@ class BlockTable:
         self.slot_mapping[:num_tokens].copy_(
             self.slot_mapping_cpu[:num_tokens], non_blocking=True)
 
-    def _get_physical_block_count(self, row_idx: int) -> int:
-        """Get the number of physical blocks for a request."""
-        logical_count = self.num_blocks_per_row[row_idx]
-        if logical_count == 0:
-            return 0
-
-        # Count unique physical blocks from logical blocks
-        logical_blocks = self.block_table_np[row_idx, :logical_count]
-        physical_blocks = self._convert_logical_to_physical_blocks(
-            logical_blocks)
-        return len(physical_blocks)
-
     def clear(self) -> None:
         self.block_table.fill_(0)
         self.block_table_cpu.fill_(0)
