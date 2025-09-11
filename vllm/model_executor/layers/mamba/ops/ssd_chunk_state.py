@@ -256,12 +256,12 @@ def _chunk_state_fwd_kernel(
                       offs_k[:, None] * stride_b_seqlen)
     dt_ptrs = dt_ptr + offs_k * stride_dt_csize
 
+    chunk_size_limit = chunk_seqlen_end - chunk_seqlen_start
+
     dA_cs_last = tl.load(dA_cumsum_ptr +
-                         (chunk_size - 1) * stride_dA_cs_csize).to(tl.float32)
+                         (chunk_size_limit - 1) * stride_dA_cs_csize).to(tl.float32)
 
     dA_cumsum_ptrs = dA_cumsum_ptr + offs_k * stride_dA_cs_csize
-
-    chunk_size_limit = chunk_seqlen_end - chunk_seqlen_start
 
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, chunk_size_limit, BLOCK_SIZE_K):

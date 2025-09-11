@@ -97,6 +97,9 @@ def _mamba_chunk_scan_combined_fwd(x,
                                       dt_softplus=dt_softplus,
                                       dt_limit=dt_limit)
 
+    print("dA_cumsum: ", dA_cumsum[0,0,0,:10])
+    print("dt: ", dt[0,0,0,:10])
+
     # 2. Compute the state for each intra-chunk
     # (right term of low-rank factorization of off-diagonal blocks; B terms)
     states = _chunk_state_fwd(B,
@@ -107,8 +110,6 @@ def _mamba_chunk_scan_combined_fwd(x,
                               seq_idx=seq_idx,
                               states_in_fp32=True)
 
-    print("after chunk_state_fwd: ")
-    print("states.shape: ", states.shape)
     print("states: ", states[0,0,0,0,:10])
 
     # 3. Compute the inter-chunk SSM recurrence; produces correct SSM states at chunk boundaries
