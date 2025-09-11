@@ -230,6 +230,7 @@ def main():
     print(f"Output token throughput (tok/s):         {decode_speed:<10.2f}")
     print()
 
+    # Only print if we use a speculative decoding method
     if args.method != "None":
         print(f"Number of drafts:                        {num_drafts:<10}")
         print(f"Draft tokens generated:                  {num_draft_tokens:<10}")
