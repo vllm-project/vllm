@@ -21,6 +21,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv, direct_register_custom_op
 from vllm.utils.deep_gemm import (is_deep_gemm_e8m0_used,
+                                  is_deep_gemm_supported,
                                   should_use_deepgemm_for_fp8_linear)
 
 logger = init_logger(__name__)
@@ -113,23 +114,20 @@ def dispatch_w8a8_blockscale_func(
 #  https://github.com/vllm-project/vllm/issues/14397
 class W8A8BlockFp8LinearOp:
     """
-    This class executes a Blocked FP8 linear layer using cutlass if supported and
-    torch.scaled_mm otherwise.
+    This class executes a Blocked FP8 linear layer using cutlass if supported
+    and torch.scaled_mm otherwise.
     """
 
     def __init__(
         self,
         cutlass_block_fp8_supported: bool = CUTLASS_BLOCK_FP8_SUPPORTED,
         use_aiter_and_is_supported: bool = False,
-        is_deep_gemm_supported: bool = False,
-        ue8m0_deepgemm_supported: bool = False,
-        is_blackwell: bool = False,
     ):
         self.cutlass_block_fp8_supported = cutlass_block_fp8_supported
         self.use_aiter_and_is_supported = use_aiter_and_is_supported
-        self.is_deep_gemm_supported = is_deep_gemm_supported
-        self.ue8m0_deepgemm_supported = ue8m0_deepgemm_supported
-        self.is_blackwell = is_blackwell
+        self.is_deep_gemm_supported = is_deep_gemm_supported()
+        self.ue8m0_deepgemm_supported = is_deep_gemm_e8m0_used()
+        self.is_blackwell = current_platform.has_device_capability(100)
 
     def apply(
         self,

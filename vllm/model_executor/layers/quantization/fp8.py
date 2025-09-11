@@ -247,17 +247,15 @@ class Fp8LinearMethod(LinearMethodBase):
         else:
             self.act_q_group_shape = GroupShape.PER_TENSOR
 
-        self.fp8_linear = Fp8LinearOp(
-            act_quant_static=self.act_q_static,
-            act_quant_group_shape=self.act_q_group_shape)
-
-        self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
-            cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
-            use_aiter_and_is_supported=self.use_aiter_and_is_supported,
-            is_deep_gemm_supported=is_deep_gemm_supported(),
-            ue8m0_deepgemm_supported=is_deep_gemm_e8m0_used(),
-            is_blackwell=current_platform.has_device_capability(100),
-        )
+        if self.block_quant:
+            self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
+                cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
+                use_aiter_and_is_supported=self.use_aiter_and_is_supported,
+            )
+        else:
+            self.fp8_linear = Fp8LinearOp(
+                    act_quant_static=self.act_q_static,
+                    act_quant_group_shape=self.act_q_group_shape)
 
     def create_weights(
         self,
