@@ -11,7 +11,7 @@
 import torch
 import triton
 import triton.language as tl
-from torch.library import triton_op, wrap_triton
+from torch.library import wrap_triton
 
 Tensor = torch.Tensor
 
@@ -80,7 +80,8 @@ def triton_scale_swizzle(
 
 def triton_mx_block_rearrange(scale_tensor: torch.Tensor) -> torch.Tensor:
     """
-    Rearranges an E8M0 tensor scale from row-major format to block-scaled swizzle format.
+    Rearranges an E8M0 tensor scale from row-major format to
+    block-scaled swizzle format.
 
     This format is suitable for Tmem as described in NVIDIA documentation:
     https://docs.nvidia.com/cuda/cublas/index.html#d-block-scaling-factors-layout
@@ -109,7 +110,8 @@ def triton_mx_block_rearrange(scale_tensor: torch.Tensor) -> torch.Tensor:
     # Input stride (for row-major format)
     input_row_stride = cols
 
-    # We probably want handle multiple blocks per tile but for now keep it simple
+    # We probably want handle multiple blocks per tile but
+    # for now keep it simple
     BLOCK_ROWS, BLOCK_COLS = 128, 4
 
     # Output block stride for the rearranged format
@@ -138,15 +140,16 @@ def ceil_div(a, b):
 
 def to_blocked(input_matrix, use_triton_kernel: bool = False) -> Tensor:
     """
-    Rearrange a large matrix by breaking it into blocks and applying the rearrangement pattern.
+    Rearrange a large matrix by breaking it into blocks and applying
+    the rearrangement pattern.
 
     See:
         https://docs.nvidia.com/cuda/cublas/index.html#d-block-scaling-factors-layout
 
     Args:
         input_matrix: Input tensor of shape (H, W)
-        use_triton_kernel: Whether to use a triton implementation instead of relying on
-            torch.compile
+        use_triton_kernel: Whether to use a triton implementation instead of
+            relying on torch.compile
 
     Returns:
         Rearranged tensor of shape (32*ceil_div(H,128), 16*ceil_div(W,4))
@@ -167,6 +170,6 @@ def to_blocked(input_matrix, use_triton_kernel: bool = False) -> Tensor:
 
     # Rearrange the blocks
     blocks = padded.view(n_row_blocks, 128, n_col_blocks, 4).permute(0, 2, 1, 3)
-    rearranged = blocks.reshape(-1, 4, 32, 4).transpose(1, 2).reshape(-1, 32, 16)
+    rearranged = blocks.reshape(-1, 4, 32, 4).transpose(1, 2).reshape(-1, 32, 16) # noqa: E501
 
     return rearranged.flatten()

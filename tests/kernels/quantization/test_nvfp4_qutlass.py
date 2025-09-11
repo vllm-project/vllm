@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
-# Copyright (C) 2025 Roberto L. Castro (Roberto.LopezCastro@ist.ac.at). All Rights Reserved.
+# Copyright (C) 2025 Roberto L. Castro (Roberto.LopezCastro@ist.ac.at).
+# All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,7 +20,7 @@
 import unittest
 import torch
 import numpy as np
-
+from typing import ClassVar
 from compressed_tensors.transform.utils.hadamard import (
     deterministic_hadamard_matrix,
 )
@@ -27,7 +28,6 @@ from compressed_tensors.transform.utils.hadamard import (
 from vllm._custom_ops import fusedQuantizeNv
 from vllm.qutlass_utils.utils import to_blocked
 from vllm import _custom_ops as ops  # use existing nvfp4 gemm in vllm
-
 
 def get_hadamard_matrix(
     group_size: int, dtype: torch.dtype, device: torch.device
@@ -175,6 +175,9 @@ def _forward_quantize_ref(x: torch.Tensor, h: torch.Tensor, rot_size: int):
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required for these tests")
 class Test(unittest.TestCase):
+    dtype: ClassVar[torch.dtype]
+    device: ClassVar[torch.device]
+
     @classmethod
     def setUpClass(cls):
         seed = 0

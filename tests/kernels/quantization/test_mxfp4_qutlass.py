@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
-# Copyright (C) 2025 Roberto L. Castro (Roberto.LopezCastro@ist.ac.at). All Rights Reserved.
+# Copyright (C) 2025 Roberto L. Castro (Roberto.LopezCastro@ist.ac.at).
+# All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,7 +20,7 @@
 import unittest
 import torch
 import numpy as np
-
+from typing import ClassVar
 from compressed_tensors.transform.utils.hadamard import (
     deterministic_hadamard_matrix,
 )
@@ -187,6 +188,9 @@ def _forward_quantize_ref(
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required for these tests")
 class Test(unittest.TestCase):
+    dtype: ClassVar[torch.dtype]
+    device: ClassVar[torch.device]
+
     @classmethod
     def setUpClass(cls):
         seed = 0
@@ -316,9 +320,8 @@ class Test(unittest.TestCase):
             for layer in layers:
                 for batch in [1, 16]:
                     for had_size in [32, 64, 128]:
-                        self.run_problem(batch, layer[1], layer[0], had_size)
-                        # self.run_problem_ada(batch, layer[1], layer[0], had_size)
-
+                        self.run_problem(batch, layer[1],
+                                         layer[0], had_size)
 
 if __name__ == "__main__":
     unittest.main()
