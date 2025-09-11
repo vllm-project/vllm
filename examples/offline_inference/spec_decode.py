@@ -183,7 +183,7 @@ def main():
     num_drafts = 0
     num_draft_tokens = 0
     num_accepted_tokens = 0
-    num_prompt_tokens = 0
+    total_num_prompt_tokens = 0
     num_requests = 0
     acceptance_counts = [0] * args.num_spec_tokens
 
@@ -203,7 +203,7 @@ def main():
                 acceptance_counts[pos] += metric.values[pos]
         elif metric.name == "vllm:prompt_tokens":
             assert isinstance(metric, Counter)
-            num_prompt_tokens += metric.value
+            total_num_prompt_tokens += metric.value
         elif metric.name == "vllm:request_prefill_time_seconds":
             assert isinstance(metric, Histogram)
             total_prefill_time += metric.sum
@@ -215,26 +215,22 @@ def main():
             num_requests += metric.value
 
     # Calculate metrics
-    total_tokens = num_prompt_tokens + total_num_output_tokens
+    total_tokens = total_num_prompt_tokens + total_num_output_tokens
     total_time = total_prefill_time + total_decode_time
-    prefill_speed = num_prompt_tokens / total_prefill_time if total_prefill_time > 0 else 0
+    prefill_speed = total_num_prompt_tokens / total_prefill_time if total_prefill_time > 0 else 0
     decode_speed = total_num_output_tokens / total_decode_time if total_decode_time > 0 else 0
     overall_speed = total_tokens / total_time if total_time > 0 else 0
     request_throughput = num_requests / total_time if total_time > 0 else 0
 
     # Print formatted benchmark results
-    print("=========== Offline Inference Stats ============")
-    print(f"Backend:                                 {'vllm':<10}")
-    print(f"Successful requests:                     {num_requests:<10}")
-    print(f"Benchmark duration (s):                  {total_time:<10.2f}")
-    print(f"Total input tokens:                      {num_prompt_tokens:<10}")
+    print("=========== Speculative Decoding Stats ============")
+    print(f"Total input tokens:                      {total_num_prompt_tokens:<10}")
     print(f"Total generated tokens:                  {total_num_output_tokens:<10}")
-    print(f"Last generation throughput (tok/s):      {decode_speed:<10.2f}")
+    print()
     print(f"Request throughput (req/s):              {request_throughput:<10.2f}")
     print(f"Input token throughput (tok/s):          {prefill_speed:<10.2f}")
     print(f"Output token throughput (tok/s):         {decode_speed:<10.2f}")
     print(f"Total token throughput (tok/s):          {overall_speed:<10.2f}")
-    print("==================================================")
     print()
 
     # Speculative decoding stats
@@ -244,7 +240,6 @@ def main():
     acceptance_length = 1 + (num_accepted_tokens / num_drafts) if num_drafts > 0 else 1
     draft_utilization_rate = num_accepted_tokens / num_draft_tokens * 100 if num_draft_tokens > 0 else 0
 
-    print("============ Speculative Decoding Stats ============")
     print(f"Total output tokens:                     {total_num_output_tokens:<10}")
     print(f"Number of drafts:                        {num_drafts:<10}")
     print(f"Draft tokens generated:                  {num_draft_tokens:<10}")
