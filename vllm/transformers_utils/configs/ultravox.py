@@ -113,7 +113,7 @@ class UltravoxConfig(transformers.PretrainedConfig):
         return super().__setattr__(key, value)
 
     @property
-    def text_config(self) -> Optional[transformers.PretrainedConfig]:
+    def text_config(self) -> transformers.PretrainedConfig:
         # When Ultravox wraps a multi-modal model (e.g. Gemma), we instantiate
         # the full model, but the text config is the text config of the inner
         # model.
