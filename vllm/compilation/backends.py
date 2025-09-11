@@ -346,8 +346,10 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                         vllm_config=self.vllm_config,
                         runtime_mode=CUDAGraphMode.PIECEWISE,
                         cudagraph_options=CUDAGraphOptions(
-                            partition_id == 0, partition_id != 0,
-                            partition_id == num_partitions - 1))
+                            debug_log_enable=partition_id == 0,
+                            gc_disable=partition_id != 0,
+                            weak_ref_output=partition_id == num_partitions - 1,
+                        ))
 
                 torch._inductor.utils.set_customized_partition_wrappers(
                     customized_cudagraph_wrapper)
