@@ -714,7 +714,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
 
 
 spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
-    # FullAttentionSpec: FullAttentionManager,
+    FullAttentionSpec: FullAttentionManager,
     SlidingWindowSpec: SlidingWindowManager,
     ChunkedLocalAttentionSpec: ChunkedLocalAttentionManager,
     MambaSpec: MambaManager,
