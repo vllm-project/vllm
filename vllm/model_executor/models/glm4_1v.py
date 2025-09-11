@@ -1054,8 +1054,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         merge_length = image_processor.merge_size**2
 
         assert isinstance(grid_thw, torch.Tensor)
-        timestamps = self._get_video_second_idx(
-            metadata, len(video_array))
+        timestamps = self._get_video_second_idx(metadata, len(video_array))
         frames_idx_token = [
             tokenizer.encode(str(i), add_special_tokens=False)
             for i in timestamps
@@ -1158,7 +1157,6 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
     ) -> BatchFeature:
         mm_data = dict(mm_data)
         processor = self.info.get_hf_processor(**mm_kwargs)
-        tokenizer = self.info.get_tokenizer()
 
         # GLM-4.1V use `image_token_id` as video placeholder, we need to
         # replace it with `video_token_id` for video processing. So we
@@ -1202,7 +1200,8 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                     # skip sampling. We construct the placeholder manually to
                     # get placeholders with correct timestamps.
                     placeholder = self.info._construct_video_placeholder(
-                        video_array, metadata,
+                        video_array,
+                        metadata,
                         video_outputs["video_grid_thw"].squeeze(0),
                     )
                     video_placeholder = processor.tokenizer.decode(placeholder)
@@ -1257,14 +1256,6 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(
             **hf_processor_mm_kwargs)
-        tokenizer = self.info.get_tokenizer()
-        hf_config = self.info.get_hf_config()
-
-        boi_token_id = hf_config.image_start_token_id
-        eoi_token_id = hf_config.image_end_token_id
-
-        bov_token_id = hf_config.video_start_token_id
-        eov_token_id = hf_config.video_end_token_id
 
         merge_length = image_processor.merge_size**2
 
