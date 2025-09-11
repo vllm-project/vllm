@@ -169,7 +169,7 @@ All Llama 3.1, 3.2 and 4 models should be supported.
 
 The tool calling that is supported is the [JSON-based tool calling](https://llama.meta.com/docs/model-cards-and-prompt-formats/llama3_1/#json-based-tool-calling). For [pythonic tool calling](https://github.com/meta-llama/llama-models/blob/main/models/llama3_2/text_prompt_format.md#zero-shot-function-calling) introduced by the Llama-3.2 models, see the `pythonic` tool parser below. As for Llama 4 models, it is recommended to use the `llama4_pythonic` tool parser.
 
-Other tool calling formats like the built in python tool calling or custom tool calling are not supported.
+Other tool calling formats like the built-in python tool calling or custom tool calling are not supported.
 
 Known issues:
 
@@ -310,6 +310,15 @@ Flags:
 
 * For non-reasoning: `--tool-call-parser hunyuan_a13b`
 * For reasoning: `--tool-call-parser hunyuan_a13b --reasoning-parser hunyuan_a13b --enable_reasoning`
+
+### GLM-4.5 Models (`glm45`)
+
+Supported models:
+
+* `ZhipuAI/GLM-4.5`
+* `ZhipuAI/GLM-4.5-Air`
+
+Flags: `--tool-call-parser glm45`
 
 ### Models with Pythonic Tool Calls (`pythonic`)
 
