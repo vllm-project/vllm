@@ -396,7 +396,7 @@ def dummy_hf_overrides(
     *,
     model_arch: str = "",
     exist_overrides: Optional[dict[str, Any]] = None,
-    original_num_layers: bool = False,
+    use_original_num_layers: bool = False,
 ) -> PretrainedConfig:
     """
     Dummy HF overrides function used to create dummy model
@@ -414,7 +414,7 @@ def dummy_hf_overrides(
 
     # we use three layers for Gemma-3n to check
     # both normal layer and kv_shared_layer
-    if original_num_layers:
+    if use_original_num_layers:
         # Use the original number of layers from the config
         num_layers = getattr(text_config, 'num_layers', 1)
         num_hidden_layers = getattr(text_config, 'num_hidden_layers', 1)

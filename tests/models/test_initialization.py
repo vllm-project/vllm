@@ -37,8 +37,9 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
     hf_overrides_fn = partial(dummy_hf_overrides,
                               model_arch=model_arch,
                               exist_overrides=model_info.hf_overrides,
-                              original_num_layers=getattr(
-                                  model_info, 'original_num_layers', False))
+                              use_original_num_layers=getattr(
+                                  model_info, 'use_original_num_layers',
+                                  False))
 
     # Avoid calling model.forward()
     def _initialize_kv_caches_v0(self) -> None:
