@@ -24,7 +24,8 @@ typedef __hip_bfloat162 __nv_bfloat162;
 typedef __hip_bfloat16 __nv_bfloat16;
 typedef __hip_bfloat16_raw __nv_bfloat16_raw;
 
-typedef __hip_fp8_e4m3 __nv_fp8_e4m3 typedef __hip_fp8x4_e4m3 __nv_fp8x4_e4m3
+typedef __hip_fp8_e4m3 __nv_fp8_e4m3;
+typedef __hip_fp8x4_e4m3 __nv_fp8x4_e4m3;
 #endif
 
 #include "core/registration.h"
@@ -144,7 +145,7 @@ __device__ __forceinline__ void cp_async4(T* _smem_ptr, const U* _glob_ptr) {
       "}\n" ::"r"(smem),
       "l"(glob_ptr), "n"(BYTES));
 #else
-    _smem_ptr[0] = _glob_ptr[0];
+  _smem_ptr[0] = _glob_ptr[0];
 #endif
 }
 
