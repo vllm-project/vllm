@@ -54,6 +54,7 @@ steps:
   - tests/utils_
   - tests/worker
   - tests/standalone_tests/lazy_imports.py
+  - tests/transformers_utils
   commands:
   - python3 standalone_tests/lazy_imports.py
   - pytest -v -s mq_llm_engine # MQLLMEngine
@@ -63,6 +64,7 @@ steps:
   - pytest -v -s multimodal
   - pytest -v -s utils_ # Utils
   - pytest -v -s worker # Worker
+  - pytest -v -s transformers_utils # transformers_utils
 
 - label: Python-only Installation Test # 10min
   timeout_in_minutes: 20
@@ -822,8 +824,8 @@ steps:
   # Avoid importing model tests that cause CUDA reinitialization error
   - pytest models/test_transformers.py -v -s -m 'distributed(num_gpus=2)'
   - pytest models/language -v -s -m 'distributed(num_gpus=2)'
-  - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py 
-  - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)' 
+  - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py
+  - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)'
   # test sequence parallel
   - pytest -v -s distributed/test_sequence_parallel.py
   # this test fails consistently.
