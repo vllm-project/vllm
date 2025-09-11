@@ -3,8 +3,10 @@
 
 import pytest
 
-from ...utils import CLSPoolingEmbedModelInfo, EmbedModelInfo
-from .embed_utils import correctness_test_embed_models
+from tests.models.language.pooling.embed_utils import (
+    correctness_test_embed_models)
+from tests.models.utils import CLSPoolingEmbedModelInfo, EmbedModelInfo
+
 from .mteb_utils import mteb_test_embed_models
 
 MODELS = [
