@@ -227,8 +227,14 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
         elif contains_type(type_hints, int):
             kwargs[name]["type"] = int
             # Special case for large integers
-            if name in {"max_model_len", "max_num_batched_tokens"}:
+            human_readable_ints = {
+                "max_model_len",
+                "max_num_batched_tokens",
+                "kv_cache_memory_bytes",
+            }
+            if name in human_readable_ints:
                 kwargs[name]["type"] = human_readable_int
+                kwargs[name]["help"] += f"\n\n{human_readable_int.__doc__}"
         elif contains_type(type_hints, float):
             kwargs[name]["type"] = float
         elif (contains_type(type_hints, dict)
@@ -335,6 +341,7 @@ class EngineArgs:
     swap_space: float = CacheConfig.swap_space
     cpu_offload_gb: float = CacheConfig.cpu_offload_gb
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
+    kv_cache_memory_bytes: Optional[int] = CacheConfig.kv_cache_memory_bytes
     max_num_batched_tokens: Optional[
         int] = SchedulerConfig.max_num_batched_tokens
     max_num_partial_prefills: int = SchedulerConfig.max_num_partial_prefills
@@ -734,6 +741,8 @@ class EngineArgs:
         cache_group.add_argument("--block-size", **cache_kwargs["block_size"])
         cache_group.add_argument("--gpu-memory-utilization",
                                  **cache_kwargs["gpu_memory_utilization"])
+        cache_group.add_argument("--kv-cache-memory-bytes",
+                                 **cache_kwargs["kv_cache_memory_bytes"])
         cache_group.add_argument("--swap-space", **cache_kwargs["swap_space"])
         cache_group.add_argument("--kv-cache-dtype",
                                  **cache_kwargs["cache_dtype"])
@@ -1174,6 +1183,7 @@ class EngineArgs:
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
+            kv_cache_memory_bytes=self.kv_cache_memory_bytes,
             swap_space=self.swap_space,
             cache_dtype=self.kv_cache_dtype,
             is_attention_free=model_config.is_attention_free,
