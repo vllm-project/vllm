@@ -290,20 +290,23 @@ async def test_serving_chat_returns_correct_model_name():
                                      chat_template=CHAT_TEMPLATE,
                                      chat_template_content_format="auto",
                                      request_logger=None)
+    messages = [{"role": "user", "content": "what is 1+1?"}]
 
     async def return_model_name(*args):
         return args[3]
 
     serving_chat.chat_completion_full_generator = return_model_name
 
-    req = ChatCompletionRequest(
-        model=MODEL_NAME_SHORT,
-        messages=[{
-            "role": "user",
-            "content": "what is 1+1?"
-        }],
-    )
+    # Test that full name is returned when short name is requested
+    req = ChatCompletionRequest(model=MODEL_NAME_SHORT, messages=messages)
+    assert await serving_chat.create_chat_completion(req) == MODEL_NAME
 
+    # Test that full name is returned when empty string is specified
+    req = ChatCompletionRequest(model="", messages=messages)
+    assert await serving_chat.create_chat_completion(req) == MODEL_NAME
+
+    # Test that full name is returned when no model is specified
+    req = ChatCompletionRequest(messages=messages)
     assert await serving_chat.create_chat_completion(req) == MODEL_NAME
 
 
