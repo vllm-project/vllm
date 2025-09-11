@@ -215,37 +215,28 @@ def main():
             num_requests += metric.value
 
     # Calculate metrics
-    total_tokens = total_num_prompt_tokens + total_num_output_tokens
-    total_time = total_prefill_time + total_decode_time
     prefill_speed = total_num_prompt_tokens / total_prefill_time if total_prefill_time > 0 else 0
     decode_speed = total_num_output_tokens / total_decode_time if total_decode_time > 0 else 0
-    overall_speed = total_tokens / total_time if total_time > 0 else 0
-    request_throughput = num_requests / total_time if total_time > 0 else 0
+    acceptance_length = 1 + (num_accepted_tokens / num_drafts) if num_drafts > 0 else 1
+    draft_utilization_rate = num_accepted_tokens / num_draft_tokens * 100 if num_draft_tokens > 0 else 0
 
     # Print formatted benchmark results
     print("=========== Speculative Decoding Stats ============")
     print(f"Total input tokens:                      {total_num_prompt_tokens:<10}")
-    print(f"Total generated tokens:                  {total_num_output_tokens:<10}")
+    print(f"Total output tokens:                     {total_num_output_tokens:<10}")
     print()
-    print(f"Request throughput (req/s):              {request_throughput:<10.2f}")
+
     print(f"Input token throughput (tok/s):          {prefill_speed:<10.2f}")
     print(f"Output token throughput (tok/s):         {decode_speed:<10.2f}")
-    print(f"Total token throughput (tok/s):          {overall_speed:<10.2f}")
     print()
 
-    # Speculative decoding stats
-    if args.method == "None":
-        return
+    if args.method != "None":
+        print(f"Number of drafts:                        {num_drafts:<10}")
+        print(f"Draft tokens generated:                  {num_draft_tokens:<10}")
+        print(f"Accepted tokens:                         {num_accepted_tokens:<10}")
+        print(f"Mean acceptance length:                  {acceptance_length:<10.2f}")
+        print(f"Draft utilization rate:                  {draft_utilization_rate:<10.1f}")
 
-    acceptance_length = 1 + (num_accepted_tokens / num_drafts) if num_drafts > 0 else 1
-    draft_utilization_rate = num_accepted_tokens / num_draft_tokens * 100 if num_draft_tokens > 0 else 0
-
-    print(f"Total output tokens:                     {total_num_output_tokens:<10}")
-    print(f"Number of drafts:                        {num_drafts:<10}")
-    print(f"Draft tokens generated:                  {num_draft_tokens:<10}")
-    print(f"Accepted tokens:                         {num_accepted_tokens:<10}")
-    print(f"Mean acceptance length:                  {acceptance_length:<10.2f}")
-    print(f"Draft utilization rate:                  {draft_utilization_rate:<10.1f}")
     print("====================================================")
 
 if __name__ == "__main__":
