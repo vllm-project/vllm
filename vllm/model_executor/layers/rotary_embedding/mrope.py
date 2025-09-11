@@ -8,7 +8,6 @@ import numpy as np
 import torch
 from transformers import PretrainedConfig
 
-from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .base import RotaryEmbedding
@@ -201,28 +200,6 @@ class MRotaryEmbedding(RotaryEmbedding):
         self.mrope_section = mrope_section
         if self.mrope_section:
             assert sum(self.mrope_section) == rotary_dim // 2
-
-        self.use_triton = current_platform.is_cuda_alike()
-
-    def forward(
-        self,
-        positions: torch.Tensor,
-        query: torch.Tensor,
-        key: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """MRope forward.
-
-        Args:
-            positions:
-                [num_tokens,] (text only) or
-                [3, num_tokens] (T/H/W positions with multimodal inputs)
-            query: [num_tokens, num_heads * head_size]
-            key: [num_tokens, num_kv_heads * head_size]
-        """
-        if self.use_triton:
-            return self.forward_cuda(positions, query, key)
-        else:
-            return self.forward_native(positions, query, key)
 
     def forward_native(
         self,
