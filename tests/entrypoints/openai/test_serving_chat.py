@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re, json
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -14,7 +15,8 @@ import pytest_asyncio
 
 from vllm.config import MultiModalConfig
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, ErrorResponse
+from vllm.entrypoints.openai.protocol import ChatCompletionRequest
+                                              
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_models import (BaseModelPath,
                                                     OpenAIServingModels)
@@ -336,8 +338,15 @@ async def test_serving_chat_tool_choice_required_streaming():
 
     # Collect all response chunks for verification
     async for chunk in resp:
-        assert not isinstance(chunk, ErrorResponse)
-    
+        if str(chunk) == "data: [DONE]\n\n":
+            continue
+        content_regex = r"data: {(.*?)}\n\n"
+        import re, json
+        match = re.match(content_regex, str(chunk))
+        assert match
+        data = json.loads(match.group(1))
+        assert not data.has_key("error")
+        
 
 @pytest.mark.asyncio
 async def test_serving_chat_should_set_correct_max_tokens():
