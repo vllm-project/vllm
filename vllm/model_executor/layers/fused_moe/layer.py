@@ -1072,6 +1072,9 @@ class FusedMoE(CustomOp):
             vllm_parallel_config=vllm_config.parallel_config,
         )
 
+        logger.debug("FusedMoEParallelConfig = %s",
+                     str(self.moe_parallel_config))
+
         self.global_num_experts = num_experts + num_redundant_experts
         self.zero_expert_num = zero_expert_num
         self.zero_expert_type = zero_expert_type
