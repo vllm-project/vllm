@@ -219,8 +219,14 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
         elif contains_type(type_hints, int):
             kwargs[name]["type"] = int
             # Special case for large integers
-            if name in {"max_model_len", "max_num_batched_tokens"}:
+            human_readable_ints = {
+                "max_model_len",
+                "max_num_batched_tokens",
+                "kv_cache_memory_bytes",
+            }
+            if name in human_readable_ints:
                 kwargs[name]["type"] = human_readable_int
+                kwargs[name]["help"] += f"\n\n{human_readable_int.__doc__}"
         elif contains_type(type_hints, float):
             kwargs[name]["type"] = float
         elif (contains_type(type_hints, dict)
