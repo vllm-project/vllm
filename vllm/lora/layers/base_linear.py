@@ -6,7 +6,7 @@ from typing import Optional, cast
 import torch
 from transformers import PretrainedConfig
 
-from vllm.config import LoRAConfig
+from vllm.config.lora import LoRAConfig
 from vllm.distributed.utils import divide
 # yapf: disable
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,

@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.config import LoRAConfig
+from vllm.config.lora import LoRAConfig
 
 if TYPE_CHECKING:
     from vllm.lora.punica_wrapper import PunicaWrapperBase
