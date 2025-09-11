@@ -50,9 +50,9 @@ class KVCacheCoordinator(ABC):
     def get_num_blocks_to_allocate(
         self,
         request_id: str,
-        num_tokens: int,
+        total_tokens_need_slots: int,
         new_computed_blocks: tuple[list[KVCacheBlock], ...],
-        num_extra_tokens_from_connector: int = 0,
+        total_computed_tokens: int = 0,
         num_encoder_tokens: int = 0,
     ) -> int:
         """
@@ -79,8 +79,8 @@ class KVCacheCoordinator(ABC):
                     request_id, num_encoder_tokens, [], 0)
             else:
                 num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
-                    request_id, num_tokens, new_computed_blocks[i],
-                    num_extra_tokens_from_connector)
+                    request_id, total_tokens_need_slots,
+                    new_computed_blocks[i], total_computed_tokens)
         return num_blocks_to_allocate
 
     def save_new_computed_blocks(

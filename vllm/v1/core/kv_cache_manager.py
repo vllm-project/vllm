@@ -192,22 +192,21 @@ class KVCacheManager:
     def _can_allocate(
         self,
         request: Request,
-        num_new_tokens: int,
+        total_tokens_need_slots: int,
         new_computed_blocks: tuple[list[KVCacheBlock], ...],
-        num_extra_tokens_from_connector: int = 0,
-        num_lookahead_tokens: int = 0,
+        total_computed_tokens: int,
         num_encoder_tokens: int = 0,
     ) -> bool:
 
         num_blocks = self.coordinator.get_num_blocks_to_allocate(
             request.request_id,
-            num_new_tokens + num_lookahead_tokens,
+            total_tokens_need_slots,
             new_computed_blocks,
-            num_extra_tokens_from_connector,
+            total_computed_tokens,
             num_encoder_tokens,
         )
 
-        return num_blocks <= self.block_pool.get_num_free_blocks()
+        return num_blocks < self.block_pool.get_num_free_blocks()
 
     def allocate_slots(
         self,
@@ -302,8 +301,16 @@ class KVCacheManager:
             new_computed_block_list = tuple(
                 [] for _ in range(len(self.kv_cache_config.kv_cache_groups)))
 
+        total_computed_tokens = sum([
+            request.num_computed_tokens,
+            num_new_computed_tokens,
+            num_extra_tokens_from_connector,
+        ])
+        total_tokens_need_slots = total_computed_tokens + num_new_tokens +\
+            num_lookahead_tokens
+
         # Free unnecessary blocks (e.g. outside sliding window)
-        # in the prefix.
+        # in request.num_computed_tokens
         self.coordinator.free_blocks_outside_attention_window(
             request.request_id,
             request.num_computed_tokens,
@@ -311,19 +318,12 @@ class KVCacheManager:
         # Check if we have sufficient free blocks.
         if not self._can_allocate(
                 request,
-                num_new_tokens,
+                total_tokens_need_slots,
                 new_computed_block_list,
-                num_extra_tokens_from_connector,
-                num_lookahead_tokens,
+                total_computed_tokens,
                 num_encoder_tokens,
         ):
             return None
-
-        total_computed_tokens = sum([
-            request.num_computed_tokens,
-            num_new_computed_tokens,
-            num_extra_tokens_from_connector,
-        ])
 
         if self.enable_caching:
             self.block_pool.touch(new_computed_block_list)
@@ -347,15 +347,10 @@ class KVCacheManager:
             extra_blocks_for_connector = self.create_empty_block_list()
 
         # For new blocks to be computed, we just allocate them normally.
-        total_tokens_need_slots = total_computed_tokens + num_new_tokens +\
-            num_lookahead_tokens
         new_blocks_to_be_computed = KVCacheBlocks(
-            self.coordinator.allocate_new_blocks(
-                request.request_id,
-                # `allocate_new_blocks` requires specifying the TOTAL number
-                # of tokens for this request.
-                total_tokens_need_slots,
-                num_encoder_tokens))
+            self.coordinator.allocate_new_blocks(request.request_id,
+                                                 total_tokens_need_slots,
+                                                 num_encoder_tokens))
 
         # P/D: don't cache blocks when the blocks are still being
         # asynchronously received from the connector.
