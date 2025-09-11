@@ -451,7 +451,6 @@ class MultiHeadAttention(nn.Module):
                 max_seqlen_k=kv_len,
                 softmax_scale=self.scale,
             )
-            out = out.reshape(bsz, q_len, -1)
         elif self.attn_backend == _Backend.XFORMERS:
             from xformers import ops as xops
 
