@@ -121,12 +121,13 @@ class PythonicToolParser(ToolParser):
                     isinstance(e, ast.Call) for e in parsed.elts):
                 # Return both text content and tool calls
                 content = text_content if text_content else None
+                tool_calls = []
+                for e in parsed.elts:
+                    if isinstance(e, ast.Call):
+                        tool_calls.append(_handle_single_tool(e))
                 return ExtractedToolCallInformation(
                     tools_called=True,
-                    tool_calls=[
-                        _handle_single_tool(e)
-                        for e in parsed.elts  # type: ignore
-                    ],
+                    tool_calls=tool_calls,
                     content=content,
                 )
             else:
@@ -172,8 +173,10 @@ class PythonicToolParser(ToolParser):
                         isinstance(e, ast.Call) for e in parsed.elts):
                     raise _UnexpectedAstError(
                         "Tool output must be a list of function calls")
-                tool_calls = [_handle_single_tool(e)
-                              for e in parsed.elts]  # type: ignore
+                tool_calls = []
+                for e in parsed.elts:
+                    if isinstance(e, ast.Call):
+                        tool_calls.append(_handle_single_tool(e))
 
                 tool_deltas = []
                 for index, new_call in enumerate(tool_calls):
@@ -257,8 +260,10 @@ class PythonicToolParser(ToolParser):
                     isinstance(e, ast.Call) for e in parsed.elts):
                 raise _UnexpectedAstError(
                     "Tool output must be a list of function calls")
-            tool_calls = [_handle_single_tool(e)
-                          for e in parsed.elts]  # type: ignore
+            tool_calls = []
+            for e in parsed.elts:
+                if isinstance(e, ast.Call):
+                    tool_calls.append(_handle_single_tool(e))
 
             tool_deltas = []
             for index, new_call in enumerate(tool_calls):
@@ -325,10 +330,11 @@ def _get_parameter_value(val: ast.expr) -> Any:
         if not all(isinstance(k, ast.Constant) for k in val.keys):
             raise _UnexpectedAstError("Dict tool call arguments"
                                       "must have literal keys")
-        return {
-            k.value: _get_parameter_value(v)  # type: ignore
-            for k, v in zip(val.keys, val.values)
-        }
+        result = {}
+        for k, v in zip(val.keys, val.values):
+            if isinstance(k, ast.Constant):
+                result[k.value] = _get_parameter_value(v)
+        return result
     elif isinstance(val, ast.List):
         return [_get_parameter_value(v) for v in val.elts]
     else:
