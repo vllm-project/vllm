@@ -345,7 +345,7 @@ def test_mamba_chunk_scan_cont_batch_prefill_chunking(chunk_size, seqlens):
     # in the mamba2 ssd kernels, by comparing concatenation (in the sequence
     # dimension) of chunked results with the full sequence result.
     # It is different from test_mamba_chunk_scan_cont_batch by:
-    # 1. Not using the naive torch implementaion (ssd_minimal_discrete) to get
+    # 1. Not using the naive torch implementation (ssd_minimal_discrete) to get
     #    reference outputs. Instead, it compares chunked kernel outputs to full
     #    sequence kernel outputs. This is the most straightforward way to
     #    assert chunked prefill correctness.
