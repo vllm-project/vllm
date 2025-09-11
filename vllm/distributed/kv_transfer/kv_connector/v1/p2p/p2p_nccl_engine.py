@@ -313,7 +313,7 @@ class P2pNcclEngine:
                                       dim=kv_heads_dim)
         else:
             tp_ratio = 1
-            tensor_list: tuple[torch.Tensor, ...] = (tensor, )
+            tensor_list = (tensor, )
 
         remote_pp_rank = self.compute_remote_pp_rank(layer_name)
 
@@ -666,7 +666,7 @@ class P2pNcclEngine:
         """
         current_layer_idx = extract_layer_index(layer_name)
         num_hidden_layers = self.model_config.hf_config.num_hidden_layers
-        assert num_hidden_layers % self.remote_pp_size == 0 (
+        assert num_hidden_layers % self.remote_pp_size == 0, (
             f"num_hidden_layers {num_hidden_layers} must be divisible by "
             f"remote_pp_size {self.remote_pp_size}")
         return current_layer_idx // (num_hidden_layers // self.remote_pp_size)
