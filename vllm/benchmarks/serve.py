@@ -426,7 +426,6 @@ async def benchmark(
         timeout=aiohttp.ClientTimeout(total=6 * 60 * 60),
     )
 
-    # We shorten the test prompt to make sure it fits the max context length
     print("Starting initial single prompt test run...")
     test_prompt, test_prompt_len, test_output_len, test_mm_content = (
         input_requests[0].prompt[:10],
@@ -536,7 +535,7 @@ async def benchmark(
         })
 
     results_per_req = []
-    time_0 = time.time()
+    time_0 = time.perf_counter()
     async for request, current_request_rate in get_request(
             input_requests, request_rate, burstiness, ramp_up_strategy,
             ramp_up_start_rps, ramp_up_end_rps):
@@ -1271,8 +1270,16 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         
         # save arguments
         args_dict = vars(args)
-        if "dispatch_function" in args_dict:  # Not JSON serializable
-            del args_dict["dispatch_function"]
+        # remove non json-serializable entries
+        non_serializable = []
+        for key, value in args_dict.items():
+            small_dict = {key: value}
+            try:
+                json.dumps(small_dict)
+            except (TypeError, OverflowError):
+                non_serializable.append(key)
+        for key in non_serializable:
+            args_dict.pop(key)
         args_filename = os.path.join(sub_result_dir, "args.json")
         with open(args_filename, "w", encoding="utf-8") as outfile:
             json.dump(args_dict, outfile, indent=2)
