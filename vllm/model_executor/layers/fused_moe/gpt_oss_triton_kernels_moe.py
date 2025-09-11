@@ -57,11 +57,12 @@ def pack_bitmatrix(
     indices = tl.load(expt_indx + offsets, mask=mask, other=sentinel)
     div = indices // 32
     rem = indices % 32
+    one = tl.cast(1, tl.uint32)
     iters = tl.cdiv(sentinel, BLOCK_SIZE_K)
     for i in range(iters):
         offs = tl.arange(0, BLOCK_SIZE_K // 32) + i * (BLOCK_SIZE_K // 32)
         x = tl.where(div[:, :, None] == offs[None, None, :],
-                     (1 << rem)[:, :, None], 0)
+                     (one << rem)[:, :, None], 0)
         y = tl.reduce_or(x, axis=1)
         bitmatrix_ptrs = bitmatrix + offsets_m[:,
                                                None] * n_cols + offs[None, :]
