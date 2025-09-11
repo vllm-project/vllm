@@ -399,7 +399,7 @@ class VocabParallelEmbedding(CustomOp):
         param[:loaded_weight.shape[0]].data.copy_(loaded_weight)
         param[loaded_weight.shape[0]:].data.fill_(0)
 
-    def forward(self, input_):
+    def forward_native(self, input_):
         if self.tp_size > 1:
             # Build the mask.
             masked_input, input_mask = get_masked_input_and_mask(
@@ -419,6 +419,9 @@ class VocabParallelEmbedding(CustomOp):
         # Reduce across all the model parallel GPUs.
         output = tensor_model_parallel_all_reduce(output_parallel)
         return output
+
+    def forward_cuda(self, input_):
+        return self.forward_native(input_)
 
     def extra_repr(self) -> str:
         s = f"num_embeddings={self.num_embeddings_per_partition}"
