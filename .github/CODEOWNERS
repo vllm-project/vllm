@@ -16,8 +16,8 @@
 /vllm/v1/sample @22quinn @houseroad
 /vllm/vllm_flash_attn @LucasWilkinson
 /vllm/lora @jeejeelee
-/vllm/reasoning @aarnphm
-/vllm/entrypoints @aarnphm
+/vllm/reasoning @aarnphm @chaunceyjiang
+/vllm/entrypoints @aarnphm @chaunceyjiang
 /vllm/compilation @zou3519 @youkaichao @ProExpertProg
 CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 
