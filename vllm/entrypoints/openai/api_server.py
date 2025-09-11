@@ -64,6 +64,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               EmbeddingRequest,
                                               EmbeddingResponse, ErrorInfo,
                                               ErrorResponse,
+                                              IOProcessorResponse,
                                               LoadLoRAAdapterRequest,
                                               PoolingRequest, PoolingResponse,
                                               RerankRequest, RerankResponse,
@@ -615,14 +616,23 @@ async def create_responses(request: ResponsesRequest, raw_request: Request):
 
 
 @router.get("/v1/responses/{response_id}")
-async def retrieve_responses(response_id: str, raw_request: Request):
+async def retrieve_responses(
+    response_id: str,
+    raw_request: Request,
+    starting_after: Optional[int] = None,
+    stream: Optional[bool] = False,
+):
     handler = responses(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(
             message="The model does not support Responses API")
 
     try:
-        response = await handler.retrieve_responses(response_id)
+        response = await handler.retrieve_responses(
+            response_id,
+            starting_after=starting_after,
+            stream=stream,
+        )
     except Exception as e:
         raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
                             detail=str(e)) from e
@@ -630,6 +640,9 @@ async def retrieve_responses(response_id: str, raw_request: Request):
     if isinstance(response, ErrorResponse):
         return JSONResponse(content=response.model_dump(),
                             status_code=response.error.code)
+    elif stream:
+        return StreamingResponse(content=response,
+                                 media_type="text/event-stream")
     return JSONResponse(content=response.model_dump())
 
 
@@ -795,7 +808,7 @@ async def create_pooling(request: PoolingRequest, raw_request: Request):
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.error.code)
-    elif isinstance(generator, PoolingResponse):
+    elif isinstance(generator, (PoolingResponse, IOProcessorResponse)):
         return JSONResponse(content=generator.model_dump())
 
     assert_never(generator)
@@ -1704,6 +1717,8 @@ async def init_app_state(
 
     if args.tool_server == "demo":
         tool_server: Optional[ToolServer] = DemoToolServer()
+        assert isinstance(tool_server, DemoToolServer)
+        await tool_server.init_and_validate()
     elif args.tool_server:
         tool_server = MCPToolServer()
         await tool_server.add_tool_server(args.tool_server)
@@ -1782,7 +1797,7 @@ async def init_app_state(
     ) if "generate" in supported_tasks else None
     state.openai_serving_pooling = OpenAIServingPooling(
         engine_client,
-        model_config,
+        vllm_config,
         state.openai_serving_models,
         request_logger=request_logger,
         chat_template=resolved_chat_template,

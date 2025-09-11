@@ -74,6 +74,7 @@ _TEXT_GENERATION_MODELS = {
     "Gemma2ForCausalLM": ("gemma2", "Gemma2ForCausalLM"),
     "Gemma3ForCausalLM": ("gemma3", "Gemma3ForCausalLM"),
     "Gemma3nForCausalLM": ("gemma3n", "Gemma3nForCausalLM"),
+    "Qwen3NextForCausalLM": ("qwen3_next", "Qwen3NextForCausalLM"),
     "GlmForCausalLM": ("glm", "GlmForCausalLM"),
     "Glm4ForCausalLM": ("glm4", "Glm4ForCausalLM"),
     "Glm4MoeForCausalLM": ("glm4_moe", "Glm4MoeForCausalLM"),
@@ -110,7 +111,7 @@ _TEXT_GENERATION_MODELS = {
     "MiniCPM3ForCausalLM": ("minicpm3", "MiniCPM3ForCausalLM"),
     "MistralForCausalLM": ("llama", "LlamaForCausalLM"),
     "MixtralForCausalLM": ("mixtral", "MixtralForCausalLM"),
-    "QuantMixtralForCausalLM": ("mixtral_quant", "MixtralForCausalLM"),
+    "MotifForCausalLM": ("motif", "MotifForCausalLM"),
     # transformers's mpt class has lower case
     "MptForCausalLM": ("mpt", "MPTForCausalLM"),
     "MPTForCausalLM": ("mpt", "MPTForCausalLM"),
@@ -155,6 +156,7 @@ _EMBEDDING_MODELS = {
     "BertModel": ("bert", "BertEmbeddingModel"),
     "DeciLMForCausalLM": ("nemotron_nas", "DeciLMForCausalLM"),
     "Gemma2Model": ("gemma2", "Gemma2ForCausalLM"),
+    "Gemma3TextModel": ("gemma3", "Gemma3Model"),
     "GlmForCausalLM": ("glm", "GlmForCausalLM"),
     "GPT2ForSequenceClassification": ("gpt2", "GPT2ForSequenceClassification"),
     "GritLM": ("gritlm", "GritLM"),
@@ -184,10 +186,11 @@ _EMBEDDING_MODELS = {
     "LlavaNextForConditionalGeneration": ("llava_next", "LlavaNextForConditionalGeneration"),  # noqa: E501
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),  # noqa: E501
-    # Technically PrithviGeoSpatialMAE is a model that works on images, both in
+    # Technically Terratorch models work on images, both in
     # input and output. I am adding it here because it piggy-backs on embedding
     # models for the time being.
-    "PrithviGeoSpatialMAE": ("prithvi_geospatial_mae", "PrithviGeoSpatialMAE"),
+    "PrithviGeoSpatialMAE": ("terratorch", "Terratorch"),
+    "Terratorch": ("terratorch", "Terratorch"),
 }
 
 _CROSS_ENCODER_MODELS = {
@@ -222,11 +225,13 @@ _MULTIMODAL_MODELS = {
     "GraniteSpeechForConditionalGeneration": ("granite_speech", "GraniteSpeechForConditionalGeneration"),  # noqa: E501
     "H2OVLChatModel": ("h2ovl", "H2OVLChatModel"),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
+    "NemotronH_Nano_VL": ("nano_nemotron_vl", "NemotronH_Nano_VL"),
     "InternS1ForConditionalGeneration": ("interns1", "InternS1ForConditionalGeneration"),  # noqa: E501
     "InternVLForConditionalGeneration": ("interns1", "InternS1ForConditionalGeneration"),  # noqa: E501
     "Idefics3ForConditionalGeneration":("idefics3","Idefics3ForConditionalGeneration"),
     "SmolVLMForConditionalGeneration": ("smolvlm","SmolVLMForConditionalGeneration"),  # noqa: E501
     "KeyeForConditionalGeneration": ("keye", "KeyeForConditionalGeneration"),
+    "KeyeVL1_5ForConditionalGeneration": ("keye_vl1_5", "KeyeVL1_5ForConditionalGeneration"), # noqa: E501
     "RForConditionalGeneration": ("rvl", "RForConditionalGeneration"),
     "KimiVLForConditionalGeneration": ("kimi_vl", "KimiVLForConditionalGeneration"),  # noqa: E501
     "Llama_Nemotron_Nano_VL": ("nemotron_vl", "LlamaNemotronVLChatModel"),
@@ -235,6 +240,7 @@ _MULTIMODAL_MODELS = {
     "LlavaNextVideoForConditionalGeneration": ("llava_next_video", "LlavaNextVideoForConditionalGeneration"),  # noqa: E501
     "LlavaOnevisionForConditionalGeneration": ("llava_onevision", "LlavaOnevisionForConditionalGeneration"),  # noqa: E501
     "MantisForConditionalGeneration": ("llava", "MantisForConditionalGeneration"),  # noqa: E501
+    "MiDashengLMModel": ("midashenglm", "MiDashengLMModel"),
     "MiniMaxVL01ForConditionalGeneration": ("minimax_vl_01", "MiniMaxVL01ForConditionalGeneration"),  # noqa: E501
     "MiniCPMO": ("minicpmo", "MiniCPMO"),
     "MiniCPMV": ("minicpmv", "MiniCPMV"),
@@ -274,13 +280,13 @@ _SPECULATIVE_DECODING_MODELS = {
     "EagleLlama4ForCausalLM": ("llama4_eagle", "EagleLlama4ForCausalLM"),
     "EagleMiniCPMForCausalLM": ("minicpm_eagle", "EagleMiniCPMForCausalLM"),
     "Eagle3LlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
-    # TODO: Re-enable this once tests/models/test_initialization.py is fixed, see PR #22333 #22611  # noqa: E501
-    # "LlamaForCausalLMEagle3": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
+    "LlamaForCausalLMEagle3": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "EagleDeepSeekMTPModel": ("deepseek_eagle", "EagleDeepseekV3ForCausalLM"),
     "DeepSeekMTPModel": ("deepseek_mtp", "DeepSeekMTP"),
     "ErnieMTPModel": ("ernie_mtp", "ErnieMTP"),
     "Glm4MoeMTPModel": ("glm4_moe_mtp", "Glm4MoeMTP"),
     "MedusaModel": ("medusa", "Medusa"),
+    "Qwen3NextMTP": ("qwen3_next_mtp", "Qwen3NextMTP"),
     # Temporarily disabled.
     # # TODO(woosuk): Re-enable this once the MLP Speculator is supported in V1.
     # "MLPSpeculatorPreTrainedModel": ("mlp_speculator", "MLPSpeculator"),
@@ -637,6 +643,9 @@ class _ModelRegistry:
                 model_info = self._try_inspect_model_cls(arch)
                 if model_info is not None:
                     return (model_info, arch)
+        elif model_config.model_impl == ModelImpl.TERRATORCH:
+            model_info = self._try_inspect_model_cls("Terratorch")
+            return (model_info, "Terratorch")
 
         # Fallback to transformers impl (after resolving convert_type)
         if (all(arch not in self.models for arch in architectures)
@@ -685,6 +694,11 @@ class _ModelRegistry:
                 model_cls = self._try_load_model_cls(arch)
                 if model_cls is not None:
                     return (model_cls, arch)
+        elif model_config.model_impl == ModelImpl.TERRATORCH:
+            arch = "Terratorch"
+            model_cls = self._try_load_model_cls(arch)
+            if model_cls is not None:
+                return (model_cls, arch)
 
         # Fallback to transformers impl (after resolving convert_type)
         if (all(arch not in self.models for arch in architectures)

@@ -37,13 +37,15 @@ from vllm.entrypoints.score_utils import (ScoreContentPartParam,
 # yapf: enable
 from vllm.entrypoints.utils import (_validate_truncation_size,
                                     log_non_default_args)
-from vllm.inputs import PromptType, SingletonPrompt, TextPrompt, TokensPrompt
+from vllm.inputs import (DataPrompt, PromptType, SingletonPrompt, TextPrompt,
+                         TokensPrompt)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.outputs import (ClassificationRequestOutput, EmbeddingRequestOutput,
                           PoolingRequestOutput, RequestOutput,
                           ScoringRequestOutput)
+from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import (BeamSearchParams, RequestOutputKind,
                                   SamplingParams)
@@ -108,6 +110,14 @@ class LLM:
             values will increase the KV cache size and thus improve the model's
             throughput. However, if the value is too high, it may cause out-of-
             memory (OOM) errors.
+        kv_cache_memory_bytes: Size of KV Cache per GPU in bytes. By default,
+            this is set to None and vllm can automatically infer the kv cache
+            size based on gpu_memory_utilization. However, users may want to
+            manually specify the kv cache memory size. kv_cache_memory_bytes
+            allows more fine-grain control of how much memory gets used when
+            compared with using gpu_memory_memory_utilization. Note that
+            kv_cache_memory_bytes (when not-None) ignores
+            gpu_memory_utilization
         swap_space: The size (GiB) of CPU memory per GPU to use as swap space.
             This can be used for temporarily storing the states of the requests
             when their `best_of` sampling parameters are larger than 1. If all
@@ -182,6 +192,7 @@ class LLM:
         hf_overrides: Optional[HfOverrides] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         override_pooler_config: Optional[PoolerConfig] = None,
+        kv_cache_memory_bytes: Optional[int] = None,
         compilation_config: Optional[Union[int, dict[str, Any],
                                            CompilationConfig]] = None,
         logits_processors: Optional[list[Union[str,
@@ -202,7 +213,7 @@ class LLM:
 
         if "kv_transfer_config" in kwargs and isinstance(
                 kwargs["kv_transfer_config"], dict):
-            from vllm.config import KVTransferConfig
+            from vllm.config.kv_transfer import KVTransferConfig
             raw_config_dict = kwargs["kv_transfer_config"]
             try:
                 kwargs["kv_transfer_config"] = KVTransferConfig(
@@ -249,6 +260,7 @@ class LLM:
             tokenizer_revision=tokenizer_revision,
             seed=seed,
             gpu_memory_utilization=gpu_memory_utilization,
+            kv_cache_memory_bytes=kv_cache_memory_bytes,
             swap_space=swap_space,
             cpu_offload_gb=cpu_offload_gb,
             enforce_eager=enforce_eager,
@@ -283,6 +295,11 @@ class LLM:
         logger.info("Supported_tasks: %s", supported_tasks)
 
         self.supported_tasks = supported_tasks
+
+        # Load the Input/Output processor plugin if any
+        io_processor_plugin = self.llm_engine.model_config.io_processor_plugin
+        self.io_processor = get_io_processor(self.llm_engine.vllm_config,
+                                             io_processor_plugin)
 
     def get_tokenizer(
         self,
@@ -329,7 +346,7 @@ class LLM:
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
                 for batch inference. See [PromptType][vllm.inputs.PromptType]
-                for more details about the format of each prompts.
+                for more details about the format of each prompt.
             sampling_params: The sampling parameters for text generation. If
                 None, we use the default sampling parameters.
                 When it is a single value, it is applied to every prompt.
@@ -789,7 +806,7 @@ class LLM:
             # NOTE: _parse_chat_message_content_parts() currently doesn't
             # handle mm_processor_kwargs, since there is no implementation in
             # the chat message parsing for it.
-            conversation, mm_data = parse_chat_messages(
+            conversation, mm_data, mm_uuids = parse_chat_messages(
                 msgs,
                 model_config,
                 tokenizer,
@@ -819,6 +836,9 @@ class LLM:
             if mm_data is not None:
                 prompt["multi_modal_data"] = mm_data
 
+            if mm_uuids is not None:
+                prompt["multi_modal_uuids"] = mm_uuids
+
             if mm_processor_kwargs is not None:
                 prompt["mm_processor_kwargs"] = mm_processor_kwargs
 
@@ -833,7 +853,7 @@ class LLM:
 
     def encode(
         self,
-        prompts: Union[PromptType, Sequence[PromptType]],
+        prompts: Union[PromptType, Sequence[PromptType], DataPrompt],
         pooling_params: Optional[Union[PoolingParams,
                                        Sequence[PoolingParams]]] = None,
         *,
@@ -853,7 +873,7 @@ class LLM:
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
                 for batch inference. See [PromptType][vllm.inputs.PromptType]
-                for more details about the format of each prompts.
+                for more details about the format of each prompt.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.
             use_tqdm: If `True`, shows a tqdm progress bar.
@@ -915,6 +935,22 @@ class LLM:
             if truncate_prompt_tokens is not None:
                 param.truncate_prompt_tokens = truncate_prompt_tokens
 
+        io_processor_prompt = False
+        if isinstance(prompts, dict) and "data" in prompts:
+            io_processor_prompt = True
+            if self.io_processor is None:
+                raise ValueError(
+                    "No IOProcessor plugin installed. Please refer "
+                    "to the documentation and to the "
+                    "'prithvi_geospatial_mae_io_processor' "
+                    "offline inference example for more details.")
+
+            # Validate the request data is valid for the loaded plugin
+            validated_prompt = self.io_processor.parse_request(prompts)
+
+            # obtain the actual model prompts from the pre-processor
+            prompts = self.io_processor.pre_process(prompt=validated_prompt)
+
         self._validate_and_add_requests(
             prompts=prompts,
             params=pooling_params,
@@ -923,8 +959,24 @@ class LLM:
         )
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
-        return self.engine_class.validate_outputs(outputs,
-                                                  PoolingRequestOutput)
+
+        model_outputs = self.engine_class.validate_outputs(
+            outputs, PoolingRequestOutput)
+
+        if io_processor_prompt:
+            # get the post-processed model outputs
+            assert self.io_processor is not None
+            processed_outputs = self.io_processor.post_process(
+                model_output=model_outputs)
+
+            return [
+                PoolingRequestOutput[Any](request_id="",
+                                          outputs=processed_outputs,
+                                          prompt_token_ids=[],
+                                          finished=True)
+            ]
+        else:
+            return model_outputs
 
     def embed(
         self,
@@ -946,7 +998,7 @@ class LLM:
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
                 for batch inference. See [PromptType][vllm.inputs.PromptType]
-                for more details about the format of each prompts.
+                for more details about the format of each prompt.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.
             use_tqdm: If `True`, shows a tqdm progress bar.
@@ -994,7 +1046,7 @@ class LLM:
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
                 for batch inference. See [PromptType][vllm.inputs.PromptType]
-                for more details about the format of each prompts.
+                for more details about the format of each prompt.
             use_tqdm: If `True`, shows a tqdm progress bar.
                 If a callable (e.g., `functools.partial(tqdm, leave=False)`),
                 it is used to create the progress bar.
@@ -1038,7 +1090,7 @@ class LLM:
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
                 for batch inference. See [PromptType][vllm.inputs.PromptType]
-                for more details about the format of each prompts.
+                for more details about the format of each prompt.
             use_tqdm: If `True`, shows a tqdm progress bar.
                 If a callable (e.g., `functools.partial(tqdm, leave=False)`),
                 it is used to create the progress bar.
