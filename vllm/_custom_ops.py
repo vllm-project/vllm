@@ -280,6 +280,13 @@ def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
+def poly_norm(out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
+              bias: torch.Tensor, epsilon: float) -> None:
+    # TODO: Remove this contiguous call when the kernel is updated to support non-contiguous input
+    input_contiguous = input.contiguous()
+    torch.ops._C.poly_norm(out, input_contiguous, weight, bias, epsilon)
+
+
 def apply_repetition_penalties_torch(
         logits: torch.Tensor, prompt_mask: torch.Tensor,
         output_mask: torch.Tensor, repetition_penalties: torch.Tensor) -> None:
@@ -709,6 +716,7 @@ def cutlass_sparse_scaled_mm_supported(cuda_device_capability: int) -> bool:
 
 def cutlass_group_gemm_supported(cuda_device_capability: int) -> bool:
     return torch.ops._C.cutlass_group_gemm_supported(cuda_device_capability)
+
 
 def cutlass_sparse_compress(a: torch.Tensor) \
     -> tuple[torch.Tensor, torch.Tensor]:
