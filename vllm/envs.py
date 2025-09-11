@@ -739,7 +739,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DISABLED_KERNELS":
     lambda: [] if "VLLM_DISABLED_KERNELS" not in os.environ else os.environ[
         "VLLM_DISABLED_KERNELS"].split(","),
-    
+
     "VLLM_DISABLE_NCCL_DP_PADDING":
     lambda: (os.getenv("VLLM_DISABLE_NCCL_DP_PADDING", "False").lower() in
              ("true", "1")),

@@ -80,12 +80,13 @@ class DPMetadata:
         device = current_platform.device_type
         group = get_dp_group().device_group
 
-        # Transfering this tensor from GPU to CPU will introduce a GPU sync point
-        # that could adversely affect performance of vllm with asynch scheduling.
-        # This environment variable exists to quickly disable this optimization
-        # if we run into this case.
+        # Transfering this tensor from GPU to CPU will introduce a GPU sync
+        # point that could adversely affect performance of vllm with asynch
+        # scheduling. This environment variable exists to quickly disable
+        # this optimization if we run into this case.
         if envs.VLLM_DISABLE_NCCL_DP_PADDING:
-            logger.info_once("Using CPU all reduce to syncronize DP padding between ranks.")
+            logger.info_once(
+                "Using CPU all reduce to syncronize DP padding between ranks.")
             device = "cpu"
             group = get_dp_group().cpu_group
         num_tokens_across_dp = [0] * dp_size
