@@ -121,19 +121,25 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
             max_num_seqs=model_info.max_num_seqs)
 
 
-@pytest.mark.parametrize("model_arch", OTHER_MODEL_ARCH_LIST)
-def test_can_initialize_other(model_arch: str,
-                              monkeypatch: pytest.MonkeyPatch):
-    """Test initializing all supported models"""
+@pytest.mark.parametrize("model_arch", MINIMAL_MODEL_ARCH_LIST)
+def test_can_initialize_small_subset(model_arch: str,
+                                     monkeypatch: pytest.MonkeyPatch):
+    """Test initializing small subset of supported models"""
     if model_arch == "Lfm2ForCausalLM":
         pytest.skip("Skipping until test supports V1-only models")
     can_initialize(model_arch, monkeypatch, HF_EXAMPLE_MODELS)
 
 
-@pytest.mark.parametrize("model_arch", MINIMAL_MODEL_ARCH_LIST)
-def test_can_initialize_subset(model_arch: str,
-                               monkeypatch: pytest.MonkeyPatch):
-    """Test initializing select subset of supported models"""
+@pytest.mark.parametrize("model_arch", OTHER_MODEL_ARCH_LIST)
+def test_can_initialize_large_subset(model_arch: str,
+                                     monkeypatch: pytest.MonkeyPatch):
+    """Test initializing large subset of supported models
+    
+    This test covers the complement of the tests covered in the "small subset"
+    test.
+    """
+    if model_arch == "Lfm2ForCausalLM":
+        pytest.skip("Skipping until test supports V1-only models")
     can_initialize(model_arch, monkeypatch, HF_EXAMPLE_MODELS)
 
 

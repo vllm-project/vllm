@@ -580,7 +580,7 @@ steps:
   - tests/models/test_initialization.py
   commands:
     # Run a subset of model initialization tests
-    - pytest -v -s models/test_initialization.py::test_can_initialize_subset
+    - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
 
 - label: Basic Models Tests [Extra Initialization] %N
   timeout_in_minutes: 45
@@ -594,7 +594,7 @@ steps:
     # subset of supported models (the complement of the small subset in the above
     # test.) Also run if model initialization test file is modified
     - pytest -v -s models/test_initialization.py \
-             -k 'not test_can_initialize_subset' \
+             -k 'not test_can_initialize_small_subset' \
              --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT \
              --shard-id=$$BUILDKITE_PARALLEL_JOB
   parallelism: 2
