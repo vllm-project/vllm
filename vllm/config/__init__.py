@@ -1091,11 +1091,11 @@ class ModelConfig:
 
         assert_never(runner_type)
 
-    def _parse_quant_hf_config(self):
-        quant_cfg = getattr(self.hf_config, "quantization_config", None)
+    def _parse_quant_hf_config(self, hf_config: PretrainedConfig):
+        quant_cfg = getattr(hf_config, "quantization_config", None)
         if quant_cfg is None:
             # compressed-tensors uses a "compression_config" key
-            quant_cfg = getattr(self.hf_config, "compression_config", None)
+            quant_cfg = getattr(hf_config, "compression_config", None)
 
         else:
             # Set quant_method for ModelOpt models.
@@ -1136,7 +1136,11 @@ class ModelConfig:
                                      self.quantization)
 
         # Parse quantization method from the HF model config, if available.
-        quant_cfg = self._parse_quant_hf_config()
+        quant_cfg = self._parse_quant_hf_config(self.hf_config)
+        if quant_cfg is None and (text_config := getattr(
+                self.hf_config, "text_config", None)):
+            # Check the text config as well for multi-modal models.
+            quant_cfg = self._parse_quant_hf_config(text_config)
 
         if quant_cfg is not None:
             # Use the community standard 'quant_method'
