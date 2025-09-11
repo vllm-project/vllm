@@ -197,6 +197,8 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
         max_frame_idx = total_frames_num - 1
         duration = duration or round(max_frame_idx / original_fps) + 1
 
+        # Refer to:
+        # https://github.com/huggingface/transformers/blob/v4.55.4/src/transformers/models/glm4v/video_processing_glm4v.py#L103-L140
         frame_indices: Union[range, list[int]]
         if duration <= max_duration:
             n = int(math.floor(duration * requested_fps))
@@ -219,11 +221,9 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
                     for t in target_seconds
                 })
 
-        uniq_frame_idx = frame_indices
-
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        frames = np.empty((len(uniq_frame_idx), height, width, 3),
+        frames = np.empty((len(frame_indices), height, width, 3),
                           dtype=np.uint8)
 
         i = 0
@@ -231,14 +231,14 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
             ok = cap.grab()
             if not ok:
                 break
-            if idx in uniq_frame_idx:
+            if idx in frame_indices:
                 ret, frame = cap.retrieve()
                 if ret:
                     frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     i += 1
 
-        assert i == len(uniq_frame_idx), (
-            f"Expected reading {len(uniq_frame_idx)} frames, "
+        assert i == len(frame_indices), (
+            f"Expected reading {len(frame_indices)} frames, "
             f"but only loaded {i} frames from video.")
 
         return frames, metadata
