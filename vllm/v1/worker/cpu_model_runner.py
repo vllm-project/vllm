@@ -64,8 +64,8 @@ class CPUModelRunner(GPUModelRunner):
         if not self.attn_groups[0]:
             return
 
-        mb = getattr(self.attn_groups[0][0], "metadata_builder", None)
-        if not isinstance(mb, TorchSDPAMetadataBuilderV1):
+        mb = getattr(self.attn_groups[0][0], "metadata_builders", None)
+        if not isinstance(mb[0], TorchSDPAMetadataBuilderV1):
             # Encoder-only / rerank models do not benefit from reordering,
             # so we safely skip here.
             return
