@@ -23,7 +23,8 @@ from safetensors.torch import load_file, safe_open, save_file
 from tqdm.auto import tqdm
 
 from vllm import envs
-from vllm.config import LoadConfig, ModelConfig
+from vllm.config import ModelConfig
+from vllm.config.load import LoadConfig
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QuantizationConfig,
