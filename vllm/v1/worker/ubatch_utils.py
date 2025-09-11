@@ -6,12 +6,12 @@ from typing_extensions import TypeAlias
 
 
 @dataclass
-class UbatchSlice:
+class UBatchSlice:
     request_slice: slice
     token_slice: slice
 
 
-UBatchSlices: TypeAlias = list[UbatchSlice]
+UBatchSlices: TypeAlias = list[UBatchSlice]
 
 
 def is_second_ubatch_empty(orig_num_tokens_per_ubatch: int,

@@ -92,7 +92,7 @@ from vllm.v1.worker.kv_connector_model_runner_mixin import (
     KVConnectorModelRunnerMixin, KVConnectorOutput)
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.ubatch_splitting import get_dp_padding_ubatch, ubatch_split
-from vllm.v1.worker.ubatch_utils import UbatchSlice, UBatchSlices
+from vllm.v1.worker.ubatch_utils import UBatchSlice, UBatchSlices
 
 from .utils import (AttentionGroup, MultiModalBudget,
                     add_kv_sharing_layers_to_kv_cache_groups, bind_kv_cache,
@@ -1774,7 +1774,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                              num_total_tokens: int):
         padded_second_ubatch_slice = slice(ubatch_slices[1].token_slice.start,
                                            num_total_tokens)
-        ubatch_slices[1] = UbatchSlice(padded_second_ubatch_slice,
+        ubatch_slices[1] = UBatchSlice(padded_second_ubatch_slice,
                                        padded_second_ubatch_slice)
 
     def _pool(
@@ -2828,9 +2828,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             assert num_reqs == num_tokens
             assert num_tokens % 2 == 0
             ubatch_slices = [
-                UbatchSlice(slice(0, num_reqs // 2), slice(0,
+                UBatchSlice(slice(0, num_reqs // 2), slice(0,
                                                            num_tokens // 2)),
-                UbatchSlice(slice(num_reqs // 2, num_reqs),
+                UBatchSlice(slice(num_reqs // 2, num_reqs),
                             slice(num_tokens // 2, num_tokens))
             ]
 

@@ -28,7 +28,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_kv_connector_cache_layout)
 from vllm.logger import init_logger
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.v1.worker.ubatch_utils import UbatchSlice
+from vllm.v1.worker.ubatch_utils import UBatchSlice
 
 logger = init_logger(__name__)
 _KV_CACHE_LAYOUT_OVERRIDE = None
@@ -93,7 +93,7 @@ def slice_query_start_locs(
 
 
 def _make_metadata_with_slice(
-        ubatch_slice: UbatchSlice,
+        ubatch_slice: UBatchSlice,
         attn_metadata: CommonAttentionMetadata) -> CommonAttentionMetadata:
     """
     This function creates a new CommonAttentionMetadata that corresponds to 
@@ -147,12 +147,12 @@ def _make_metadata_with_slice(
 
 
 def split_attn_metadata(
-    ubatch_slices: list[UbatchSlice],
+    ubatch_slices: list[UBatchSlice],
     common_attn_metadata: CommonAttentionMetadata,
 ) -> list[CommonAttentionMetadata]:
     """
     Creates a new CommonAttentionMetadata instance that corresponds to the 
-    requests for each UbatchSlice in ubatch_slices.
+    requests for each UBatchSlice in ubatch_slices.
 
     Note: This function does not modify common_attn_metadata
     """

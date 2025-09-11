@@ -9,7 +9,7 @@ from vllm.config import VllmConfig
 from vllm.forward_context import DPMetadata
 from vllm.logger import init_logger
 from vllm.utils import round_up
-from vllm.v1.worker.ubatch_utils import (UbatchSlice, UBatchSlices,
+from vllm.v1.worker.ubatch_utils import (UBatchSlice, UBatchSlices,
                                          is_second_ubatch_empty)
 
 logger = init_logger(__name__)
@@ -147,8 +147,8 @@ def ubatch_split(
 
     # Note there's an assumption here that there's 1 token per request
     ubatch_slices = [
-        UbatchSlice(padded_first_ubatch_slice, padded_first_ubatch_slice),
-        UbatchSlice(padded_second_ubatch_slice, padded_second_ubatch_slice)
+        UBatchSlice(padded_first_ubatch_slice, padded_first_ubatch_slice),
+        UBatchSlice(padded_second_ubatch_slice, padded_second_ubatch_slice)
     ]
 
     return (ubatch_slices, num_tokens_after_padding)
