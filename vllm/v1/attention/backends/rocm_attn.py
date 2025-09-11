@@ -7,6 +7,7 @@ from typing import ClassVar, Optional
 
 import torch
 
+from vllm import _custom_ops as ops
 from vllm import envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
@@ -23,11 +24,6 @@ from vllm.v1.attention.backends.utils import (AttentionCGSupport,
                                               AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
 from vllm.v1.kv_cache_interface import AttentionSpec
-
-if current_platform.is_cuda_alike():
-    from vllm import _custom_ops as ops
-elif current_platform.is_xpu():
-    from vllm._ipex_ops import ipex_ops as ops
 
 logger = init_logger(__name__)
 
@@ -247,7 +243,7 @@ class RocmAttentionImpl(AttentionImpl):
             raise NotImplementedError("Encoder self-attention and "
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
-                                      "TritonAttentionImpl")
+                                      "RocmAttentionImpl")
 
         self.fp8_dtype = current_platform.fp8_dtype()
         self.force_prefill_decode_attn = \
@@ -258,13 +254,13 @@ class RocmAttentionImpl(AttentionImpl):
             # unified attention implementation.
             if use_aiter_unified_attention():
                 logger.info_once(
-                    "Using aiter unified attention for TritonAttentionImpl")
+                    "Using aiter unified attention for RocmAttentionImpl")
                 from aiter.ops.triton.unified_attention import (
                     unified_attention)
                 self.unified_attention = unified_attention
             else:
                 logger.info_once(
-                    "Using vllm unified attention for TritonAttentionImpl")
+                    "Using vllm unified attention for RocmAttentionImpl")
                 from vllm.attention.ops.triton_unified_attention import (
                     unified_attention)
                 self.unified_attention = unified_attention
@@ -305,7 +301,7 @@ class RocmAttentionImpl(AttentionImpl):
         if output_block_scale is not None:
             raise NotImplementedError(
                 "fused block_scale output quantization is not yet supported"
-                " for TritonAttentionImpl")
+                " for RocmAttentionImpl")
 
         if attn_metadata is None:
             # Profiling run.
