@@ -24,7 +24,7 @@ class LinearLayerWithActivatedLoRAMixin:
     output_slices: tuple[int, ...]
 
     @classmethod
-    def maybe_mixin(cls, lora_cls: "BaseLayerWithLoRA"):
+    def maybe_mixin(cls, lora_cls: "type[BaseLayerWithLoRA]"):
         if issubclass(lora_cls, BaseLinearLayerWithLoRA):
             return type(lora_cls.__name__.replace("LoRA", "ActivatedLoRA"),
                         (cls, lora_cls), {})
