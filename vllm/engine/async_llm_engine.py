@@ -31,6 +31,7 @@ from vllm.sequence import ExecuteModelRequest
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Device, deprecate_kwargs, weak_bind
+from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)
 ENGINE_ITERATION_TIMEOUT_S = envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
@@ -813,7 +814,7 @@ class AsyncLLMEngine(EngineClient):
 
     async def generate(
         self,
-        prompt: PromptType,
+        request: Union[EngineCoreRequest, PromptType],
         sampling_params: SamplingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
@@ -828,9 +829,10 @@ class AsyncLLMEngine(EngineClient):
         from the LLMEngine to the caller.
 
         Args:
-            prompt: The prompt to the LLM. See
+            request: The prompt to the LLM (PromptType). See
                 [`PromptType`][vllm.inputs.PromptType] for more details about
-                the format of each input.
+                the format of each input. It can not be an
+                [`EngineCoreRequest`][vllm.v1.engine.EngineCoreRequest] in V0.
             sampling_params: The sampling parameters of the request.
             request_id: The unique id of the request.
             lora_request: LoRA request to use for generation, if any.
@@ -888,9 +890,10 @@ class AsyncLLMEngine(EngineClient):
             >>> ...
         """
         try:
+            assert not isinstance(request, EngineCoreRequest)
             async for output in await self.add_request(
                     request_id,
-                    prompt,
+                    request,
                     sampling_params,
                     lora_request=lora_request,
                     trace_headers=trace_headers,

@@ -265,36 +265,6 @@ class OpenAIServing:
                 lora_config=vllm_config.lora_config)
         self.processor = Processor(vllm_config, tokenizer)
 
-    def _process_inputs(
-        self,
-        request_id: str,
-        engine_prompt: PromptType,
-        sampling_params: SamplingParams,
-        *,
-        lora_request: Optional[LoRARequest],
-        trace_headers: Optional[Mapping[str, str]],
-        priority: int,
-    ) -> tuple[Optional[str], EngineCoreRequest, dict]:
-        """
-        using the Processor to process inputs for AsyncLLM
-        """
-        assert self.processor is not None
-        tokenization_kwargs: dict[str, Any] = {}
-        _validate_truncation_size(self.max_model_len,
-                                  sampling_params.truncate_prompt_tokens,
-                                  tokenization_kwargs)
-
-        prompt_str, engine_request = self.processor.process_inputs(
-            request_id,
-            engine_prompt,
-            sampling_params,
-            lora_request=lora_request,
-            tokenization_kwargs=tokenization_kwargs,
-            trace_headers=trace_headers,
-            priority=priority,
-        )
-        return prompt_str, engine_request, tokenization_kwargs
-
     def _get_renderer(self, tokenizer: Optional[AnyTokenizer]) -> BaseRenderer:
         """
         Get a Renderer instance with the provided tokenizer.
@@ -1068,6 +1038,36 @@ class OpenAIServing:
 
         return conversation, [request_prompt], [engine_prompt]
 
+    def _process_inputs(
+        self,
+        request_id: str,
+        engine_prompt: PromptType,
+        sampling_params: SamplingParams,
+        *,
+        lora_request: Optional[LoRARequest],
+        trace_headers: Optional[Mapping[str, str]],
+        priority: int,
+    ) -> tuple[Optional[str], EngineCoreRequest, dict]:
+        """
+        using the Processor to process inputs for AsyncLLM
+        """
+        assert self.processor is not None
+        tokenization_kwargs: dict[str, Any] = {}
+        _validate_truncation_size(self.max_model_len,
+                                  sampling_params.truncate_prompt_tokens,
+                                  tokenization_kwargs)
+
+        prompt_str, engine_request = self.processor.process_inputs(
+            request_id,
+            engine_prompt,
+            sampling_params,
+            lora_request=lora_request,
+            tokenization_kwargs=tokenization_kwargs,
+            trace_headers=trace_headers,
+            priority=priority,
+        )
+        return prompt_str, engine_request, tokenization_kwargs
+
     async def _generate_with_builtin_tools(
         self,
         request_id: str,
@@ -1088,6 +1088,8 @@ class OpenAIServing:
                 params=sampling_params,
                 lora_request=lora_request,
             )
+            # TODO: remove AsyncLLM check and update EngineClient
+            # once we fully deprecate V0
             if isinstance(self.engine_client, AsyncLLM):
                 await self._initialize_processor()
                 trace_headers = kwargs.get("trace_headers")
@@ -1102,10 +1104,9 @@ class OpenAIServing:
                     ))
 
                 generator = self.engine_client.generate(
-                    engine_prompt,
+                    engine_request,
                     sampling_params,
                     request_id,
-                    engine_request=engine_request,
                     lora_request=lora_request,
                     priority=priority,
                     prompt_str=prompt_str,

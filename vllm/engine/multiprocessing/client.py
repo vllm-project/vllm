@@ -46,6 +46,7 @@ from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.utils import Device
+from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)
 
@@ -452,7 +453,7 @@ class MQLLMEngineClient(EngineClient):
 
     def generate(
         self,
-        prompt: PromptType,
+        request: Union[EngineCoreRequest, PromptType],
         sampling_params: SamplingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
@@ -466,9 +467,10 @@ class MQLLMEngineClient(EngineClient):
         from the LLMEngine to the caller.
 
         Args:
-            prompt: The prompt to the LLM. See
+            request: The prompt to the LLM (PromptType). See
                 [`PromptType`][vllm.inputs.PromptType] for more details about
-                the format of each input.
+                the format of each input. It can not be an
+                [`EngineCoreRequest`][vllm.v1.engine.EngineCoreRequest] in V0.
             sampling_params: The sampling parameters of the request.
             request_id: The unique id of the request.
             lora_request: LoRA request to use for generation, if any.
@@ -477,7 +479,8 @@ class MQLLMEngineClient(EngineClient):
                 Any priority other than 0 will lead to an error if the
                 scheduling policy is not "priority".
         """
-        return self._process_request(prompt, sampling_params, request_id,
+        assert not isinstance(request, EngineCoreRequest)
+        return self._process_request(request, sampling_params, request_id,
                                      lora_request, trace_headers, priority)
 
     def encode(

@@ -282,8 +282,8 @@ class AsyncLLM(EngineClient):
         if not isinstance(request, EngineCoreRequest):
             assert prompt_str is None
             logger.warning_once(
-                "Processor in AsyncLLM is deprecated. "
-                "Processor has been moved to the API server layer. ")
+                "Processor has been moved under OpenAIServing/LLM and will "
+                "be removed from AsyncLLM in v0.13.")
             prompt_str, request = self.processor.process_inputs(
                 request_id, request, params, None, lora_request,
                 tokenization_kwargs, trace_headers, priority,
@@ -326,10 +326,10 @@ class AsyncLLM(EngineClient):
     # re-multiplexed in the API server anyhow.
     async def generate(
         self,
-        prompt: PromptType,
+        request: Union[EngineCoreRequest, PromptType],
         sampling_params: SamplingParams,
         request_id: str,
-        engine_request: Optional[EngineCoreRequest] = None,
+        *,
         prompt_str: Optional[str] = None,
         lora_request: Optional[LoRARequest] = None,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
@@ -374,10 +374,6 @@ class AsyncLLM(EngineClient):
                     truncate_prompt_tokens,
                     tokenization_kwargs,
                 )
-
-            request: Union[EngineCoreRequest, PromptType] = engine_request
-            if engine_request is None:
-                request = prompt
 
             q = await self.add_request(
                 request_id,

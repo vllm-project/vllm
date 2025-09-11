@@ -219,6 +219,8 @@ class OpenAIServingCompletion(OpenAIServing):
                         lora_request=lora_request,
                     )
                 else:
+                    # TODO: remove AsyncLLM check and update EngineClient
+                    # once we fully deprecate V0
                     from vllm.v1.engine.async_llm import AsyncLLM
                     if isinstance(self.engine_client, AsyncLLM):
                         await self._initialize_processor()
@@ -233,10 +235,9 @@ class OpenAIServingCompletion(OpenAIServing):
                             ))
 
                         generator = self.engine_client.generate(
-                            engine_prompt,
+                            engine_request,
                             sampling_params,
                             request_id_item,
-                            engine_request=engine_request,
                             lora_request=lora_request,
                             trace_headers=trace_headers,
                             priority=request.priority,
