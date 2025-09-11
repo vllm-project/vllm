@@ -15,7 +15,8 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 # yapf: enable
 
 if TYPE_CHECKING:
-    from vllm.config import KVTransferConfig, VllmConfig
+    from vllm.config import VllmConfig
+    from vllm.config.kv_transfer import KVTransferConfig
 
 logger = init_logger(__name__)
 

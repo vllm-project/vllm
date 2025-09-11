@@ -93,7 +93,7 @@ AITER_MODEL_LIST = [
             "allenai/OLMoE-1B-7B-0924-Instruct",
             marks=[pytest.mark.cpu_model],
         ),
-        pytest.param("swiss-ai/Apertus-8B"),  # apertus
+        pytest.param("swiss-ai/Apertus-8B-2509"),  # apertus
     ])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
