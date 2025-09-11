@@ -194,6 +194,7 @@ class MambaSpec(KVCacheSpec):
     dtypes: tuple[torch.dtype]
     page_size_padded: Optional[int] = None
     mamba_type: str = "mamba2"
+    cache_strategy: str = "disabled"
 
     @property
     def page_size_bytes(self) -> int:
@@ -205,10 +206,15 @@ class MambaSpec(KVCacheSpec):
             return self.page_size_padded
         return page_size
 
-    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        # We allocate 1 block for each request now, so max_memory_usage_bytes is
-        # the same as page_size_bytes.
-        # Need to update this when supporting prefix caching.
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:        
+        if self.cache_strategy == "last":
+            # Keeps the last full block and one non-full block state:
+            return 2 * self.page_size_bytes
+        elif self.cache_strategy == "all":
+            # Keeps a state at every block boundary:
+            max_model_len = vllm_config.model_config.max_model_len
+            return cdiv(max_model_len, self.block_size) * self.page_size_bytes
+        # By default keeps the last state only:
         return self.page_size_bytes
 
 

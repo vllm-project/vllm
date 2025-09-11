@@ -87,7 +87,14 @@ class CacheConfig:
     mamba_page_size_padded: Optional[int] = None
     """ Optional override for mamba page size; used by hybrid mamba/attention
     models to ensure exact alignment with attention page size."""
-
+    mamba_block_size: Optional[int] = None
+    """Size of a contiguous cache block in number of tokens for mamba cache."""
+    mamba_cache_strategy: str = "all"
+    """Logic for mamba cache:
+    * disabled - turn of prefix caching
+    * all - keep states for all prefixes
+    * last - keep the states of the last full blocks after each request
+    """
     mamba_cache_dtype: MambaDType = "auto"
     """The data type to use for the Mamba cache (both the conv as well as the
     ssm state). If set to 'auto', the data type will be inferred from the model
