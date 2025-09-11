@@ -183,16 +183,14 @@ class CudaPlatformBase(Platform):
         compilation_config = vllm_config.compilation_config
         if (envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
                 and parallel_config.data_parallel_size > 1
-                and compilation_config.cudagraph_mode != CUDAGraphMode.NONE):
+                and compilation_config.cudagraph_mode
+                not in [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE]):
             logger.info(
-                "Data Parallel: disabling cudagraphs since DP "
-                "with DeepEP high-throughput kernels are not CUDA Graph "
-                "compatible. The DeepEP low-latency kernels are CUDA Graph "
-                "compatible. Set the all_to_all backend to deepep_low_latency "
-                "to use those kernels instead.")
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            if model_config is not None:
-                model_config.enforce_eager = True
+                "Data Parallel with DeepEP high-throughput: using PIECEWISE "
+                "CUDA graphs and excluding MoE ops from capture. Set "
+                "VLLM_ALL2ALL_BACKEND=deepep_low_latency if you need MoE "
+                "graphs captured as well.")
+            compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
     @classmethod
     def get_current_memory_usage(cls,
@@ -230,6 +228,8 @@ class CudaPlatformBase(Platform):
             use_cutlassmla = selected_backend == _Backend.CUTLASS_MLA or (
                 selected_backend is None and cls.is_device_capability(100)
                 and block_size == 128)
+            use_flashinfermla = (selected_backend == _Backend.FLASHINFER_MLA
+                                 and cls.has_device_capability(100))
             use_flashmla = selected_backend in [
                 _Backend.FLASHMLA, _Backend.FLASHMLA_VLLM_V1
             ] or (selected_backend is None and is_flashmla_supported()[0])
@@ -254,6 +254,19 @@ class CudaPlatformBase(Platform):
                 else:
                     logger.warning(
                         "Cutlass MLA backend is only supported on V1 engine")
+            if use_flashinfermla:
+                if use_v1:
+                    from vllm.v1.attention.backends.utils import (
+                        set_kv_cache_layout)
+                    set_kv_cache_layout("HND")
+                    logger.info_once(
+                        "Using FlashInfer MLA backend on V1 engine.")
+                    return ("vllm.v1.attention.backends.mla."
+                            "flashinfer_mla.FlashInferMLABackend")
+                else:
+                    logger.warning(
+                        "FlashInfer MLA backend is only supported on V1 engine"
+                    )
             if use_flashmla:
                 if block_size != 64:
                     logger.warning(
@@ -532,6 +545,10 @@ class CudaPlatformBase(Platform):
                     supported = flash_attn_supports_fp8()
                 else:
                     supported = True
+            elif attention_backend == "FLASHINFER":
+                supported = True
+            elif attention_backend == "TRITON_ATTN_VLLM_V1":
+                supported = cls.supports_fp8()
         return supported
 
     @classmethod

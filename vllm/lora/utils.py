@@ -13,22 +13,23 @@ from transformers import PretrainedConfig
 
 from vllm.config import LoRAConfig
 from vllm.logger import init_logger
-from vllm.lora.fully_sharded_layers import (
-    ColumnParallelLinearWithShardedLoRA,
-    MergedColumnParallelLinearWithShardedLoRA,
-    MergedQKVParallelLinearWithShardedLoRA, QKVParallelLinearWithShardedLoRA,
-    RowParallelLinearWithShardedLoRA)
 # being imported for _all_lora_classes below
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.lora.layers import (ActivatedLoRAMixin, BaseLayerWithLoRA,
+from vllm.lora.layers import (BaseLayerWithLoRA, BaseLinearLayerWithLoRA,
                               ColumnParallelLinearWithLoRA,
+                              ColumnParallelLinearWithShardedLoRA,
+                              LinearLayerWithActivatedLoRAMixin,
                               LogitsProcessorWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
+                              MergedColumnParallelLinearWithShardedLoRA,
                               MergedQKVParallelLinearWithLoRA,
+                              MergedQKVParallelLinearWithShardedLoRA,
                               QKVParallelLinearWithLoRA,
+                              QKVParallelLinearWithShardedLoRA,
                               ReplicatedLinearWithLoRA,
                               RowParallelLinearWithLoRA,
+                              RowParallelLinearWithShardedLoRA,
                               VocabParallelEmbeddingWithLoRA)
 from vllm.model_executor.layers.linear import LinearBase
 
@@ -72,10 +73,10 @@ def from_layer(layer: nn.Module,
                                       model_config=model_config):
             # inject a-LoRA behaviour
             if (lora_config.activated_lora_enabled
-                    and issubclass(lora_cls, BaseLayerWithLoRA)):
+                    and issubclass(lora_cls, BaseLinearLayerWithLoRA)):
                 lora_cls = type(
                     lora_cls.__name__.replace("LoRA", "ActivatedLoRA"),
-                    (ActivatedLoRAMixin, lora_cls), {})
+                    (LinearLayerWithActivatedLoRAMixin, lora_cls), {})
             instance_layer = lora_cls(layer)
             instance_layer.create_lora_weights(max_loras, lora_config,
                                                model_config)
