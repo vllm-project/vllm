@@ -148,6 +148,9 @@ def analyze_dtype_patterns(configs: list[dict], dtype: str):
 def analyze_block_sizes(configs):
     """Analyze block size patterns."""
     print("\n--- Block Size Analysis ---")
+    if not configs:
+        print("  No batch configs to analyze for block sizes.")
+        return
 
     block_m_values = [c['BLOCK_SIZE_M'] for c in configs]
     block_n_values = [c['BLOCK_SIZE_N'] for c in configs]
