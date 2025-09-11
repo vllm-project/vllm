@@ -34,9 +34,9 @@ namespace hadacore {
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
-typedef uint32_t b32;
-typedef uint16_t b16;
-typedef uint64_t u64;
+using b16 = uint16_t;
+using b32 = uint32_t;
+using u64 = uint64_t;
 
 constexpr int launch_configs_big[7][3] = {
     // default
@@ -729,8 +729,6 @@ void run_fht(void* a_mat_ptr, void* out_ptr, u64 numel, u64 had_size, cudaStream
     constexpr u64 chunks_per_warp_large = 2;
     constexpr u64 warps_per_block_large = 1;
     constexpr u64 blocks_per_sm_large = 24;
-
-    // constexpr torch::ScalarType dtype = torch::ScalarType::Half;
 
     b16* a_mat = (b16*) a_mat_ptr;
     b16* out = (b16*) out_ptr;
