@@ -345,3 +345,6 @@ extend-ignore-re = []
 windo = "windo"
 
 [tool.typos.type.vimscript.extend-words]
+
+[tool.uv]
+no-build-isolation-package = ["torch"]
