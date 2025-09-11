@@ -412,9 +412,7 @@ class Qwen2_5_VisionAttention(nn.Module):
             qk_rotated = apply_rotary_pos_emb_vision(qk_concat, rotary_pos_emb)
             q, k = torch.chunk(qk_rotated, 2, dim=0)
 
-        # torch.library.opcheck(torch.ops.mylib.attn_executor, (q, k, v, cu_seqlens, max_seqlen, seqlens, batch_size, out_dim, self.is_flash_attn_backend, self.attn_backend == _Backend.ROCM_AITER_FA, self.attn_backend == _Backend.TORCH_SDPA, self.attn_backend == _Backend.XFORMERS), test_utils='test_faketensor')
-
-        context_layer = torch.ops.mylib.attn_executor(
+        context_layer = torch.ops.mylib.custom_vision_attention(
             q, k, v, cu_seqlens, max_seqlen, seqlens, batch_size,
             self.is_flash_attn_backend,
             self.attn_backend == _Backend.ROCM_AITER_FA,
@@ -425,12 +423,12 @@ class Qwen2_5_VisionAttention(nn.Module):
         return output
 
 
-@torch.library.custom_op("mylib::attn_executor", mutates_args=())
-def attn_executor(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-                  cu_seqlens: torch.Tensor, max_seqlen: torch.Tensor,
-                  seqlens: torch.Tensor, batch_size: int, is_flash_attn: bool,
-                  is_rocm_aiter: bool, is_sdpa: bool,
-                  is_xformers: bool) -> torch.Tensor:
+@torch.library.custom_op("mylib::custom_vision_attention", mutates_args=())
+def custom_vision_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+                            cu_seqlens: torch.Tensor, max_seqlen: torch.Tensor,
+                            seqlens: torch.Tensor, batch_size: int,
+                            is_flash_attn: bool, is_rocm_aiter: bool,
+                            is_sdpa: bool, is_xformers: bool) -> torch.Tensor:
     if is_flash_attn:
         if is_rocm_aiter:
             from aiter import flash_attn_varlen_func
@@ -485,20 +483,21 @@ def attn_executor(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     return context_layer
 
 
-@torch.library.register_fake("mylib::attn_executor")
-def attn_executor_fake(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-                       cu_seqlens: torch.Tensor, max_seqlen: torch.Tensor,
-                       seqlens: torch.Tensor, batch_size: int,
-                       is_flash_attn: bool, is_rocm_aiter: bool, is_sdpa: bool,
-                       is_xformers: bool) -> torch.Tensor:
-    size = torch.empty((
+@torch.library.register_fake("mylib::custom_vision_attention")
+def custom_vision_attention_fake(q: torch.Tensor, k: torch.Tensor,
+                                 v: torch.Tensor, cu_seqlens: torch.Tensor,
+                                 max_seqlen: torch.Tensor,
+                                 seqlens: torch.Tensor, batch_size: int,
+                                 is_flash_attn: bool, is_rocm_aiter: bool,
+                                 is_sdpa: bool,
+                                 is_xformers: bool) -> torch.Tensor:
+    return torch.empty((
         q.shape[1],
         batch_size,
         q.shape[2] * q.shape[3],
     ),
                        dtype=q.dtype,
                        device=q.device)
-    return size
 
 
 @set_model_tag("Qwen2_5_VisionBlock")
@@ -682,12 +681,6 @@ class Qwen2_5_VisionRotaryEmbedding(nn.Module):
         return self._freqs_cached[:seqlen]
 
 
-# @set_model_tag("Qwen2_5_VisionBlock")
-# @support_torch_compile(dynamic_arg_dims={
-#     "x": 0,
-#     "cu_seqlens": 0,
-#     "rotary_pos_emb": 0,
-# })
 class Qwen2_5_VisionTransformer(nn.Module):
     def __init__(
         self,
@@ -962,9 +955,9 @@ class Qwen2_5_VisionTransformer(nn.Module):
 
         # transformers
         # pre-compute seqlens for window/full attn to reduce cuMemcpy operations
-        max_seqlen_full, seqlens_full = self.compute_attn_mask_seqlen_tensor(
+        max_seqlen_full, seqlens_full = self.compute_attn_mask_seqlen(
             cu_seqlens)
-        max_seqlen_window, seqlens_window = self.compute_attn_mask_seqlen_tensor(
+        max_seqlen_window, seqlens_window = self.compute_attn_mask_seqlen(
             cu_window_seqlens)
 
         cu_seqlens = cu_seqlens.to(device=self.device, non_blocking=True)
