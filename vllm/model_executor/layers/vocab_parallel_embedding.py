@@ -40,6 +40,12 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
 
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if current_platform.is_cpu():
+            from vllm.model_executor.layers.utils import (
+                dispatch_cpu_unquantized_gemm)
+            dispatch_cpu_unquantized_gemm(layer, remove_weight=False)
+
     def apply(self,
               layer: torch.nn.Module,
               x: torch.Tensor,
@@ -423,6 +429,7 @@ class VocabParallelEmbedding(CustomOp):
         return s
 
 
+@CustomOp.register("parallel_lm_head")
 class ParallelLMHead(VocabParallelEmbedding):
     """Parallelized LM head.
 

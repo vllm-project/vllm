@@ -280,6 +280,13 @@ def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
+def poly_norm(out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
+              bias: torch.Tensor, epsilon: float) -> None:
+    # TODO: Remove this contiguous call when the kernel is updated to support non-contiguous input
+    input_contiguous = input.contiguous()
+    torch.ops._C.poly_norm(out, input_contiguous, weight, bias, epsilon)
+
+
 def apply_repetition_penalties_torch(
         logits: torch.Tensor, prompt_mask: torch.Tensor,
         output_mask: torch.Tensor, repetition_penalties: torch.Tensor) -> None:
@@ -709,6 +716,7 @@ def cutlass_sparse_scaled_mm_supported(cuda_device_capability: int) -> bool:
 
 def cutlass_group_gemm_supported(cuda_device_capability: int) -> bool:
     return torch.ops._C.cutlass_group_gemm_supported(cuda_device_capability)
+
 
 def cutlass_sparse_compress(a: torch.Tensor) \
     -> tuple[torch.Tensor, torch.Tensor]:
@@ -1502,6 +1510,17 @@ def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                                   gating_output)
 
 
+def grouped_topk(scores: torch.Tensor, scores_with_bias: torch.Tensor,
+                 num_expert_group: int, topk_group: int, topk: int,
+                 renormalize: bool, routed_scaling_factor: float):
+    if not current_platform.is_cuda():
+        raise NotImplementedError("The fused grouped_topk kernel is only "
+                                  "available on CUDA platforms")
+    return torch.ops._moe_C.grouped_topk(scores, scores_with_bias,
+                                         num_expert_group, topk_group, topk,
+                                         renormalize, routed_scaling_factor)
+
+
 def moe_wna16_marlin_gemm(input: torch.Tensor, output: Optional[torch.Tensor],
                           b_qweight: torch.Tensor,
                           b_bias: Optional[torch.Tensor],
@@ -1649,6 +1668,16 @@ def gather_and_maybe_dequant_cache(
     torch.ops._C_cache_ops.gather_and_maybe_dequant_cache(
         src_cache, dst, block_table, cu_seq_lens, batch_size, kv_cache_dtype,
         scale, seq_starts)
+
+
+def cp_gather_cache(src_cache: torch.Tensor,
+                    dst: torch.Tensor,
+                    block_table: torch.Tensor,
+                    cu_seq_lens: torch.Tensor,
+                    batch_size: int,
+                    seq_starts: Optional[torch.Tensor] = None) -> None:
+    torch.ops._C_cache_ops.cp_gather_cache(src_cache, dst, block_table,
+                                           cu_seq_lens, batch_size, seq_starts)
 
 
 def get_device_attribute(attribute: int, device: int) -> int:
@@ -1812,13 +1841,13 @@ def cutlass_mla_decode(out: torch.Tensor, q_nope: torch.Tensor,
     return out
 
 
-def sm100_cutlass_mla_decode(out: torch.Tensor, q_nope: torch.Tensor,
-                             q_pe: torch.Tensor,
+def sm100_cutlass_mla_decode(out: torch.Tensor, lse: torch.Tensor,
+                             q_nope: torch.Tensor, q_pe: torch.Tensor,
                              kv_c_and_k_pe_cache: torch.Tensor,
                              seq_lens: torch.Tensor, page_table: torch.Tensor,
                              workspace: torch.Tensor, scale: float,
                              num_kv_splits: int) -> torch.Tensor:
-    torch.ops._C.sm100_cutlass_mla_decode(out, q_nope, q_pe,
+    torch.ops._C.sm100_cutlass_mla_decode(out, lse, q_nope, q_pe,
                                           kv_c_and_k_pe_cache, seq_lens,
                                           page_table, workspace, scale,
                                           num_kv_splits)
@@ -1891,6 +1920,35 @@ class CPUDNNLGEMMHandler:
     def __del__(self):
         if self.handler is not None:
             torch.ops._C.release_dnnl_matmul_handler(self.handler)
+
+
+if hasattr(torch.ops._C, "create_onednn_mm_handler"):
+    _supports_onednn = True
+else:
+    _supports_onednn = False
+
+
+def create_onednn_mm(
+    weight: torch.Tensor,  # [K, N]
+    primitive_cache_size: int = 128,
+) -> CPUDNNLGEMMHandler:
+    handler = CPUDNNLGEMMHandler()
+    handler.k, handler.n = weight.size()
+    handler.handler = torch.ops._C.create_onednn_mm_handler(
+        weight, primitive_cache_size)
+    return handler
+
+
+def onednn_mm(
+    dnnl_handler: CPUDNNLGEMMHandler,
+    x: torch.Tensor,
+    bias: Optional[torch.Tensor],
+) -> torch.Tensor:
+    output = torch.empty((*x.shape[0:-1], dnnl_handler.n), dtype=x.dtype)
+    torch.ops._C.onednn_mm(output, x.reshape(-1, dnnl_handler.k), bias,
+                           dnnl_handler.handler)
+
+    return output
 
 
 def create_onednn_scaled_mm(

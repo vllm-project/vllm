@@ -190,8 +190,7 @@ class Attention(nn.Module, AttentionLayerBase):
         # torch.compile works by registering the attention as one giant
         # opaque custom op. For other platforms, we directly call them
         # and let torch.compile handle them.
-        self.use_direct_call = not current_platform.is_cuda_alike(
-        ) and not current_platform.is_cpu()
+        self.use_direct_call = not current_platform.opaque_attention_op()
 
         self.use_output = self.attn_backend.accept_output_buffer
         compilation_config = get_current_vllm_config().compilation_config
@@ -361,13 +360,13 @@ class MultiHeadAttention(nn.Module):
             # currently, only torch_sdpa is supported on rocm
             self.attn_backend = _Backend.TORCH_SDPA
         else:
-            if backend in (_Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1,
-                           _Backend.FLEX_ATTENTION):
-                backend = _Backend.XFORMERS
-
             self.attn_backend = backend if backend in {
-                _Backend.TORCH_SDPA, _Backend.XFORMERS, _Backend.PALLAS_VLLM_V1
-            } else _Backend.TORCH_SDPA
+                _Backend.TORCH_SDPA,
+                _Backend.TORCH_SDPA_VLLM_V1,
+                _Backend.XFORMERS,
+                _Backend.PALLAS_VLLM_V1,
+                _Backend.ROCM_AITER_FA,
+            } else current_platform.get_vit_attn_backend()
 
         if (self.attn_backend == _Backend.XFORMERS
                 and not check_xformers_availability()):
@@ -400,7 +399,8 @@ class MultiHeadAttention(nn.Module):
                                                           key,
                                                           value,
                                                           scale=self.scale)
-        elif self.attn_backend == _Backend.TORCH_SDPA:
+        elif (self.attn_backend == _Backend.TORCH_SDPA
+              or self.attn_backend == _Backend.TORCH_SDPA_VLLM_V1):
             query, key, value = (x.transpose(1, 2)
                                  for x in (query, key, value))
             out = F.scaled_dot_product_attention(query,
@@ -414,6 +414,19 @@ class MultiHeadAttention(nn.Module):
             from torch_xla.experimental.custom_kernel import flash_attention
             out = flash_attention(query, key, value, sm_scale=self.scale)
             out = out.transpose(1, 2)
+        elif self.attn_backend == _Backend.ROCM_AITER_FA:
+            from aiter import flash_attn_varlen_func
+
+            # ROCm Flash Attention expects (batch, seq, heads, head_dim)
+            out = flash_attn_varlen_func(query,
+                                         key,
+                                         value,
+                                         softmax_scale=self.scale)
+        else:
+            # ViT attention hasn't supported this backend yet
+            raise NotImplementedError(
+                f"ViT attention hasn't supported {self.attn_backend} "
+                f"backend yet.")
 
         return out.reshape(bsz, q_len, -1)
 

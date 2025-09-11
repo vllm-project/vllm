@@ -108,7 +108,7 @@ class Idefics2VisionEmbeddings(nn.Module):
                        bucket_coords_w).flatten()
             position_ids[batch_idx][p_attn_mask.view(-1).cpu()] = pos_ids
         position_ids = position_ids.to(self.position_embedding.weight.device)
-        embeddings = embeddings + self.position_embedding(position_ids)
+        embeddings += self.position_embedding(position_ids)
         return embeddings
 
 
@@ -170,6 +170,7 @@ class Idefics2VisionAttention(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.out_proj",
             )
+        # Use unified MultiHeadAttention with Flash Attention support
         self.attn = MultiHeadAttention(self.num_heads_per_partition,
                                        self.head_dim, self.scale)
 
@@ -181,6 +182,8 @@ class Idefics2VisionAttention(nn.Module):
             hidden_states
         )  # batch_size, q_len, 3 * num_heads_per_partition * head_dim
         query_states, key_states, value_states = qkv.chunk(3, dim=-1)
+
+        # Use unified MultiHeadAttention implementation
         out = self.attn(query_states, key_states, value_states)
         attn_output, _ = self.out_proj(out)
         return attn_output
@@ -262,11 +265,11 @@ class Idefics2EncoderLayer(nn.Module):
         residual = hidden_states
         hidden_states = self.layer_norm1(hidden_states)
         hidden_states = self.self_attn(hidden_states)
-        hidden_states = residual + hidden_states
+        hidden_states += residual
         residual = hidden_states
         hidden_states = self.layer_norm2(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
+        hidden_states += residual
         return hidden_states
 
 
