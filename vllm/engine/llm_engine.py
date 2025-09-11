@@ -16,9 +16,9 @@ import torch
 from typing_extensions import TypeVar
 
 import vllm.envs as envs
-from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
-                         ObservabilityConfig, ParallelConfig, SchedulerConfig,
-                         VllmConfig)
+from vllm.config import (DecodingConfig, ModelConfig, ObservabilityConfig,
+                         ParallelConfig, SchedulerConfig, VllmConfig)
+from vllm.config.lora import LoRAConfig
 from vllm.core.scheduler import ScheduledSequenceGroup, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase, Stats
@@ -278,7 +278,8 @@ class LLMEngine:
                     self.cache_config.block_size,
                     "gpu_memory_utilization":
                     self.cache_config.gpu_memory_utilization,
-
+                    "kv_cache_memory_bytes":
+                    self.cache_config.kv_cache_memory_bytes,
                     # Quantization
                     "quantization":
                     self.model_config.quantization,
@@ -1239,7 +1240,7 @@ class LLMEngine:
 
             # Stop the execute model loop in parallel workers until there are
             # more requests to process. This avoids waiting indefinitely in
-            # torch.distributed ops which may otherwise timeout, and unblocks
+            # torch.distributed ops which may otherwise time out, and unblocks
             # the RPC thread in the workers so that they can process any other
             # queued control plane messages, such as add/remove lora adapters.
             logger.debug("Stopping remote worker execution loop.")
@@ -1414,7 +1415,7 @@ class LLMEngine:
         num_generation_tokens_iter = 0
         num_tokens_iter = 0
         time_to_first_tokens_iter: List[float] = []
-        time_per_output_tokens_iter: List[float] = []
+        inter_token_latencies_iter: List[float] = []
         num_preemption_iter = (0 if scheduler_outputs is None else
                                scheduler_outputs.preempted)
 
@@ -1498,9 +1499,9 @@ class LLMEngine:
                         num_generation_tokens_from_prefill_groups += (
                             seq_group.num_seqs())
                 else:
-                    # TPOTs.
+                    # ITLs
                     latency = seq_group.get_last_token_latency()
-                    time_per_output_tokens_iter.append(latency)
+                    inter_token_latencies_iter.append(latency)
                     if seq_group.state.current_step == 0:
                         # For async_output_proc, the do_log_stats()
                         # is called following init_multi_step(), which
@@ -1582,7 +1583,7 @@ class LLMEngine:
             num_generation_tokens_iter=num_generation_tokens_iter,
             num_tokens_iter=num_tokens_iter,
             time_to_first_tokens_iter=time_to_first_tokens_iter,
-            time_per_output_tokens_iter=time_per_output_tokens_iter,
+            inter_token_latencies_iter=inter_token_latencies_iter,
             num_preemption_iter=num_preemption_iter,
 
             # Request stats

@@ -107,7 +107,7 @@ def _find_longest_matched_ngram_and_propose_tokens(
     longest_ngram = 0
     position = 0
 
-    # lps[0] always equal to 0, we starts with index 1
+    # lps[0] always equal to 0, we start with index 1
     prev_lps = 0
     i = 1
     while i < total_token:
