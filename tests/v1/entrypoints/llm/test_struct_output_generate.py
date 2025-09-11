@@ -32,7 +32,6 @@ NGRAM_SPEC_CONFIG = {
     "prompt_lookup_min": 1,
 }
 
-
 PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
     ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", None),
     ("Qwen/Qwen2.5-1.5B-Instruct", "guidance", "auto", None),
@@ -46,8 +45,7 @@ PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
     # ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto",
     #  NGRAM_SPEC_CONFIG),
     ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", NGRAM_SPEC_CONFIG),
-    ("meta-llama/Llama-3.2-1B-Instruct", "xgrammar", "auto",
-     NGRAM_SPEC_CONFIG)
+    ("meta-llama/Llama-3.2-1B-Instruct", "xgrammar", "auto", NGRAM_SPEC_CONFIG)
 ]
 
 PARAMS_MODELS_TOKENIZER_MODE = [
@@ -125,10 +123,11 @@ def test_structured_output(
         max_tokens=4096,
         guided_decoding=GuidedDecodingParams(json=sample_json_schema))
 
-    prompt = ("Generate a valid JSON object for an employee profile that exactly matches this schema. "
-              "Output only the JSON object with no additional text, explanations, or formatting. "
-              "Use only ASCII characters. Schema: "
-              f"{sample_json_schema}")
+    prompt = (
+        "Generate a valid JSON object for an employee profile that exactly matches this schema. "
+        "Output only the JSON object with no additional text, explanations, or formatting. "
+        "Use only ASCII characters. Schema: "
+        f"{sample_json_schema}")
     outputs = llm.generate(
         [prompt] * 2,
         sampling_params=sampling_params,
@@ -163,7 +162,8 @@ def test_structured_output(
 
         outputs = llm.generate(prompts=(
             "Create a JSON object with exactly two fields: 'name' set to 'John Smith' and 'age' set to 31. "
-            "Output only the JSON object: {\"name\": \"John Smith\", \"age\": 31}"),
+            "Output only the JSON object: {\"name\": \"John Smith\", \"age\": 31}"
+        ),
                                sampling_params=sampling_params,
                                use_tqdm=True)
 
@@ -194,16 +194,18 @@ def test_structured_output(
                            match="The provided JSON schema contains features "
                            "not supported by xgrammar."):
 
-            prompt = (f"Generate a valid JSON object for an employee profile that exactly matches this schema: {unsupported_json_schema}. "
-                      f"Output only the JSON object with no additional text.")
+            prompt = (
+                f"Generate a valid JSON object for an employee profile that exactly matches this schema: {unsupported_json_schema}. "
+                f"Output only the JSON object with no additional text.")
             llm.generate(
                 [prompt] * 2,
                 sampling_params=sampling_params,
                 use_tqdm=True,
             )
     else:
-        prompt = (f"Generate a valid JSON object for a grade that exactly matches this schema: {unsupported_json_schema}. "
-                  f"Output only the JSON object with no additional text.")
+        prompt = (
+            f"Generate a valid JSON object for a grade that exactly matches this schema: {unsupported_json_schema}. "
+            f"Output only the JSON object with no additional text.")
         outputs = llm.generate(
             prompt,
             sampling_params=sampling_params,
@@ -322,9 +324,10 @@ def test_structured_output(
         top_p=0.95,
         guided_decoding=GuidedDecodingParams(regex=sample_regex))
 
-    prompt = (f"Generate exactly one valid IPv4 address matching this regex: {sample_regex}. "
-              "Output only the IP address with no additional characters, spaces, or punctuation. "
-              "Example format: 192.168.1.1")
+    prompt = (
+        f"Generate exactly one valid IPv4 address matching this regex: {sample_regex}. "
+        "Output only the IP address with no additional characters, spaces, or punctuation. "
+        "Example format: 192.168.1.1")
     outputs = llm.generate(
         [prompt] * 2,
         sampling_params=sampling_params,
@@ -381,7 +384,8 @@ def test_structured_output(
     outputs = llm.generate(
         ("Generate a JSON object with exactly three fields: 'brand', 'model', and 'car_type' for a 1990s car. "
          "Output only the JSON object with no additional text. "
-         "Example: {\"brand\": \"Toyota\", \"model\": \"Supra\", \"car_type\": \"Coupe\"}."),
+         "Example: {\"brand\": \"Toyota\", \"model\": \"Supra\", \"car_type\": \"Coupe\"}."
+         ),
         sampling_params=sampling_params,
         use_tqdm=True,
     )
@@ -425,7 +429,8 @@ def test_structured_output(
 
     outputs = llm.generate(
         ("Generate a JSON object with a 'description' field containing exactly 50 characters describing a frog. "
-         "Use only ASCII letters, numbers, and spaces. Output only the JSON object."),
+         "Use only ASCII letters, numbers, and spaces. Output only the JSON object."
+         ),
         sampling_params=sampling_params,
         use_tqdm=True,
     )
