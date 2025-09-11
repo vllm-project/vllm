@@ -233,34 +233,6 @@ class BlockTable:
 
         return np.array(logical_blocks, dtype=np.int32)
 
-    def _convert_logical_to_physical_blocks(
-            self, logical_blocks: np.ndarray) -> np.ndarray:
-        """Convert logical block IDs back to physical block IDs."""
-        if not self.use_hybrid_blocks or self.blocks_per_phys_block == 1:
-            return logical_blocks
-
-        # Convert logical blocks back to physical blocks (reverse mapping)
-        physical_blocks = []
-        seen_phys = set()
-
-        for logic_block in logical_blocks:
-            if logic_block == 0:  # Handle empty blocks
-                phys_block = 0
-            else:
-                # Convert logical block back to physical block
-                # Logical block 1 becomes physical block 1
-                # Logical blocks [1, 2, ..., split_ratio] become
-                # physical block 1
-                phys_block = (logic_block -
-                              1) // self.blocks_per_phys_block + 1
-
-            # Only add unique physical blocks
-            if phys_block not in seen_phys:
-                physical_blocks.append(phys_block)
-                seen_phys.add(phys_block)
-
-        return np.array(physical_blocks, dtype=np.int32)
-
     def get_device_tensor(self) -> torch.Tensor:
         """Returns the device tensor of the block table."""
         return self.block_table
