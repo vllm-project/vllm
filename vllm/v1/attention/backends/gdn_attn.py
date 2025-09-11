@@ -93,7 +93,7 @@ class GDNAttentionMetadataBuilder(
             device=device,
         )
         self.spec_token_masks = torch.empty(
-            (self.decode_cudagraph_max_bs * self.num_spec, ),
+            (self.decode_cudagraph_max_bs * (self.num_spec + 1), ),
             dtype=torch.bool,
             device=device,
         )
