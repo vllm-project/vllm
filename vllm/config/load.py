@@ -51,7 +51,7 @@ class LoadConfig:
     download_dir: Optional[str] = None
     """Directory to download and load the weights, default to the default
     cache directory of Hugging Face."""
-    safetensors_load_strategy: Optional[str] = "lazy"
+    safetensors_load_strategy: str = "lazy"
     """Specifies the loading strategy for safetensors weights.
     - "lazy" (default): Weights are memory-mapped from the file. This enables
       on-demand loading and is highly efficient for models on local storage.
