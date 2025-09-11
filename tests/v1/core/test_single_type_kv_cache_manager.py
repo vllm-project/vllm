@@ -160,7 +160,7 @@ def test_sliding_window_possible_cached_prefix():
     ], 8)
 
 
-def test_chunked_local_attention_remove_skipped_blocks():
+def test_chunked_local_attention_free_blocks_outside_attention_window():
     attention_spec = ChunkedLocalAttentionSpec(
         block_size=2,
         num_kv_heads=1,
@@ -195,24 +195,24 @@ def test_chunked_local_attention_remove_skipped_blocks():
     block_table = id_to_block_table(original_block_ids)
     manager.req_to_blocks["test"] = block_table
 
-    manager.remove_skipped_blocks("test", 0)
+    manager.free_blocks_outside_attention_window("test", 0)
     assert_block_id(block_table, original_block_ids)
 
     # For 4th token (0-indexed), token 0-3 is out of the local attention window.
-    manager.remove_skipped_blocks("test", 4)
+    manager.free_blocks_outside_attention_window("test", 4)
     assert_block_id(block_table, [null_block_id] * 2)
 
     # For 6th token (0-indexed), token 4 - 6 are in local attention window,
     # token 0 - 3 are out, 2 blocks can be removed.
-    manager.remove_skipped_blocks("test", 6)
+    manager.free_blocks_outside_attention_window("test", 6)
     assert_block_id(block_table, [null_block_id] * 2 + original_block_ids[2:])
     # For 12th token (0-indexed),
     # token 0-11 are out, 6 block can be removed.
-    manager.remove_skipped_blocks("test", 12)
+    manager.free_blocks_outside_attention_window("test", 12)
     assert_block_id(block_table, [null_block_id] * 6)
 
 
-def test_sliding_window_remove_skipped_blocks():
+def test_sliding_window_free_blocks_outside_attention_window():
     sliding_window_spec = SlidingWindowSpec(
         block_size=2,
         num_kv_heads=1,
@@ -247,35 +247,35 @@ def test_sliding_window_remove_skipped_blocks():
     block_table = id_to_block_table(original_block_ids)
     manager.req_to_blocks["test"] = block_table
 
-    manager.remove_skipped_blocks("test", 0)
+    manager.free_blocks_outside_attention_window("test", 0)
     assert_block_id(block_table, original_block_ids)
 
     # 4 tokens are computed. Only token 0 is out of the sliding window. As
     # block 1000 also contains token 1 that is in the sliding window, block 1000
     # cannot be removed.
-    manager.remove_skipped_blocks("test", 4)
+    manager.free_blocks_outside_attention_window("test", 4)
     assert_block_id(block_table, original_block_ids)
 
     # 5 tokens are computed. Token 0 & 1 are out of the sliding window.
     # Block 1000 can be removed.
-    manager.remove_skipped_blocks("test", 5)
+    manager.free_blocks_outside_attention_window("test", 5)
     assert_block_id(block_table, [null_block_id] + original_block_ids[1:])
 
     # 6 tokens are computed. Token 0-2 are out of the sliding window.
     # Cannot remove new block as the block 1001 is still used by token 3.
-    manager.remove_skipped_blocks("test", 6)
+    manager.free_blocks_outside_attention_window("test", 6)
     assert_block_id(block_table, [null_block_id] + original_block_ids[1:])
 
     # 7 tokens are computed. Token 0-3 are out of the sliding window.
     # Block 1001 can be removed and block 1000 is already removed.
-    manager.remove_skipped_blocks("test", 7)
+    manager.free_blocks_outside_attention_window("test", 7)
     assert_block_id(block_table, [null_block_id] * 2 + original_block_ids[2:])
 
     # 11 tokens are computed. Token 0-7 are out of the sliding window.
     # Block 1002 & 1003 can be removed now. Block 1003 represents a longer
     # sequence, and is expected to be evicted earlier than 1002, so the order
     # of removed blocks should be [1003, 1002].
-    manager.remove_skipped_blocks("test", 11)
+    manager.free_blocks_outside_attention_window("test", 11)
     assert_block_id(block_table, [null_block_id] * 4 + original_block_ids[4:])
 
 
