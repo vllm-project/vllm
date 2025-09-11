@@ -11,7 +11,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from vllm.config import LoRAConfig
+from vllm.config.lora import LoRAConfig
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
