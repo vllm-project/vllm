@@ -48,13 +48,16 @@ class _Backend(enum.Enum):
     ROCM_AITER_MLA_VLLM_V1 = enum.auto()
     ROCM_AITER_FA = enum.auto()  # used for ViT attn backend
     TORCH_SDPA = enum.auto()
+    TORCH_SDPA_VLLM_V1 = enum.auto()
     FLASHINFER = enum.auto()
     FLASHINFER_VLLM_V1 = enum.auto()
+    FLASHINFER_MLA = enum.auto()
     TRITON_MLA = enum.auto()  # Supported by V1
     TRITON_MLA_VLLM_V1 = enum.auto()
-    FLASHMLA_VLLM_V1 = enum.auto()
-    FLASHMLA = enum.auto()  # Supported by V1
     CUTLASS_MLA = enum.auto()
+    FLASHMLA = enum.auto()  # Supported by V1
+    FLASHMLA_VLLM_V1 = enum.auto()
+    FLASH_ATTN_MLA = enum.auto()  # Supported by V1
     PALLAS = enum.auto()
     PALLAS_VLLM_V1 = enum.auto()
     IPEX = enum.auto()
@@ -72,7 +75,6 @@ class PlatformEnum(enum.Enum):
     TPU = enum.auto()
     XPU = enum.auto()
     CPU = enum.auto()
-    NEURON = enum.auto()
     OOT = enum.auto()
     UNSPECIFIED = enum.auto()
 
@@ -162,9 +164,6 @@ class Platform:
 
     def is_cpu(self) -> bool:
         return self._enum == PlatformEnum.CPU
-
-    def is_neuron(self) -> bool:
-        return self._enum == PlatformEnum.NEURON
 
     def is_out_of_tree(self) -> bool:
         return self._enum == PlatformEnum.OOT
@@ -510,6 +509,14 @@ class Platform:
         return False
 
     @classmethod
+    def opaque_attention_op(cls) -> bool:
+        """
+        Returns True if we register attention as one giant opaque custom op
+        on the current platform
+        """
+        return False
+
+    @classmethod
     def validate_request(
         cls,
         prompt: PromptType,
@@ -529,7 +536,7 @@ class Platform:
 
     def get_global_graph_pool(self) -> Any:
         """
-        Return the global graph pool for the this platform.
+        Return the global graph pool for this platform.
         """
         cls = self.__class__
         if cls._global_graph_pool is None:

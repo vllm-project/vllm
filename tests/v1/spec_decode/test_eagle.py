@@ -12,9 +12,10 @@ from tests.v1.attention.utils import (BatchSpec, _Backend,
                                       create_common_attn_metadata,
                                       create_standard_kv_cache_spec,
                                       get_attention_backend)
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
+from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, SpeculativeConfig,
                          VllmConfig)
+from vllm.config.load import LoadConfig
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.v1.spec_decode.eagle import EagleProposer
@@ -183,7 +184,7 @@ def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
     mock_pp_group.world_size = pp_size
     mock_get_pp_group.return_value = mock_pp_group
 
-    # Setup the target model mock with a custom class so that
+    # Set up the target model mock with a custom class so that
     # isinstance() checks match the expected type.
     class _TargetModelStub(LlamaForCausalLM):
         model: mock.MagicMock

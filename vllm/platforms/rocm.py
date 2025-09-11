@@ -171,7 +171,7 @@ class RocmPlatform(Platform):
 
     supported_quantization: list[str] = [
         "awq", "gptq", "fp8", "compressed-tensors", "fbgemm_fp8", "gguf",
-        "quark", "ptpc_fp8", "mxfp4", "petit_nvfp4"
+        "quark", "ptpc_fp8", "mxfp4", "petit_nvfp4", "torchao"
     ]
 
     @classmethod
@@ -322,23 +322,35 @@ class RocmPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        from vllm.config.compilation import CUDAGraphMode
+
         cache_config = vllm_config.cache_config
+        compilation_config = vllm_config.compilation_config
+        parallel_config = vllm_config.parallel_config
+        is_eager_execution = compilation_config == CUDAGraphMode.NONE
+
+        use_v1 = envs.VLLM_USE_V1
+        use_aiter_rms_norm = envs.VLLM_ROCM_USE_AITER and \
+             envs.VLLM_ROCM_USE_AITER_RMSNORM
+
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
 
-        parallel_config = vllm_config.parallel_config
         if parallel_config.worker_cls == "auto":
             if vllm_config.speculative_config:
-                if not envs.VLLM_USE_V1:
+                if not use_v1:
                     raise NotImplementedError(
                         "Speculative decoding is not supported on vLLM V0.")
                 parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
             else:
-                if envs.VLLM_USE_V1:
+                if use_v1:
                     parallel_config.worker_cls = \
                         "vllm.v1.worker.gpu_worker.Worker"
                 else:
                     parallel_config.worker_cls = "vllm.worker.worker.Worker"
+        #  Aiter rms norm perform best when CUDA Graph capture is enabled.
+        if use_v1 and use_aiter_rms_norm and not is_eager_execution:
+            compilation_config.custom_ops.append("+rms_norm")
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
@@ -410,6 +422,10 @@ class RocmPlatform(Platform):
         gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
         supported_archs = ['gfx94', 'gfx95']
         return any(gfx in gcn_arch for gfx in supported_archs)
+
+    @classmethod
+    def opaque_attention_op(cls) -> bool:
+        return True
 
     @classmethod
     def get_cu_count(cls, device_id: int = 0) -> int:

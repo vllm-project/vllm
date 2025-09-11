@@ -115,6 +115,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "silu_and_mul_quant(Tensor! result, Tensor input, Tensor scale) -> ()");
   ops.impl("silu_and_mul_quant", torch::kCUDA, &silu_and_mul_quant);
 
+#ifndef USE_ROCM
+  ops.def(
+      "silu_and_mul_nvfp4_quant(Tensor! result, Tensor! result_block_scale, "
+      "Tensor input, Tensor input_global_scale) -> ()");
+  ops.impl("silu_and_mul_nvfp4_quant", torch::kCUDA, &silu_and_mul_nvfp4_quant);
+#endif
+
   ops.def("mul_and_silu(Tensor! out, Tensor input) -> ()");
   ops.impl("mul_and_silu", torch::kCUDA, &mul_and_silu);
 
@@ -160,6 +167,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor weight, "
       "float epsilon) -> ()");
   ops.impl("fused_add_rms_norm", torch::kCUDA, &fused_add_rms_norm);
+
+  // Polynomial Normalization.
+  ops.def(
+      "poly_norm(Tensor! out, Tensor input, Tensor weight, Tensor bias, float "
+      "epsilon) -> ()");
+  ops.impl("poly_norm", torch::kCUDA, &poly_norm);
 
   // Apply repetition penalties to logits in-place
   ops.def(
@@ -509,10 +522,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // SM100 CUTLASS MLA decode
   ops.def(
-      "sm100_cutlass_mla_decode(Tensor! out, Tensor q_nope, Tensor q_pe,"
-      "                         Tensor kv_c_and_k_pe_cache, Tensor seq_lens,"
-      "                         Tensor page_table, Tensor workspace, float "
-      "scale,"
+      "sm100_cutlass_mla_decode(Tensor! out, Tensor! lse, Tensor q_nope,"
+      "                         Tensor q_pe, Tensor kv_c_and_k_pe_cache,"
+      "                         Tensor seq_lens, Tensor page_table,"
+      "                         Tensor workspace, float scale,"
       "                         int num_kv_splits) -> ()");
   // conditionally compiled so impl in source file
 
@@ -702,6 +715,11 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "                               Tensor scale, Tensor? seq_starts) -> ()");
   cache_ops.impl("gather_and_maybe_dequant_cache", torch::kCUDA,
                  &gather_and_maybe_dequant_cache);
+
+  cache_ops.def(
+      "cp_gather_cache(Tensor src_cache, Tensor! dst, Tensor block_table, "
+      "Tensor cu_seq_lens, int batch_size, Tensor? seq_starts) -> ()");
+  cache_ops.impl("cp_gather_cache", torch::kCUDA, &cp_gather_cache);
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cuda_utils), cuda_utils) {

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
 import torch
 from torch.nn.parameter import Parameter
@@ -10,8 +10,8 @@ from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
                                                   FusedMoEMethodBase)
-from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
-    triton_kernel_moe_forward)
+from vllm.model_executor.layers.fused_moe import modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.trtllm_moe import TrtLlmGenExperts
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -122,6 +122,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 "MXFP4 MoE is enabled on Blackwell but FlashInfer "
                 "is not available. This may result in degraded performance. "
                 "Please `pip install vllm[flashinfer]` for best results.")
+        self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
 
     def _should_use_marlin(self):
         if envs.VLLM_MXFP4_USE_MARLIN is not None:
@@ -266,7 +267,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         if self.use_marlin:
             prepare_moe_fp4_layer_for_marlin(layer)
         elif should_use_flashinfer_mxfp4():
-            from flashinfer import shuffle_matrix_a, shuffle_matrix_sf_a
+            from flashinfer.fp4_quantization import (
+                nvfp4_block_scale_interleave)
+            from flashinfer.fused_moe.core import (
+                _maybe_get_cached_w2_permute_indices)
             layer.gemm1_alpha = Parameter(torch.tensor(
                 [1.702] * self.num_experts, dtype=torch.float32).cuda(),
                                           requires_grad=False)
@@ -310,7 +314,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             w13_bias = layer.w13_bias.data.to(torch.float32)
             w2_bias = layer.w2_bias.data.to(torch.float32)
 
-            # Swap w1 and w3 as the defenition of
+            # Swap w1 and w3 as the definition of
             # swiglu is different in the trtllm-gen
             def swap_every_two_rows(x, axis=-1):
                 shape = x.shape
@@ -343,25 +347,63 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             gemm2_bias_shuffled = []
             epilogue_tile_m = 128  # FIXME: this depends on the kernel internals
             for i in range(self.num_experts):
-                gemm1_weights_mxfp4_shuffled.append(
-                    shuffle_matrix_a(w13_weight[i].view(torch.uint8),
-                                     epilogue_tile_m))
+                # w13 weight shuffling
+                permute_indices = _maybe_get_cached_w2_permute_indices(
+                    self._cache_permute_indices,
+                    w13_weight[i].view(torch.uint8),
+                    epilogue_tile_m,
+                )
+                gemm1_weights_mxfp4_shuffled.append(w13_weight[i].view(
+                    torch.uint8)[permute_indices.to(
+                        w13_weight.device)].contiguous())
+                # w13 scale shuffling
+                permute_sf_indices = _maybe_get_cached_w2_permute_indices(
+                    self._cache_permute_indices,
+                    w13_weight_scale[i].view(torch.uint8),
+                    epilogue_tile_m,
+                    num_elts_per_sf=16,
+                )
                 gemm1_scales_mxfp4_shuffled.append(
-                    shuffle_matrix_sf_a(w13_weight_scale[i].view(torch.uint8),
-                                        epilogue_tile_m))
-                gemm1_bias_shuffled.append(
-                    shuffle_matrix_a(w13_bias[i].clone().reshape(-1, 1),
-                                     epilogue_tile_m))
-
-                gemm2_weights_mxfp4_shuffled.append(
-                    shuffle_matrix_a(w2_weight[i].view(torch.uint8),
-                                     epilogue_tile_m))
+                    nvfp4_block_scale_interleave(w13_weight_scale[i].view(
+                        torch.uint8)[permute_sf_indices.to(
+                            w13_weight_scale.device)].contiguous()))
+                # w13 bias shuffling
+                permute_bias_indices = _maybe_get_cached_w2_permute_indices(
+                    self._cache_permute_indices,
+                    w13_bias[i].clone().reshape(-1, 1),
+                    epilogue_tile_m,
+                )
+                gemm1_bias_shuffled.append(w13_bias[i].clone().reshape(
+                    -1,
+                    1)[permute_bias_indices.to(w13_bias.device)].contiguous())
+                # w2 weight shuffling
+                permute_indices = _maybe_get_cached_w2_permute_indices(
+                    self._cache_permute_indices,
+                    w2_weight[i].view(torch.uint8),
+                    epilogue_tile_m,
+                )
+                gemm2_weights_mxfp4_shuffled.append(w2_weight[i].view(
+                    torch.uint8)[permute_indices.to(
+                        w2_weight.device)].contiguous())
+                # w2 scale shuffling
+                permute_sf_indices = _maybe_get_cached_w2_permute_indices(
+                    self._cache_permute_indices,
+                    w2_weight_scale[i].view(torch.uint8),
+                    epilogue_tile_m,
+                    num_elts_per_sf=16,
+                )
                 gemm2_scales_mxfp4_shuffled.append(
-                    shuffle_matrix_sf_a(w2_weight_scale[i].view(torch.uint8),
-                                        epilogue_tile_m))
-                gemm2_bias_shuffled.append(
-                    shuffle_matrix_a(w2_bias[i].clone().reshape(-1, 1),
-                                     epilogue_tile_m))
+                    nvfp4_block_scale_interleave(w2_weight_scale[i].view(
+                        torch.uint8)[permute_sf_indices.to(
+                            w2_weight_scale.device)].contiguous()))
+                # w2 bias shuffling
+                permute_indices = _maybe_get_cached_w2_permute_indices(
+                    self._cache_permute_indices,
+                    w2_bias[i].clone().reshape(-1, 1),
+                    epilogue_tile_m,
+                )
+                gemm2_bias_shuffled.append(w2_bias[i].clone().reshape(
+                    -1, 1)[permute_indices.to(w2_bias.device)].contiguous())
 
             w13_weight = torch.stack(gemm1_weights_mxfp4_shuffled)
             w13_weight_scale = torch.stack(
@@ -447,6 +489,91 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         return tile_tokens_dim
 
+    def select_gemm_impl(
+        self,
+        prepare_finalize: mk.FusedMoEPrepareAndFinalize,
+        moe: FusedMoEConfig,
+        layer: torch.nn.Module,
+    ) -> mk.FusedMoEPermuteExpertsUnpermute:
+        if (prepare_finalize.activation_format ==
+                mk.FusedMoEActivationFormat.BatchedExperts):
+            raise NotImplementedError(
+                "Mxfp4 does not support batched experts format for EP")
+        else:
+            if should_use_flashinfer_mxfp4():
+                # B200 code-path
+                kwargs = {
+                    "gemm1_alpha": layer.gemm1_alpha,
+                    "gemm1_beta": layer.gemm1_beta,
+                    "gemm1_clamp_limit": layer.gemm1_clamp_limit,
+                    "w13_bias": layer.w13_bias,
+                    "w2_bias": layer.w2_bias,
+                    "max_capture_size": self.max_capture_size,
+                }
+                return TrtLlmGenExperts(moe, **kwargs)
+            else:
+                # Use matmul_ogs from triton_kernels here!
+                raise NotImplementedError(
+                    "Mxfp4 does not support non-batched experts format for EP")
+
+    def _route_and_experts(
+            self,
+            layer: torch.nn.Module,
+            x: torch.Tensor,
+            router_logits: torch.Tensor,
+            top_k: int,
+            renormalize: bool,
+            use_grouped_topk: bool = False,
+            topk_group: Optional[int] = None,
+            num_expert_group: Optional[int] = None,
+            global_num_experts: int = -1,
+            expert_map: Optional[torch.Tensor] = None,
+            custom_routing_function: Optional[Callable] = None,
+            scoring_func: str = "softmax",
+            e_score_correction_bias: Optional[torch.Tensor] = None,
+            apply_router_weight_on_input: bool = False,
+            activation: str = "silu",
+            enable_eplb: bool = False,
+            expert_load_view: Optional[torch.Tensor] = None,
+            logical_to_physical_map: Optional[torch.Tensor] = None,
+            logical_replica_count: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+
+        assert isinstance(self.fused_experts, mk.FusedMoEModularKernel)
+
+        topk_weights, topk_ids = FusedMoE.select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+            use_grouped_topk=use_grouped_topk,
+            top_k=top_k,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            e_score_correction_bias=e_score_correction_bias,
+            indices_type=self.topk_indices_dtype,
+            enable_eplb=enable_eplb,
+            expert_map=expert_map,
+            expert_load_view=expert_load_view,
+            logical_to_physical_map=logical_to_physical_map,
+            logical_replica_count=logical_replica_count)
+
+        return self.fused_experts(
+            hidden_states=x,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            inplace=True,
+            activation=activation,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
+            w1_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+        )
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -461,6 +588,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
@@ -468,7 +596,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
 
         if enable_eplb:
             raise NotImplementedError("EPLB is not supported for mxfp4")
@@ -484,6 +612,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 num_expert_group=num_expert_group,
                 custom_routing_function=custom_routing_function,
                 scoring_func=scoring_func,
+                routed_scaling_factor=routed_scaling_factor,
                 e_score_correction_bias=e_score_correction_bias)
 
             return torch.ops.vllm.fused_marlin_moe(
@@ -505,6 +634,29 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 activation=activation,
                 expert_map=expert_map)
 
+        if self.fused_experts is not None:
+            return self._route_and_experts(
+                layer,
+                x,
+                router_logits,
+                top_k,
+                renormalize,
+                use_grouped_topk,
+                topk_group,
+                num_expert_group,
+                global_num_experts,
+                expert_map,
+                custom_routing_function,
+                scoring_func,
+                e_score_correction_bias,
+                apply_router_weight_on_input,
+                activation,
+                enable_eplb,
+                expert_load_view,
+                logical_to_physical_map,
+                logical_replica_count,
+            )
+
         assert _can_support_mxfp4(
             use_grouped_topk, topk_group, num_expert_group, expert_map,
             custom_routing_function, e_score_correction_bias,
@@ -515,8 +667,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         if should_use_flashinfer_mxfp4():
             from flashinfer import mxfp8_quantize, trtllm_fp4_block_scale_moe
-            assert not self.moe.use_ep, (
-                "EP is not supported for flashinfer mxfp4 moe backend yet.")
             if _should_use_flashinfer_mxfp4_bf16():
                 assert x.dtype == torch.bfloat16
                 x_quant = x
@@ -542,12 +692,12 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 None,  # output1_scale_scalar
                 None,  # output1_scale_gate_scalar
                 None,  # output2_scale_scalar
-                self.num_experts,
+                global_num_experts,
                 top_k,
                 None,  # n_group
                 None,  # topk_group
                 self.intermediate_size,  # padded to multiple of 256
-                0,  # local_expert_offset
+                layer.ep_rank * layer.local_num_experts,  # local_expert_offset
                 self.num_experts,  # local num experts
                 None,
                 self._get_tile_tokens_dim(x, top_k),
@@ -557,6 +707,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             )[0]
             return trtllm_gen_output
         else:
+            from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (  # noqa: E501
+                triton_kernel_moe_forward)
             return triton_kernel_moe_forward(
                 hidden_states=x,
                 w1=self.w13_weight_triton_tensor,
