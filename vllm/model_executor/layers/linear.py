@@ -243,7 +243,7 @@ class LinearBase(CustomOp):
 
         vllm_config = get_current_vllm_config()
         if (vllm_config.lora_config
-                and vllm_config.lora_config.activated_lora_enabled):
+                and vllm_config.lora_config.enable_activated_lora):
             # lets torch.compile know that forward_context needs to be
             # considered as an input to the layer (copied from attention)
             compilation_config = vllm_config.compilation_config

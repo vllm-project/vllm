@@ -329,7 +329,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.num_accepted_tokens = self._make_buffer(self.max_num_reqs,
                                                      dtype=torch.int64)
 
-        if self.lora_config and self.lora_config.activated_lora_enabled:
+        if self.lora_config and self.lora_config.enable_activated_lora:
             self.mask1d = torch.zeros(self.max_num_tokens,
                                       dtype=torch.int64,
                                       device=self.device)
@@ -1101,7 +1101,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Compute aLoRA metadata
         alora_metadata = None
-        if self.lora_config and self.lora_config.activated_lora_enabled:
+        if self.lora_config and self.lora_config.enable_activated_lora:
             alora_metadata = self.build_alora_metadata(
                 num_reqs, positions_np, req_indices,
                 total_num_scheduled_tokens, self.input_batch, self.requests,
@@ -2816,7 +2816,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     f"Expected {_cg_mode}, but got {cudagraph_runtime_mode}.")
 
             alora_metadata = None
-            if self.lora_config and self.lora_config.activated_lora_enabled:
+            if self.lora_config and self.lora_config.enable_activated_lora:
                 alora_metadata = self.build_dummy_alora_metadata(
                     num_tokens, self.mask1d)
 

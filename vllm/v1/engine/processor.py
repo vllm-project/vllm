@@ -425,7 +425,7 @@ class Processor:
                         mm_position=decoder_mm_positions[modality][idx]))
 
         # Handle aLoRA invocation sequence if applicable.
-        if (self.lora_config and self.lora_config.activated_lora_enabled
+        if (self.lora_config and self.lora_config.enable_activated_lora
                 and lora_request is not None):
 
             text_config = self.model_config.hf_config.get_text_config()

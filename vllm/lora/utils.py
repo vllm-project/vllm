@@ -71,7 +71,7 @@ def from_layer(layer: nn.Module,
                                       packed_modules_list=packed_modules_list,
                                       model_config=model_config):
             # inject a-LoRA behaviour
-            if lora_config.activated_lora_enabled:
+            if lora_config.enable_activated_lora:
                 lora_cls = LinearLayerWithActivatedLoRAMixin.maybe_mixin(
                     lora_cls)
             instance_layer = lora_cls(layer)
