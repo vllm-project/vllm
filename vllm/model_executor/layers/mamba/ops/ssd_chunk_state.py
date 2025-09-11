@@ -15,18 +15,6 @@ from vllm.triton_utils import tl, triton
 from .mamba_ssm import softplus
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({'BLOCK_SIZE_H': 1}),
-        triton.Config({'BLOCK_SIZE_H': 2}),
-        triton.Config({'BLOCK_SIZE_H': 4}),
-        triton.Config({'BLOCK_SIZE_H': 8}),
-        triton.Config({'BLOCK_SIZE_H': 16}),
-        triton.Config({'BLOCK_SIZE_H': 32}),
-        triton.Config({'BLOCK_SIZE_H': 64}),
-    ],
-    key=['chunk_size', 'nheads'],
-)
 @triton.jit
 def _chunk_cumsum_fwd_kernel(
     # Pointers to matrices
@@ -73,6 +61,7 @@ def _chunk_cumsum_fwd_kernel(
     chunk_seqlen_start = tl.load(cu_chunk_seqlens_ptr + pid_c)
     chunk_seqlen_end = tl.load(cu_chunk_seqlens_ptr + pid_c + 1)
 
+
     dt_ptr += pid_b * stride_dt_batch + chunk_seqlen_start * stride_dt_seqlen
     dt_out_ptr += pid_b * stride_dt_out_batch + pid_c * stride_dt_out_chunk
     dA_cumsum_ptr += pid_b * stride_dA_cs_batch + pid_c * stride_dA_cs_chunk
@@ -86,10 +75,11 @@ def _chunk_cumsum_fwd_kernel(
                                 offs_c[None, :] * stride_dt_out_csize)
     dA_cs_ptrs = dA_cumsum_ptr + (offs_h[:, None] * stride_dA_cs_head +
                                   offs_c[None, :] * stride_dA_cs_csize)
+    chunk_size_limit = chunk_seqlen_end - chunk_seqlen_start
 
     dt = tl.load(dt_ptrs,
                  mask=(offs_h[:, None] < nheads) &
-                 (offs_c[None, :] < chunk_seqlen_end),
+                 (offs_c[None, :] < chunk_size_limit),
                  other=0.0).to(tl.float32)
     if HAS_DT_BIAS:
         dt_bias = tl.load(dt_bias_ptr + offs_h * stride_dt_bias_head,
@@ -102,17 +92,17 @@ def _chunk_cumsum_fwd_kernel(
     # dt = tl.clamp(dt, dt_min, dt_max)
     dt = tl.minimum(tl.maximum(dt, dt_min), dt_max)
     dt = tl.where(
-        (offs_h[:, None] < nheads) & (offs_c[None, :] < chunk_seqlen_end), dt,
+        (offs_h[:, None] < nheads) & (offs_c[None, :] < chunk_size_limit), dt,
         0.0)
     tl.store(dt_out_ptrs,
              dt,
-             mask=(offs_h[:, None] < nheads) & (offs_c[None, :] < chunk_size))
+             mask=(offs_h[:, None] < nheads) & (offs_c[None, :] < chunk_size_limit))
     A = tl.load(A_ptrs, mask=offs_h < nheads, other=0.0).to(tl.float32)
     dA = dt * A[:, None]
     dA_cs = tl.cumsum(dA, axis=1)
     tl.store(dA_cs_ptrs,
              dA_cs,
-             mask=(offs_h[:, None] < nheads) & (offs_c[None, :] < chunk_size))
+             mask=(offs_h[:, None] < nheads) & (offs_c[None, :] < chunk_size_limit))
 
 
 @triton.autotune(
@@ -200,8 +190,8 @@ def _chunk_state_fwd_kernel(
     states_ptr,
     dt_ptr,
     dA_cumsum_ptr,
-    seq_idx_ptr,
     cu_chunk_seqlens_ptr,
+    seq_idx_ptr,
     # Matrix dimensions
     hdim,
     dstate,
@@ -271,7 +261,7 @@ def _chunk_state_fwd_kernel(
 
     dA_cumsum_ptrs = dA_cumsum_ptr + offs_k * stride_dA_cs_csize
 
-    chunk_size_limit = chunk_seqlen_end
+    chunk_size_limit = chunk_seqlen_end - chunk_seqlen_start
 
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, chunk_size_limit, BLOCK_SIZE_K):
@@ -577,6 +567,10 @@ def _chunk_cumsum_fwd(dt,
                             dtype=torch.float32)
     grid_chunk_cs = lambda META: (batch, nchunks,
                                   triton.cdiv(nheads, META['BLOCK_SIZE_H']))
+
+    print("dt_out.shape: ", dt_out.shape)
+    print("dA_cumsum.shape: ", dA_cumsum.shape)
+
     with torch.cuda.device(dt.device.index):
         _chunk_cumsum_fwd_kernel[grid_chunk_cs](
             dt,
@@ -606,6 +600,7 @@ def _chunk_cumsum_fwd(dt,
             dA_cumsum.stride(3),
             dt_softplus,
             HAS_DT_BIAS=dt_bias is not None,
+            BLOCK_SIZE_H=1,
             BLOCK_SIZE_CHUNK=triton.next_power_of_2(chunk_size),
         )
     return dA_cumsum, dt_out
@@ -637,6 +632,7 @@ def _chunk_state_fwd(B,
                              dtype=states_dtype)
 
     print("[_chunk_state_fwd] states.shape: ", states.shape)
+    print("[_chunk_state_fwd] cu_chunk_seqlens: ", cu_chunk_seqlens)
 
     grid = lambda META: (
         triton.cdiv(headdim, META['BLOCK_SIZE_M']) * triton.cdiv(

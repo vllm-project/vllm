@@ -142,8 +142,6 @@ def _bmm_chunk_fwd_kernel(
 
     a_ptr += pid_b * stride_a_batch + chunk_seqlen_start * stride_a_seqlen + pid_h * stride_a_head
     b_ptr += pid_b * stride_b_batch + chunk_seqlen_start * stride_b_seqlen + pid_h * stride_b_head
-    if HAS_SEQ_IDX:
-        seq_idx_ptr += pid_b * stride_seq_idx_batch + pid_c * chunk_size * stride_seq_idx_seqlen
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
@@ -152,7 +150,7 @@ def _bmm_chunk_fwd_kernel(
                       offs_k[None, :] * stride_ak)
     b_ptrs = b_ptr + (offs_k[:, None] * stride_bk +
                       offs_n[None, :] * stride_b_seqlen)
-    chunk_size_limit = chunk_seqlen_end
+    chunk_size_limit = chunk_seqlen_end - chunk_seqlen_start
 
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):

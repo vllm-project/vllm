@@ -107,6 +107,10 @@ def _mamba_chunk_scan_combined_fwd(x,
                               seq_idx=seq_idx,
                               states_in_fp32=True)
 
+    print("after chunk_state_fwd: ")
+    print("states.shape: ", states.shape)
+    print("states: ", states[0,0,0,0,:10])
+
     # 3. Compute the inter-chunk SSM recurrence; produces correct SSM states at chunk boundaries
     # (middle term of factorization of off-diag blocks; A terms)
     # - for handling chunked prefill, this requires i) initial_states
@@ -118,7 +122,7 @@ def _mamba_chunk_scan_combined_fwd(x,
     # - this will ensure that states will be updated with the rightmost flushed seq_idx
     #   of the previous chunk. This implies that the first chunk of states is either 0
     #   or equal to init_states of the first example.
-    states, final_states = _state_passing_fwd(
+    states = _state_passing_fwd(
         rearrange(states, "... p n -> ... (p n)"),
         dA_cumsum,
         cu_chunk_seqlens,
@@ -129,8 +133,13 @@ def _mamba_chunk_scan_combined_fwd(x,
         out_dtype=state_dtype if state_dtype is not None else C.dtype,
         is_cont_batched=cu_seqlens is not None,
         chunk_offsets=chunk_offsets)
-    states, final_states = (rearrange(t, "... (p n) -> ... p n", n=dstate)
-                            for t in [states, final_states])
+
+    print("after state passing: ")
+    print("states.shape: ", states.shape)
+
+    print("states: ", states[0 ,0, 0,:10])
+
+    states = rearrange(states, "... (p n) -> ... p n", n=dstate)
 
     # 4. Compute batched matrix multiply for C_j^T B_i terms
     CB = _bmm_chunk_fwd(C,
@@ -172,8 +181,10 @@ def _mamba_chunk_scan_combined_fwd(x,
         assert batch == 1, "passing cu_seqlens to get the varlen states is only supported if batch dimension is 1"
         print("last_chunk: ", last_chunk)
         print(states.shape)
-        varlen_states = states[:, last_chunk, ...]
+        varlen_states = states[:, last_chunk, ...].clone()
         print(varlen_states.shape)
+        print("varlen_states: ", varlen_states[0,0,0,:10])
+        final_states = states[:, -1, ...]
         return out_x, dt, dA_cumsum, states, final_states, varlen_states
 
 

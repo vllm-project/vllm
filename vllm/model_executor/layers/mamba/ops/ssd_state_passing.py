@@ -27,7 +27,6 @@ def _state_passing_fwd_kernel(
     # Pointers to matrices
     states_ptr,
     out_ptr,
-    final_states_ptr,
     dA_cs_ptr,
     initstates_ptr,
     seq_idx_ptr,
@@ -48,9 +47,6 @@ def _state_passing_fwd_kernel(
     stride_out_chunk,
     stride_out_head,
     stride_out_dim,
-    stride_final_states_batch,
-    stride_final_states_head,
-    stride_final_states_dim,
     stride_dA_cs_batch,
     stride_dA_cs_chunk,
     stride_dA_cs_head,
@@ -73,11 +69,11 @@ def _state_passing_fwd_kernel(
     dA_cs_ptr += pid_b * stride_dA_cs_batch + pid_h * stride_dA_cs_head + (
         chunk_size - 1) * stride_dA_cs_csize
     out_ptr += pid_b * stride_out_batch + pid_h * stride_out_head
-    final_states_ptr += pid_b * stride_final_states_batch + pid_h * stride_final_states_head
     if HAS_INITSTATES:
         initstates_ptr += pid_h * stride_initstates_head
         if not IS_CONT_BATCHED:
             initstates_ptr += pid_b * stride_initstates_batch
+        initstates_ptr += offs_m * stride_initstates_dim
 
     if HAS_SEQ_IDX:
         seq_idx_ptr += pid_b * stride_seq_idx_batch
@@ -85,59 +81,40 @@ def _state_passing_fwd_kernel(
     offs_m = pid_m * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     states_ptrs = states_ptr + offs_m * stride_states_dim
     out_ptrs = out_ptr + offs_m * stride_out_dim
-    final_states_ptrs = final_states_ptr + offs_m * stride_final_states_dim
 
-    # - states will be the past state of the sequence that continues on the current check
-    if not HAS_INITSTATES:
-        states = tl.zeros((BLOCK_SIZE, ), dtype=tl.float32)
-    else:
-        initstates_ptr += offs_m * stride_initstates_dim
-        initstates_ptrs = initstates_ptr
-        # - for cont batches, for the first chunk mean it will be the first batch's
-        #   init state
-        states = tl.load(initstates_ptrs, mask=offs_m < dim,
+    if HAS_INITSTATES:
+        initstates_ptrs = initstates_ptr + 0 * stride_initstates_batch
+        states = tl.load(initstates_ptrs,
+                         mask=offs_m < dim,
                          other=0.0).to(tl.float32)
-
-    tl.store(out_ptrs, states, mask=offs_m < dim)
-    out_ptrs += stride_out_chunk
+    else:
+        states = tl.zeros((BLOCK_SIZE, ), dtype=tl.float32)
 
     prev_seq_idx = 0
     for c in range(nchunks):
-
 
         chunk_seqlen_start = tl.load(cu_chunk_seqlens_ptr + c)
 
         new_states = tl.load(states_ptrs, mask=offs_m < dim,
                              other=0.0).to(tl.float32)
         dA_cs = tl.load(dA_cs_ptr).to(tl.float32)
-        scale_mask = True
-        if HAS_SEQ_IDX:
 
-            seq_idx = tl.load(seq_idx_ptr + chunk_seqlen_start * stride_seq_idx_seqlen)
+        seq_idx = tl.load(seq_idx_ptr + chunk_seqlen_start * stride_seq_idx_seqlen)
 
+        # we are started a new sequence
+        if prev_seq_idx != seq_idx:
             if HAS_INITSTATES:
-                if IS_CONT_BATCHED and prev_seq_idx != seq_idx:
-                    # this means in the current chunk the rightmost flushed seq
-                    # has changed.
-                    # - so we do not propagate the state from previous chunk
-                    # - but rather we load that sequence's init state
-                    initstates_ptrs = initstates_ptr + seq_idx * stride_initstates_batch
-
-                    # - update state with seq_idx_new's init state
-                    states = tl.load(initstates_ptrs,
-                                     mask=offs_m < dim,
-                                     other=0.0).to(tl.float32)
+                initstates_ptrs = initstates_ptr + seq_idx * stride_initstates_batch
+                states = tl.load(initstates_ptrs,
+                                 mask=offs_m < dim,
+                                 other=0.0).to(tl.float32)
             else:
-                scale_mask = seq_idx == prev_seq_idx
+                states = tl.zeros((BLOCK_SIZE, ), dtype=tl.float32)
 
-            prev_seq_idx = seq_idx
+        prev_seq_idx = seq_idx
 
-        scale = tl.where(scale_mask, tl.exp(dA_cs), 0.0)
-        states = scale * states + new_states
-        if c < nchunks - 1:
-            tl.store(out_ptrs, states, mask=offs_m < dim)
-        else:
-            tl.store(final_states_ptrs, states, mask=offs_m < dim)
+        states = tl.exp(dA_cs) * states + new_states
+        tl.store(out_ptrs, states, mask=offs_m < dim)
         states_ptrs += stride_states_chunk
         dA_cs_ptr += stride_dA_cs_chunk
         out_ptrs += stride_out_chunk
@@ -155,6 +132,7 @@ def _state_passing_fwd(
     chunk_offsets=None,
 ):
     batch, nchunks, nheads, dim = states.shape
+    assert batch == 1
     if chunk_size is None:
         chunk_size = dA_cumsum.shape[-1]
     else:
@@ -182,15 +160,12 @@ def _state_passing_fwd(
     out = torch.empty((batch, nchunks, nheads, dim),
                       device=states.device,
                       dtype=out_dtype)
-    final_states = torch.empty((batch, nheads, dim),
-                               device=states.device,
-                               dtype=torch.float32)
+
     grid = lambda META: (triton.cdiv(dim, META['BLOCK_SIZE']), batch, nheads)
     with torch.cuda.device(states.device.index):
         _state_passing_fwd_kernel[grid](
             states,
             out,
-            final_states,
             dA_cumsum,
             initial_states,
             seq_idx,
@@ -209,9 +184,6 @@ def _state_passing_fwd(
             out.stride(1),
             out.stride(2),
             out.stride(3),
-            final_states.stride(0),
-            final_states.stride(1),
-            final_states.stride(2),
             dA_cumsum.stride(0),
             dA_cumsum.stride(2),
             dA_cumsum.stride(1),
@@ -225,4 +197,4 @@ def _state_passing_fwd(
             HAS_SEQ_IDX=seq_idx is not None,
             IS_CONT_BATCHED=is_cont_batched,
         )
-    return out, final_states
+    return out
