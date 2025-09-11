@@ -3708,32 +3708,41 @@ class VllmConfig:
 
     def _set_cudagraph_sizes(self):
         """
-        cudagraph batch size capture logic:
-        By default, vLLM defines a candidate list of batch sizes for
-        CUDA graph capture as:
-        [1, 2, 4] + [8 * i for i in range(1, 65)] → [1, 2, 4, 8, 16, ..., 512]
-        These sizes are used to capture and reuse CUDA graphs for
-        performance-critical paths (e.g., decoding). Capturing enables
-        significantly faster kernel dispatch by avoiding Python overhead.
-        The list is then filtered based on `max_num_batched_tokens`
-        (e.g., 8192 on most GPUs), which controls the total allowed number
-        of tokens in a batch. Since each sequence may have a variable
-        number of tokens (not always 32), the maximum usable batch size
-        will depend on actual sequence lengths.
-        For example, with max_num_batched_tokens = 8192, and typical
-        sequences averaging ~32 tokens, most practical batch sizes fall
-        below 256. However, the system will still allow capture sizes
-        up to 512 if shape and memory permit.
-        
+        vLLM defines the default candidate list of batch sizes for CUDA graph
+        capture as:
+
+        ```python
+        max_graph_size = min(max_num_seqs * 2, 512)
+        cuda_graph_sizes = (
+            [1, 2, 4] + [i for i in range(8, max_graph_size + 1, 8)]
+        )
+
         In the end, `vllm_config.compilation_config.cudagraph_capture_sizes`
         will be the final sizes to capture cudagraph (in descending order).
-        Note: if users explicitly specify cudagraph capture sizes in the
-        compilation config, those will override this default logic.
-        At runtime:
-        - If batch size ≤ one of the `cudagraph_capture_sizes`, the closest
-          padded CUDA graph will be used.
-        - If batch size > largest `cudagraph_capture_sizes`, cudagraph will
-          not be used.
+
+        These sizes are used to capture and reuse CUDA graphs for
+        performance-critical paths (e.g., decoding). Capturing enables
+        significantly faster kernel dispatch by avoiding Python overhead. The
+        list is then filtered based on `max_num_batched_tokens` (e.g., 8192 on
+        most GPUs), which controls the total allowed number of tokens in a
+        batch. Since each sequence may have a variable number of tokens, the
+        maximum usable batch size will depend on actual sequence lengths.
+
+        Example:
+            With `max_num_batched_tokens = 8192`, and typical sequences
+            averaging ~32 tokens, most practical batch sizes fall below 256.
+            However, the system will still allow capture sizes up to 512 if
+            shape and memory permit.
+
+        Note:
+            If users explicitly specify cudagraph capture sizes in the
+            compilation config, those will override this default logic.
+            At runtime:
+
+            - If batch size <= one of the `cudagraph_capture_sizes`, the closest
+            padded CUDA graph will be used.
+            - If batch size > largest `cudagraph_capture_sizes`, cudagraph will
+            not be used.
         """
 
         # calculate the default `batch_size_capture_list`
