@@ -619,7 +619,8 @@ class WorkerProc:
             result = (WorkerProc.ResponseStatus.FAILURE, str(output))
         else:
             result = (WorkerProc.ResponseStatus.SUCCESS, output)
-        self.worker_response_mq.enqueue(result)
+        if (response_mq := self.worker_response_mq) is not None:
+            response_mq.enqueue(result)
 
     def handle_output(self, output: Any):
         """Handles output from the worker. If async scheduling is enabled,
