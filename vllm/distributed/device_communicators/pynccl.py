@@ -8,6 +8,8 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup, ReduceOp
 
+from vllm.distributed.device_communicators.pynccl_allocator import(
+  is_symmetric_memory_enabled,)
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     NCCLLibrary, buffer_type, cudaStream_t, ncclComm_t, ncclDataTypeEnum,
     ncclRedOpTypeEnum, ncclUniqueId)
@@ -16,6 +18,42 @@ from vllm.logger import init_logger
 from vllm.utils import current_stream
 
 logger = init_logger(__name__)
+
+
+_NCCL_SYMM_OPS_REGISTERED = False
+
+def register_nccl_symmetric_ops(pynccl_comm):
+    from vllm.distributed.device_communicators.pynccl_allocator import (
+        nccl_symm_mem_context,)
+    from vllm.utils import direct_register_custom_op
+
+    global _NCCL_SYMM_OPS_REGISTERED
+    if _NCCL_SYMM_OPS_REGISTERED:
+        return
+    _NCCL_SYMM_OPS_REGISTERED = True
+
+    def all_reduce_symmetric_with_copy_impl(
+        input_tensor: torch.Tensor
+    ) -> torch.Tensor:
+        with nccl_symm_mem_context(pynccl_comm):
+            symm_input = torch.empty_like(input_tensor)
+            symm_output = torch.empty_like(input_tensor)
+        symm_input.copy_(input_tensor)
+        symm_output = pynccl_comm.all_reduce(symm_input, symm_output)
+        return symm_output
+
+
+    def all_reduce_symmetric_with_copy_fake(
+        input_tensor: torch.Tensor
+    ) -> torch.Tensor:
+        return torch.empty_like(input_tensor)
+
+    direct_register_custom_op(
+        op_name="all_reduce_symmetric_with_copy",
+        op_func=all_reduce_symmetric_with_copy_impl,
+        mutates_args=[],
+        fake_impl=all_reduce_symmetric_with_copy_fake,
+    )
 
 
 class PyNcclCommunicator:
@@ -107,6 +145,11 @@ class PyNcclCommunicator:
             self.all_reduce(data)
             stream.synchronize()
             del data
+
+    def should_use_nccl_symm_mem_allreduce(
+        self, input_tensor: torch.Tensor
+    ) -> bool:
+        return is_symmetric_memory_enabled()
 
     def all_reduce(self,
                    in_tensor: torch.Tensor,
