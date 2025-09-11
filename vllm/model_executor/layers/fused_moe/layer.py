@@ -809,6 +809,9 @@ class FusedMoE(CustomOp):
                 dp_size_=dp_size_,
                 vllm_parallel_config=vllm_config.parallel_config))
 
+        logger.debug("FusedMoEParallelConfig = %s",
+                     str(self.moe_parallel_config))
+
         self.global_num_experts = num_experts + num_redundant_experts
 
         # we are padding globally so EP buffer allocation works
