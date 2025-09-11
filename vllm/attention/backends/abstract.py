@@ -61,7 +61,7 @@ class AttentionBackend(ABC):
         raise NotImplementedError
 
     def get_supported_block_size(self) -> list[int]:
-        # [-1] is a placeholder: the actual block size will be determined
+        # [0] is a placeholder: the actual block size will be determined
         # by config.block_size at runtime.
         return self.get_impl_cls().get_supported_block_size()
 
