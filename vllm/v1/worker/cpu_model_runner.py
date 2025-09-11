@@ -65,7 +65,12 @@ class CPUModelRunner(GPUModelRunner):
             return
 
         mb = getattr(self.attn_groups[0][0], "metadata_builders", None)
-        if not isinstance(mb[0], TorchSDPAMetadataBuilderV1):
+        if isinstance(mb, list):
+            if not isinstance(mb[0], TorchSDPAMetadataBuilderV1):
+                return
+            mb[0].reorder_batch(self.input_batch, scheduler_output)
+            return
+        elif not isinstance(mb, TorchSDPAMetadataBuilderV1):
             # Encoder-only / rerank models do not benefit from reordering,
             # so we safely skip here.
             return

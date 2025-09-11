@@ -23,9 +23,6 @@ from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
-from vllm.v1.worker.ubatch_utils import (UbatchSlice, UBatchSlices)
-from vllm.v1.worker.gpu_ubatch_wrapper import (UBatchWrapper)
-from vllm.v1.worker.ubatch_splitting import (get_dp_padding_ubatch, ubatch_split)
 from vllm.config import (CompilationLevel, CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config, update_config)
 from vllm.distributed.eplb.eplb_state import EplbState
@@ -57,8 +54,7 @@ from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         GiB_bytes, LazyLoader, check_use_alibi, get_dtype_size,
-                        get_dtype_size, is_pin_memory_available, round_up,
-                        supports_dynamo)
+                        is_pin_memory_available, supports_dynamo)
 from vllm.v1.attention.backends.flash_attn import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
@@ -90,9 +86,12 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import (
     KVConnectorModelRunnerMixin, KVConnectorOutput)
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from vllm.v1.worker.ubatch_splitting import get_dp_padding_ubatch, ubatch_split
+from vllm.v1.worker.ubatch_utils import UbatchSlice, UBatchSlices
 
 from .utils import (AttentionGroup, MultiModalBudget,
                     add_kv_sharing_layers_to_kv_cache_groups, bind_kv_cache,
@@ -948,7 +947,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         query_start_loc = self.query_start_loc.gpu[:num_reqs + 1]
 
         num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
-        num_tokens_padded = num_tokens_unpadded + self.get_local_padding(num_tokens_unpadded)
+        num_tokens_padded = num_tokens_unpadded + self.get_local_padding(
+            num_tokens_unpadded)
         ubatch_slices, num_tokens_after_padding = \
             ubatch_split(max_num_scheduled_tokens,
                          num_tokens_unpadded,
@@ -1121,8 +1121,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     attn_metadata_i = builder.build(
                         common_prefix_len=common_prefix_len,
                         common_attn_metadata=common_attn_metadata,
-                        **extra_attn_metadata_args
-                    )
+                        **extra_attn_metadata_args)
                     for layer_name in attn_group.layer_names:
                         attn_metadata[layer_name] = attn_metadata_i
 
@@ -1743,9 +1742,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                                 dtype=torch.int32)
         return max_tokens_across_dp_cpu - num_tokens, num_tokens_after_padding
 
-    def get_local_padding(
-            self,
-            num_tokens_unpadded: int) -> int:
+    def get_local_padding(self, num_tokens_unpadded: int) -> int:
 
         num_tokens_padded = num_tokens_unpadded
 
@@ -1767,7 +1764,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         num_pad_tokens = num_tokens_padded - num_tokens_unpadded
         return num_pad_tokens
-
 
     # This is where the second ubatch is adjusted to account for the padding.
     # Should be called after attention metadata creation. This just pads
@@ -2099,9 +2095,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             try:
                 # Prepare the decoder inputs.
                 (attn_metadata, logits_indices, spec_decode_metadata,
-                num_scheduled_tokens_np, spec_decode_common_attn_metadata,
-                max_query_len, ubatch_slices,
-                num_tokens_after_padding) = self._prepare_inputs(scheduler_output)
+                 num_scheduled_tokens_np, spec_decode_common_attn_metadata,
+                 max_query_len, ubatch_slices, num_tokens_after_padding
+                 ) = self._prepare_inputs(scheduler_output)
 
             finally:
                 if self.prepare_inputs_event is not None:
@@ -2116,7 +2112,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 positions,
                 intermediate_tensors,
                 model_kwargs,
-            ) = self._preprocess(scheduler_output, intermediate_tensors, ubatch_slices, num_tokens_after_padding)
+            ) = self._preprocess(scheduler_output, intermediate_tensors,
+                                 ubatch_slices, num_tokens_after_padding)
 
             if ubatch_slices is not None:
                 num_input_tokens = num_input_tokens // 2
@@ -2748,9 +2745,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.parallel_config.microbatching_token_threshold and \
                 allow_microbatching
 
-            (should_ubatch,
-             num_tokens_across_dp) = get_dp_padding_ubatch(
-                 num_tokens, num_tokens, should_ubatch, self.vllm_config)
+            (should_ubatch, num_tokens_across_dp) = get_dp_padding_ubatch(
+                num_tokens, num_tokens, should_ubatch, self.vllm_config)
 
             # Currently the dummy run should only be ubatching during
             # cuda graph capture, meaning all DP ranks should already
