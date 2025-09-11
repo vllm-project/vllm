@@ -3584,9 +3584,8 @@ class VllmConfig:
 
         ```python
         max_graph_size = min(max_num_seqs * 2, 512)
-        cuda_graph_sizes = (
-            [1, 2, 4] + [i for i in range(8, max_graph_size + 1, 8)]
-        )
+        # 1, 2, 4, then multiples of 8 up to max_graph_size
+        cuda_graph_sizes = [1, 2, 4, 8, 16, 24, 32, 40, ..., max_graph_size]
 
         In the end, `vllm_config.compilation_config.cudagraph_capture_sizes`
         will be the final sizes to capture cudagraph (in descending order).
