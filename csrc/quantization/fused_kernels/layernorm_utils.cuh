@@ -32,7 +32,7 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
   __shared__ typename BlockReduce::TempStorage reduceStore;
-  ss = BlockReduce(reduceStore).Reduce(ss, AddOp{}, blockDim.x);
+  ss = BlockReduce(reduceStore).Reduce(ss, CubAddOp{}, blockDim.x);
 
   __shared__ float s_rms;
   if (threadIdx.x == 0) {
@@ -69,7 +69,7 @@ __device__ void compute_dynamic_per_token_scales(
   __shared__ typename BlockReduce::TempStorage reduceStore;
   block_absmax_val_maybe =
       BlockReduce(reduceStore)
-          .Reduce(block_absmax_val_maybe, MaxOp{}, blockDim.x);
+          .Reduce(block_absmax_val_maybe, CubMaxOp{}, blockDim.x);
 
   __shared__ float s_token_scale;
   if (threadIdx.x == 0) {
@@ -165,7 +165,7 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
   __shared__ typename BlockReduce::TempStorage reduceStore;
-  ss = BlockReduce(reduceStore).Reduce(ss, AddOp{}, blockDim.x);
+  ss = BlockReduce(reduceStore).Reduce(ss, CubAddOp{}, blockDim.x);
 
   __shared__ float s_rms;
   if (threadIdx.x == 0) {
@@ -236,7 +236,7 @@ __device__ void compute_dynamic_per_token_scales(
   __shared__ typename BlockReduce::TempStorage reduceStore;
   block_absmax_val_maybe =
       BlockReduce(reduceStore)
-          .Reduce(block_absmax_val_maybe, MaxOp{}, blockDim.x);
+          .Reduce(block_absmax_val_maybe, CubMaxOp{}, blockDim.x);
 
   __shared__ float s_token_scale;
   if (threadIdx.x == 0) {
