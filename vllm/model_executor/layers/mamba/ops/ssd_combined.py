@@ -39,6 +39,8 @@ def _mamba_chunk_scan_combined_fwd(x,
                                    chunk_indices=None,
                                    chunk_offsets=None,
                                    cu_seqlens=None,
+                                   cu_chunk_seqlens=None,
+                                   last_chunk=None,
                                    dt_softplus=False,
                                    dt_limit=(0.0, float("inf")),
                                    state_dtype=None,
@@ -85,19 +87,15 @@ def _mamba_chunk_scan_combined_fwd(x,
     # - see the blog and paper for a visualization of the submatrices
     #   which we refer to in the comments below
 
-    num_seqs = len(cu_seqlens) - 1
     # 1. Compute chunked cumsum of A * dt
     # - here dt may go through a softplus activation
     dA_cumsum, dt = _chunk_cumsum_fwd(dt,
                                       A,
                                       chunk_size,
-                                      cu_seqlens,
+                                      cu_chunk_seqlens,
                                       dt_bias=dt_bias,
                                       dt_softplus=dt_softplus,
                                       dt_limit=dt_limit)
-
-    print("dA_cumsum.shape: ", dA_cumsum.shape)
-    print("dt.shape: ", dt.shape)
 
     # 2. Compute the state for each intra-chunk
     # (right term of low-rank factorization of off-diagonal blocks; B terms)
@@ -105,7 +103,7 @@ def _mamba_chunk_scan_combined_fwd(x,
                               x,
                               dt,
                               dA_cumsum,
-                              cu_seqlens,
+                              cu_chunk_seqlens,
                               seq_idx=seq_idx,
                               states_in_fp32=True)
 
@@ -123,7 +121,7 @@ def _mamba_chunk_scan_combined_fwd(x,
     states, final_states = _state_passing_fwd(
         rearrange(states, "... p n -> ... (p n)"),
         dA_cumsum,
-        cu_seqlens,
+        cu_chunk_seqlens,
         initial_states=rearrange(initial_states, "... p n -> ... (p n)")
         if initial_states is not None else None,
         seq_idx=seq_idx,
@@ -138,6 +136,7 @@ def _mamba_chunk_scan_combined_fwd(x,
     CB = _bmm_chunk_fwd(C,
                         B,
                         chunk_size,
+                        cu_chunk_seqlens,
                         seq_idx=seq_idx,
                         output_dtype=torch.float32)
 
@@ -158,6 +157,7 @@ def _mamba_chunk_scan_combined_fwd(x,
         dA_cumsum,
         C,
         states,
+        cu_chunk_seqlens,
         D=D,
         z=z,
         seq_idx=seq_idx,
@@ -170,16 +170,11 @@ def _mamba_chunk_scan_combined_fwd(x,
         return out_x, dt, dA_cumsum, states, final_states
     else:
         assert batch == 1, "passing cu_seqlens to get the varlen states is only supported if batch dimension is 1"
-        varlen_states = chunk_state_varlen(
-            B.squeeze(0),
-            x.squeeze(0),
-            dt.squeeze(0),
-            dA_cumsum.squeeze(0),
-            cu_seqlens,
-            states.squeeze(0),
-            initial_states=initial_states,
-        )
-        return out_x, dt, dA_cumsum, states, final_states, varlen_states
+        print("last_chunk: ", last_chunk)
+        print(states.shape)
+        varlen_states = states[last_chunk]
+        print(varlen_states.shape)
+        return out_x, dt, dA_cumsum, states, final_states, states
 
 
 def mamba_chunk_scan_combined(x,
@@ -196,6 +191,8 @@ def mamba_chunk_scan_combined(x,
                               chunk_indices=None,
                               chunk_offsets=None,
                               cu_seqlens=None,
+                              cu_chunk_seqlens=None,
+                              last_chunk=None,
                               dt_softplus=False,
                               dt_limit=(0.0, float("inf")),
                               out=None,
@@ -216,12 +213,12 @@ def mamba_chunk_scan_combined(x,
         initial_states: (batch, nheads, headdim, dstate)
         seq_idx: (batch, seqlen)
         cu_seqlens: (num_sequences + 1) or None, only used if return_varlen_states is True
+        cu_chunk_seqlens: (num_chunks + 1)
         dt_softplus: Whether to apply softplus to dt
         out: Preallocated output tensor
         state_dtype: The data type of the ssm state
     """
-    print("-------------------------")
-    print("cu_seqlens: ", cu_seqlens)
+
     if not return_varlen_states:
         cu_seqlens = None
     else:
@@ -241,6 +238,8 @@ def mamba_chunk_scan_combined(x,
         chunk_indices=chunk_indices,
         chunk_offsets=chunk_offsets,
         cu_seqlens=cu_seqlens,
+        cu_chunk_seqlens=cu_chunk_seqlens,
+        last_chunk=last_chunk,
         dt_softplus=dt_softplus,
         dt_limit=dt_limit,
         out=out,

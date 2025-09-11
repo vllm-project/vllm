@@ -10,7 +10,6 @@ import torch
 
 from vllm.triton_utils import tl, triton
 
-from .ssd_chunk_state import find_seq_idx
 
 @triton.autotune(
     configs=[
@@ -34,13 +33,12 @@ def _state_passing_fwd_kernel(
     seq_idx_ptr,
     chunk_offsets_ptr,
     chunk_meta_num,
-    cu_seqlens_ptr,
+    cu_chunk_seqlens_ptr,
     # Matrix dimensions
     dim,
     nchunks,
     seqlen,
     chunk_size,
-    num_seqs,
     # Strides
     stride_states_batch,
     stride_states_chunk,
@@ -102,12 +100,12 @@ def _state_passing_fwd_kernel(
 
     tl.store(out_ptrs, states, mask=offs_m < dim)
     out_ptrs += stride_out_chunk
-    prev_seq_idx_chunk_end = 0
-    logical_chunk_idx = 0
+
+    prev_seq_idx = 0
     for c in range(nchunks):
 
-        # now a chunk can only contain one sequence
-        seq_idx_chunk = find_seq_idx(cu_seqlens_ptr, c, num_seqs, chunk_size, True)
+
+        chunk_seqlen_start = tl.load(cu_chunk_seqlens_ptr + c)
 
         new_states = tl.load(states_ptrs, mask=offs_m < dim,
                              other=0.0).to(tl.float32)
@@ -115,51 +113,24 @@ def _state_passing_fwd_kernel(
         scale_mask = True
         if HAS_SEQ_IDX:
 
-            # - the seq to pass forward is the one that is flushed to the right
-            #   boundary.
-            # - that is given by seq_idx_chunk_end below: the sequence index at the end of the chunk.
-            seq_idx_chunk_end = seq_idx_chunk
+            seq_idx = tl.load(seq_idx_ptr + chunk_seqlen_start * stride_seq_idx_seqlen)
 
             if HAS_INITSTATES:
-                if IS_CONT_BATCHED and prev_seq_idx_chunk_end != seq_idx_chunk_end:
+                if IS_CONT_BATCHED and prev_seq_idx != seq_idx:
                     # this means in the current chunk the rightmost flushed seq
                     # has changed.
                     # - so we do not propagate the state from previous chunk
                     # - but rather we load that sequence's init state
-                    initstates_ptrs = initstates_ptr + seq_idx_chunk_end * stride_initstates_batch
+                    initstates_ptrs = initstates_ptr + seq_idx * stride_initstates_batch
 
                     # - update state with seq_idx_new's init state
                     states = tl.load(initstates_ptrs,
                                      mask=offs_m < dim,
                                      other=0.0).to(tl.float32)
-
-                    # - we need to consider the cumsum only of the last sequence in the chunk
-                    # - find its starting position (given by c_off of the logical chunk index)
-                    # - and subtract the cumsum just before that position from the total cumsum
-                    # - first, update the logical chunk index (add the number of sequences in the current physical chunk):
-                    # sequence index at the start of the current chunk
-                    seq_idx_chunk_start = seq_idx_chunk
-
-                    logical_chunk_idx += seq_idx_chunk_end - seq_idx_chunk_start
-                    # - load the chunk offset:
-                    c_off = tl.load(chunk_offsets_ptr + logical_chunk_idx,
-                                    mask=logical_chunk_idx < chunk_meta_num,
-                                    other=0)
-                    # - if offset is 0, then the sequence starts at the beginning of the chunk, and we don't need to subtract anything
-                    if c_off > 0:
-                        # - dA_cs_ptr currently points to the cumsum at the end of the chunk - subtract the chunk size and add the offset
-                        dA_cs_boundary = tl.load(
-                            dA_cs_ptr - (chunk_size - 1) * stride_dA_cs_csize +
-                            (c_off - 1) * stride_dA_cs_csize,
-                            mask=(c_off - 1) > -1 and c_off < chunk_size,
-                            other=0.0)
-                        dA_cs -= dA_cs_boundary
-
-                # - increment logical chunk index for every physical chunk
-                logical_chunk_idx += 1
             else:
-                scale_mask = seq_idx_chunk_end == prev_seq_idx_chunk_end
-            prev_seq_idx_chunk_end = seq_idx_chunk_end
+                scale_mask = seq_idx == prev_seq_idx
+
+            prev_seq_idx = seq_idx
 
         scale = tl.where(scale_mask, tl.exp(dA_cs), 0.0)
         states = scale * states + new_states
@@ -175,7 +146,7 @@ def _state_passing_fwd_kernel(
 def _state_passing_fwd(
     states,
     dA_cumsum,
-    cu_seqlens,
+    cu_chunk_seqlens,
     initial_states=None,
     seq_idx=None,
     chunk_size=None,
@@ -215,9 +186,6 @@ def _state_passing_fwd(
                                device=states.device,
                                dtype=torch.float32)
     grid = lambda META: (triton.cdiv(dim, META['BLOCK_SIZE']), batch, nheads)
-
-    print("[_state_passing_fwd] seq_idx.shape: ", seq_idx.shape)
-    print("[_state_passing_fwd] chunk_offsets: ", chunk_offsets)
     with torch.cuda.device(states.device.index):
         _state_passing_fwd_kernel[grid](
             states,
@@ -228,12 +196,11 @@ def _state_passing_fwd(
             seq_idx,
             chunk_offsets,
             len(chunk_offsets) if chunk_offsets is not None else 0,
-            cu_seqlens,
+            cu_chunk_seqlens,
             dim,
             nchunks,
             seqlen if seq_idx is not None else 0,
             chunk_size,
-            len(cu_seqlens)-1,
             states.stride(0),
             states.stride(1),
             states.stride(2),
