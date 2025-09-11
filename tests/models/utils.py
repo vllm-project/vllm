@@ -401,7 +401,6 @@ def dummy_hf_overrides(
     """
     Dummy HF overrides function used to create dummy model
     with only minimum nums of layer.
-    
     """
     hf_config.update(exist_overrides or {})
 
