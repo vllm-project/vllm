@@ -32,11 +32,6 @@ NGRAM_SPEC_CONFIG = {
     "prompt_lookup_min": 1,
 }
 
-EAGLE_SPEC_CONFIG = {
-    "method": "eagle",
-    "model": "yuhuili/EAGLE-LLaMA3.1-Instruct-8B",
-    "num_speculative_tokens": 5,
-}
 
 PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
     ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", None),
@@ -52,7 +47,7 @@ PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
     #  NGRAM_SPEC_CONFIG),
     ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", NGRAM_SPEC_CONFIG),
     ("meta-llama/Llama-3.2-1B-Instruct", "xgrammar", "auto",
-     EAGLE_SPEC_CONFIG)
+     NGRAM_SPEC_CONFIG)
 ]
 
 PARAMS_MODELS_TOKENIZER_MODE = [
