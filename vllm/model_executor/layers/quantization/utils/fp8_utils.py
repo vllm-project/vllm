@@ -177,8 +177,8 @@ class W8A8BlockFp8LinearOp:
                     cdiv(weight.shape[0], 128) == weight_scale.shape[0]
                     and cdiv(weight.shape[1], 128) == weight_scale.shape[1])
             else:
-                # TODO: update this after switching to public sm90 block scale gemm
-                # as it also supports weight.shape % 128 != 0
+                # TODO: update this after switching to public sm90 block scale
+                # gemm as it also supports weight.shape % 128 != 0
                 use_cutlass = self.cutlass_block_fp8_supported and (
                     weight.shape[0] % 128 == 0 and weight.shape[1] % 128 == 0)
         else:
@@ -188,10 +188,13 @@ class W8A8BlockFp8LinearOp:
             use_cutlass, self.use_aiter_and_is_supported)
         if use_cutlass:
             q_input, x_scale = per_token_group_quant_fp8(
-                input_2d, block_size[1], column_major_scales=use_cutlass,
+                input_2d,
+                block_size[1],
+                column_major_scales=use_cutlass,
                 use_ue8m0=self.ue8m0_deepgemm_supported)
-            output = w8a8_blockscale_func(q_input, weight, x_scale, weight_scale,
-                                        block_size, input.dtype)
+            output = w8a8_blockscale_func(q_input, weight, x_scale,
+                                          weight_scale, block_size,
+                                          input.dtype)
 
         else:
             if self.use_aiter_and_is_supported:
@@ -199,11 +202,14 @@ class W8A8BlockFp8LinearOp:
                     input_2d.contiguous(), quant_dtype=rocm_aiter.dtypes.fp8)
             else:
                 q_input, x_scale = per_token_group_quant_fp8(
-                    input_2d, block_size[1], column_major_scales=use_cutlass,
+                    input_2d,
+                    block_size[1],
+                    column_major_scales=use_cutlass,
                     use_ue8m0=self.ue8m0_deepgemm_supported)
 
-            output = w8a8_blockscale_func(q_input, weight, x_scale, weight_scale,
-                                        block_size, input.dtype)
+            output = w8a8_blockscale_func(q_input, weight, x_scale,
+                                          weight_scale, block_size,
+                                          input.dtype)
 
         if bias is not None:
             output = output + bias

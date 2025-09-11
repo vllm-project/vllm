@@ -49,8 +49,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.utils import has_deep_gemm
-from vllm.utils.deep_gemm import (is_deep_gemm_e8m0_used,
-                                  is_deep_gemm_supported)
+from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used, is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer_moe
 
 if TYPE_CHECKING:
@@ -254,8 +253,8 @@ class Fp8LinearMethod(LinearMethodBase):
             )
         else:
             self.fp8_linear = Fp8LinearOp(
-                    act_quant_static=self.act_q_static,
-                    act_quant_group_shape=self.act_q_group_shape)
+                act_quant_static=self.act_q_static,
+                act_quant_group_shape=self.act_q_group_shape)
 
     def create_weights(
         self,
