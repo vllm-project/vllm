@@ -2440,7 +2440,7 @@ class LoRAConfig:
     bias_enabled: bool = False
     """[DEPRECATED] Enable bias for LoRA adapters. This option will be
     removed in v0.12.0."""
-    activated_lora_enabled: bool = False
+    enable_activated_lora: bool = False
     """Enable Activated LoRA."""
 
     def compute_hash(self) -> str:
