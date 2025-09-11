@@ -103,27 +103,14 @@ class BlockTable:
             return
 
         if self.use_hybrid_blocks:
-            logical_blocks = self._convert_physical_to_logical_blocks(
+            block_ids = self._convert_physical_to_logical_blocks(
                 np.array(block_ids))
-            logical_num = len(logical_blocks)
-
-            start = self.num_blocks_per_row[row_idx]
-            max_logical_blocks = (self.max_num_blocks_per_req *
-                                  self.blocks_per_phys_block)
-
-            if start + logical_num > max_logical_blocks:
-                raise ValueError(
-                    f"Request {row_idx} exceeds max logical blocks limit")
-
-            # Store only logical blocks - no need for separate physical table
-            self.block_table_np[row_idx,
-                                start:start + logical_num] = logical_blocks
-            self.num_blocks_per_row[row_idx] += logical_num
-        else:
-            num_blocks = len(block_ids)
-            start = self.num_blocks_per_row[row_idx]
-            self.num_blocks_per_row[row_idx] += num_blocks
-            self.block_table_np[row_idx, start:start + num_blocks] = block_ids
+        
+        num_blocks = len(block_ids)
+        start = self.num_blocks_per_row[row_idx]
+        
+        self.block_table_np[row_idx, start:start + num_blocks] = block_ids
+        self.num_blocks_per_row[row_idx] += num_blocks
 
     def add_row(self, block_ids: list[int], row_idx: int) -> None:
         self.num_blocks_per_row[row_idx] = 0
