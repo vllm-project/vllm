@@ -243,7 +243,7 @@ class KVConnectorBase_V1(ABC):
         self,
         request: "Request",
         num_computed_tokens: int,
-    ) -> tuple[int, bool]:
+    ) -> tuple[Optional[int], bool]:
         """
         Get number of new tokens that can be loaded from the
         external KV cache beyond the num_computed_tokens.
@@ -255,8 +255,11 @@ class KVConnectorBase_V1(ABC):
 
         Returns:
             A tuple with the following elements:
-                - The number of tokens that can be loaded from the 
-                  external KV cache beyond what is already computed.
+                - An optional number of tokens that can be loaded from the 
+                  external KV cache beyond what is already computed. 
+                  If None, it means that the connector needs more time to
+                  determine the number of matched tokens, and the scheduler
+                  should query for this request again later.
                 - `True` if external KV cache tokens will be loaded
                   asynchronously (between scheduler steps). Must be
                   'False' if the first element is 0.

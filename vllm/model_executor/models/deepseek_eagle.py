@@ -37,8 +37,6 @@ class DeepseekV2Model(nn.Module):
         super().__init__()
         self.config = vllm_config. \
             speculative_config.draft_model_config.hf_config
-        model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.vocab_size = self.config.vocab_size
 
@@ -51,11 +49,8 @@ class DeepseekV2Model(nn.Module):
 
         self.layers = nn.ModuleList([
             DeepseekV2DecoderLayer(
-                self.config,
+                vllm_config,
                 prefix=maybe_prefix(prefix, f"layers.{i + start_layer_id}"),
-                model_config=model_config,
-                cache_config=cache_config,
-                quant_config=quant_config,
             ) for i in range(self.config.num_hidden_layers)
         ])
 

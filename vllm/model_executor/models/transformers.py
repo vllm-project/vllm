@@ -44,7 +44,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalInputs, PlaceholderRange)
+                                    MultiModalInputs, MultiModalUUIDDict,
+                                    PlaceholderRange)
 from vllm.multimodal.parse import ImageProcessorItems, MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo)
@@ -347,7 +348,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Optional[Mapping[str, object]] = None,
-        mm_hash_overrides: Optional[dict[str, list[str]]] = None,
+        mm_uuids: Optional[MultiModalUUIDDict] = None,
     ) -> MultiModalInputs:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -415,9 +416,8 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
                                        num_image_patches),
         )
         # Use overrides if provided; fallback to data-dependent hashing.
-        mm_hashes = (mm_hash_overrides if mm_hash_overrides is not None else
-                     self._hash_mm_items(mm_items, hf_processor_mm_kwargs,
-                                         tokenization_kwargs))
+        mm_hashes = (mm_uuids if mm_uuids is not None else self._hash_mm_items(
+            mm_items, hf_processor_mm_kwargs, tokenization_kwargs))
 
         return MultiModalInputs(
             type="multimodal",
