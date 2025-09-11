@@ -235,9 +235,9 @@ No extra registration is required beyond having your model class available via t
 
 ## 4. Examples in-tree
 
-- Whisper encoder–decoder (audio-only): [`vllm/model_executor/models/whisper.py`](gh-file:vllm/model_executor/models/whisper.py)
-- Voxtral decoder-only (audio embeddings + LLM): [`vllm/model_executor/models/voxtral.py`](gh-file:vllm/model_executor/models/voxtral.py)
-- Gemma3n decoder-only with fixed instruction prompt: [`vllm/model_executor/models/gemma3n_mm.py`](gh-file:vllm/model_executor/models/gemma3n_mm.py)
+- Whisper encoder–decoder (audio-only): <gh-file:vllm/model_executor/models/whisper.py>
+- Voxtral decoder-only (audio embeddings + LLM): <gh-file:vllm/model_executor/models/voxtral.py>
+- Gemma3n decoder-only with fixed instruction prompt: <gh-file:vllm/model_executor/models/gemma3n_mm.py>
 
 ## 5. Test with the API
 
@@ -264,9 +264,9 @@ Once your model implements `SupportsTranscription`, you can test the endpoints (
       -F "model=$MODEL_ID" \
       http://localhost:8000/v1/audio/translations
     ```
-Or check out more examples in [`examples/online_serving/`](gh-file:examples/online_serving/).
+Or check out more examples in <gh-file:examples/online_serving>.
 
-### Notes
+!!! note
 
 - If your model handles chunking internally (e.g., via its processor or encoder), set `min_energy_split_window_size=None` in the returned `SpeechToTextConfig` to disable server-side chunking.
 - Implementing `get_num_audio_tokens` improves accuracy of streaming usage metrics (`prompt_tokens`) without an extra forward pass.
