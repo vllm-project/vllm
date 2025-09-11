@@ -159,6 +159,14 @@ class EagleProposer:
         sampling_metadata: SamplingMetadata,
         mm_embeds: Optional[list[torch.Tensor]] = None,
     ) -> torch.Tensor:
+        # do not attempt to forward if the input size is too big
+        if common_attn_metadata.seq_lens.max(
+        ) + self.num_speculative_tokens > self.draft_model_config.max_model_len:
+            batch_size = common_attn_metadata.num_reqs
+            return torch.empty((batch_size, 0),
+                               dtype=torch.long,
+                               device=common_attn_metadata.seq_lens.device)
+
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
         last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
