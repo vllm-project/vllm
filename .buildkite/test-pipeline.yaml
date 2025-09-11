@@ -147,7 +147,7 @@ steps:
   - pytest -v -s entrypoints/test_chat_utils.py
 
 - label: Entrypoints Integration Test (Pooling)
-  timeout_in_minutes: 130
+  timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
   fast_check: true
