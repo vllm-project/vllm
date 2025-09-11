@@ -172,7 +172,7 @@ def _mamba_chunk_scan_combined_fwd(x,
         assert batch == 1, "passing cu_seqlens to get the varlen states is only supported if batch dimension is 1"
         print("last_chunk: ", last_chunk)
         print(states.shape)
-        varlen_states = states[last_chunk]
+        varlen_states = states[:, last_chunk, ...]
         print(varlen_states.shape)
         return out_x, dt, dA_cumsum, states, final_states, varlen_states
 
