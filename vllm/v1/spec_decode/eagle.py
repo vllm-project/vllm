@@ -633,6 +633,9 @@ class EagleProposer:
         with set_model_tag("eagle_head"):
             self.model = get_model(vllm_config=self.vllm_config,
                                    model_config=draft_model_config)
+        print(target_model)
+        print(draft_model_config)
+        print(self.model)
 
         draft_attn_layer_names = (
             get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
@@ -669,6 +672,7 @@ class EagleProposer:
                 hasattr(target_language_model, "lm_head"):
             logger.info("Loading EAGLE LM head weights from the target model.")
 
+            # if pruning the draft model vocabulary, we must make a copy of the lm_head
             if self.vllm_config.speculative_config.draft_vocab_frequency_path is not None:
                 self.model.lm_head = copy.deepcopy(target_language_model.lm_head)
             else:
@@ -696,6 +700,7 @@ class EagleProposer:
             # Update lm_head weights with pruned vocabulary
             ic(self.model.lm_head.weight.shape, target_language_model.lm_head.weight.shape)
             if hasattr(self.model, "lm_head"):
+                # head = self.lm_head.weight
                 self.model.lm_head.weight.data = self.model.lm_head.weight.data[self.pruned_vocab]
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()

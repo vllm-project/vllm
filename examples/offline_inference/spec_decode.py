@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-print('hi')
 from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
