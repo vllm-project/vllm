@@ -301,7 +301,7 @@ def test_fail_upon_inc_requests_and_finished_requests_lt_available_blocks(
     finished_requests_ids is larger than the maximum mamba block capacity.
 
     This could generally happen due to the fact that hybrid does support
-    statelessness mechanism where it can cleanup new incoming requests in
+    statelessness mechanism where it can clean up new incoming requests in
     a single step.
     """
     try:
@@ -322,7 +322,7 @@ def test_state_cleanup(
     This test is for verifying that the Hybrid state is cleaned up between
     steps.
     
-    If its not cleaned, an error would be expected.
+    If it's not cleaned, an error would be expected.
     """
     try:
         with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
