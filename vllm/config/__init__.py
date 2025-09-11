@@ -1996,9 +1996,7 @@ class SpeculativeConfig:
     Hub. It can be a branch name, a tag name, or a commit id. If unspecified,
     will use the default version."""
 
-    # Draft model vocabulary
-    draft_vocab_pruned: Optional[str] = None
-    """The path to the pruned draft model vocabulary."""
+    # Draft model vocabulary configuration
     draft_vocab_frequency_path: Optional[str] = None
     """The path to token frequencies for the draft model vocabulary."""
     draft_vocab_frequency_prune_ratio: Optional[float] = None
