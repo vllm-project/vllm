@@ -334,7 +334,16 @@ class RocmPlatform(Platform):
              envs.VLLM_ROCM_USE_AITER_RMSNORM
 
         if cache_config and cache_config.block_size is None:
-            cache_config.block_size = 16
+            logic_block_size = 16
+        else:
+            logic_block_size = cache_config.block_size
+
+        if envs.VLLM_USE_V1:
+            cache_config.kernel_block_size = logic_block_size  # type: ignore
+            if cache_config.block_size is None:
+                cache_config.block_size = logic_block_size  # type: ignore
+        else:
+            cache_config.block_size = logic_block_size  # type: ignore
 
         if parallel_config.worker_cls == "auto":
             if vllm_config.speculative_config:

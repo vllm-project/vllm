@@ -134,8 +134,11 @@ class CudaPlatformBase(Platform):
                     parallel_config.worker_cls = "vllm.worker.worker.Worker"
 
         cache_config = vllm_config.cache_config
+
         if cache_config and cache_config.block_size is None:
-            cache_config.block_size = 16
+            logic_block_size = 16
+        else:
+            logic_block_size = cache_config.block_size
 
         # TODO(lucas): handle this more gracefully
         # Note: model_config may be None during testing
@@ -167,13 +170,13 @@ class CudaPlatformBase(Platform):
 
             from vllm.attention.ops.flashmla import is_flashmla_supported
             if use_flashmla and is_flashmla_supported()[0] \
-                and cache_config.block_size != 64:
-                cache_config.block_size = 64
+                and logic_block_size != 64:
+                logic_block_size = 64
                 logger.info(
                     "Forcing kv cache block size to 64 for FlashMLA backend.")
 
-            if use_cutlass_mla and cache_config.block_size != 128:
-                cache_config.block_size = 128
+            if use_cutlass_mla and logic_block_size != 128:
+                logic_block_size = 128
                 logger.info("Forcing kv cache block size to 128 for "
                             "CUTLASS_MLA backend.")
 
@@ -191,6 +194,13 @@ class CudaPlatformBase(Platform):
                 "VLLM_ALL2ALL_BACKEND=deepep_low_latency if you need MoE "
                 "graphs captured as well.")
             compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+
+        if envs.VLLM_USE_V1:
+            cache_config.kernel_block_size = logic_block_size  # type: ignore
+            if cache_config.block_size is None:
+                cache_config.block_size = logic_block_size  # type: ignore
+        else:
+            cache_config.block_size = logic_block_size  # type: ignore
 
     @classmethod
     def get_current_memory_usage(cls,

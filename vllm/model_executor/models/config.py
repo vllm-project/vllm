@@ -374,12 +374,22 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             block_size=model_config.max_model_len,
         ).page_size_bytes
 
-        # some attention backends (e.g. FA) only support setting
-        # block size to multiple of 16, so let's suggest a value
-        # that would work (note: FA is currently not compatible
-        # with mamba layers, use FlashInfer instead).
-        attn_block_size = 16 * cdiv(mamba_page_size,
-                                    16 * attn_page_size_1_token)
+        # Attention backend constraints:
+        # - FlashAttention (FA) requires block size to be multiple of 16
+        # - MLA (Multi-head Latent Attention) requires larger alignment:
+        #   * CUTLASS_MLA backend: 128-byte alignment
+        #   * Other MLA backends: 64-byte alignment
+        if model_config.use_mla:
+            use_cutlass_mla = (envs.VLLM_ATTENTION_BACKEND == "CUTLASS_MLA")
+            block_alignment_bytes = 128 if use_cutlass_mla else 64
+        else:
+            block_alignment_bytes = 16
+
+        # Calculate minimum attention block size that satisfies both:
+        # 1. Backend alignment requirements (block_alignment_bytes)
+        # 2. Mamba page size compatibility (attn_page_size >= mamba_page_size)
+        attn_block_size = block_alignment_bytes * cdiv(
+            mamba_page_size, block_alignment_bytes * attn_page_size_1_token)
 
         # override attention block size if either (a) the
         # user has not set it or (b) the user has set it
@@ -388,7 +398,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
                 or cache_config.block_size < attn_block_size):
             cache_config.block_size = attn_block_size
             logger.info(
-                "Setting attention block size to %d tokens "
+                "Setting attention physical block size to %d tokens "
                 "to ensure that attention page size is >= mamba page size.",
                 attn_block_size)
 

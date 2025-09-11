@@ -112,6 +112,11 @@ class CacheConfig:
     attention metadata for eligible layers to be overridden with metadata
     necessary for implementing this optimization in some models (e.g. Gemma3n)
     """
+    kernel_block_size: SkipValidation[BlockSize] = 0  # type: ignore
+    """Size of a contiguous cache block in number of tokens for Kernel.
+    
+    This is the logical block size used by the kernel internally.
+    """
 
     def compute_hash(self) -> str:
         """

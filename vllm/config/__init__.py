@@ -3794,6 +3794,7 @@ class VllmConfig:
             cls.verify_and_update_config(self)
 
         if self.model_config.is_hybrid:
+            # hybird padding pagesize
             HybridAttentionMambaModelConfig.verify_and_update_config(self)
 
         if self.model_config.convert_type == "classify":

@@ -291,6 +291,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.is_pooling_model,
                 self.vllm_config.model_config.logits_processors),
             is_pooling_model=self.is_pooling_model,
+            kernel_block_sizes=[self.cache_config.kernel_block_size],
         )
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
@@ -3328,6 +3329,22 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             kv_cache_group.kv_cache_spec.block_size
             for kv_cache_group in kv_cache_config.kv_cache_groups
         ]
+
+        # Generate kernel_block_sizes that matches each block_size
+        # For attention backends that support virtual block splitting,
+        # use the logical block size
+        # For other backends (like Mamba), use 0 (no splitting)
+        kernel_block_sizes = []
+        for kv_cache_group in kv_cache_config.kv_cache_groups:
+            if isinstance(kv_cache_group.kv_cache_spec, AttentionSpec):
+                # This is an attention backend that supports virtual
+                # block splitting.
+                kernel_block_sizes.append(self.cache_config.kernel_block_size)
+            else:
+                # This is likely Mamba or other non-attention cache,
+                # no splitting.
+                kernel_block_sizes.append(0)
+
         if block_sizes != [self.cache_config.block_size]:
             assert self.cache_config.cpu_offload_gb == 0, (
                 "Cannot re-initialize the input batch when CPU weight "
@@ -3347,6 +3364,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_speculative_tokens=(
                     self.vllm_config.speculative_config.num_speculative_tokens
                     if self.vllm_config.speculative_config else 0),
+                kernel_block_sizes=kernel_block_sizes,
             )
 
     def _allocate_kv_cache_tensors(
