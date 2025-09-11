@@ -117,10 +117,12 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 self.driver_worker.execute_method)
 
     def shutdown(self) -> None:
-        logger.info(
-            "Shutting down Ray distributed executor. If you see error log "
-            "from logging.cc regarding SIGTERM received, please ignore because "
-            "this is the expected termination process in Ray.")
+        if logger:
+            # Somehow logger can be None here.
+            logger.info(
+                "Shutting down Ray distributed executor. If you see error log "
+                "from logging.cc regarding SIGTERM received, please ignore "
+                "because this is the expected termination process in Ray.")
         if hasattr(self, "forward_dag") and self.forward_dag is not None:
             self.forward_dag.teardown()
             import ray
@@ -607,6 +609,21 @@ class RayDistributedExecutor(DistributedExecutorBase):
                     ]
 
             forward_dag = MultiOutputNode(outputs)
+
+        if envs.VLLM_USE_RAY_WRAPPED_PP_COMM:
+            from ray.experimental.channel.accelerator_context import (
+                register_accelerator_context)
+
+            from vllm.distributed.device_communicators.ray_communicator import (
+                RayPPCommunicator)
+            register_accelerator_context(torch_module_name="cuda",
+                                         communicator_cls=RayPPCommunicator)
+            logger.info("Using RayPPCommunicator "
+                        "(which wraps vLLM _PP GroupCoordinator) "
+                        "for Ray Compiled Graph communication.")
+        else:
+            logger.info("Using Ray's NCCL communicator for "
+                        "Ray Compiled Graph communication.")
 
         return forward_dag.experimental_compile(
             enable_asyncio=enable_asyncio,

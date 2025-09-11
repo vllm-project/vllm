@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import multiprocessing
-import os
 import pickle
+import queue
 import signal
-import sys
 import threading
 import time
 import traceback
@@ -27,19 +26,25 @@ from vllm.distributed import (destroy_distributed_environment,
 from vllm.distributed.device_communicators.shm_broadcast import (Handle,
                                                                  MessageQueue)
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
+from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
+                                             get_pp_group, get_tp_group)
 from vllm.executor.multiproc_worker_utils import (
-    _add_prefix, set_multiprocessing_worker_envs)
+    set_multiprocessing_worker_envs)
 from vllm.logger import init_logger
-from vllm.utils import (get_distributed_init_method, get_loopback_ip,
-                        get_mp_context, get_open_port)
+from vllm.utils import (decorate_logs, get_distributed_init_method,
+                        get_loopback_ip, get_mp_context, get_open_port,
+                        set_process_title)
 from vllm.v1.executor.abstract import Executor, FailureCallback
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import (AsyncModelRunnerOutput, DraftTokenIds,
+                             ModelRunnerOutput)
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 
 
 class MultiprocExecutor(Executor):
+
+    supports_pp: bool = True
 
     def _init_executor(self) -> None:
         # Call self.shutdown at exit to clean up
@@ -104,8 +109,12 @@ class MultiprocExecutor(Executor):
         finally:
             if not success:
                 # Clean up the worker procs if there was a failure.
+                # Close death_writers first to signal workers to exit
+                for uw in unready_workers:
+                    if uw.death_writer is not None:
+                        uw.death_writer.close()
                 self._ensure_worker_termination(
-                    [w.proc for w in unready_workers])
+                    [uw.proc for uw in unready_workers])
 
         # For pipeline parallel, we use a thread pool for asynchronous
         # execute_model.
@@ -185,6 +194,16 @@ class MultiprocExecutor(Executor):
                 outputs, self.output_rank)
         return self.kv_output_aggregator.aggregate(outputs, self.output_rank)
 
+    def execute_dummy_batch(self) -> None:
+        self.collective_rpc("execute_dummy_batch",
+                            unique_reply_rank=self.output_rank)
+
+    def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
+        # OPTIMIZATION: Get output only from a single worker (output_rank)
+        outputs = self.collective_rpc("take_draft_token_ids",
+                                      unique_reply_rank=self.output_rank)
+        return outputs[0]
+
     def collective_rpc(self,
                        method: Union[str, Callable],
                        timeout: Optional[float] = None,
@@ -230,12 +249,18 @@ class MultiprocExecutor(Executor):
                 dequeue_timeout = None if deadline is None else (
                     deadline - time.monotonic())
 
-                if non_block:
+                if self.io_thread_pool is not None:
+                    # We must consume worker_response_mq from a single thread.
                     result = self.io_thread_pool.submit(  # type: ignore
                         get_response, w, dequeue_timeout, self.shutdown_event)
+                    if not non_block:
+                        result = result.result()
+                elif not non_block:
+                    result = get_response(w, dequeue_timeout,
+                                          self.shutdown_event)
                 else:
-                    result = get_response(w, dequeue_timeout)
-
+                    raise RuntimeError("non_block can only be used when"
+                                       " max_concurrent_batches > 1")
                 responses.append(result)
 
             return responses
@@ -274,16 +299,21 @@ class MultiprocExecutor(Executor):
         """Properly shut down the executor and its workers"""
         if not getattr(self, 'shutting_down', False):
             self.shutting_down = True
-            self.shutdown_event.set()
 
-            if self.io_thread_pool is not None:
-                self.io_thread_pool.shutdown(wait=False, cancel_futures=True)
-                self.io_thread_pool = None
-
+            # Make sure all the worker processes are terminated first.
             if workers := getattr(self, 'workers', None):
                 for w in workers:
+                    # Close death_writer to signal child processes to exit
+                    if w.death_writer is not None:
+                        w.death_writer.close()
+                        w.death_writer = None
                     w.worker_response_mq = None
                 self._ensure_worker_termination([w.proc for w in workers])
+
+            self.shutdown_event.set()
+            if self.io_thread_pool is not None:
+                self.io_thread_pool.shutdown(wait=False, cancel_futures=True)
+                del self.io_thread_pool
 
         self.rpc_broadcast_mq = None
 
@@ -316,6 +346,7 @@ class UnreadyWorkerProcHandle:
     proc: BaseProcess
     rank: int
     ready_pipe: Connection
+    death_writer: Optional[Connection] = None
 
 
 @dataclass
@@ -323,6 +354,7 @@ class WorkerProcHandle:
     proc: BaseProcess
     rank: int
     worker_response_mq: MessageQueue  # The worker process writes to this MQ
+    death_writer: Optional[Connection] = None
 
     @classmethod
     def from_unready_handle(
@@ -332,6 +364,7 @@ class WorkerProcHandle:
             proc=unready_handle.proc,
             rank=unready_handle.rank,
             worker_response_mq=worker_response_mq,
+            death_writer=unready_handle.death_writer,
         )
 
 
@@ -366,10 +399,6 @@ class WorkerProc:
         wrapper.init_worker(all_kwargs)
         self.worker = wrapper
 
-        pid = os.getpid()
-        _add_prefix(sys.stdout, f"VllmWorker rank={rank}", pid)
-        _add_prefix(sys.stderr, f"VllmWorker rank={rank}", pid)
-
         # Initialize MessageQueue for receiving SchedulerOutput
         self.rpc_broadcast_mq = MessageQueue.create_from_handle(
             input_shm_handle, self.worker.rank)
@@ -377,8 +406,24 @@ class WorkerProc:
         # Initializes a message queue for sending the model output
         self.worker_response_mq = MessageQueue(1, 1)
 
-        # Initialize device and loads weights
+        scheduler_config = vllm_config.scheduler_config
+        self.use_async_scheduling = scheduler_config.async_scheduling
+        if self.use_async_scheduling:
+            self.async_output_queue: queue.Queue = queue.Queue()
+            self.async_output_copy_thread = Thread(
+                target=self.async_output_busy_loop,
+                daemon=True,
+                name="WorkerAsyncOutputCopy")
+            self.async_output_copy_thread.start()
+
+        # Initialize device
         self.worker.init_device()
+
+        # Set process title and log prefix
+        self.setup_proc_title_and_log_prefix(
+            enable_ep=vllm_config.parallel_config.enable_expert_parallel)
+
+        # Load model
         self.worker.load_model()
 
     @staticmethod
@@ -393,6 +438,9 @@ class WorkerProc:
         # (reader, writer)
         reader, writer = context.Pipe(duplex=False)
 
+        # Create death pipe to detect parent process exit
+        death_reader, death_writer = context.Pipe(duplex=False)
+
         process_kwargs = {
             "vllm_config": vllm_config,
             "local_rank": local_rank,
@@ -400,6 +448,7 @@ class WorkerProc:
             "distributed_init_method": distributed_init_method,
             "input_shm_handle": input_shm_handle,
             "ready_pipe": (reader, writer),
+            "death_pipe": death_reader,
         }
         # Run EngineCore busy loop in background process.
         proc = context.Process(target=WorkerProc.worker_main,
@@ -409,7 +458,9 @@ class WorkerProc:
 
         proc.start()
         writer.close()
-        return UnreadyWorkerProcHandle(proc, rank, reader)
+        # Keep death_writer open in parent - when parent exits,
+        # death_reader in child will get EOFError
+        return UnreadyWorkerProcHandle(proc, rank, reader, death_writer)
 
     @staticmethod
     def wait_for_ready(
@@ -452,6 +503,7 @@ class WorkerProc:
         return cast(list[WorkerProcHandle], ready_proc_handles)
 
     def shutdown(self):
+        self.worker.shutdown()
         self.rpc_broadcast_mq = None
         self.worker_response_mq = None
         destroy_model_parallel()
@@ -480,6 +532,28 @@ class WorkerProc:
         worker = None
         # tuple[Connection, Connection]
         reader, ready_writer = kwargs.pop("ready_pipe")
+        death_pipe = kwargs.pop("death_pipe", None)
+        shutdown_event = threading.Event()
+        # Start death monitoring thread if death_pipe is provided
+        if death_pipe is not None:
+
+            def monitor_parent_death():
+                try:
+                    # This will block until parent process exits (pipe closes)
+                    death_pipe.recv()
+                except EOFError:
+                    # Parent process has exited, terminate this worker
+                    logger.info("Parent process exited, terminating worker")
+                    # Send signal to self to trigger clean shutdown
+                    shutdown_event.set()
+                except Exception as e:
+                    logger.warning("Death monitoring error: %s", e)
+
+            death_monitor = Thread(target=monitor_parent_death,
+                                   daemon=True,
+                                   name="WorkerDeathMonitor")
+            death_monitor.start()
+
         try:
             reader.close()
             worker = WorkerProc(*args, **kwargs)
@@ -499,7 +573,7 @@ class WorkerProc:
             ready_writer.close()
             ready_writer = None
 
-            worker.worker_busy_loop()
+            worker.worker_busy_loop(cancel=shutdown_event)
 
         except Exception:
             # NOTE: if an Exception arises in busy_loop, we send
@@ -509,6 +583,8 @@ class WorkerProc:
 
             if ready_writer is not None:
                 logger.exception("WorkerProc failed to start.")
+            elif shutdown_event.is_set():
+                logger.info("WorkerProc shutting down.")
             else:
                 logger.exception("WorkerProc failed.")
 
@@ -520,6 +596,8 @@ class WorkerProc:
         finally:
             if ready_writer is not None:
                 ready_writer.close()
+            if death_pipe is not None:
+                death_pipe.close()
             # Clean up once worker exits busy loop
             if worker is not None:
                 worker.shutdown()
@@ -528,11 +606,41 @@ class WorkerProc:
         SUCCESS = auto()
         FAILURE = auto()
 
-    def worker_busy_loop(self):
+    def enqueue_output(self, output: Any):
+        """Prepares output from the worker and enqueues it to the
+        worker_response_mq. If the output is an Exception, it is
+        converted to a FAILURE response.
+        """
+        if isinstance(output, AsyncModelRunnerOutput):
+            output = output.get_output()
+
+        if isinstance(output, Exception):
+            result = (WorkerProc.ResponseStatus.FAILURE, str(output))
+        else:
+            result = (WorkerProc.ResponseStatus.SUCCESS, output)
+        self.worker_response_mq.enqueue(result)
+
+    def handle_output(self, output: Any):
+        """Handles output from the worker. If async scheduling is enabled,
+        it is passed to the async_output_busy_loop thread. Otherwise, it is
+        enqueued directly to the worker_response_mq.
+        """
+        if self.use_async_scheduling:
+            self.async_output_queue.put(output)
+        else:
+            self.enqueue_output(output)
+
+    def async_output_busy_loop(self):
+        """Entrypoint for the thread which handles outputs asynchronously."""
+        while True:
+            output = self.async_output_queue.get()
+            self.enqueue_output(output)
+
+    def worker_busy_loop(self, cancel: Optional[threading.Event] = None):
         """Main busy loop for Multiprocessing Workers"""
         while True:
-            method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue()
-
+            method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue(
+                cancel=cancel)
             try:
                 if isinstance(method, str):
                     func = getattr(self.worker, method)
@@ -547,10 +655,29 @@ class WorkerProc:
                 # exception might not be serializable, so we convert it to
                 # string, only for logging purpose.
                 if output_rank is None or self.rank == output_rank:
-                    self.worker_response_mq.enqueue(
-                        (WorkerProc.ResponseStatus.FAILURE, str(e)))
+                    self.handle_output(e)
                 continue
 
             if output_rank is None or self.rank == output_rank:
-                self.worker_response_mq.enqueue(
-                    (WorkerProc.ResponseStatus.SUCCESS, output))
+                self.handle_output(output)
+
+    @staticmethod
+    def setup_proc_title_and_log_prefix(enable_ep: bool) -> None:
+        dp_size = get_dp_group().world_size
+        dp_rank = get_dp_group().rank_in_group
+        pp_size = get_pp_group().world_size
+        pp_rank = get_pp_group().rank_in_group
+        tp_size = get_tp_group().world_size
+        tp_rank = get_tp_group().rank_in_group
+        process_name = "Worker"
+        if dp_size > 1:
+            process_name += f"_DP{dp_rank}"
+        if pp_size > 1:
+            process_name += f"_PP{pp_rank}"
+        if tp_size > 1:
+            process_name += f"_TP{tp_rank}"
+        if enable_ep:
+            ep_rank = get_ep_group().rank_in_group
+            process_name += f"_EP{ep_rank}"
+        set_process_title(name=process_name)
+        decorate_logs(process_name)

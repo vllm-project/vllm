@@ -1,4 +1,4 @@
-ARG NIGHTLY_DATE="20250714"
+ARG NIGHTLY_DATE="20250730"
 ARG BASE_IMAGE="us-central1-docker.pkg.dev/tpu-pytorch-releases/docker/xla:nightly_3.12_tpuvm_$NIGHTLY_DATE"
 
 FROM $BASE_IMAGE
@@ -7,7 +7,8 @@ WORKDIR /workspace/vllm
 # Install some basic utilities
 RUN apt-get update && apt-get install -y \
     git \
-    ffmpeg libsm6 libxext6 libgl1
+    ffmpeg libsm6 libxext6 libgl1 && \
+    rm -rf /var/lib/apt/lists/*
 
 # Build vLLM.
 COPY . .
@@ -16,6 +17,9 @@ RUN --mount=type=bind,source=.git,target=.git \
     if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh; fi
 
 # Remove existing versions of dependencies
+# TODO: These packages will remain as dead weight in the Docker image layers.
+# We should find a way to build the image without uninstalling these.
+# Consider using a different base image.
 RUN pip uninstall -y torch torch_xla torchvision
 
 ENV VLLM_TARGET_DEVICE="tpu"
@@ -23,9 +27,10 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,source=.git,target=.git \
     python3 -m pip install \
         -r requirements/tpu.txt
-RUN python3 -m pip install -e .
+
+RUN --mount=type=cache,target=/root/.cache/pip python3 -m pip install -e .
 
 # install development dependencies (for testing)
-RUN python3 -m pip install -e tests/vllm_test_utils
+RUN --mount=type=cache,target=/root/.cache/pip python3 -m pip install -e tests/vllm_test_utils
 
 CMD ["/bin/bash"]

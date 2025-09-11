@@ -3,12 +3,12 @@
 import argparse
 import datetime
 import os
-import re
 from typing import Union
 
 import albumentations
 import numpy as np
 import rasterio
+import regex as re
 import torch
 from einops import rearrange
 from terratorch.datamodules import Sen1Floods11NonGeoDataModule
@@ -45,7 +45,11 @@ datamodule_config = {
 class PrithviMAE:
     def __init__(self, model):
         self.model = LLM(
-            model=model, skip_tokenizer_init=True, dtype="float16", enforce_eager=True
+            model=model,
+            skip_tokenizer_init=True,
+            dtype="float16",
+            enforce_eager=True,
+            model_impl="terratorch",
         )
 
     def run(self, input_data, location_coords):

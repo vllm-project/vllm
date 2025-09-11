@@ -4,6 +4,8 @@ import asyncio
 import os
 import threading
 import time
+import traceback
+from typing import Optional, cast
 
 import openai  # use the official client for correctness check
 import pytest
@@ -11,7 +13,7 @@ import pytest_asyncio
 
 from tests.utils import RemoteOpenAIServer
 from tests.v1.test_utils import check_request_balancing
-from vllm.platforms import Platform
+from vllm.platforms import current_platform
 
 MODEL_NAME = "ibm-research/PowerMoE-3b"
 
@@ -41,12 +43,15 @@ class MultinodeInternalLBServerManager:
         self.tp_size = tp_size
         self.api_server_count = api_server_count
         self.base_server_args = base_server_args
-        self.servers: list[tuple[RemoteOpenAIServer, list[str]]] = []
+        self.servers: list[Optional[tuple[RemoteOpenAIServer,
+                                          list[str]]]] = [None] * (dp_size //
+                                                                   dp_per_node)
         self.server_threads: list[threading.Thread] = []
 
     def __enter__(self) -> list[tuple[RemoteOpenAIServer, list[str]]]:
         """Start all server instances for multi-node internal LB mode."""
-        for rank in range(0, self.dp_size, self.dp_per_node):
+        for server_idx, rank in enumerate(
+                range(0, self.dp_size, self.dp_per_node)):
             # Create server args for this specific rank
             server_args = self.base_server_args.copy()
 
@@ -87,7 +92,7 @@ class MultinodeInternalLBServerManager:
                 ])
 
             # Use a thread to start each server to allow parallel initialization
-            def start_server(r: int, sargs: list[str]):
+            def start_server(sidx: int, r: int, sargs: list[str]):
                 gpus_per_node = self.tp_size * self.dp_per_node
                 try:
                     # Start the server
@@ -96,10 +101,12 @@ class MultinodeInternalLBServerManager:
                         sargs,
                         auto_port=False,
                         env_dict={
-                            "CUDA_VISIBLE_DEVICES":
+                            current_platform.device_control_env_var:
                             ",".join(
-                                str(Platform.device_id_to_physical_device_id(
-                                    i)) for i in range(r, r + gpus_per_node))
+                                str(
+                                    current_platform.
+                                    device_id_to_physical_device_id(i))
+                                for i in range(r, r + gpus_per_node))
                         })
                     server.__enter__()
                     if r == 0:
@@ -108,13 +115,14 @@ class MultinodeInternalLBServerManager:
                             f"{self.api_server_count} API servers")
                     else:
                         print(f"Headless node (rank {r}) started successfully")
-                    self.servers.append((server, sargs))
+                    self.servers[sidx] = (server, sargs)
                 except Exception as e:
                     print(f"Failed to start server rank {r}: {e}")
+                    traceback.print_exc()
                     raise
 
             thread = threading.Thread(target=start_server,
-                                      args=(rank, server_args))
+                                      args=(server_idx, rank, server_args))
             thread.start()
 
             self.server_threads.append(thread)
@@ -126,18 +134,20 @@ class MultinodeInternalLBServerManager:
         # Give servers additional time to fully initialize and coordinate
         time.sleep(3)
 
-        if len(self.servers) != self.dp_size // self.dp_per_node:
+        if not all(self.servers):
             raise Exception("Servers failed to start")
 
-        return self.servers
+        return cast(list[tuple[RemoteOpenAIServer, list[str]]], self.servers)
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Stop all server instances."""
         while self.servers:
-            try:
-                self.servers.pop()[0].__exit__(exc_type, exc_val, exc_tb)
-            except Exception as e:
-                print(f"Error stopping server: {e}")
+            if server := self.servers.pop():
+                try:
+                    server[0].__exit__(exc_type, exc_val, exc_tb)
+                except Exception as e:
+                    print(f"Error stopping server: {e}")
+                    traceback.print_exc()
 
 
 class APIOnlyServerManager:
@@ -155,7 +165,8 @@ class APIOnlyServerManager:
         self.tp_size = tp_size
         self.api_server_count = api_server_count
         self.base_server_args = base_server_args
-        self.servers: list[tuple[RemoteOpenAIServer, list[str]]] = []
+        self.servers: list[Optional[tuple[RemoteOpenAIServer,
+                                          list[str]]]] = [None] * 2
         self.server_threads: list[threading.Thread] = []
 
     def __enter__(self) -> list[tuple[RemoteOpenAIServer, list[str]]]:
@@ -207,7 +218,7 @@ class APIOnlyServerManager:
                 server.__enter__()
                 print(f"API-only server started successfully with "
                       f"{self.api_server_count} API servers")
-                self.servers.append((server, api_server_args))
+                self.servers[0] = (server, api_server_args)
             except Exception as e:
                 print(f"Failed to start API-only server: {e}")
                 raise
@@ -219,15 +230,17 @@ class APIOnlyServerManager:
                     engines_server_args,
                     auto_port=False,
                     env_dict={
-                        "CUDA_VISIBLE_DEVICES":
+                        current_platform.device_control_env_var:
                         ",".join(
-                            str(Platform.device_id_to_physical_device_id(i))
+                            str(
+                                current_platform.
+                                device_id_to_physical_device_id(i))
                             for i in range(self.dp_size * self.tp_size))
                     })
                 server.__enter__()
                 print(f"Headless engines server started successfully with "
                       f"{self.dp_size} engines")
-                self.servers.append((server, engines_server_args))
+                self.servers[1] = (server, engines_server_args)
             except Exception as e:
                 print(f"Failed to start headless engines server: {e}")
                 raise
@@ -249,18 +262,20 @@ class APIOnlyServerManager:
         # Give servers additional time to fully initialize and coordinate
         time.sleep(3)
 
-        if len(self.servers) != 2:
+        if not all(self.servers):
             raise Exception("Both servers failed to start")
 
-        return self.servers
+        return cast(list[tuple[RemoteOpenAIServer, list[str]]], self.servers)
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Stop both server instances."""
         while self.servers:
-            try:
-                self.servers.pop()[0].__exit__(exc_type, exc_val, exc_tb)
-            except Exception as e:
-                print(f"Error stopping server: {e}")
+            if server := self.servers.pop():
+                try:
+                    server[0].__exit__(exc_type, exc_val, exc_tb)
+                except Exception as e:
+                    print(f"Error stopping server: {e}")
+                    traceback.print_exc()
 
 
 @pytest.fixture(scope="module")
@@ -330,7 +345,7 @@ async def test_multinode_dp_completion(client: openai.AsyncOpenAI,
         completion = await client.completions.create(
             model=model_name,
             prompt="Hello, my name is",
-            max_tokens=10,
+            max_tokens=5,
             temperature=1.0)
 
         assert completion.id is not None
@@ -361,8 +376,11 @@ async def test_multinode_dp_completion(client: openai.AsyncOpenAI,
     await asyncio.sleep(0.5)
 
     # Send multiple requests - internal LB should distribute across DP ranks
-    num_requests = 50
-    all_tasks = [make_request() for _ in range(num_requests)]
+    num_requests = 200
+    all_tasks = []
+    for _ in range(num_requests):
+        all_tasks.append(asyncio.create_task(make_request()))
+        await asyncio.sleep(0.01)
 
     results = await asyncio.gather(*all_tasks)
     assert len(results) == num_requests
@@ -371,7 +389,10 @@ async def test_multinode_dp_completion(client: openai.AsyncOpenAI,
     await asyncio.sleep(0.5)
 
     # Second burst of requests
-    all_tasks = [make_request() for _ in range(num_requests)]
+    all_tasks = []
+    for _ in range(num_requests):
+        all_tasks.append(asyncio.create_task(make_request()))
+        await asyncio.sleep(0.01)
 
     results = await asyncio.gather(*all_tasks)
     assert len(results) == num_requests
@@ -449,8 +470,11 @@ async def test_multinode_dp_completion_streaming(client: openai.AsyncOpenAI,
 
     # Send multiple streaming requests - internal LB should distribute across
     # DP ranks
-    num_requests = 50
-    all_tasks = [make_streaming_request() for _ in range(num_requests)]
+    num_requests = 200
+    all_tasks = []
+    for _ in range(num_requests):
+        all_tasks.append(asyncio.create_task(make_streaming_request()))
+        await asyncio.sleep(0.01)
 
     results = await asyncio.gather(*all_tasks)
     assert len(results) == num_requests
@@ -459,7 +483,10 @@ async def test_multinode_dp_completion_streaming(client: openai.AsyncOpenAI,
     await asyncio.sleep(0.5)
 
     # Second burst of streaming requests
-    all_tasks = [make_streaming_request() for _ in range(num_requests)]
+    all_tasks = []
+    for _ in range(num_requests):
+        all_tasks.append(asyncio.create_task(make_streaming_request()))
+        await asyncio.sleep(0.01)
 
     results = await asyncio.gather(*all_tasks)
     assert len(results) == num_requests
@@ -492,7 +519,7 @@ async def test_api_only_multinode_dp_completion(
         completion = await api_only_client.completions.create(
             model=model_name,
             prompt="Hello, my name is",
-            max_tokens=10,
+            max_tokens=5,
             temperature=1.0)
 
         assert completion.id is not None
@@ -522,8 +549,11 @@ async def test_api_only_multinode_dp_completion(
 
     # Send multiple requests - should be distributed across engines on
     # headless server
-    num_requests = 50
-    all_tasks = [make_request() for _ in range(num_requests)]
+    num_requests = 200
+    all_tasks = []
+    for _ in range(num_requests):
+        all_tasks.append(asyncio.create_task(make_request()))
+        await asyncio.sleep(0.01)
 
     results = await asyncio.gather(*all_tasks)
     assert len(results) == num_requests
@@ -532,13 +562,16 @@ async def test_api_only_multinode_dp_completion(
     await asyncio.sleep(0.5)
 
     # Second burst of requests
-    all_tasks = [make_request() for _ in range(num_requests)]
+    all_tasks = []
+    for _ in range(num_requests):
+        all_tasks.append(asyncio.create_task(make_request()))
+        await asyncio.sleep(0.01)
 
     results = await asyncio.gather(*all_tasks)
     assert len(results) == num_requests
     assert all(completion is not None for completion in results)
 
-    _, api_server_args = api_only_servers[0]
+    api_server, api_server_args = api_only_servers[0]
     api_server_count = (
         api_server_args.count('--api-server-count')
         and api_server_args[api_server_args.index('--api-server-count') + 1]
@@ -547,7 +580,6 @@ async def test_api_only_multinode_dp_completion(
           f"engines on headless server (API server count: {api_server_count})")
 
     # Check request balancing via Prometheus metrics
-    api_server = api_only_servers[0][0]
     check_request_balancing(api_server, DP_SIZE)
 
 
@@ -610,8 +642,11 @@ async def test_api_only_multinode_dp_completion_streaming(
     await asyncio.sleep(0.5)
 
     # Send multiple streaming requests - should be distributed across engines
-    num_requests = 50
-    all_tasks = [make_streaming_request() for _ in range(num_requests)]
+    num_requests = 200
+    all_tasks = []
+    for _ in range(num_requests):
+        all_tasks.append(asyncio.create_task(make_streaming_request()))
+        await asyncio.sleep(0.01)
 
     results = await asyncio.gather(*all_tasks)
     assert len(results) == num_requests
@@ -620,7 +655,10 @@ async def test_api_only_multinode_dp_completion_streaming(
     await asyncio.sleep(0.5)
 
     # Second burst of streaming requests
-    all_tasks = [make_streaming_request() for _ in range(num_requests)]
+    all_tasks = []
+    for _ in range(num_requests):
+        all_tasks.append(asyncio.create_task(make_streaming_request()))
+        await asyncio.sleep(0.01)
 
     results = await asyncio.gather(*all_tasks)
     assert len(results) == num_requests

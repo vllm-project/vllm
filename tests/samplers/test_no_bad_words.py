@@ -14,9 +14,9 @@ from vllm import LLM, SamplingParams
 
 
 @pytest.fixture(autouse=True)
-def v1(run_with_both_engines):
-    """We can run both engines for this test."""
-    pass
+def v1(monkeypatch):
+    """Only run on vLLM v1."""
+    monkeypatch.setenv('VLLM_USE_V1', '1')
 
 
 def _generate(

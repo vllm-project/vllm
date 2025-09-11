@@ -34,7 +34,7 @@ def _run_test(
             set_default_torch_num_threads(1),
             vllm_runner(
                 model,
-                task="embed",
+                runner="pooling",
                 dtype=torch.float16,
                 enforce_eager=True,
                 skip_tokenizer_init=True,
@@ -46,7 +46,7 @@ def _run_test(
         vllm_model.encode(prompt)
 
 
-MODELS = ["christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM"]
+MODELS = ["mgazz/Prithvi-EO-2.0-300M-TL-Sen1Floods11"]
 
 
 @pytest.mark.core_model

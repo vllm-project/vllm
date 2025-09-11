@@ -105,7 +105,8 @@ class DeviceCommunicatorBase:
             # we initialize the all2all manager used in expert parallel.
             use_ep = config.parallel_config.data_parallel_size > 1
 
-        self.use_all2all = "ep" in unique_name and use_ep
+        self.is_ep_communicator = "ep" in unique_name
+        self.use_all2all = self.is_ep_communicator and use_ep
         self.all2all_manager: Optional[All2AllManagerBase] = None
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
@@ -219,7 +220,7 @@ class DeviceCommunicatorBase:
         return output_tensor
 
     def send(self, tensor: torch.Tensor, dst: Optional[int] = None) -> None:
-        """Sends a tensor to the destination rank in a non-blocking way"""
+        """Sends a tensor to the destination rank in a blocking way"""
         """NOTE: `dst` is the local rank of the destination rank."""
         if dst is None:
             dst = (self.rank_in_group + 1) % self.world_size
@@ -246,15 +247,18 @@ class DeviceCommunicatorBase:
         """
         Prepare the communication buffer for the model.
         """
-        if not self.use_all2all:
+        if not self.is_ep_communicator:
             return
 
         moe_modules = [
             module for module in model.modules()
-            if module.__class__.__name__ == "FusedMoE"
+            # TODO(bnell): Should use isinstance but can't.  Maybe search for
+            # presence of quant_method.init_prepare_finalize?
+            if (module.__class__.__name__ == "FusedMoE"
+                or module.__class__.__name__ == "SharedFusedMoE")
         ]
         for module in moe_modules:
-            module.quant_method.init_prepare_finalize(module.moe_config)
+            module.quant_method.init_prepare_finalize(module)
 
     def dispatch(
             self, hidden_states: torch.Tensor,

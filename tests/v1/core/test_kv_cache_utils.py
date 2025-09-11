@@ -1,22 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib
+from typing import Callable, Optional
 
 import pytest
 import torch
 
+import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
-from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
+from vllm.multimodal.inputs import (MultiModalFeatureSpec,
+                                    MultiModalKwargsItem, PlaceholderRange)
 from vllm.sampling_params import SamplingParams
-from vllm.utils import GiB_bytes, sha256, sha256_cbor_64bit
+from vllm.utils import GiB_bytes, sha256, sha256_cbor
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 # disable yapf here as it formats differently than isort such that both fail
 # yapf: disable
 from vllm.v1.core.kv_cache_utils import (
-    FreeKVCacheBlockQueue, KVCacheBlock, PrefixCachingMetrics,
+    BlockHash, FreeKVCacheBlockQueue, KVCacheBlock, PrefixCachingMetrics,
     estimate_max_model_len, generate_block_hash_extra_keys,
     get_kv_cache_config, get_max_concurrency_for_kv_cache_config,
-    hash_block_tokens, hash_request_tokens, init_none_hash,
+    get_request_block_hasher, hash_block_tokens, init_none_hash,
+    is_kv_cache_type_uniform, make_block_hash_with_group_id,
     unify_kv_cache_configs)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheTensor,
@@ -27,28 +31,35 @@ from vllm.v1.request import Request
 # yapf: enable
 
 
-def make_request(request_id,
-                 prompt_token_ids,
-                 mm_positions=None,
-                 mm_hashes=None,
-                 cache_salt=None):
-    if mm_positions is None:
-        multi_modal_inputs = None
-    else:
-        multi_modal_inputs = [MultiModalKwargs({})] * len(mm_positions)
+def make_request(
+    request_id: str,
+    prompt_token_ids: list[int],
+    block_size: int = 3,
+    hash_fn: Callable = hash,
+    mm_positions: Optional[list[PlaceholderRange]] = None,
+    mm_hashes: Optional[list[str]] = None,
+    cache_salt: Optional[str] = None,
+):
+    mm_features = []
+    if mm_positions is not None:
+        for j, position in enumerate(mm_positions):
+            identifier = mm_hashes[j] if mm_hashes else f"hash_{j}"
+            mm_feature = MultiModalFeatureSpec(
+                data=MultiModalKwargsItem.dummy("dummy_m"),
+                mm_position=position,
+                identifier=identifier,
+                modality="image")
+            mm_features.append(mm_feature)
 
-    return Request(
-        request_id=request_id,
-        prompt_token_ids=prompt_token_ids,
-        multi_modal_inputs=multi_modal_inputs,
-        multi_modal_hashes=mm_hashes,
-        multi_modal_placeholders=mm_positions,
-        sampling_params=SamplingParams(max_tokens=17),
-        pooling_params=None,
-        eos_token_id=100,
-        lora_request=None,
-        cache_salt=cache_salt,
-    )
+    return Request(request_id=request_id,
+                   prompt_token_ids=prompt_token_ids,
+                   mm_features=mm_features if mm_features else None,
+                   sampling_params=SamplingParams(max_tokens=17),
+                   pooling_params=None,
+                   eos_token_id=100,
+                   lora_request=None,
+                   cache_salt=cache_salt,
+                   block_hasher=get_request_block_hasher(block_size, hash_fn))
 
 
 def new_kv_cache_spec(block_size=16,
@@ -79,7 +90,7 @@ def new_sliding_window_spec(block_size=16,
                              sliding_window=sliding_window)
 
 
-@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor_64bit, hash])
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_none_hash(monkeypatch, hash_fn):
     import vllm.v1.core.kv_cache_utils
 
@@ -89,8 +100,8 @@ def test_none_hash(monkeypatch, hash_fn):
         reloaded_kv_cache_utils = importlib.reload(vllm.v1.core.kv_cache_utils)
         reloaded_kv_cache_utils.init_none_hash(hash_fn)
         assert reloaded_kv_cache_utils.NONE_HASH is not None
-        assert isinstance(reloaded_kv_cache_utils.NONE_HASH, int)
-        assert reloaded_kv_cache_utils.NONE_HASH != 0
+        assert isinstance(reloaded_kv_cache_utils.NONE_HASH, bytes)
+        assert reloaded_kv_cache_utils.NONE_HASH != b""
 
     # case 2: PYTHONHASHSEED is set, use the seed and hash_fn
     with monkeypatch.context() as m:
@@ -98,12 +109,11 @@ def test_none_hash(monkeypatch, hash_fn):
         reloaded_kv_cache_utils = importlib.reload(vllm.v1.core.kv_cache_utils)
         reloaded_kv_cache_utils.init_none_hash(hash_fn)
         assert reloaded_kv_cache_utils.NONE_HASH is not None
-        assert isinstance(reloaded_kv_cache_utils.NONE_HASH, int)
+        assert isinstance(reloaded_kv_cache_utils.NONE_HASH, bytes)
         assert hash_fn('python hash seed') == reloaded_kv_cache_utils.NONE_HASH
 
 
 def test_kv_cache_block():
-    import vllm.v1.core.kv_cache_utils
 
     # Test KVCacheBlock initialization
     block = KVCacheBlock(block_id=0)
@@ -112,14 +122,13 @@ def test_kv_cache_block():
     assert block.block_hash is None
 
     # Test reference count manipulation
-    block.incr_ref()
+    block.ref_cnt += 1
     assert block.ref_cnt == 1
-    block.decr_ref()
+    block.ref_cnt -= 1
     assert block.ref_cnt == 0
 
     # Test block hash setting and resetting
-    block_hash = vllm.v1.core.kv_cache_utils.BlockHash(hash_value=123,
-                                                       token_ids=(1, 2, 3))
+    block_hash = make_block_hash_with_group_id(BlockHash(b"abc"), 0)
     block.block_hash = block_hash
     assert block.block_hash == block_hash
 
@@ -238,7 +247,7 @@ def test_free_kv_cache_block_queue_append_n():
 
 def test_free_kv_cache_block_queue_popleft_n():
     blocks = [KVCacheBlock(block_id=i) for i in range(6)]
-    # Create a empty FreeKVCacheBlockQueue with these blocks
+    # Create an empty FreeKVCacheBlockQueue with these blocks
     queue = FreeKVCacheBlockQueue(
         [blocks[1], blocks[3], blocks[5], blocks[4], blocks[0], blocks[2]])
     assert queue.num_free_blocks == 6
@@ -316,7 +325,7 @@ def test_free_kv_cache_block_queue_get_all_free_blocks():
 
 def test_generate_block_hash_extra_keys():
     request = make_request(
-        request_id=0,
+        request_id="0",
         prompt_token_ids=[_ for _ in range(20)],
         mm_positions=[
             PlaceholderRange(offset=0, length=5),
@@ -348,7 +357,7 @@ def test_generate_block_hash_extra_keys():
 
 def test_generate_block_hash_extra_keys_no_mm_inputs():
     request = make_request(
-        request_id=0,
+        request_id="0",
         prompt_token_ids=[_ for _ in range(6)],
         mm_positions=None,
         mm_hashes=None,
@@ -361,7 +370,7 @@ def test_generate_block_hash_extra_keys_no_mm_inputs():
 
 def test_generate_block_hash_extra_keys_cache_salt():
     request = make_request(
-        request_id=0,
+        request_id="0",
         prompt_token_ids=[_ for _ in range(6)],
         mm_positions=None,
         mm_hashes=None,
@@ -382,7 +391,7 @@ def test_generate_block_hash_extra_keys_cache_salt():
 
     # works together with other extra keys
     request_mm = make_request(
-        request_id=0,
+        request_id="0",
         prompt_token_ids=[_ for _ in range(20)],
         mm_positions=[
             PlaceholderRange(offset=0, length=5),
@@ -398,30 +407,28 @@ def test_generate_block_hash_extra_keys_cache_salt():
     assert next_mm_idx == 1
 
 
-@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor_64bit, hash])
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_hash_block_tokens(hash_fn):
-    import vllm.v1.core.kv_cache_utils
     init_none_hash(hash_fn)
-    parent_block_hash = 123
+    parent_block_hash = BlockHash(b"123")
     curr_block_token_ids = (1, 2, 3)
     extra_keys = ("key1", "key2")
 
     block_hash = hash_block_tokens(hash_fn, parent_block_hash,
                                    curr_block_token_ids, extra_keys)
-    assert isinstance(block_hash, vllm.v1.core.kv_cache_utils.BlockHash)
-    assert block_hash.hash_value == hash_fn(
-        (parent_block_hash, curr_block_token_ids, extra_keys))
-    assert block_hash.token_ids == curr_block_token_ids
-    assert block_hash.extra_keys == extra_keys
+    expected = hash_fn((parent_block_hash, curr_block_token_ids, extra_keys))
+    assert block_hash == expected
 
 
-@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor_64bit, hash])
-def test_hash_request_tokens(hash_fn):
-    import vllm.v1.core.kv_cache_utils
-    init_none_hash(hash_fn)
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+def test_request_block_hasher(hash_fn):
+    kv_cache_utils.init_none_hash(hash_fn)
+
     request = make_request(
-        request_id=0,
+        request_id="0",
         prompt_token_ids=[_ for _ in range(6)],
+        block_size=3,
+        hash_fn=hash_fn,
         mm_positions=[
             PlaceholderRange(offset=0, length=3),
             PlaceholderRange(offset=3, length=3),
@@ -429,29 +436,23 @@ def test_hash_request_tokens(hash_fn):
         mm_hashes=["hash1", "hash2"],
     )
 
-    block_size = 3
-    block_hashes = hash_request_tokens(hash_fn, block_size, request)
-
+    block_hashes = request.block_hashes
     assert len(block_hashes) == 2
-    assert isinstance(block_hashes[0], vllm.v1.core.kv_cache_utils.BlockHash)
-    assert isinstance(block_hashes[1], vllm.v1.core.kv_cache_utils.BlockHash)
-
-    # Check the first block
-    assert block_hashes[0].token_ids == (0, 1, 2)
-    assert block_hashes[0].extra_keys == ("hash1", )
-
-    # Check the second block
-    assert block_hashes[1].token_ids == (3, 4, 5)
-    assert block_hashes[1].extra_keys == ("hash2", )
+    assert block_hashes[0] == hash_fn(
+        (kv_cache_utils.NONE_HASH, (0, 1, 2), ("hash1", )))
+    assert block_hashes[1] == hash_fn(
+        (block_hashes[0], (3, 4, 5), ("hash2", )))
 
 
-@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor_64bit, hash])
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_hash_tokens_different_mm_input(hash_fn):
     init_none_hash(hash_fn)
 
     request1 = make_request(
-        request_id=0,
+        request_id="0",
         prompt_token_ids=[_ for _ in range(6)],
+        block_size=3,
+        hash_fn=hash_fn,
         mm_positions=[
             PlaceholderRange(offset=0, length=3),
             PlaceholderRange(offset=3, length=3),
@@ -459,7 +460,7 @@ def test_hash_tokens_different_mm_input(hash_fn):
         mm_hashes=["hash1", "hash2"],
     )
     request2 = make_request(
-        request_id=1,
+        request_id="1",
         prompt_token_ids=[_ for _ in range(6)],
         mm_positions=[
             PlaceholderRange(offset=0, length=3),
@@ -467,32 +468,31 @@ def test_hash_tokens_different_mm_input(hash_fn):
         ],
         mm_hashes=["hash3", "hash2"],
     )
-    block_size = 3
-    block_hashes1 = hash_request_tokens(hash_fn, block_size, request1)
-    block_hashes2 = hash_request_tokens(hash_fn, block_size, request2)
+    block_hashes1 = request1.block_hashes
+    block_hashes2 = request2.block_hashes
     assert block_hashes1[0] != block_hashes2[0]
     assert block_hashes1[1] != block_hashes2[1]
 
 
-@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor_64bit, hash])
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_hash_request_tokens_no_mm_inputs(hash_fn):
-    init_none_hash(hash_fn)
+    kv_cache_utils.init_none_hash(hash_fn)
 
     request = make_request(
-        request_id=0,
+        request_id="0",
         prompt_token_ids=[_ for _ in range(6)],
+        block_size=3,
+        hash_fn=hash_fn,
         mm_positions=None,
         mm_hashes=None,
     )
 
-    block_size = 3
-    block_hashes = hash_request_tokens(hash_fn, block_size, request)
+    block_hashes = request.block_hashes
 
     assert len(block_hashes) == 2
-    assert block_hashes[0].token_ids == (0, 1, 2)
-    assert block_hashes[0].extra_keys is None
-    assert block_hashes[1].token_ids == (3, 4, 5)
-    assert block_hashes[1].extra_keys is None
+    assert block_hashes[0] == hash_fn(
+        (kv_cache_utils.NONE_HASH, (0, 1, 2), None))
+    assert block_hashes[1] == hash_fn((block_hashes[0], (3, 4, 5), None))
 
 
 def test_metrics():
@@ -590,8 +590,14 @@ def test_unify_kv_cache_configs():
     ]
 
     unify_kv_cache_configs(need_sort_kv_cache_config)
-    assert need_sort_kv_cache_config[0].num_blocks == 10
-    assert need_sort_kv_cache_config[1].num_blocks == 10
+    sorted_kv_cache_groups = [
+        KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
+        KVCacheGroupSpec(["layer2"], new_kv_cache_spec(num_kv_heads=4)),
+    ]
+    assert (
+        need_sort_kv_cache_config[0].kv_cache_groups == sorted_kv_cache_groups)
+    assert (
+        need_sort_kv_cache_config[1].kv_cache_groups == sorted_kv_cache_groups)
 
     diff_kv_cache_config = [
         KVCacheConfig(
@@ -685,6 +691,38 @@ def test_merge_kv_cache_spec():
     assert merged_layer_spec.sliding_window == 1
 
 
+def test_is_kv_cache_type_uniform():
+    kv_cache_spec = {
+        "layer_1": new_kv_cache_spec(num_kv_heads=32),
+        "layer_2": new_kv_cache_spec(num_kv_heads=32),
+    }
+    assert is_kv_cache_type_uniform(kv_cache_spec)
+
+    kv_cache_spec = {
+        "layer_1": new_kv_cache_spec(num_kv_heads=32),
+        "layer_2": new_kv_cache_spec(num_kv_heads=32, sliding_window=1),
+    }
+    assert is_kv_cache_type_uniform(kv_cache_spec)
+
+    kv_cache_spec = {
+        "layer_1": new_kv_cache_spec(num_kv_heads=32),
+        "layer_2": new_sliding_window_spec(num_kv_heads=32, sliding_window=1),
+    }
+    assert not is_kv_cache_type_uniform(kv_cache_spec)
+
+    kv_cache_spec = {
+        "layer_1": new_sliding_window_spec(num_kv_heads=32, sliding_window=1),
+        "layer_2": new_sliding_window_spec(num_kv_heads=32, sliding_window=1),
+    }
+    assert is_kv_cache_type_uniform(kv_cache_spec)
+
+    kv_cache_spec = {
+        "layer_1": new_sliding_window_spec(num_kv_heads=32, sliding_window=1),
+        "layer_2": new_sliding_window_spec(num_kv_heads=32, sliding_window=2),
+    }
+    assert not is_kv_cache_type_uniform(kv_cache_spec)
+
+
 @pytest.mark.parametrize(
     ("model_id", "max_model_len", "want_estimated_max_len"), [
         ("Qwen/Qwen1.5-7B", 16385, 16384),
@@ -695,11 +733,7 @@ def test_estimate_max_model_len(model_id, max_model_len,
     # Create a VllmConfig
     model_config = ModelConfig(
         model_id,
-        task="generate",
-        tokenizer=model_id,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        seed=0,
+        runner="generate",
         dtype="float16",
         max_model_len=max_model_len,
     )
@@ -733,11 +767,7 @@ def test_get_max_concurrency_for_kv_cache_config():
     max_model_len = 16384
     model_config = ModelConfig(
         model_id,
-        task="generate",
-        tokenizer=model_id,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        seed=0,
+        runner="generate",
         dtype="float16",
         max_model_len=max_model_len,
     )
@@ -820,8 +850,9 @@ def test_allocate_with_lookahead():
     )
 
     request = make_request(
-        request_id=0,
+        request_id="0",
         prompt_token_ids=[],
+        block_size=block_size,
         mm_positions=None,
         mm_hashes=None,
     )

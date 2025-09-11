@@ -103,7 +103,8 @@ When tool_choice='required' is set, the model is guaranteed to generate one or m
 
 vLLM supports the `tool_choice='none'` option in the chat completion API. When this option is set, the model will not generate any tool calls and will respond with regular text content only, even if tools are defined in the request.
 
-However, when `tool_choice='none'` is specified, vLLM includes tool definitions from the prompt.
+!!! note
+    When tools are specified in the request, vLLM includes tool definitions in the prompt by default, regardless of the `tool_choice` setting. To exclude tool definitions when `tool_choice='none'`, use the `--exclude-tools-when-tool-choice-none` option.
 
 ## Automatic Function Calling
 
@@ -168,7 +169,7 @@ All Llama 3.1, 3.2 and 4 models should be supported.
 
 The tool calling that is supported is the [JSON-based tool calling](https://llama.meta.com/docs/model-cards-and-prompt-formats/llama3_1/#json-based-tool-calling). For [pythonic tool calling](https://github.com/meta-llama/llama-models/blob/main/models/llama3_2/text_prompt_format.md#zero-shot-function-calling) introduced by the Llama-3.2 models, see the `pythonic` tool parser below. As for Llama 4 models, it is recommended to use the `llama4_pythonic` tool parser.
 
-Other tool calling formats like the built in python tool calling or custom tool calling are not supported.
+Other tool calling formats like the built-in python tool calling or custom tool calling are not supported.
 
 Known issues:
 
@@ -283,6 +284,14 @@ Supported models:
 
 Flags: `--tool-call-parser deepseek_v3 --chat-template {see_above}`
 
+### DeepSeek-V3.1 Models (`deepseek_v31`)
+
+Supported models:
+
+* `deepseek-ai/DeepSeek-V3.1` (use with <gh-file:examples/tool_chat_template_deepseekv31.jinja>)
+
+Flags: `--tool-call-parser deepseek_v31 --chat-template {see_above}`
+
 ### Kimi-K2 Models (`kimi_k2`)
 
 Supported models:
@@ -301,6 +310,15 @@ Flags:
 
 * For non-reasoning: `--tool-call-parser hunyuan_a13b`
 * For reasoning: `--tool-call-parser hunyuan_a13b --reasoning-parser hunyuan_a13b --enable_reasoning`
+
+### GLM-4.5 Models (`glm45`)
+
+Supported models:
+
+* `ZhipuAI/GLM-4.5`
+* `ZhipuAI/GLM-4.5-Air`
+
+Flags: `--tool-call-parser glm45`
 
 ### Models with Pythonic Tool Calls (`pythonic`)
 

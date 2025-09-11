@@ -3,7 +3,7 @@
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Optional, Tuple, Type
+from typing import List, Optional, Tuple, Type
 
 import torch
 
@@ -17,9 +17,7 @@ from vllm.attention.backends.mla.common import (MLACommonBackend,
 from vllm.attention.ops.flashmla import (flash_mla_with_kvcache,
                                          get_mla_metadata,
                                          is_flashmla_supported)
-
-if TYPE_CHECKING:
-    from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
+from vllm.platforms.cuda import CudaPlatform
 
 
 class FlashMLABackend(MLACommonBackend):
@@ -61,16 +59,6 @@ class FlashMLAMetadata(MLACommonMetadata):
             decode_metadata.decode_num_splits=\
                 self.decode_num_splits
         return decode_metadata
-
-    def advance_step(self,
-                     model_input: "ModelInputForGPUWithSamplingMetadata",
-                     sampled_token_ids: Optional[torch.Tensor],
-                     block_size: int,
-                     num_seqs: int,
-                     num_queries: int,
-                     turn_prefills_into_decodes: bool = False):
-        raise NotImplementedError(
-            "advance_step is not implemented for FlashMLA")
 
 
 class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
@@ -193,6 +181,16 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
 
         assert is_flashmla_supported(), \
             "FlashMLA is not supported on this device"
+
+        # disallow FlashMLA on NVIDIA Blackwell (SM 10.0+) GPUs
+        # context:
+        # https://github.com/deepseek-ai/FlashMLA/issues/83
+        # https://github.com/vllm-project/vllm/issues/24513
+        if CudaPlatform.has_device_capability(100):
+            raise NotImplementedError(
+                "FlashMLA is temporarily disabled on Blackwell (SM 10.0). "
+                "Please use CUTLASS_MLA or TRITON_MLA instead. "
+                "Example: `export VLLM_ATTENTION_BACKEND=CUTLASS_MLA`")
 
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):

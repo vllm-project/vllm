@@ -82,6 +82,7 @@ class RequestFuncOutput:
     success: bool = False
     latency: float = 0.0
     output_tokens: int = 0
+    request_time: float = 0.0
     ttft: float = 0.0  # Time to first token
     itl: list[float] = field(
         default_factory=list)  # list of inter-token latencies
@@ -137,6 +138,7 @@ async def async_request_openai_completions(
 
     generated_text = ""
     st = time.perf_counter()
+    output.request_time = st
     most_recent_timestamp = st
     try:
         async with session.post(url=api_url, json=payload,
@@ -267,6 +269,7 @@ async def async_request_openai_chat_completions(
     generated_text = ""
     ttft = 0.0
     st = time.perf_counter()
+    output.request_time = st
     most_recent_timestamp = st
     try:
         async with session.post(url=api_url, json=payload,
@@ -389,6 +392,7 @@ async def async_request_openai_audio(
         generated_text = ""
         ttft = 0.0
         st = time.perf_counter()
+        output.request_time = st
         most_recent_timestamp = st
         try:
             async with session.post(url=api_url,
@@ -468,6 +472,7 @@ async def async_request_openai_embeddings(
 
     output = RequestFuncOutput()
     st = time.perf_counter()
+    output.request_time = st
     try:
         async with session.post(
             url=api_url,

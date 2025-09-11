@@ -6,7 +6,6 @@ import time
 from abc import ABC, abstractmethod
 from typing import Callable, Optional, Union
 
-import numpy as np
 import prometheus_client
 
 from vllm.config import SupportsMetricsInfo, VllmConfig
@@ -67,18 +66,20 @@ class LoggingStatLogger(StatLoggerBase):
         self.last_log_time = now
 
         # Tracked stats over current local logging interval.
-        self.num_prompt_tokens: list[int] = []
-        self.num_generation_tokens: list[int] = []
+        self.num_prompt_tokens: int = 0
+        self.num_generation_tokens: int = 0
 
     def _track_iteration_stats(self, iteration_stats: IterationStats):
         # Save tracked stats for token counters.
-        self.num_prompt_tokens.append(iteration_stats.num_prompt_tokens)
-        self.num_generation_tokens.append(
-            iteration_stats.num_generation_tokens)
+        self.num_prompt_tokens += iteration_stats.num_prompt_tokens
+        self.num_generation_tokens += iteration_stats.num_generation_tokens
 
-    def _get_throughput(self, tracked_stats: list[int], now: float) -> float:
+    def _get_throughput(self, tracked_stats: int, now: float) -> float:
         # Compute summary metrics for tracked stats
-        return float(np.sum(tracked_stats) / (now - self.last_log_time))
+        delta_time = now - self.last_log_time
+        if delta_time <= 0.0:
+            return 0.0
+        return float(tracked_stats / delta_time)
 
     def record(self,
                scheduler_stats: Optional[SchedulerStats],
@@ -376,9 +377,13 @@ class PrometheusStatLogger(StatLoggerBase):
         self.histogram_time_to_first_token = make_per_engine(
             histogram_time_to_first_token, engine_indexes, model_name)
 
+        # Deprecated in 0.11 - Renamed as vllm:inter_token_latency_seconds
+        # TODO: in 0.12, only enable if show_hidden_metrics=True
         histogram_time_per_output_token = self._histogram_cls(
             name="vllm:time_per_output_token_seconds",
-            documentation="Histogram of time per output token in seconds.",
+            documentation=(
+                "Histogram of time per output token in seconds."
+                "DEPRECATED: Use vllm:inter_token_latency_seconds instead."),
             buckets=[
                 0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75,
                 1.0, 2.5, 5.0, 7.5, 10.0, 20.0, 40.0, 80.0
@@ -386,6 +391,17 @@ class PrometheusStatLogger(StatLoggerBase):
             labelnames=labelnames)
         self.histogram_time_per_output_token = make_per_engine(
             histogram_time_per_output_token, engine_indexes, model_name)
+
+        histogram_inter_token_latency = self._histogram_cls(
+            name="vllm:inter_token_latency_seconds",
+            documentation="Histogram of inter-token latency in seconds.",
+            buckets=[
+                0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75,
+                1.0, 2.5, 5.0, 7.5, 10.0, 20.0, 40.0, 80.0
+            ],
+            labelnames=labelnames)
+        self.histogram_inter_token_latency = make_per_engine(
+            histogram_inter_token_latency, engine_indexes, model_name)
 
         request_latency_buckets = [
             0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0,
@@ -536,8 +552,9 @@ class PrometheusStatLogger(StatLoggerBase):
             self.histogram_n_request[engine_idx].observe(n_param)
         for ttft in iteration_stats.time_to_first_tokens_iter:
             self.histogram_time_to_first_token[engine_idx].observe(ttft)
-        for tpot in iteration_stats.time_per_output_tokens_iter:
-            self.histogram_time_per_output_token[engine_idx].observe(tpot)
+        for itl in iteration_stats.inter_token_latencies_iter:
+            self.histogram_inter_token_latency[engine_idx].observe(itl)
+            self.histogram_time_per_output_token[engine_idx].observe(itl)
 
         for finished_request in iteration_stats.finished_requests:
             self.counter_request_success[
@@ -634,15 +651,21 @@ class StatLoggerManager:
         vllm_config: VllmConfig,
         engine_idxs: Optional[list[int]] = None,
         custom_stat_loggers: Optional[list[StatLoggerFactory]] = None,
+        enable_default_loggers: bool = True,
+        client_count: int = 1,
     ):
         self.engine_idxs = engine_idxs if engine_idxs else [0]
 
-        factories: list[StatLoggerFactory]
+        factories: list[StatLoggerFactory] = []
         if custom_stat_loggers is not None:
-            factories = custom_stat_loggers
-        else:
-            factories = []
-            if logger.isEnabledFor(logging.INFO):
+            factories.extend(custom_stat_loggers)
+
+        if enable_default_loggers and logger.isEnabledFor(logging.INFO):
+            if client_count > 1:
+                logger.warning(
+                    "AsyncLLM created with api_server_count more than 1; "
+                    "disabling stats logging to avoid incomplete stats.")
+            else:
                 factories.append(LoggingStatLogger)
 
         # engine_idx: StatLogger
