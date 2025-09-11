@@ -116,7 +116,7 @@ class MQLLMEngineClient(EngineClient):
         self.output_socket: Socket = self.context.socket(zmq.constants.PULL)
         self.output_socket.connect(f"{ipc_path}{IPC_OUTPUT_EXT}")
 
-        # IPC path for hacking heartbeats.
+        # IPC path for acking heartbeats.
         self.heartbeat_socket: Socket = self.context.socket(zmq.constants.PULL)
         self.heartbeat_socket.connect(f"{ipc_path}{IPC_HEALTH_EXT}")
 
