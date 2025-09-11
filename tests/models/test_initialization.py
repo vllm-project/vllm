@@ -63,8 +63,9 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
                        _initialize_kv_caches_v1), monkeypatch.context() as m):
         if model_info.v0_only:
             m.setenv("VLLM_USE_V1", "0")
-        if model_arch == "Phi4FlashForCausalLM":
-            # Phi4FlashForCausalLM only supports DIFFERENTIAL_FLASH_ATTN backend
+        if model_arch in ("Phi4FlashForCausalLM", "MotifForCausalLM"):
+            # Phi4FlashForCausalLM and MotifForCausalLM
+            # only supports DIFFERENTIAL_FLASH_ATTN backend
             m.setenv("VLLM_ATTENTION_BACKEND", "DIFFERENTIAL_FLASH_ATTN")
         if model_arch == "GptOssForCausalLM":
             # FIXME: A hack to bypass FA3 assertion because our CI's L4 GPU
