@@ -6,9 +6,9 @@ import pytest
 import torch
 
 from tests.conftest import HfRunner
+from tests.models.utils import LASTPoolingRerankModelInfo, RerankModelInfo
 from tests.utils import multi_gpu_test
 
-from ...utils import LASTPoolingRerankModelInfo, RerankModelInfo
 from .mteb_utils import mteb_test_rerank_models
 
 qwen3_reranker_hf_overrides = {

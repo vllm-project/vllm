@@ -7,9 +7,9 @@ import pytest
 import torch
 
 from tests.conftest import HfRunner
-
-from ...utils import LASTPoolingRerankModelInfo, RerankModelInfo
-from .mteb_utils import VllmMtebEncoder, mteb_test_rerank_models
+from tests.models.language.pooling_mteb_test.mteb_utils import (
+    VllmMtebEncoder, mteb_test_rerank_models)
+from tests.models.utils import LASTPoolingRerankModelInfo, RerankModelInfo
 
 RERANK_MODELS = [
     LASTPoolingRerankModelInfo("BAAI/bge-reranker-v2-gemma",
