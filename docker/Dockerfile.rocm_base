@@ -75,9 +75,7 @@ ARG TRITON_REPO
 RUN git clone ${TRITON_REPO}
 RUN cd triton \
     && git checkout ${TRITON_BRANCH} \
-    && if [ ! -f setup.py ]; then cd python; fi \
-    && python3 setup.py bdist_wheel --dist-dir=triton/dist \
-    && mkdir -p /app/install && cp triton/dist/triton*.whl /app/install
+    && mkdir -p /app/install
 RUN if [ -d triton/python/triton_kernels ]; then \
     pip install build \
     && cd triton/python/triton_kernels \
