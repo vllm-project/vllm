@@ -533,9 +533,10 @@ class FusedMoEModularKernel(torch.nn.Module):
     """
     
     class SharedBuffers:
-        fused_out = SharedResizableBuffer()
-        workspace13 = SharedResizableBuffer()
-        workspace2 = SharedResizableBuffer()
+        def __init__(self) -> None:
+            self.fused_out = SharedResizableBuffer()
+            self.workspace13 = SharedResizableBuffer()
+            self.workspace2 = SharedResizableBuffer()
 
     shared_buffers: list[SharedBuffers] = [SharedBuffers(), SharedBuffers()]
 
