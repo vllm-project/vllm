@@ -611,7 +611,8 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
                                             trust_remote_code=True,
                                             speculative_model="yuhuili/EAGLE3-LLaMA3.1-Instruct-8B", # noqa: E501
                                             tokenizer="meta-llama/Llama-3.1-8B-Instruct",
-                                            original_num_layers=True),
+                                            original_num_layers=True,
+                                            max_model_len=10240),
     "LlamaForCausalLMEagle3": _HfExamplesInfo("Qwen/Qwen3-8B",  # noqa: E501
                                             trust_remote_code=True,
                                             speculative_model="AngelSlim/Qwen3-8B_eagle3",   # noqa: E501
