@@ -82,10 +82,10 @@ def triton_kernel_fused_experts(
 
     # type check, uint8 means mxfp4
     assert hidden_states.dtype == torch.bfloat16
-    assert (quant_config.w1_zp is None
-            or quant_config.w1_zp.dtype == torch.float32)
-    assert (quant_config.w2_zp is None
-            or quant_config.w2_zp.dtype == torch.float32)
+    assert (quant_config.w1_bias is None
+            or quant_config.w1_bias.dtype == torch.float32)
+    assert (quant_config.w2_bias is None
+            or quant_config.w2_bias.dtype == torch.float32)
 
     # Shape check, only check non-mxfp4
     assert hidden_states.shape[-1] == w1.shape[-2]
@@ -104,7 +104,7 @@ def triton_kernel_fused_experts(
     intermediate_cache1 = matmul_ogs(
         hidden_states,
         w1,
-        quant_config.w1_zp,
+        quant_config.w1_bias,
         routing_data,
         gather_indx=gather_indx,
         precision_config=quant_config.w1_precision,
@@ -114,7 +114,7 @@ def triton_kernel_fused_experts(
     intermediate_cache3 = matmul_ogs(
         intermediate_cache1,
         w2,
-        quant_config.w2_zp,
+        quant_config.w2_bias,
         routing_data,
         scatter_indx=scatter_indx,
         precision_config=quant_config.w2_precision,
