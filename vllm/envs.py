@@ -166,7 +166,7 @@ if TYPE_CHECKING:
     VLLM_HAS_FLASHINFER_CUBIN: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
-    VLLM_ALLREDUCE_USE_SYMM_MEM: bool = False
+    VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_TUNED_CONFIG_FOLDER: Optional[str] = None
     VLLM_DISABLE_PAD_FOR_CUDAGRAPH: bool = False
     VLLM_GPT_OSS_USE_CONTAINER_TOOL: bool = False
@@ -1203,7 +1203,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Whether to use pytorch symmetric memory for allreduce
     "VLLM_ALLREDUCE_USE_SYMM_MEM":
-    lambda: bool(int(os.getenv("VLLM_ALLREDUCE_USE_SYMM_MEM", "0"))),
+    lambda: bool(int(os.getenv("VLLM_ALLREDUCE_USE_SYMM_MEM", "1"))),
 
     # Allows vllm to find tuned config under customized folder
     "VLLM_TUNED_CONFIG_FOLDER":
