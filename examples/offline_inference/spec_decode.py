@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import ast
+
 from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
@@ -103,7 +105,10 @@ def main():
 
     spec_token_tree_str = None
     if args.spec_token_tree is not None:
-        spec_token_tree_str = args.spec_token_tree
+        spec_token_tree = ast.literal_eval(args.spec_token_tree)
+        assert args.num_spec_tokens == len(spec_token_tree), f'expected `len(spec_token_tree) == num_spec_tokens` but got {len(spec_token_tree)=} and {args.num_spec_tokens=}'
+        spec_token_tree_str = str(sorted(spec_token_tree, key=lambda t: (len(t), t)))
+        print(spec_token_tree_str)
 
     # vanilla inference
     if args.method == "None":
