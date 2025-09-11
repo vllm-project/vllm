@@ -674,27 +674,35 @@ class EagleProposer:
             else:
                 self.model.lm_head = target_language_model.lm_head
 
-        # optionally prune the draft model vocabulary
+        # Prune the draft model vocabulary
         if self.vllm_config.speculative_config.draft_vocab_frequency_path is not None:
-            # load the draft model vocabulary
-            logger.info(f"Loading pruned draft model vocabulary from {self.vllm_config.speculative_config.draft_vocab_frequency_path}")
-            vocab_freq = load_vocab_freq(
-                self.vllm_config.speculative_config.draft_vocab_frequency_path)
 
-            # prune the draft model vocabulary
-            self.pruned_vocab = prune_draft_vocab(
-                vocab_freq,
-                self.vllm_config.speculative_config.draft_vocab_frequency_prune_ratio)
+            vocab_freq_path = self.vllm_config.speculative_config.draft_vocab_frequency_path
+            prune_ratio = self.vllm_config.speculative_config.draft_vocab_frequency_prune_ratio
+
+            if prune_ratio is None:
+                raise ValueError(
+                    "When `draft_vocab_frequency_path` is set, "
+                    "`draft_vocab_frequency_prune_ratio` cannot be None."
+                )
+
+            logger.info(f"Loading draft model vocabulary from {vocab_freq_path}")
+            vocab_freq = load_vocab_freq(vocab_freq_path)
+
+            logger.info(f"Pruning draft vocabulary with ratio {prune_ratio}")
+            self.pruned_vocab = prune_draft_vocab(vocab_freq, prune_ratio)
             self.pruned_vocab = self.pruned_vocab.to(self.model.lm_head.weight.device)
 
-            # create a new lm_head with the pruned vocab
+            # Update lm_head weights with pruned vocabulary
             if hasattr(self.model, "lm_head"):
                 self.model.lm_head.weight.data = self.model.lm_head.weight.data[self.pruned_vocab]
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
+                logger.info("Updated lm_head weights with pruned vocabulary.")
             elif hasattr(self.model.model, "embed_tokens"):
-                print('Assuming lm_head is tied to embed_tokens.')
-
+                logger.info("Assuming lm_head is tied to embed_tokens; skipping direct weight update.")
+            else:
+                logger.warning("No lm_head or embed_tokens found; pruned vocabulary not applied.")
 
     @torch.inference_mode()
     def dummy_run(
@@ -737,42 +745,64 @@ class EagleProposer:
         ) == 1, "All eagle layers should belong to the same kv cache group"
 
 
-def load_vocab_freq(vocab_frequency_path: Optional[str]) -> torch.Tensor:
+def load_vocab_freq(vocab_frequency_path: str) -> torch.Tensor:
+    """
+    Load vocabulary frequencies from a Hugging Face dataset file.
 
-    # parse the path
+    Args:
+        vocab_frequency_path: HF path in the form 'username/repo/file.pt'
+
+    Returns:
+        Tensor of integer vocabulary frequencies.
+    """
+    if not vocab_frequency_path:
+        raise ValueError("`vocab_frequency_path` must be provided.")
+
+    # Parse HF path
     parts = vocab_frequency_path.split("/")
     if len(parts) < 3:
         raise ValueError("HF path must be at least 'username/repo/file.pt'")
     repo_id = "/".join(parts[:2])
     file_path_in_repo = "/".join(parts[2:])
 
-    # download the file
-    vocab_frequency_path = hf_hub_download(repo_id=repo_id, filename=file_path_in_repo, repo_type="dataset")
+    # Download the file
+    local_path = hf_hub_download(repo_id=repo_id, filename=file_path_in_repo, repo_type="dataset")
 
-    # make it a tensor of integers
-    vocab_freq = torch.load(vocab_frequency_path, weights_only=True)
-    vocab_freq = vocab_freq.to(torch.int64)
+    # Load as a tensor of integers
+    vocab_freq = torch.load(local_path, weights_only=True).to(torch.int64)
     return vocab_freq
 
-def prune_draft_vocab(vocab_freq, prune_ratio: float):
-    # use all of the tokens in the vocab_freq as our new pruned vocab
-    if prune_ratio is None:
-        pruned_vocab = torch.arange(len(vocab_freq))
-        return pruned_vocab
 
+def prune_draft_vocab(vocab_freq: torch.Tensor, prune_ratio: float) -> torch.Tensor:
+    """
+    Prune a draft vocabulary based on cumulative frequency mass.
+
+    Args:
+        vocab_freq: Tensor of vocabulary frequencies.
+        prune_ratio: Fraction of cumulative mass to retain (0 < prune_ratio < 1).
+
+    Returns:
+        Tensor of indices representing the pruned vocabulary.
+    """
+    if not isinstance(vocab_freq, torch.Tensor):
+        raise TypeError("`vocab_freq` must be a torch.Tensor.")
     if not (0 < prune_ratio < 1):
-        raise ValueError(f'Expected draft_vocab_frequency_prune_ratio to be in (0, 1) but got {prune_ratio}')
+        raise ValueError(f"`prune_ratio` must be in (0, 1), got {prune_ratio}")
 
-    # Keep tokens until relative cumulative frequency mass reaches threshold for the draft model vocabulary
+    # Sort frequencies descending
     sorted_freq, sorted_indices = torch.sort(vocab_freq, descending=True)
+
+    # Compute relative cumulative mass
     cumulative_mass = torch.cumsum(sorted_freq, dim=0)
     relative_cumulative_mass = cumulative_mass / cumulative_mass[-1]
-    cutoff = relative_cumulative_mass < prune_ratio
-    cutoff_idx = cutoff.sum().item() + 1
-    assert isinstance(cutoff_idx, int)
-    pruned_vocab = sorted_indices[:cutoff_idx]
 
+    # Determine cutoff index
+    cutoff_mask = relative_cumulative_mass < prune_ratio
+    cutoff_idx = int(cutoff_mask.sum().item()) + 1
+
+    pruned_vocab = sorted_indices[:cutoff_idx]
     return pruned_vocab
+
 
 # NOTE(woosuk): Currently, the below code is not used and we always use argmax
 # to sample the draft tokens. We will use this after we find a way to manage
