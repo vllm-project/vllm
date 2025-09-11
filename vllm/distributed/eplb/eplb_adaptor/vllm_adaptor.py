@@ -20,6 +20,7 @@ models in vLLM framework. Key features include:
 
 Supported Model Architectures:
 - DeepSeek V3 (with quantization support)
+- Kimi K2 (with quantization support)
 - Qwen3-MoE
 - Standard MoE models with configurable expert layers
 
