@@ -7,6 +7,7 @@ from typing import Literal, Optional, TypedDict, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from einops import rearrange
 from torch.nn import LayerNorm
 from transformers.modeling_utils import PreTrainedModel
 from transformers.models.qwen2_vl import Qwen2VLProcessor
@@ -106,19 +107,12 @@ class DotsOCRProcessingInfo(Qwen2_5_VLProcessingInfo):
 
     def get_hf_processor(
         self,
-        *,
-        min_pixels: Optional[int] = None,
-        max_pixels: Optional[int] = None,
-        size: Optional[dict[str, int]] = None,
         **kwargs: object,
     ) -> Qwen2VLProcessor:
         self.get_tokenizer(
         ).image_token = "<|imgpad|>"  # Ensure image token is set
         processor = self.ctx.get_hf_processor(
             Qwen2VLProcessor,
-            image_processor=self.get_image_processor(min_pixels=min_pixels,
-                                                     max_pixels=max_pixels,
-                                                     size=size),
             **kwargs,
         )
         processor.image_token = "<|imgpad|>"
@@ -238,24 +232,29 @@ class VisionSdpaAttention(nn.Module):
         k = apply_rotary_pos_emb_vision(k.unsqueeze(0),
                                         rotary_pos_emb).squeeze(0)
 
-        attention_mask = torch.zeros([1, seq_length, seq_length],
-                                     device=q.device,
-                                     dtype=torch.bool)
+        # Rearrange to batch-first format for processing
+        q, k, v = (rearrange(x, "s h d -> 1 s h d") for x in (q, k, v))
+
+        # Execute attention entry by entry for speed & less VRAM
+        outputs = []
         for i in range(1, len(cu_seqlens)):
-            attention_mask[..., cu_seqlens[i - 1]:cu_seqlens[i],
-                           cu_seqlens[i - 1]:cu_seqlens[i]] = True
+            start_idx = cu_seqlens[i - 1]
+            end_idx = cu_seqlens[i]
+            q_i = q[:, start_idx:end_idx]
+            k_i = k[:, start_idx:end_idx]
+            v_i = v[:, start_idx:end_idx]
+            q_i, k_i, v_i = (rearrange(x, "b s h d -> b h s d")
+                             for x in [q_i, k_i, v_i])
+            output_i = F.scaled_dot_product_attention(q_i,
+                                                      k_i,
+                                                      v_i,
+                                                      dropout_p=0.0)
+            output_i = rearrange(output_i, "b h s d -> b s h d")
+            outputs.append(output_i)
+        attn_output = torch.cat(outputs, dim=1)
 
-        q = q.transpose(0, 1)
-        k = k.transpose(0, 1)
-        v = v.transpose(0, 1)
-
-        attn_output = F.scaled_dot_product_attention(q,
-                                                     k,
-                                                     v,
-                                                     attention_mask,
-                                                     dropout_p=0.0)
-        attn_output = attn_output.transpose(0, 1)
-        attn_output = attn_output.reshape(seq_length, -1)
+        # Convert back to sequence-first format and reshape
+        attn_output = rearrange(attn_output, "1 s h d -> s (h d)")
 
         attn_output = self.proj(attn_output)
         return attn_output
@@ -375,10 +374,8 @@ class DotsVisionTransformer(PreTrainedModel):
         self.rotary_pos_emb = VisionRotaryEmbedding(head_dim // 2)
 
         _num_hidden_layers = config.num_hidden_layers
-        self.blocks = nn.ModuleList([
-            DotsVisionBlock(config, config.attn_implementation)
-            for _ in range(_num_hidden_layers)
-        ])
+        self.blocks = nn.ModuleList(
+            [DotsVisionBlock(config) for _ in range(_num_hidden_layers)])
 
         if self.config.post_norm:
             self.post_trunk_norm = RMSNorm(config.embed_dim,
@@ -627,7 +624,7 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 pixel_values, grid_thw)[:, :self.config.hidden_size]
 
         # Split concatenated embeddings for each image item.
-        merge_size = self.visual.spatial_merge_size
+        merge_size = self.vision_tower.spatial_merge_size
         sizes = (torch.tensor(grid_thw_list, dtype=torch.long).prod(-1) //
                  (merge_size * merge_size)).tolist()
 
