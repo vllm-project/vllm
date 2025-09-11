@@ -1593,7 +1593,7 @@ class FusedMoE(CustomOp):
         else:
             return tensor_model_parallel_all_reduce(final_hidden_states)
 
-    def forward(
+    def forward_native(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
@@ -1626,6 +1626,13 @@ class FusedMoE(CustomOp):
                     hidden_states, router_logits, self.layer_name)
             return (shared_output[..., :og_hidden_states],
                     fused_output[..., :og_hidden_states])
+
+    def forward_cuda(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        return self.forward_native(hidden_states, router_logits)
 
     def forward_impl_chunked(
         self,
