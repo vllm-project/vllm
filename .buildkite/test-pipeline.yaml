@@ -642,6 +642,16 @@ steps:
   commands:
     - pytest -v -s models/language/pooling -m 'not core_model'
 
+- label: Language Models Test (MTEB)
+  timeout_in_minutes: 110
+  mirror_hardwares: [amdexperimental]
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/language/pooling_mteb_test
+  commands:
+    - pytest -v -s models/language/pooling_mteb_test
+
 - label: Multi-Modal Processor Test # 44min
   timeout_in_minutes: 60
   source_file_dependencies:
