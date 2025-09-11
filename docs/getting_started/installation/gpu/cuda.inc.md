@@ -165,14 +165,14 @@ There are scenarios where the PyTorch dependency cannot be easily installed with
 - Building vLLM with PyTorch nightly or a custom PyTorch build.
 - Building vLLM with aarch64 and CUDA (GH200), where the PyTorch wheels are not available on PyPI. Currently, only the PyTorch nightly has wheels for aarch64 with CUDA. You can run `uv pip install --index-url https://download.pytorch.org/whl/nightly/cu128 torch torchvision torchaudio` to [install PyTorch nightly](https://pytorch.org/get-started/locally/) and then build vLLM on top of it.
 
-To build vLLM using an existing PyTorch installation:
+To build vLLM using an existing PyTorch installation, it is recommended to use `uv`, because it has [a unique mechanism](https://docs.astral.sh/uv/concepts/projects/config/#disabling-build-isolation) for disabling build isolation for specific packages and vLLM leverages this mechanism to specify `torch` as the package to disable build isolation.
 
 ```bash
+# install PyTorch first, either from PyPI or from source
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
-python use_existing_torch.py
-uv pip install -r requirements/build.txt
-uv pip install --no-build-isolation -e .
+# pip install -e . does not work directly, only uv can do this
+uv pip install -e .
 ```
 
 ##### Use the local cutlass for compilation
