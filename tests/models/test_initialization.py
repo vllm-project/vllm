@@ -18,15 +18,23 @@ from .registry import (_TRANSFORMERS_BACKEND_MODELS, AUTO_EXAMPLE_MODELS,
                        HF_EXAMPLE_MODELS, HfExampleModels)
 from .utils import dummy_hf_overrides
 
+# This minimal list of model architectures is smaller than the total list of
+# supported models. The intention is that in the "typical" regression testing
+# scenario, we only test initializing these models. This subset was chosen
+# to include representative examples of model varieties/workloads (conditional
+# generation, sequence classification, causal LM, ranking, chat, reward model,
+# multimodal, geospatial, voice, embedding, MTP)
 MINIMAL_MODEL_ARCH_LIST = [
     "LlavaForConditionalGeneration", "Llama4ForConditionalGeneration",
     "BertForSequenceClassification", "Gemma3nForCausalLM", "JinaVLForRanking",
     "InternVLChatModel", "InternLM2ForRewardModel",
     "TransformersForMultimodalLM", "PrithviGeoSpatialMAE", "UltravoxModel",
-    "DeepSeekMTPModel", "MedusaModel", "TransformersModel", "MiDashengLMModel",
-    "XLMRobertaModel"
+    "DeepSeekMTPModel", "XLMRobertaModel"
 ]
 
+# This list is the complement of the minimal list above. The intention is that
+# this list of models is only tested in a "special case" i.e. most PRs should
+# not test these models
 OTHER_MODEL_ARCH_LIST = (set(HF_EXAMPLE_MODELS.get_supported_archs()) -
                          set(MINIMAL_MODEL_ARCH_LIST))
 
