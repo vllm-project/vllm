@@ -12,11 +12,11 @@ import os
 import textwrap
 import warnings
 from contextlib import contextmanager
-from dataclasses import field, fields, is_dataclass, replace
+from dataclasses import InitVar, field, fields, is_dataclass, replace
 from functools import cached_property, lru_cache
 from importlib.util import find_spec
-from typing import (TYPE_CHECKING, Any, Callable, InitVar, Literal, Optional,
-                    Protocol, TypeVar, Union, cast, get_args)
+from typing import (TYPE_CHECKING, Any, Callable, Literal, Optional, Protocol,
+                    TypeVar, Union, cast, get_args)
 
 import regex as re
 import torch
