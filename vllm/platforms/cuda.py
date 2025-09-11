@@ -215,23 +215,26 @@ class CudaPlatformBase(Platform):
             return _Backend.XFORMERS, False
 
         if cls.has_device_capability(80):
-            if head_size % 32 == 0:
-                # Use vllm-flash-attn
+            FLASH_ATTN_V1 = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"  # noqa: E501
+            from vllm.attention.selector import is_attn_backend_supported
+            is_default_fa_supported = is_attn_backend_supported(
+                FLASH_ATTN_V1, head_size, dtype, allow_import_error=False)
+            from transformers.utils import is_flash_attn_2_available
+            is_upstream_fa_supported = is_flash_attn_2_available()
+            if is_default_fa_supported:
                 return _Backend.FLASH_ATTN, False
-            if head_size % 32 != 0:
-                from transformers.utils import is_flash_attn_2_available
-                if is_flash_attn_2_available():
-                    # Use upstream FA
-                    return _Backend.FLASH_ATTN, True
-                else:
-                    # Fallback to XFORMERS
-                    logger.warning_once(
-                        "Using xformers for ViT attention backend. "
-                        "To use flash attention for ViT"
-                        "please install flash_attn")
-                    return _Backend.XFORMERS, False
-        # Fallback for Volta/Turing GPUs or FA not supported
-        return _Backend.XFORMERS, False
+            elif is_upstream_fa_supported:
+                return _Backend.FLASH_ATTN, True
+            else:
+                # Fallback to XFORMERS
+                logger.warning_once(
+                    "Using xformers for ViT attention backend. "
+                    "To use flash attention for ViT"
+                    "please install flash_attn")
+                return _Backend.XFORMERS, False
+        else:
+            # Fallback for Volta/Turing GPUs or FA not supported
+            return _Backend.XFORMERS, False
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,

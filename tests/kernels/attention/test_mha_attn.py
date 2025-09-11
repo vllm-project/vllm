@@ -36,35 +36,11 @@ def test_mha_attn_platform(device: str):
     torch.set_default_dtype(torch.float16)
 
     if device == "cpu":
-<<<<<<< HEAD
-        with patch("vllm.attention.selector.current_platform",
-                   CpuPlatform()), \
-             patch("vllm.platforms.current_platform", CpuPlatform()):
-=======
         with patch("vllm.model_executor.models.vision.current_platform",
                    CpuPlatform()):
->>>>>>> add dtype checking and fix tests
             attn = MultiHeadAttention(16, 64, scale=1)
             assert attn.attn_backend == _Backend.TORCH_SDPA_VLLM_V1
     elif device == "hip":
-<<<<<<< HEAD
-        with patch("vllm.attention.selector.current_platform",
-                   RocmPlatform()), \
-             patch("vllm.platforms.current_platform", RocmPlatform()), \
-             patch("vllm.attention.layer.current_platform", RocmPlatform()):
-            attn = MultiHeadAttention(16, 64, scale=1)
-            assert attn.attn_backend == _Backend.TORCH_SDPA
-    else:
-        with patch("vllm.attention.selector.current_platform",
-                   CudaPlatform()), \
-             patch("vllm.platforms.current_platform", CudaPlatform()):
-            attn = MultiHeadAttention(16, 64, scale=1)
-            assert attn.attn_backend == _Backend.XFORMERS
-
-        with patch("vllm.attention.selector.current_platform",
-                   CudaPlatform()), \
-             patch("vllm.platforms.current_platform", CudaPlatform()):
-=======
         with patch("vllm.model_executor.models.vision.current_platform",
                    RocmPlatform()):
             attn = MultiHeadAttention(16, 64, scale=1)
@@ -92,7 +68,6 @@ def test_mha_attn_platform(device: str):
                    CudaPlatform()), \
              patch("transformers.utils.is_flash_attn_2_available",
                    return_value=False):
->>>>>>> add dtype checking and fix tests
             attn = MultiHeadAttention(16, 72, scale=1)
             assert attn.attn_backend == _Backend.XFORMERS
 
