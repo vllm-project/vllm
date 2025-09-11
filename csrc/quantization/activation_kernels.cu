@@ -215,7 +215,7 @@ constexpr __nv_bfloat16 get_fp8_min() {
     return __nv_bfloat16(__nv_bfloat16_raw{.x = 50032});
   }
 }
-
+#ifndef USE_ROCM
 template <typename fp8_type, int32_t NUM_WARPS, typename Idx_t,
           int NUM_PARALLEL_TOKENS, bool USE_UE8M0, int GROUP_SIZE = 128,
           int NUM_STAGES = 3>
@@ -346,7 +346,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     cp_async_fence();
   };
 
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < NUM_STAGES - 1; i++) {
     load_and_advance_y_pred();
   }
@@ -387,14 +387,14 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     __int64_t up64 = *s_up_compute_64;
     __nv_bfloat162* s_up_compute_32 = reinterpret_cast<__nv_bfloat162*>(&up64);
 
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < 2; i++) {
       // For silu, we make sure that div is emitted.
       float2 gate = silu2(__bfloat1622float2(s_gate_compute_32[i]));
       results_bf162[i] = __float22bfloat162_rn(gate);
     }
 
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < 2; i++) {
       results_bf162[i] = __hmul2(results_bf162[i], s_up_compute_32[i]);
     }
@@ -416,7 +416,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 
     auto y_s2 = make_bfloat162(inv_y, inv_y);
 
-#pragma unroll
+  #pragma unroll
     for (int32_t i = 0; i < 2; ++i) {
       results_bf162[i] =
           clip(__hmul2(results_bf162[i], y_s2), __bfloat162bfloat162(fp8_min),
@@ -433,6 +433,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     }
   }
 }
+#endif
 
 }  // namespace vllm
 
