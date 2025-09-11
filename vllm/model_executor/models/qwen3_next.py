@@ -252,12 +252,12 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # projection of the input hidden states
         self.projection_size_qkvz = self.key_dim * 2 + self.value_dim * 2
         self.projection_size_ba = self.num_v_heads * 2
-        self.in_proj = MergedColumnParallelLinear(
+        self.in_qkvz_ba_proj = MergedColumnParallelLinear(
             input_size=self.hidden_size,
             output_sizes=[self.projection_size_qkvz, self.projection_size_ba],
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.in_proj",
+            prefix=f"{prefix}.in_qkvz_ba_proj",
         )
 
         query_key_settings = (self.key_dim, 0, False)
@@ -422,7 +422,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         num_accepted_tokens = attn_metadata.num_accepted_tokens
 
         # 1. Set up dimensions for reshapes later
-        projected_states, _ = self.in_proj(hidden_states[:num_actual_tokens])
+        projected_states, _ = self.in_qkvz_ba_proj(
+            hidden_states[:num_actual_tokens])
         if spec_token_masks is not None:
             spec_token_masks = spec_token_masks[:num_actual_tokens]
         projected_states_qkvz, projected_states_ba = torch.split(
@@ -975,8 +976,8 @@ class Qwen3NextModel(nn.Module):
             ("qkv_proj", "v_proj", "v"),
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
-            ("in_proj", "in_proj_qkvz", 0),
-            ("in_proj", "in_proj_ba", 1),
+            ("in_qkvz_ba_proj", "in_proj_qkvz", 0),
+            ("in_qkvz_ba_proj", "in_proj_ba", 1),
         ]
 
         params_dict = dict(self.named_parameters())
@@ -1053,8 +1054,8 @@ class Qwen3NextForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
             "k_proj",
             "v_proj",
         ],
-        "gate_up_proj": ["up_proj", "down_proj"],
-        "in_proj": ["in_proj_qkvz", "in_proj_ba"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "in_qkvz_ba_proj": ["in_proj_qkvz", "in_proj_ba"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
