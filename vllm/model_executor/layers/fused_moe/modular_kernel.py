@@ -164,7 +164,7 @@ PrepareResultType = tuple[
     Optional[torch.Tensor],
 ]
 
-ReceiverType = Callable[[any], PrepareResultType]
+ReceiverType = Callable[[], PrepareResultType]
 
 
 # TODO: pass FusedMoEParallelConfig in as ctor parameter?
@@ -881,15 +881,14 @@ class FusedMoEModularKernel(torch.nn.Module):
                 receiver = prepare_ret
 
             if hook is not None:
-                dbo_register_recv_hook(hook)
-                dbo_yield()
                 if dbo_enabled():
-                    hook = None
-                (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
-                 _expert_topk_weights) = receiver(hook)
-            else:
-                (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
-                 _expert_topk_weights) = receiver()
+                    dbo_register_recv_hook(hook)
+                    dbo_yield()
+                else:
+                    hook()
+
+            (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
+                _expert_topk_weights) = receiver()
 
         # Maybe prepare gathered topk_ids and topk_weights from other EP ranks.
         topk_ids = topk_ids if _expert_topk_ids is None else _expert_topk_ids
