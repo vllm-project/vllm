@@ -312,7 +312,8 @@ class MambaModelConfig(VerifyAndUpdateConfig):
 
         # TODO(tdoublep): remove as full cuda graph support is added
         FCG_NOT_SUPPORTED_MODELS = [
-            "Lfm2ForCausalLM", "MiniMaxText01ForCausalLM"
+            "Lfm2ForCausalLM",
+            "MiniMaxText01ForCausalLM",
         ]
 
         if (model_config.architecture not in FCG_NOT_SUPPORTED_MODELS
