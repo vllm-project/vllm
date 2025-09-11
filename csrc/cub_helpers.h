@@ -4,14 +4,14 @@
   #include <cub/cub.cuh>
   #if CUB_VERSION >= 200800
     #include <cuda/std/functional>
-using AddOp = cuda::std::plus<>;
-using MaxOp = cuda::maximum<>;
+using CubAddOp = cuda::std::plus<>;
+using CubMaxOp = cuda::maximum<>;
   #else   // if CUB_VERSION < 200800
-using AddOp = cub::Sum;
-using MaxOp = cub::Max;
+using CubAddOp = cub::Sum;
+using CubMaxOp = cub::Max;
   #endif  // CUB_VERSION
 #else
   #include <hipcub/hipcub.hpp>
-using AddOp = cub::Sum;
-using MaxOp = cub::Max;
+using CubAddOp = cub::Sum;
+using CubMaxOp = cub::Max;
 #endif  // USE_ROCM
