@@ -19,7 +19,7 @@ from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.v1.spec_decode.eagle import EagleProposer
 
-model_dir = "meta-llama/Llama-3.1-8B-Instruct"
+model_dir = "NousResearch/Meta-Llama-3-8B-Instruct" # "meta-llama/Llama-3.1-8B-Instruct"
 eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
 eagle3_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
 vocab_freq_dir = "eturok/llama-3.1-8b-instruct-vocab-freq/vocab_freq.pt"
@@ -215,8 +215,8 @@ def test_load_model(mock_deepcopy, mock_get_model, mock_get_layers, mock_get_pp_
         # Setup the lm_head with data, device, and shape
         target_model.lm_head = mock.MagicMock()
         device = torch.device(current_platform.device_type)
-        target_model.lm_head.weight.data.device = device
-        target_model.lm_head.weight.data.shape = (131072, 4096)
+        target_model.lm_head.weight.device = device
+        target_model.lm_head.weight.shape = (131072, 4096)
 
     # Create mock copy.deepcopy
     if prune_vocab:
@@ -232,9 +232,9 @@ def test_load_model(mock_deepcopy, mock_get_model, mock_get_layers, mock_get_pp_
     # Call the method under test
     proposer.load_model(target_model)
 
-    # Manually set the pruned vocab size
-    if method == "eagle" and prune_vocab:
-        proposer.model.lm_head.weight.data.shape = (32768, 4096)
+    # # Manually set the pruned vocab size
+    # if method == "eagle" and prune_vocab:
+    #     proposer.model.lm_head.weight.data.shape = (32768, 4096)
 
     # Verify common interactions
     mock_get_model.assert_called_once()
