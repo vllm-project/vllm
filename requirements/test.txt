@@ -1063,7 +1063,7 @@ timm==1.0.17
     #   segmentation-models-pytorch
     #   terratorch
     #   torchgeo
-tokenizers==0.21.1
+tokenizers==0.22.0
     # via
     #   -r requirements/test.in
     #   transformers
