@@ -8,6 +8,7 @@
 #include "type_convert.cuh"
 #include "quantization/fp8/common.cuh"
 #include "dispatch_utils.h"
+#include "utils.h"
 
 #include <torch/cuda.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -175,6 +176,8 @@ void rms_norm_static_fp8_quant(torch::Tensor& out,     // [..., hidden_size]
                                torch::Tensor& scale,   // [1]
                                double epsilon) {
   TORCH_CHECK(out.is_contiguous());
+  TORCH_CHECK(input.stride(-1) == 1);
+  TORCH_CHECK(is_contiguous_except_last_dim(input));
   int hidden_size = input.size(-1);
   int input_stride = input.stride(-2);
   int num_tokens = input.numel() / hidden_size;
@@ -219,6 +222,8 @@ void fused_add_rms_norm_static_fp8_quant(
     torch::Tensor& scale,     // [1]
     double epsilon) {
   TORCH_CHECK(out.is_contiguous());
+  TORCH_CHECK(input.stride(-1) == 1);
+  TORCH_CHECK(is_contiguous_except_last_dim(input));
   TORCH_CHECK(residual.is_contiguous());
   int hidden_size = input.size(-1);
   int input_stride = input.stride(-2);
