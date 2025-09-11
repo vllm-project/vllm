@@ -87,7 +87,7 @@ class VllmEplbAdaptor(BaseAdaptor):
             self.expert_map_per_layer[self.num_dense_layers + layer_idx] = \
                 self.model.get_expert_map(self.num_dense_layers + layer_idx)
 
-        # TODO: here we set number of buffer tensor equal to number of expert in each laryer, which can be improved
+        # TODO: here we set number of buffer tensor equal to number of expert in each layer, which can be improved
         num_buffer_tensor = torch.where(
             self.expert_map_per_layer[self.num_dense_layers] != -1)[0].numel()
         self.buffer_tensor_list: list[list[Any]] = [
