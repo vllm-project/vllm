@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 import base64
 import math
 from abc import abstractmethod
 from functools import partial
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -198,13 +197,14 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
         max_frame_idx = total_frames_num - 1
         duration = duration or round(max_frame_idx / original_fps) + 1
 
+        frame_indices: Union[range, list[int]]
         if duration <= max_duration:
             n = int(math.floor(duration * requested_fps))
-            frame_indices = {
+            frame_indices = sorted({
                 min(max_frame_idx,
                     int(math.ceil(i * original_fps / requested_fps)))
                 for i in range(n)
-            }
+            })
         else:
             num_samples = int(max_duration * requested_fps)
             if num_samples >= total_frames_num:
@@ -214,12 +214,12 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
                                              duration,
                                              num_samples,
                                              endpoint=True)
-                frame_indices = {
+                frame_indices = sorted({
                     min(max_frame_idx, int(math.ceil(t * original_fps)))
                     for t in target_seconds
-                }
+                })
 
-        uniq_frame_idx = sorted(frame_indices)
+        uniq_frame_idx = frame_indices
 
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
