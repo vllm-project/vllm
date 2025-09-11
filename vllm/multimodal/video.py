@@ -219,7 +219,7 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
                     for t in target_seconds
                 }
 
-        uniq_frame_idx = frame_indices
+        uniq_frame_idx = sorted(frame_indices)
 
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
