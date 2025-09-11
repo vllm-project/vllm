@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional, Union, Callable
+from typing import Callable, Optional, Union
 
 import pplx_kernels as pplx
 import torch

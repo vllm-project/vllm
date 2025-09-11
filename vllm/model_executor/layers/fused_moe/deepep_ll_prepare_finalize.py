@@ -11,11 +11,9 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate)
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input, normalize_batched_scales_shape)
-from vllm.v1.worker.ubatching import (dbo_enabled,
-                                      dbo_current_ubatch_id,
-                                      dbo_yield,
+from vllm.v1.worker.ubatching import (dbo_current_ubatch_id, dbo_enabled,
                                       dbo_maybe_run_recv_hook,
-                                      dbo_register_recv_hook)
+                                      dbo_register_recv_hook, dbo_yield)
 
 # DeepEP kernels quantize dispatch inputs in 128 element chunks.
 DEEPEP_QUANT_BLOCK_SIZE = 128
@@ -131,6 +129,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     ) -> tuple[Callable, mk.ReceiverType]:
 
         hidden_size = a1.size(1)
+
         a2a_idx = dbo_current_ubatch_id()
 
         if self.use_fp8_dispatch:
@@ -162,7 +161,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self.handles[a2a_idx] = handle
 
         return (hook, lambda: self._receiver(expert_x, expert_num_tokens,
-                                      a1_scale, a1.dtype, quant_config))
+                                             a1_scale, a1.dtype, quant_config))
 
     def _receiver(
         self,
@@ -193,10 +192,11 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
-        hook, receiver = self.prepare_async(a1, a1_scale, a2_scale, topk_weights,
-                                      topk_ids, num_experts, expert_map,
-                                      apply_router_weight_on_input,
-                                      quant_config)
+        hook, receiver = self.prepare_async(a1, a1_scale, a2_scale,
+                                            topk_weights, topk_ids,
+                                            num_experts, expert_map,
+                                            apply_router_weight_on_input,
+                                            quant_config)
         hook()
         return receiver()
 
@@ -225,14 +225,15 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         # TODO (varun) : Enable zero copy mode
         dbo_maybe_run_recv_hook()
-        _, _, recv_hook = self.buffer.low_latency_combine(fused_expert_output,
-                                                      topk_ids,
-                                                      combine_topk_weights,
-                                                      handle,
-                                                      async_finish=False,
-                                                      zero_copy=False,
-                                                      return_recv_hook=do_recv_hook,
-                                                      out=output)
+        _, _, recv_hook = self.buffer.low_latency_combine(
+            fused_expert_output,
+            topk_ids,
+            combine_topk_weights,
+            handle,
+            async_finish=False,
+            zero_copy=False,
+            return_recv_hook=do_recv_hook,
+            out=output)
         if recv_hook is not None:
-            dbo_register_recv_hook(recv_hook)            
+            dbo_register_recv_hook(recv_hook)
         dbo_yield()

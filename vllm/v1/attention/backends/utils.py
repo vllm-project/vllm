@@ -28,7 +28,6 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_kv_connector_cache_layout)
 from vllm.logger import init_logger
 from vllm.v1.kv_cache_interface import AttentionSpec
-
 from vllm.v1.worker.ubatch_utils import UbatchSlice
 
 logger = init_logger(__name__)
@@ -124,7 +123,7 @@ def _make_metadata_with_slice(
         torch.max(torch.abs(query_start_loc_cpu[1:] -
                             query_start_loc_cpu[:-1])).item())
 
-    # This is to account for the case where we are in a dummy 
+    # This is to account for the case where we are in a dummy
     # run and query_start_loc_cpu is full of 0s
     if max_query_len == 0:
         max_query_len = attn_metadata.max_query_len

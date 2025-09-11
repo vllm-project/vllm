@@ -17,8 +17,6 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.v1.worker.ubatching import UBatchContext, make_ubatch_contexts
 
-from vllm.distributed.parallel_state import is_global_first_rank
-
 logger = init_logger(__name__)
 
 
