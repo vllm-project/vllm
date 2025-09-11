@@ -10,6 +10,7 @@ import torch
 from tqdm import tqdm
 
 import vllm.envs as envs
+from vllm.distributed.parallel_state import get_dp_group
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import DeepGemmExperts
 from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
     compute_aligned_M, deep_gemm_block_shape)
@@ -145,7 +146,9 @@ def _deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(
     num_experts = w1.size(0)
     device = w1.device
 
-    max_tokens = min(max_tokens, envs.VLLM_FUSED_MOE_CHUNK_SIZE)
+    # Assumes all ranks have the same max_num_batched_tokens
+    max_tokens_across_dp = get_dp_group().world_size * max_tokens
+    max_tokens = min(max_tokens_across_dp, envs.VLLM_FUSED_MOE_CHUNK_SIZE)
 
     # This is the maximum GroupedGemm M size that we expect to run
     # the grouped_gemm with.
