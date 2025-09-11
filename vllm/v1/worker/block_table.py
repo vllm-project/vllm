@@ -53,7 +53,10 @@ class BlockTable:
             self.logical_block_size = selected_kernel_size
             self.blocks_per_phys_block = (self.physical_block_size //
                                           self.logical_block_size)
-            self.use_hybrid_blocks = True
+            if self.blocks_per_phys_block > 1:
+                self.use_hybrid_blocks = True
+            else:
+                self.use_hybrid_blocks = False
 
         if self.use_hybrid_blocks:
             logical_table_size = (max_num_blocks_per_req *
@@ -217,7 +220,7 @@ class BlockTable:
     def _convert_physical_to_logical_blocks(
             self, physical_blocks: np.ndarray) -> np.ndarray:
         """Convert physical block IDs to logical block IDs."""
-        if not self.use_hybrid_blocks or self.blocks_per_phys_block == 1:
+        if not self.use_hybrid_blocks:
             return physical_blocks
 
         # Create logical block IDs by splitting each physical block
