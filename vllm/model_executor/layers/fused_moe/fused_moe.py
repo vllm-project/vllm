@@ -823,7 +823,6 @@ def get_default_config(
         # num_stages=3 can cause triton.runtime.errors.OutOfResources
         # on ROCm, set it to 2 instead.
 
-        # Batch size dependent BLOCK_SIZE_M and GROUP_SIZE_M based on FP8 data
         if M <= 16:
             # Small batch: 69% use BLOCK_SIZE_M=16, GROUP_SIZE_M=1 preferred
             block_m = 16
@@ -861,8 +860,6 @@ def get_default_config(
         else:
             config = {"BLOCK_SIZE_M": 64, "GROUP_SIZE_M": 1}
     else:
-        # Data-driven heuristics based on analysis of 204 configs
-
         # BLOCK_SIZE_M: Strong batch size correlation
         # Analysis shows: tiny_batch(≤8): 96% use 16, small_batch: 69-89% use 16
         if M <= 8:
