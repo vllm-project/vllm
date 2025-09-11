@@ -22,9 +22,8 @@ from vllm.v1.spec_decode.eagle import EagleProposer
 model_dir = "meta-llama/Llama-3.1-8B-Instruct"
 eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
 eagle3_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
-pruned_vocab_dir = "thunlp/LLaMA3-Instruct-8B-FR-Spec/freq_32768.pt"
 vocab_freq_dir = "eturok/llama-3.1-8b-instruct-vocab-freq/vocab_freq.pt"
-
+draft_vocab_frequency_prune_ratio = 0.5
 
 def _create_proposer(
     method: str,
@@ -44,9 +43,9 @@ def _create_proposer(
         assert num_speculative_tokens == len(speculative_token_tree)
         spec_token_tree_str = str(speculative_token_tree)
 
-    draft_vocab_pruned = None
+    draft_vocab_frequency_path = None
     if prune_vocab:
-        draft_vocab_pruned = pruned_vocab_dir
+        draft_vocab_frequency_path = vocab_freq_dir
 
     speculative_config = SpeculativeConfig(
         target_model_config=model_config,
@@ -55,7 +54,8 @@ def _create_proposer(
         method=method,
         num_speculative_tokens=num_speculative_tokens,
         speculative_token_tree=spec_token_tree_str,
-        draft_vocab_pruned=draft_vocab_pruned,
+        draft_vocab_frequency_path=draft_vocab_frequency_path,
+        draft_vocab_frequency_prune_ratio=draft_vocab_frequency_prune_ratio,
     )
 
     vllm_config = VllmConfig(
@@ -215,10 +215,10 @@ def test_load_model(mock_deepcopy, mock_get_model, mock_get_layers, mock_get_pp_
         # Setup the lm_head with data, device, and shape
         target_model.lm_head = mock.MagicMock()
         device = torch.device(current_platform.device_type)
-        target_model.lm_head.data.device = device
-        target_model.lm_head.data.shape = (131072, 4096)
+        target_model.lm_head.weight.data.device = device
+        target_model.lm_head.weight.data.shape = (131072, 4096)
 
-    # to prune the vocab, we need to run copy.deepcopy on lm_head
+    # Create mock copy.deepcopy
     if prune_vocab:
         def my_deepcopy(obj, memo=None):
             if hasattr(obj, 'data') and hasattr(obj.data, 'device'):
@@ -232,9 +232,9 @@ def test_load_model(mock_deepcopy, mock_get_model, mock_get_layers, mock_get_pp_
     # Call the method under test
     proposer.load_model(target_model)
 
-    # set the pruned vocab size after the fact
+    # Manually set the pruned vocab size
     if method == "eagle" and prune_vocab:
-        proposer.model.lm_head.data.shape = (32768, 4096)
+        proposer.model.lm_head.weight.data.shape = (32768, 4096)
 
     # Verify common interactions
     mock_get_model.assert_called_once()
@@ -242,8 +242,8 @@ def test_load_model(mock_deepcopy, mock_get_model, mock_get_layers, mock_get_pp_
     if method == "eagle":
         if prune_vocab:
             # Verify that the vocab of EAGLE models is pruned to the correct ratio
-            pruned_vocab_size = proposer.model.lm_head.data.shape[0]
-            original_vocab_size = target_model.lm_head.data.shape[0]
+            pruned_vocab_size = proposer.model.lm_head.weight.data.shape[0]
+            original_vocab_size = target_model.lm_head.weight.data.shape[0]
             assert pruned_vocab_size/original_vocab_size == 0.25, f"{pruned_vocab_size/original_vocab_size=}"
         else:
             # Verify that EAGLE models have the same lm head as the target model

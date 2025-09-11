@@ -694,11 +694,13 @@ class EagleProposer:
             self.pruned_vocab = self.pruned_vocab.to(self.model.lm_head.weight.device)
 
             # Update lm_head weights with pruned vocabulary
+            ic(self.model.lm_head.weight.shape, target_language_model.lm_head.weight.shape)
             if hasattr(self.model, "lm_head"):
                 self.model.lm_head.weight.data = self.model.lm_head.weight.data[self.pruned_vocab]
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
                 logger.info("Updated lm_head weights with pruned vocabulary.")
+                ic(self.model.lm_head.weight.shape, target_language_model.lm_head.weight.shape)
             elif hasattr(self.model.model, "embed_tokens"):
                 logger.info("Assuming lm_head is tied to embed_tokens; skipping direct weight update.")
             else:
