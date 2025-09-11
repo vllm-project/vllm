@@ -178,7 +178,7 @@ async def test_gpt_oss_multi_turn_chat(gptoss_client: OpenAI,
         },
         {
             "role": "user",
-            "content": "What is the weather in Dallas, TX?"
+            "content": "What is the weather in Dallas, TX with celsius?"
         },
     ]
 

@@ -7,10 +7,9 @@ import pytest
 import requests
 from transformers import AutoProcessor
 
+from tests.utils import VLLM_PATH, RemoteOpenAIServer
 from vllm.entrypoints.openai.protocol import EmbeddingResponse
 from vllm.multimodal.utils import encode_image_base64, fetch_image
-
-from ...utils import VLLM_PATH, RemoteOpenAIServer
 
 MODEL_NAME = "TIGER-Lab/VLM2Vec-Full"
 MAXIMUM_IMAGES = 2
