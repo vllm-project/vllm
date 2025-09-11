@@ -49,7 +49,9 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.utils import has_deep_gemm
-from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used, is_deep_gemm_supported
+from vllm.utils.deep_gemm import (is_deep_gemm_e8m0_used,
+                                  is_deep_gemm_supported,
+                                  should_use_deepgemm_for_fp8_linear)
 from vllm.utils.flashinfer import has_flashinfer_moe
 
 if TYPE_CHECKING:
@@ -251,8 +253,10 @@ class Fp8LinearMethod(LinearMethodBase):
             act_quant_group_shape=self.act_q_group_shape)
 
         self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
-            self.cutlass_block_fp8_supported,
-            self.use_aiter_and_is_supported,
+            cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
+            use_aiter_and_is_supported=self.use_aiter_and_is_supported,
+            ue8m0_deepgemm_supported=is_deep_gemm_e8m0_used(),
+            is_blackwell=current_platform.has_device_capability(100),
         )
 
     def create_weights(
@@ -364,6 +368,9 @@ class Fp8LinearMethod(LinearMethodBase):
                 layer.register_parameter("input_scale", scale)
             else:
                 layer.register_parameter("input_scale", None)
+
+        self.w8a8_block_fp8_linear.set_should_use_deepgemm(
+            should_use_deepgemm_for_fp8_linear(self.out_dtype, weight))
 
     def _maybe_pad_weight(self, weight: torch.Tensor) -> torch.Tensor:
         # Pad the weight tensor. This is an optimization on ROCm platform, which
