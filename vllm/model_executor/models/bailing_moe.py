@@ -107,7 +107,7 @@ class BailingAttention(nn.Module):
                                     else nn.LayerNorm(self.head_dim, eps=1e-6))
             self.key_layernorm = (RMSNorm(
                 self.head_dim, eps=config.rms_norm_eps) if self.use_rmsnorm
-                                    else nn.LayerNorm(self.head_dim, eps=1e-6))
+                                  else nn.LayerNorm(self.head_dim, eps=1e-6))
 
         self.dense = RowParallelLinear(
             self.total_num_heads * self.head_dim,
