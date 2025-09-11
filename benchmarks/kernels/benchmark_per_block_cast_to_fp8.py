@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
-import time
 
 import torch
 
@@ -15,6 +14,7 @@ def _align(x: int, y: int) -> int:
     return cdiv(x, y) * y
 
 
+@torch.compile
 def per_block_cast_to_fp8_baseline(
     x: torch.Tensor,
     block_size: list[int],
@@ -50,12 +50,17 @@ def _time_it(fn, warmup: int, iters: int):
         fn()
     torch.cuda.synchronize()
 
-    start = time.perf_counter()
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+
+    times_ms = []
     for _ in range(iters):
+        start.record()
         fn()
-    torch.cuda.synchronize()
-    end = time.perf_counter()
-    return (end - start) / iters * 1000.0
+        end.record()
+        end.synchronize()
+        times_ms.append(start.elapsed_time(end))
+    return sum(times_ms) / len(times_ms)
 
 
 def run_case(
