@@ -146,7 +146,7 @@ class ServingClassification(ClassificationMixin):
         request: ClassificationRequest,
         raw_request: Request,
     ) -> Union[ClassificationResponse, ErrorResponse]:
-        model_name = self._get_model_name(request.model)
+        model_name = self.models.model_name()
         request_id = (f"{self.request_id_prefix}-"
                       f"{self._base_request_id(raw_request)}")
 
