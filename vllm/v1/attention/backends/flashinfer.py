@@ -59,7 +59,6 @@ def _trtllm_prefill_attn_kvfp8_dequant(
     v_scale_ptr,
     K_CACHE_STRIDE: tl.constexpr,
     KV_CACHE_STRIDE: tl.constexpr,
-    dequant_to_bf16: tl.constexpr,
 ):
     batch_idx = tl.program_id(0).to(tl.int64)
     mock_block_table_idx = tl.program_id(1).to(tl.int64)
@@ -68,6 +67,7 @@ def _trtllm_prefill_attn_kvfp8_dequant(
                             mock_block_table_idx).to(tl.int64)
     if orig_page_num <= 0:
         return
+    dequant_dtype = mock_kv_cache_ptr.dtype.element_ty
 
     # Dequantize K
     k_scale_val = tl.load(k_scale_ptr)
@@ -76,10 +76,7 @@ def _trtllm_prefill_attn_kvfp8_dequant(
     dequantized_vals = fp8_vals.to(tl.float32) * k_scale_val
     mock_cache_offset = (batch_idx * block_table_stride + mock_block_table_idx
                          + 1) * KV_CACHE_STRIDE + tl.arange(0, K_CACHE_STRIDE)
-    if dequant_to_bf16:
-        dequantized_vals = dequantized_vals.to(tl.bfloat16)
-    else:
-        dequantized_vals = dequantized_vals.to(tl.float16)
+    dequantized_vals = dequantized_vals.to(dequant_dtype)
     tl.store(mock_kv_cache_ptr + mock_cache_offset, dequantized_vals)
 
     # Dequantize V
@@ -91,10 +88,7 @@ def _trtllm_prefill_attn_kvfp8_dequant(
     mock_cache_offset = (
         (batch_idx * block_table_stride + mock_block_table_idx + 1) *
         KV_CACHE_STRIDE + K_CACHE_STRIDE + tl.arange(0, K_CACHE_STRIDE))
-    if dequant_to_bf16:
-        dequantized_vals = dequantized_vals.to(tl.bfloat16)
-    else:
-        dequantized_vals = dequantized_vals.to(tl.float16)
+    dequantized_vals = dequantized_vals.to(dequant_dtype)
     tl.store(mock_kv_cache_ptr + mock_cache_offset, dequantized_vals)
 
 
@@ -133,7 +127,6 @@ def trtllm_prefill_attn_kvfp8_dequant(
         v_scale,
         k_cache_stride,
         kv_cache_stride,
-        dequant_dtype is torch.bfloat16,
     )
     return mock_kv_cache, mock_block_table
 
