@@ -182,6 +182,9 @@ def analyze_block_sizes(configs):
 def analyze_warp_stage_patterns(configs):
     """Analyze warp and stage patterns."""
     print("\n--- Warp/Stage Analysis ---")
+    if not configs:
+        print("  No batch configs to analyze for warp/stage patterns.")
+        return
 
     warp_values = [c['num_warps'] for c in configs]
     stage_values = [c['num_stages'] for c in configs]
