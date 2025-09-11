@@ -782,7 +782,7 @@ def load_vocab_freq(vocab_frequency_path: str) -> torch.Tensor:
 
 def prune_draft_vocab(vocab_freq: torch.Tensor, keep_threshold: float) -> torch.Tensor:
     """
-    Prune a draft vocabulary based on cumulative frequency mass.
+    Prune a draft vocabulary based on the keep threshold.
 
     Args:
         vocab_freq: Tensor of vocabulary frequencies.
