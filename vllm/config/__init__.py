@@ -447,13 +447,13 @@ class ModelConfig:
 
     # Multimodal config and init vars
     multimodal_config: Optional[MultiModalConfig] = None
-    limit_mm_per_prompt: InitVar[dict[str, int]] = None
-    media_io_kwargs: InitVar[dict[str, dict[str, Any]]] = None
+    limit_mm_per_prompt: InitVar[Optional[dict[str, int]]] = None
+    media_io_kwargs: InitVar[Optional[dict[str, dict[str, Any]]]] = None
     mm_processor_kwargs: InitVar[Optional[dict[str, Any]]] = None
-    mm_processor_cache_gb: InitVar[float] = None
-    mm_encoder_tp_mode: InitVar[MMEncoderTPMode] = None
-    interleave_mm_strings: InitVar[bool] = None
-    skip_mm_profiling: InitVar[bool] = None
+    mm_processor_cache_gb: InitVar[Optional[float]] = None
+    mm_encoder_tp_mode: InitVar[Optional[MMEncoderTPMode]] = None
+    interleave_mm_strings: InitVar[Optional[bool]] = None
+    skip_mm_profiling: InitVar[Optional[bool]] = None
 
     def compute_hash(self) -> str:
         """
@@ -488,13 +488,13 @@ class ModelConfig:
         assert_hashable(str_factors)
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
-    def __post_init__(self, limit_mm_per_prompt: dict[str, int],
-                      media_io_kwargs: dict[str, dict[str, Any]],
+    def __post_init__(self, limit_mm_per_prompt: Optional[dict[str, int]],
+                      media_io_kwargs: Optional[dict[str, dict[str, Any]]],
                       mm_processor_kwargs: Optional[dict[str, Any]],
-                      mm_processor_cache_gb: float,
-                      mm_encoder_tp_mode: MMEncoderTPMode,
-                      interleave_mm_strings: bool,
-                      skip_mm_profiling: bool) -> None:
+                      mm_processor_cache_gb: Optional[float],
+                      mm_encoder_tp_mode: Optional[MMEncoderTPMode],
+                      interleave_mm_strings: Optional[bool],
+                      skip_mm_profiling: Optional[bool]) -> None:
         # Set the default seed to 0 in V1.
         # NOTE(woosuk): In V0, we set the default seed to None because the
         # driver worker shares the same process as the user process, and thus
