@@ -32,7 +32,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.parallel_state import (
     get_pp_group, get_tp_group, graph_capture, is_global_first_rank,
     prepare_communication_buffer_for_model)
-from vllm.forward_context import (BatchDescriptor, DPMetadata,
+from vllm.forward_context import (ALoRAMetadata, BatchDescriptor, DPMetadata,
                                   set_forward_context)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -328,6 +328,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                                   dtype=torch.int32)
         self.num_accepted_tokens = self._make_buffer(self.max_num_reqs,
                                                      dtype=torch.int64)
+
+        if self.lora_config and self.lora_config.enable_activated_lora:
+            self.mask1d = torch.zeros(self.max_num_tokens,
+                                      dtype=torch.int64,
+                                      device=self.device)
 
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
@@ -863,7 +868,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> tuple[dict[str, Any], torch.Tensor, Optional[SpecDecodeMetadata],
-               np.ndarray, Optional[CommonAttentionMetadata], int]:
+               Optional[ALoRAMetadata], np.ndarray,
+               Optional[CommonAttentionMetadata], int]:
         """
         :return: tuple[
             attn_metadata: layer-to-attention_metadata mapping,
@@ -1093,9 +1099,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.lora_config:
             self.set_active_loras(self.input_batch, num_scheduled_tokens)
 
+        # Compute aLoRA metadata
+        alora_metadata = None
+        if self.lora_config and self.lora_config.enable_activated_lora:
+            alora_metadata = self.build_alora_metadata(
+                num_reqs, positions_np, req_indices,
+                total_num_scheduled_tokens, self.input_batch, self.requests,
+                self.mask1d)
+
         return (attn_metadata, logits_indices, spec_decode_metadata,
-                num_scheduled_tokens, spec_decode_common_attn_metadata,
-                max_num_scheduled_tokens)
+                alora_metadata, num_scheduled_tokens,
+                spec_decode_common_attn_metadata, max_num_scheduled_tokens)
 
     def _compute_cascade_attn_prefix_len(
         self,
@@ -2022,7 +2036,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             try:
                 # Prepare the decoder inputs.
                 (attn_metadata, logits_indices, spec_decode_metadata,
-                 num_scheduled_tokens_np, spec_decode_common_attn_metadata,
+                 alora_metadata, num_scheduled_tokens_np,
+                 spec_decode_common_attn_metadata,
                  max_query_len) = self._prepare_inputs(scheduler_output)
 
             finally:
@@ -2057,6 +2072,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_tokens=num_input_tokens,
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
+                alora_metadata=alora_metadata,
                 batch_descriptor=batch_descriptor,
         ), record_function_or_nullcontext("Forward"),
               self.maybe_get_kv_connector_output(scheduler_output) as
@@ -2799,11 +2815,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     f"Cudagraph runtime mode mismatch at dummy_run. "
                     f"Expected {_cg_mode}, but got {cudagraph_runtime_mode}.")
 
+            alora_metadata = None
+            if self.lora_config and self.lora_config.enable_activated_lora:
+                alora_metadata = self.build_dummy_alora_metadata(
+                    num_tokens, self.mask1d)
+
             with self.maybe_randomize_inputs(input_ids), set_forward_context(
                     attn_metadata,
                     self.vllm_config,
                     num_tokens=num_tokens,
                     num_tokens_across_dp=num_tokens_across_dp,
+                    alora_metadata=alora_metadata,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_descriptor):
                 outputs = self.model(

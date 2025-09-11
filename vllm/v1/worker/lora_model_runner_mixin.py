@@ -12,11 +12,13 @@ import torch
 import torch.nn as nn
 
 from vllm.config import LoRAConfig, ModelConfig, SchedulerConfig
+from vllm.forward_context import ALoRAMetadata
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora, supports_multimodal
+from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.v1.worker.gpu_input_batch import InputBatch as GPUInputBatch
 from vllm.v1.worker.tpu_input_batch import InputBatch as TPUInputBatch
 
@@ -85,6 +87,37 @@ class LoRAModelRunnerMixin:
                             input_batch.make_lora_inputs(num_scheduled_tokens)
         return self._set_active_loras(prompt_lora_mapping, token_lora_mapping,
                                       lora_requests)
+
+    def build_alora_metadata(self, num_reqs: int, positions_np: np.ndarray,
+                             req_indices: np.ndarray,
+                             total_num_scheduled_tokens: int,
+                             input_batch: InputBatch,
+                             requests: dict[str, CachedRequestState],
+                             mask1d: torch.Tensor) -> ALoRAMetadata:
+        invocation_start = np.empty(shape=(num_reqs, ), dtype=int)
+        for req_id in input_batch.req_ids:
+            req_index = input_batch.req_id_to_index[req_id]
+            cached_lora_request = requests[req_id].lora_request
+            if (cached_lora_request is not None
+                    and cached_lora_request.invocation_start is not None):
+                invocation_start[
+                    req_index] = cached_lora_request.invocation_start
+            else:
+                invocation_start[req_index] = len(
+                    requests[req_id].prompt_token_ids)
+        mask1d_cpu = torch.tensor(positions_np < invocation_start[req_indices],
+                                  dtype=torch.bool,
+                                  device="cpu")
+        mask1d = mask1d[:total_num_scheduled_tokens]
+        mask1d.copy_(mask1d_cpu, non_blocking=True)
+        return ALoRAMetadata(mask1d=mask1d)
+
+    def build_dummy_alora_metadata(self, num_tokens: int,
+                                   mask1d: torch.tensor):
+        alora_metadata = ALoRAMetadata(mask1d=mask1d[:num_tokens])
+        # needed to avoid guard failures
+        torch._dynamo.mark_dynamic(alora_metadata.mask1d, 0)
+        return alora_metadata
 
     @contextmanager
     def maybe_setup_dummy_loras(self,

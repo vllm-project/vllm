@@ -35,6 +35,8 @@ class PEFTHelper:
     use_rslora: bool = field(default=False)
     # True to use Weight-Decomposed Low-Rank Adaptation (DoRA, see: https://arxiv.org/abs/2402.09353)
     use_dora: bool = field(default=False)
+    # Invocation tokens for Activated LoRA (aLoRA, see: https://arxiv.org/abs/2504.12397)
+    alora_invocation_tokens: Optional[list[int]] = None
     # Extra vllm field, start with 'vllm_' to avoid conflict
     vllm_lora_scaling_factor: float = field(default=1.0)
     vllm_max_position_embeddings: Optional[int] = field(default=False)

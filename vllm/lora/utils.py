@@ -18,6 +18,7 @@ from vllm.logger import init_logger
 # yapf: disable
 from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
                               ColumnParallelLinearWithShardedLoRA,
+                              LinearLayerWithActivatedLoRAMixin,
                               LogitsProcessorWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
                               MergedColumnParallelLinearWithShardedLoRA,
@@ -69,6 +70,10 @@ def from_layer(layer: nn.Module,
                                       lora_config=lora_config,
                                       packed_modules_list=packed_modules_list,
                                       model_config=model_config):
+            # inject a-LoRA behaviour
+            if lora_config.enable_activated_lora:
+                lora_cls = LinearLayerWithActivatedLoRAMixin.maybe_mixin(
+                    lora_cls)
             instance_layer = lora_cls(layer)
             instance_layer.create_lora_weights(max_loras, lora_config,
                                                model_config)
