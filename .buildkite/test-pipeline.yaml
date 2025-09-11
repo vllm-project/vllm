@@ -31,7 +31,7 @@
 steps:
 #####  models test  #####
 
-- label: Basic Models Tests [Initialization]
+- label: Basic Models Tests (Initialization)
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
@@ -43,7 +43,7 @@ steps:
     - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset \
              --durations=100
 
-- label: Basic Models Tests [Extra Initialization] %N
+- label: Basic Models Tests (Extra Initialization) %N
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
@@ -61,7 +61,7 @@ steps:
              --durations=100
   parallelism: 2
 
-- label: Basic Models Tests [Other]
+- label: Basic Models Tests (Other)
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
@@ -77,7 +77,7 @@ steps:
                    models/test_utils.py \
                    models/test_vision.py
 
-- label: Language Models Tests [Standard]
+- label: Language Models Tests (Standard)
   timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
@@ -90,7 +90,7 @@ steps:
     - pytest -v -s models/language -m 'core_model and (not slow_test)' \
              --durations=100
 
-- label: Language Models Tests [Extra Standard] %N
+- label: Language Models Tests (Extra Standard) %N
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
@@ -109,7 +109,7 @@ steps:
              --durations=100
   parallelism: 2
 
-- label: Language Models Tests [Hybrid] %N
+- label: Language Models Tests (Hybrid) %N
   timeout_in_minutes: 75
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
