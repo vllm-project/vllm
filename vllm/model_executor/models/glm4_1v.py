@@ -1036,6 +1036,44 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
             selected_timestamps.append(timestamps_list[idx])
         return selected_timestamps
 
+    def _construct_video_placeholder(
+        self,
+        video_array: np.ndarray,
+        metadata: dict[str, Any],
+        grid_thw: torch.Tensor,
+    ) -> str:
+        hf_processor = self.get_hf_processor()
+        tokenizer = self.get_tokenizer()
+        image_processor = hf_processor.image_processor
+
+        hf_config = self.get_hf_config()
+        boi_token_id = hf_config.image_start_token_id
+        eoi_token_id = hf_config.image_end_token_id
+        bov_token_id = hf_config.video_start_token_id
+        eov_token_id = hf_config.video_end_token_id
+        merge_length = image_processor.merge_size**2
+
+        assert isinstance(grid_thw, torch.Tensor)
+        timestamps = self._get_video_second_idx(
+            metadata, len(video_array))
+        frames_idx_token = [
+            tokenizer.encode(str(i), add_special_tokens=False)
+            for i in timestamps
+        ]
+        T, H, W = grid_thw
+        num_tokens_per_frame = int(H * W) // merge_length
+        placeholder = []
+        placeholder.append(bov_token_id)
+        for frame_idx in frames_idx_token:
+            placeholder.append(boi_token_id)
+            placeholder.extend([hf_processor.video_token_id] *
+                               num_tokens_per_frame)
+            placeholder.append(eoi_token_id)
+            placeholder.extend(frame_idx)
+        placeholder.append(eov_token_id)
+
+        return placeholder
+
 
 class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
 
@@ -1160,34 +1198,13 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                 )
                 if "do_sample_frames" in mm_kwargs and not mm_kwargs[
                         "do_sample_frames"]:
-                    hf_config = self.info.get_hf_config()
-                    boi_token_id = hf_config.image_start_token_id
-                    eoi_token_id = hf_config.image_end_token_id
-                    bov_token_id = hf_config.video_start_token_id
-                    eov_token_id = hf_config.video_end_token_id
-
-                    merge_length = processor.image_processor.merge_size**2
-
-                    grid_thw = video_outputs["video_grid_thw"].data
-                    assert isinstance(grid_thw, torch.Tensor)
-
-                    timestamps = self.info._get_video_second_idx(
-                        metadata, len(video_array))
-                    frames_idx_token = [
-                        tokenizer.encode(str(i), add_special_tokens=False)
-                        for i in timestamps
-                    ]
-                    num_tokens_per_frame = int(
-                        grid_thw[0, 1:].prod()) // merge_length
-                    placeholder = []
-                    placeholder.append(bov_token_id)
-                    for frame_idx in frames_idx_token:
-                        placeholder.append(boi_token_id)
-                        placeholder.extend([processor.video_token_id] *
-                                           num_tokens_per_frame)
-                        placeholder.append(eoi_token_id)
-                        placeholder.extend(frame_idx)
-                    placeholder.append(eov_token_id)
+                    # Transformers v4.55 has incorrect timestamps issue for
+                    # skip sampling. We construct the placeholder manually to
+                    # get placeholders with correct timestamps.
+                    placeholder = self.info._construct_video_placeholder(
+                        video_array, metadata,
+                        video_outputs["video_grid_thw"].squeeze(0),
+                    )
                     video_placeholder = processor.tokenizer.decode(placeholder)
                 else:
                     input_ids = video_outputs.pop("input_ids")
@@ -1265,21 +1282,8 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             assert isinstance(grid_thw, torch.Tensor)
 
             video, metadata = mm_items["video"][item_idx]
-            timestamps = self.info._get_video_second_idx(metadata, len(video))
-            frames_idx_token = [
-                tokenizer.encode(str(i), add_special_tokens=False)
-                for i in timestamps
-            ]
-            num_tokens_per_frame = int(grid_thw[1:].prod()) // merge_length
-            placeholder = []
-            placeholder.append(bov_token_id)
-            for frame_idx in frames_idx_token:
-                placeholder.append(boi_token_id)
-                placeholder.extend([hf_processor.video_token_id] *
-                                   num_tokens_per_frame)
-                placeholder.append(eoi_token_id)
-                placeholder.extend(frame_idx)
-            placeholder.append(eov_token_id)
+            placeholder = self.info._construct_video_placeholder(
+                video, metadata, grid_thw)
             return PromptUpdateDetails.select_token_id(
                 placeholder,
                 embed_token_id=hf_processor.video_token_id,
