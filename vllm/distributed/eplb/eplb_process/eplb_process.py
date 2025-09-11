@@ -12,7 +12,7 @@ class EplbProcess:
     rearrangement threads
     """
 
-    def __init__(self, target_func: Callable, num_wait_worker_iterations: int):
+    def __init__(self, target_func: Callable, num_wait_worker_iterations: int, adaptor):
         """
         Initialize asynchronous thread manager
         Args:
@@ -36,6 +36,8 @@ class EplbProcess:
 
         # Save parameters needed for post-processing
         self._post_process_args: Optional[dict[str, Any]] = None
+        # import adaptor to get num_moe_layers
+        self.adaptor = adaptor
 
     def start(self, args: tuple, post_process_args: dict[str, Any]) -> bool:
         """
@@ -147,12 +149,12 @@ class EplbProcess:
             raise ValueError("Queue is empty, cannot retrieve element")
         size = self._result_queue.qsize()
         # check if queue length matches the of layers
-        if size != 94: #layer of qwen
-            raise ValueError(f"Queue length {size} does not match the expected layer numbers of qwen")
+        if size != self.eplb_adaptor.num_moe_layers: 
+            raise ValueError(f"Queue length {size} does not match the number of moe layers in the model")
         if i <=0 or i > size:
             raise ValueError(f"Index {i} out of range for queue of size {size}")
         result_result_queue = list(self._result_queue)
-        return result_result_queue[i-1]
+        return result_result_queue[i]
     
     def cleanup(self) -> None:
         """Clean up thread resources"""
