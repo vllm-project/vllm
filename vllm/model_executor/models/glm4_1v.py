@@ -272,22 +272,9 @@ class Glm4vVisionAttention(nn.Module):
     def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
         # [s, b, 3 * head * head_dim]
         seq_len, bs, _ = qkv.shape
-        if self.tp_size > 1:
-            qkv = all_gather_interleave(qkv, self.qkv.hidden_size,
-                                        self.tp_size)
 
         # [s, b, 3 * head * head_dim] -> 3 * [s, b, head * head_dim]
         q, k, v = qkv.chunk(3, dim=2)
-
-        # 3 * [s, b, head * head_dim]
-        if self.tp_size > 1:
-            splitter = partial(
-                dist_utils.split_tensor_along_last_dim,
-                num_partitions=self.tp_size,
-            )
-            q = splitter(q)[self.tp_rank]
-            k = splitter(k)[self.tp_rank]
-            v = splitter(v)[self.tp_rank]
 
         # 3 * [s, b, head * head_dim] -> 3 * [s, b, head, head_dim]
         new_shape = (
