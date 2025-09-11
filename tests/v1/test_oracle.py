@@ -10,7 +10,6 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 
 UNSUPPORTED_MODELS_V1 = [
-    "openai/whisper-large-v3",  # transcription
     "facebook/bart-large-cnn",  # encoder decoder
 ]
 
