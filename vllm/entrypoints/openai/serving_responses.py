@@ -714,9 +714,13 @@ class OpenAIServingResponses(OpenAIServing):
             # New conversation.
             reasoning_effort = (request.reasoning.effort
                                 if request.reasoning else None)
-            # Temporary: OpenAI types doesn't have container tool
-            # so we used MCP to cover that, up for change
-            tool_types = [tool.type for tool in request.tools]
+            # If there is a MCP tool with a matching server_label, then
+            # the tool is enabled. Native types like code_interpreter work
+            # as well
+            tool_types = [
+                tool.server_label if tool.type == "mcp" else tool.type
+                for tool in request.tools
+            ]
             if envs.VLLM_GPT_OSS_USE_CONTAINER_TOOL:
                 tool_types.append("container")
             enable_browser = ("web_search_preview" in tool_types
