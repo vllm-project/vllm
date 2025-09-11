@@ -238,10 +238,46 @@ class OpenAIServingChat(OpenAIServing):
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
+        tpi = 0  # mm tokens per img
+        limited_prompt_len = 0
+        limit_prompt = os.getenv("VLLM_LIMIT_PROMPT_LEN")
+
+        if limit_prompt:
+            limited_prompt_len = int(limit_prompt)
+        hf_config = getattr(self.model_config, "hf_config", None)
+        if hf_config is not None:
+            tpi = getattr(hf_config, "mm_tokens_per_image", None)
+
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
+                len_prompt = len(engine_prompt.get("prompt_token_ids", []))
+                len_encode_prompt = len(engine_prompt.get("encoder_prompt_token_ids", []))
+
+                mmd = engine_prompt.get("multi_modal_data") or {}
+                images = mmd.get("image") or []
+                if not isinstance(images, (list, tuple)):
+                    images = [images] if images else []
+                len_images = len(images)
+
+                total_prompt_len = len_prompt + len_encode_prompt + (len_images * tpi)
+                if limit_prompt:
+                    if total_prompt_len > limited_prompt_len:
+                        return self.create_error_response(
+                            f"Prompt too long: {total_prompt_len} > limit={limited_prompt_len} "
+                            "Reduce input length or adjust VLLM_LIMIT_PROMPT_LEN."
+                        )
+
+                    requested_max = (request.max_tokens or 0)
+
+                    if requested_max and total_prompt_len + requested_max > limited_prompt_len:
+                        return self.create_error_response(
+                            f"Requested max_tokens too large for prompt: "
+                            f"{total_prompt_len}+{requested_max} > limit={limited_prompt_len}. "
+                            f"Set max_tokens < or = {limited_prompt_len - total_prompt_len}."
+                        )
+
                 sampling_params: Union[SamplingParams, BeamSearchParams]
                 default_max_tokens = self.max_model_len - len(
                     engine_prompt["prompt_token_ids"])
