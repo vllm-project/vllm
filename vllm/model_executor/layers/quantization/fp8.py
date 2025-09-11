@@ -757,7 +757,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 layer.w2_weight = torch.nn.Parameter(shuffled_w2,
                                                      requires_grad=False)
 
-            # DeepGemm scales need to be transposed and aligned.  We try to do
+            # DeepGemm scales need to be transposed and aligned. We try to do
             # it ahead of time for performance reasons.
             if self.allow_deep_gemm and not is_deep_gemm_e8m0_used():
                 if _is_col_major(layer.w13_weight_scale_inv):
