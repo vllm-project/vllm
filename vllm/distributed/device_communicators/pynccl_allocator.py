@@ -8,6 +8,7 @@ from torch.utils.cpp_extension import load_inline
 from vllm import envs
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 
 logger = init_logger(__name__)
@@ -34,12 +35,12 @@ _allocator = None
 _mem_pool = None
 _registered_base_addrs = set()
 _graph_pool_id = None
-_nccl_allocator_disabled = False
+_nccl_allocator_failed_to_compile = False
 _cached_pool_snapshot = None
 
 def is_symmetric_memory_enabled():
-    global _nccl_allocator_disabled
-    return envs.VLLM_USE_NCCL_SYMM_MEM and not _nccl_allocator_disabled
+    global _nccl_allocator_failed_to_compile
+    return envs.VLLM_USE_NCCL_SYMM_MEM and not _nccl_allocator_failed_to_compile
 
 
 def is_symmetric_memory_tensor(tensor: torch.Tensor):
@@ -57,40 +58,50 @@ def set_graph_pool_id(graph_pool_id):
     _graph_pool_id = graph_pool_id
 
 
+def compile_nccl_allocator():
+    global _allocator, _nccl_allocator_failed_to_compile
+    if not current_platform.is_cuda():
+        _nccl_allocator_failed_to_compile = True
+        return
+    try: 
+        out_dir = tempfile.gettempdir()
+        nccl_allocator_libname = "nccl_allocator"
+        load_inline(
+            name=nccl_allocator_libname,
+            cpp_sources=nccl_allocator_source,
+            with_cuda=True,
+            extra_ldflags=["-lnccl"],
+            verbose=envs.VLLM_LOGGING_LEVEL == "DEBUG",
+            is_python_module=False,
+            build_directory=out_dir,
+            extra_include_paths=envs.VLLM_NCCL_INCLUDE_PATH,
+        )
+        _allocator = CUDAPluggableAllocator(
+            f"{out_dir}/{nccl_allocator_libname}.so",
+            "nccl_alloc_plug",
+            "nccl_free_plug",
+        ).allocator()
+    except Exception as e:
+        _nccl_allocator_failed_to_compile = True
+        logger.warning(
+            "Failed to compile NCCL memory allocator. "
+            "Symmetric memory will be disabled. "
+            "This is expected if NCCL headers are not available. "
+            "optionally set VLLM_NCCL_INCLUDE_PATH to point to NCCL header."
+            "Error: %s", str(e)
+        )
+
+
 def get_nccl_mem_pool():
-    global _allocator, _mem_pool, _nccl_allocator_disabled
-    if _mem_pool is None and not _nccl_allocator_disabled:
-        try: 
-            out_dir = tempfile.gettempdir()
-            nccl_allocator_libname = "nccl_allocator"
-            load_inline(
-                name=nccl_allocator_libname,
-                cpp_sources=nccl_allocator_source,
-                with_cuda=True,
-                extra_ldflags=["-lnccl"],
-                verbose=True,
-                is_python_module=False,
-                build_directory=out_dir,
-            )
-            _allocator = CUDAPluggableAllocator(
-                f"{out_dir}/{nccl_allocator_libname}.so",
-                "nccl_alloc_plug",
-                "nccl_free_plug",
-            ).allocator()
+    global _mem_pool, _nccl_allocator_failed_to_compile
+    if _mem_pool is None and not _nccl_allocator_failed_to_compile:
+        compile_nccl_allocator()
+        if _allocator is not None:
             _mem_pool = torch.cuda.MemPool(_allocator)
-        except Exception as e:
-            _nccl_allocator_disabled = True
-            logger.warning(
-                "Failed to compile NCCL memory allocator. "
-                "Symmetric memory will be disabled. "
-                "This is expected if NCCL headers are not available. "
-                "Error: %s", str(e)
-            )
-            _mem_pool = None
     return _mem_pool
 
 
-class use_symmetric_memory:
+class nccl_symm_mem_context:
     def __init__(
         self,
         pynccl_comm: PyNcclCommunicator,
@@ -100,6 +111,7 @@ class use_symmetric_memory:
             disabled
             or not is_symmetric_memory_enabled()
             or pynccl_comm.world_size == 1
+            or not current_platform.is_cuda()
             or get_nccl_mem_pool() is None
             or version.parse(torch.__version__) < version.parse("2.8.0.a0")
         )

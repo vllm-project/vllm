@@ -192,7 +192,7 @@ if TYPE_CHECKING:
     GPT_OSS_SYSTEM_TOOL_MCP_LABELS: list[str] = []
     VLLM_PATTERN_MATCH_DEBUG: Optional[str] = None
     VLLM_USE_NCCL_SYMM_MEM: bool = False
-
+    VLLM_NCCL_INCLUDE_PATH: Optional[str] = None
 
 def get_default_cache_root():
     return os.getenv(
@@ -1404,6 +1404,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Flag to enable NCCL symmetric memory allocation and registration
     "VLLM_USE_NCCL_SYMM_MEM":
     lambda: bool(int(os.getenv("VLLM_USE_NCCL_SYMM_MEM", "0"))),
+
+    # NCCL header path
+    "VLLM_NCCL_INCLUDE_PATH":
+    lambda: os.environ.get("VLLM_NCCL_INCLUDE_PATH", None),
 
 }
 
