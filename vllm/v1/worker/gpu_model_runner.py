@@ -2070,7 +2070,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
         with record_function_or_nullcontext("Bookkeep"):
-            assert isinstance(hidden_states, torch.Tensor)
             (
                 num_nans_in_logits,
                 logprobs_lists,
