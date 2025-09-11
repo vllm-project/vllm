@@ -519,7 +519,7 @@ def np_cache_weights_iterator(
 def safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
-    safetensors_load_strategy: Optional[str] = "lazy",
+    safetensors_load_strategy: str = "lazy",
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
     loading_desc = "Loading safetensors checkpoint shards"
