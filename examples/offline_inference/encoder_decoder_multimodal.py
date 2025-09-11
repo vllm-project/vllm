@@ -5,6 +5,7 @@ This example shows how to use vLLM for running offline inference with
 the explicit/implicit prompt format on enc-dec LMMs for text generation.
 """
 
+import os
 import time
 from collections.abc import Sequence
 from dataclasses import asdict
@@ -130,6 +131,8 @@ def run_mllama():
 
 
 def run_whisper():
+    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
     engine_args = EngineArgs(
         model="openai/whisper-large-v3-turbo",
         max_model_len=448,

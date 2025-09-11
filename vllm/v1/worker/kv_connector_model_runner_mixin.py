@@ -9,7 +9,8 @@ from typing import Generator  # noqa: UP035
 from typing import TYPE_CHECKING, Optional
 
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer import (get_kv_transfer_group,
+from vllm.distributed.kv_transfer import (ensure_kv_transfer_shutdown,
+                                          get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.forward_context import get_forward_context, set_forward_context
@@ -41,6 +42,12 @@ class KVConnectorModelRunnerMixin:
             # involved may be disjoint from the running requests.
             # Do this here to save a collective_rpc.
             kv_connector.start_load_kv(get_forward_context())
+
+    @staticmethod
+    def ensure_kv_transfer_shutdown() -> None:
+        # has_kv_transfer_group can be None during interpreter shutdown.
+        if has_kv_transfer_group and has_kv_transfer_group():
+            ensure_kv_transfer_shutdown()
 
     @staticmethod
     def maybe_wait_for_kv_save() -> None:

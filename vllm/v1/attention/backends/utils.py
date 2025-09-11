@@ -28,7 +28,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_kv_connector_cache_layout)
 from vllm.logger import init_logger
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.v1.worker.ubatch_utils import UbatchSlice
+from vllm.v1.worker.ubatch_utils import UBatchSlice
 
 logger = init_logger(__name__)
 _KV_CACHE_LAYOUT_OVERRIDE = None
@@ -73,6 +73,9 @@ class CommonAttentionMetadata:
     logits_indices_padded: Optional[torch.Tensor] = None
     num_logits_indices: Optional[int] = None
 
+    # Needed by CrossAttentionBuilder
+    encoder_seq_lens: Optional[np.ndarray] = None
+
 
 def slice_query_start_locs(
     query_start_loc: torch.Tensor,
@@ -90,7 +93,7 @@ def slice_query_start_locs(
 
 
 def _make_metadata_with_slice(
-        ubatch_slice: UbatchSlice,
+        ubatch_slice: UBatchSlice,
         attn_metadata: CommonAttentionMetadata) -> CommonAttentionMetadata:
     """
     This function creates a new CommonAttentionMetadata that corresponds to 
@@ -102,7 +105,7 @@ def _make_metadata_with_slice(
 
     request_slice = ubatch_slice.request_slice
     token_slice = ubatch_slice.token_slice
-    
+
     start_locs = attn_metadata.query_start_loc_cpu
     first_req = request_slice.start
     first_tok = token_slice.start
@@ -115,11 +118,11 @@ def _make_metadata_with_slice(
         "Token slice end outside of last request"
 
     splits_first_request = first_tok > start_locs[first_req]
-    splits_last_request = last_tok < start_locs[last_req+1] - 1
+    splits_last_request = last_tok < start_locs[last_req + 1] - 1
 
     query_start_loc_cpu = slice_query_start_locs(start_locs, request_slice)
-    query_start_loc = slice_query_start_locs(
-        attn_metadata.query_start_loc, request_slice)
+    query_start_loc = slice_query_start_locs(attn_metadata.query_start_loc,
+                                             request_slice)
 
     assert len(query_start_loc) >= 2, (
         f"query_start_loc must have at least 2 elements, "
@@ -136,11 +139,11 @@ def _make_metadata_with_slice(
         tokens_skipped = query_start_loc_cpu[-1] - token_slice.stop
         query_start_loc[-1] -= tokens_skipped
         query_start_loc_cpu[-1] -= tokens_skipped
-        
+
         # Make sure we don't modify the seq_lens tensors
         #  (not cudagraph compatible)
         seq_lens = seq_lens.clone()
-        seq_lens_cpu = seq_lens_cpu.clone()        
+        seq_lens_cpu = seq_lens_cpu.clone()
         seq_lens[-1] -= tokens_skipped
         seq_lens_cpu[-1] -= tokens_skipped
 
@@ -178,12 +181,12 @@ def _make_metadata_with_slice(
 
 
 def split_attn_metadata(
-    ubatch_slices: list[UbatchSlice],
+    ubatch_slices: list[UBatchSlice],
     common_attn_metadata: CommonAttentionMetadata,
 ) -> list[CommonAttentionMetadata]:
     """
     Creates a new CommonAttentionMetadata instance that corresponds to the 
-    requests for each UbatchSlice in ubatch_slices.
+    requests for each UBatchSlice in ubatch_slices.
 
     Note: This function does not modify common_attn_metadata
     """
@@ -239,6 +242,9 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
         self.kv_cache_spec = kv_cache_spec
+        self.layer_names = layer_names
+        self.vllm_config = vllm_config
+        self.device = device
 
     @abstractmethod
     def build(self,
@@ -588,7 +594,14 @@ def make_local_attention_virtual_batches(
                                                    1)
     batch_indices = np.repeat(np.arange(actual_batch_size, dtype=np.int32),
                               local_blocks * pages_per_local_batch)
-    block_table_local = block_table[batch_indices, block_indices]\
+
+    # NOTE: https://github.com/pytorch/pytorch/pull/160256 causes performance
+    # regression when using numpy arrays (batch and block indices) to index into
+    # torch tensor (block_table). As a workaround, convert numpy arrays to torch
+    # tensor first, which recovers perf.
+    batch_indices_torch = torch.from_numpy(batch_indices)
+    block_indices_torch = torch.from_numpy(block_indices)
+    block_table_local = block_table[batch_indices_torch, block_indices_torch]\
         .view(virtual_batches, -1)
 
     query_start_loc_cpu = torch.from_numpy(cu_seqlens_q_local)

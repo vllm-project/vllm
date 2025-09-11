@@ -229,7 +229,7 @@ class FusedMoEPrepareAndFinalize(ABC):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-    ) -> ReceiverType:
+    ) -> tuple[Callable, ReceiverType]:
         """
         Perform any quantization (and/or) dispatching needed for this kernel
         but do not wait for results from other workers.
@@ -305,7 +305,7 @@ class FusedMoEPrepareAndFinalize(ABC):
     def max_num_tokens_per_rank(self) -> Optional[int]:
         """
         Some PrepareFinalize All2All implementations are batched. Meaning,
-        they can processes only as set of tokens at a time. This
+        they can process only as set of tokens at a time. This
         function returns the batch size i.e the maximum number of tokens
         the implementation can process at a time.
         Return None if there are no such restrictions.
@@ -504,8 +504,6 @@ class SharedResizableBuffer:
     def __init__(self):
         self.buffer = None
 
-    # NOTE: Assumes the first call to get() is the largest shape,
-    #  this is usually true due to the profile run.
     def get(self, shape: tuple[int, ...], device: torch.device,
             dtype: torch.dtype):
         shape_numel = prod(shape)
@@ -531,8 +529,9 @@ class FusedMoEModularKernel(torch.nn.Module):
     layer due to any layer specific state that may be used by the component
     objects.
     """
-    
+
     class SharedBuffers:
+
         def __init__(self) -> None:
             self.fused_out = SharedResizableBuffer()
             self.workspace13 = SharedResizableBuffer()
@@ -889,7 +888,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                     hook()
 
             (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
-                _expert_topk_weights) = receiver()
+             _expert_topk_weights) = receiver()
 
         # Maybe prepare gathered topk_ids and topk_weights from other EP ranks.
         topk_ids = topk_ids if _expert_topk_ids is None else _expert_topk_ids

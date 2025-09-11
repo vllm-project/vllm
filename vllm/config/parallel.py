@@ -134,7 +134,7 @@ class ParallelConfig:
     """The threshold for microbatching for decode batches. If the number of
     tokens in the request is greater than this threshold, microbatching will
     be used. Otherwise, the request will be processed in a single batch."""
-    
+
     microbatching_prefill_token_threshold: int = 32
     """The threshold for microbatching mixed prefill-decode batches. If the
     number of tokens in the request is greater than this threshold,
@@ -183,6 +183,11 @@ class ParallelConfig:
     """List of open port auto-queried for data parallel messaging.
     Set to be private as it's not intended to be configured by users.
     """
+
+    decode_context_parallel_size: int = 1
+    """Number of decode context parallel groups, because the world size does
+    not change by dcp, it simply reuse the GPUs of TP group, and tp_size
+    needs to be divisible by dcp_size."""
 
     @property
     def world_size_across_dp(self) -> int:
@@ -377,8 +382,10 @@ class ParallelConfig:
         else:
             if self.eplb_config.num_redundant_experts != 0:
                 raise ValueError(
-                    "num_redundant_experts should be used with EPLB."
-                    f"{self.eplb_config.num_redundant_experts}.")
+                    "num_redundant_experts is set to "
+                    f"{self.eplb_config.num_redundant_experts} but EPLB is not "
+                    "enabled. Either enable EPLB or unset "
+                    "num_redundant_experts.")
         if self.distributed_executor_backend is None and self.world_size > 1:
             # We use multiprocessing by default if world_size fits on the
             # current node and we aren't in a ray placement group.
@@ -386,10 +393,7 @@ class ParallelConfig:
             from vllm.executor import ray_utils
             backend: DistributedExecutorBackend = "mp"
             ray_found = ray_utils.ray_is_available()
-            if current_platform.is_neuron():
-                # neuron uses single process to control multiple devices
-                backend = "uni"
-            elif current_platform.is_tpu() and envs.VLLM_XLA_USE_SPMD:
+            if current_platform.is_tpu() and envs.VLLM_XLA_USE_SPMD:
                 backend = "uni"
             elif (current_platform.is_cuda()
                   and cuda_device_count_stateless() < self.world_size):

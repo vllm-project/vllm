@@ -5,7 +5,6 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-import numpy as np
 import torch
 
 import vllm.envs as envs
@@ -36,6 +35,7 @@ class CUDAGraphMetaData:
     cudagraph: torch.cuda.CUDAGraph
     ubatch_metadata: UbatchMetadata
     outputs: Optional[Any] = None
+
 
 class UBatchWrapper:
 

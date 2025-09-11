@@ -13,7 +13,7 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
-from vllm.v1.worker.ubatch_utils import (UbatchSlice, UBatchSlices)
+from vllm.v1.worker.ubatch_utils import UBatchSlices, is_second_ubatch_empty
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -67,7 +67,6 @@ def _compute_chunked_local_num_tokens(num_tokens_across_dp_cpu: list[int],
 class DPMetadata:
     max_tokens_across_dp_cpu: torch.Tensor
     cu_tokens_across_dp_cpu: torch.Tensor
-    _num_tokens_across_dp: torch.Tensor
     local_sizes: Optional[list[int]] = None
 
     @staticmethod
@@ -87,30 +86,31 @@ class DPMetadata:
         return num_tokens_tensor
 
     @staticmethod
-    def should_ubatch_across_dp(should_ubatch: bool, orig_num_tokens_per_ubatch: int,
-                                padded_num_tokens_per_ubatch: int, dp_size: int,
-                                dp_rank: int) -> tuple[bool, Optional[torch.Tensor]]:
+    def should_ubatch_across_dp(
+            should_ubatch: bool, orig_num_tokens_per_ubatch: int,
+            padded_num_tokens_per_ubatch: int, dp_size: int,
+            dp_rank: int) -> tuple[bool, Optional[torch.Tensor]]:
 
         tensor = torch.zeros(3, dp_size, device="cuda", dtype=torch.int32)
         tensor[0][dp_rank] = orig_num_tokens_per_ubatch
         tensor[1][dp_rank] = padded_num_tokens_per_ubatch
         tensor[2][dp_rank] = 1 if should_ubatch else 0
 
-
         from vllm.distributed.parallel_state import get_dp_group
         dist.all_reduce(tensor, group=get_dp_group().device_group)
 
-        result: bool = bool(torch.all(tensor[2]== 1).item())
+        result: bool = bool(torch.all(tensor[2] == 1).item())
         if not result:
             return result, None
-        
+
         orig_num_tokens_tensor = tensor[0, :]
         padded_num_tokens_tensor = tensor[1, :]
 
-        orig_min_num_tokens = orig_num_tokens_tensor.min().item()
-        padded_max_num_tokens = padded_num_tokens_tensor.max().item()
-        if padded_max_num_tokens >= 2 * orig_min_num_tokens:
-            logger.debug(f"Aborting ubatching {orig_min_num_tokens} {padded_max_num_tokens}")
+        orig_min_num_tokens = int(orig_num_tokens_tensor.min().item())
+        padded_max_num_tokens = int(padded_num_tokens_tensor.max().item())
+        if is_second_ubatch_empty(orig_min_num_tokens, padded_max_num_tokens):
+            logger.debug("Aborting ubatching %s %s", orig_min_num_tokens,
+                         padded_max_num_tokens)
             return False, None
         return result, padded_num_tokens_tensor
 
@@ -136,14 +136,14 @@ class DPMetadata:
 
         # If num_tokens_across_dp is None, it will be computed by all_reduce
         # Otherwise, num_tokens_across_dp[dp_rank] should be equal to batchsize
-        assert (num_tokens_across_dp is None
-                or num_tokens_across_dp[dp_rank] == batchsize)
+        assert (num_tokens_across_dp is None or num_tokens_across_dp[dp_rank]
+                == batchsize), f"{num_tokens_across_dp[dp_rank]} {batchsize}"
         if num_tokens_across_dp is None:
             num_tokens_across_dp = DPMetadata.num_tokens_across_dp(
                 batchsize, dp_size, dp_rank)
         max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp)
         cu_tokens_across_dp_cpu = torch.cumsum(num_tokens_across_dp, dim=0)
-        return DPMetadata(max_tokens_across_dp_cpu, cu_tokens_across_dp_cpu, 
+        return DPMetadata(max_tokens_across_dp_cpu, cu_tokens_across_dp_cpu,
                           num_tokens_across_dp)
 
     @contextmanager
@@ -197,9 +197,12 @@ class ForwardContext:
     Type AttentionMetadata for v0, 
     Type Dict[str, AttentionMetadata] for v1, map from layer_name of each 
     attention layer to its attention metadata
-    set dynamically for each forward pass
+    Type List[Dict[str, AttentionMetadata]] for DBO. List of size two, one
+    for each microbatch.
+    Set dynamically for each forward pass
     """
-    attn_metadata: Union["AttentionMetadata", dict[str, "AttentionMetadata"], list[dict[str, "AttentionMetadata"]]]
+    attn_metadata: Union["AttentionMetadata", dict[str, "AttentionMetadata"],
+                         list[dict[str, "AttentionMetadata"]]]
     # TODO: remove after making all virtual_engines share the same kv cache
     virtual_engine: int  # set dynamically for each forward pass
     # set dynamically for each forward pass
@@ -228,13 +231,14 @@ def get_forward_context() -> ForwardContext:
     return _forward_context
 
 
-def create_forward_context(attn_metadata: Any,
-                           vllm_config: VllmConfig,
-                           virtual_engine: int = 0,
-                           dp_metadata: Optional[DPMetadata] = None,
-                           cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-                           batch_descriptor: Optional[BatchDescriptor] = None,
-                           ubatch_slices: Optional[UBatchSlices] = None):
+def create_forward_context(
+        attn_metadata: Any,
+        vllm_config: VllmConfig,
+        virtual_engine: int = 0,
+        dp_metadata: Optional[DPMetadata] = None,
+        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        batch_descriptor: Optional[BatchDescriptor] = None,
+        ubatch_slices: Optional[UBatchSlices] = None):
     return ForwardContext(no_compile_layers=vllm_config.compilation_config.
                           static_forward_context,
                           virtual_engine=virtual_engine,
@@ -288,8 +292,8 @@ def set_forward_context(
 
     forward_context = create_forward_context(attn_metadata, vllm_config,
                                              virtual_engine, dp_metadata,
-                                             cudagraph_runtime_mode, batch_descriptor,
-                                             ubatch_slices)
+                                             cudagraph_runtime_mode,
+                                             batch_descriptor, ubatch_slices)
 
     try:
         with override_forward_context(forward_context):
