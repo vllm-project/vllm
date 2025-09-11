@@ -1210,8 +1210,7 @@ class Scheduler(SchedulerInterface):
         if self.connector is None:
             return False, None
 
-        blocks = self.kv_cache_manager.coordinator.get_blocks(
-            request.request_id)
+        blocks = self.kv_cache_manager.get_blocks(request.request_id)
         return self.connector.request_finished(request, blocks)
 
     def _update_waiting_for_remote_kv(self, request: Request) -> bool:
