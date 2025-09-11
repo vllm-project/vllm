@@ -586,6 +586,13 @@ class Platform:
         """
         raise NotImplementedError
 
+    @classmethod
+    def support_hybrid_kv_cache(cls) -> bool:
+        """
+        Returns if the hybrid kv cache is supported by the current platform.
+        """
+        return False
+
 
 class UnspecifiedPlatform(Platform):
     _enum = PlatformEnum.UNSPECIFIED
