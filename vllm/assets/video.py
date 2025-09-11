@@ -111,21 +111,22 @@ class VideoAsset:
         return self._NAME_TO_FILE[self.name]
 
     @property
+    def video_path(self) -> str:
+        return download_video_asset(self.filename)
+
+    @property
     def pil_images(self) -> list[Image.Image]:
-        video_path = download_video_asset(self.filename)
-        ret = video_to_pil_images_list(video_path, self.num_frames)
+        ret = video_to_pil_images_list(self.video_path, self.num_frames)
         return ret
 
     @property
     def np_ndarrays(self) -> npt.NDArray:
-        video_path = download_video_asset(self.filename)
-        ret = video_to_ndarrays(video_path, self.num_frames)
+        ret = video_to_ndarrays(self.video_path, self.num_frames)
         return ret
 
     @property
     def metadata(self) -> dict[str, Any]:
-        video_path = download_video_asset(self.filename)
-        ret = video_get_metadata(video_path)
+        ret = video_get_metadata(self.video_path)
         return ret
 
     def get_audio(self, sampling_rate: Optional[float] = None) -> npt.NDArray:
@@ -134,5 +135,4 @@ class VideoAsset:
         
         See also: examples/offline_inference/qwen2_5_omni/only_thinker.py
         """
-        video_path = download_video_asset(self.filename)
-        return librosa.load(video_path, sr=sampling_rate)[0]
+        return librosa.load(self.video_path, sr=sampling_rate)[0]
