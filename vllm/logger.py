@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Logging configuration for vLLM."""
+import copy
 import datetime
 import json
 import logging
@@ -25,6 +26,7 @@ VLLM_LOGGING_STREAM = envs.VLLM_LOGGING_STREAM
 _FORMAT = (f"{VLLM_LOGGING_PREFIX}%(levelname)s %(asctime)s "
            "[%(fileinfo)s:%(lineno)d] %(message)s")
 _DATE_FORMAT = "%m-%d %H:%M:%S"
+LOG_FILE_NAME = None
 
 DEFAULT_LOGGING_CONFIG = {
     "formatters": {
@@ -50,7 +52,7 @@ DEFAULT_LOGGING_CONFIG = {
         },
     },
     "version": 1,
-    "disable_existing_loggers": False
+    "disable_existing_loggers": False,
 }
 
 
@@ -136,6 +138,23 @@ def _configure_vllm_root_logger() -> None:
             raise ValueError("Invalid logging config. Expected dict, got %s.",
                              type(custom_config).__name__)
         logging_config = custom_config
+    elif envs.VLLM_LOGS_DIR:
+        LOG_FILE_DIR = os.path.expanduser(envs.VLLM_LOGS_DIR)
+        if envs.VLLM_PER_RANK_LOGS and not LOG_FILE_DIR:
+            raise ValueError("VLLM_PER_RANK_LOGS is set to true, "
+                             "but VLLM_LOGS_DIR is not set.")
+        os.makedirs(LOG_FILE_DIR, exist_ok=True)
+
+        global LOG_FILE_NAME
+        LOG_FILE_NAME = os.path.join(LOG_FILE_DIR, "vllm.log")
+        logging_config["handlers"]["vllm_log_file"] = {
+            "class": "logging.FileHandler",
+            "formatter": "vllm",
+            "level": VLLM_LOGGING_LEVEL,
+            "filename": LOG_FILE_NAME,
+            "encoding": "utf-8",
+        }
+        logging_config["loggers"]["vllm"]["handlers"].append("vllm_log_file")
 
     for formatter in logging_config.get("formatters", {}).values():
         # This provides backwards compatibility after #10134.
@@ -144,6 +163,26 @@ def _configure_vllm_root_logger() -> None:
 
     if logging_config:
         dictConfig(logging_config)
+
+
+def setup_per_rank_logger(rank) -> None:
+    if not envs.VLLM_PER_RANK_LOGS:
+        return
+    if LOG_FILE_NAME is None:
+        raise ValueError(
+            "LOG_FILE_NAME is None. "
+            "Please configure logging before setting up per-rank logger.")
+    base_str = os.path.splitext(LOG_FILE_NAME)[0]
+    log_file = f"{base_str}_rank_{rank}.log"
+
+    log_config = copy.deepcopy(DEFAULT_LOGGING_CONFIG)
+    try:
+        log_config["handlers"]["vllm_log_file"][  # type: ignore[index]
+            "filename"] = log_file  # type: ignore[index]
+    except KeyError as err:
+        raise ValueError(
+            "vllm_log_file handler is not configured correctly.") from err
+    dictConfig(log_config)
 
 
 def init_logger(name: str) -> _VllmLogger:

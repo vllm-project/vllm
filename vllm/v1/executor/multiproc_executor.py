@@ -30,7 +30,7 @@ from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
                                              get_pp_group, get_tp_group)
 from vllm.executor.multiproc_worker_utils import (
     set_multiprocessing_worker_envs)
-from vllm.logger import init_logger
+from vllm.logger import init_logger, setup_per_rank_logger
 from vllm.utils import (decorate_logs, get_distributed_init_method,
                         get_loopback_ip, get_mp_context, get_open_port,
                         set_process_title)
@@ -518,6 +518,10 @@ class WorkerProc:
         # SystemExit exception is only raised once to allow this and worker
         # processes to terminate without error
         shutdown_requested = False
+
+        rank = kwargs.get("rank")
+        if rank is not None:
+            setup_per_rank_logger(rank)
 
         def signal_handler(signum, frame):
             nonlocal shutdown_requested
