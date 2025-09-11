@@ -1,0 +1,17 @@
+[
+  {
+    "prompt": "Hello, my name is",
+    "prefill_output": " [Your Name]. I",
+    "full_prompt": "Hello, my name is [Your Name]. I"
+  },
+  {
+    "prompt": "The capital of France is",
+    "prefill_output": " Paris, which is located",
+    "full_prompt": "The capital of France is Paris, which is located"
+  },
+  {
+    "prompt": "Tell me about artificial intelligence",
+    "prefill_output": " and machine learning\nArt",
+    "full_prompt": "Tell me about artificial intelligence and machine learning\nArt"
+  }
+]

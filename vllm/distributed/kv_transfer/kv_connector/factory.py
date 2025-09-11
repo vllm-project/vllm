@@ -105,3 +105,8 @@ KVConnectorFactory.register_connector(
     "MultiConnector",
     "vllm.distributed.kv_transfer.kv_connector.v1.multi_connector",
     "MultiConnector")
+
+KVConnectorFactory.register_connector(
+    "GTSConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.gts_connector",
+    "GTSConnector")
