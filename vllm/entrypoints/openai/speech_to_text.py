@@ -81,8 +81,10 @@ class OpenAISpeechToText(OpenAIServing):
             model_config, task_type)
 
         self.max_audio_filesize_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
-        self.tokenizer = cast(PreTrainedTokenizerBase,
-                              get_tokenizer(model_config.tokenizer))
+        self.tokenizer = cast(
+            PreTrainedTokenizerBase,
+            get_tokenizer(tokenizer_name=model_config.tokenizer,
+                          tokenizer_mode=model_config.tokenizer_mode))
         if self.default_sampling_params:
             logger.info(
                 "Overwriting default completion sampling param with: %s",
