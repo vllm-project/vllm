@@ -113,6 +113,15 @@ class CacheConfig:
     necessary for implementing this optimization in some models (e.g. Gemma3n)
     """
 
+    kv_cache_memory_bytes: Optional[int] = None
+    """Size of KV Cache per GPU in bytes. By default, this is set to None
+    and vllm can automatically infer the kv cache size based on
+    gpu_memory_utilization. However, users may want to manually specify
+    the kv cache memory size. kv_cache_memory_bytes allows more fine-grain
+    control of how much memory gets used when compared with using
+    gpu_memory_memory_utilization. Note that kv_cache_memory_bytes
+    (when not-None) ignores gpu_memory_utilization"""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

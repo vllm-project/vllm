@@ -230,6 +230,67 @@ class Worker(LocalOrDistributedWorkerBase):
             tensorizer_config=tensorizer_config, )
 
     @torch.inference_mode()
+    def determine_available_kv_cache_memory(self,
+                                            total_gpu_memory: int) -> float:
+        if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
+            # still need a profile run which compiles the model for
+            # max_num_batched_tokens
+            self.model_runner.profile_run()
+
+            GiB = lambda b: b / GiB_bytes
+            msg = (
+                f"Initial free memory "
+                f"{GiB(self.baseline_snapshot.free_memory):.2f} "
+                f"GiB, reserved {GiB(kv_cache_memory_bytes):.2f}GiB memory for "
+                "KV Cache as specified by kv_cache_memory_bytes config and "
+                "skipped memory profiling. This does does not respect the "
+                "gpu_memory_utilization config. Only use kv_cache_memory_bytes "
+                "config when you want manual control of KV cache memory "
+                "size. If OOM'ed, check the difference of initial free "
+                "memory between the current run and the previous run "
+                "where kv_cache_memory_bytes is suggested and update it "
+                "correspondingly.")
+            logger.info(msg)
+            return self.cache_config.kv_cache_memory_bytes
+
+        # Execute a forward pass with dummy inputs to profile the memory usage
+        # of the model.
+        with memory_profiling(
+                self.baseline_snapshot,
+                weights_memory=self.model_runner.model_memory_usage) as result:
+            self.model_runner.profile_run()
+
+        self.non_torch_memory = result.non_torch_increase
+        self.peak_activation_memory = result.torch_peak_increase
+
+        self._assert_memory_footprint_increased_during_profiling()
+
+        self.requested_memory = total_gpu_memory * \
+            self.cache_config.gpu_memory_utilization
+
+        self.available_kv_cache_memory = (self.requested_memory -
+                                          result.non_kv_cache_memory)
+
+        msg = (f"Memory profiling takes {result.profile_time:.2f} seconds\n"
+               "the current vLLM instance can use "
+               "total_gpu_memory "
+               f"({(total_gpu_memory / GiB_bytes):.2f}GiB)"
+               " x gpu_memory_utilization "
+               f"({self.cache_config.gpu_memory_utilization:.2f})"
+               f" = {(self.requested_memory / GiB_bytes):.2f}GiB\n"
+               "model weights take "
+               f"{(result.weights_memory / GiB_bytes):.2f}GiB;"
+               " non_torch_memory takes "
+               f"{(result.non_torch_increase / GiB_bytes):.2f}GiB;"
+               " PyTorch activation peak memory takes "
+               f"{(result.torch_peak_increase / GiB_bytes):.2f}GiB;"
+               " the rest of the memory reserved for KV Cache is "
+               f"{(self.available_kv_cache_memory / GiB_bytes):.2f}GiB.")
+
+        logger.info(msg)
+        return self.available_kv_cache_memory
+
+    @torch.inference_mode()
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Profiles the peak memory usage of the model to determine how many
         KV blocks may be allocated without OOMs.
@@ -248,20 +309,8 @@ class Worker(LocalOrDistributedWorkerBase):
         torch.cuda.reset_peak_memory_stats()
 
         free_memory_pre_profile, total_gpu_memory = torch.cuda.mem_get_info()
-
-        # Execute a forward pass with dummy inputs to profile the memory usage
-        # of the model.
-        with memory_profiling(
-                self.baseline_snapshot,
-                weights_memory=self.model_runner.model_memory_usage) as result:
-            self.model_runner.profile_run()
-
-        self._assert_memory_footprint_increased_during_profiling()
-
-        memory_for_current_instance = total_gpu_memory * \
-            self.cache_config.gpu_memory_utilization
-        available_kv_cache_memory = (memory_for_current_instance -
-                                     result.non_kv_cache_memory)
+        available_kv_cache_memory = self.determine_available_kv_cache_memory(
+            total_gpu_memory)
 
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
@@ -276,23 +325,6 @@ class Worker(LocalOrDistributedWorkerBase):
         num_gpu_blocks = max(num_gpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
 
-        msg = (f"Memory profiling takes {result.profile_time:.2f} seconds\n"
-               "the current vLLM instance can use "
-               "total_gpu_memory "
-               f"({(total_gpu_memory / GiB_bytes):.2f}GiB)"
-               " x gpu_memory_utilization "
-               f"({self.cache_config.gpu_memory_utilization:.2f})"
-               f" = {(memory_for_current_instance / GiB_bytes):.2f}GiB\n"
-               "model weights take "
-               f"{(result.weights_memory / GiB_bytes):.2f}GiB;"
-               " non_torch_memory takes "
-               f"{(result.non_torch_increase / GiB_bytes):.2f}GiB;"
-               " PyTorch activation peak memory takes "
-               f"{(result.torch_peak_increase / GiB_bytes):.2f}GiB;"
-               " the rest of the memory reserved for KV Cache is "
-               f"{(available_kv_cache_memory / GiB_bytes):.2f}GiB.")
-
-        logger.info(msg)
         # Final cleanup
         gc.collect()
 
@@ -382,8 +414,58 @@ class Worker(LocalOrDistributedWorkerBase):
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size)
+
+        cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
-            self.model_runner.capture_model(self.gpu_cache)
+            cuda_graph_memory_bytes = self.model_runner.capture_model(
+                self.gpu_cache)
+
+        if (self.cache_config.kv_cache_memory_bytes is None
+                and hasattr(self, "peak_activation_memory")):
+            # Suggests optimal kv cache memory size if we rely on
+            # memory_profiling to guess the kv cache memory size which
+            # provides peak_activation_memory and a few other memory
+            # consumption. `memory_profiling` does not consider
+            # CUDAGraph memory size and may not utilize all gpu memory.
+            # Users may want fine-grained control to specify kv cache
+            # memory size.
+            GiB = lambda b: round(b / GiB_bytes, 2)
+            non_kv_cache_memory = (self.model_runner.model_memory_usage +
+                                   self.peak_activation_memory +
+                                   self.non_torch_memory +
+                                   cuda_graph_memory_bytes)
+
+            # empirically observed that the memory profiling may
+            # slightly underestimate the memory consumption.
+            # So leave a small buffer (=150MiB) to avoid OOM.
+            redundancy_buffer_memory = 150 * (1 << 20)
+            kv_cache_memory_bytes_to_gpu_limit = (
+                self.baseline_snapshot.free_memory - non_kv_cache_memory -
+                redundancy_buffer_memory)
+            kv_cache_memory_bytes_to_requested_limit = (
+                int(self.requested_memory) - non_kv_cache_memory -
+                redundancy_buffer_memory)
+
+            msg = (
+                f"Free memory on device "
+                f"({GiB(self.baseline_snapshot.free_memory)}/"
+                f"{GiB(self.baseline_snapshot.total_memory)} GiB) on startup. "
+                f"Desired GPU memory utilization is "
+                f"({self.cache_config.gpu_memory_utilization}, "
+                f"{GiB(self.requested_memory)} GiB). "
+                f"Actual usage is {GiB(self.model_runner.model_memory_usage)} "
+                f"GiB for weight, {GiB(self.peak_activation_memory)} GiB "
+                f"for peak activation, {GiB(self.non_torch_memory)} GiB "
+                f"for non-torch memory, and {GiB(cuda_graph_memory_bytes)} "
+                f"GiB for CUDAGraph memory. Replace gpu_memory_utilization "
+                f"config with `--kv-cache-memory="
+                f"{kv_cache_memory_bytes_to_requested_limit}` to fit into "
+                f"requested memory, or `--kv-cache-memory="
+                f"{kv_cache_memory_bytes_to_gpu_limit}` to fully "
+                f"utilize gpu memory. Current kv cache memory in use is "
+                f"{int(self.available_kv_cache_memory)} bytes.")
+            logger.info(msg)
+
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
