@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utilities for downloading and initializing model weights."""
+import concurrent.futures
 import fnmatch
 import glob
 import hashlib
@@ -18,11 +19,12 @@ import huggingface_hub.constants
 import numpy as np
 import torch
 from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
-from safetensors.torch import load_file, safe_open, save_file
+from safetensors.torch import load, load_file, safe_open, save_file
 from tqdm.auto import tqdm
 
 from vllm import envs
-from vllm.config import LoadConfig, ModelConfig
+from vllm.config import ModelConfig
+from vllm.config.load import LoadConfig
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QuantizationConfig,
@@ -517,18 +519,58 @@ def np_cache_weights_iterator(
 def safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
+    safetensors_load_strategy: Optional[str] = "lazy",
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
+    loading_desc = "Loading safetensors checkpoint shards"
+    if safetensors_load_strategy == "eager":
+        loading_desc += " (eager)"
+
     for st_file in tqdm(
             hf_weights_files,
-            desc="Loading safetensors checkpoint shards",
+            desc=loading_desc,
             disable=not enable_tqdm(use_tqdm_on_load),
             bar_format=_BAR_FORMAT,
     ):
-        with safe_open(st_file, framework="pt") as f:
-            for name in f.keys():  # noqa: SIM118
-                param = f.get_tensor(name)
-                yield name, param
+        if safetensors_load_strategy == "eager":
+            with open(st_file, "rb") as f:
+                state_dict = load(f.read())
+            yield from state_dict.items()
+        else:
+            with safe_open(st_file, framework="pt") as f:
+                for name in f.keys():  # noqa: SIM118
+                    param = f.get_tensor(name)
+                    yield name, param
+
+
+def multi_thread_safetensors_weights_iterator(
+    hf_weights_files: list[str],
+    use_tqdm_on_load: bool,
+    max_workers: int = 4,
+) -> Generator[tuple[str, torch.Tensor], None, None]:
+    """Multi-Thread iterate over the weights in the model safetensor files."""
+
+    def _load_file(st_file: str):
+        result = load_file(st_file, device="cpu")
+        return result
+
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=max_workers) as executor:
+        futures = [
+            executor.submit(_load_file, st_file)
+            for st_file in hf_weights_files
+        ]
+        futures_iter = tqdm(
+            concurrent.futures.as_completed(futures),
+            total=len(hf_weights_files),
+            desc="Multi-thread loading shards",
+            disable=not enable_tqdm(use_tqdm_on_load),
+            bar_format=_BAR_FORMAT,
+        )
+
+        for future in futures_iter:
+            state_dict = future.result()
+            yield from state_dict.items()
 
 
 def runai_safetensors_weights_iterator(
@@ -609,6 +651,39 @@ def pt_weights_iterator(
                            weights_only=True)
         yield from state.items()
         del state
+
+
+def multi_thread_pt_weights_iterator(
+    hf_weights_files: list[str],
+    use_tqdm_on_load: bool,
+    pt_load_map_location: Union[str, dict[str, str]] = "cpu",
+    max_workers: int = 4,
+) -> Generator[tuple[str, torch.Tensor], None, None]:
+    """Multi-Thread iterate over the weights in the model bin/pt files."""
+
+    def _load_file(bin_file: str):
+        return torch.load(bin_file,
+                          map_location=pt_load_map_location,
+                          weights_only=True)
+
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=max_workers) as executor:
+        futures = [
+            executor.submit(_load_file, bin_file)
+            for bin_file in hf_weights_files
+        ]
+        futures_iter = tqdm(
+            concurrent.futures.as_completed(futures),
+            total=len(hf_weights_files),
+            desc="Multi-thread loading pt checkpoint shards",
+            disable=not enable_tqdm(use_tqdm_on_load),
+            bar_format=_BAR_FORMAT,
+        )
+
+        for future in futures_iter:
+            state = future.result()
+            yield from state.items()
+            del state
 
 
 def get_gguf_extra_tensor_names(
