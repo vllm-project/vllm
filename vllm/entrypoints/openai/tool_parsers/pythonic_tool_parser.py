@@ -63,12 +63,11 @@ class PythonicToolParser(ToolParser):
         if "\n\n" in model_output:
             # Look for the pattern where text is followed by tool calls
             parts = model_output.split("\n\n")
-            for i in range(len(parts) - 1):
-                text_part = "\n\n".join(parts[:i + 1]).strip()
-                tools_part = "\n\n".join(parts[i + 1:]).strip()
-
-                # Check if the remaining part looks like tool calls
+            # Iterate from the right to find the last block that could be tools
+            for i in range(len(parts) - 1, 0, -1):
+                tools_part = "\n\n".join(parts[i:]).strip()
                 if self._looks_like_tool_calls(tools_part):
+                    text_part = "\n\n".join(parts[:i]).strip()
                     return text_part, tools_part
 
         # No separator found, return as-is
