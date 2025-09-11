@@ -185,7 +185,6 @@ if TYPE_CHECKING:
     ] = "allgather_reducescatter"
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
-    VLLM_SLEEP_WHEN_IDLE: bool = False
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
     VLLM_KV_CACHE_LAYOUT: Literal["NHD", "HND"] | None = None
@@ -1325,9 +1324,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS": lambda: int(
         os.getenv("VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS", "1")
     ),
-    # Reduce CPU usage when vLLM is idle. Enabling this will incur small
-    # latency penalty when a request eventually comes.
-    "VLLM_SLEEP_WHEN_IDLE": lambda: bool(int(os.getenv("VLLM_SLEEP_WHEN_IDLE", "0"))),
     # Control the max chunk bytes (in MB) for the rpc message queue.
     # Object larger than this threshold will be broadcast to worker
     # processes via zmq.
