@@ -260,6 +260,10 @@ steps:
 
 - label: V1 Test entrypoints # 35min
   timeout_in_minutes: 50
+  retry:
+    automatic:
+      - exit_status: '*'
+        limit: 3
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
     - vllm/
