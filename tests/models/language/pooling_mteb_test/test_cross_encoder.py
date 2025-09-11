@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 
-from ...utils import (CLSPoolingRerankModelInfo, LASTPoolingRerankModelInfo,
-                      RerankModelInfo)
+from tests.models.utils import (CLSPoolingRerankModelInfo,
+                                LASTPoolingRerankModelInfo, RerankModelInfo)
+
 from .mteb_utils import mteb_test_rerank_models
 
 RERANK_MODELS = [
