@@ -194,6 +194,7 @@ class MambaSpec(KVCacheSpec):
     dtypes: tuple[torch.dtype]
     page_size_padded: Optional[int] = None
     mamba_type: str = "mamba2"
+    num_speculative_blocks: int = 0
 
     @property
     def page_size_bytes(self) -> int:
