@@ -127,6 +127,10 @@ class Mamba2AttentionMetadata:
     chunk_indices_p: Optional[torch.Tensor]
     chunk_offsets_p: Optional[torch.Tensor]
 
+    # tpa
+    chunk_seqlen_start_p: Optional[torch.Tensor]
+    chunk_seqlen_end_p: Optional[torch.Tensor]
+
     state_indices_tensor: torch.Tensor  # shape: [batch,]
 
     # The following attributes are for triton implementation of causal_conv1d

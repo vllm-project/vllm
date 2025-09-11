@@ -10,6 +10,7 @@ import torch
 
 from vllm.triton_utils import tl, triton
 
+from .ssd_chunk_state import find_seq_idx
 
 @triton.autotune(
     configs=[
@@ -33,11 +34,13 @@ def _state_passing_fwd_kernel(
     seq_idx_ptr,
     chunk_offsets_ptr,
     chunk_meta_num,
+    cu_seqlens_ptr,
     # Matrix dimensions
     dim,
     nchunks,
     seqlen,
     chunk_size,
+    num_seqs,
     # Strides
     stride_states_batch,
     stride_states_chunk,
@@ -102,16 +105,21 @@ def _state_passing_fwd_kernel(
     prev_seq_idx_chunk_end = 0
     logical_chunk_idx = 0
     for c in range(nchunks):
+
+        # now a chunk can only contain one sequence
+        seq_idx_chunk = find_seq_idx(cu_seqlens_ptr, c, num_seqs, chunk_size, True)
+
         new_states = tl.load(states_ptrs, mask=offs_m < dim,
                              other=0.0).to(tl.float32)
         dA_cs = tl.load(dA_cs_ptr).to(tl.float32)
         scale_mask = True
         if HAS_SEQ_IDX:
+
             # - the seq to pass forward is the one that is flushed to the right
             #   boundary.
             # - that is given by seq_idx_chunk_end below: the sequence index at the end of the chunk.
-            seq_idx_chunk_end = tl.load(seq_idx_ptr + (min(
-                (c + 1) * chunk_size, seqlen) - 1) * stride_seq_idx_seqlen)
+            seq_idx_chunk_end = seq_idx_chunk
+
             if HAS_INITSTATES:
                 if IS_CONT_BATCHED and prev_seq_idx_chunk_end != seq_idx_chunk_end:
                     # this means in the current chunk the rightmost flushed seq
@@ -130,9 +138,8 @@ def _state_passing_fwd_kernel(
                     # - and subtract the cumsum just before that position from the total cumsum
                     # - first, update the logical chunk index (add the number of sequences in the current physical chunk):
                     # sequence index at the start of the current chunk
-                    seq_idx_chunk_start = tl.load(seq_idx_ptr +
-                                                  min(c * chunk_size, seqlen) *
-                                                  stride_seq_idx_seqlen)
+                    seq_idx_chunk_start = seq_idx_chunk
+
                     logical_chunk_idx += seq_idx_chunk_end - seq_idx_chunk_start
                     # - load the chunk offset:
                     c_off = tl.load(chunk_offsets_ptr + logical_chunk_idx,
@@ -168,6 +175,7 @@ def _state_passing_fwd_kernel(
 def _state_passing_fwd(
     states,
     dA_cumsum,
+    cu_seqlens,
     initial_states=None,
     seq_idx=None,
     chunk_size=None,
@@ -207,6 +215,9 @@ def _state_passing_fwd(
                                device=states.device,
                                dtype=torch.float32)
     grid = lambda META: (triton.cdiv(dim, META['BLOCK_SIZE']), batch, nheads)
+
+    print("[_state_passing_fwd] seq_idx.shape: ", seq_idx.shape)
+    print("[_state_passing_fwd] chunk_offsets: ", chunk_offsets)
     with torch.cuda.device(states.device.index):
         _state_passing_fwd_kernel[grid](
             states,
@@ -217,10 +228,12 @@ def _state_passing_fwd(
             seq_idx,
             chunk_offsets,
             len(chunk_offsets) if chunk_offsets is not None else 0,
+            cu_seqlens,
             dim,
             nchunks,
             seqlen if seq_idx is not None else 0,
             chunk_size,
+            len(cu_seqlens)-1,
             states.stride(0),
             states.stride(1),
             states.stride(2),

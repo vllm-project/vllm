@@ -85,14 +85,19 @@ def _mamba_chunk_scan_combined_fwd(x,
     # - see the blog and paper for a visualization of the submatrices
     #   which we refer to in the comments below
 
+    num_seqs = len(cu_seqlens) - 1
     # 1. Compute chunked cumsum of A * dt
     # - here dt may go through a softplus activation
     dA_cumsum, dt = _chunk_cumsum_fwd(dt,
                                       A,
                                       chunk_size,
+                                      cu_seqlens,
                                       dt_bias=dt_bias,
                                       dt_softplus=dt_softplus,
                                       dt_limit=dt_limit)
+
+    print("dA_cumsum.shape: ", dA_cumsum.shape)
+    print("dt.shape: ", dt.shape)
 
     # 2. Compute the state for each intra-chunk
     # (right term of low-rank factorization of off-diagonal blocks; B terms)
@@ -100,6 +105,7 @@ def _mamba_chunk_scan_combined_fwd(x,
                               x,
                               dt,
                               dA_cumsum,
+                              cu_seqlens,
                               seq_idx=seq_idx,
                               states_in_fp32=True)
 
@@ -117,6 +123,7 @@ def _mamba_chunk_scan_combined_fwd(x,
     states, final_states = _state_passing_fwd(
         rearrange(states, "... p n -> ... (p n)"),
         dA_cumsum,
+        cu_seqlens,
         initial_states=rearrange(initial_states, "... p n -> ... (p n)")
         if initial_states is not None else None,
         seq_idx=seq_idx,
@@ -213,7 +220,8 @@ def mamba_chunk_scan_combined(x,
         out: Preallocated output tensor
         state_dtype: The data type of the ssm state
     """
-
+    print("-------------------------")
+    print("cu_seqlens: ", cu_seqlens)
     if not return_varlen_states:
         cu_seqlens = None
     else:
