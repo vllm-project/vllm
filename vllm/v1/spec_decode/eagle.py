@@ -681,7 +681,8 @@ class EagleProposer:
                 self.vllm_config.speculative_config.draft_vocab_frequency_path,
                 self.vllm_config.speculative_config.draft_vocab_frequency_prune_ratio,
                 )
-            self.pruned_vocab = self.pruned_vocab.to(self.model.lm_head.data.device)
+            ic(self.model.lm_head)
+            self.pruned_vocab = self.pruned_vocab.to(self.model.lm_head.weight.device)
 
             if hasattr(self.model, "lm_head"):
                 self.model.lm_head.data = self.model.lm_head.data[self.pruned_vocab]
@@ -751,7 +752,7 @@ def load_pruned_draft_vocab(draft_vocab_frequency_path_path: Optional[str], prun
     if not (0 < prune_ratio < 1):
         raise ValueError(f'Expected draft_vocab_frequency_prune_ratio to be in (0, 1) but got {prune_ratio}')
 
-    # compute the relative cumulative frequencies
+    # prune the draft vocab
     sorted_freq, sorted_indices = torch.sort(draft_vocab_freq, descending=True)
     cumulative_mass = torch.cumsum(sorted_freq, dim=0)
     relative_cumulative_mass = cumulative_mass / cumulative_mass[-1]
@@ -803,5 +804,3 @@ def compute_probs_and_sample_next_token(
             next_token_ids,
         )
     return next_token_ids, probs
-
-load_pruned_draft_vocab("eturok/llama-3.1-8b-instruct-vocab-freq/vocab_freq.pt")

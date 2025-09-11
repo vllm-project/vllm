@@ -71,8 +71,8 @@ def parse_args():
     parser.add_argument("--eagle-dir", type=str, default=None)
     parser.add_argument("--custom-mm-prompts", action="store_true")
     parser.add_argument("--draft-vocab-pruned", type=str, default=None)
-    parser.add_argument("--draft-vocab-frequency-path", type=str, defualt=None)
-    parser.add_argument("--draft-vocab-frequency-prune-ratio", type=str, defualt=None)
+    parser.add_argument("--draft-vocab-frequency-path", type=str, default=None)
+    parser.add_argument("--draft-vocab-frequency-prune-ratio", type=str, default=None)
     return parser.parse_args()
 
 
@@ -116,8 +116,9 @@ def main():
             "method": args.method,
             "model": eagle_dir,
             "num_speculative_tokens": args.num_spec_tokens,
-            "draft_vocab_pruned": args.draft_vocab_pruned,
             "spec_token_tree": spec_token_tree_str,
+            "draft_vocab_frequency_path": args.draft_vocab_frequency_path,
+            "draft_vocab_frequency_prune_ratio": args.draft_vocab_frequency_prune_ratio,
         }
     elif args.method == "eagle3":
         eagle_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B" if args.eagle_dir is None else args.eagle_dir
