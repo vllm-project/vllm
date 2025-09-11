@@ -205,9 +205,6 @@ class Scheduler(SchedulerInterface):
         # For logging.
         scheduled_timestamp = time.monotonic()
 
-        # self.external_load_encoder_cache: dict[str, list[int]] = {}
-        # self.external_load_encoder_cache.clear()
-
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
@@ -710,7 +707,7 @@ class Scheduler(SchedulerInterface):
         num_computed_tokens: int,
         num_new_tokens: int,
         encoder_compute_budget: int,
-    ) -> tuple[list[int], int, int]:
+    ) -> tuple[list[int], int, int, list[int]]:
         """
         Determine which encoder inputs need to be scheduled in the current step,
         and update `num_new_tokens` and encoder token budget accordingly.
@@ -720,6 +717,7 @@ class Scheduler(SchedulerInterface):
         in this step, i.e.,
         [num_computed_tokens, num_computed_tokens + num_new_tokens).
         - It is not already computed and stored in the encoder cache.
+        - It is not exist on remote encoder cache (via ECConnector)
         - There is sufficient encoder token budget to process it.
         - The encoder cache has space to store it.
 
@@ -731,7 +729,7 @@ class Scheduler(SchedulerInterface):
         blocks and externally cached blocks (via KVConnector).
         """
         if num_new_tokens == 0 or not request.has_encoder_inputs:
-            return [], num_new_tokens, encoder_compute_budget
+            return [], num_new_tokens, encoder_compute_budget, []
         encoder_inputs_to_schedule: list[int] = []
         mm_positions = request.mm_positions
         assert mm_positions is not None
