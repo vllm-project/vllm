@@ -4,9 +4,9 @@
 Test (piecewise) compilation with a simple model where multiple submodules
 are compiled and graph captured separately.
 """
+
 import torch
 from torch import nn
-from torch.library import Library
 
 from vllm.compilation.backends import set_model_tag
 from vllm.compilation.counter import compilation_counter
@@ -15,36 +15,14 @@ from vllm.compilation.decorators import (ignore_torch_compile,
 from vllm.config import (CompilationConfig, CompilationLevel, CUDAGraphMode,
                          VllmConfig, set_current_vllm_config)
 from vllm.forward_context import BatchDescriptor, set_forward_context
-from vllm.utils import direct_register_custom_op
 
-# create a library to hold the custom op
-silly_lib = Library("silly", "FRAGMENT")  # noqa
+# This import automatically registers `torch.ops.silly.attention`
+from .. import silly_attention  # noqa: F401
 
 BATCH_SIZE = 32
 MLP_SIZE = 128
 HIDDEN_SIZE = 1024
 RANDOM_SEED = 0
-
-
-def silly_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-                    out: torch.Tensor) -> None:
-    out.copy_(q)
-    out += k
-    out += v
-
-
-def silly_attention_fake(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-                         out: torch.Tensor) -> None:
-    return
-
-
-direct_register_custom_op(
-    op_name="attention",
-    op_func=silly_attention,
-    mutates_args=["out"],
-    fake_impl=silly_attention_fake,
-    target_lib=silly_lib,
-)
 
 
 @support_torch_compile
@@ -134,7 +112,7 @@ class SimpleModelWithTwoGraphs(ParentModel):
         # Test will fail without set_model_tag here with error:
         # "ValueError: too many values to unpack (expected 3)"
         # This is because CompiledAttention and CompiledAttentionTwo
-        # have different implmentations but the same torch.compile
+        # have different implementations but the same torch.compile
         # cache dir will be used as default prefix is 'model_tag'
         with set_model_tag("attn_one"):
             self.attn_one = CompiledAttention(
