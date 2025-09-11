@@ -6,8 +6,8 @@ import pytest
 import torch
 
 from tests.conftest import HfRunner
+from tests.models.utils import LASTPoolingRerankModelInfo, RerankModelInfo
 
-from ...utils import LASTPoolingRerankModelInfo, RerankModelInfo
 from .mteb_utils import mteb_test_rerank_models
 
 mxbai_rerank_hf_overrides = {
