@@ -109,15 +109,14 @@ def dispatch_w8a8_blockscale_func(
     return w8a8_block_fp8_matmul
 
 
+# TODO fix ROCm->Triton custom path:
+#  https://github.com/vllm-project/vllm/issues/14397
 class W8A8BlockFp8LinearOp:
     """
     This class executes a Blocked FP8 linear layer using cutlass if supported and
     torch.scaled_mm otherwise.
     """
 
-    # TODO where to put
-    # cutlass_block_fp8_supported: bool = CUTLASS_BLOCK_FP8_SUPPORTED,
-    # use_aiter_and_is_supported: bool = False,
     def __init__(
         self,
         cutlass_block_fp8_supported: bool = CUTLASS_BLOCK_FP8_SUPPORTED,
