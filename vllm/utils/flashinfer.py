@@ -15,10 +15,12 @@ from typing import Any, Callable, NoReturn, Optional
 
 import requests
 import torch
+from packaging.version import parse
 
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.version import FLASHINFER_VERSION
 
 logger = init_logger(__name__)
 
@@ -37,6 +39,22 @@ def has_flashinfer() -> bool:
     # Use find_spec to check if the module exists without importing it
     # This avoids potential CUDA initialization side effects
     return importlib.util.find_spec("flashinfer") is not None
+
+
+def valid_flashinfer_version() -> bool:
+    """Check the installed FlashInfer version matches the expected."""
+    if not has_flashinfer():
+        return False
+
+    try:
+        import flashinfer
+
+        # Parse both versions to handle version comparison properly
+        expected = parse(FLASHINFER_VERSION)
+        actual = parse(flashinfer.__version__)
+        return actual == expected
+    except (ImportError, AttributeError):
+        return False
 
 
 def _missing(*_: Any, **__: Any) -> NoReturn:
@@ -65,6 +83,11 @@ def _lazy_import_wrapper(module_name: str,
     def _get_impl():
         if not has_flashinfer():
             return None
+        if not valid_flashinfer_version():
+            raise RuntimeError(
+                "Installed FlashInfer version is not supported. "
+                f"Please install flashinfer-python=={FLASHINFER_VERSION} "
+                "or use the vLLM extra: pip install 'vllm[flashinfer]'")
         mod = _get_submodule(module_name)
         return getattr(mod, attr_name, None) if mod else None
 
@@ -355,6 +378,7 @@ def flashinfer_scaled_fp8_mm(
 
 __all__ = [
     "has_flashinfer",
+    "valid_flashinfer_version",
     "flashinfer_trtllm_fp8_block_scale_moe",
     "flashinfer_cutlass_fused_moe",
     "fp4_quantize",
