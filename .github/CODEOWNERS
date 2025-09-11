@@ -8,17 +8,18 @@
 /vllm/executor/executor_base.py @zhuohan123 @youkaichao @alexm-redhat @comaniac @njhill @22quinn
 /vllm/worker/worker_base.py @zhuohan123 @youkaichao @alexm-redhat @comaniac @njhill @22quinn
 /vllm/worker/worker.py @zhuohan123 @youkaichao @alexm-redhat @comaniac @njhill
-/vllm/model_executor/layers/sampler.py @zhuohan123 @youkaichao @alexm-redhat @comaniac @njhill
+/vllm/model_executor/layers/sampler.py @zhuohan123 @youkaichao @alexm-redhat @comaniac @njhill @NickLucche
 /vllm/model_executor/layers/quantization @mgoin @robertgshaw2-redhat @tlrmchlsmth @yewentao256
 /vllm/model_executor/layers/mamba @tdoublep
 /vllm/model_executor/model_loader @22quinn
-/vllm/multimodal @DarkLight1337 @ywang96
+/vllm/multimodal @DarkLight1337 @ywang96 @NickLucche
 /vllm/v1/sample @22quinn @houseroad
 /vllm/vllm_flash_attn @LucasWilkinson
 /vllm/lora @jeejeelee
 /vllm/reasoning @aarnphm @chaunceyjiang
 /vllm/entrypoints @aarnphm @chaunceyjiang
 /vllm/compilation @zou3519 @youkaichao @ProExpertProg
+/vllm/distributed/kv_transfer @NickLucche
 CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 
 # Any change to the VllmConfig changes can have a large user-facing impact,
@@ -39,10 +40,10 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /tests/distributed/test_multi_node_assignment.py @youkaichao
 /tests/distributed/test_pipeline_parallel.py @youkaichao
 /tests/distributed/test_same_node.py @youkaichao
-/tests/entrypoints @DarkLight1337 @robertgshaw2-redhat @simon-mo @aarnphm
+/tests/entrypoints @DarkLight1337 @robertgshaw2-redhat @simon-mo @aarnphm @NickLucche
 /tests/kernels @tlrmchlsmth @WoosukKwon @yewentao256
 /tests/models @DarkLight1337 @ywang96
-/tests/multimodal @DarkLight1337 @ywang96
+/tests/multimodal @DarkLight1337 @ywang96 @NickLucche
 /tests/prefix_caching @comaniac @KuntaiDu
 /tests/quantization @mgoin @robertgshaw2-redhat @yewentao256
 /tests/test_inputs.py @DarkLight1337 @ywang96
@@ -52,6 +53,7 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /tests/weight_loading @mgoin @youkaichao @yewentao256
 /tests/lora @jeejeelee
 /tests/models/language/generation/test_hybrid.py @tdoublep
+/tests/v1/kv_connector/nixl_integration @NickLucche
 
 # Docs
 /docs @hmellor
@@ -94,3 +96,9 @@ mkdocs.yaml @hmellor
 /vllm/v1/attention/backends/mla/rocm*.py @gshtras
 /vllm/attention/ops/rocm*.py @gshtras
 /vllm/model_executor/layers/fused_moe/rocm*.py @gshtras
+
+# TPU
+/vllm/v1/worker/tpu* @NickLucche
+/vllm/platforms/tpu.py @NickLucche
+/vllm/v1/sample/tpu @NickLucche
+/vllm/tests/v1/tpu @NickLucche
