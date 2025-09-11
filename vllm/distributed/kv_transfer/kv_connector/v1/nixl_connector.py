@@ -67,7 +67,10 @@ except ImportError:
 # Supported platforms and types of kv transfer buffer.
 # {device: tuple of supported kv buffer types}
 _NIXL_SUPPORTED_DEVICE = {
-    "cuda": ("cuda", ),
+    "cuda": (
+        "cuda",
+        "cpu",
+    ),
     "tpu": ("cpu", ),
     "xpu": ("cpu", ),
 }

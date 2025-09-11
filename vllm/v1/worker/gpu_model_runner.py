@@ -3897,7 +3897,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
-            if self.device.type == 'xpu':
+            if self.device.type == 'xpu' or (
+                    self.device.type == "cuda"
+                    and self.vllm_config.kv_transfer_config.kv_buffer_device
+                    == "cpu"):
                 get_kv_transfer_group().set_host_xfer_buffer_ops(
                     copy_kv_blocks)
 
