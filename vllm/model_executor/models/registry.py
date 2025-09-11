@@ -436,8 +436,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
 
     def _load_modelinfo_from_cache(self,
                                    module_hash: str) -> _ModelInfo | None:
-        modelinfo_path = self._get_cache_dir().joinpath(
-            self._get_cache_filename())
+        modelinfo_path = self._get_cache_dir() / self._get_cache_filename()
         if not modelinfo_path.exists():
             return None
 
