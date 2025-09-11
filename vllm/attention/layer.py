@@ -56,6 +56,14 @@ def check_xformers_availability():
     return USE_XFORMERS_OPS
 
 
+def check_upstream_fa_availability(dtype: torch.dtype):
+    if dtype in (torch.float16, torch.bfloat16) and current_platform.is_cuda(
+    ) and current_platform.has_device_capability(80):
+        from transformers.utils import is_flash_attn_2_available
+        return is_flash_attn_2_available()
+    return False
+
+
 class Attention(nn.Module, AttentionLayerBase):
     """Attention layer.
 
@@ -355,14 +363,22 @@ class MultiHeadAttention(nn.Module):
         dtype = torch.get_default_dtype()
 
         # Determine the attention backend
-        backend, use_upstream_fa = get_vit_attn_backend(head_size=head_size,
-                                                        dtype=dtype)
+        backend = get_vit_attn_backend(head_size=head_size, dtype=dtype)
+
+        # Some auto-selected backends can be upgraded
+        # to upstream flash attention if available.
+        # If vllm native fa is selected, we use it directly.
+        use_upstream_fa = False
+        if check_upstream_fa_availability(
+                dtype) and backend != _Backend.FLASH_ATTN:
+            backend = _Backend.FLASH_ATTN
+            use_upstream_fa = True
 
         if current_platform.is_rocm():
             # currently, only torch_sdpa is supported on rocm
             self.attn_backend = _Backend.TORCH_SDPA
         else:
-            
+
             self.attn_backend = backend if backend in {
                 _Backend.TORCH_SDPA,
                 _Backend.TORCH_SDPA_VLLM_V1,
@@ -371,7 +387,7 @@ class MultiHeadAttention(nn.Module):
                 _Backend.ROCM_AITER_FA,
                 _Backend.FLASH_ATTN,
                 _Backend.FLASH_ATTN_VLLM_V1,
-            } else current_platform.get_vit_attn_backend()
+            } else _Backend.TORCH_SDPA
 
         if (self.attn_backend == _Backend.XFORMERS
                 and not check_xformers_availability()):

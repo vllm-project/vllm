@@ -54,20 +54,9 @@ def test_mha_attn_platform(device: str):
             assert attn.attn_backend == _Backend.FLASH_ATTN
 
         # Test CUDA with head_size=72 (not divisible by 32)
-        # - upstream FA available
+        # - should use xformers
         with patch("vllm.model_executor.models.vision.current_platform",
-                   CudaPlatform()), \
-             patch("transformers.utils.is_flash_attn_2_available",
-                   return_value=True):
-            attn = MultiHeadAttention(16, 72, scale=1)
-            assert attn.attn_backend == _Backend.FLASH_ATTN
-
-        # Test CUDA with head_size=72 (not divisible by 32)
-        # - upstream FA not available
-        with patch("vllm.model_executor.models.vision.current_platform",
-                   CudaPlatform()), \
-             patch("transformers.utils.is_flash_attn_2_available",
-                   return_value=False):
+                   CudaPlatform()):
             attn = MultiHeadAttention(16, 72, scale=1)
             assert attn.attn_backend == _Backend.XFORMERS
 

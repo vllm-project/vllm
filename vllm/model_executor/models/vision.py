@@ -68,8 +68,7 @@ def get_vision_encoder_info(
     raise NotImplementedError(msg)
 
 
-def get_vit_attn_backend(head_size: int,
-                         dtype: torch.dtype) -> tuple[_Backend, bool]:
+def get_vit_attn_backend(head_size: int, dtype: torch.dtype) -> _Backend:
     """
     Get the available attention backend for Vision Transformer.
     
@@ -78,7 +77,7 @@ def get_vit_attn_backend(head_size: int,
     """
     selected_backend: Optional[_Backend] = get_env_variable_attn_backend()
     if selected_backend is not None:
-        return selected_backend, False
+        return selected_backend
 
     return current_platform.get_vit_attn_backend(head_size, dtype)
 

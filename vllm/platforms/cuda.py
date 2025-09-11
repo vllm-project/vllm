@@ -210,31 +210,23 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def get_vit_attn_backend(cls, head_size: int,
-                             dtype: torch.dtype) -> tuple[_Backend, bool]:
+                             dtype: torch.dtype) -> _Backend:
         if dtype not in (torch.float16, torch.bfloat16):
-            return _Backend.XFORMERS, False
+            return _Backend.XFORMERS
 
         if cls.has_device_capability(80):
             FLASH_ATTN_V1 = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"  # noqa: E501
             from vllm.attention.selector import is_attn_backend_supported
             is_default_fa_supported = is_attn_backend_supported(
                 FLASH_ATTN_V1, head_size, dtype, allow_import_error=False)
-            from transformers.utils import is_flash_attn_2_available
-            is_upstream_fa_supported = is_flash_attn_2_available()
             if is_default_fa_supported:
-                return _Backend.FLASH_ATTN, False
-            elif is_upstream_fa_supported:
-                return _Backend.FLASH_ATTN, True
+                return _Backend.FLASH_ATTN
             else:
                 # Fallback to XFORMERS
-                logger.warning_once(
-                    "Using xformers for ViT attention backend. "
-                    "To use flash attention for ViT"
-                    "please install flash_attn")
-                return _Backend.XFORMERS, False
+                return _Backend.XFORMERS
         else:
             # Fallback for Volta/Turing GPUs or FA not supported
-            return _Backend.XFORMERS, False
+            return _Backend.XFORMERS
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,

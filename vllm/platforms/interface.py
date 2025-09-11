@@ -193,8 +193,8 @@ class Platform:
 
     @classmethod
     def get_vit_attn_backend(cls, head_size: int,
-                             dtype: torch.dtype) -> tuple[_Backend, bool]:
-        return _Backend.TORCH_SDPA, False
+                             dtype: torch.dtype) -> _Backend:
+        return _Backend.TORCH_SDPA
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
