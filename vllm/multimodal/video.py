@@ -200,26 +200,26 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
 
         if duration <= max_duration:
             n = int(math.floor(duration * requested_fps))
-            frame_indices = [
+            frame_indices = {
                 min(max_frame_idx,
                     int(math.ceil(i * original_fps / requested_fps)))
                 for i in range(n)
-            ]
+            }
         else:
             num_samples = int(max_duration * requested_fps)
             if num_samples >= total_frames_num:
-                frame_indices = list(range(total_frames_num))
+                frame_indices = range(total_frames_num)
             else:
                 target_seconds = np.linspace(0,
                                              duration,
                                              num_samples,
                                              endpoint=True)
-                frame_indices = [
+                frame_indices = {
                     min(max_frame_idx, int(math.ceil(t * original_fps)))
                     for t in target_seconds
-                ]
+                }
 
-        uniq_frame_idx = sorted(list(set(frame_indices)))
+        uniq_frame_idx = frame_indices
 
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
