@@ -30,7 +30,8 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     register_moe_scaling_factors, rotate_flashinfer_fp8_moe_weights,
     select_cutlass_fp8_gemm_impl, swap_w13_to_w31)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    get_col_major_tma_aligned_tensor, requant_weight_ue8m0_inplace)
+    get_col_major_tma_aligned_tensor, requant_weight_ue8m0_inplace,
+    should_use_deepgemm_for_fp8_linear)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear, prepare_fp8_layer_for_marlin,
     prepare_moe_fp8_layer_for_marlin)
@@ -461,6 +462,15 @@ class Fp8LinearMethod(LinearMethodBase):
                     layer, "weight_scale_inv") else layer.weight_scale.data,
                 block_sz,
             )
+
+        # SM90 Block FP8 CUTLASS requires row-major weight scales
+        if (self.block_quant and current_platform.is_device_capability(90)
+                and self.cutlass_block_fp8_supported
+                and not should_use_deepgemm_for_fp8_linear(
+                    torch.bfloat16, layer.weight)):
+            layer.weight_scale_inv = Parameter(
+                layer.weight_scale_inv.data.T.contiguous(),
+                requires_grad=False)
 
     def apply(self,
               layer: torch.nn.Module,
