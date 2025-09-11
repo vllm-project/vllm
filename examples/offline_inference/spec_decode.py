@@ -233,9 +233,9 @@ def main():
     if args.method != "None":
         print(f"Number of drafts:                        {num_drafts:<10}")
         print(f"Draft tokens generated:                  {num_draft_tokens:<10}")
+        print(f"Draft utilization rate:                  {draft_utilization_rate:<10.1f}")
         print(f"Accepted tokens:                         {num_accepted_tokens:<10}")
         print(f"Mean acceptance length:                  {acceptance_length:<10.2f}")
-        print(f"Draft utilization rate:                  {draft_utilization_rate:<10.1f}")
 
     print("====================================================")
 
