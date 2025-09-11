@@ -305,18 +305,17 @@ class CompilationConfig:
     are finished. It generates a single `call` function which wraps
     cudagraph-safe ops into partition functions and leave cudagraph-unsafe ops
     outside the partition functions. For a graph with N cudagraph-unsafe ops
-    (e.g., Attention), there would be N partition functions. To mark an op as
+    (e.g., Attention), there would be N+1 partitions. To mark an op as
     cudagraph unsafe, we can add `tags=(torch._C.Tag.cudagraph_unsafe)` when
     register the custom op. 
 
     This config supports both full cudagraph and piecewise cudagraph without
     compiling twice. For piecewise cudagraph, it applies vLLM CUDAGraph wrapper
-    to each partition function. For N partition functions, there would be N
-    CUDAGraph wrapper.
+    to each partition. For N+1 partitions, there would be N+1
+    CUDAGraph wrapper instances.
 
-    For full CUDAGraph, we still apply a single CUDAGraph wrapper outside the
-    inductor `call` function. This captures away all the python-level partition
-    functions.
+    For full CUDAGraph, we always apply a single CUDAGraph wrapper outside the
+    inductor `call` function in the model runner. The top-level full cudagraph capture ignores all partitioning.
     """
 
     pass_config: PassConfig = field(default_factory=PassConfig)
