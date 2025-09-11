@@ -353,7 +353,7 @@ class ServingScores(OpenAIServing):
                 final_res_batch,
                 request_id,
                 created_time,
-                self._get_model_name(request.model),
+                self.models.model_name(),
             )
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
@@ -399,7 +399,7 @@ class ServingScores(OpenAIServing):
             return self.request_output_to_rerank_response(
                 final_res_batch,
                 request_id,
-                self._get_model_name(request.model),
+                self.models.model_name(),
                 documents,
                 top_n,
             )
