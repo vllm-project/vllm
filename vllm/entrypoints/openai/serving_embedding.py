@@ -28,6 +28,7 @@ from vllm.entrypoints.openai.serving_engine import (EmbeddingServeContext,
                                                     TextTokensPrompt)
 # yapf: enable
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.renderer import RenderConfig
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import (EmbeddingOutput, EmbeddingRequestOutput,
@@ -97,22 +98,27 @@ class EmbeddingMixin(OpenAIServing):
                     add_special_tokens=ctx.request.add_special_tokens,
                 )
             else:
-                # Set max_length based on chunked processing capability
-                if self._should_use_chunked_processing(ctx.request):
-                    max_length = None
-                else:
-                    max_length = self.max_embed_len or self.max_model_len
-
                 ctx.engine_prompts = await renderer.render_prompt(
                     prompt_or_prompts=ctx.request.input,
-                    max_length=max_length,
-                    truncate_prompt_tokens=ctx.request.truncate_prompt_tokens,
-                    add_special_tokens=ctx.request.add_special_tokens,
+                    config=self._build_render_config(ctx.request),
                 )
             return None
         except (ValueError, TypeError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
+
+    def _build_render_config(
+            self, request: EmbeddingCompletionRequest) -> RenderConfig:
+        # Set max_length based on chunked processing capability
+        if self._should_use_chunked_processing(request):
+            max_length = None
+        else:
+            max_length = self.max_embed_len or self.max_model_len
+
+        return RenderConfig(
+            max_length=max_length,
+            truncate_prompt_tokens=request.truncate_prompt_tokens,
+            add_special_tokens=request.add_special_tokens)
 
     @override
     def _build_response(

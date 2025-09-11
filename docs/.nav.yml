@@ -48,7 +48,7 @@ nav:
     - Design Documents: design
   - API Reference:
     - api/README.md
-    - api/vllm/*
+    - api/vllm
   - CLI Reference: cli
   - Community:
     - community/*

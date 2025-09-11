@@ -30,6 +30,7 @@ from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
                                                     clamp_prompt_logprobs)
 # yapf: enable
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.renderer import RenderConfig
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.inputs.data import (EmbedsPrompt, TokensPrompt, is_embeds_prompt,
                               is_tokens_prompt)
@@ -129,18 +130,11 @@ class OpenAIServingCompletion(OpenAIServing):
                 tokenizer = await self.engine_client.get_tokenizer(lora_request
                                                                    )
             renderer = self._get_renderer(tokenizer)
-            max_input_tokens_len = self.max_model_len - (request.max_tokens
-                                                         or 0)
 
             engine_prompts = await renderer.render_prompt_and_embeds(
                 prompt_or_prompts=request.prompt,
                 prompt_embeds=request.prompt_embeds,
-                max_length=max_input_tokens_len,
-                truncate_prompt_tokens=request.truncate_prompt_tokens,
-                add_special_tokens=request.add_special_tokens,
-                cache_salt=request.cache_salt,
-                needs_detokenization=bool(request.echo
-                                          and not request.return_token_ids),
+                config=self._build_render_config(request),
             )
         except ValueError as e:
             logger.exception("Error in preprocessing prompt inputs")
@@ -676,4 +670,19 @@ class OpenAIServingCompletion(OpenAIServing):
             token_logprobs=out_token_logprobs,
             tokens=out_tokens,
             top_logprobs=out_top_logprobs,
+        )
+
+    def _build_render_config(
+        self,
+        request: CompletionRequest,
+        max_input_length: Optional[int] = None,
+    ) -> RenderConfig:
+        max_input_tokens_len = self.max_model_len - (request.max_tokens or 0)
+        return RenderConfig(
+            max_length=max_input_tokens_len,
+            truncate_prompt_tokens=request.truncate_prompt_tokens,
+            add_special_tokens=request.add_special_tokens,
+            cache_salt=request.cache_salt,
+            needs_detokenization=bool(request.echo
+                                      and not request.return_token_ids),
         )

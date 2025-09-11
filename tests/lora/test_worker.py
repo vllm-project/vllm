@@ -6,9 +6,9 @@ import random
 import tempfile
 from unittest.mock import patch
 
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ParallelConfig, SchedulerConfig,
-                         VllmConfig)
+from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig, VllmConfig)
+from vllm.config.load import LoadConfig
 from vllm.lora.models import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.v1.worker.gpu_worker import Worker

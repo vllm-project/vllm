@@ -9,13 +9,12 @@ from typing import Optional
 import openai
 import pytest
 
-from vllm.entrypoints.openai.protocol import EmbeddingResponse
-
-from ...conftest import HfRunner
-from ...models.language.pooling.embed_utils import (
+from tests.conftest import HfRunner
+from tests.models.language.pooling.embed_utils import (
     run_embedding_correctness_test)
-from ...models.utils import EmbedModelInfo
-from ...utils import RemoteOpenAIServer
+from tests.models.utils import EmbedModelInfo
+from tests.utils import RemoteOpenAIServer
+from vllm.entrypoints.openai.protocol import EmbeddingResponse
 
 MODELS = [
     EmbedModelInfo("intfloat/multilingual-e5-small", is_matryoshka=False),

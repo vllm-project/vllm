@@ -6,9 +6,8 @@ import requests
 import torch
 import torch.nn.functional as F
 
+from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.openai.protocol import RerankResponse
-
-from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "BAAI/bge-reranker-base"
 DTYPE = "bfloat16"

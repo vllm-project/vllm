@@ -78,7 +78,8 @@ class Worker(LocalOrDistributedWorkerBase):
                         "deepseek_mtp",
                         "glm4_moe_mtp",
                         "mimo_mtp",
-                        "ernie_mtp")) \
+                        "ernie_mtp",
+                        "qwen3_next_mtp")) \
                     else {"return_hidden_states": True}
 
         ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
