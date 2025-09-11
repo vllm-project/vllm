@@ -28,11 +28,6 @@ else:
     log2 = tl.log2
 
 
-@triton.jit
-def safe_exp(x):
-    return exp(tl.where(x <= 0, x, float('-inf')))
-
-
 if not hasattr(tl, 'gather'):
 
     @triton.jit

@@ -70,6 +70,15 @@ class MambaStateDtypeCalculator:
                                                     model_dtype)
         return (conv_state_dtype, )
 
+    @classmethod
+    def gated_delta_net_state_dtype(
+        cls,
+        model_dtype: Union[ModelDType, torch.dtype],
+        mamba_cache_dtype: MambaDType,
+    ) -> tuple[torch.dtype, torch.dtype]:
+        state_dtype = get_kv_cache_torch_dtype(mamba_cache_dtype, model_dtype)
+        return (state_dtype, state_dtype)
+
 
 class MambaStateShapeCalculator:
 
@@ -163,3 +172,31 @@ class MambaStateShapeCalculator:
 
         # for n_groups == 1, this is exactly tp_size - n_groups
         return tp_size - ngroups
+
+    @classmethod
+    def gated_delta_net_state_shape(
+        cls,
+        tp_world_size: int,
+        num_k_heads: int,
+        num_v_heads: int,
+        head_k_dim: int,
+        head_v_dim: int,
+        conv_kernel_size: int,
+        num_spec: int = 0,
+        use_v1: bool = True,
+    ):
+        conv_dim = (head_k_dim * num_k_heads * 2 + head_v_dim * num_v_heads)
+        conv_state_shape = (
+            divide(conv_dim, tp_world_size),
+            conv_kernel_size - 1 + num_spec,
+        )
+
+        # In V0, the conv_state shape was swapped during allocation in
+        # MambaCacheManager, but in V1 it needs to be determined here at the
+        # calculation level
+        if use_v1:
+            conv_state_shape = conv_state_shape[1], conv_state_shape[0]
+
+        temporal_state_shape = (divide(num_v_heads,
+                                       tp_world_size), head_k_dim, head_v_dim)
+        return conv_state_shape, temporal_state_shape

@@ -14,7 +14,7 @@ import torch
 from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices, prepare_chunk_offsets
-from .op import exp, safe_exp
+from .op import exp
 from .utils import is_nvidia_hopper, use_cuda_graph
 
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
@@ -175,12 +175,13 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                      boundary_check=(0, 1))
 
         if USE_G:
+            m_t = (i_t * BT + tl.arange(0, BT)) < T
             last_idx = min((i_t + 1) * BT, T) - 1
             b_g_last = tl.load(g + bos * H + last_idx * H + i_h)
             p_g = tl.make_block_ptr(g + bos * H + i_h, (T, ), (H, ),
                                     (i_t * BT, ), (BT, ), (0, ))
             b_g = tl.load(p_g, boundary_check=(0, ))
-            b_v_new = b_v_new * safe_exp(b_g_last - b_g)[:, None]
+            b_v_new = b_v_new * tl.where(m_t, exp(b_g_last - b_g), 0)[:, None]
             b_g_last = exp(b_g_last)
             b_h1 = b_h1 * b_g_last
             if K > 64:
