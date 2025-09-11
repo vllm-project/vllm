@@ -121,20 +121,15 @@ class W8A8BlockFp8LinearOp:
         self,
         cutlass_block_fp8_supported: bool = CUTLASS_BLOCK_FP8_SUPPORTED,
         use_aiter_and_is_supported: bool = False,
+        is_deep_gemm_supported: bool = False,
         ue8m0_deepgemm_supported: bool = False,
         is_blackwell: bool = False,
     ):
         self.cutlass_block_fp8_supported = cutlass_block_fp8_supported
         self.use_aiter_and_is_supported = use_aiter_and_is_supported
+        self.is_deep_gemm_supported = is_deep_gemm_supported
         self.ue8m0_deepgemm_supported = ue8m0_deepgemm_supported
         self.is_blackwell = is_blackwell
-        self.should_use_deepgemm = False
-
-    def set_should_use_deepgemm(
-        self,
-        should_use_deepgemm: bool,
-    ):
-        self.should_use_deepgemm = should_use_deepgemm
 
     def apply(
         self,
@@ -151,7 +146,8 @@ class W8A8BlockFp8LinearOp:
         output_shape = [*input.shape[:-1], weight.shape[0]]
         output_dtype = input.dtype
 
-        if self.should_use_deepgemm:
+        if should_use_deepgemm_for_fp8_linear(self.is_deep_gemm_supported,
+                                              output_dtype, weight):
 
             input_2d = input.view(-1, input.shape[-1])
             output_shape = [*input.shape[:-1], weight.shape[0]]
