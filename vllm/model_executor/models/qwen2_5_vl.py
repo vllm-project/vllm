@@ -73,7 +73,7 @@ from .qwen2_vl import (Qwen2VLMultiModalProcessor, Qwen2VLProcessingInfo,
                        apply_rotary_pos_emb_vision)
 from .utils import (AutoWeightsLoader, WeightsMapper, cast_overflow_tensors,
                     init_vllm_registered_model, maybe_prefix,
-                    merge_multimodal_embeddings)
+                    merge_multimodal_embeddings_from_mask)
 from .vision import get_vit_attn_backend
 
 logger = init_logger(__name__)
@@ -950,6 +950,17 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
+        placeholder_ids = torch.tensor(
+            [config.image_token_id, config.video_token_id], dtype=torch.long)
+        self.register_buffer(
+            "_mm_placeholder_ids", placeholder_ids, persistent=False)
+        vocab_size = self.config.vocab_size
+        lut = torch.zeros(vocab_size, dtype=torch.bool)
+        for tid in placeholder_ids.tolist():
+            if 0 <= tid < vocab_size:
+                lut[tid] = True
+        self.register_buffer("_mm_placeholder_lut", lut, persistent=False)
+
     def _maybe_ignore_quant_config(self, config: Optional[QuantizationConfig]):
         # GPTQ configs do not have a list of ignored modules, however AutoGPTQ
         # seems to avoid vision encoder sections for some models.
@@ -1148,9 +1159,12 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None \
             and len(multimodal_embeddings) != 0:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                [self.config.image_token_id, self.config.video_token_id])
+            is_multimodal = self._mm_placeholder_lut[input_ids]
+            inputs_embeds = merge_multimodal_embeddings_from_mask(
+                inputs_embeds=inputs_embeds,
+                is_multimodal=is_multimodal,
+                multimodal_embeddings=multimodal_embeddings,
+            )
         return inputs_embeds
 
     def get_input_embeddings_v0(
