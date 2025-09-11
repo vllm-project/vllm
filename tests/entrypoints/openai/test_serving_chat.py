@@ -14,7 +14,7 @@ import pytest_asyncio
 
 from vllm.config import MultiModalConfig
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.protocol import ChatCompletionRequest, ErrorResponse
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_models import (BaseModelPath,
                                                     OpenAIServingModels)
@@ -269,6 +269,75 @@ def test_async_serving_chat_init():
     serving_completion = asyncio.run(_async_serving_chat_init())
     assert serving_completion.chat_template == CHAT_TEMPLATE
 
+@pytest.mark.asyncio
+async def test_serving_chat_tool_choice_required_streaming():
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "get_current_weather",
+            "description": "Get the current weather in a given location",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "city": {
+                        "type": "string"
+                    },
+                    "state": {
+                        "type": "string"
+                    },
+                    "unit": {
+                        "type": "string",
+                        "enum": ["celsius", "fahrenheit"],
+                    },
+                },
+                "required": ["city", "state", "unit"],
+            },
+        },
+    }]
+
+    messages = [
+        {
+            "role": "system",
+            "content": "you are a helpful assistant"
+        },
+        {
+            "role": "user",
+            "content": "What is the weather in Dallas, TX?"
+        },
+    ]
+
+
+
+    mock_engine = MagicMock(spec=MQLLMEngineClient)
+    mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
+    mock_engine.errored = False
+
+    models = OpenAIServingModels(engine_client=mock_engine,
+                                 base_model_paths=BASE_MODEL_PATHS,
+                                 model_config=MockModelConfig())
+    serving_chat = OpenAIServingChat(mock_engine,
+                                     MockModelConfig(),
+                                     models,
+                                     response_role="assistant",
+                                     chat_template=CHAT_TEMPLATE,
+                                     chat_template_content_format="auto",
+                                     request_logger=None)
+    
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=messages,
+        tools=tools,
+        stream=True,
+        tool_choice="required",
+        guided_decoding_backend="outlines",
+    )
+    
+    resp = await serving_chat.create_chat_completion(req)
+
+    # Collect all response chunks for verification
+    async for chunk in resp:
+        assert not isinstance(chunk, ErrorResponse)
+    
 
 @pytest.mark.asyncio
 async def test_serving_chat_should_set_correct_max_tokens():
