@@ -71,6 +71,10 @@ class UniProcExecutor(ExecutorBase):
             self.shutdown()
         return
 
+    def shutdown(self) -> None:
+        if worker := self.driver_worker:
+            worker.shutdown()
+
 
 UniProcExecutorAsync = UniProcExecutor
 
