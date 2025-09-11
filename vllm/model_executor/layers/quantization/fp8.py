@@ -30,7 +30,8 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     register_moe_scaling_factors, rotate_flashinfer_fp8_moe_weights,
     select_cutlass_fp8_gemm_impl, swap_w13_to_w31)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    get_col_major_tma_aligned_tensor, requant_weight_ue8m0_inplace)
+    W8A8BlockFp8LinearOp, get_col_major_tma_aligned_tensor,
+    requant_weight_ue8m0_inplace)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear, prepare_fp8_layer_for_marlin,
     prepare_moe_fp8_layer_for_marlin)
@@ -248,6 +249,11 @@ class Fp8LinearMethod(LinearMethodBase):
         self.fp8_linear = Fp8LinearOp(
             act_quant_static=self.act_q_static,
             act_quant_group_shape=self.act_q_group_shape)
+
+        self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
+            self.cutlass_block_fp8_supported,
+            self.use_aiter_and_is_supported,
+        )
 
     def create_weights(
         self,
@@ -480,15 +486,13 @@ class Fp8LinearMethod(LinearMethodBase):
         if self.block_quant:
             assert self.quant_config.weight_block_size is not None
 
-            return torch.ops.vllm.apply_w8a8_block_fp8_linear(
+            return self.w8a8_block_fp8_linear.apply(
                 input=x,
                 weight=layer.weight,
                 block_size=self.quant_config.weight_block_size,
                 weight_scale=layer.weight_scale_inv,
                 input_scale=layer.input_scale,
                 bias=bias,
-                cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
-                use_aiter_and_is_supported=self.use_aiter_and_is_supported,
             )
 
         return self.fp8_linear.apply(input=x,
