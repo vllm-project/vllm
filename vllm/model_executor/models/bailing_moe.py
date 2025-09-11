@@ -102,16 +102,12 @@ class BailingAttention(nn.Module):
         )
 
         if self.use_qk_norm:
-            self.query_layernorm = (
-                RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-                if self.use_rmsnorm
-                else nn.LayerNorm(self.head_dim, eps=1e-6)
-            )
-            self.key_layernorm = (
-                RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-                if self.use_rmsnorm
-                else nn.LayerNorm(self.head_dim, eps=1e-6)
-            )
+            self.query_layernorm = (RMSNorm(
+                self.head_dim, eps=config.rms_norm_eps) if self.use_rmsnorm
+                                    else nn.LayerNorm(self.head_dim, eps=1e-6))
+            self.key_layernorm = (RMSNorm(
+                self.head_dim, eps=config.rms_norm_eps) if self.use_rmsnorm
+                                    else nn.LayerNorm(self.head_dim, eps=1e-6))
 
         self.dense = RowParallelLinear(
             self.total_num_heads * self.head_dim,
@@ -260,7 +256,7 @@ class BailingMoE(nn.Module):
         else:
             self.gate.expert_bias = None
 
-        self.correction_bias = (self.gate.expert_bias.data 
+        self.correction_bias = (self.gate.expert_bias.data
                                 if self.gate.expert_bias is not None else None)
 
         if self.score_function is not None:
@@ -270,7 +266,7 @@ class BailingMoE(nn.Module):
             ) or (
                 self.score_function == "sigmoid"
                 and self.correction_bias is not None
-            ), "score_function and correction_bias should be in 2 combination (softmax, None) or (sigmoid, not None)" # noqa: E501
+            ), "score_function and correction_bias should be in 2 combination (softmax, None) or (sigmoid, not None)"  # noqa: E501
         else:
             # default value for scoring_func
             self.score_function = "softmax"
