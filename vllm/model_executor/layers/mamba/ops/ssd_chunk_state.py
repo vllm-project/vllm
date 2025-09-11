@@ -502,7 +502,7 @@ def _chunk_state_varlen_kernel(
         dA_cumsum_ptrs += BLOCK_SIZE_K * stride_dA_cs_csize
 
     # If the sequence starts after the last chunk idx, we don't need to add the contribution from the last chunk
-    # If HAS_INITSTATES==True need to consider two possiblties
+    # If HAS_INITSTATES==True need to consider two possibilities
     # - if start_idx < pid_c * chunk_size, then we need to take the past_states_ptrs
     # - if state_idx >= pid * chunk_size, then we need to insert initstates
     if ((start_idx < pid_c * chunk_size)  # first chunk

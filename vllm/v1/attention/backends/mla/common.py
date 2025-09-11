@@ -463,7 +463,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             self.dcp_world_size = 1
             self.dcp_rank = 0
 
-        # Dont try to access the runner on AMD
+        # Don't try to access the runner on AMD
         if self.aot_schedule:
             self.page_size = self.kv_cache_spec.block_size
 
