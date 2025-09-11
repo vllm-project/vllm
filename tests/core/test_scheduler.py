@@ -10,7 +10,8 @@ import pytest  # noqa
 import torch
 from torch import Use  # noqa
 
-from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
+from vllm.config import CacheConfig, SchedulerConfig
+from vllm.config.lora import LoRAConfig
 from vllm.core.interfaces import AllocStatus
 from vllm.core.scheduler import Scheduler, SchedulingBudget
 from vllm.lora.request import LoRARequest
