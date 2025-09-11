@@ -7,7 +7,6 @@ import torch
 
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.platforms import current_platform
-from vllm.utils import cdiv
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
@@ -67,8 +66,6 @@ class AITERPagedAttention(PagedAttention):
     ) -> torch.Tensor:
         if output is None:
             output = torch.empty_like(query)
-        block_size = value_cache.shape[3]
-        max_num_blocks_per_seq = cdiv(max_seq_len, block_size)
         is_8bit_kvcache = kv_cache_dtype in ["int8", "fp8", "fp8_e4m3"]
 
         if "fp8" in kv_cache_dtype:
@@ -86,7 +83,7 @@ class AITERPagedAttention(PagedAttention):
                               V=value_cache,
                               block_tables=block_tables,
                               context_lens=seq_lens,
-                              max_num_blocks=max_num_blocks_per_seq,
+                              block_tables_stride0=block_tables.stride(0),
                               K_QScale=k_scale if is_8bit_kvcache else None,
                               V_QScale=v_scale if is_8bit_kvcache else None,
                               out_=output)
