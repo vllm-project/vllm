@@ -584,6 +584,8 @@ class OpenAIServingResponses(OpenAIServing):
             enable_code_interpreter = (enable_code_interpreter
                                     and self.tool_server is not None
                                     and self.tool_server.has_tool("python"))
+        print("ENABLED TOOLS", enable_browser, enable_code_interpreter)
+        print("OTHER TOOLS", request.tools)
         sys_msg = get_system_message(
             reasoning_effort=reasoning_effort,
             browser_description=self.tool_server.get_tool_description(
@@ -599,12 +601,23 @@ class OpenAIServingResponses(OpenAIServing):
         messages.append(dev_msg)
 
         for message in prev_msgs:
-            assert isinstance(message, OpenAIHarmonyMessage)
-            message_role = message.author.role
-            # Don't use the previous system or developer messages
-            if message_role == Role.SYSTEM or message_role == Role.DEVELOPER:
-                continue
-            messages.append(message)
+            # Handle both OpenAIHarmonyMessage objects and dictionary inputs
+            if isinstance(message, OpenAIHarmonyMessage):
+                message_role = message.author.role
+                # Don't use the previous system or developer messages
+                if message_role == Role.SYSTEM or message_role == Role.DEVELOPER:
+                    continue
+                messages.append(message)
+            else:
+                # Convert dictionary to harmony message using parse_chat_input
+                from vllm.entrypoints.harmony_utils import parse_chat_input
+                harmony_messages = parse_chat_input(message)
+                for harmony_msg in harmony_messages:
+                    message_role = harmony_msg.author.role
+                    # Don't use the previous system or developer messages
+                    if message_role == Role.SYSTEM or message_role == Role.DEVELOPER:
+                        continue
+                    messages.append(harmony_msg)
         # Append the new input.
         # Responses API supports simple text inputs without chat format.
         if isinstance(request.input, str):
