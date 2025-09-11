@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
 # Copyright (C) 2025 Roberto L. Castro (Roberto.LopezCastro@ist.ac.at). All Rights Reserved.
 #
@@ -14,19 +16,17 @@
 # limitations under the License.
 #
 
-import sys
-import numpy as np
-import torch
-import triton
-import itertools
-import copy
 import argparse
-from weight_shapes import WEIGHT_SHAPES
+import copy
+import itertools
+
+import torch
+from vllm.triton_utils import triton
 
 from compressed_tensors.transform.utils.hadamard import deterministic_hadamard_matrix
+from weight_shapes import WEIGHT_SHAPES
 
-import vllm
-from vllm._custom_ops import matmul_mxf4_bf16_tn, fusedQuantizeMx
+from vllm._custom_ops import fusedQuantizeMx, matmul_mxf4_bf16_tn
 from vllm.qutlass_utils.utils import to_blocked
 
 PROVIDER_CFGS = {

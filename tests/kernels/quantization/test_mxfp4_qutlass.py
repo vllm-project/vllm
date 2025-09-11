@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
 # Copyright (C) 2025 Roberto L. Castro (Roberto.LopezCastro@ist.ac.at). All Rights Reserved.
 #
@@ -15,14 +17,13 @@
 #
 
 import unittest
-import torch, importlib.util
+import torch
 import numpy as np
 
 from compressed_tensors.transform.utils.hadamard import (
     deterministic_hadamard_matrix,
 )
 
-import vllm
 from vllm._custom_ops import matmul_mxf4_bf16_tn, fusedQuantizeMx
 from vllm.qutlass_utils.utils import to_blocked
 
