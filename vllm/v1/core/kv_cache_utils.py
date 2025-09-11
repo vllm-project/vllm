@@ -1048,7 +1048,7 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
         kv_cache_spec: The kv cache spec of each attention layer in the model
     """
 
-    if is_kv_cache_type_attention_free(kv_cache_spec) or is_kv_cache_type_uniform(kv_cache_spec):
+    if is_kv_cache_type_uniform(kv_cache_spec):
         return
 
     logger.warning(
@@ -1108,7 +1108,8 @@ def get_kv_cache_config(
         The generated KVCacheConfigs
     """
     check_enough_kv_cache_memory(vllm_config, kv_cache_spec, available_memory)
-    if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
+    if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager \
+            and not is_kv_cache_type_attention_free(kv_cache_spec):
         unify_hybrid_kv_cache_specs(kv_cache_spec)
 
     if is_kv_cache_type_attention_free(kv_cache_spec):
