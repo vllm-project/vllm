@@ -3558,6 +3558,10 @@ class VllmConfig:
                     disable_chunked_prefill_reasons.append(
                         "Only \"last\" pooling supports chunked "
                         "prefill and prefix caching; disabling both.")
+                if not getattr(self.model_config.hf_config, "is_causal", True):
+                    disable_chunked_prefill_reasons.append(
+                        "Only models using causal attention supports chunked "
+                        "prefill and prefix caching; disabling both.")
             elif self.model_config.is_encoder_decoder:
                 self.scheduler_config.max_num_encoder_input_tokens = \
                     MULTIMODAL_REGISTRY.get_encdec_max_encoder_len(self.model_config)
