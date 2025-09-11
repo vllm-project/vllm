@@ -204,6 +204,7 @@ constexpr __nv_bfloat16 get_fp8_max() {
     return __nv_bfloat16(__nv_bfloat16_raw{.x = 17264});
   }
 }
+
 template <class T>
 constexpr __nv_bfloat16 get_fp8_min() {
   static_assert(std::is_same_v<T, c10::Float8_e4m3fn> ||
@@ -422,10 +423,8 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
                __bfloat162bfloat162(fp8_max));
     }
 
-#if __CUDACC_VER_MAJOR__ >= 11 && __CUDA_ARCH__ >= 800
     auto fp8x4 = __nv_fp8x4_e4m3(results_bf162[0], results_bf162[1]);
     *reinterpret_cast<__nv_fp8x4_e4m3*>(y_q_ptr) = fp8x4;
-#endif
     y_q_ptr += stride_yq_t;
 
     if (lane_id == 0) {
@@ -506,14 +505,6 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
 
   static constexpr int GROUP_SIZE = 128;
 
-  Idx_t G;
-  dim3 block, grid;
-  auto populate_launch_params = [&](int num_warps, int _num_parallel_tokens) {
-    G = H / Idx_t(group_size * num_warps);
-    grid = dim3(E * G, _num_parallel_tokens);
-    block = dim3(num_warps * WARP_SIZE);
-  };
-
 #define KERNEL_FN                                                         \
   if (use_ue8m0) {                                                        \
     vllm::silu_mul_fp8_quant_deep_gemm_kernel<fp8_t, NUM_WARPS, Idx_t,    \
@@ -572,9 +563,20 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
     KERNEL_CALL_H                                  \
   }
 
+#ifndef USE_ROCM
+  Idx_t G;
+  dim3 block, grid;
+  auto populate_launch_params = [&](int num_warps, int _num_parallel_tokens) {
+    G = H / Idx_t(group_size * num_warps);
+    grid = dim3(E * G, _num_parallel_tokens);
+    block = dim3(num_warps * WARP_SIZE);
+  };
+
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   VLLM_DISPATCH_FP8_TYPES(y_q.scalar_type(),
                           "silu_mul_fp8_quant_deep_gemm_kernel",
                           [&] { KERNEL_CALL_TOP_LEVEL });
+
+#endif
 }
