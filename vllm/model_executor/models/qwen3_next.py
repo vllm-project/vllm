@@ -1053,7 +1053,7 @@ class Qwen3NextForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
             "k_proj",
             "v_proj",
         ],
-        "gate_up_proj": ["up_proj", "down_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
         "in_proj": ["in_proj_qkvz", "in_proj_ba"],
     }
 
