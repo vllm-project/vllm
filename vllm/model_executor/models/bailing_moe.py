@@ -648,5 +648,6 @@ class BailingMoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
 
+
 class BailingMoeV2ForCausalLM(BailingMoeForCausalLM):
     pass
