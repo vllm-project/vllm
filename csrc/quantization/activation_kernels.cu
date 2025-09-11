@@ -212,11 +212,14 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     Idx_t stride_ys_g, Idx_t stride_counts_e) {
   static constexpr __nv_bfloat16 fp8_min = get_fp8_min<fp8_type>();
   static constexpr __nv_bfloat16 fp8_max = get_fp8_max<fp8_type>();
-  // We assign EPS with it's 16-bit unsigned counterpart to allow constexpr.
+  // We assign EPS with its 16-bit unsigned counterpart to allow constexpr.
   static constexpr __nv_bfloat16 EPS = (__nv_bfloat16_raw{.x = 11996});
 
   // We pack 8 16-bit bfloat16 values into a 128-bit __int128_t.
   static constexpr int32_t BFLOAT16_PER_GROUP = 8;
+
+  // We split the shared memory in half, corresponding to gate and up matrices:
+  // [...gate_i, ...up_i]  where 0 <= i < stages.
   static constexpr int32_t S_NUM_128 =
       2u * (GROUP_SIZE / BFLOAT16_PER_GROUP) * NUM_WARPS * NUM_STAGES;
   static constexpr auto THREAD_COUNT = NUM_WARPS * WARP_SIZE;
@@ -245,6 +248,10 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 
   int32_t n_tokens_lower, n_tokens_upper;
 
+  // Each block i iterates over tokens of a slice of n_tokens =
+  // expert_counts[i], with the size of chunk being
+  // (n_tokens / NUM_PARALLEL_TOKENS) + residual, instead of
+  // updiv(n_tokens, NUM_PARALLEL_TOKENS) for better scheduling.
   if (n_tokens < NUM_PARALLEL_TOKENS && blockIdx.y < n_tokens) {
     // Specialize this, but can be likely fused.
     if (blockIdx.y >= NUM_PARALLEL_TOKENS) {
@@ -270,37 +277,38 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     return;
   }
 
-  // base offsets (element-based)
+  // We do calculations here, using constexpr wherever possible.
   const Idx_t base_i = e * stride_i_e + NUM_WARPS * g * GROUP_SIZE * stride_i_h;
   const Idx_t base_ys = e * stride_ys_e + NUM_WARPS * g * stride_ys_g;
   const Idx_t base_yq =
       e * stride_yq_e + NUM_WARPS * g * GROUP_SIZE * stride_yq_h;
-
   Idx_t gate_off_128 = (base_i / static_cast<Idx_t>(8u));
   auto input_128_ptr = reinterpret_cast<const __int128_t*>(_input);
   auto gate_128_ptr = input_128_ptr + gate_off_128 + (tid % HALF_THREAD_COUNT) +
                       stride_i_t_128 * n_tokens_lower;
   auto up_128_ptr = gate_128_ptr + (H * stride_i_h) / 8u;
-
   auto y_s_ptr =
       _y_s + base_ys + warp_id * stride_ys_g + n_tokens_lower * stride_ys_t;
-
   auto y_q_ptr = _y_q + base_yq + warp_id * GROUP_SIZE +
                  stride_yq_t * n_tokens_lower + 4 * lane_id;
-
   int32_t t_load = n_tokens_lower, load_stage_id = 0;
   auto s_buff_gate_load_128 = s_buff_128 + (tid % HALF_THREAD_COUNT);
   auto s_buff_up_load_128 = s_buff_gate_load_128 + S_NUM_128 / 2u;
-
   int32_t stage_offset{};
+
   static constexpr int32_t LOAD_STAGE_SIZE = (NUM_WARPS * WARP_SIZE / 2);
   static constexpr int32_t LOAD_STAGE_MOD =
       NUM_STAGES * (NUM_WARPS * WARP_SIZE / 2);
+
+  // Two halves of all threads in a block conduct global loads for gate and up,
+  // repsectively.
   auto load_and_advance_y_pred = [&] {
     if (t_load < n_tokens_upper) {
       auto s_gate_stage_128_staged_ptr = s_buff_gate_load_128 + stage_offset;
       auto s_up_stage_128_staged_ptr = s_buff_up_load_128 + stage_offset;
 
+      // It is very important that LOAD_STAGE_SIZE is constexpr to avoid
+      // unnecessary ALU ops.
       stage_offset += LOAD_STAGE_SIZE;
       stage_offset %= LOAD_STAGE_MOD;
 
@@ -314,6 +322,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
       ++t_load;
       ++load_stage_id;
     }
+    // We fence even if there is nothing to load to simplify pipelining.
     cp_async_fence();
   };
 
@@ -339,12 +348,18 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     cp_async_wait<NUM_STAGES - 2>();
     __syncthreads();
 
+    // We double-buffer pipelined loads so that the next load will
+    // concurrently run with compute without overwrites.
     load_and_advance_y_pred();
 
     auto s_gate_compute_64 = s_gate_ptr + compute_pipeline_offset_64;
     auto s_up_compute_64 = s_up_ptr + compute_pipeline_offset_64;
+
+    // STAGE_SIZE must also be constexpr!
     compute_pipeline_offset_64 += STAGE_SIZE;
     compute_pipeline_offset_64 %= STAGE_MOD;
+
+    // Each thread loads (gate/up) 2X 4X bfloat16 values into registers.
     __int64_t gate64 = *s_gate_compute_64;
     __nv_bfloat162* s_gate_compute_32 =
         reinterpret_cast<__nv_bfloat162*>(&gate64);
@@ -354,6 +369,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 
 #pragma unroll
     for (int i = 0; i < 2; i++) {
+      // For silu, we make sure that div is emitted.
       float2 gate = silu2(__bfloat1622float2(s_gate_compute_32[i]));
       results_bf162[i] = __float22bfloat162_rn(gate);
     }
@@ -368,6 +384,8 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 
     y_max_bf16 = __hmax(_y_max2.x, _y_max2.y);
 
+    // An entire group is assigned to a single warp, so a simple warp reduce
+    // is used.
     __nv_bfloat16 y_s = warp_max(y_max_bf16) / fp8_max;
 
     if constexpr (USE_UE8M0) {
