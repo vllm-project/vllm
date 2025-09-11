@@ -229,6 +229,7 @@ fo = "fo"
 ba = "ba"
 
 [tool.typos.type.py.extend-words]
+ba = "ba"
 
 [tool.typos.type.cpp]
 extend-glob = ["*.cu"]
@@ -345,3 +346,6 @@ extend-ignore-re = []
 windo = "windo"
 
 [tool.typos.type.vimscript.extend-words]
+
+[tool.uv]
+no-build-isolation-package = ["torch"]
