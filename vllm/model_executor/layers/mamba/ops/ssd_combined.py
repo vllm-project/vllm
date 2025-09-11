@@ -195,7 +195,8 @@ def mamba_chunk_scan_combined(x,
                               out=None,
                               return_final_states=False,
                               return_varlen_states=False,
-                              state_dtype=None):
+                              state_dtype=None,
+                              seq_pad=None):
     """
     Argument:
         x: (batch, seqlen, nheads, headdim)
@@ -219,6 +220,39 @@ def mamba_chunk_scan_combined(x,
         cu_seqlens = None
     else:
         assert cu_seqlens is not None, "cu_seqlens must be provided if return_varlen_states is True"
+        # Padding logic used by prefix caching:
+        if seq_pad is not None and seq_pad.sum() > 0:
+            pass #Padding needed
+            seq_pad[-1] = 0 #never pad last
+            def pad(v):
+                v2 = []
+                for idx in torch.arange(len(cu_seqlens)-1):
+                    v2.append(v[:, cu_seqlens[idx]:cu_seqlens[idx+1]])
+                    v2.append(v[:, cu_seqlens[idx]:cu_seqlens[idx]+1].repeat_interleave(seq_pad[idx], 1)) #last value pad
+                    #v2.append(torch.zeros_like(x[:,0:1]).repeat_interleave(seq_pad[idx], 1)) #zero pad
+                return torch.cat(v2[:-1], 1) #don't need to pad the last
+                        
+            x = pad(x)
+            dt = pad(dt)
+            B = pad(B)
+            C = pad(C)
+            seq_idx = pad(seq_idx)
+            
+            # adjust the cu_seqlens
+            org_cu_seqlens = cu_seqlens
+            cu_seqlens = cu_seqlens.clone()
+            cu_seqlens[1:] = cu_seqlens[1:] + seq_pad.cumsum(0)
+
+            # no shared chunks -> just feed an incremental list, no offsets
+            chunk_indices = torch.arange(-(- x.shape[1] // chunk_size), device=x.device)
+            chunk_offsets = torch.zeros_like(chunk_indices, device=x.device)
+
+            # Return by value - we need to store the old tensor
+            org_out = out
+            # allocate a new larger tensor
+            out = torch.zeros_like(x)
+            # and after the kernel write back the results        
+            
     out_x, dt_out, dA_cumsum, states, final_states, *rest = _mamba_chunk_scan_combined_fwd(
         x,
         dt,
@@ -238,6 +272,15 @@ def mamba_chunk_scan_combined(x,
         dt_limit=dt_limit,
         out=out,
         state_dtype=state_dtype)
+    
+    # Padding logic used by prefix caching:
+    if return_varlen_states and seq_pad is not None and seq_pad.sum() > 0:
+        #unpad the output and write to the originally passed tensor:
+        offset = 0
+        for idx in torch.arange(len(org_cu_seqlens)-1):
+            org_out[0, org_cu_seqlens[idx]:org_cu_seqlens[idx+1]] = \
+                out[0, offset+org_cu_seqlens[idx]:offset+org_cu_seqlens[idx+1]]
+            offset += seq_pad[idx]
 
     if not return_varlen_states:
         if not return_final_states:
