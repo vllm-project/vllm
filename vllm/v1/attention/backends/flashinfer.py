@@ -244,11 +244,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
-        self.device = device
-        self.vllm_config = vllm_config
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.cache_config = vllm_config.cache_config
         self.model_config = vllm_config.model_config
-        self.kv_cache_spec = kv_cache_spec
         self._workspace_buffer = None
         self._prefill_wrapper = None  # Wrapper for prefill/append
         self._decode_wrapper = None  # Wrapper for decode (general shape)
@@ -300,7 +298,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.window_left = self.global_hyperparameters.window_left
         self.logits_soft_cap = self.global_hyperparameters.logits_soft_cap
         self.has_sinks = self.global_hyperparameters.has_sinks
-
+        if self.has_sinks and not supports_trtllm_attention()[0]:
+            raise NotImplementedError(
+                "FlashInfer backend currently does not support attention "
+                "sinks, please use trtllm on blackwell or flash attention on "
+                "earlier GPUs.")
         # Preparing persistent buffers (device-side)
         self.paged_kv_indptr = torch.zeros(max_num_reqs + 1,
                                            dtype=torch.int32,
@@ -492,7 +494,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                                                  self.q_data_type,
                                                  is_prefill=False,
                                                  has_sinks=self.has_sinks)
-
+        if self.has_sinks and not (prefill_use_trtllm and decode_use_trtllm):
+            raise NotImplementedError(
+                "FlashInfer backend currently does not support attention "
+                "sinks, please use trtllm on blackwell or flash attention on "
+                "earlier GPUs.")
         attn_metadata = FlashInferMetadata(
             num_actual_tokens=num_actual_tokens,
             q_data_type=self.q_data_type,
@@ -624,22 +630,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         kv_data_type=self.kv_cache_dtype,
                     )
         return attn_metadata
-
-    def build_for_cudagraph_capture(
-            self, common_attn_metadata: CommonAttentionMetadata):
-        """
-        This method builds the metadata for full cudagraph capture.
-        Currently, only decode is supported for full cudagraphs with FlashInfer.
-        """
-        m = common_attn_metadata
-
-        assert m.num_reqs == m.num_actual_tokens, \
-            "FlashInfer only supports decode-only full CUDAGraph capture. " \
-            "Make sure all cudagraph capture sizes <= max_num_seq."
-
-        m.max_query_len = 1  # decode-only
-
-        return self.build(0, m)
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         if self.kv_cache_spec.dtype != self.vllm_config.model_config.dtype:
