@@ -16,9 +16,9 @@ import torch
 from typing_extensions import TypeVar
 
 import vllm.envs as envs
-from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
-                         ObservabilityConfig, ParallelConfig, SchedulerConfig,
-                         VllmConfig)
+from vllm.config import (DecodingConfig, ModelConfig, ObservabilityConfig,
+                         ParallelConfig, SchedulerConfig, VllmConfig)
+from vllm.config.lora import LoRAConfig
 from vllm.core.scheduler import ScheduledSequenceGroup, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase, Stats
