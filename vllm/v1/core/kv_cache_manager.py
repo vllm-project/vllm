@@ -335,6 +335,7 @@ class KVCacheManager:
                 request.request_id,
                 total_computed_tokens,
             )
+            # need to allocate blocks for connector-cached tokens.
             extra_blocks_for_connector = KVCacheBlocks(
                 self.coordinator.allocate_new_blocks(
                     request.request_id,
