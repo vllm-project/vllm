@@ -850,7 +850,7 @@ def test_hybrid_block_table_initialization():
 
     # Test configuration: physical block size = 32, kernel block size = 16
     physical_block_size = 32
-    kernel_block_size = 16
+    kernel_block_sizes = [16]
     max_num_reqs = 10
     max_num_blocks_per_req = 20
     max_num_batched_tokens = 512
@@ -861,14 +861,16 @@ def test_hybrid_block_table_initialization():
                              max_num_batched_tokens=max_num_batched_tokens,
                              pin_memory=False,
                              device=torch.device(DEVICE),
-                             kernel_size=kernel_block_size)
+                             kernel_sizes=kernel_block_sizes)
 
     # Verify hybrid block configuration
     assert block_table.use_hybrid_blocks is True
     assert block_table.physical_block_size == physical_block_size
-    assert block_table.logical_block_size == kernel_block_size
-    assert block_table.blocks_per_phys_block == (physical_block_size //
-                                                 kernel_block_size)
+    assert block_table.logical_block_size == kernel_block_sizes[
+        0]  # Changed to use first element
+    assert block_table.blocks_per_phys_block == (
+        physical_block_size // kernel_block_sizes[0]
+    )  # Changed to use first element
 
     # Test block table conversion logic
     # One physical block should map to multiple logical blocks
@@ -904,7 +906,7 @@ def test_input_batch_with_kernel_block_sizes():
 
     # Test with different kernel block sizes
     physical_block_sizes = [32, 64]
-    kernel_block_sizes = [16, 32]
+    kernel_block_sizes = [[16], [32]]
 
     input_batch = InputBatch(max_num_reqs=max_num_reqs,
                              max_model_len=max_model_len,
@@ -919,9 +921,10 @@ def test_input_batch_with_kernel_block_sizes():
     assert len(
         input_batch.block_table.block_tables) == len(physical_block_sizes)
 
-    for i, (phys_size, kernel_size) in enumerate(
+    for i, (phys_size, kernel_size_list) in enumerate(
             zip(physical_block_sizes, kernel_block_sizes)):
         block_table = input_batch.block_table.block_tables[i]
+        kernel_size = kernel_size_list[0]  # Use first element from list
         if phys_size != kernel_size:
             assert block_table.use_hybrid_blocks is True
             assert block_table.physical_block_size == phys_size
@@ -932,36 +935,13 @@ def test_input_batch_with_kernel_block_sizes():
             assert block_table.logical_block_size == phys_size
 
 
-def test_cache_config_kernel_block_size():
-    """Test CacheConfig with kernel_block_size field."""
-    # Test default configuration
-    cache_config = CacheConfig(block_size=32,
-                               gpu_memory_utilization=0.9,
-                               swap_space=0,
-                               cache_dtype="auto")
-
-    # kernel_block_size should default to 0
-    assert cache_config.kernel_block_size == 0
-
-    # Test explicit kernel_block_size configuration
-    cache_config_with_kernel = CacheConfig(block_size=32,
-                                           kernel_block_size=16,
-                                           gpu_memory_utilization=0.9,
-                                           swap_space=0,
-                                           cache_dtype="auto")
-
-    assert cache_config_with_kernel.block_size == 32
-    assert cache_config_with_kernel.kernel_block_size == 16
-
-
 def test_hybrid_cache_integration(model_runner, dist_init):
     """Test hybrid cache architecture integration with GPUModelRunner."""
     # Create a new model runner with hybrid cache configuration
     vllm_config = get_vllm_config()
 
-    # Configure hybrid cache with different physical and kernel block sizes
+    # Configure hybrid cache with different physical block size
     vllm_config.cache_config.block_size = 32
-    vllm_config.cache_config.kernel_block_size = 16
 
     model_config = vllm_config.model_config
     num_heads = model_config.get_num_kv_heads(vllm_config.parallel_config)
@@ -971,10 +951,9 @@ def test_hybrid_cache_integration(model_runner, dist_init):
 
     runner = GPUModelRunner(vllm_config, DEVICE)
 
-    # Initialize KV cache with hybrid configuration
+    # Initialize KV cache with configuration
     attn_spec = FullAttentionSpec(
-        block_size=vllm_config.cache_config.
-        kernel_block_size,  # Use kernel block size
+        block_size=16,  # Use logical block size directly
         num_kv_heads=runner.model_config.get_num_kv_heads(
             runner.parallel_config),
         head_size=runner.model_config.get_head_size(),
@@ -1004,7 +983,7 @@ def test_hybrid_cache_integration(model_runner, dist_init):
         block_sizes=[
             kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
         ],
-        kernel_block_sizes=[vllm_config.cache_config.kernel_block_size])
+        kernel_block_sizes=[[16]])  # Use logical block size list
 
     runner.initialize_attn_backend(kv_cache_config)
 
@@ -1012,8 +991,7 @@ def test_hybrid_cache_integration(model_runner, dist_init):
     block_table = runner.input_batch.block_table.block_tables[0]
     assert block_table.physical_block_size == (
         kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size)
-    assert block_table.logical_block_size == (
-        vllm_config.cache_config.kernel_block_size)
+    assert block_table.logical_block_size == 16
 
     # Test request processing with hybrid blocks
     req_id = "hybrid_req_0"

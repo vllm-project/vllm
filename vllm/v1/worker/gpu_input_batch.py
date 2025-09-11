@@ -84,7 +84,7 @@ class InputBatch:
             is_spec_decode: bool = False,
             is_pooling_model: bool = False,
             num_speculative_tokens: int = 0,
-            kernel_block_sizes: Optional[list[int]] = None):
+            kernel_block_sizes: Optional[list[list[int]]] = None):
         self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
         self.max_num_reqs = max_num_reqs

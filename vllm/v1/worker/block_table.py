@@ -22,32 +22,38 @@ class BlockTable:
                  max_num_batched_tokens: int,
                  pin_memory: bool,
                  device: torch.device,
-                 kernel_size: int = 0):
+                 kernel_sizes: list[int] | None = None):
         self.max_num_reqs = max_num_reqs
         self.max_num_blocks_per_req = max_num_blocks_per_req
         self.max_num_batched_tokens = max_num_batched_tokens
         self.pin_memory = pin_memory
         self.device = device
         self.physical_block_size = block_size
-        # Forward compatibility: maintain logical block size semantics
-        # for callers. When kernel_size is specified, use it as logical
-        # block size for backward compatibility
-        self.block_size = kernel_size if kernel_size != 0 else block_size
-        # Hybrid block table support
-        if self.physical_block_size != self.block_size:
-            self.logical_block_size = kernel_size
-            self.blocks_per_phys_block = (self.physical_block_size //
-                                          self.logical_block_size)
-            if self.physical_block_size % self.logical_block_size != 0:
-                raise ValueError(
-                    f"Physical block size {self.physical_block_size} "
-                    f"must be divisible by logical block size "
-                    f"{self.logical_block_size}")
-            self.use_hybrid_blocks = True
-        else:
+        # If kernel_sizes is [0], use physical block size (no splitting)
+        if kernel_sizes == [0]:
+            self.block_size = block_size
             self.logical_block_size = block_size
             self.blocks_per_phys_block = 1
             self.use_hybrid_blocks = False
+        else:
+            # Find the first kernel size that divides physical_block_size evenly
+            selected_kernel_size = None
+            for kernel_size in kernel_sizes:
+                if kernel_size > 0 \
+                    and self.physical_block_size % kernel_size == 0:
+                    selected_kernel_size = kernel_size
+                    break
+
+            if selected_kernel_size is None:
+                raise ValueError(
+                    f"None of the kernel sizes {kernel_sizes} can divide "
+                    f"physical block size {self.physical_block_size} evenly")
+
+            self.block_size = selected_kernel_size
+            self.logical_block_size = selected_kernel_size
+            self.blocks_per_phys_block = (self.physical_block_size //
+                                          self.logical_block_size)
+            self.use_hybrid_blocks = True
 
         if self.use_hybrid_blocks:
             logical_table_size = (max_num_blocks_per_req *
@@ -291,7 +297,7 @@ class MultiGroupBlockTable:
                  device: torch.device,
                  block_sizes: list[int],
                  num_speculative_tokens: int = 0,
-                 kernel_sizes: Optional[list[int]] = None) -> None:
+                 kernel_sizes: Optional[list[list[int]]] = None) -> None:
         # Note(hc): each dcp rank only store
         # (max_model_len//dcp_world_size) tokens in kvcache,
         # so the block_size which used for calc max_num_blocks_per_req
@@ -303,7 +309,7 @@ class MultiGroupBlockTable:
             dcp_world_size = 1
 
         if kernel_sizes is None:
-            kernel_sizes = [0] * len(block_sizes)
+            kernel_sizes = [[0]] * len(block_sizes)
         # Ensure kernel_sizes matches block_sizes length
         elif len(kernel_sizes) == 1 and len(block_sizes) > 1:
             kernel_sizes = kernel_sizes * len(block_sizes)
@@ -318,8 +324,9 @@ class MultiGroupBlockTable:
                 block_size, max_num_reqs,
                 max(cdiv(max_model_len, block_size * dcp_world_size),
                     1 + num_speculative_tokens), max_num_batched_tokens,
-                pin_memory, device, kernel_size)
-            for block_size, kernel_size in zip(block_sizes, kernel_sizes)
+                pin_memory, device,
+                       kernel_size_list)
+            for block_size, kernel_size_list in zip(block_sizes, kernel_sizes)
         ]
 
     def append_row(self, block_ids: tuple[list[int], ...],

@@ -60,6 +60,11 @@ class AttentionBackend(ABC):
     def get_state_cls() -> Type["AttentionState"]:
         raise NotImplementedError
 
+    def get_supported_block_size(self) -> list[int]:
+        # [-1] is a placeholder: the actual block size will be determined
+        # by config.block_size at runtime.
+        return self.get_impl_cls().get_supported_block_size()
+
     @classmethod
     def make_metadata(cls, *args, **kwargs) -> "AttentionMetadata":
         return cls.get_metadata_cls()(*args, **kwargs)
@@ -298,6 +303,12 @@ class AttentionImpl(ABC, Generic[T]):
         kv_sharing_target_layer_name: Optional[str] = None,
     ) -> None:
         raise NotImplementedError
+
+    @staticmethod
+    def get_supported_block_size() -> list[int]:
+        # [0] is a placeholder: the actual block size will be determined
+        # by config.block_size at runtime.
+        return [0]
 
     @abstractmethod
     def forward(
