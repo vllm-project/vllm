@@ -29,7 +29,8 @@ from transformers import BartConfig
 from transformers.utils import logging
 
 from vllm.attention import Attention, AttentionType
-from vllm.config import CacheConfig, LoRAConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig
+from vllm.config.lora import LoRAConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
