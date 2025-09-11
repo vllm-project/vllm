@@ -197,8 +197,8 @@ class VllmEplbAdaptor(BaseAdaptor):
             if self.model.config.model_type == "qwen3_moe":
                 self.expert_map_per_layer_cpu[layer_idx] = \
                     expert_map_all[layer_idx][self.rank_id]
-            else:
-                self.expert_map_per_layer_cpu[layer_idx + 3] = \
+            else: #adapt both dsv3 and kimik2
+                self.expert_map_per_layer_cpu[layer_idx + self.num_dense_layers] = \
                     expert_map_all[layer_idx][self.rank_id]
         return expert_map_all
 
