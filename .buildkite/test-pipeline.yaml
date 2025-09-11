@@ -565,7 +565,9 @@ steps:
                    models/test_registry.py \
                    models/test_utils.py \
                    models/test_vision.py \
-                   models/test_initialization.py::test_can_initialize_subset \
+                   --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT \
+                   --shard-id=$$BUILDKITE_PARALLEL_JOB
+    - pytest -v -s models/test_initialization.py::test_can_initialize_subset \
                    --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT \
                    --shard-id=$$BUILDKITE_PARALLEL_JOB
   parallelism: 4
@@ -634,7 +636,7 @@ steps:
                    -m hybrid_model \
                    --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT \
                    --shard-id=$$BUILDKITE_PARALLEL_JOB
-  parallelism: 8
+  parallelism: 4
 
 - label: Language Models Test (Extended Generation) # 80min
   timeout_in_minutes: 110
