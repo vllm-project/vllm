@@ -340,6 +340,7 @@ class TritonAttentionImpl(AttentionImpl):
             k_descale=layer._k_scale.expand(descale_shape),
             v_descale=layer._v_scale.expand(descale_shape),
             sinks=self.sinks,
+            output_scale=output_scale,
         )
 
         return output

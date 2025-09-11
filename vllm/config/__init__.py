@@ -8,6 +8,7 @@ import enum
 import hashlib
 import inspect
 import json
+import os
 import textwrap
 import warnings
 from collections.abc import Mapping
@@ -41,6 +42,7 @@ from vllm.config.scheduler import SchedulerConfig, SchedulerPolicy
 from vllm.config.utils import ConfigType, config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationMethods
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
@@ -419,7 +421,7 @@ class ModelConfig:
     `--media-io-kwargs '{"video": {"num_frames": 40} }'` """
     use_async_output_proc: bool = True
     """Whether to use async output processor."""
-    config_format: Union[str, ConfigFormat] = ConfigFormat.AUTO.value
+    config_format: Union[str, ConfigFormat] = "auto"
     """The format of the model config to load:\n
     - "auto" will try to load the config in hf format if available else it
     will try to load in mistral format.\n
@@ -623,9 +625,6 @@ class ModelConfig:
                 and not current_platform.is_sleep_mode_available()):
             raise ValueError(
                 "Sleep mode is not supported on current platform.")
-
-        if isinstance(self.config_format, str):
-            self.config_format = ConfigFormat(self.config_format)
 
         hf_config = get_config(self.hf_config_path or self.model,
                                self.trust_remote_code,
@@ -1092,11 +1091,11 @@ class ModelConfig:
 
         assert_never(runner_type)
 
-    def _parse_quant_hf_config(self):
-        quant_cfg = getattr(self.hf_config, "quantization_config", None)
+    def _parse_quant_hf_config(self, hf_config: PretrainedConfig):
+        quant_cfg = getattr(hf_config, "quantization_config", None)
         if quant_cfg is None:
             # compressed-tensors uses a "compression_config" key
-            quant_cfg = getattr(self.hf_config, "compression_config", None)
+            quant_cfg = getattr(hf_config, "compression_config", None)
 
         else:
             # Set quant_method for ModelOpt models.
@@ -1137,7 +1136,11 @@ class ModelConfig:
                                      self.quantization)
 
         # Parse quantization method from the HF model config, if available.
-        quant_cfg = self._parse_quant_hf_config()
+        quant_cfg = self._parse_quant_hf_config(self.hf_config)
+        if quant_cfg is None and (text_config := getattr(
+                self.hf_config, "text_config", None)):
+            # Check the text config as well for multi-modal models.
+            quant_cfg = self._parse_quant_hf_config(text_config)
 
         if quant_cfg is not None:
             # Use the community standard 'quant_method'
@@ -1505,7 +1508,8 @@ class ModelConfig:
         if (self.hf_text_config.model_type == "deepseek_mtp"
                 or self.hf_config.model_type == "mimo_mtp"
                 or self.hf_config.model_type == "glm4_moe_mtp"
-                or self.hf_config.model_type == "ernie_mtp"):
+                or self.hf_config.model_type == "ernie_mtp"
+                or self.hf_config.model_type == "qwen3_next_mtp"):
             total_num_hidden_layers = getattr(self.hf_text_config,
                                               "num_nextn_predict_layers", 0)
         else:
@@ -1568,14 +1572,27 @@ class ModelConfig:
             if attn_type_list:
                 return sum(t == 1 for t in attn_type_list[start:end])
 
-            if layers_block_type_value is None and attn_type_list is None:
+            # Hybrid model Qwen3Next
+            layer_types_value = getattr(self.hf_config, "layer_types", None)
+            if layer_types_value is not None:
+                if getattr(block_type, "value", block_type) == "attention":
+                    return sum(t == "full_attention"
+                               for t in layer_types_value[start:end])
+                elif getattr(block_type, "value",
+                             block_type) == "linear_attention":
+                    return sum(t == "linear_attention"
+                               for t in layer_types_value[start:end])
+                else:
+                    return sum(t == getattr(block_type, "value", block_type)
+                               for t in layer_types_value[start:end])
+
+            if (layers_block_type_value is None and attn_type_list is None
+                    and layer_types_value is None):
                 raise ValueError(
                     "The model is an hybrid without a"
-                    "layers_block_type or an attn_type_list in the hf_config,"
-                    "cannot determine the num of "
+                    "layers_block_type or an attn_type_list, or a layer_types "
+                    "in the hf_config, cannot determine the num of "
                     f"{block_type.value} layers")
-
-            return sum(t == 1 for t in attn_type_list[start:end])
 
     def get_mamba_chunk_size(self) -> Optional[int]:
         """
@@ -1863,7 +1880,7 @@ class DeviceConfig:
 
 SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "medusa",
                             "mlp_speculator", "draft_model", "deepseek_mtp",
-                            "ernie_mtp"]
+                            "ernie_mtp", "qwen3_next_mtp"]
 
 
 @config
@@ -2004,7 +2021,15 @@ class SpeculativeConfig:
                 "n_predict": n_predict,
                 "architectures": ["ErnieMTPModel"]
             })
-            return hf_config
+
+        if hf_config.model_type == "qwen3_next":
+            hf_config.model_type = "qwen3_next_mtp"
+        if hf_config.model_type == "qwen3_next_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update({
+                "n_predict": n_predict,
+                "architectures": ["Qwen3NextMTP"]
+            })
 
         return hf_config
 
@@ -2025,9 +2050,13 @@ class SpeculativeConfig:
                 (self.target_model_config.hf_text_config.model_type \
                         == "deepseek_v3" or
                     self.target_model_config.hf_text_config.model_type in
-                        ("mimo","ernie4_5_moe")):
+                        ("mimo","ernie4_5_moe", "qwen3_next")):
                 # use the draft model from the same model:
                 self.model = self.target_model_config.model
+                # Align the quantization of draft model for cases such as
+                # --quantization fp8 with a bf16 checkpoint.
+                if not self.quantization:
+                    self.quantization = self.target_model_config.quantization
             elif self.method in ("ngram", "[ngram]"):
                 self.model = "ngram"
             else:
@@ -2134,6 +2163,15 @@ class SpeculativeConfig:
                     if self.num_speculative_tokens > 1:
                         logger.warning(
                                 "All Ernie MTP models only have " \
+                                "one layer. Might need some code changes " \
+                                "to support multiple layers."
+                            )
+                elif (self.draft_model_config.hf_config.model_type ==
+                      "qwen3_next_mtp"):
+                    self.method = "qwen3_next_mtp"
+                    if self.num_speculative_tokens > 1:
+                        logger.warning(
+                                "All Qwen3Next MTP models only have " \
                                 "one layer. Might need some code changes " \
                                 "to support multiple layers."
                             )
@@ -2352,7 +2390,8 @@ class SpeculativeConfig:
         return self.num_speculative_tokens
 
     def use_eagle(self) -> bool:
-        return self.method in ("eagle", "eagle3", "deepseek_mtp", "ernie_mtp")
+        return self.method in ("eagle", "eagle3", "deepseek_mtp", "ernie_mtp",
+                               "qwen3_next_mtp")
 
     def __repr__(self) -> str:
         method = self.method
@@ -3512,16 +3551,33 @@ class VllmConfig:
 
         disable_chunked_prefill_reasons: list[str] = []
 
-        if self.model_config and self.model_config.pooler_config:
-            pooling_type = self.model_config.pooler_config.pooling_type
-            if pooling_type is None or pooling_type.lower() != "last":
+        if self.model_config:
+            if self.model_config.pooler_config:
+                pooling_type = self.model_config.pooler_config.pooling_type
+                if pooling_type is None or pooling_type.lower() != "last":
+                    disable_chunked_prefill_reasons.append(
+                        "Only \"last\" pooling supports chunked "
+                        "prefill and prefix caching; disabling both.")
+            elif self.model_config.is_encoder_decoder:
+                self.scheduler_config.max_num_encoder_input_tokens = \
+                    MULTIMODAL_REGISTRY.get_encdec_max_encoder_len(self.model_config)
+                logger.debug(
+                    "Encoder-decoder model detected: setting "
+                    "`max_num_encoder_input_tokens` to encoder length (%s)",
+                    self.scheduler_config.max_num_encoder_input_tokens)
+                self.scheduler_config.disable_chunked_mm_input = True
                 disable_chunked_prefill_reasons.append(
-                    "Only \"last\" pooling supports chunked "
-                    "prefill and prefix caching; disabling both.")
-            elif not getattr(self.model_config.hf_config, "is_causal", True):
-                disable_chunked_prefill_reasons.append(
-                    "Only models using causal attention supports chunked "
-                    "prefill and prefix caching; disabling both.")
+                    "Encoder-decoder models do not support chunked prefill nor"
+                    " prefix caching; disabling both.")
+                if (self.model_config.architecture
+                        == "WhisperForConditionalGeneration"
+                        and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD")
+                        != "spawn"):
+                    logger.warning(
+                        "Whisper is known to have issues with "
+                        "forked workers. If startup is hanging, "
+                        "try setting 'VLLM_WORKER_MULTIPROC_METHOD' "
+                        "to 'spawn'.")
 
         if disable_chunked_prefill_reasons:
             for reason in disable_chunked_prefill_reasons:
@@ -3861,7 +3917,7 @@ def contains_object_print(text):
     Check if the text looks like a printed Python object, e.g.
     contains any substring matching the pattern: "at 0xFFFFFFF>"
     We match against 0x followed by 2-16 hex chars (there's
-    a max of 16 on a 64 bit system).
+    a max of 16 on a 64-bit system).
 
     Args:
         text (str): The text to check

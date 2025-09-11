@@ -276,7 +276,7 @@ class UltravoxProjector(nn.Module):
         else:
             self.act = get_act_fn(config.projector_act)
 
-        dim_out = config.text_hidden_size
+        dim_out = config.text_config.hidden_size
         self.linear_2 = nn.Linear(dim_mid, dim_out, bias=False)
 
         # Ultravox v0.4.1 and below use layer_norm after the second linear layer
