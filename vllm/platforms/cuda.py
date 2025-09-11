@@ -571,6 +571,10 @@ class CudaPlatformBase(Platform):
                     "You can use float16 instead by explicitly setting the "
                     "`dtype` flag in CLI, for example: --dtype=half.")
 
+    @classmethod
+    def support_hybrid_kv_cache(cls) -> bool:
+        return True
+
 
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
