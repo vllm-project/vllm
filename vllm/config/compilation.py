@@ -315,7 +315,8 @@ class CompilationConfig:
     CUDAGraph wrapper instances.
 
     For full CUDAGraph, we always apply a single CUDAGraph wrapper outside the
-    inductor `call` function in the model runner. The top-level full cudagraph capture ignores all partitioning.
+    inductor `call` function in the model runner. The top-level full cudagraph
+    capture ignores all partitioning.
     """
 
     pass_config: PassConfig = field(default_factory=PassConfig)
@@ -441,6 +442,14 @@ class CompilationConfig:
             KEY = 'enable_auto_functionalized_v2'
             if KEY not in self.inductor_compile_config:
                 self.inductor_compile_config[KEY] = False
+
+        if self.use_inductor_graph_partition and not is_torch_equal_or_newer(
+                "2.9.0.dev"):
+            logger.warning_once(
+                "Inductor graph partition requires pytorch 2.9 which is "
+                "not available. Falling back to "
+                "use_inductor_graph_partition=False.")
+            self.use_inductor_graph_partition = False
 
         for k, v in self.inductor_passes.items():
             if not isinstance(v, str):
@@ -589,6 +598,13 @@ class CompilationConfig:
                     "cudagraph_mode to NONE explicitly if encountering "
                     "any problems.")
                 self.cudagraph_mode = CUDAGraphMode.FULL
+            self.splitting_ops = []
+        elif self.use_inductor_graph_partition:
+            logger.warning_once(
+                "When use_inductor_graph_partition=True, splitting_ops "
+                "are ignored and set to an empty list. Instead, "
+                "\"tags=(torch._C.Tag.cudagraph_unsafe, ),\" is "
+                "used to annotate custom ops for graph partition.")
             self.splitting_ops = []
 
         if envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput":

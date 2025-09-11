@@ -328,8 +328,14 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
             global compilation_start_time
 
             if (self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-                    and self.compilation_config.use_inductor_graph_partition
-                    and is_torch_equal_or_newer("2.9.0.dev")):
+                    and self.compilation_config.use_inductor_graph_partition):
+                # If we're using Inductor-based graph partitioning, we currently
+                # have the whole `fx.Graph` before Inductor lowering and
+                # and the piecewise splitting happens after all graph
+                # passes and fusions. Here, we add a custom hook for Inductor
+                # to wrap each partition with our static graph wrapper class to
+                # maintain more control over static graph capture and replay.
+
                 from torch._inductor.utils import CUDAGraphWrapperMetadata
 
                 from .cuda_graph import CUDAGraphOptions
