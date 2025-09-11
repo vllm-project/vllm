@@ -8,7 +8,7 @@ from tests.reasoning.utils import run_reasoning_extraction
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 
 parser_name = "minimax_m1"
-start_token = "<think>"
+start_token = "<think>\n"
 end_token = "</think>"
 
 REASONING_MODEL_NAME = "MiniMaxAI/MiniMax-M1-80k"
@@ -19,86 +19,107 @@ def minimax_m1_tokenizer():
     return AutoTokenizer.from_pretrained(REASONING_MODEL_NAME)
 
 
-# 带 <think></think>，非stream
-WITH_THINK = {
-    "output": "<think>\nThis is a reasoning section\n</think>\nThis is the rest",
+SIMPLE_REASONING = {
+    "output": "This is a reasoning section\n</think>\nThis is the rest",
     "reasoning_content": "This is a reasoning section",
     "content": "This is the rest",
+    "is_reasoning_end": True,
 }
-# 带 <think></think>，stream
-WITH_THINK_STREAM = {
-    "output": "<think>\nThis is a reasoning section\n</think>\nThis is the rest",
-    "reasoning_content": "This is a reasoning section",
-    "content": "This is the rest",
-}
-# 不带 <think></think>，非stream
-WITHOUT_THINK = {
-    "output": "This is the rest",
-    "reasoning_content": None,
-    "content": "This is the rest",
-}
-# 不带 <think></think>，stream
-WITHOUT_THINK_STREAM = {
-    "output": "This is the rest",
-    "reasoning_content": None,
-    "content": "This is the rest",
-}
-
 COMPLETE_REASONING = {
+    "output": "This is a reasoning section\n</think>\n",
+    "reasoning_content": "This is a reasoning section",
+    "content": None,
+    "is_reasoning_end": True,
+}
+NO_CONTENT = {
+    "output": "This is content",
+    "reasoning_content": "This is content",
+    "content": None,
+    "is_reasoning_end": False,
+}
+NO_REASONING_STREAMING = {
+    "output": "This is a reasoning section",
+    "reasoning_content": "This is a reasoning section",
+    "content": None,
+    "is_reasoning_end": False,
+}
+MULTIPLE_LINES = {
+    "output": "This\nThat\n</think>\nThis is the rest\nThat",
+    "reasoning_content": "This\nThat",
+    "content": "This is the rest\nThat",
+    "is_reasoning_end": True,
+}
+SHORTEST_REASONING_NO_STREAMING = {
+    "output": "\n</think>\nThis is the rest",
+    "reasoning_content": "",
+    "content": "This is the rest",
+    "is_reasoning_end": True,
+}
+SHORTEST_REASONING = {
+    "output": "\n</think>\nThis is the rest",
+    "reasoning_content": None,
+    "content": "This is the rest",
+    "is_reasoning_end": True,
+}
+REASONING_WITH_THINK = {
+    "output": "<think>\nThis is a reasoning section\n</think>\nThis is the rest",
+    "reasoning_content": "This is a reasoning section",
+    "content": "This is the rest",
+    "is_reasoning_end": True,
+}
+COMPLETE_REASONING_WITH_THINK = {
     "output": "<think>\nThis is a reasoning section\n</think>\n",
     "reasoning_content": "This is a reasoning section",
     "content": None,
+    "is_reasoning_end": True,
 }
-MULTILINE_REASONING = {
-    "output":
-    "<think>\nThis is a reasoning\nsection\n</think>\nThis is the rest\nThat",
-    "reasoning_content": "This is a reasoning\nsection",
+MULTIPLE_LINES_WITH_THINK = {
+    "output": "<think>\nThis\nThat\n</think>\nThis is the rest\nThat",
+    "reasoning_content": "This\nThat",
     "content": "This is the rest\nThat",
+    "is_reasoning_end": True,
 }
-ONLY_OPEN_TAG = {
-    "output": "<think>\nThis is a reasoning section",
+SHORTEST_REASONING_NO_STREAMING_WITH_THINK = {
+    "output": "\n</think>\nThis is the rest",
+    "reasoning_content": "",
+    "content": "This is the rest",
+    "is_reasoning_end": True,
+}
+SHORTEST_REASONING_WITH_THINK = {
+    "output": "\n</think>\nThis is the rest",
     "reasoning_content": None,
-    "content": "<think>\nThis is a reasoning section",
+    "content": "This is the rest",
+    "is_reasoning_end": True,
 }
-
-ONLY_OPEN_TAG_STREAM = {
+THINK_NO_END = {
     "output": "<think>\nThis is a reasoning section",
     "reasoning_content": "This is a reasoning section",
     "content": None,
+    "is_reasoning_end": False,
 }
-
-PERIOD = {
-    "output": "<think>\nHTML换行可以用<br>。\n</think>\nHTML用<br>换行",
-    "reasoning_content": "HTML换行可以用<br>。",
-    "content": "HTML用<br>换行",
+EMPTY = {
+    "output": "",
+    "reasoning_content": "",
+    "content": None,
+    "is_reasoning_end": False,
 }
-
-PERIOD_STREAM = {
-    "output": "<think>\nHTML换行可以用<br>。\n</think>\nHTML用<br>换行",
-    "reasoning_content": "HTML换行可以用<br>。",
-    "content": "HTML用<br>换行",
+EMPTY_STREAMING = {
+    "output": "",
+    "reasoning_content": None,
+    "content": None,
+    "is_reasoning_end": False,
 }
 
 TEST_CASES = [
     pytest.param(
         False,
-        WITH_THINK,
-        id="with_think",
+        SIMPLE_REASONING,
+        id="simple_reasoning",
     ),
     pytest.param(
         True,
-        WITH_THINK_STREAM,
-        id="with_think_stream",
-    ),
-    pytest.param(
-        False,
-        WITHOUT_THINK,
-        id="without_think",
-    ),
-    pytest.param(
-        True,
-        WITHOUT_THINK_STREAM,
-        id="without_think_stream",
+        SIMPLE_REASONING,
+        id="simple_reasoning_streaming",
     ),
     pytest.param(
         False,
@@ -108,37 +129,97 @@ TEST_CASES = [
     pytest.param(
         True,
         COMPLETE_REASONING,
-        id="complete_reasoning_stream",
+        id="complete_reasoning_streaming",
     ),
     pytest.param(
         False,
-        MULTILINE_REASONING,
-        id="multiline_reasoning",
+        NO_CONTENT,
+        id="no_content_token",
     ),
     pytest.param(
         True,
-        MULTILINE_REASONING,
-        id="multiline_reasoning_stream",
+        NO_REASONING_STREAMING,
+        id="no_reasoning_token_streaming",
     ),
     pytest.param(
         False,
-        ONLY_OPEN_TAG,
-        id="only_open_tag",
+        MULTIPLE_LINES,
+        id="multiple_lines",
     ),
     pytest.param(
         True,
-        ONLY_OPEN_TAG_STREAM,
-        id="only_open_tag_stream",
+        MULTIPLE_LINES,
+        id="multiple_lines_streaming",
+    ),
+    pytest.param(
+        True,
+        SHORTEST_REASONING,
+        id="shortest_streaming",
     ),
     pytest.param(
         False,
-        PERIOD,
-        id="period",
+        SHORTEST_REASONING_NO_STREAMING,
+        id="shortest",
+    ),
+    pytest.param(
+        False,
+        REASONING_WITH_THINK,
+        id="reasoning_with_think",
     ),
     pytest.param(
         True,
-        PERIOD_STREAM,
-        id="period_stream",
+        REASONING_WITH_THINK,
+        id="reasoning_with_think_streaming",
+    ),
+    pytest.param(
+        False,
+        COMPLETE_REASONING_WITH_THINK,
+        id="complete_reasoning_with_think",
+    ),
+    pytest.param(
+        True,
+        COMPLETE_REASONING_WITH_THINK,
+        id="complete_reasoning_with_think_streaming",
+    ),
+    pytest.param(
+        False,
+        MULTIPLE_LINES_WITH_THINK,
+        id="multiple_lines_with_think",
+    ),
+    pytest.param(
+        True,
+        MULTIPLE_LINES_WITH_THINK,
+        id="multiple_lines_with_think_streaming",
+    ),
+    pytest.param(
+        False,
+        SHORTEST_REASONING_NO_STREAMING_WITH_THINK,
+        id="shortest_with_think",
+    ),
+    pytest.param(
+        True,
+        SHORTEST_REASONING_WITH_THINK,
+        id="shortest_with_think_streaming",
+    ),
+    pytest.param(
+        False,
+        THINK_NO_END,
+        id="think_no_end",
+    ),
+    pytest.param(
+        True,
+        THINK_NO_END,
+        id="think_no_end_streaming",
+    ),
+    pytest.param(
+        False,
+        EMPTY,
+        id="empty",
+    ),
+    pytest.param(
+        True,
+        EMPTY_STREAMING,
+        id="empty_streaming",
     ),
 ]
 

@@ -73,9 +73,12 @@ class MiniMaxM1ReasoningParser(ReasoningParser):
                         self.current_state = "reasoning"
                         self.matching_pos = 0
                 else:
-                    self.current_state = "response"
-                    content += self.start_token[:self.matching_pos] + c
-                    self.matching_pos = 0
+                    self.current_state = "reasoning"
+                    if c == self.end_token[0]:
+                        self.matching_pos = 1
+                    else:
+                        reasoning_content += self.start_token[:self.matching_pos] + c
+                        self.matching_pos = 0
             elif self.current_state == "reasoning":
                 if c == self.end_token[self.matching_pos]:
                     self.matching_pos += 1
@@ -86,8 +89,7 @@ class MiniMaxM1ReasoningParser(ReasoningParser):
                     if c == self.end_token[0]:
                         self.matching_pos = 1
                     else:
-                        if self.matching_pos > 0:
-                            reasoning_content += self.end_token[:self.matching_pos]
+                        reasoning_content += self.end_token[:self.matching_pos]
                         reasoning_content += c
                         self.matching_pos = 0
             else:
@@ -117,17 +119,20 @@ class MiniMaxM1ReasoningParser(ReasoningParser):
         reasoning_content = None
         content = None
 
-        if model_output.startswith(self.start_token):
-            end_idx = model_output.find(self.end_token)
-            if end_idx != -1:
-                reasoning_content = model_output[len(self.start_token):end_idx]
-                content = model_output[end_idx + len(self.end_token):]
-                if len(content) == 0:
-                    content = None
-            else:
-                content = model_output
+        end_idx = model_output.find(self.end_token)
+        start_idx = model_output.find(self.start_token)
 
+        if end_idx != -1:
+            reasoning_content = model_output[:end_idx]
+            content = model_output[end_idx + len(self.end_token):]
+            if start_idx != -1:
+                reasoning_content = reasoning_content[start_idx + len(self.start_token):]
+            if len(content) == 0:
+                content = None
         else:
-            content = model_output
+            reasoning_content = model_output
+            if start_idx != -1:
+                reasoning_content = reasoning_content[len(self.start_token):]
+            content = None
 
         return reasoning_content, content
