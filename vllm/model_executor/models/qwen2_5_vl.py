@@ -867,20 +867,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
             cu_seqlens_thw,
         )
 
-    def compute_attn_mask_seqlen(
-        self,
-        cu_seqlens: torch.Tensor,
-    ) -> tuple[int | None, list[int] | None]:
-        max_seqlen, seqlens = None, None
-        if (
-            self.attn_backend == _Backend.FLASH_ATTN
-            or self.attn_backend == _Backend.ROCM_AITER_FA
-        ):
-            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-        elif self.attn_backend == _Backend.XFORMERS:
-            seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
-        return max_seqlen, seqlens
-
     @staticmethod
     def invert_permutation(perm: torch.Tensor) -> torch.Tensor:
         # building the inverse permutation in O(n) time
@@ -888,7 +874,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         inv[perm] = torch.arange(perm.numel(), device=perm.device, dtype=perm.dtype)
         return inv
 
-    def compute_attn_mask_seqlen_tensor(
+    def compute_attn_mask_seqlen(
         self,
         cu_seqlens: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
