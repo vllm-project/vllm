@@ -30,6 +30,7 @@ except ImportError:  # For newer openai versions (>= 1.100.0)
     from openai.types.responses import (ResponseFormatTextConfig as
                                         ResponseTextConfig)
 
+from openai.types.chat import ChatCompletionPredictionContentParam
 from openai.types.responses.response import ToolChoice
 from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
@@ -133,11 +134,19 @@ class PromptTokenUsageInfo(OpenAIBaseModel):
     cached_tokens: Optional[int] = None
 
 
+class CompletionTokensDetails(BaseModel):
+    accepted_prediction_tokens: Optional[int] = None
+    audio_tokens: Optional[int] = None
+    reasoning_tokens: Optional[int] = None
+    rejected_prediction_tokens: Optional[int] = None
+
+
 class UsageInfo(OpenAIBaseModel):
     prompt_tokens: int = 0
     total_tokens: int = 0
     completion_tokens: Optional[int] = 0
     prompt_tokens_details: Optional[PromptTokenUsageInfo] = None
+    completion_tokens_details: Optional[CompletionTokensDetails] = None
 
 
 class RequestResponseMetadata(BaseModel):
@@ -435,6 +444,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     ]] = "none"
     reasoning_effort: Optional[Literal["low", "medium", "high"]] = None
     include_reasoning: bool = True
+    prediction: Optional[ChatCompletionPredictionContentParam] = None
 
     # NOTE this will be ignored by vLLM -- the model determines the behavior
     parallel_tool_calls: Optional[bool] = False
@@ -697,6 +707,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
             whitespace_pattern=self.guided_whitespace_pattern,
             structural_tag=self.structural_tag,
         )
+        prediction = None
+        if self.prediction is not None:
+            prediction = self.prediction.get('content')
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
@@ -732,6 +745,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             logit_bias=self.logit_bias,
             bad_words= self.bad_words,
             allowed_token_ids=self.allowed_token_ids,
+            prediction=prediction,
             extra_args=extra_args or None,
         )
 

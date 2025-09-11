@@ -216,6 +216,9 @@ class SamplingParams(
     last token of a corresponding token sequence is not allowed when the next
     generated token can complete the sequence."""
     _bad_words_token_ids: Optional[list[list[int]]] = None
+    prediction: Optional[Union[str, list[int]]] = None
+    """If provided, the engine will use the predicted output tokens to propose,
+    currently only support ngram method."""
 
     @staticmethod
     def from_optional(
@@ -249,6 +252,7 @@ class SamplingParams(
         guided_decoding: Optional[GuidedDecodingParams] = None,
         logit_bias: Optional[Union[dict[int, float], dict[str, float]]] = None,
         allowed_token_ids: Optional[list[int]] = None,
+        prediction: Optional[Union[str, list[int]]] = None,
         extra_args: Optional[dict[str, Any]] = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
@@ -291,6 +295,7 @@ class SamplingParams(
             guided_decoding=guided_decoding,
             logit_bias=logit_bias,
             allowed_token_ids=allowed_token_ids,
+            prediction=prediction,
             extra_args=extra_args,
         )
 
@@ -560,6 +565,7 @@ class SamplingParams(
             f"{self.spaces_between_special_tokens}, "
             f"truncate_prompt_tokens={self.truncate_prompt_tokens}, "
             f"guided_decoding={self.guided_decoding}, "
+            f"prediction={self.prediction}, "
             f"extra_args={self.extra_args})")
 
 

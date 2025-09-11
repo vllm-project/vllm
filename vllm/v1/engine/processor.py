@@ -398,6 +398,12 @@ class Processor:
             if self.tokenizer is not None:
                 sampling_params.update_from_tokenizer(
                     self.tokenizer.get_lora_tokenizer(lora_request))
+            if self.vllm_config.speculative_config is not None\
+                and self.vllm_config.speculative_config.predicted_outputs \
+                and isinstance(sampling_params.prediction, str):
+                sampling_params.prediction = self.tokenizer.get_lora_tokenizer(
+                    lora_request).encode(sampling_params.prediction,
+                                         add_special_tokens=False)
         else:
             pooling_params = params.clone()
 
