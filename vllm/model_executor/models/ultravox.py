@@ -418,7 +418,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = vllm_config.model_config.hf_config
+        config: UltravoxConfig = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multi_modal_config = multimodal_config
@@ -438,7 +438,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         self.multi_modal_projector = UltravoxProjector(config)
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
-            hf_config=config.text_config,
+            hf_config=config.wrapped_model_config,
             prefix=maybe_prefix(prefix, "language_model"),
         )
         if config.text_model_id is not None:
