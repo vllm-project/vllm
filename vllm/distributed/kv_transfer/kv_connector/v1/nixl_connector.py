@@ -59,7 +59,10 @@ except ImportError:
 # Supported xPUs and types of kv transfer buffer.
 # {xPU: tuple of supported kv buffer types}
 _NIXL_SUPPORTED_XPUS = {
-    "cuda": ("cuda", ),
+    "cuda": (
+        "cuda",
+        "cpu",
+    ),
     "tpu": ("cpu", ),
     "xpu": ("cpu", ),
 }
