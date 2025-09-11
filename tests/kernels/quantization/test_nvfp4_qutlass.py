@@ -18,57 +18,116 @@ import unittest
 import torch
 import numpy as np
 
-from compressed_tensors.transform.utils.hadamard import deterministic_hadamard_matrix
+from compressed_tensors.transform.utils.hadamard import (
+    deterministic_hadamard_matrix,
+)
 
 import vllm
 from vllm._custom_ops import fusedQuantizeNv
 from vllm.qutlass_utils.utils import to_blocked
-from vllm import _custom_ops as ops # use existing nvfp4 gemm in vllm
+from vllm import _custom_ops as ops  # use existing nvfp4 gemm in vllm
 
-def get_hadamard_matrix(group_size: int, dtype: torch.dtype, device: torch.device):
-    return deterministic_hadamard_matrix(group_size, dtype=dtype, device=device) * group_size**-0.5
+
+def get_hadamard_matrix(
+    group_size: int, dtype: torch.dtype, device: torch.device
+):
+    return (
+        deterministic_hadamard_matrix(group_size, dtype=dtype, device=device)
+        * group_size**-0.5
+    )
+
 
 def _rtne_fp4(x: torch.Tensor):
     device = x.device
     grid = torch.tensor(
-        [-6., -4., -3., -2., -1.5, -1., -.5, -0., 0., .5, 1., 1.5, 2., 3., 4., 6.],
-        dtype=x.dtype, device=x.device
+        [
+            -6.0,
+            -4.0,
+            -3.0,
+            -2.0,
+            -1.5,
+            -1.0,
+            -0.5,
+            -0.0,
+            0.0,
+            0.5,
+            1.0,
+            1.5,
+            2.0,
+            3.0,
+            4.0,
+            6.0,
+        ],
+        dtype=x.dtype,
+        device=x.device,
     )
     grid_int = torch.tensor(
         [-1, -2, -3, -4, -5, -6, -7, -8, 0, 1, 2, 3, 4, 5, 6, 7],
-        dtype=torch.uint8, device=device
+        dtype=torch.uint8,
+        device=device,
     )
     inds = torch.bucketize(x, grid)
     lo, hi = (inds - 1).clamp(min=0, max=15), inds.clamp(min=0, max=15)
     g_lo, g_hi = grid[lo], grid[hi]
-    pick_hi = (g_hi - x < x - g_lo) | (g_hi - x == x - g_lo) & (grid_int[hi] % 2 == 0)
+    pick_hi = (g_hi - x < x - g_lo) | (g_hi - x == x - g_lo) & (
+        grid_int[hi] % 2 == 0
+    )
     y = torch.where(pick_hi, g_hi, g_lo)
     y_int = torch.where(pick_hi, grid_int[hi], grid_int[lo])
     y_int_packed = (y_int[..., 1::2] & 0xF) << 4 | y_int[..., ::2] & 0xF
     return y, y_int_packed
 
+
 def _dq_fp4(x_e2m1: torch.Tensor, x_e4m3: torch.Tensor, alpha: float):
     device = x_e2m1.device
 
     x_e2m1_i32 = x_e2m1.view(dtype=torch.uint8).to(dtype=torch.int32)
-    x_e2m1_unpacked = torch.stack([x_e2m1_i32 & 0xF, (x_e2m1_i32 >> 4) & 0xF], dim=-1).flatten(start_dim=-2)
+    x_e2m1_unpacked = torch.stack(
+        [x_e2m1_i32 & 0xF, (x_e2m1_i32 >> 4) & 0xF], dim=-1
+    ).flatten(start_dim=-2)
 
     grid_dq = torch.tensor(
-        [0., .5, 1., 1.5, 2., 3., 4., 6., -0., -.5, -1., -1.5, -2., -3., -4., -6.,],
-        dtype=torch.float64, device=device
+        [
+            0.0,
+            0.5,
+            1.0,
+            1.5,
+            2.0,
+            3.0,
+            4.0,
+            6.0,
+            -0.0,
+            -0.5,
+            -1.0,
+            -1.5,
+            -2.0,
+            -3.0,
+            -4.0,
+            -6.0,
+        ],
+        dtype=torch.float64,
+        device=device,
     )
     x_fp4_dq = grid_dq[x_e2m1_unpacked]
 
     scales_dq = x_e4m3.to(torch.float64)
-    x_dq = (x_fp4_dq.unflatten(dim=-1, sizes=(-1, 16)) * scales_dq[..., None]).flatten(start_dim=-2) / alpha  #* (4. / 3.)
+    x_dq = (
+        x_fp4_dq.unflatten(dim=-1, sizes=(-1, 16)) * scales_dq[..., None]
+    ).flatten(start_dim=-2) / alpha  # * (4. / 3.)
     return x_dq, x_fp4_dq, scales_dq
 
 
 def _unpack_mask(clip_mask: torch.Tensor) -> torch.Tensor:
-    clip_mask_unpacked_dq = torch.zeros(*clip_mask.shape[:-1], clip_mask.size(-1) * 8, dtype=torch.bool, device=clip_mask.device)
+    clip_mask_unpacked_dq = torch.zeros(
+        *clip_mask.shape[:-1],
+        clip_mask.size(-1) * 8,
+        dtype=torch.bool,
+        device=clip_mask.device,
+    )
     for i in range(8):
         clip_mask_unpacked_dq[..., i::8] = (clip_mask >> i) & 1
     return clip_mask_unpacked_dq
+
 
 def _forward_quantize_ref(x: torch.Tensor, h: torch.Tensor, rot_size: int):
     device = x.device
@@ -83,14 +142,20 @@ def _forward_quantize_ref(x: torch.Tensor, h: torch.Tensor, rot_size: int):
 
     xh_e4m3_ref = scales_ref64_.to(dtype=torch.float8_e4m3fn)
     scales_ref64 = xh_e4m3_ref.to(dtype=torch.float64)
-    xh_scaled_ref64 = (xh_ref64.unflatten(dim=-1, sizes=(-1, 16)) / scales_ref64[..., None]).flatten(start_dim=-2)
+    xh_scaled_ref64 = (
+        xh_ref64.unflatten(dim=-1, sizes=(-1, 16)) / scales_ref64[..., None]
+    ).flatten(start_dim=-2)
 
-    xh_scaled_ref64 *= 6.
+    xh_scaled_ref64 *= 6.0
 
-    clip_mask_unpacked_ref = xh_scaled_ref64.abs() < 6.
-    clip_mask_ref = torch.zeros(*x.shape[:-1], x.size(-1) // 8, dtype=torch.uint8, device=device)
+    clip_mask_unpacked_ref = xh_scaled_ref64.abs() < 6.0
+    clip_mask_ref = torch.zeros(
+        *x.shape[:-1], x.size(-1) // 8, dtype=torch.uint8, device=device
+    )
     for i in range(8):
-        clip_mask_ref |= clip_mask_unpacked_ref[..., i::8].to(dtype=torch.uint8) << i
+        clip_mask_ref |= (
+            clip_mask_unpacked_ref[..., i::8].to(dtype=torch.uint8) << i
+        )
 
     xh_fp4_ref, xh_e2m1_ref = _rtne_fp4(xh_scaled_ref64)
     xh_dq, xh_fp4_dq, scales_dq = _dq_fp4(xh_e2m1_ref, xh_e4m3_ref, 6.0)
@@ -100,7 +165,12 @@ def _forward_quantize_ref(x: torch.Tensor, h: torch.Tensor, rot_size: int):
     assert scales_dq.equal(scales_ref64)
     assert clip_mask_unpacked_dq.equal(clip_mask_unpacked_ref)
 
-    return xh_dq, clip_mask_unpacked_ref, (xh_e2m1_ref, xh_e4m3_ref, clip_mask_ref)
+    return (
+        xh_dq,
+        clip_mask_unpacked_ref,
+        (xh_e2m1_ref, xh_e4m3_ref, clip_mask_ref),
+    )
+
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required for these tests")
 class Test(unittest.TestCase):
@@ -117,7 +187,7 @@ class Test(unittest.TestCase):
 
         def _absmax_nv_case(rot_size: int, global_scale_value: float):
             h = get_hadamard_matrix(rot_size, dtype, device)
-            x = torch.randn(2, 4096, 4096, dtype=dtype, device=device) * 25.
+            x = torch.randn(2, 4096, 4096, dtype=dtype, device=device) * 25.0
             global_scale = torch.tensor([global_scale_value], device=device)
 
             xh_dq_ref, _, _ = _forward_quantize_ref(x, h, rot_size)
@@ -130,20 +200,27 @@ class Test(unittest.TestCase):
             assert (xh_dq != xh_dq_ref).float().mean() <= 1e-1
 
             m, n, k = 504, 4096 * 2, 4096
-            a = torch.randn(m, k, dtype=dtype, device=device) * 25.
-            b = torch.randn(n, k, dtype=dtype, device=device) * 25.
+            a = torch.randn(m, k, dtype=dtype, device=device) * 25.0
+            b = torch.randn(n, k, dtype=dtype, device=device) * 25.0
 
             a_e2m1, a_e4m3 = fusedQuantizeNv(a, h, global_scale)
             b_e2m1, b_e4m3 = fusedQuantizeNv(b, h, global_scale)
 
-            a_dq, *_ = _dq_fp4(a_e2m1, a_e4m3[:m, :k], alpha=1.)
-            b_dq, *_ = _dq_fp4(b_e2m1, b_e4m3[:n, :k], alpha=1.)
+            a_dq, *_ = _dq_fp4(a_e2m1, a_e4m3[:m, :k], alpha=1.0)
+            b_dq, *_ = _dq_fp4(b_e2m1, b_e4m3[:n, :k], alpha=1.0)
             out_ref = a_dq @ b_dq.transpose(-2, -1)
 
-            a_scale_block = to_blocked(a_e4m3).view(-1,k//16)
-            b_scale_block = to_blocked(b_e4m3).view(-1,k//16)
-            alpha = torch.tensor([1.], device=device)
-            out = ops.cutlass_scaled_fp4_mm(a_e2m1, b_e2m1, a_scale_block, b_scale_block, alpha, torch.bfloat16)
+            a_scale_block = to_blocked(a_e4m3).view(-1, k // 16)
+            b_scale_block = to_blocked(b_e4m3).view(-1, k // 16)
+            alpha = torch.tensor([1.0], device=device)
+            out = ops.cutlass_scaled_fp4_mm(
+                a_e2m1,
+                b_e2m1,
+                a_scale_block,
+                b_scale_block,
+                alpha,
+                torch.bfloat16,
+            )
             assert out.equal(out_ref.to(dtype=out.dtype))
 
         for rs in (16, 32, 64, 128):
@@ -151,51 +228,53 @@ class Test(unittest.TestCase):
 
     def run_problem(self, m, n, k, rot_size):
         print(m, n, k)
-        a = torch.randn(m, k, dtype=self.dtype, device=self.device) * 25.
-        b = torch.randn(n, k, dtype=self.dtype, device=self.device) * 25.
+        a = torch.randn(m, k, dtype=self.dtype, device=self.device) * 25.0
+        b = torch.randn(n, k, dtype=self.dtype, device=self.device) * 25.0
         hadamard_matrix = get_hadamard_matrix(rot_size, self.dtype, self.device)
-        global_scale = torch.tensor([1.], device=self.device)
+        global_scale = torch.tensor([1.0], device=self.device)
 
         a_e2m1, a_e4m3 = fusedQuantizeNv(a, hadamard_matrix, global_scale)
         b_e2m1, b_e4m3 = fusedQuantizeNv(b, hadamard_matrix, global_scale)
 
-        a_dq, *_ = _dq_fp4(a_e2m1, a_e4m3[:m, :k], alpha=1.)
-        b_dq, *_ = _dq_fp4(b_e2m1, b_e4m3[:n, :k], alpha=1.)
+        a_dq, *_ = _dq_fp4(a_e2m1, a_e4m3[:m, :k], alpha=1.0)
+        b_dq, *_ = _dq_fp4(b_e2m1, b_e4m3[:n, :k], alpha=1.0)
         out_ref = a_dq @ b_dq.transpose(-2, -1)
 
-        a_scale_block = to_blocked(a_e4m3).view(-1,k//16)
-        b_scale_block = to_blocked(b_e4m3).view(-1,k//16)
-        alpha = torch.tensor([1.], device=self.device)
-        out = ops.cutlass_scaled_fp4_mm(a_e2m1, b_e2m1, a_scale_block, b_scale_block, alpha, torch.bfloat16)
+        a_scale_block = to_blocked(a_e4m3).view(-1, k // 16)
+        b_scale_block = to_blocked(b_e4m3).view(-1, k // 16)
+        alpha = torch.tensor([1.0], device=self.device)
+        out = ops.cutlass_scaled_fp4_mm(
+            a_e2m1, b_e2m1, a_scale_block, b_scale_block, alpha, torch.bfloat16
+        )
         assert out.equal(out_ref.to(dtype=out.dtype))
 
     def test_llama_shapes(self):
         print()
         MODELS = {
-            ' 7B': [
+            " 7B": [
                 (4096, 3 * 4096),
                 (4096, 4096),
                 (4096, 2 * 10752),
-                (10752, 4096)
+                (10752, 4096),
             ],
-            '13B': [
+            "13B": [
                 (5120, 3 * 5120),
                 (5120, 5120),
                 (5120, 2 * 13568),
-                (13568, 5120)
+                (13568, 5120),
             ],
-            '33B': [
+            "33B": [
                 (6656, 3 * 6656),
                 (6656, 6656),
                 (6656, 2 * 17664),
-                (17664, 6656)
+                (17664, 6656),
             ],
-            '70B': [
+            "70B": [
                 (8192, 3 * 8192),
                 (8192, 8192),
                 (8192, 2 * 21760),
-                (21760, 8192)
-            ]
+                (21760, 8192),
+            ],
         }
         for _, layers in MODELS.items():
             for layer in layers:
@@ -203,5 +282,6 @@ class Test(unittest.TestCase):
                     for rot_size in [16, 32, 64, 128]:
                         self.run_problem(batch, layer[1], layer[0], rot_size)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     unittest.main()
