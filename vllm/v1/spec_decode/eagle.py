@@ -676,16 +676,20 @@ class EagleProposer:
 
         # optionally prune the draft model vocabulary
         if self.vllm_config.speculative_config.draft_vocab_frequency_path is not None:
+            # load the draft model vocabulary
             logger.info(f"Loading pruned draft model vocabulary from {self.vllm_config.speculative_config.draft_vocab_frequency_path}")
-            self.pruned_vocab = load_pruned_draft_vocab(
-                self.vllm_config.speculative_config.draft_vocab_frequency_path,
-                self.vllm_config.speculative_config.draft_vocab_frequency_prune_ratio,
-                )
-            ic(self.model.lm_head)
+            vocab_freq = load_vocab_freq(
+                self.vllm_config.speculative_config.draft_vocab_frequency_path)
+
+            # prune the draft model vocabulary
+            self.pruned_vocab = prune_draft_vocab(
+                vocab_freq,
+                self.vllm_config.speculative_config.draft_vocab_frequency_prune_ratio)
             self.pruned_vocab = self.pruned_vocab.to(self.model.lm_head.weight.device)
 
+            # create a new lm_head with the pruned vocab
             if hasattr(self.model, "lm_head"):
-                self.model.lm_head.data = self.model.lm_head.data[self.pruned_vocab]
+                self.model.lm_head.weight.data = self.model.lm_head.weight.data[self.pruned_vocab]
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
             elif hasattr(self.model.model, "embed_tokens"):
@@ -733,27 +737,34 @@ class EagleProposer:
         ) == 1, "All eagle layers should belong to the same kv cache group"
 
 
-def load_pruned_draft_vocab(draft_vocab_frequency_path_path: Optional[str], prune_ratio: Optional[float]) -> torch.Tensor:
+def load_vocab_freq(vocab_frequency_path: Optional[str]) -> torch.Tensor:
 
     # parse the path
-    parts = draft_vocab_frequency_path_path.split("/")
+    parts = vocab_frequency_path.split("/")
     if len(parts) < 3:
         raise ValueError("HF path must be at least 'username/repo/file.pt'")
     repo_id = "/".join(parts[:2])
     file_path_in_repo = "/".join(parts[2:])
 
     # download the file
-    draft_vocab_frequency_path_path = hf_hub_download(repo_id=repo_id, filename=file_path_in_repo, repo_type="dataset")
+    vocab_frequency_path = hf_hub_download(repo_id=repo_id, filename=file_path_in_repo, repo_type="dataset")
 
     # make it a tensor of integers
-    draft_vocab_freq = torch.load(draft_vocab_frequency_path_path, weights_only=True)
-    draft_vocab_freq = draft_vocab_freq.to(torch.int64)
+    vocab_freq = torch.load(vocab_frequency_path, weights_only=True)
+    vocab_freq = vocab_freq.to(torch.int64)
+    return vocab_freq
+
+def prune_draft_vocab(vocab_freq, prune_ratio: float):
+    # use all of the tokens in the vocab_freq as our new pruned vocab
+    if prune_ratio is None:
+        pruned_vocab = torch.arange(len(vocab_freq))
+        return pruned_vocab
 
     if not (0 < prune_ratio < 1):
         raise ValueError(f'Expected draft_vocab_frequency_prune_ratio to be in (0, 1) but got {prune_ratio}')
 
-    # prune the draft vocab
-    sorted_freq, sorted_indices = torch.sort(draft_vocab_freq, descending=True)
+    # Keep tokens until relative cumulative frequency mass reaches threshold for the draft model vocabulary
+    sorted_freq, sorted_indices = torch.sort(vocab_freq, descending=True)
     cumulative_mass = torch.cumsum(sorted_freq, dim=0)
     relative_cumulative_mass = cumulative_mass / cumulative_mass[-1]
     cutoff = relative_cumulative_mass < prune_ratio
