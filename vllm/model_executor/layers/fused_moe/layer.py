@@ -40,8 +40,8 @@ from vllm.utils import (cdiv, direct_register_custom_op, has_deep_ep, has_pplx,
 
 if current_platform.is_cuda_alike():
     from .fused_batched_moe import BatchedTritonExperts
-    from .fused_moe import TritonExperts, fused_experts, \
-        eplb_map_to_physical_and_record
+    from .fused_moe import (TritonExperts, eplb_map_to_physical_and_record,
+                            fused_experts)
     if has_pplx():
         from .pplx_prepare_finalize import (PplxPrepareAndFinalize,
                                             pplx_hidden_dim_scale_bytes)
@@ -53,13 +53,16 @@ else:
     fused_experts = None  # type: ignore
     FusedMoEPermuteExpertsUnpermute = None  # type: ignore
     FusedMoEPrepareAndFinalize = None  # type: ignore
-    def eplb_map_to_physical_and_record(topk_ids: torch.Tensor,
-                                        expert_load_view: torch.Tensor,
-                                        logical_to_physical_map: torch.Tensor,
-                                        logical_replica_count: torch.Tensor,
-                                        indices_type: Optional[torch.dtype]) -> torch.Tensor:
+
+    def eplb_map_to_physical_and_record(
+            topk_ids: torch.Tensor, expert_load_view: torch.Tensor,
+            logical_to_physical_map: torch.Tensor,
+            logical_replica_count: torch.Tensor,
+            indices_type: Optional[torch.dtype]) -> torch.Tensor:
         # CPU fallback: no EPLB so just return as is
         return topk_ids
+
+
 if is_rocm_aiter_moe_enabled():
     from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
         rocm_aiter_grouped_topk as grouped_topk)

@@ -1024,9 +1024,11 @@ def eplb_map_to_physical_and_record(
         logical_replica_count: torch.Tensor,
         indices_type: Optional[torch.dtype] = None) -> torch.Tensor:
     '''
-    Map the logical expert ids to physical expert ids and record the expert load metrics.
+    Map the logical expert ids to physical expert ids
+    and record the expert load metrics.
 
-    This will select a pseudo-random replica for each logical expert. Only used for EPLB.
+    This will select a pseudo-random replica for each logical expert.
+    Only used for EPLB.
 
     Args:
         topk_ids: The logical expert ids.
@@ -1045,10 +1047,12 @@ def eplb_map_to_physical_and_record(
     # In case `indices_type` is not `torch.long` or `torch.int`,
     # e.g. `torch.uint32` as required by dispatch/combine kernels
     topk_ids_long = topk_ids.long()
-    # Use token position modulo replica count to deterministically choose a replica
+    # Use (token position) modulo (replica count)
+    # to deterministically choose a replica
     replica_count = logical_replica_count[topk_ids_long]
     # Flatten-position based index, reshaped back to `topk_ids` shape
-    pos_indices = torch.arange(topk_ids.numel(), device=topk_ids.device,
+    pos_indices = torch.arange(topk_ids.numel(),
+                               device=topk_ids.device,
                                dtype=torch.long).reshape_as(topk_ids)
     # Compute pseudo-random indices by modulo
     replica_indices = (pos_indices % replica_count).unsqueeze(-1)
@@ -1075,9 +1079,10 @@ def eplb_map_to_physical_and_record(
 
     # `torch.bincount` is not compilable, so use `scatter_add_` instead.
     topk_ids_flatten = topk_ids.flatten()
-    expert_load_view.scatter_add_(dim=0,
-                                  index=topk_ids_flatten.long(),
-                                  src=torch.ones_like(topk_ids_flatten).to(expert_load_view))
+    expert_load_view.scatter_add_(
+        dim=0,
+        index=topk_ids_flatten.long(),
+        src=torch.ones_like(topk_ids_flatten).to(expert_load_view))
 
     if indices_type is not None:
         topk_ids = topk_ids.to(dtype=indices_type)
