@@ -51,6 +51,7 @@ class _Backend(enum.Enum):
     TORCH_SDPA_VLLM_V1 = enum.auto()
     FLASHINFER = enum.auto()
     FLASHINFER_VLLM_V1 = enum.auto()
+    FLASHINFER_MLA = enum.auto()
     TRITON_MLA = enum.auto()  # Supported by V1
     TRITON_MLA_VLLM_V1 = enum.auto()
     CUTLASS_MLA = enum.auto()
@@ -584,6 +585,13 @@ class Platform:
         Check if the dtype is supported by the current platform.
         """
         raise NotImplementedError
+
+    @classmethod
+    def support_hybrid_kv_cache(cls) -> bool:
+        """
+        Returns if the hybrid kv cache is supported by the current platform.
+        """
+        return False
 
 
 class UnspecifiedPlatform(Platform):
