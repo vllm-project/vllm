@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
+from typing import Optional, Union
 
 import numpy as np
 import torch
@@ -22,7 +22,7 @@ class BlockTable:
                  max_num_batched_tokens: int,
                  pin_memory: bool,
                  device: torch.device,
-                 kernel_sizes: list[int] | None = None):
+                 kernel_sizes: Union[list[int], None] = None):
         self.max_num_reqs = max_num_reqs
         self.max_num_blocks_per_req = max_num_blocks_per_req
         self.max_num_batched_tokens = max_num_batched_tokens
