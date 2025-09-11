@@ -92,6 +92,9 @@ void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
 void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
                         torch::Tensor& weight, double epsilon);
 
+void poly_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
+               torch::Tensor& bias, double epsilon);
+
 void apply_repetition_penalties_(torch::Tensor& logits,
                                  const torch::Tensor& prompt_mask,
                                  const torch::Tensor& output_mask,
@@ -130,8 +133,7 @@ void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
 void silu_and_mul_quant(torch::Tensor& out, torch::Tensor& input,
                         torch::Tensor& scale);
 
-#if (defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100) || \
-    (defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120)
+#ifndef USE_ROCM
 void silu_and_mul_nvfp4_quant(torch::Tensor& out,
                               torch::Tensor& output_block_scale,
                               torch::Tensor& input,
