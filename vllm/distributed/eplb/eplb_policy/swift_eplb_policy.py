@@ -5,14 +5,7 @@ import numpy as np
 import torch
 from typing import Any, Optional
 
-from vllm.distributed.eplb.eplb_policy.abstract_policy import EplbPolicy
-
-
-class DynamicTable:
-
-    workload_table = None
-
-    placement_table = None
+from vllm.distributed.eplb.eplb_policy.abstract_policy import EplbPolicy, DynamicTable
 
 
 class SwiftBalancer(EplbPolicy):

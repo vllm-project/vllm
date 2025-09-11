@@ -6,6 +6,13 @@ from abc import ABC, abstractmethod
 import torch
 
 
+class DynamicTable:
+
+    workload_table = None
+
+    placement_table = None
+
+
 class EplbPolicy(ABC):
 
     @abstractmethod
@@ -44,6 +51,7 @@ class EplbPolicy(ABC):
                     converted_expert_workload[layer_id][expert_id] += expert_workload[layer_id][rank_id][index]
 
         return converted_expert_workload
+        
     @staticmethod
     def convert_table(current_expert_table, num_layer):
         return current_expert_table.reshape(num_layer, -1)
