@@ -73,17 +73,11 @@ async def test_zero_truncation_size(client: openai.AsyncOpenAI):
         "truncate_prompt_tokens": truncation_size
     }
 
-    with pytest.raises(openai.BadRequestError) as err:
-        await client.post(path="embeddings", cast_to=object, body={**kwargs})
+    response = await client.post(path="embeddings",
+                                 cast_to=object,
+                                 body={**kwargs})
 
-    assert err.value.status_code == 400
-    error_details = err.value.response.json()["error"]
-
-    assert error_details["type"] == "BadRequestError"
-    assert "This model's maximum context length is" in error_details["message"]
-    assert "tokens in the input for embedding generation" in error_details[
-        "message"]
-    assert "Please reduce the length of the input" in error_details["message"]
+    assert response["usage"]["prompt_tokens"] == truncation_size
 
 
 @pytest.mark.asyncio
