@@ -8,7 +8,7 @@ import functools
 import time
 
 
-def logtime(logger):
+def logtime(logger, msg=None):
     """
     Logs the execution time of the decorated function.
     Always place it beneath other decorators.
@@ -22,8 +22,9 @@ def logtime(logger):
             result = func(*args, **kwargs)
             elapsed = time.perf_counter() - start
 
-            logger.debug("Function '%s.%s' took %.7f secs", func.__module__,
-                         func.__qualname__, elapsed)
+            prefix = f"Function '{func.__module__}.{func.__qualname__}'" \
+                if msg is None else msg
+            logger.debug("%s: Elapsed time %.7f secs", prefix, elapsed)
             return result
 
         return _wrapper

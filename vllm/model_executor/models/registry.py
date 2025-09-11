@@ -8,7 +8,6 @@ import hashlib
 import importlib
 import json
 import os
-import pathlib
 import pickle
 import subprocess
 import sys
@@ -17,6 +16,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Set
 from dataclasses import dataclass, field, fields
 from functools import lru_cache
+from pathlib import Path
 from typing import Callable, Optional, TypeVar, Union
 
 import torch.nn as nn
@@ -427,8 +427,8 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
     class_name: str
 
     @staticmethod
-    def _get_cache_dir() -> pathlib.Path:
-        return pathlib.Path(envs.VLLM_CACHE_ROOT).joinpath("modelinfos")
+    def _get_cache_dir() -> Path:
+        return Path(envs.VLLM_CACHE_ROOT) / "modelinfos"
 
     def _get_cache_filename(self) -> str:
         cls_name = f"{self.module_name}-{self.class_name}".replace(".", "-")
@@ -436,40 +436,54 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
 
     def _load_modelinfo_from_cache(self,
                                    module_hash: str) -> _ModelInfo | None:
-        modelinfo_path = self._get_cache_dir() / self._get_cache_filename()
-        if not modelinfo_path.exists():
+        try:
+            modelinfo_path = self._get_cache_dir() / self._get_cache_filename()
+            if not modelinfo_path.exists():
+                logger.debug(("Cached model info file "
+                              "for class %s.%s not found"), self.module_name,
+                             self.class_name)
+                return None
+
+            with open(modelinfo_path, encoding="utf-8") as file:
+                mi_dict = json.load(file)
+
+            if mi_dict["hash"] != module_hash:
+                logger.debug(("Cached model info file "
+                              "for class %s.%s is stale"), self.module_name,
+                             self.class_name)
+                return None
+
+            # file not changed, use cached _ModelInfo properties
+            return _ModelInfo(**mi_dict["modelinfo"])
+        except Exception:
+            logger.exception(("Cached model info "
+                              "for class %s.%s error. "), self.module_name,
+                             self.class_name)
             return None
-
-        with open(modelinfo_path, encoding="utf-8") as file:
-            mi_dict = json.load(file)
-
-        if mi_dict["hash"] != module_hash:
-            return None
-
-        # file not changed, use cached _ModelInfo properties
-        return _ModelInfo(**mi_dict["modelinfo"])
 
     def _save_modelinfo_to_cache(self, mi: _ModelInfo,
                                  module_hash: str) -> None:
         """save dictionary json file to cache"""
-        mi_dict = {}
-        for f in fields(mi):
-            mi_dict[f.name] = getattr(mi, f.name)
-        modelinfo_dict = {
-            "hash": module_hash,
-            "modelinfo": mi_dict,
-        }
-        modelinfo_path = self._get_cache_dir().joinpath(
-            self._get_cache_filename())
-        with open(modelinfo_path, "w", encoding="utf-8") as f:
-            json.dump(modelinfo_dict, f, indent=2)
+        try:
+            mi_dict = {}
+            for f in fields(mi):
+                mi_dict[f.name] = getattr(mi, f.name)
+            modelinfo_dict = {
+                "hash": module_hash,
+                "modelinfo": mi_dict,
+            }
+            modelinfo_path = self._get_cache_dir() / self._get_cache_filename()
+            with open(modelinfo_path, "w", encoding="utf-8") as f:
+                json.dump(modelinfo_dict, f, indent=2)
+        except Exception:
+            logger.exception("Error saving model info cache.")
 
-    @logtime(logger=logger)
+    @logtime(logger=logger, msg="Registry inspect model class")
     def inspect_model_cls(self) -> _ModelInfo:
         from vllm.model_executor.model_loader.weight_utils import get_lock
 
-        model_path = pathlib.Path(__file__).parent.joinpath(
-            f"{self.module_name.split('.')[-1]}.py")
+        model_path = Path(
+            __file__).parent / f"{self.module_name.split('.')[-1]}.py"
 
         assert model_path.exists(), \
             f"Model {self.module_name} expected to be on path {model_path}"
@@ -477,16 +491,17 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
             module_hash = hashlib.md5(f.read()).hexdigest()
 
         with get_lock(self._get_cache_filename(), self._get_cache_dir()):
-            try:
-                mi = self._load_modelinfo_from_cache(module_hash)
-                if mi is not None:
-                    logger.debug(("Loaded model info "
-                                  "for class %s.%s from cache"),
-                                 self.module_name, self.class_name)
-                    return mi
-            except Exception:
-                logger.exception(
-                    "Error loading _ModelInfo properties, load model instead.")
+            mi = self._load_modelinfo_from_cache(module_hash)
+            if mi is not None:
+                logger.debug(("Loaded model info "
+                              "for class %s.%s from cache"), self.module_name,
+                             self.class_name)
+                return mi
+            else:
+                logger.debug(("Cache model info "
+                              "for class %s.%s miss. "
+                              "Loading model instead."), self.module_name,
+                             self.class_name)
 
             # Performed in another process to avoid initializing CUDA
             mi = _run_in_subprocess(
@@ -496,10 +511,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
                          self.class_name)
 
             # save cache file
-            try:
-                self._save_modelinfo_to_cache(mi, module_hash)
-            except Exception:
-                logger.exception("Error saving _ModelInfo properties.")
+            self._save_modelinfo_to_cache(mi, module_hash)
 
             return mi
 
