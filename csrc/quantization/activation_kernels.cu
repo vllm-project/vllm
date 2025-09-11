@@ -116,6 +116,7 @@ __device__ __forceinline__ float2 silu2(float2 x) {
   return make_float2(silu(x.x), silu(x.y));
 }
 
+#ifndef USE_ROCM
 __device__ __forceinline__ float warp_max(float v) {
   static constexpr unsigned FULL_MASK = 0xffffffffu;
   for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
@@ -131,6 +132,7 @@ __device__ __forceinline__ __nv_bfloat16 warp_max(__nv_bfloat16 v) {
   }
   return v;
 }
+#endif
 
 template <typename T, typename U>
 __device__ __forceinline__ void cp_async4(T* _smem_ptr, const U* _glob_ptr) {
