@@ -1442,7 +1442,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 data = mm_data_items[modality][idx]
                 if data is None:
                     raise ValueError(
-                        f"Cache miss for {modality} at index {idx} but data is not provided."
+                        f"Cache miss for {modality} at index {idx} but data is not provided."  # noqa: E501
                     )
                 else:
                     mm_missing_data[modality].append(data)

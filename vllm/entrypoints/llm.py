@@ -1491,24 +1491,24 @@ class LLM:
             if isinstance(data, list):
                 for i, d in enumerate(data):
                     if d is None:
-                        if multi_modal_uuids is None or modality not in multi_modal_uuids or multi_modal_uuids[
+                        if multi_modal_uuids is None or modality not in multi_modal_uuids or multi_modal_uuids[  # noqa: E501
                                 modality] is None:
                             raise ValueError(
-                                f"Multi-modal data for {modality} is None but UUID is not provided"
+                                f"Multi-modal data for {modality} is None but UUID is not provided"  # noqa: E501
                             )
                         else:
                             if len(
                                     multi_modal_uuids[modality]
                             ) <= i or multi_modal_uuids[modality][i] is None:
                                 raise ValueError(
-                                    f"Multi-modal data for {modality} is None but UUID is not provided"
+                                    f"Multi-modal data for {modality} is None but UUID is not provided"  # noqa: E501
                                 )
             else:
                 if data is None:
-                    if multi_modal_uuids is None or modality not in multi_modal_uuids or multi_modal_uuids[
+                    if multi_modal_uuids is None or modality not in multi_modal_uuids or multi_modal_uuids[  # noqa: E501
                             modality] is None:
                         raise ValueError(
-                            f"Multi-modal data for {modality} is None but UUID is not provided"
+                            f"Multi-modal data for {modality} is None but UUID is not provided"  # noqa: E501
                         )
 
     def _add_request(

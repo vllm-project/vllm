@@ -69,15 +69,10 @@ class AudioURL(TypedDict, total=False):
 
 
 class ChatCompletionContentPartAudioParam(TypedDict, total=False):
-    audio_url: Optional[AudioURL]
+    audio_url: Required[AudioURL]
 
     type: Required[Literal["audio_url"]]
     """The type of the content part."""
-    uuid: Optional[str]
-    """
-    User-provided UUID of a media. User must guarantee that it is properly
-    generated and unique for different medias.
-    """
 
 
 class ChatCompletionContentPartImageEmbedsParam(TypedDict, total=False):
@@ -104,15 +99,10 @@ class VideoURL(TypedDict, total=False):
 
 
 class ChatCompletionContentPartVideoParam(TypedDict, total=False):
-    video_url: Optional[VideoURL]
+    video_url: Required[VideoURL]
 
     type: Required[Literal["video_url"]]
     """The type of the content part."""
-    uuid: Optional[str]
-    """
-    User-provided UUID of a media. User must guarantee that it is properly
-    generated and unique for different medias.
-    """
 
 
 class PILImage(BaseModel):
@@ -1198,7 +1188,7 @@ def _parse_chat_message_content_mm_part(
     part_type = part.get("type", None)
     uuid = part.get("uuid", None)
 
-    if isinstance(part_type, str) and part_type in MM_PARSER_MAP and uuid is None:
+    if isinstance(part_type, str) and part_type in MM_PARSER_MAP and uuid is None: # noqa: E501
         content = MM_PARSER_MAP[part_type](part)
 
         # Special case for 'image_url.detail'

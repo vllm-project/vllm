@@ -1987,7 +1987,7 @@ def main(args):
         try:
             # Verify cache hits with UUIDs
             print(
-                "Sending a second batch of requests with empty media and matching UUIDs."
+                "Sending a second batch of requests with empty media and matching UUIDs."  # noqa: E501
             )
             outputs = llm.generate(
                 inputs_with_empty_media,
