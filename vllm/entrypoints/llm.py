@@ -1505,8 +1505,7 @@ class LLM:
             else:
                 if data is None and (multi_modal_uuids is None
                                      or modality not in multi_modal_uuids
-                                     or multi_modal_uuids[
-                                         modality] is None):
+                                     or multi_modal_uuids[modality] is None):
                     raise ValueError(f"Multi-modal data for {modality} is None"
                                      f" but UUID is not provided")
 
