@@ -1986,7 +1986,9 @@ def main(args):
     if args.verify_mm_cache_hit_with_uuids:
         try:
             # Verify cache hits with UUIDs
-            print("Sending a second batch of requests with empty media and matching UUIDs.")
+            print(
+                "Sending a second batch of requests with empty media and matching UUIDs."
+            )
             outputs = llm.generate(
                 inputs_with_empty_media,
                 sampling_params=sampling_params,
