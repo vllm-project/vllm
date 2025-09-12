@@ -1031,6 +1031,7 @@ class FusedMoE(CustomOp):
             or (self.dp_size > 1
                 and self.moe_config.use_flashinfer_cutlass_kernels))
 
+        # TODO(bnell): make this into a method on prepare finalize (or all2all?)
         self.must_reduce_shared = (self.use_pplx_kernels
                                    or self.use_deepep_ht_kernels
                                    or self.use_deepep_ll_kernels
@@ -1692,9 +1693,9 @@ class FusedMoE(CustomOp):
     def maybe_all_reduce_tensor_model_parallel(
             self, final_hidden_states: torch.Tensor):
         """
-        The pplx combine kernel reduces across GPU ranks by default.
+        Some combine kernel reduces across GPU ranks by default.
         """
-        if self.must_reduce_shared_expert_outputs():
+        if self.must_reduce_shared:
             return final_hidden_states
         else:
             return tensor_model_parallel_all_reduce(final_hidden_states)
