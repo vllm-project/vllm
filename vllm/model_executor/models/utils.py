@@ -404,6 +404,7 @@ def merge_multimodal_embeddings_from_map(
         placeholder_map.src].to(dtype=inputs_embeds.dtype)
     return inputs_embeds
 
+
 def merge_multimodal_embeddings_from_mask(
     inputs_embeds: torch.Tensor,
     is_multimodal: torch.Tensor,
@@ -419,6 +420,7 @@ def merge_multimodal_embeddings_from_mask(
         is_multimodal=is_multimodal,
         multimodal_embeddings=multimodal_embeddings,
     )
+
 
 def _merge_multimodal_embeddings(
     inputs_embeds: torch.Tensor,

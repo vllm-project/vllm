@@ -73,6 +73,7 @@ from .qwen2_vl import (Qwen2VLMultiModalProcessor, Qwen2VLProcessingInfo,
                        apply_rotary_pos_emb_vision)
 from .utils import (AutoWeightsLoader, WeightsMapper, cast_overflow_tensors,
                     init_vllm_registered_model, maybe_prefix,
+                    merge_multimodal_embeddings,
                     merge_multimodal_embeddings_from_mask)
 from .vision import get_vit_attn_backend
 
@@ -952,8 +953,9 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         placeholder_ids = torch.tensor(
             [config.image_token_id, config.video_token_id], dtype=torch.long)
-        self.register_buffer(
-            "_mm_placeholder_ids", placeholder_ids, persistent=False)
+        self.register_buffer("_mm_placeholder_ids",
+                             placeholder_ids,
+                             persistent=False)
         vocab_size = self.config.vocab_size
         lut = torch.zeros(vocab_size, dtype=torch.bool)
         for tid in placeholder_ids.tolist():
@@ -1159,7 +1161,13 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None \
             and len(multimodal_embeddings) != 0:
-            is_multimodal = self._mm_placeholder_lut[input_ids]
+            max_id = int(torch.amax(input_ids))
+            if max_id < self._mm_placeholder_lut.numel():
+                is_multimodal = self._mm_placeholder_lut[input_ids]
+            else:
+                ids = self._mm_placeholder_lut.to(device=input_ids.device)
+                is_multimodal = (
+                    input_ids.unsqueeze(-1) == ids.view(1,-1)).any(dim=-1)
             inputs_embeds = merge_multimodal_embeddings_from_mask(
                 inputs_embeds=inputs_embeds,
                 is_multimodal=is_multimodal,
