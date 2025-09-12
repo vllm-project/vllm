@@ -866,6 +866,7 @@ class OpenAIServing:
         **kwargs,
     ):
         orig_priority = priority
+        toolcall_turn = 0
         while True:
             self._log_inputs(
                 request_id,
@@ -879,6 +880,7 @@ class OpenAIServing:
                 request_id,
                 lora_request=lora_request,
                 priority=priority,
+                toolcall_turn=toolcall_turn,
                 **kwargs,
             )
             async for res in generator:
@@ -908,6 +910,7 @@ class OpenAIServing:
                 prompt_token_ids)
             # OPTIMIZATION
             priority = orig_priority - 1
+            toolcall_turn += 1
 
     def _log_inputs(
         self,
