@@ -142,12 +142,28 @@ class MooncakeStore(KVStoreBufferBase):
         self,
         key: str,
     ) -> Optional[torch.Tensor]:
-        """Get KVCache from Mooncake Store"""
+        """Get and Remove KVCache from Mooncake Store"""
         try:
             data = self.store.get(key)
         except TypeError as err:
             logger.error("Failed to get value from Mooncake Store: %s", err)
             raise TypeError("Mooncake Store Get Type Error.") from err
+
+        # The mooncake store API has a 3 function semantics: put/get/remove
+        # and caching strategies (e.g., eviction policies) are left to
+        # upper-layer frameworks (like vLLM).
+        # However, the vLLM KVStoreBufferBase API uses a 2 function
+        # semantics: put/get.
+        # To avoid filling up the cache with already used data,
+        # we remove it after first get,
+        # under the assumption that each value is only needed once.
+        # This is a workaround, that fails to maximally utilize the cache
+        # for repeated prompt prefixes.
+        try:
+            self.store.remove(key)
+        except TypeError as err:
+            logger.error("Failed to remove value from Mooncake Store: %s", err)
+            raise TypeError("Mooncake Store Remove Type Error.") from err
 
         if data:
             loaded_tensors = safetensors_load(data)
