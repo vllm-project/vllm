@@ -7,7 +7,6 @@ from typing import Final, Generic, Optional, Protocol, TypeVar, Union
 import torch
 from transformers import PretrainedConfig
 
-from vllm.attention.selector import get_env_variable_attn_backend
 from vllm.logger import init_logger
 from vllm.platforms import _Backend, current_platform
 
@@ -75,6 +74,9 @@ def get_vit_attn_backend(head_size: int, dtype: torch.dtype) -> _Backend:
     Returns:
         Tuple of (backend, use_upstream_fa)
     """
+    # Lazy import to avoid circular dependency
+    from vllm.attention.selector import get_env_variable_attn_backend
+
     selected_backend: Optional[_Backend] = get_env_variable_attn_backend()
     if selected_backend is not None:
         return selected_backend

@@ -49,7 +49,7 @@ def test_mha_attn_platform(device: str):
             assert attn.attn_backend == _Backend.TORCH_SDPA
     else:
         # Test CUDA with head_size=64 (divisible by 32)
-        # - should upstream FlashAttention
+        # - should use vLLM's FlashAttention
         with patch("vllm.attention.layer.current_platform", CudaPlatform()), \
              patch("vllm.model_executor.models.vision.current_platform",
                    CudaPlatform()):
@@ -74,7 +74,11 @@ def test_mha_attn_platform(device: str):
              patch("vllm.model_executor.models.vision.current_platform",
                    CudaPlatform()), \
              patch("vllm.attention.layer.check_upstream_fa_availability",
-                   return_value=True):
+                   return_value=True), \
+             patch.dict('sys.modules', {'flash_attn': type('MockFlashAttn', (),
+                                                           {
+                 'flash_attn_varlen_func': lambda *args, **kwargs: None
+             })()}):
             attn = MultiHeadAttention(16, 72, scale=1)
             assert attn.attn_backend == _Backend.FLASH_ATTN
 
