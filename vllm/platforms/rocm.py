@@ -243,7 +243,8 @@ class RocmPlatform(Platform):
                         "rocm_aiter_fa.AiterFlashAttentionBackend")
             elif (envs.VLLM_ROCM_USE_AITER and
                 envs.VLLM_USE_AITER_UNIFIED_ATTENTION) or \
-                    envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION:
+                    envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION or \
+                        selected_backend == _Backend.ROCM_ATTN_VLLM_V1:
                 # rocm specific backend, with aiter and/or
                 #   triton prefix-prefill
                 logger.info("Using Rocm/Aiter Attention backend on V1 engine.")
