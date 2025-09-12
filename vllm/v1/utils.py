@@ -1,17 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
+import contextlib
 import multiprocessing
 import time
 import weakref
 from collections.abc import Sequence
+from contextlib import AbstractContextManager
 from multiprocessing import connection
 from multiprocessing.process import BaseProcess
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Optional, TypeVar,
                     Union, overload)
 
 import torch
+from torch.autograd.profiler import record_function
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
@@ -19,6 +23,8 @@ from vllm.utils import (get_open_port, get_open_zmq_ipc_path, get_tcp_uri,
                         kill_process_tree)
 
 if TYPE_CHECKING:
+    import numpy as np
+
     from vllm.v1.engine.coordinator import DPCoordinator
     from vllm.v1.engine.utils import (CoreEngineActorManager,
                                       CoreEngineProcManager)
@@ -97,20 +103,31 @@ class ConstantList(Generic[T], Sequence):
 
 
 class CpuGpuBuffer:
+    """Buffer to easily copy tensors between CPU and GPU."""
 
     def __init__(
         self,
-        *args,
+        *size: Union[int, torch.SymInt],
         dtype: torch.dtype,
         device: torch.device,
         pin_memory: bool,
-    ):
-        self.cpu = torch.zeros(*args,
+        with_numpy: bool = True,
+    ) -> None:
+        self.cpu = torch.zeros(*size,
                                dtype=dtype,
                                device="cpu",
                                pin_memory=pin_memory)
-        self.np = self.cpu.numpy()
         self.gpu = self.cpu.to(device)
+        self.np: np.ndarray
+        # To keep type hints simple (avoiding generics and subclasses), we
+        # only conditionally create the numpy array attribute. This can cause
+        # AttributeError if `self.np` is accessed when `with_numpy=False`.
+        if with_numpy:
+            if dtype == torch.bfloat16:
+                raise ValueError(
+                    "Bfloat16 torch tensors cannot be directly cast to a "
+                    "numpy array, so call CpuGpuBuffer with with_numpy=False")
+            self.np = self.cpu.numpy()
 
     def copy_to_gpu(self, n: Optional[int] = None) -> torch.Tensor:
         if n is None:
@@ -142,7 +159,7 @@ def get_engine_client_zmq_addr(local_only: bool,
 
 class APIServerProcessManager:
     """Manages a group of API server processes.
-    
+
     Handles creation, monitoring, and termination of API server worker
     processes. Also monitors extra processes to check if they are healthy.
     """
@@ -159,7 +176,7 @@ class APIServerProcessManager:
         stats_update_address: Optional[str] = None,
     ):
         """Initialize and start API server worker processes.
-        
+
         Args:
             target_server_fn: Function to call for each API server process
             listen_address: Address to listen for client connections
@@ -168,7 +185,7 @@ class APIServerProcessManager:
             num_servers: Number of API server processes to start
             input_addresses: Input addresses for each API server
             output_addresses: Output addresses for each API server
-            stats_update_address: Optional stats update address 
+            stats_update_address: Optional stats update address
         """
         self.listen_address = listen_address
         self.sock = sock
@@ -212,7 +229,7 @@ def wait_for_completion_or_failure(
                                        "CoreEngineActorManager"]] = None,
         coordinator: Optional["DPCoordinator"] = None) -> None:
     """Wait for all processes to complete or detect if any fail.
-    
+
     Raises an exception if any process exits with a non-zero status.
 
     Args:
@@ -338,7 +355,8 @@ def report_usage_stats(
             vllm_config.cache_config.block_size,
             "gpu_memory_utilization":
             vllm_config.cache_config.gpu_memory_utilization,
-
+            "kv_cache_memory_bytes":
+            vllm_config.cache_config.kv_cache_memory_bytes,
             # Quantization
             "quantization":
             vllm_config.model_config.quantization,
@@ -355,3 +373,10 @@ def report_usage_stats(
             "disable_custom_all_reduce":
             vllm_config.parallel_config.disable_custom_all_reduce,
         })
+
+
+def record_function_or_nullcontext(name: str) -> AbstractContextManager:
+    if envs.VLLM_CUSTOM_SCOPES_FOR_PROFILING:
+        return record_function(name)
+    else:
+        return contextlib.nullcontext()

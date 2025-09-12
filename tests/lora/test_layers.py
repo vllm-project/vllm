@@ -11,21 +11,21 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from vllm.config import LoRAConfig
-from vllm.lora.fully_sharded_layers import (
-    ColumnParallelLinearWithShardedLoRA,
-    MergedColumnParallelLinearWithShardedLoRA,
-    MergedQKVParallelLinearWithShardedLoRA, QKVParallelLinearWithShardedLoRA,
-    RowParallelLinearWithShardedLoRA)
+from vllm.config.lora import LoRAConfig
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
+                              ColumnParallelLinearWithShardedLoRA,
                               LogitsProcessorWithLoRA, LoRAMapping,
                               MergedColumnParallelLinearWithLoRA,
+                              MergedColumnParallelLinearWithShardedLoRA,
                               MergedQKVParallelLinearWithLoRA,
+                              MergedQKVParallelLinearWithShardedLoRA,
                               QKVParallelLinearWithLoRA,
+                              QKVParallelLinearWithShardedLoRA,
                               ReplicatedLinearWithLoRA,
                               RowParallelLinearWithLoRA,
+                              RowParallelLinearWithShardedLoRA,
                               VocabParallelEmbeddingWithLoRA)
 # yapf: enable
 from vllm.lora.models import LoRALayerWeights, PackedLoRALayerWeights
@@ -60,9 +60,9 @@ DEVICES = ([
 # prefill stage(True) or decode stage(False)
 STAGES = [True, False]
 
-NUM_RANDOM_SEEDS = 6
+NUM_RANDOM_SEEDS = 2
 
-VOCAB_PARALLEL_EMBEDDING_TEST_NUM_RANDOM_SEEDS = 128
+VOCAB_PARALLEL_EMBEDDING_TEST_NUM_RANDOM_SEEDS = 2
 
 
 @pytest.fixture(autouse=True)

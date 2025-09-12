@@ -54,7 +54,6 @@ SystemEnv = namedtuple(
         'is_xnnpack_available',
         'cpu_info',
         'rocm_version',  # vllm specific field
-        'neuron_sdk_version',  # vllm specific field
         'vllm_version',  # vllm specific field
         'vllm_build_flags',  # vllm specific field
         'gpu_topo',  # vllm specific field
@@ -75,6 +74,7 @@ DEFAULT_CONDA_PATTERNS = {
     "zmq",
     "nvidia",
     "pynvml",
+    "flashinfer-python",
 }
 
 DEFAULT_PIP_PATTERNS = {
@@ -90,6 +90,7 @@ DEFAULT_PIP_PATTERNS = {
     "zmq",
     "nvidia",
     "pynvml",
+    "flashinfer-python",
 }
 
 
@@ -275,15 +276,6 @@ def get_rocm_version(run_lambda):
                                      r'HIP version: (\S+)')
 
 
-def get_neuron_sdk_version(run_lambda):
-    # Adapted from your install script
-    try:
-        result = run_lambda(["neuron-ls"])
-        return result if result[0] == 0 else 'N/A'
-    except Exception:
-        return 'N/A'
-
-
 def get_vllm_version():
     from vllm import __version__, __version_tuple__
 
@@ -306,10 +298,9 @@ def get_vllm_version():
 
 def summarize_vllm_build_flags():
     # This could be a static method if the flags are constant, or dynamic if you need to check environment variables, etc.
-    return 'CUDA Archs: {}; ROCm: {}; Neuron: {}'.format(
+    return 'CUDA Archs: {}; ROCm: {}'.format(
         os.environ.get('TORCH_CUDA_ARCH_LIST', 'Not Set'),
         'Enabled' if os.environ.get('ROCM_HOME') else 'Disabled',
-        'Enabled' if os.environ.get('NEURON_CORES') else 'Disabled',
     )
 
 
@@ -498,6 +489,16 @@ def get_libc_version():
     return '-'.join(platform.libc_ver())
 
 
+def is_uv_venv():
+    if os.environ.get("UV"):
+        return True
+    pyvenv_cfg_path = os.path.join(sys.prefix, 'pyvenv.cfg')
+    if os.path.exists(pyvenv_cfg_path):
+        with open(pyvenv_cfg_path, 'r') as f:
+            return any(line.startswith('uv = ') for line in f)
+    return False
+
+
 def get_pip_packages(run_lambda, patterns=None):
     """Return `pip list` output. Note: will also find conda-installed pytorch and numpy packages."""
     if patterns is None:
@@ -513,7 +514,7 @@ def get_pip_packages(run_lambda, patterns=None):
 
         if pip_available:
             cmd = [sys.executable, '-mpip', 'list', '--format=freeze']
-        elif os.environ.get("UV") is not None:
+        elif is_uv_venv():
             print("uv is set")
             cmd = ["uv", "pip", "list", "--format=freeze"]
         else:
@@ -601,7 +602,6 @@ def get_env_info():
     conda_packages = get_conda_packages(run_lambda)
 
     rocm_version = get_rocm_version(run_lambda)
-    neuron_sdk_version = get_neuron_sdk_version(run_lambda)
     vllm_version = get_vllm_version()
     vllm_build_flags = summarize_vllm_build_flags()
     gpu_topo = get_gpu_topo(run_lambda)
@@ -635,7 +635,6 @@ def get_env_info():
         is_xnnpack_available=is_xnnpack_available(),
         cpu_info=get_cpu_info(run_lambda),
         rocm_version=rocm_version,
-        neuron_sdk_version=neuron_sdk_version,
         vllm_version=vllm_version,
         vllm_build_flags=vllm_build_flags,
         gpu_topo=gpu_topo,
@@ -702,7 +701,6 @@ env_info_fmt += """
          vLLM Info
 ==============================
 ROCM Version                 : {rocm_version}
-Neuron SDK Version           : {neuron_sdk_version}
 vLLM Version                 : {vllm_version}
 vLLM Build Flags:
   {vllm_build_flags}

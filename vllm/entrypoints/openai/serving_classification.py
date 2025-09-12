@@ -20,6 +20,7 @@ from vllm.entrypoints.openai.serving_engine import (ClassificationServeContext,
                                                     OpenAIServing,
                                                     ServeContext)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.renderer import RenderConfig
 from vllm.logger import init_logger
 from vllm.outputs import ClassificationOutput, PoolingRequestOutput
 from vllm.pooling_params import PoolingParams
@@ -54,14 +55,10 @@ class ClassificationMixin(OpenAIServing):
             ctx.tokenizer = await self.engine_client.get_tokenizer(
                 ctx.lora_request)
 
-            (
-                ctx.request_prompts,
-                ctx.engine_prompts,
-            ) = await self._preprocess_completion(
-                ctx.request,
-                ctx.tokenizer,
-                ctx.request.input,
-            )
+            renderer = self._get_renderer(ctx.tokenizer)
+            ctx.engine_prompts = await renderer.render_prompt(
+                prompt_or_prompts=ctx.request.input,
+                config=self._build_render_config(ctx.request))
 
             return None
 
@@ -117,6 +114,12 @@ class ClassificationMixin(OpenAIServing):
             usage=usage,
         )
 
+    def _build_render_config(self,
+                             request: ClassificationRequest) -> RenderConfig:
+        return RenderConfig(
+            max_length=self.max_model_len,
+            truncate_prompt_tokens=request.truncate_prompt_tokens)
+
 
 class ServingClassification(ClassificationMixin):
     request_id_prefix = "classify"
@@ -143,7 +146,7 @@ class ServingClassification(ClassificationMixin):
         request: ClassificationRequest,
         raw_request: Request,
     ) -> Union[ClassificationResponse, ErrorResponse]:
-        model_name = self._get_model_name(request.model)
+        model_name = self.models.model_name()
         request_id = (f"{self.request_id_prefix}-"
                       f"{self._base_request_id(raw_request)}")
 

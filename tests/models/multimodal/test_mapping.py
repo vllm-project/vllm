@@ -59,7 +59,9 @@ def test_hf_model_weights_mapper(model_arch: str):
         revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=model_info.hf_overrides,
-    )
+        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        enforce_eager=model_info.enforce_eager,
+        dtype=model_info.dtype)
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
 
     original_weights = create_repo_dummy_weights(model_id)

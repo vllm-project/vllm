@@ -7,6 +7,7 @@
 # Copyright (c) 2023 OpenGVLab
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Any, Literal, Optional, TypeVar, Union
@@ -37,6 +38,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.utils import set_default_torch_num_threads
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
@@ -115,13 +117,26 @@ InternVLVideoInputs = Union[InternVLVideoPixelInputs,
 # adapted from https://huggingface.co/OpenGVLab/InternVL2-1B
 def build_transform(input_size: int):
     MEAN, STD = IMAGENET_MEAN, IMAGENET_STD
-    return T.Compose([
+    transform = T.Compose([
         T.Lambda(lambda img: convert_image_mode(img, 'RGB')),
         T.Resize((input_size, input_size),
                  interpolation=T.InterpolationMode.BICUBIC),
         T.ToTensor(),
         T.Normalize(mean=MEAN, std=STD)
     ])
+    # Image transformation operations (which include tensor computations
+    # on the CPU) can occupy a substantial number of CPU cores, introducing
+    # overhead due to CPU contention. This issue becomes particularly
+    # noticeable when deploying multiple vLLM instances on a single machine.
+    # Therefore, it is necessary to limit the number of threads allocated to
+    # image transformation tasks.
+    num_threads = int(os.environ.get("OMP_NUM_THREADS", "1"))
+
+    def apply(img):
+        with set_default_torch_num_threads(num_threads):
+            return transform(img)
+
+    return apply
 
 
 # adapted from https://huggingface.co/OpenGVLab/InternVL2-1B

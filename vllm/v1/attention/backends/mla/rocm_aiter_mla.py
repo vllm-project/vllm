@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import ClassVar, Optional
+from typing import ClassVar, Optional, Union
 
 import torch
 
@@ -105,11 +105,15 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                                           device=device)
 
     def _build_decode(self, block_table_tensor: torch.Tensor,
-                      seq_lens: torch.Tensor) -> AiterMLADecodeMetadata:
+                      seq_lens_cpu: torch.Tensor,
+                      seq_lens_device: torch.Tensor,
+                      query_start_loc_cpu: torch.Tensor,
+                      query_start_loc_device: torch.Tensor,
+                      num_decode_tokens: int) -> AiterMLADecodeMetadata:
         page_size = self.kv_cache_spec.block_size
-        block_table_bounds = (seq_lens + page_size - 1) // page_size
+        block_table_bounds = (seq_lens_device + page_size - 1) // page_size
         device = self.device
-        num_reqs = seq_lens.size(0)
+        num_reqs = seq_lens_device.size(0)
 
         mask = (torch.arange(block_table_tensor.size(1),
                              dtype=block_table_tensor.dtype,
@@ -117,7 +121,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 < block_table_bounds.unsqueeze(1))
         paged_kv_indices = block_table_tensor[mask]
 
-        paged_kv_last_page_len = seq_lens % page_size
+        paged_kv_last_page_len = seq_lens_device % page_size
         paged_kv_last_page_len = torch.where(paged_kv_last_page_len == 0,
                                              page_size, paged_kv_last_page_len)
 
@@ -156,7 +160,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
         attn_metadata = AiterMLADecodeMetadata(
             block_table=block_table_tensor,
-            seq_lens=seq_lens,
+            seq_lens=seq_lens_device,
             paged_kv_indptr=paged_kv_indptr,
             paged_kv_indices=paged_kv_indices,
             paged_kv_last_page_len=paged_kv_last_page_len,
@@ -218,18 +222,19 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
     def _forward_decode(
         self,
-        q_nope: torch.Tensor,
-        q_pe: torch.Tensor,
+        q: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: AiterMLAMetadata,
         layer: AttentionLayer,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
 
-        B = q_nope.shape[0]
+        if type(q) is tuple:
+            q = torch.cat(q, dim=-1)
 
-        q = torch.cat([q_nope, q_pe], dim=-1)
+        assert isinstance(q, torch.Tensor)
+        B = q.shape[0]
         o = torch.zeros(B,
                         self.num_heads,
                         self.kv_lora_rank,
@@ -247,4 +252,4 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                              attn_metadata.decode.paged_kv_indices,
                              attn_metadata.decode.paged_kv_last_page_len)
 
-        return self._v_up_proj(o)
+        return o, None

@@ -104,7 +104,9 @@ def test_get_gen_prompt(model, template, add_generation_prompt,
         trust_remote_code=model_info.trust_remote_code,
         revision=model_info.revision,
         hf_overrides=model_info.hf_overrides,
-    )
+        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        enforce_eager=model_info.enforce_eager,
+        dtype=model_info.dtype)
 
     # Initialize the tokenizer
     tokenizer = get_tokenizer(

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 
@@ -123,21 +123,22 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
     def _forward_decode(
         self,
-        q_nope: torch.Tensor,
-        q_pe: torch.Tensor,
+        q: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: MLACommonMetadata,
         layer: AttentionLayer,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
 
         if self.kv_cache_dtype.startswith("fp8"):
             raise NotImplementedError("FP8 Triton MLA not yet supported")
 
-        B = q_nope.shape[0]
+        if type(q) is tuple:
+            q = torch.cat(q, dim=-1)
 
-        q = torch.cat([q_nope, q_pe], dim=-1)
+        assert isinstance(q, torch.Tensor)
+        B = q.shape[0]
         o = torch.zeros(B,
                         self.num_heads,
                         self.kv_lora_rank,
@@ -171,4 +172,4 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                              attn_metadata.decode.seq_lens, attn_logits,
                              num_kv_splits, self.scale, PAGE_SIZE)
 
-        return self._v_up_proj(o)
+        return o, None

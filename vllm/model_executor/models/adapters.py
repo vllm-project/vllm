@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import ast
+import inspect
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Optional, TypeVar, cast
 
 import torch
 import torch.nn as nn
 
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.models.config import VerifyAndUpdateConfig
@@ -49,26 +52,28 @@ def _load_st_projector(model_config: "ModelConfig") -> Optional[nn.Module]:
         if not dense_modules:
             return None
 
-        module = dense_modules[0]
-        folder = module.get("path", "")
+        layers = []
+        for module in dense_modules:
+            folder = module.get("path", "")
 
-        config_path = f"{folder}/config.json" if folder else "config.json"
-        layer_config = get_hf_file_to_dict(config_path, model_config.model,
-                                           model_config.revision)
-        if not layer_config:
-            return None
+            config_path = f"{folder}/config.json" if folder else "config.json"
+            layer_config = get_hf_file_to_dict(config_path, model_config.model,
+                                               model_config.revision)
+            if not layer_config:
+                continue
 
-        linear = nn.Linear(layer_config.get("in_features", 768),
-                           layer_config.get("out_features", 768),
-                           bias=layer_config.get("bias", True),
-                           dtype=torch.float32)
+            linear = nn.Linear(layer_config.get("in_features", 768),
+                               layer_config.get("out_features", 768),
+                               bias=layer_config.get("bias", True),
+                               dtype=model_config.head_dtype)
 
-        if _load_dense_weights(linear, folder, model_config):
-            layers = [linear]
+            if not _load_dense_weights(linear, folder, model_config):
+                continue
+
+            layers.append(linear)
             if act_name := layer_config.get("activation_function"):
                 layers.append(get_act_fn(act_name))
-            return nn.Sequential(*layers).to(dtype=torch.float32)
-
+        return nn.Sequential(*layers).to(dtype=model_config.head_dtype)
     except Exception:
         logger.exception("ST projector loading failed")
 
@@ -103,15 +108,13 @@ def _load_dense_weights(linear: nn.Linear, folder: str,
                 if weight_key in state_dict:
                     weight_loader = getattr(linear.weight, "weight_loader",
                                             default_weight_loader)
-                    weight_loader(linear.weight,
-                                  state_dict[weight_key].to(torch.float32))
+                    weight_loader(linear.weight, state_dict[weight_key])
 
                     bias_key = weight_key.replace("weight", "bias")
                     if linear.bias is not None and bias_key in state_dict:
                         bias_loader = getattr(linear.bias, "weight_loader",
                                               default_weight_loader)
-                        bias_loader(linear.bias,
-                                    state_dict[bias_key].to(torch.float32))
+                        bias_loader(linear.bias, state_dict[bias_key])
                     return True
         except Exception:
             logger.exception("Failed to load %s", filename)
@@ -127,6 +130,41 @@ def _get_pooling_model_name(orig_model_name: str, pooling_suffix: str) -> str:
         model_name = model_name.removesuffix(generate_suffix)
 
     return model_name + pooling_suffix
+
+
+def try_create_mm_pooling_model_cls(orig_cls: _T) -> _T:
+
+    class CallVisitor(ast.NodeVisitor):
+
+        def __init__(self):
+            self.calls = []
+
+        def visit_Call(self, node):
+            if isinstance(node.func, ast.Name):
+                self.calls.append(node.func.id)
+            self.generic_visit(node)
+
+    visitor = CallVisitor()
+    visitor.visit(ast.parse(inspect.getsource(orig_cls)))
+    if "init_vllm_registered_model" not in visitor.calls:
+        return None
+
+    class ModelForPooling(orig_cls, VllmModelForPooling):
+
+        is_pooling_model = True
+
+        def __init__(
+            self,
+            *,
+            vllm_config: "VllmConfig",
+            prefix: str = "",
+            **kwargs: Any,
+        ) -> None:
+            super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
+
+            self.pooler = self.get_language_model().pooler
+
+    return ModelForPooling  # type: ignore
 
 
 def _create_pooling_model_cls(orig_cls: _T) -> _T:
@@ -255,7 +293,7 @@ def as_seq_cls_model(cls: _T) -> _T:
     from vllm.model_executor.models.interfaces import SupportsCrossEncoding
     from vllm.sequence import IntermediateTensors
 
-    from .utils import maybe_prefix
+    from .utils import get_model_hidden_size, maybe_prefix
 
     class ModelForSequenceClassification(_create_pooling_model_cls(cls),
                                          SupportsCrossEncoding):
@@ -263,9 +301,10 @@ def as_seq_cls_model(cls: _T) -> _T:
         def _init_pooler(self, vllm_config: "VllmConfig", prefix: str = ""):
             config = vllm_config.model_config.hf_config
             quant_config = vllm_config.quant_config
+            hidden_size = get_model_hidden_size(config)
 
             self.score = ReplicatedLinear(
-                config.hidden_size,
+                hidden_size,
                 config.num_labels,
                 bias=False,
                 params_dtype=torch.float32,
@@ -398,6 +437,7 @@ def load_weights_using_from_2_way_softmax(
     from vllm.model_executor.models.utils import AutoWeightsLoader
 
     model_config = model.vllm_config.model_config
+
     tokens = getattr(model.config, "classifier_from_token", [])
     tokens = cast(list[int], tokens)
     assert len(tokens) == 2
@@ -405,9 +445,10 @@ def load_weights_using_from_2_way_softmax(
     if model.config.tie_word_embeddings:
         model.lm_head = model.model.embed_tokens
     else:
+        quant_config = model.vllm_config.quant_config
         model.lm_head = ParallelLMHead(model.config.vocab_size,
                                        model.config.hidden_size,
-                                       quant_config=model.quant_config)
+                                       quant_config=quant_config)
 
     loader = AutoWeightsLoader(model)
     loaded_weights = loader.load_weights(weights)
@@ -451,9 +492,10 @@ def load_weights_no_post_processing(model,
     if model.config.tie_word_embeddings:
         model.lm_head = model.model.embed_tokens
     else:
+        quant_config = model.vllm_config.quant_config
         model.lm_head = ParallelLMHead(model.config.vocab_size,
                                        model.config.hidden_size,
-                                       quant_config=model.quant_config)
+                                       quant_config=quant_config)
 
     loader = AutoWeightsLoader(model)
     loaded_weights = loader.load_weights(weights)

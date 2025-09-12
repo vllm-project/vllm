@@ -242,10 +242,9 @@ class ipex_ops:
         k_scale_float: float = 1.0,
         v_scale_float: float = 1.0,
     ) -> None:
-        assert kv_cache_dtype == "auto"
-        # TODO: support FP8 kv cache.
         ipex.llm.modules.PagedAttention.reshape_and_cache_flash(
-            key, value, key_cache, value_cache, slot_mapping)
+            key, value, key_cache, value_cache, slot_mapping, kv_cache_dtype,
+            k_scale_float, v_scale_float)
 
     @staticmethod
     def flash_attn_varlen_func(

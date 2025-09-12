@@ -651,15 +651,21 @@ class StatLoggerManager:
         vllm_config: VllmConfig,
         engine_idxs: Optional[list[int]] = None,
         custom_stat_loggers: Optional[list[StatLoggerFactory]] = None,
+        enable_default_loggers: bool = True,
+        client_count: int = 1,
     ):
         self.engine_idxs = engine_idxs if engine_idxs else [0]
 
-        factories: list[StatLoggerFactory]
+        factories: list[StatLoggerFactory] = []
         if custom_stat_loggers is not None:
-            factories = custom_stat_loggers
-        else:
-            factories = []
-            if logger.isEnabledFor(logging.INFO):
+            factories.extend(custom_stat_loggers)
+
+        if enable_default_loggers and logger.isEnabledFor(logging.INFO):
+            if client_count > 1:
+                logger.warning(
+                    "AsyncLLM created with api_server_count more than 1; "
+                    "disabling stats logging to avoid incomplete stats.")
+            else:
                 factories.append(LoggingStatLogger)
 
         # engine_idx: StatLogger
