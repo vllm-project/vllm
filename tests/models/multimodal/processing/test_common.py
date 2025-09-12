@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import copy
 from functools import partial
 from typing import Optional, Union
 
@@ -235,15 +234,13 @@ def _test_processing_correctness_one(
 
     baseline_tokenized_result = baseline_processor.apply(
         token_prompt,
-        mm_data=(copy.deepcopy(mm_data)
-                 if model_type in MM_DATA_PATCHES else mm_data),
+        mm_data=mm_data,
         hf_processor_mm_kwargs={},
     )
 
     cached_tokenized_result = cached_processor.apply(
         token_prompt,
-        mm_data=(copy.deepcopy(mm_data)
-                 if model_type in MM_DATA_PATCHES else mm_data),
+        mm_data=mm_data,
         hf_processor_mm_kwargs={},
     )
 

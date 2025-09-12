@@ -577,9 +577,9 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         if not isinstance(indices, list):
             indices = indices.tolist()
         if len(indices) % merge_size != 0:
-            indices.extend(indices[-1]
-                           for _ in range(merge_size -
-                                          len(indices) % merge_size))
+            # don't update metadata's frames_indices directly
+            indices = indices + [indices[-1]
+                                 ] * (merge_size - len(indices) % merge_size)
         timestamps = [idx / video_fps for idx in indices]
         timestamps = [(timestamps[i] + timestamps[i + merge_size - 1]) / 2
                       for i in range(0, len(timestamps), merge_size)]
