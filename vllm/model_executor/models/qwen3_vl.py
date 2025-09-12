@@ -704,6 +704,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo]
                 prompt = prompt.replace(
                     "<|vision_start|><|video_pad|><|vision_end|>",
                     video_placeholder,
+                    1,
                 )
 
                 video_grid_thw_lst.append(video_outputs["video_grid_thw"])
