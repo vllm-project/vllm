@@ -5,6 +5,7 @@ from typing import Optional
 
 import torch
 
+from vllm.envs import VLLM_USE_FLASHINFER_ROPE
 from vllm.model_executor.custom_op import CustomOp
 
 from .common import apply_rotary_emb_torch
@@ -32,7 +33,8 @@ class RotaryEmbedding(CustomOp):
         self.dtype = dtype
 
         cache = self._compute_cos_sin_cache()
-        cache = cache.to(dtype)
+        if not VLLM_USE_FLASHINFER_ROPE:
+            cache = cache.to(dtype)
         self.cos_sin_cache: torch.Tensor
         self.register_buffer("cos_sin_cache", cache, persistent=False)
 
@@ -65,6 +67,7 @@ class RotaryEmbedding(CustomOp):
         offsets: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """A PyTorch-native implementation of forward()."""
+        # print('Using native backend for RoPE')
         if offsets is not None:
             positions = positions + offsets
         positions = positions.flatten()
@@ -98,8 +101,21 @@ class RotaryEmbedding(CustomOp):
         key: Optional[torch.Tensor] = None,
         offsets: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        if VLLM_USE_FLASHINFER_ROPE and self.head_size in [64, 128, 256, 512]:
+            # print('Using FlashInfer backend for RoPE')
+            torch.ops.vllm.flashinfer_rotary_embedding(
+                positions=positions,
+                query=query,
+                key=key,
+                head_size=self.head_size,
+                cos_sin_cache=self.cos_sin_cache,
+                is_neox=self.is_neox_style,
+            )
+            return query, key
+
         from vllm import _custom_ops as ops
 
+        # print('Using custom ops backend for RoPE')
         # __setattr__ in nn.Module (called by `self.cos_sin_cache = ...`)
         # is expensive, so avoid calling it if possible
         if self.cos_sin_cache.device != query.device or \
