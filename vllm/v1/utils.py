@@ -3,6 +3,7 @@
 import argparse
 import contextlib
 import multiprocessing
+import socket
 import time
 import weakref
 from collections.abc import Sequence
@@ -168,7 +169,7 @@ class APIServerProcessManager:
         self,
         target_server_fn: Callable,
         listen_address: str,
-        sock: Any,
+        sock: Union[socket.socket, list[socket.socket]],
         args: argparse.Namespace,
         num_servers: int,
         input_addresses: list[str],
@@ -180,7 +181,8 @@ class APIServerProcessManager:
         Args:
             target_server_fn: Function to call for each API server process
             listen_address: Address to listen for client connections
-            sock: Socket for client connections
+            sock: Socket(s) for client connections (single socket or list of
+                sockets)
             args: Command line arguments
             num_servers: Number of API server processes to start
             input_addresses: Input addresses for each API server
