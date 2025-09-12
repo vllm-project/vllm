@@ -61,7 +61,6 @@ class VllmEplbAdaptor(BaseAdaptor):
             model: vLLM model instance containing MoE layers
             **args: Additional base class arguments
         """
-        super().__init__(**args)
         self.model = model
         self.rank_id = dist.get_rank()
         self.world_size = dist.get_world_size()
