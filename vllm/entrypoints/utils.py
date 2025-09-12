@@ -113,6 +113,26 @@ def load_aware_call(func):
                        False):
             return await func(*args, **kwargs)
 
+        # Check if max load limit is configured and exceeded
+        max_load = getattr(raw_request.app.state, 'max_server_load', None)
+        if (max_load is not None
+                and raw_request.app.state.server_load_metrics >= max_load):
+            logger.warning(
+                "Server overloaded: current load %s >= max load %s. "
+                "Rejecting request.",
+                raw_request.app.state.server_load_metrics, max_load)
+            return JSONResponse(content={
+                "error": {
+                    "type":
+                    "server_overloaded",
+                    "message":
+                    f"Server is currently overloaded. Current load: "
+                    f"{raw_request.app.state.server_load_metrics}, Max load: "
+                    f"{max_load}. Please try again later."
+                }
+            },
+                                status_code=503)
+
         # ensure the counter exists
         if not hasattr(raw_request.app.state, "server_load_metrics"):
             raw_request.app.state.server_load_metrics = 0
