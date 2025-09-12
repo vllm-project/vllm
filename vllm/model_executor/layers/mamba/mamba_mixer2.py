@@ -568,8 +568,32 @@ class MambaMixer2(MambaBase, CustomOp):
                 [num_decodes, num_prefills],
                 dim=0,
             )
+            query_start_loc_p = (
+                attn_metadata.query_start_loc[-num_prefills - 1:] -
+                num_decodes if has_prefill else None)
+        else:
+            hidden_states_B_C_p, hidden_states_B_C_d = torch.split(
+                hidden_states_B_C,
+                [num_prefill_tokens, num_decodes],
+                dim=0,
+            )
+            dt_p, dt_d = torch.split(
+                dt,
+                [num_prefill_tokens, num_decodes],
+                dim=0,
+            )
+            # Split along batch dimension
+            state_indices_tensor_p, state_indices_tensor_d = torch.split(
+                state_indices_tensor,
+                [num_prefills, num_decodes],
+                dim=0,
+            )
+            query_start_loc_p = (attn_metadata.query_start_loc[:num_prefills +
+                                                               1]
+                                 if has_prefill else None)
 
-            # Note: Eventually this will be moved to mamba2 metadata builder:
+        if envs.VLLM_USE_V1 and cache_enabled:
+            # Additional variables used by caching logic:
             seq_lens_pending = (
                 torch.roll(attn_metadata.query_start_loc, -1, -1) -
                 attn_metadata.query_start_loc)[:-1]
@@ -594,30 +618,6 @@ class MambaMixer2(MambaBase, CustomOp):
             current_last_idx_d, current_last_idx_p = torch.split(
                 current_last_token_block_idx, [num_decodes, num_prefills],
                 dim=0)
-
-            query_start_loc_p = (
-                attn_metadata.query_start_loc[-num_prefills - 1:] -
-                num_decodes if has_prefill else None)
-        else:
-            hidden_states_B_C_p, hidden_states_B_C_d = torch.split(
-                hidden_states_B_C,
-                [num_prefill_tokens, num_decodes],
-                dim=0,
-            )
-            dt_p, dt_d = torch.split(
-                dt,
-                [num_prefill_tokens, num_decodes],
-                dim=0,
-            )
-            # Split along batch dimension
-            state_indices_tensor_p, state_indices_tensor_d = torch.split(
-                state_indices_tensor,
-                [num_prefills, num_decodes],
-                dim=0,
-            )
-            query_start_loc_p = (attn_metadata.query_start_loc[:num_prefills +
-                                                               1]
-                                 if has_prefill else None)
 
         # Preallocate output tensor to avoid memcpy cost for merging prefill
         # and decode outputs
@@ -649,7 +649,7 @@ class MambaMixer2(MambaBase, CustomOp):
             #   pointed to by "state_indices_tensor"
             x = hidden_states_B_C_p.transpose(
                 0, 1)  # this is the form that causal-conv see
-            if mamba2_metadata.cu_seqlen is None: #TODO: move to MDBuilder?
+            if mamba2_metadata.cu_seqlen is None:
                 mamba2_metadata = update_metadata(x, query_start_loc_p,
                                                   mamba2_metadata)
 
