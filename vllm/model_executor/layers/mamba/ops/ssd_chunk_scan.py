@@ -13,7 +13,6 @@ from vllm.triton_utils import tl, triton
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse('2.2.0')
 
-'''
 @triton.autotune(
     configs=[
         triton.Config(
@@ -107,7 +106,6 @@ TRITON_22 = version.parse(triton.__version__) >= version.parse('2.2.0')
     ],
     key=['chunk_size', 'hdim', 'dstate', 'IS_CAUSAL'],
 )
-'''
 @triton.jit
 def _chunk_scan_fwd_kernel(
     # Pointers to matrices
@@ -233,7 +231,7 @@ def _chunk_scan_fwd_kernel(
 
     offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     dA_cs_m = tl.load(dA_cumsum_ptr + offs_m * stride_dA_cs_csize,
-                      mask=offs_m < chunk_size_limit,
+                      mask=offs_m < chunk_size,
                       other=0.0).to(tl.float32)
 
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
@@ -337,16 +335,16 @@ def _chunk_scan_fwd_kernel(
         (pid_m + 1) * BLOCK_SIZE_M, chunk_size_limit)
     for k in range(0, K_MAX, BLOCK_SIZE_K):
         cb = tl.load(cb_ptrs,
-                     mask=(offs_m[:, None] < chunk_size_limit) &
-                     (offs_k[None, :] < chunk_size_limit - k),
+                     mask=(offs_m[:, None] < chunk_size) &
+                     (offs_k[None, :] < chunk_size - k),
                      other=0.0).to(tl.float32)
         dA_cs_k = tl.load(dA_cumsum_ptrs,
-                          mask=offs_k < chunk_size_limit - k,
+                          mask=offs_k < chunk_size - k,
                           other=0.0).to(tl.float32)
         # If there's seq_idx, we already set cb[i, j] = 0 for seq_idx[i] != seq_idx[j].
         # So we don't need masking wrt seq_idx here.
         cb *= tl.exp(dA_cs_m[:, None] - dA_cs_k[None, :])
-        dt_k = tl.load(dt_ptrs, mask=offs_k < chunk_size_limit - k,
+        dt_k = tl.load(dt_ptrs, mask=offs_k < chunk_size - k,
                        other=0.0).to(tl.float32)
         cb *= dt_k
         if IS_CAUSAL:
@@ -538,8 +536,5 @@ def _chunk_scan_fwd(
         HAS_SEQ_IDX=seq_idx is not None,
         IS_TRITON_22=TRITON_22,
         HAS_INITSTATES=initial_states is not None,
-        BLOCK_SIZE_M=64,
-        BLOCK_SIZE_N=64,
-        BLOCK_SIZE_K=32,
     )
     return out_x

@@ -13,7 +13,18 @@ from vllm.triton_utils import tl, triton
 
 from .mamba_ssm import softplus
 
-
+@triton.autotune(
+    configs=[
+        triton.Config({'BLOCK_SIZE_H': 1}),
+        triton.Config({'BLOCK_SIZE_H': 2}),
+        triton.Config({'BLOCK_SIZE_H': 4}),
+        triton.Config({'BLOCK_SIZE_H': 8}),
+        triton.Config({'BLOCK_SIZE_H': 16}),
+        triton.Config({'BLOCK_SIZE_H': 32}),
+        triton.Config({'BLOCK_SIZE_H': 64}),
+    ],
+    key=['chunk_size', 'nheads'],
+)
 @triton.jit
 def _chunk_cumsum_fwd_kernel(
     # Pointers to matrices
@@ -255,6 +266,7 @@ def _chunk_state_fwd_kernel(
 
     chunk_size_limit = chunk_seqlen_end - chunk_seqlen_start
 
+    # should this be limit or not? 
     dA_cs_last = tl.load(dA_cumsum_ptr +
                          (chunk_size_limit - 1) * stride_dA_cs_csize).to(
                              tl.float32)
@@ -598,7 +610,6 @@ def _chunk_cumsum_fwd(dt,
             dA_cumsum.stride(3),
             dt_softplus,
             HAS_DT_BIAS=dt_bias is not None,
-            BLOCK_SIZE_H=1,
             BLOCK_SIZE_CHUNK=triton.next_power_of_2(chunk_size),
         )
     return dA_cumsum, dt_out

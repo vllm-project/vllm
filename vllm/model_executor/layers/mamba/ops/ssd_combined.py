@@ -148,6 +148,8 @@ def _mamba_chunk_scan_combined_fwd(x,
                         seq_idx=seq_idx,
                         output_dtype=torch.float32)
 
+    print("CB: ", CB[0,0,0,0,:10])
+
     # 5. Scan and compute the diagonal blocks, taking into
     #    account past causal states.
     # - if initial states are provided, then states information will be
