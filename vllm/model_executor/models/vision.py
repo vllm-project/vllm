@@ -70,9 +70,6 @@ def get_vision_encoder_info(
 def get_vit_attn_backend(head_size: int, dtype: torch.dtype) -> _Backend:
     """
     Get the available attention backend for Vision Transformer.
-    
-    Returns:
-        Tuple of (backend, use_upstream_fa)
     """
     # Lazy import to avoid circular dependency
     from vllm.attention.selector import get_env_variable_attn_backend
