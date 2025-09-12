@@ -692,6 +692,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         See `workspace_shapes` for a description of additional arguments.
         Returns a tuple of (workspace13, workspace2, output) tensors.
         """
+        # XXXXXXXXX rework this to be more obvious
         CHUNK_SIZE = (M if not self.fused_experts.supports_chunking() else
                       envs.VLLM_FUSED_MOE_CHUNK_SIZE)
         num_chunks = cdiv(M, CHUNK_SIZE)
@@ -900,25 +901,31 @@ class FusedMoEModularKernel(torch.nn.Module):
         else:
             _, M, N, K, top_k = _moe_problem_size(a1q, w1, w2, topk_ids)
 
-            CHUNK_SIZE = (M if not self.fused_experts.supports_chunking() else
-                          envs.VLLM_FUSED_MOE_CHUNK_SIZE)
-            num_chunks = cdiv(M, CHUNK_SIZE)
+            if self.fused_experts.supports_chunking():
+                CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
+                num_chunks = cdiv(M, CHUNK_SIZE)
+            else:
+                CHUNK_SIZE = M #a1q.size(0)
+                num_chunks = 1
 
             def input_chunk_range(chunk_idx: int) -> tuple[int, int]:
-                s = chunk_idx * CHUNK_SIZE
-                e = min(s + CHUNK_SIZE, M)
-                return s, e
+                if num_chunks == 1:
+                    return 0, a1q.size(0)
+                else:
+                    s = chunk_idx * CHUNK_SIZE
+                    e = min(s + CHUNK_SIZE, M)
+                    return s, e
 
             workspace13, workspace2, fused_out = self._allocate_buffers(
                 hidden_states.dtype, a1q.device, M, N, K, top_k,
                 global_num_experts, local_num_experts, expert_tokens_meta)
 
-            print(f"XXX {num_chunks}, {CHUNK_SIZE}, {M, N, K}")
+            #print(f"XXX {num_chunks}, {CHUNK_SIZE}, {M, N, K}")
 
             for chunk_idx in range(num_chunks):
                 s, e = input_chunk_range(chunk_idx)
 
-                print(f"S, E = {s, e}")
+                #print(f"S, E = {s, e}")
 
                 c_expert_tokens_meta = self._slice_expert_tokens_metadata(
                     num_chunks, expert_tokens_meta, topk_ids[s:e],
