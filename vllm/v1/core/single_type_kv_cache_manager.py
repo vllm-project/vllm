@@ -113,12 +113,6 @@ class SingleTypeKVCacheManager(ABC):
             # A running request. Should not have new computed blocks.
             assert len(new_computed_blocks) == 0
 
-    @abstractmethod
-    def free_blocks_outside_attention_window(
-            self, request_id: str, total_computed_tokens: int) -> None:
-
-        raise NotImplementedError
-
     def allocate_new_blocks(self, request_id: str,
                             num_tokens: int) -> list[KVCacheBlock]:
         """
@@ -142,6 +136,12 @@ class SingleTypeKVCacheManager(ABC):
             new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
             req_blocks.extend(new_blocks)
             return new_blocks
+
+    @abstractmethod
+    def free_blocks_outside_attention_window(
+            self, request_id: str, total_computed_tokens: int) -> None:
+
+        raise NotImplementedError
 
     def cache_blocks(self, request: Request, num_tokens: int) -> None:
         """
@@ -283,6 +283,10 @@ class FullAttentionManager(SingleTypeKVCacheManager):
                 computed.pop()
         return computed_blocks
 
+    def free_blocks_outside_attention_window(
+            self, request_id: str, total_computed_tokens: int) -> None:
+        pass
+
     def get_num_common_prefix_blocks(self, request_id: str,
                                      num_running_requests: int) -> int:
         blocks = self.req_to_blocks[request_id]
@@ -293,10 +297,6 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             else:
                 break
         return num_common_blocks
-
-    def free_blocks_outside_attention_window(
-            self, request_id: str, total_computed_tokens: int) -> None:
-        pass
 
 
 class SlidingWindowManager(SingleTypeKVCacheManager):
@@ -633,16 +633,6 @@ class MambaManager(SingleTypeKVCacheManager):
                                      num_running_requests: int) -> int:
         return 0
 
-    def allocate_new_blocks(self, request_id: str,
-                            num_tokens: int) -> list[KVCacheBlock]:
-        # Allocate extra `num_speculative_blocks` blocks for
-        # speculative decoding (MTP/EAGLE) with linear attention.
-        assert isinstance(self.kv_cache_spec, MambaSpec)
-        if self.kv_cache_spec.num_speculative_blocks > 0:
-            num_tokens += (self.kv_cache_spec.block_size *
-                           self.kv_cache_spec.num_speculative_blocks)
-        return super().allocate_new_blocks(request_id, num_tokens)
-
     def get_num_blocks_to_allocate(
         self,
         request_id: str,
@@ -676,6 +666,16 @@ class MambaManager(SingleTypeKVCacheManager):
                 total_computed_tokens,
             ) + blocks_for_spec_decode,
             max_blocks + 1 + blocks_for_spec_decode)
+
+    def allocate_new_blocks(self, request_id: str,
+                            num_tokens: int) -> list[KVCacheBlock]:
+        # Allocate extra `num_speculative_blocks` blocks for
+        # speculative decoding (MTP/EAGLE) with linear attention.
+        assert isinstance(self.kv_cache_spec, MambaSpec)
+        if self.kv_cache_spec.num_speculative_blocks > 0:
+            num_tokens += (self.kv_cache_spec.block_size *
+                           self.kv_cache_spec.num_speculative_blocks)
+        return super().allocate_new_blocks(request_id, num_tokens)
 
 
 class CrossAttentionManager(SingleTypeKVCacheManager):
