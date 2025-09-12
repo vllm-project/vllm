@@ -86,7 +86,7 @@ def flashinfer_fused_moe_blockscale_fp8_fake(
     return torch.empty_like(x)
 
 
-# TODO(bnell): does this really need to be a torch op?
+# TODO(bnell): Does this really need to be a torch.op?
 direct_register_custom_op(
     op_name="flashinfer_fused_moe_blockscale_fp8",
     op_func=flashinfer_fused_moe_blockscale_fp8,
@@ -170,9 +170,10 @@ def flashinfer_fused_moe_per_tensor_scale_fp8_fake(
         use_routing_scales_on_input: bool,
         routing_method_type: int,
         routed_scaling_factor: float = 1.0) -> torch.Tensor:
-    pass
+    return torch.empty_like(hidden_states)
 
 
+# TODO(bnell): Does this really need to be a torch.op?
 direct_register_custom_op(
     op_name="flashinfer_fused_moe_per_tensor_scale_fp8",
     op_func=flashinfer_fused_moe_per_tensor_scale_fp8,
