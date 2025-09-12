@@ -8,7 +8,6 @@ import numpy as np
 import torch
 from transformers import PretrainedConfig
 
-from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .base import RotaryEmbedding
@@ -202,28 +201,6 @@ class MRotaryEmbedding(RotaryEmbedding):
         if self.mrope_section:
             assert sum(self.mrope_section) == rotary_dim // 2
 
-        self.use_triton = current_platform.is_cuda_alike()
-
-    def forward(
-        self,
-        positions: torch.Tensor,
-        query: torch.Tensor,
-        key: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """MRope forward.
-
-        Args:
-            positions:
-                [num_tokens,] (text only) or
-                [3, num_tokens] (T/H/W positions with multimodal inputs)
-            query: [num_tokens, num_heads * head_size]
-            key: [num_tokens, num_kv_heads * head_size]
-        """
-        if self.use_triton:
-            return self.forward_cuda(positions, query, key)
-        else:
-            return self.forward_native(positions, query, key)
-
     def forward_native(
         self,
         positions: torch.Tensor,
@@ -322,6 +299,15 @@ class MRotaryEmbedding(RotaryEmbedding):
                                             self.is_neox_style)
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
+
+    def forward_cpu(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: Optional[torch.Tensor] = None,
+        offsets: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        return self.forward_native(positions, query, key, offsets)
 
     @classmethod
     def get_input_positions(

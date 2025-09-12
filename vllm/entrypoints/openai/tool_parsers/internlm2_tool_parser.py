@@ -60,7 +60,7 @@ class Internlm2ToolParser(ToolParser):
         if '<|action_start|>' not in current_text:
             self.position = len(current_text)
             return DeltaMessage(content=delta_text)
-        # if the tool call is sended, return an empty delta message
+        # if the tool call is sent, return an empty delta message
         # to make sure the finish_reason will be sent correctly.
         if self.current_tool_id > 0:
             return DeltaMessage(content='')
@@ -89,7 +89,7 @@ class Internlm2ToolParser(ToolParser):
         try:
             parsable_arr = action
 
-            # tool calls are generated in an object in inernlm2
+            # tool calls are generated in an object in internlm2
             # it's not support parallel tool calls
             try:
                 tool_call_arr: dict = partial_json_parser.loads(

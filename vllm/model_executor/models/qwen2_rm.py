@@ -53,15 +53,18 @@ class Qwen2RewardBaseModel(nn.Module, SupportsLoRA, SupportsPP):
         self.quant_config = quant_config
         self.model = Qwen2Model(vllm_config=vllm_config,
                                 prefix=maybe_prefix(prefix, "model"))
+        self.head_dtype = vllm_config.model_config.head_dtype
 
         self.score = nn.Sequential(
             ColumnParallelLinear(config.hidden_size,
                                  config.hidden_size,
                                  quant_config=quant_config,
+                                 params_dtype=self.head_dtype,
                                  return_bias=False),
             nn.ReLU(),
             RowParallelLinear(config.hidden_size,
                               config.num_labels,
+                              params_dtype=self.head_dtype,
                               quant_config=quant_config,
                               return_bias=False),
         )
@@ -80,6 +83,7 @@ class Qwen2RewardBaseModel(nn.Module, SupportsLoRA, SupportsPP):
     ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.model(input_ids, positions, intermediate_tensors,
                                    inputs_embeds)
+        hidden_states = hidden_states.to(self.head_dtype)
         logits = self.score(hidden_states)
         return logits
 

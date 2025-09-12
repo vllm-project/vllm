@@ -5,7 +5,8 @@ from typing import Optional
 
 from typing_extensions import assert_never
 
-from vllm.config import LoRAConfig, ModelConfig, SchedulerConfig
+from vllm.config import ModelConfig, SchedulerConfig
+from vllm.config.lora import LoRAConfig
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, encode_tokens,
                                                get_lora_tokenizer,

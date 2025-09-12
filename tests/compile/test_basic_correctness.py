@@ -23,7 +23,7 @@ class TestSetting:
     fullgraph: bool
 
 
-# we cannot afford testing the full Catesian product
+# we cannot afford testing the full Cartesian product
 # of all models and all levels
 @pytest.mark.parametrize(
     "test_setting",
