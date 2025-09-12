@@ -491,14 +491,14 @@ class KeyeVL1_5ForConditionalGeneration(BaseKeyeModule, SupportsMultiModal,
             if mm_input.ndim == expected_dim:
                 return mm_input
             elif mm_input.ndim == expected_dim + 1:
-                return torch.concat(list(mm_input))
+                return mm_input.reshape(-1, *mm_input.shape[2:])
             else:
                 raise ValueError(
                     f"{name} should be {expected_dim}D or "
                     f"batched {expected_dim}D tensor."
                     f"Got ndim: {mm_input.ndim} (shape={mm_input.shape})")
         else:
-            return torch.concat(list(mm_input))
+            return torch.concat(mm_input)
 
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[KeyeVL1_5ImageInputs]:

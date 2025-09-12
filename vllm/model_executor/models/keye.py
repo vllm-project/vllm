@@ -1611,12 +1611,12 @@ class KeyeForConditionalGeneration(BaseKeyeModule, SupportsMultiModal,
                 raise ValueError(f"{name} should be 2D or batched 3D tensor. "
                                  f"Got ndim: {mm_input.ndim} "
                                  f"(shape={mm_input.shape})")
-            return torch.concat(list(mm_input))
+            return mm_input.reshape(-1, mm_input.shape[-1])
         elif is_list_of(mm_input, torch.Tensor):
             if all(p.dim() == 4 for p in mm_input) or all(p.dim() == 2
                                                           for p in mm_input):
                 return mm_input
-        return torch.concat(list(mm_input))
+        return torch.concat(mm_input)
 
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[KeyeImageInputs]:
