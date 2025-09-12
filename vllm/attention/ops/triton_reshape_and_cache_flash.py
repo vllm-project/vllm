@@ -56,8 +56,8 @@ def reshape_and_cache_kernel_flash(
         if key_load.dtype.is_fp8():
             key_tile = key_load
         else:
-            # tl.store will do the correct implicit cast to fp8, 
-            #  based on the key_cache_ptr.dtype.element_ty 
+            # tl.store will do the correct implicit cast to fp8,
+            #  based on the key_cache_ptr.dtype.element_ty
             key_tile = key_load / tl.load(k_scale)
     else:
         key_tile = key_load
@@ -70,7 +70,7 @@ def reshape_and_cache_kernel_flash(
             value_tile = value_load
         else:
             # tl.store will do the correct implicit cast to fp8,
-            #  based on the value_cache_ptr.dtype.element_ty 
+            #  based on the value_cache_ptr.dtype.element_ty
             value_tile = value_load / tl.load(v_scale)
     else:
         value_tile = value_load
@@ -116,8 +116,8 @@ def triton_reshape_and_cache_flash(
 
     assert kv_cache_dtype == "auto" or kv_cache_dtype.startswith("fp8"), \
         f"unsupported kv_cache_dtype (str), got {kv_cache_dtype}."
-    kv_cache_torch_dtype = current_platform.fp8_dtype() if kv_cache_dtype.startswith("fp8") \
-        else key_cache.dtype
+    kv_cache_torch_dtype = current_platform.fp8_dtype() if \
+        kv_cache_dtype.startswith("fp8") else key_cache.dtype
 
     if key_cache.dtype != kv_cache_torch_dtype and kv_cache_dtype.startswith(
             "fp8"):
@@ -132,9 +132,9 @@ def triton_reshape_and_cache_flash(
     assert (not FP8_KV_CACHE) or kv_cache_torch_dtype in [
         torch.float8_e4m3fn, torch.float8_e5m2, torch.uint8,
         torch.float8_e4m3fnuz], \
-            f"unsupported dtype of KV cache tensor, got {kv_cache_torch_dtype}." \
-            "Supported kv cache dtypes: fp8e4m3fn, fp8e5m2, uint8, bfloat16, " \
-            "float16, float32, fp8e4m3fnuz"
+            "unsupported dtype of KV cache tensor, got "\
+            "{kv_cache_torch_dtype}. Supported kv cache dtypes: fp8e4m3fn, " \
+            "fp8e5m2, uint8, bfloat16, float16, float32, fp8e4m3fnuz."
 
     # heuristics instead of autotuning
     TILE_SIZE = min(2048, triton.next_power_of_2(n))
