@@ -168,7 +168,6 @@ def _bmm_chunk_fwd_kernel(
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-
     out = acc.to(out_ptr.dtype.element_ty)
 
     out_ptr += pid_b * stride_out_batch + pid_c * stride_out_chunk + pid_h * stride_out_head
