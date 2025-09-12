@@ -584,7 +584,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             window_left=self._global_hyperparameters.window_left,
             logits_soft_cap=self._global_hyperparameters.logits_soft_cap,
             q_data_type=self.model_config.dtype,
-            kv_data_type=self.kv_cache_spec.dtype,
         )
 
         # Prepare context prefills
@@ -605,7 +604,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     logits_soft_cap=self._global_hyperparameters.
                     logits_soft_cap,
                     q_data_type=self.model_config.dtype,
-                    kv_data_type=self.kv_cache_spec.dtype,
                 )
 
         prefill.prefill_main = self._fi_prefill_main
