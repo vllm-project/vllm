@@ -808,9 +808,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 dt_limit=(0.0, float("inf")),
                 out=preallocated_ssm_out_p.view(1, num_prefill_tokens, -1,
                                                 self.head_dim),
-                state_dtype=ssm_state.dtype,
-                layer=self.prefix,
-            )
+                state_dtype=ssm_state.dtype)
 
             if cache_enabled and num_prefills == 1:
                 states, varlen_state = mamba_outputs
@@ -880,9 +878,6 @@ class MambaMixer2(MambaBase, CustomOp):
                             state_indices_tensor_p[:, current_last_idx_p[seq_idx] -
                                                 1:]] = states_at_blocks[:, -2:]
             else:
-                #print("preallocated_ssm_out_p: ", preallocated_ssm_out_p[0,:10]) TODO
-                #print("varlen_state: ", varlen_state[0,0,0,:10]) TODO
-
                 varlen_state = mamba_outputs
                 # update ssm states
                 # - varlen state is (num_prefills, nheads, headdim, dstate)
