@@ -24,6 +24,9 @@
                 "tag"
             ]
         },
+        "imagePullSecrets": {
+            "type": "array"
+        },
         "containerPort": {
             "type": "integer"
         },
@@ -239,6 +242,12 @@
                 "environment",
                 "release"
             ]
+        },
+        "pvWithModels": {
+            "type": "string"
+        },
+        "modelsPath": {
+            "type": "string"
         }
     },
     "required": [
