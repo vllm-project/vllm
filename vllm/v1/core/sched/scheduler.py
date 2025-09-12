@@ -80,7 +80,6 @@ class Scheduler(SchedulerInterface):
         # will have a corresponding KVConnector with Role=WORKER.
         # KV Connector pushes/pull of remote KVs for P/D and offloading.
         self.connector = None
-        self.finished_count: Optional[int] = None
         if self.vllm_config.kv_transfer_config is not None:
             assert len(self.kv_cache_config.kv_cache_groups) == 1, (
                 "Multiple KV cache groups are not currently supported "
@@ -90,7 +89,6 @@ class Scheduler(SchedulerInterface):
                 "with KV connectors")
             self.connector = KVConnectorFactory.create_connector(
                 config=self.vllm_config, role=KVConnectorRole.SCHEDULER)
-            self.finished_count = self.connector.get_finished_count()
 
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
