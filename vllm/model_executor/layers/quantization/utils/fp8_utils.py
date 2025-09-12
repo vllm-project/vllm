@@ -93,7 +93,7 @@ if current_platform.is_rocm():
         aiter_per1x128_quant = get_hip_quant(rocm_aiter.QuantType.per_1x128)
 
 
-def dispatch_w8a8_blockscale_func(
+def dispatch_w8a8_blockscale_op(
     use_cutlass: bool, use_aiter_and_is_supported: bool
 ) -> Callable[[
         torch.Tensor,
@@ -146,26 +146,12 @@ class W8A8BlockFp8LinearOp:
 
         if should_use_deepgemm_for_fp8_linear(self.is_deep_gemm_supported,
                                               output_dtype, weight):
-            q_input, x_scale = per_token_group_quant_fp8(
-                input_2d,
-                block_size[1],
-                column_major_scales=True,
-                use_ue8m0=self.ue8m0_deepgemm_supported,
-            )
+            output = self._run_deepgemm(input, weight, block_size,
+                                        weight_scale, input_scale, bias)
 
-            # ensure DeepGEMM-backed custom op is registered before use
-            import vllm.model_executor.layers.quantization.deepgemm  # noqa: F401
-
-            output = torch.ops.vllm.w8a8_block_fp8_matmul_deepgemm(
-                q_input,
-                weight,
-                x_scale,
-                weight_scale,
-                block_size,
-                output_dtype=output_dtype)
             if bias is not None:
-                output += bias
-            return output.to(dtype=output_dtype).view(*output_shape)
+                output = output + bias
+            return output.to(dtype=input.dtype).view(*output_shape)
 
         if current_platform.is_cuda():
             if self.is_blackwell:
@@ -180,36 +166,93 @@ class W8A8BlockFp8LinearOp:
         else:
             use_cutlass = False
 
-        w8a8_blockscale_func = dispatch_w8a8_blockscale_func(
+        w8a8_blockscale_op = self._dispatch_w8a8_blockscale_op(
             use_cutlass, self.use_aiter_and_is_supported)
-        if use_cutlass:
-            q_input, x_scale = per_token_group_quant_fp8(
-                input_2d,
-                block_size[1],
-                column_major_scales=use_cutlass,
-                use_ue8m0=self.ue8m0_deepgemm_supported)
-            output = w8a8_blockscale_func(q_input, weight, x_scale,
-                                          weight_scale, block_size,
-                                          input.dtype)
-
-        else:
-            if self.use_aiter_and_is_supported:
-                q_input, x_scale = aiter_per1x128_quant(
-                    input_2d.contiguous(), quant_dtype=rocm_aiter.dtypes.fp8)
-            else:
-                q_input, x_scale = per_token_group_quant_fp8(
-                    input_2d,
-                    block_size[1],
-                    column_major_scales=use_cutlass,
-                    use_ue8m0=self.ue8m0_deepgemm_supported)
-
-            output = w8a8_blockscale_func(q_input, weight, x_scale,
-                                          weight_scale, block_size,
-                                          input.dtype)
+        output = w8a8_blockscale_op(input_2d, weight, block_size, weight_scale)
 
         if bias is not None:
             output = output + bias
         return output.to(dtype=input.dtype).view(*output_shape)
+
+    def _run_deepgemm(
+        self,
+        input_2d: torch.Tensor,
+        weight: torch.Tensor,
+        block_size: list[int],
+        weight_scale: torch.Tensor,
+    ) -> torch.Tensor:
+        # ensure DeepGEMM-backed custom op is registered before use
+        import vllm.model_executor.layers.quantization.deepgemm  # noqa: F401
+
+        q_input, x_scale = per_token_group_quant_fp8(
+            input_2d,
+            block_size[1],
+            column_major_scales=True,
+            use_ue8m0=self.ue8m0_deepgemm_supported,
+        )
+        return torch.ops.vllm.w8a8_block_fp8_matmul_deepgemm(
+            q_input,
+            weight,
+            x_scale,
+            weight_scale,
+            block_size,
+            output_dtype=input_2d.dtype)
+
+    def _run_cutlass(
+        self,
+        input_2d: torch.Tensor,
+        weight: torch.Tensor,
+        block_size: list[int],
+        weight_scale: torch.Tensor,
+    ) -> torch.Tensor:
+        q_input, x_scale = per_token_group_quant_fp8(input_2d,
+                                                     block_size[1],
+                                                     column_major_scales=True,
+                                                     use_ue8m0=False)
+        return cutlass_scaled_mm(q_input, weight, x_scale, weight_scale,
+                                 block_size, input_2d.dtype)
+
+    def _run_aiter(
+        self,
+        input_2d: torch.Tensor,
+        weight: torch.Tensor,
+        block_size: list[int],
+        weight_scale: torch.Tensor,
+    ) -> torch.Tensor:
+        q_input, x_scale = aiter_per1x128_quant(
+            input_2d.contiguous(), quant_dtype=rocm_aiter.dtypes.fp8)
+        return torch.ops.vllm.rocm_aiter_gemm_w8a8_blockscale(
+            q_input, weight, x_scale, weight_scale, block_size, input_2d.dtype)
+
+    def _w8a8_block_fp8_matmul(
+        self,
+        input_2d: torch.Tensor,
+        weight: torch.Tensor,
+        block_size: list[int],
+        weight_scale: torch.Tensor,
+    ) -> torch.Tensor:
+        q_input, x_scale = per_token_group_quant_fp8(input_2d,
+                                                     block_size[1],
+                                                     column_major_scales=False,
+                                                     use_ue8m0=False)
+        return w8a8_block_fp8_matmul(q_input, weight, x_scale, weight_scale,
+                                     block_size, input_2d.dtype)
+
+    def _dispatch_w8a8_blockscale_op(
+        self, use_cutlass: bool, use_aiter_and_is_supported: bool
+    ) -> Callable[[
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            list[int],
+            torch.dtype,
+    ], torch.Tensor]:
+        if use_cutlass:
+            return self._run_cutlass
+        if (use_aiter_and_is_supported):
+            return self._run_aiter
+        return self._run_w8a8_block_fp8_matmul
 
 
 def input_to_float8(
