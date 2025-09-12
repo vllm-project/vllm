@@ -119,8 +119,11 @@ class BailingAttention(nn.Module):
         )
 
         if hasattr(config, "partial_rotary_factor"):
-            self.rotary_dim = int(self.head_dim * config.partial_rotary_factor)
-        elif hasattr(config, "rotary_dim"):
+            self.partial_rotary_factor = config.partial_rotary_factor
+        else:
+            self.partial_rotary_factor = 1.0
+
+        if hasattr(config, "rotary_dim"):
             self.rotary_dim = config.rotary_dim
         else:
             self.rotary_dim = self.head_dim
@@ -132,6 +135,7 @@ class BailingAttention(nn.Module):
             base=config.rope_theta,
             is_neox_style=True,
             rope_scaling=config.rope_scaling,
+            partial_rotary_factor=self.partial_rotary_factor,
         )
 
         self.attn = Attention(
@@ -341,13 +345,10 @@ class BailingMoeBlock(nn.Module):
         intermediate_size = config.intermediate_size
 
         self.input_layernorm = RMSNorm(hidden_size, eps=config.rms_norm_eps)
-
-        self.attention = BailingAttention(
-            config,
-            cache_config,
-            quant_config,
-            prefix=f"{prefix}.attention",
-        )
+        self.attention = BailingAttention(config,
+                                          cache_config,
+                                          quant_config,
+                                          prefix=f"{prefix}.attention")
 
         self.post_attention_layernorm = RMSNorm(hidden_size,
                                                 eps=config.rms_norm_eps)
@@ -581,10 +582,8 @@ class BailingMoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
     ) -> None:
         super().__init__()
 
-        config = vllm_config.model_config.hf_config
-        if hasattr(config, "llm_config"):
-            config = config.llm_config
-            vllm_config.model_config.hf_config = config
+        config = vllm_config.model_config.hf_config.get_text_config()
+        vllm_config.model_config.hf_config = config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
 
