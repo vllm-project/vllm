@@ -325,11 +325,8 @@ class Processor:
     ) -> tuple[Optional[str], EngineCoreRequest]:
 
         # TODO(woosuk): Support pooling models.
-        # TODO(woosuk): Support encoder-decoder models.
         self._validate_lora(lora_request)
         self._validate_params(params, lora_request)
-        if trace_headers is not None:
-            raise ValueError("V1 does not support tracing yet.")
 
         data_parallel_size = self.vllm_config.parallel_config.data_parallel_size
         if data_parallel_rank is not None and not (0 <= data_parallel_rank <
@@ -384,10 +381,6 @@ class Processor:
 
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
 
-        # TODO: Impl encoder-decoder
-        if encoder_inputs is not None:
-            raise NotImplementedError
-
         sampling_params = None
         pooling_params = None
         if isinstance(params, SamplingParams):
@@ -440,6 +433,7 @@ class Processor:
             cache_salt=decoder_inputs.get("cache_salt"),
             priority=priority,
             data_parallel_rank=data_parallel_rank,
+            trace_headers=trace_headers,
         )
 
     def _validate_model_inputs(self,

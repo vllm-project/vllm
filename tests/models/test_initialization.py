@@ -36,7 +36,10 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
 
     hf_overrides_fn = partial(dummy_hf_overrides,
                               model_arch=model_arch,
-                              exist_overrides=model_info.hf_overrides)
+                              exist_overrides=model_info.hf_overrides,
+                              use_original_num_layers=getattr(
+                                  model_info, 'use_original_num_layers',
+                                  False))
 
     # Avoid calling model.forward()
     def _initialize_kv_caches_v0(self) -> None:
@@ -60,14 +63,21 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
                        _initialize_kv_caches_v1), monkeypatch.context() as m):
         if model_info.v0_only:
             m.setenv("VLLM_USE_V1", "0")
-        if model_arch == "Phi4FlashForCausalLM":
-            # Phi4FlashForCausalLM only supports DIFFERENTIAL_FLASH_ATTN backend
+        if model_arch in ("Phi4FlashForCausalLM", "MotifForCausalLM"):
+            # Phi4FlashForCausalLM and MotifForCausalLM
+            # only supports DIFFERENTIAL_FLASH_ATTN backend
             m.setenv("VLLM_ATTENTION_BACKEND", "DIFFERENTIAL_FLASH_ATTN")
         if model_arch == "GptOssForCausalLM":
             # FIXME: A hack to bypass FA3 assertion because our CI's L4 GPU
             # has cc==8.9 which hasn't supported FA3 yet. Remove this hack when
             # L4 supports FA3.
             m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN_VLLM_V1")
+        if model_arch == "Florence2ForConditionalGeneration":
+            # An encoder-decoder model that's V0-only. Just skip it
+            # since V0 is about to be removed.
+            pytest.skip("Skipping Florence2ForConditionalGeneration")
+        if model_arch == "WhisperForConditionalGeneration":
+            m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
         LLM(
             model_info.default,
             tokenizer=model_info.tokenizer,
