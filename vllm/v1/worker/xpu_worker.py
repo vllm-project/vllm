@@ -13,6 +13,7 @@ from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu_worker import (Worker,
                                        init_worker_distributed_environment)
+from vllm.v1.worker.worker_utils import setup_worker_process_title_and_logging
 from vllm.v1.worker.xpu_model_runner import XPUModelRunner
 
 logger = init_logger(__name__)
@@ -166,6 +167,10 @@ class XPUWorker(Worker):
                                             self.distributed_init_method,
                                             self.local_rank,
                                             current_platform.dist_backend)
+        
+        # Set up process title and logging prefix early for better debugging
+        setup_worker_process_title_and_logging(
+            enable_ep=self.parallel_config.enable_expert_parallel)
 
         # global all_reduce needed for overall oneccl warm up
         torch.distributed.all_reduce(torch.zeros(1).xpu(),

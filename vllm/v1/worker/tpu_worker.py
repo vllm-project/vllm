@@ -16,6 +16,7 @@ from vllm.distributed import (ensure_model_parallel_initialized,
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
                                           has_kv_transfer_group)
 from vllm.logger import init_logger
+from vllm.v1.worker.worker_utils import setup_worker_process_title_and_logging
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
@@ -128,6 +129,10 @@ class TPUWorker:
         self._init_tpu_worker_distributed_environment(
             self.vllm_config, self.rank, self.distributed_init_method,
             self.local_rank)
+
+        # Set process title and logging prefix for better debugging
+        setup_worker_process_title_and_logging(
+            enable_ep=self.parallel_config.enable_expert_parallel)
 
         # Device initialization should happen after initializing
         # the distributed runtime.

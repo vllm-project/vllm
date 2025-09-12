@@ -16,6 +16,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
+from vllm.v1.worker.worker_utils import setup_worker_process_title_and_logging
 from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import init_logger
@@ -194,6 +195,11 @@ class Worker(WorkerBase):
                                             self.distributed_init_method,
                                             self.local_rank,
                                             current_platform.dist_backend)
+        
+        # Set process title and logging prefix for better debugging
+        setup_worker_process_title_and_logging(
+            enable_ep=self.parallel_config.enable_expert_parallel)
+        
         # Set random seed.
         set_random_seed(self.model_config.seed)
 

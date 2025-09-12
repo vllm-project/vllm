@@ -19,6 +19,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.cpu_model_runner import CPUModelRunner
 from vllm.v1.worker.gpu_worker import (Worker,
                                        init_worker_distributed_environment)
+from vllm.v1.worker.worker_utils import setup_worker_process_title_and_logging
 
 logger = init_logger(__name__)
 
@@ -77,6 +78,11 @@ class CPUWorker(Worker):
                                             self.distributed_init_method,
                                             self.local_rank,
                                             current_platform.dist_backend)
+        
+        # Set process title and logging prefix for better debugging
+        setup_worker_process_title_and_logging(
+            enable_ep=self.parallel_config.enable_expert_parallel)
+        
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
