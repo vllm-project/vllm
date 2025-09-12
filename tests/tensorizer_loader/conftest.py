@@ -90,6 +90,7 @@ class DummyExecutor(UniProcExecutor):
             distributed_init_method=distributed_init_method,
             is_driver_worker=is_driver_worker,
         )
+        self.mm_receiver_cache = None
         self.collective_rpc("init_worker", args=([kwargs], ))
         self.collective_rpc("init_device")
 
