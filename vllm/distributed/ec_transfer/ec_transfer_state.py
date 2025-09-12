@@ -25,7 +25,7 @@ def has_ec_transfer() -> bool:
 
 def ensure_ec_transfer_initialized(vllm_config: "VllmConfig") -> None:
     """
-    Initialize KV cache transfer parallel group.
+    Initialize EC cache connector.
     """
 
     global _EC_CONNECTOR_AGENT

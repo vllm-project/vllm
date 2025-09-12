@@ -74,10 +74,10 @@ class ECSharedStorageConnector(ECConnectorBase):
         assert encoder_cache is not None
         if metadata is None:
             logger.warning(
-                "In connector.start_load_kv, but the connector metadata is None"
+                "In connector.start_load_caches, but the connector metadata is None"
             )
             return
-        # Load the KV for each request each layer
+        # Load the EC for each mm datas
         for mm_data in metadata.mm_datas:
             if mm_data.mm_hash in encoder_cache:
                 continue
@@ -87,7 +87,7 @@ class ECSharedStorageConnector(ECConnectorBase):
             logger.debug(f"Success load encoder cache for hash {mm_data.mm_hash}")
 
     def save_caches(self, **kwargs) -> None:
-        """Start saving the KV cache of the layer from encoder cache
+        """Start saving the EC cache for each mm_datas from encoder cache
 
         Args:
             **kwargs: additional arguments for the save operation.
