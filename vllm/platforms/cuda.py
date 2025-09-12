@@ -144,46 +144,45 @@ class CudaPlatformBase(Platform):
             # then we default to FlashMLA backend for non-blackwell GPUs,
             # else we default to CutlassMLA. For each case, we force the
             # required block_size.
-            use_flashmla = False
-            use_cutlass_mla = False
-            use_flashinfer_mla = False
 
             if envs.VLLM_ATTENTION_BACKEND is None:
                 # Default case
                 if cls.is_device_capability(100):
                     # Blackwell => Force CutlassMLA.
-                    use_cutlass_mla = True
                     # TODO: This does not work, because the
                     # global_force_attn_backend_context_manager is not set.
                     # See vllm/attention/selector.py:_cached_get_attn_backend
                     envs.VLLM_ATTENTION_BACKEND = "CUTLASS_MLA"
                 else:
-                    # Not Blackwell
-                    use_flashmla = True
-            else:
-                # Forced case
-                use_flashmla = (envs.VLLM_ATTENTION_BACKEND == "FLASHMLA")
-                use_cutlass_mla = (
-                    envs.VLLM_ATTENTION_BACKEND == "CUTLASS_MLA")
-                use_flashinfer_mla = (
-                    envs.VLLM_ATTENTION_BACKEND == "FLASHINFER_MLA")
+                    # Not Blackwell => Force FlashMLA.
+                    envs.VLLM_ATTENTION_BACKEND = "FLASHMLA"
 
-            from vllm.attention.ops.flashmla import is_flashmla_supported
-            if use_flashmla and is_flashmla_supported()[0] \
-                and cache_config.block_size != 64:
-                cache_config.block_size = 64
-                logger.info(
-                    "Forcing kv cache block size to 64 for FlashMLA backend.")
+            # Adjust block sizes for MLA backends based on their requirements
+            mla_backends = {
+                "FLASHMLA":
+                ("vllm.attention.backends.flashmla", "FlashMLABackend"),
+                "CUTLASS_MLA": ("vllm.v1.attention.backends.mla.cutlass_mla",
+                                "CutlassMLABackend"),
+                "FLASHINFER_MLA":
+                ("vllm.v1.attention.backends.mla.flashinfer_mla",
+                 "FlashInferMLABackend")
+            }
 
-            if use_cutlass_mla and cache_config.block_size != 128:
-                cache_config.block_size = 128
-                logger.info("Forcing kv cache block size to 128 for "
-                            "CUTLASS_MLA backend.")
-            if use_flashinfer_mla and cache_config.block_size not in [32, 64]:
-                cache_config.block_size = 64
-                logger.info(
-                    "Forcing kv cache block size to 64 for FlashInferMLA "
-                    "backend.")
+            if envs.VLLM_ATTENTION_BACKEND in mla_backends:
+                module_name, class_name = mla_backends[
+                    envs.VLLM_ATTENTION_BACKEND]
+
+                # Import and get supported block sizes for other MLA backends
+                import importlib
+                module = importlib.import_module(module_name)
+                backend_class = getattr(module, class_name)
+                supported_sizes = backend_class.get_supported_block_sizes()
+
+                if cache_config.block_size not in supported_sizes:
+                    cache_config.block_size = supported_sizes[0]
+                    logger.info(
+                        "Forcing kv cache block size to %s for %s backend.",
+                        supported_sizes[0], envs.VLLM_ATTENTION_BACKEND)
 
         # lazy import to avoid circular import
         from vllm.config import CUDAGraphMode

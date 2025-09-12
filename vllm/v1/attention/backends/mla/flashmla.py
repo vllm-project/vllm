@@ -31,6 +31,10 @@ class FlashMLABackend(MLACommonBackend):
         return "FLASHMLA_VLLM_V1"
 
     @staticmethod
+    def get_supported_block_sizes() -> list[int]:
+        return [64]
+
+    @staticmethod
     def get_metadata_cls() -> type["FlashMLAMetadata"]:
         return FlashMLAMetadata
 

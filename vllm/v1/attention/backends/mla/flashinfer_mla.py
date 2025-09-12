@@ -25,6 +25,10 @@ class FlashInferMLABackend(MLACommonBackend):
         return "FLASHINFER_MLA"
 
     @staticmethod
+    def get_supported_block_sizes() -> list[int]:
+        return [32, 64]
+
+    @staticmethod
     def get_impl_cls() -> type["FlashInferMLAImpl"]:
         return FlashInferMLAImpl
 
