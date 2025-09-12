@@ -177,9 +177,6 @@ class AsyncLLM(EngineClient):
                     worker_name=worker_name,
                     use_gzip=True))
         else:
-            logger.info(
-                "Torch profiler disabled. AsyncLLM CPU traces will not be collected."  # noqa: E501
-            )
             self.profiler = None
 
     @classmethod
