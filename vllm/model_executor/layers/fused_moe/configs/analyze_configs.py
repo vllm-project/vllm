@@ -6,6 +6,7 @@
 import json
 import os
 from collections import defaultdict
+from typing import Any
 
 import numpy as np
 
@@ -24,7 +25,7 @@ def parse_all_configs():
         name = filename[:-5]  # remove .json
         parts = name.split(',')
 
-        config_info: dict[str, any] = {}
+        config_info: dict[str, Any] = {}
         for part in parts:
             if part.startswith('E='):
                 config_info['E'] = int(part[2:])
