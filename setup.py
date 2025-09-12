@@ -62,7 +62,41 @@ def _get_git_origin_url() -> str:
                                 text=True,
                                 cwd=ROOT_DIR)
         if result.returncode == 0:
-            return result.stdout.strip()
+            origin_url = result.stdout.strip()
+            
+            # If we're in a uv cache directory and origin points to local db,
+            # try to get the original URL from git config
+            if origin_url.startswith('/root/.cache/uv/git-v0/db/'):
+                try:
+                    # Try to get the original URL from git config
+                    config_result = subprocess.run(['git', 'config', '--get', 'remote.origin.url'],
+                                                   capture_output=True,
+                                                   text=True,
+                                                   cwd=ROOT_DIR)
+                    if config_result.returncode == 0:
+                        config_url = config_result.stdout.strip()
+                        # If config also points to local db, try to infer from directory structure
+                        if not config_url.startswith('/root/.cache/uv/git-v0/db/'):
+                            return config_url
+                    
+                    # Try to get URL from git log or other sources
+                    log_result = subprocess.run(['git', 'log', '--format=%D', '-1'],
+                                               capture_output=True,
+                                               text=True,
+                                               cwd=ROOT_DIR)
+                    if log_result.returncode == 0:
+                        log_output = log_result.stdout.strip()
+                        # Look for GitHub URLs in the log
+                        if 'github.com' in log_output and '/vllm' in log_output:
+                            # Extract URL from log if possible
+                            import re
+                            url_match = re.search(r'https://github\.com/[^/]+/vllm', log_output)
+                            if url_match:
+                                return url_match.group(0) + '.git'
+                except Exception:
+                    pass
+            
+            return origin_url
     except Exception:
         pass
     return ""
@@ -82,12 +116,27 @@ def is_installing_from_github() -> bool:
     is_uv_cache = '/.cache/uv/git-v0/checkouts/' in current_dir
     
     if is_uv_cache:
+        # Check if this is a vLLM repository by looking for setup.py and vllm directory
+        has_setup_py = os.path.exists(os.path.join(ROOT_DIR, 'setup.py'))
+        has_vllm_dir = os.path.exists(os.path.join(ROOT_DIR, 'vllm'))
+        is_vllm_project = has_setup_py and has_vllm_dir
+        
+        with open("/tmp/vllm_debug.log", "a") as f:
+            f.write(f"DEBUG: UV cache detected, has_setup_py: {has_setup_py}, "
+                   f"has_vllm_dir: {has_vllm_dir}, is_vllm_project: {is_vllm_project}\n")
+        
+        if is_vllm_project:
+            with open("/tmp/vllm_debug.log", "a") as f:
+                f.write("DEBUG: UV cache vLLM project detected\n")
+            return True
+        
+        # Fallback to git remote check
         origin_url = _get_git_origin_url()
         with open("/tmp/vllm_debug.log", "a") as f:
-            f.write(f"DEBUG: UV cache detected, origin_url: {origin_url}\n")
+            f.write(f"DEBUG: UV cache fallback, origin_url: {origin_url}\n")
         if _is_vllm_github_repo(origin_url):
             with open("/tmp/vllm_debug.log", "a") as f:
-                f.write("DEBUG: UV cache vLLM repo detected\n")
+                f.write("DEBUG: UV cache vLLM repo detected via git\n")
             return True
 
     # Method 3: Check if we're in a temporary directory with vLLM repo
