@@ -42,7 +42,8 @@ def _mamba_chunk_scan_combined_fwd(x,
                                    dt_softplus=False,
                                    dt_limit=(0.0, float("inf")),
                                    state_dtype=None,
-                                   out=None):
+                                   out=None,
+                                   org_cu_seqlens=None):
     assert is_int_pow_2(chunk_size), "chunk_size must be integer power of 2"
     batch, seqlen, nheads, headdim = x.shape
     _, _, ngroups, dstate = B.shape
@@ -162,7 +163,13 @@ def _mamba_chunk_scan_combined_fwd(x,
     if cu_seqlens is None:
         return out_x, dt, dA_cumsum, states, final_states
     else:
-        assert batch == 1, "passing cu_seqlens to get the varlen states is only supported if batch dimension is 1"
+        assert batch == 1, "passing cu_seqlens to get the varlen states is only supported if batch dimension is 1"    
+        if org_cu_seqlens is not None:
+            # Padding logic:
+            # The varlen_state, i.e., last state of the request, for the first request is wrong.
+            # The reason for this is that the varlen state is computed for the full last chunk and not for the partial chunk
+            # The workaround solution is that the cu_seqlens[1] needs to be corrected to be the original cu_seq_len
+            cu_seqlens[1] = org_cu_seqlens[1]
         varlen_states = chunk_state_varlen(
             B.squeeze(0),
             x.squeeze(0),
@@ -220,6 +227,7 @@ def mamba_chunk_scan_combined(x,
         cu_seqlens = None
     else:
         assert cu_seqlens is not None, "cu_seqlens must be provided if return_varlen_states is True"
+        org_cu_seqlens = cu_seqlens
         # Padding logic used by prefix caching:
         if seq_pad is not None and seq_pad.sum() > 0:
             pass #Padding needed
@@ -271,7 +279,8 @@ def mamba_chunk_scan_combined(x,
         dt_softplus=dt_softplus,
         dt_limit=dt_limit,
         out=out,
-        state_dtype=state_dtype)
+        state_dtype=state_dtype,
+        org_cu_seqlens=org_cu_seqlens)
     
     # Padding logic used by prefix caching:
     if return_varlen_states and seq_pad is not None and seq_pad.sum() > 0:
