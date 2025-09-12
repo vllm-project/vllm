@@ -36,6 +36,7 @@ from vllm.config.compilation import (CompilationConfig, CompilationLevel,
 from vllm.config.kv_events import KVEventsConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.config.load import LoadConfig
+from vllm.config.lora import LoRAConfig
 from vllm.config.parallel import (DistributedExecutorBackend, EPLBConfig,
                                   ParallelConfig)
 from vllm.config.scheduler import SchedulerConfig, SchedulerPolicy
@@ -2400,116 +2401,6 @@ class SpeculativeConfig:
         return f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=})"
 
 
-LoRADType = Literal["auto", "float16", "bfloat16"]
-
-
-@config
-@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
-class LoRAConfig:
-    """Configuration for LoRA."""
-
-    max_lora_rank: int = 16
-    """Max LoRA rank."""
-    max_loras: int = 1
-    """Max number of LoRAs in a single batch."""
-    fully_sharded_loras: bool = False
-    """By default, only half of the LoRA computation is sharded with tensor
-    parallelism. Enabling this will use the fully sharded layers. At high
-    sequence length, max rank or tensor parallel size, this is likely faster.
-    """
-    max_cpu_loras: Optional[int] = None
-    """Maximum number of LoRAs to store in CPU memory. Must be >= than
-    `max_loras`."""
-    lora_dtype: Union[torch.dtype, LoRADType] = "auto"
-    """Data type for LoRA. If auto, will default to base model dtype."""
-    lora_extra_vocab_size: int = 256
-    """(Deprecated) Maximum size of extra vocabulary that can be present in a 
-    LoRA adapter. Will be removed in v0.12.0."""
-    lora_vocab_padding_size: ClassVar[int] = current_platform\
-        .get_lora_vocab_padding_size()
-    default_mm_loras: Optional[dict[str, str]] = None
-    """Dictionary mapping specific modalities to LoRA model paths; this field
-    is only applicable to multimodal models and should be leveraged when a
-    model always expects a LoRA to be active when a given modality is present.
-    Note that currently, if a request provides multiple additional
-    modalities, each of which have their own LoRA, we do NOT apply
-    default_mm_loras because we currently only support one lora adapter
-    per prompt. When run in offline mode, the lora IDs for n modalities
-    will be automatically assigned to 1-n with the names of the modalities
-    in alphabetic order."""
-    bias_enabled: bool = False
-    """[DEPRECATED] Enable bias for LoRA adapters. This option will be
-    removed in v0.12.0."""
-
-    def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
-
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
-        """
-        factors: list[Any] = []
-        factors.append(self.max_lora_rank)
-        factors.append(self.max_loras)
-        factors.append(self.fully_sharded_loras)
-        factors.append(self.lora_dtype)
-        factors.append(self.lora_extra_vocab_size)
-        factors.append(self.lora_vocab_padding_size)
-        factors.append(self.bias_enabled)
-        hash_str = hashlib.md5(str(factors).encode(),
-                               usedforsecurity=False).hexdigest()
-        return hash_str
-
-    def __post_init__(self):
-        # Deprecation warning for lora_extra_vocab_size
-        logger.warning(
-            "`lora_extra_vocab_size` is deprecated and will be removed "
-            "in v0.12.0. Additional vocabulary support for "
-            "LoRA adapters is being phased out.")
-
-        # Deprecation warning for enable_lora_bias
-        if self.bias_enabled:
-            logger.warning("`enable_lora_bias` is deprecated "
-                           "and will be removed in v0.12.0.")
-
-        # Setting the maximum rank to 512 should be able to satisfy the vast
-        # majority of applications.
-        possible_max_ranks = (8, 16, 32, 64, 128, 256, 320, 512)
-        possible_lora_extra_vocab_size = (256, 512)
-        if self.max_lora_rank not in possible_max_ranks:
-            raise ValueError(
-                f"max_lora_rank ({self.max_lora_rank}) must be one of "
-                f"{possible_max_ranks}.")
-        if self.lora_extra_vocab_size not in possible_lora_extra_vocab_size:
-            raise ValueError(
-                f"lora_extra_vocab_size ({self.lora_extra_vocab_size}) "
-                f"must be one of {possible_lora_extra_vocab_size}.")
-        if self.max_loras < 1:
-            raise ValueError(f"max_loras ({self.max_loras}) must be >= 1.")
-        if self.max_cpu_loras is None:
-            self.max_cpu_loras = self.max_loras
-        elif self.max_cpu_loras < self.max_loras:
-            raise ValueError(
-                f"max_cpu_loras ({self.max_cpu_loras}) must be >= "
-                f"max_loras ({self.max_loras})")
-
-    def verify_with_cache_config(self, cache_config: CacheConfig):
-        if cache_config.cpu_offload_gb > 0 and not envs.VLLM_USE_V1:
-            raise ValueError(
-                "V0 LoRA does not support CPU offload, please use V1.")
-
-    def verify_with_model_config(self, model_config: ModelConfig):
-        if self.lora_dtype in (None, "auto"):
-            self.lora_dtype = model_config.dtype
-        elif isinstance(self.lora_dtype, str):
-            self.lora_dtype = getattr(torch, self.lora_dtype)
-
-
 @config
 @dataclass
 class MultiModalConfig:
@@ -3558,6 +3449,10 @@ class VllmConfig:
                     disable_chunked_prefill_reasons.append(
                         "Only \"last\" pooling supports chunked "
                         "prefill and prefix caching; disabling both.")
+                if not getattr(self.model_config.hf_config, "is_causal", True):
+                    disable_chunked_prefill_reasons.append(
+                        "Only models using causal attention supports chunked "
+                        "prefill and prefix caching; disabling both.")
             elif self.model_config.is_encoder_decoder:
                 self.scheduler_config.max_num_encoder_input_tokens = \
                     MULTIMODAL_REGISTRY.get_encdec_max_encoder_len(self.model_config)
@@ -3634,8 +3529,7 @@ class VllmConfig:
             # logger should only print warning message for hybrid models. As we
             # can't know whether the model is hybrid or not now, so we don't log
             # warning message here and will log it later.
-            if not (current_platform.is_cuda() or current_platform.is_rocm()
-                    or current_platform.is_cpu()):
+            if not current_platform.support_hybrid_kv_cache():
                 # Hybrid KV cache manager is not supported on non-GPU platforms.
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True
             if self.kv_transfer_config is not None:
@@ -3685,30 +3579,40 @@ class VllmConfig:
 
     def _set_cudagraph_sizes(self):
         """
-        cudagraph batchsize padding logic:
+        vLLM defines the default candidate list of batch sizes for CUDA graph
+        capture as:
 
-        `[1, 2, 4] + [8 * i for i in range(1, 1025)]` is a list of all possible
-        batch sizes that cudagraph will capture.
-
-        Depending on the engine's configuration of `max_num_seqs`, the
-        candidate batch sizes to capture cudagraph will shrink to the subset
-        which just cover the range of `[1, max_num_seqs]`. In the common case,
-        `max_num_seqs` is 256, and the cudagraph batch sizes will be
-        `[1, 2, 4, 8, 16, 24, 32, 40, ..., 256]`.
-
-        However, if users specify the cudagraph capture sizes through
-        compilation config, we will use the specified sizes instead.
+        ```python
+        max_graph_size = min(max_num_seqs * 2, 512)
+        # 1, 2, 4, then multiples of 8 up to max_graph_size
+        cuda_graph_sizes = [1, 2, 4, 8, 16, 24, 32, 40, ..., max_graph_size]
 
         In the end, `vllm_config.compilation_config.cudagraph_capture_sizes`
         will be the final sizes to capture cudagraph (in descending order).
 
-        During runtime, if batchsize is larger than
-        `vllm_config.compilation_config.cudagraph_capture_sizes`,
-        no cudagraph will be used.
-        If the batch size is no larger than
-        `vllm_config.compilation_config.cudagraph_capture_sizes`,
-        we can quickly find the padded graph size for a given batch size by
-        looking up `vllm_config.compilation_config.bs_to_padded_graph_size`.
+        These sizes are used to capture and reuse CUDA graphs for
+        performance-critical paths (e.g., decoding). Capturing enables
+        significantly faster kernel dispatch by avoiding Python overhead. The
+        list is then filtered based on `max_num_batched_tokens` (e.g., 8192 on
+        most GPUs), which controls the total allowed number of tokens in a
+        batch. Since each sequence may have a variable number of tokens, the
+        maximum usable batch size will depend on actual sequence lengths.
+
+        Example:
+            With `max_num_batched_tokens = 8192`, and typical sequences
+            averaging ~32 tokens, most practical batch sizes fall below 256.
+            However, the system will still allow capture sizes up to 512 if
+            shape and memory permit.
+
+        Note:
+            If users explicitly specify cudagraph capture sizes in the
+            compilation config, those will override this default logic.
+            At runtime:
+
+            - If batch size <= one of the `cudagraph_capture_sizes`, the closest
+            padded CUDA graph will be used.
+            - If batch size > largest `cudagraph_capture_sizes`, cudagraph will
+            not be used.
         """
 
         # calculate the default `batch_size_capture_list`
