@@ -105,6 +105,7 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && curl -sS ${GET_PIP_URL} | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
 
+
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 ARG PYTORCH_CUDA_INDEX_BASE_URL
@@ -439,6 +440,10 @@ COPY tools/install_deepgemm.sh /tmp/install_deepgemm.sh
 RUN --mount=type=cache,target=/root/.cache/uv \
     VLLM_DOCKER_BUILD_CONTEXT=1 /tmp/install_deepgemm.sh --cuda-version "${CUDA_VERSION}" ${DEEPGEMM_GIT_REF:+--ref "$DEEPGEMM_GIT_REF"} 
 
+# Install libgdrapi dependency for nixl/ucx
+RUN curl https://developer.download.nvidia.com/compute/redist/gdrcopy/CUDA%2012.8/ubuntu24_04/x64/libgdrapi_2.5.1-1_amd64.Ubuntu24_04.deb --output libgdrapi_2.5.1-1_amd64.Ubuntu24_04.deb && \
+    apt install ./libgdrapi_2.5.1-1_amd64.Ubuntu24_04.deb
+
 # Install EP kernels(pplx-kernels and DeepEP)
 COPY tools/ep_kernels/install_python_libraries.sh install_python_libraries.sh
 ENV CUDA_HOME=/usr/local/cuda
@@ -506,6 +511,7 @@ ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 ENV UV_HTTP_TIMEOUT=500
 
 COPY requirements/kv_connectors.txt requirements/kv_connectors.txt
+
 
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/uv \
