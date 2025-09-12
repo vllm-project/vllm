@@ -1780,13 +1780,15 @@ class ModelConfig:
         you can use --hf-overrides '{"head_dtype": "model"}' to disable it.
         """
 
-        if self.runner_type != "pooling":
-            raise ValueError(
-                "`head_dtype` currently only supports pooling models.")
-
         head_dtype = _get_head_dtype(config=self.hf_config,
                                      dtype=self.dtype,
                                      runner_type=self.runner_type)
+
+        if self.runner_type != "pooling" and head_dtype != self.dtype:
+            logger.warning_once(
+                "`head_dtype` [%s] currently only supports pooling models."
+                "fallback to model dtype [%s].", head_dtype, self.dtype)
+            return self.dtype
 
         if head_dtype not in current_platform.supported_dtypes:
             logger.warning_once(
