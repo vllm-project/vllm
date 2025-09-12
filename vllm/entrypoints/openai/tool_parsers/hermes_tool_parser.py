@@ -257,11 +257,21 @@ class Hermes2ProToolParser(ToolParser):
                     return None
                 diff = self.prev_tool_call_arr[self.current_tool_id].get(
                     "arguments")
-                if diff:
+                if diff is not None:
+                    if ('"}' not in delta_text):
+                        # the empty argument {}
+                        if isinstance(diff, dict) and not diff:
+                            return DeltaMessage(tool_calls=[
+                                DeltaToolCall(index=self.current_tool_id,
+                                              function=DeltaFunctionCall(
+                                                  arguments="{}").model_dump(
+                                                      exclude_none=True))
+                            ])
+                        else:
+                            return None
+
                     diff = diff.encode('utf-8').decode(
                         'unicode_escape') if diff is str else diff
-                    if ('"}' not in delta_text):
-                        return None
                     end_loc = delta_text.rindex('"}')
                     diff = delta_text[:end_loc] + '"}'
                     logger.debug(
