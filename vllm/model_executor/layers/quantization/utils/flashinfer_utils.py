@@ -13,6 +13,8 @@ from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     FlashInferExperts)
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
     FlashInferCutlassMoEPrepareAndFinalize)
+from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer_moe
 
 logger = init_logger(__name__)
 
@@ -245,14 +247,32 @@ def flashinfer_cutlass_moe_fp8(
     )
 
 
-def get_flashinfer_moe_backend() -> FlashinferMoeBackend:
+def get_flashinfer_moe_backend(layer: torch.nn.Module) -> FlashinferMoeBackend:
     flashinfer_moe_backend = envs.VLLM_FLASHINFER_MOE_BACKEND
-    if flashinfer_moe_backend == "throughput":
-        return FlashinferMoeBackend.CUTLASS
-    elif flashinfer_moe_backend == "latency":
+    from vllm.model_executor.models.llama4 import Llama4MoE
+    if flashinfer_moe_backend == "latency" or (
+            flashinfer_moe_backend == "throughput"
+            and layer.custom_routing_function
+            != Llama4MoE.custom_routing_function):
         return FlashinferMoeBackend.TENSORRT_LLM
+    elif flashinfer_moe_backend == "throughput":
+        return FlashinferMoeBackend.CUTLASS
 
     allowed_backends = ["throughput", "latency"]
     raise ValueError(
         f"Unknown flashinfer moe backend: {flashinfer_moe_backend}"
         f" expected one of {allowed_backends}")
+
+
+def should_use_flashinfer_moe_fp8(layer: torch.nn.Module) -> bool:
+    from vllm.model_executor.models.llama4 import Llama4MoE
+    if envs.VLLM_USE_FLASHINFER_MOE_FP8 and has_flashinfer_moe():
+        return True
+
+    if envs.VLLM_USE_FLASHINFER_MOE_FP8 is None and has_flashinfer_moe():
+        return current_platform.is_cuda(
+        ) and current_platform.is_device_capability(
+            100
+        ) and layer.custom_routing_function == Llama4MoE.custom_routing_function
+
+    return False
