@@ -126,6 +126,9 @@ pull_request_rules:
       - files~=^tests/.*gpt[-_]?oss.*\.py
       - files~=^vllm/model_executor/models/.*gpt[-_]?oss.*\.py
       - files~=^vllm/model_executor/layers/.*gpt[-_]?oss.*\.py
+      - files~=^vllm/entrypoints/harmony_utils.py
+      - files~=^vllm/entrypoints/tool_server.py
+      - files~=^vllm/entrypoints/tool.py
       - title~=(?i)gpt[-_]?oss
       - title~=(?i)harmony
   actions:
