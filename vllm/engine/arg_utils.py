@@ -22,9 +22,9 @@ from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
 from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
-                         ConfigFormat, ConfigType, ConvertOption,
-                         DecodingConfig, DetailedTraceModules, Device,
-                         DeviceConfig, DistributedExecutorBackend, EPLBConfig,
+                         ConfigType, ConvertOption, DecodingConfig,
+                         DetailedTraceModules, Device, DeviceConfig,
+                         DistributedExecutorBackend, EPLBConfig,
                          GuidedDecodingBackend, HfOverrides, KVEventsConfig,
                          KVTransferConfig, LoadConfig, LogprobsMode,
                          LoRAConfig, MambaDType, MMEncoderTPMode, ModelConfig,
@@ -289,6 +289,8 @@ class EngineArgs:
     trust_remote_code: bool = ModelConfig.trust_remote_code
     allowed_local_media_path: str = ModelConfig.allowed_local_media_path
     download_dir: Optional[str] = LoadConfig.download_dir
+    safetensors_load_strategy: Optional[
+        str] = LoadConfig.safetensors_load_strategy
     load_format: Union[str, LoadFormats] = LoadConfig.load_format
     config_format: str = ModelConfig.config_format
     dtype: ModelDType = ModelConfig.dtype
@@ -547,7 +549,6 @@ class EngineArgs:
             help="Disable async output processing. This may result in "
             "lower performance.")
         model_group.add_argument("--config-format",
-                                 choices=[f.value for f in ConfigFormat],
                                  **model_kwargs["config_format"])
         # This one is a special case because it can bool
         # or str. TODO: Handle this in get_kwargs
@@ -588,6 +589,8 @@ class EngineArgs:
         load_group.add_argument("--load-format", **load_kwargs["load_format"])
         load_group.add_argument("--download-dir",
                                 **load_kwargs["download_dir"])
+        load_group.add_argument("--safetensors-load-strategy",
+                                **load_kwargs["safetensors_load_strategy"])
         load_group.add_argument("--model-loader-extra-config",
                                 **load_kwargs["model_loader_extra_config"])
         load_group.add_argument("--ignore-patterns",
@@ -1024,6 +1027,7 @@ class EngineArgs:
         return LoadConfig(
             load_format=self.load_format,
             download_dir=self.download_dir,
+            safetensors_load_strategy=self.safetensors_load_strategy,
             device="cpu"
             if is_online_quantization(self.quantization) else None,
             model_loader_extra_config=self.model_loader_extra_config,
@@ -1053,9 +1057,10 @@ class EngineArgs:
             SpeculatorsConfig)
 
         if self.speculative_config is None:
-            hf_config = get_config(self.hf_config_path or self.model,
-                                   self.trust_remote_code, self.revision,
-                                   self.code_revision, self.config_format)
+            hf_config = get_config(
+                self.hf_config_path or target_model_config.model,
+                self.trust_remote_code, self.revision, self.code_revision,
+                self.config_format)
 
             # if loading a SpeculatorsConfig, load the speculative_config
             # details from the config directly
@@ -1065,7 +1070,7 @@ class EngineArgs:
                 self.speculative_config = {}
                 self.speculative_config[
                     "num_speculative_tokens"] = hf_config.num_lookahead_tokens
-                self.speculative_config["model"] = self.model
+                self.speculative_config["model"] = target_model_config.model
                 self.speculative_config["method"] = hf_config.method
             else:
                 return None
@@ -1504,6 +1509,7 @@ class EngineArgs:
             "FLASH_ATTN_MLA",
             "FLASHINFER",
             "FLASHINFER_VLLM_V1",
+            "FLASHINFER_MLA",
             "ROCM_AITER_MLA",
             "TORCH_SDPA_VLLM_V1",
             "FLEX_ATTENTION",

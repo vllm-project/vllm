@@ -291,6 +291,7 @@ class MambaMixer2(MambaBase, CustomOp):
             output_size=self.conv_dim,
             bias=use_conv_bias,
             quant_config=None,
+            prefix=f"{prefix}.conv1d",
         )
         # unsqueeze to fit conv1d weights shape into the linear weights shape.
         # Can't do this in `weight_loader` since it already exists in
@@ -303,6 +304,7 @@ class MambaMixer2(MambaBase, CustomOp):
             output_size=intermediate_size + self.conv_dim + self.num_heads,
             bias=use_bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.in_proj",
         )
 
         # - because in_proj is a concatenation of 3 weights, we
@@ -402,6 +404,7 @@ class MambaMixer2(MambaBase, CustomOp):
             bias=use_bias,
             input_is_parallel=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.out_proj",
         )
 
         self.norm = Mixer2RMSNormGated(intermediate_size,
@@ -488,6 +491,8 @@ class MambaMixer2(MambaBase, CustomOp):
                 mamba_block_size = attn_metadata.cache_spec.block_size
                 cache_strategy = attn_metadata.cache_spec.cache_strategy
                 cache_enabled = (cache_strategy != 'disabled')
+                cu_chunk_seqlen_p = attn_metadata.cu_chunk_seqlen_p #TODO: from TPA
+                last_chunk_p = attn_metadata.last_chunk_p #TODO: from TPA
         else:
             conv_state = mamba_cache_params.conv_state
             ssm_state = mamba_cache_params.ssm_state
@@ -793,6 +798,8 @@ class MambaMixer2(MambaBase, CustomOp):
                 chunk_indices=chunk_indices_p,
                 chunk_offsets=chunk_offsets_p,
                 cu_seqlens=query_start_loc_p,
+                cu_chunk_seqlens=cu_chunk_seqlen_p,
+                last_chunk=last_chunk_p,
                 initial_states=initial_states,
                 return_intermediate_states=cache_enabled,
                 return_varlen_states=True,
@@ -802,7 +809,8 @@ class MambaMixer2(MambaBase, CustomOp):
                 out=preallocated_ssm_out_p.view(1, num_prefill_tokens, -1,
                                                 self.head_dim),
                 state_dtype=ssm_state.dtype,
-                seq_pad=seq_pad)
+                layer=self.prefix,
+            )
 
             if cache_enabled and num_prefills == 1:
                 states, varlen_state = mamba_outputs
@@ -872,8 +880,10 @@ class MambaMixer2(MambaBase, CustomOp):
                             state_indices_tensor_p[:, current_last_idx_p[seq_idx] -
                                                 1:]] = states_at_blocks[:, -2:]
             else:
-                varlen_state = mamba_outputs
+                #print("preallocated_ssm_out_p: ", preallocated_ssm_out_p[0,:10]) TODO
+                #print("varlen_state: ", varlen_state[0,0,0,:10]) TODO
 
+                varlen_state = mamba_outputs
                 # update ssm states
                 # - varlen state is (num_prefills, nheads, headdim, dstate)
                 ssm_state[state_indices_tensor_p] = varlen_state

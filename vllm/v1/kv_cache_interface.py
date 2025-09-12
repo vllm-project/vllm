@@ -195,6 +195,7 @@ class MambaSpec(KVCacheSpec):
     page_size_padded: Optional[int] = None
     mamba_type: str = "mamba2"
     cache_strategy: str = "disabled"
+    num_speculative_blocks: int = 0
 
     @property
     def page_size_bytes(self) -> int:

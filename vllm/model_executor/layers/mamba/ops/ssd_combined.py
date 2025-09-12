@@ -39,11 +39,13 @@ def _mamba_chunk_scan_combined_fwd(x,
                                    chunk_indices=None,
                                    chunk_offsets=None,
                                    cu_seqlens=None,
+                                   cu_chunk_seqlens=None,
+                                   last_chunk=None,
                                    dt_softplus=False,
                                    dt_limit=(0.0, float("inf")),
                                    state_dtype=None,
                                    out=None,
-                                   org_cu_seqlens=None):
+                                   layer=None):
     assert is_int_pow_2(chunk_size), "chunk_size must be integer power of 2"
     batch, seqlen, nheads, headdim = x.shape
     _, _, ngroups, dstate = B.shape
@@ -91,9 +93,25 @@ def _mamba_chunk_scan_combined_fwd(x,
     dA_cumsum, dt = _chunk_cumsum_fwd(dt,
                                       A,
                                       chunk_size,
+                                      cu_chunk_seqlens,
                                       dt_bias=dt_bias,
                                       dt_softplus=dt_softplus,
                                       dt_limit=dt_limit)
+
+    '''
+    print("layer: ", layer)
+    has_init = initial_states is not None
+    print("has_init: ", has_init)
+
+    dA_cumsum_ref = torch.load("dump/dA_cumsum_%s_main_%d" % (layer, has_init))
+    torch.cuda.synchronize()
+    torch.testing.assert_close(dA_cumsum, dA_cumsum_ref, atol=0.0, rtol=0.0)
+
+    dt_ref = torch.load("dump/dt_%s_main_%d" % (layer, has_init))
+    torch.cuda.synchronize()
+    torch.testing.assert_close(dt, dt_ref, atol=0.0, rtol=0.0)
+    '''
+
 
     # 2. Compute the state for each intra-chunk
     # (right term of low-rank factorization of off-diagonal blocks; B terms)
@@ -101,8 +119,15 @@ def _mamba_chunk_scan_combined_fwd(x,
                               x,
                               dt,
                               dA_cumsum,
+                              cu_chunk_seqlens,
                               seq_idx=seq_idx,
                               states_in_fp32=True)
+
+    '''
+    states_ref = torch.load("dump/states_%s_main_%d" % (layer, has_init))
+    torch.cuda.synchronize()
+    torch.testing.assert_close(states, states_ref, atol=0.0, rtol=0.0)
+    '''
 
     # 3. Compute the inter-chunk SSM recurrence; produces correct SSM states at chunk boundaries
     # (middle term of factorization of off-diag blocks; A terms)
@@ -115,9 +140,10 @@ def _mamba_chunk_scan_combined_fwd(x,
     # - this will ensure that states will be updated with the rightmost flushed seq_idx
     #   of the previous chunk. This implies that the first chunk of states is either 0
     #   or equal to init_states of the first example.
-    states, final_states = _state_passing_fwd(
+    states = _state_passing_fwd(
         rearrange(states, "... p n -> ... (p n)"),
         dA_cumsum,
+        cu_chunk_seqlens,
         initial_states=rearrange(initial_states, "... p n -> ... (p n)")
         if initial_states is not None else None,
         seq_idx=seq_idx,
@@ -125,15 +151,29 @@ def _mamba_chunk_scan_combined_fwd(x,
         out_dtype=state_dtype if state_dtype is not None else C.dtype,
         is_cont_batched=cu_seqlens is not None,
         chunk_offsets=chunk_offsets)
-    states, final_states = (rearrange(t, "... (p n) -> ... p n", n=dstate)
-                            for t in [states, final_states])
+
+    states = rearrange(states, "... (p n) -> ... p n", n=dstate)
+
+    '''
+    print("after state passing: ")
+    states_ref = torch.load("dump/final_states_%s_main_%d" % (layer, has_init)).unsqueeze(0)
+    print("states.shape: ", states.shape)
+    print("states_ref.shape: ", states_ref.shape)
+    torch.testing.assert_close(states, states_ref, atol=0.0, rtol=0.0)
+    '''
 
     # 4. Compute batched matrix multiply for C_j^T B_i terms
     CB = _bmm_chunk_fwd(C,
                         B,
                         chunk_size,
+                        cu_chunk_seqlens,
                         seq_idx=seq_idx,
                         output_dtype=torch.float32)
+
+    '''
+    CB_ref = torch.load("dump/CB_%s_main_%d" % (layer, has_init))
+    torch.testing.assert_close(CB, CB_ref, atol=0.0, rtol=0.0)
+    '''
 
     # 5. Scan and compute the diagonal blocks, taking into
     #    account past causal states.
@@ -152,6 +192,7 @@ def _mamba_chunk_scan_combined_fwd(x,
         dA_cumsum,
         C,
         states,
+        cu_chunk_seqlens,
         D=D,
         z=z,
         seq_idx=seq_idx,
@@ -160,25 +201,22 @@ def _mamba_chunk_scan_combined_fwd(x,
         initial_states=initial_states,
         out=out,
     )
+    '''
+    out_x_ref = torch.load("dump/out_x_%s_main_%d" % (layer, has_init))
+    torch.testing.assert_close(out_x, out_x_ref, atol=0.0, rtol=0.0)
+
+    out_ref = torch.load("dump/out_%s_main_%d" % (layer, has_init))
+    torch.testing.assert_close(out, out_ref, atol=0.0, rtol=0.0)
+    '''
+
     if cu_seqlens is None:
         return out_x, dt, dA_cumsum, states, final_states
     else:
-        assert batch == 1, "passing cu_seqlens to get the varlen states is only supported if batch dimension is 1"    
-        if org_cu_seqlens is not None:
-            # Padding logic:
-            # The varlen_state, i.e., last state of the request, for the first request is wrong.
-            # The reason for this is that the varlen state is computed for the full last chunk and not for the partial chunk
-            # The workaround solution is that the cu_seqlens[1] needs to be corrected to be the original cu_seq_len
-            cu_seqlens[1] = org_cu_seqlens[1]
-        varlen_states = chunk_state_varlen(
-            B.squeeze(0),
-            x.squeeze(0),
-            dt.squeeze(0),
-            dA_cumsum.squeeze(0),
-            cu_seqlens,
-            states.squeeze(0),
-            initial_states=initial_states,
-        )
+        assert batch == 1, "passing cu_seqlens to get the varlen states is only supported if batch dimension is 1"
+        #print("last_chunk: ", last_chunk)
+        varlen_states = states[:, last_chunk, ...].clone().squeeze(0)
+        #print("varlen_states: ", varlen_states[0,0,0,:10])
+        final_states = states[:, -1, ...]
         return out_x, dt, dA_cumsum, states, final_states, varlen_states
 
 
@@ -196,6 +234,8 @@ def mamba_chunk_scan_combined(x,
                               chunk_indices=None,
                               chunk_offsets=None,
                               cu_seqlens=None,
+                              cu_chunk_seqlens=None,
+                              last_chunk=None,
                               dt_softplus=False,
                               dt_limit=(0.0, float("inf")),
                               return_intermediate_states=False,
@@ -203,7 +243,7 @@ def mamba_chunk_scan_combined(x,
                               return_final_states=False,
                               return_varlen_states=False,
                               state_dtype=None,
-                              seq_pad=None):
+                              layer=None):
     """
     Argument:
         x: (batch, seqlen, nheads, headdim)
@@ -218,6 +258,7 @@ def mamba_chunk_scan_combined(x,
         initial_states: (batch, nheads, headdim, dstate)
         seq_idx: (batch, seqlen)
         cu_seqlens: (num_sequences + 1) or None, only used if return_varlen_states is True
+        cu_chunk_seqlens: (num_chunks + 1)
         dt_softplus: Whether to apply softplus to dt
         out: Preallocated output tensor
         state_dtype: The data type of the ssm state
@@ -227,40 +268,6 @@ def mamba_chunk_scan_combined(x,
         cu_seqlens = None
     else:
         assert cu_seqlens is not None, "cu_seqlens must be provided if return_varlen_states is True"
-        org_cu_seqlens = cu_seqlens
-        # Padding logic used by prefix caching:
-        if seq_pad is not None and seq_pad.sum() > 0:
-            pass #Padding needed
-            seq_pad[-1] = 0 #never pad last
-            def pad(v):
-                v2 = []
-                for idx in torch.arange(len(cu_seqlens)-1):
-                    v2.append(v[:, cu_seqlens[idx]:cu_seqlens[idx+1]])
-                    v2.append(v[:, cu_seqlens[idx]:cu_seqlens[idx]+1].repeat_interleave(seq_pad[idx], 1)) #last value pad
-                    #v2.append(torch.zeros_like(x[:,0:1]).repeat_interleave(seq_pad[idx], 1)) #zero pad
-                return torch.cat(v2[:-1], 1) #don't need to pad the last
-                        
-            x = pad(x)
-            dt = pad(dt)
-            B = pad(B)
-            C = pad(C)
-            seq_idx = pad(seq_idx)
-            
-            # adjust the cu_seqlens
-            org_cu_seqlens = cu_seqlens
-            cu_seqlens = cu_seqlens.clone()
-            cu_seqlens[1:] = cu_seqlens[1:] + seq_pad.cumsum(0)
-
-            # no shared chunks -> just feed an incremental list, no offsets
-            chunk_indices = torch.arange(-(- x.shape[1] // chunk_size), device=x.device)
-            chunk_offsets = torch.zeros_like(chunk_indices, device=x.device)
-
-            # Return by value - we need to store the old tensor
-            org_out = out
-            # allocate a new larger tensor
-            out = torch.zeros_like(x)
-            # and after the kernel write back the results        
-            
     out_x, dt_out, dA_cumsum, states, final_states, *rest = _mamba_chunk_scan_combined_fwd(
         x,
         dt,
@@ -276,21 +283,13 @@ def mamba_chunk_scan_combined(x,
         chunk_indices=chunk_indices,
         chunk_offsets=chunk_offsets,
         cu_seqlens=cu_seqlens,
+        cu_chunk_seqlens=cu_chunk_seqlens,
+        last_chunk=last_chunk,
         dt_softplus=dt_softplus,
         dt_limit=dt_limit,
         out=out,
         state_dtype=state_dtype,
-        org_cu_seqlens=org_cu_seqlens)
-    
-    # Padding logic used by prefix caching:
-    if return_varlen_states and seq_pad is not None and seq_pad.sum() > 0:
-        #unpad the output and write to the originally passed tensor:
-        offset = 0
-        for idx in torch.arange(len(org_cu_seqlens)-1):
-            org_out[0, org_cu_seqlens[idx]:org_cu_seqlens[idx+1]] = \
-                out[0, offset+org_cu_seqlens[idx]:offset+org_cu_seqlens[idx+1]]
-            offset += seq_pad[idx]
-
+        layer=layer)
     if not return_varlen_states:
         if not return_final_states:
             return
