@@ -83,7 +83,11 @@ def is_installing_from_github() -> bool:
     
     if is_uv_cache:
         origin_url = _get_git_origin_url()
+        with open("/tmp/vllm_debug.log", "a") as f:
+            f.write(f"DEBUG: UV cache detected, origin_url: {origin_url}\n")
         if _is_vllm_github_repo(origin_url):
+            with open("/tmp/vllm_debug.log", "a") as f:
+                f.write("DEBUG: UV cache vLLM repo detected\n")
             return True
 
     # Method 3: Check if we're in a temporary directory with vLLM repo
@@ -93,12 +97,21 @@ def is_installing_from_github() -> bool:
     
     if is_temp_dir:
         origin_url = _get_git_origin_url()
+        with open("/tmp/vllm_debug.log", "a") as f:
+            f.write(f"DEBUG: Temp dir detected, origin_url: {origin_url}\n")
         if _is_vllm_github_repo(origin_url):
+            with open("/tmp/vllm_debug.log", "a") as f:
+                f.write("DEBUG: Temp dir vLLM repo detected\n")
             return True
 
     # Method 4: Check if we're in the actual vLLM repository (for local dev)
     origin_url = _get_git_origin_url()
-    return _is_vllm_github_repo(origin_url)
+    with open("/tmp/vllm_debug.log", "a") as f:
+        f.write(f"DEBUG: Method 4, origin_url: {origin_url}\n")
+    result = _is_vllm_github_repo(origin_url)
+    with open("/tmp/vllm_debug.log", "a") as f:
+        f.write(f"DEBUG: Method 4 result: {result}\n")
+    return result
 
 
 # Auto-enable precompiled wheels when installing from GitHub
