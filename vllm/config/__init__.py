@@ -624,6 +624,20 @@ class ModelConfig:
                 "https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile "  # noqa: E501
                 "for instructions on how to install it.")
 
+        if self.disable_cascade_attn and not \
+            self.disable_multi_cascade_attn:
+            logger.info("To enable multi-cascade attention, must also"
+                        "enable cascade attention.")
+            self.disable_multi_cascade_attn = True
+
+        if (backend := envs.VLLM_ATTENTION_BACKEND) and backend != "FLASH_ATTN" \
+            and not self.disable_multi_cascade_attn:
+            logger.info("Multi-cascade attention can currently only be used with "
+                        "FlashAttention. Set backend to FLASH_ATTN with "
+                        "export VLLM_ATTENTION_BACKEND=FLASH_ATTN to enable FLASH_ATTN"
+                        "backend.")
+            self.disable_multi_cascade_attn = True
+
         from vllm.platforms import current_platform
 
         if (self.override_attention_dtype is not None
