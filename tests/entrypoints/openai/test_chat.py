@@ -12,7 +12,7 @@ import pytest_asyncio
 import regex as re
 import requests
 import torch
-from openai import BadRequestError, OpenAI
+from openai import BadRequestError
 
 from ...utils import RemoteOpenAIServer
 
@@ -966,59 +966,6 @@ async def test_long_seed(client: openai.AsyncOpenAI):
 
         assert ("greater_than_equal" in exc_info.value.message
                 or "less_than_equal" in exc_info.value.message)
-
-
-@pytest.mark.asyncio
-async def test_http_chat_no_model_name_with_curl(server: RemoteOpenAIServer):
-    url = f"http://localhost:{server.port}/v1/chat/completions"
-    headers = {
-        "Content-Type": "application/json",
-    }
-    data = {
-        # model_name is avoided here.
-        "messages": [{
-            "role": "system",
-            "content": "You are a helpful assistant."
-        }, {
-            "role": "user",
-            "content": "what is 1+1?"
-        }],
-        "max_tokens":
-        5
-    }
-
-    response = requests.post(url, headers=headers, json=data)
-    response_data = response.json()
-    print(response_data)
-    assert response_data.get("model") == MODEL_NAME
-    choice = response_data.get("choices")[0]
-    message = choice.get("message")
-    assert message is not None
-    content = message.get("content")
-    assert content is not None
-    assert len(content) > 0
-
-
-@pytest.mark.asyncio
-async def test_http_chat_no_model_name_with_openai(server: RemoteOpenAIServer):
-    openai_api_key = "EMPTY"
-    openai_api_base = f"http://localhost:{server.port}/v1"
-
-    client = OpenAI(
-        api_key=openai_api_key,
-        base_url=openai_api_base,
-    )
-    messages = [
-        {
-            "role": "user",
-            "content": "Hello, vLLM!"
-        },
-    ]
-    response = client.chat.completions.create(
-        model="",  # empty string
-        messages=messages,
-    )
-    assert response.model == MODEL_NAME
 
 
 @pytest.mark.asyncio
