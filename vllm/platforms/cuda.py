@@ -225,17 +225,24 @@ class CudaPlatformBase(Platform):
 
             use_cutlassmla = selected_backend == _Backend.CUTLASS_MLA or (
                 selected_backend is None and cls.is_device_capability(100)
-                and block_size == 128)
+                and backend_to_class(
+                    _Backend.CUTLASS_MLA).supports_block_size(block_size))
             use_flashinfermla = selected_backend == _Backend.FLASHINFER_MLA or (
                 selected_backend is None and cls.is_device_capability(100)
-                and block_size in [32, 64])
+                and backend_to_class(
+                    _Backend.FLASHINFER_MLA).supports_block_size(block_size))
             use_flashmla = selected_backend in [
                 _Backend.FLASHMLA, _Backend.FLASHMLA_VLLM_V1
-            ] or (selected_backend is None and is_flashmla_supported()[0])
+            ] or (selected_backend is None and is_flashmla_supported()[0]
+                  and backend_to_class(
+                      _Backend.FLASHMLA).supports_block_size(block_size))
             use_flashattn = selected_backend == _Backend.FLASH_ATTN_MLA or (
-                selected_backend is None and flash_attn_supports_mla())
+                selected_backend is None and flash_attn_supports_mla()
+                and backend_to_class(
+                    _Backend.FLASH_ATTN_MLA).supports_block_size(block_size))
             use_triton = selected_backend == _Backend.TRITON_MLA or (
-                selected_backend is None)
+                selected_backend is None and backend_to_class(
+                    _Backend.TRITON_MLA).supports_block_size(block_size))
 
             if use_cutlassmla:
                 if use_v1:
