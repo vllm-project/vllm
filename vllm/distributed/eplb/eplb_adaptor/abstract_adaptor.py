@@ -10,9 +10,9 @@ class BaseAdaptor(ABC):
     Abstract base class for Expert Parallel Load Balancer (EPLB) adaptors.
 
     This class defines the interface required for coordination with EPLB,
-    including obtaining workloads, managing expert maps, and updating expert weights.
-    Specific adaptor implementations (e.g., for vLLM) should inherit from this
-    base class and implement all abstract methods.
+    including obtaining workloads, managing expert maps, and updating
+    expert weights. Specific adaptor implementations (e.g., for vLLM)
+    should inherit from this base class and implement all abstract methods.
     """
     def __init__(self, **args):
         """
@@ -26,10 +26,12 @@ class BaseAdaptor(ABC):
     @abstractmethod
     def get_rank_expert_workload(self):
         """
-        Abstract method: Retrieves the expert workload statistics for the current rank.
+        Abstract method: Retrieves the expert workload statistics for the
+        current rank.
 
         Concrete implementations should return a tensor or other data structure
-        representing the workload metrics for MoE layers within the current process.
+        representing the workload metrics for MoE layers within the current
+        process.
 
         Raises:
             NotImplementedError: If the subclass does not implement this method.
@@ -66,7 +68,8 @@ class BaseAdaptor(ABC):
 
         Args:
             layer_id: The ID of the MoE layer to update.
-            updated_expert_map: The tensor or data structure containing the new expert map.
+            updated_expert_map: The tensor or data structure containing the new
+                expert map.
 
         Returns:
             Any: The result of the update operation (if applicable).
@@ -88,8 +91,10 @@ class BaseAdaptor(ABC):
 
         Args:
             layer_id: The ID of the MoE layer containing the expert to update.
-            local_expert_to_replace: The local ID of the expert whose weights are to be replaced.
-            buffer_tensor_id: The ID of the buffer tensor containing the new weights.
+                local_expert_to_replace: The local ID of the expert whose
+                weights are to be replaced.
+            buffer_tensor_id: The ID of the buffer tensor containing the new
+                weights.
 
         Returns:
             Any: The result of the update operation (if applicable).
