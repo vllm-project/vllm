@@ -605,7 +605,11 @@ class MambaMixer2(MambaBase, CustomOp):
             seq_lens_completed = (mamba2_metadata.seq_lens - seq_lens_pending)
             # e.g. 16 blocks computed; 0th based indexing -> state[15]
             last_computed_token_block_idx = \
-                seq_lens_completed // mamba_block_size - 1
+                cdiv(seq_lens_completed, mamba_block_size) - 1
+            last_computed_token_block_offset = \
+                seq_lens_completed % mamba_block_size
+            if last_computed_token_block_offset.sum() > 0:
+                pass # block mis-alignment
             # -1 in case it's non-computed and causes later issues with indexing
             last_computed_token_block_idx = last_computed_token_block_idx.clamp(
                 min=0)
@@ -614,8 +618,14 @@ class MambaMixer2(MambaBase, CustomOp):
             current_last_token_block_idx = cdiv(
                 seq_lens_completed + seq_lens_pending, mamba_block_size) - 1
 
+            seq_lens_completed_d, seq_lens_completed_p = torch.split(
+                seq_lens_completed, [num_decodes, num_prefills],
+                dim=0)
             last_computed_idx_d, last_computed_idx_p = torch.split(
                 last_computed_token_block_idx, [num_decodes, num_prefills],
+                dim=0)
+            last_computed_offset_d, last_computed_offset_p = torch.split(
+                last_computed_token_block_offset, [num_decodes, num_prefills],
                 dim=0)
             current_first_idx_d, current_first_idx_p = torch.split(
                 current_first_token_block_idx, [num_decodes, num_prefills],
@@ -688,7 +698,7 @@ class MambaMixer2(MambaBase, CustomOp):
 
             if cache_enabled:
 
-                def copy_x_to_conv_state(conv_state_block_idx, x_offset, x_end,
+                def copy_to_conv_state(conv_state_block_idx, x, x_offset, x_end,
                                          query_start_loc):
                     conv_state[conv_state_block_idx, :, 0] = torch.transpose(
                         x[:, query_start_loc + x_offset - 3:query_start_loc +
@@ -706,26 +716,32 @@ class MambaMixer2(MambaBase, CustomOp):
                 #   state_indices_tensor_p[<REQ>, current_first_idx_p[<REQ>]:
                 #                                    current_last_idx_p[<REQ>]]
                 if cache_strategy == "all":
+                    num_blocks_to_fill = current_last_idx_p - last_computed_idx_p
                     # Iterate over all sequences to need prefill
-                    for seq_idx in range(state_indices_tensor_p.shape[0]):
-                        number_full_blocks = seq_lens_pending[
-                            seq_idx] // mamba_block_size
-                        if seq_lens_pending[seq_idx] % mamba_block_size > 0:
-                            second_last_block_idx = number_full_blocks
-                        else:
-                            second_last_block_idx = number_full_blocks - 1
-                        #TODO: simpler logic via?:
-                        # if (current_last_idx_p - current_first_idx_p)
-                        #                                        [seq_idx] > 0:
-                        if number_full_blocks > 0:  # and seq_lens_pending[
-                            #seq_idx] % mamba_block_size > 0: # unnecessary?
-                            copy_x_to_conv_state(
-                                state_indices_tensor_p[
-                                    seq_idx, current_first_idx_p[seq_idx]:
-                                    current_first_idx_p[seq_idx] +
-                                    second_last_block_idx], mamba_block_size,
-                                mamba_block_size * second_last_block_idx,
-                                query_start_loc_p[seq_idx])
+                    for seq_idx in range(num_prefills):
+                        if num_blocks_to_fill[seq_idx] == 0:
+                            continue
+                        cache_blocks_to_fill = state_indices_tensor_p[seq_idx,
+                            current_first_idx_p[seq_idx]:
+                            current_first_idx_p[seq_idx]+num_blocks_to_fill[seq_idx]]
+                        from_where = x[:,query_start_loc_p[seq_idx]:query_start_loc_p[seq_idx+1]]
+                        # if last computation ended just before the end of block
+                        if last_computed_offset_p[seq_idx] + 3 >= mamba_block_size:
+                            # the current x doesn't have the proper values anymore
+                            # we need to get them from the past state.
+                            # Trick: The indices will go negative:
+                            # e.g. x[:,-3], x[:,-2], x[:,-1]
+                            # so pass x := concat(x, last_state)
+                            # to enable reading from the back
+                            # Note: Maybe always do this and remove "if"?
+                            from_where = torch.concat([from_where, 
+                                conv_state[cache_blocks_to_fill[0]]], 1)
+                        copy_to_conv_state(cache_blocks_to_fill, 
+                            from_where,
+                            mamba_block_size,
+                            mamba_block_size * num_blocks_to_fill[seq_idx],
+                            mamba_block_size * last_computed_idx_p[seq_idx]
+                            - seq_lens_completed_p[seq_idx])
                 elif cache_strategy == "last":
                     # i.e. keep two states: either
                     #  a) states at the last two block boundaries or
@@ -736,19 +752,20 @@ class MambaMixer2(MambaBase, CustomOp):
                         # Only store the additional second state if there are
                         # is at least one full block and a remainder.
                         # Otherwise, there is only one state to store
-                        if number_full_blocks > 0 and seq_lens_pending[
-                                seq_idx] % mamba_block_size > 0:
-                            if seq_lens_pending[seq_idx] % mamba_block_size > 0:
-                                second_last_block_idx = number_full_blocks
-                            else:
-                                second_last_block_idx = number_full_blocks - 1
-                            copy_x_to_conv_state(
-                                state_indices_tensor_p[
-                                    seq_idx, current_last_idx_p[seq_idx] -
-                                    1:current_last_idx_p[seq_idx]],
-                                mamba_block_size * second_last_block_idx,
-                                mamba_block_size * second_last_block_idx,
-                                query_start_loc_p[seq_idx])
+                        pass
+                        # if number_full_blocks > 0 and seq_lens_pending[
+                        #         seq_idx] % mamba_block_size > 0:
+                        #     if seq_lens_pending[seq_idx] % mamba_block_size > 0:
+                        #         second_last_block_idx = number_full_blocks
+                        #     else:
+                        #         second_last_block_idx = number_full_blocks - 1
+                        #     copy_x_to_conv_state(
+                        #         state_indices_tensor_p[
+                        #             seq_idx, current_last_idx_p[seq_idx] -
+                        #             1:current_last_idx_p[seq_idx]],
+                        #         mamba_block_size * second_last_block_idx,
+                        #         mamba_block_size * second_last_block_idx,
+                        #         query_start_loc_p[seq_idx])
 
             hidden_states_p, B_p, C_p = split_hidden_states_B_C_fn(
                 hidden_states_B_C_p)
