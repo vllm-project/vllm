@@ -464,10 +464,11 @@ class OpenAIServing:
             message=message_str, type=err_type, code=status_code.value))
 
     def create_streaming_error_response(
-            self,
-            message: Union[str, Exception],
-            err_type: str = "BadRequestError",
-            status_code: HTTPStatus = HTTPStatus.BAD_REQUEST) -> str:
+        self,
+        message: Union[str, Exception],
+        err_type: str = "BadRequestError",
+        status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
+    ) -> str:
         json_str = json.dumps(
             self.create_error_response(message=message,
                                        err_type=err_type,
