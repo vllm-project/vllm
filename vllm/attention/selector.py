@@ -12,7 +12,7 @@ import torch
 import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger
-from vllm.platforms import _Backend, current_platform
+from vllm.platforms import _Backend
 from vllm.utils import STR_BACKEND_ENV_VAR, resolve_obj_by_qualname
 
 logger = init_logger(__name__)
@@ -28,12 +28,12 @@ def backend_name_to_enum(backend_name: str) -> Optional[_Backend]:
             loaded.
     """
     assert backend_name is not None
-    return _Backend[backend_name] if backend_name in _Backend.__members__ else \
-          None
+    return (_Backend[backend_name]
+            if backend_name in _Backend.__members__ else None)
 
 
 def get_env_variable_attn_backend() -> Optional[_Backend]:
-    '''
+    """
     Get the backend override specified by the vLLM attention
     backend environment variable, if one is specified.
 
@@ -41,10 +41,9 @@ def get_env_variable_attn_backend() -> Optional[_Backend]:
 
     * _Backend enum value if an override is specified
     * None otherwise
-    '''
+    """
     backend_name = os.environ.get(STR_BACKEND_ENV_VAR)
-    return (None
-            if backend_name is None else backend_name_to_enum(backend_name))
+    return None if backend_name is None else backend_name_to_enum(backend_name)
 
 
 # Global state allows a particular choice of backend
@@ -58,7 +57,7 @@ forced_attn_backend: Optional[_Backend] = None
 
 
 def global_force_attn_backend(attn_backend: Optional[_Backend]) -> None:
-    '''
+    """
     Force all attention operations to use a specified backend.
 
     Passing `None` for the argument re-enables automatic
@@ -67,16 +66,16 @@ def global_force_attn_backend(attn_backend: Optional[_Backend]) -> None:
     Arguments:
 
     * attn_backend: backend selection (None to revert to auto)
-    '''
+    """
     global forced_attn_backend
     forced_attn_backend = attn_backend
 
 
 def get_global_forced_attn_backend() -> Optional[_Backend]:
-    '''
+    """
     Get the currently-forced choice of attention backend,
     or None if auto-selection is currently enabled.
-    '''
+    """
     return forced_attn_backend
 
 
@@ -179,6 +178,7 @@ def _cached_get_attn_backend(
     if is_attention_free:
         from vllm.attention.backends.placeholder_attn import (
             PlaceholderAttentionBackend)
+
         return PlaceholderAttentionBackend
 
     # Check whether a particular choice of backend was
@@ -202,6 +202,8 @@ def _cached_get_attn_backend(
                     f"Valid backends are: {list(_Backend.__members__.keys())}")
 
     # get device-specific attn_backend
+    from vllm.platforms import current_platform
+
     attention_cls = current_platform.get_attn_backend_cls(
         selected_backend, head_size, dtype, kv_cache_dtype, block_size, use_v1,
         use_mla, has_sink)
@@ -214,7 +216,7 @@ def _cached_get_attn_backend(
 @contextmanager
 def global_force_attn_backend_context_manager(
         attn_backend: _Backend) -> Generator[None, None, None]:
-    '''
+    """
     Globally force a vLLM attention backend override within a
     context manager, reverting the global attention backend
     override to its prior state upon exiting the context
@@ -227,7 +229,7 @@ def global_force_attn_backend_context_manager(
     Returns:
 
     * Generator
-    '''
+    """
 
     # Save the current state of the global backend override (if any)
     original_value = get_global_forced_attn_backend()
