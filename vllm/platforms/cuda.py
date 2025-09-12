@@ -39,6 +39,31 @@ pynvml = import_pynvml()
 # see https://github.com/huggingface/diffusers/issues/9704 for details
 torch.backends.cuda.enable_cudnn_sdp(False)
 
+BACKEND_PRIORITIES = {
+    # V1 non-MLA backends
+    _Backend.FLASHINFER_VLLM_V1: 0,
+    _Backend.FLASH_ATTN_VLLM_V1: 1,
+    _Backend.FLEX_ATTENTION: 2,
+    # V0 non-MLA backends
+    # NOTE: backends with V1 versions must match
+    # the numeric values of their V1 counterparts
+    _Backend.FLASH_ATTN: 1,
+    _Backend.XFORMERS: 3,
+
+    # V1 MLA backends
+    _Backend.CUTLASS_MLA: 0,
+    _Backend.FLASHINFER_MLA: 1,
+    _Backend.FLASHMLA_VLLM_V1: 2,
+    _Backend.FLASH_ATTN_MLA: 3,
+    _Backend.TRITON_MLA_VLLM_V1: 4,
+    # V0 MLA backends
+    # NOTE: backends with V1 versions must match
+    # the numeric values of their V1 counterparts
+    _Backend.FLASHMLA: 2,
+    _Backend.TRITON_MLA: 4,
+}
+BACKEND_LOW_PRIORITY = 100
+
 
 def with_nvml_context(fn: Callable[_P, _R]) -> Callable[_P, _R]:
 
@@ -267,6 +292,8 @@ class CudaPlatformBase(Platform):
                 f"use_v1: {use_v1}, use_mla: {use_mla}, has_sink: {has_sink}. "
                 f"Reasons: {invalid_reasons}")
 
+        # We have found some valid backends. Select the one with the
+        # highest priority.
         logger.info("Valid backends: %s", valid_backends)
 
         valid_backends_classes_str = [
@@ -276,7 +303,8 @@ class CudaPlatformBase(Platform):
             resolve_obj_by_qualname(b) for b in valid_backends_classes_str
         ]
         valid_backends_priorities = [
-            b.get_selection_priority() for b in valid_backends_classes
+            BACKEND_PRIORITIES.get(b, BACKEND_LOW_PRIORITY)
+            for b in valid_backends_classes
         ]
         sorted_indices = sorted(range(len(valid_backends_priorities)),
                                 key=lambda i: valid_backends_priorities[i])
