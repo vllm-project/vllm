@@ -1027,6 +1027,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             assert scoring_func == 'sigmoid', (
                 f"Expected 'sigmoid' scoring func but got {scoring_func}")
             if self.block_quant:
+                from vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe import (  # noqa: E501, F401
+                    flashinfer_fused_moe_blockscale_fp8)
                 assert (renormalize and use_grouped_topk
                         and custom_routing_function is None)
 

@@ -1022,9 +1022,11 @@ class FusedMoE(CustomOp):
         # Chunked all2all staging tensor
         self.batched_hidden_states: Optional[torch.Tensor] = None
         self.batched_router_logits: Optional[torch.Tensor] = None
+
+        # TODO(bnell): flashinfer uses non-batched format.
+        # Does it really need a batched buffer?
         if (self.moe_parallel_config.use_pplx_kernels
                 or self.moe_parallel_config.use_deepep_ll_kernels
-                # TODO: this is probably not quite right
                 or self.moe_config.use_flashinfer_cutlass_kernels):
             if vllm_config.parallel_config.enable_dbo:
                 self.batched_hidden_states = torch.zeros(
