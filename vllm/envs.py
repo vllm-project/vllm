@@ -163,10 +163,12 @@ if TYPE_CHECKING:
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = False
     VLLM_ENABLE_RESPONSES_API_STORE: bool = False
     VLLM_USE_TRTLLM_ATTENTION: Optional[str] = None
+    VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION: bool = False
     VLLM_HAS_FLASHINFER_CUBIN: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
-    VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
+    VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS: bool = False
+    VLLM_ALLREDUCE_USE_SYMM_MEM: bool = False
     VLLM_TUNED_CONFIG_FOLDER: Optional[str] = None
     VLLM_DISABLE_PAD_FOR_CUDAGRAPH: bool = False
     VLLM_GPT_OSS_USE_CONTAINER_TOOL: bool = False
@@ -1005,6 +1007,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8":
     lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8", "0"))),
 
+    # If set to 1, use the FlashInfer CUTLASS backend for
+    # MXFP8 (activation) x MXFP4 (weight) MoE.
+    # This is separate from the TRTLLMGEN path controlled by
+    # VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8.
+    "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS":
+    lambda: bool(int(
+        os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS", "0")
+        )),
+
     # If set to 1, use the FlashInfer
     # BF16 (activation) x MXFP4 (weight) MoE backend.
     "VLLM_USE_FLASHINFER_MOE_MXFP4_BF16":
@@ -1146,6 +1157,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_TRTLLM_ATTENTION":
     lambda: os.getenv("VLLM_USE_TRTLLM_ATTENTION", None),
 
+    # If set to 1, when we use fp8 kv, we do not quantize Q to fp8
+    "VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION":
+    lambda: bool(int(os.getenv("VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION", "0"))),
+
     # If set, it means we pre-downloaded cubin files and flashinfer will
     # read the cubin files directly.
     "VLLM_HAS_FLASHINFER_CUBIN":
@@ -1204,7 +1219,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Whether to use pytorch symmetric memory for allreduce
     "VLLM_ALLREDUCE_USE_SYMM_MEM":
-    lambda: bool(int(os.getenv("VLLM_ALLREDUCE_USE_SYMM_MEM", "1"))),
+    lambda: bool(int(os.getenv("VLLM_ALLREDUCE_USE_SYMM_MEM", "0"))),
 
     # Allows vllm to find tuned config under customized folder
     "VLLM_TUNED_CONFIG_FOLDER":
@@ -1303,9 +1318,11 @@ def compute_hash() -> str:
         "VLLM_USE_FLASHINFER_MOE_FP8",
         "VLLM_USE_FLASHINFER_MOE_FP4",
         "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8",
+        "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS",
         "VLLM_USE_FLASHINFER_MOE_MXFP4_BF16",
         "VLLM_USE_CUDNN_PREFILL",
         "VLLM_USE_TRTLLM_ATTENTION",
+        "VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION",
         "VLLM_ROCM_USE_AITER",
         "VLLM_ROCM_USE_AITER_PAGED_ATTN",
         "VLLM_ROCM_USE_AITER_LINEAR",
