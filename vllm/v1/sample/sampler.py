@@ -131,7 +131,10 @@ class Sampler(nn.Module):
         temp: torch.Tensor,
     ) -> torch.Tensor:
         # Use in-place division to avoid creating a new tensor.
-        return logits.div_(temp.unsqueeze(dim=1))
+        # Avoid div by -1 (which is mask for greedy), because there may be
+        # -inf in logits, which can cause nan in probs.
+        return logits.div_(
+            torch.where(temp < _SAMPLING_EPS, 1.0, temp).unsqueeze(dim=1))
 
     def greedy_sample(self, logits: torch.Tensor) -> torch.Tensor:
         return logits.argmax(dim=-1).view(-1)
