@@ -157,7 +157,7 @@ class HarmonyContext(ConversationContext):
 
     def _update_prefill_token_usage(self, output: RequestOutput) -> None:
         """Update token usage statistics for the prefill phase of generation.
-
+        
         The prefill phase processes the input prompt tokens. This method:
         1. Counts the prompt tokens for this turn
         2. Calculates tool output tokens for multi-turn conversations
