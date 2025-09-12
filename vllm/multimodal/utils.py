@@ -421,7 +421,8 @@ def group_mm_kwargs_by_modality(
         mm_kwargs_group = MultiModalKwargs.as_kwargs(
             MultiModalKwargs.batch(
                 [
-                    MultiModalKwargsItems.from_seq([item]).get_data()
+                    MultiModalKwargsItems.from_seq(
+                        [item]).get_data(pin_memory=pin_memory)
                     for item in items_lst
                 ],
                 pin_memory=pin_memory,
