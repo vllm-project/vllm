@@ -571,33 +571,82 @@ steps:
 
 #####  models test  #####
 
-- label: Basic Models Test # 57min
-  timeout_in_minutes: 75
+- label: Basic Models Tests (Initialization)
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
   - vllm/
-  - tests/models
+  - tests/models/test_initialization.py
   commands:
-    - pytest -v -s models/test_transformers.py
-    - pytest -v -s models/test_registry.py
-    - pytest -v -s models/test_utils.py
-    - pytest -v -s models/test_vision.py
-    - pytest -v -s models/test_initialization.py
+    # Run a subset of model initialization tests
+    - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
 
-- label: Language Models Test (Standard) # 35min
+- label: Basic Models Tests (Extra Initialization) %N
   timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental]
+  torch_nightly: true
+  source_file_dependencies:
+  - vllm/model_executor/models/
+  - tests/models/test_initialization.py
+  commands:
+    # Only when vLLM model source is modified - test initialization of a large
+    # subset of supported models (the complement of the small subset in the above
+    # test.) Also run if model initialization test file is modified
+    - pytest -v -s models/test_initialization.py \
+             -k 'not test_can_initialize_small_subset' \
+             --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT \
+             --shard-id=$$BUILDKITE_PARALLEL_JOB
+  parallelism: 2
+
+- label: Basic Models Tests (Other)
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental]
+  torch_nightly: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/test_transformers.py
+  - tests/models/test_registry.py
+  - tests/models/test_utils.py
+  - tests/models/test_vision.py
+  commands:
+    - pytest -v -s models/test_transformers.py \
+                   models/test_registry.py \
+                   models/test_utils.py \
+                   models/test_vision.py
+
+- label: Language Models Tests (Standard)
+  timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/language
   commands:
+    # Test standard language models, excluding a subset of slow tests
     - pip freeze | grep -E 'torch'
-    - pytest -v -s models/language -m core_model
+    - pytest -v -s models/language -m 'core_model and (not slow_test)'
 
-- label: Language Models Test (Hybrid) # 35 min
+- label: Language Models Tests (Extra Standard) %N
   timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental]
+  torch_nightly: true
+  source_file_dependencies:
+  - vllm/model_executor/models/
+  - tests/models/language/pooling/test_embedding.py
+  - tests/models/language/generation/test_common.py
+  - tests/models/language/pooling/test_classification.py
+  commands:
+    # Shard slow subset of standard language models tests. Only run when model
+    # source is modified, or when specified test files are modified
+    - pip freeze | grep -E 'torch'
+    - pytest -v -s models/language -m 'core_model and slow_test' \
+             --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT \
+             --shard-id=$$BUILDKITE_PARALLEL_JOB
+  parallelism: 2
+
+- label: Language Models Tests (Hybrid) %N
+  timeout_in_minutes: 75
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
@@ -608,7 +657,12 @@ steps:
     # Note: also needed to run plamo2 model in vLLM
     - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.2.5'
     - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
-    - pytest -v -s models/language/generation -m hybrid_model
+    # Shard hybrid language model tests
+    - pytest -v -s models/language/generation \
+                   -m hybrid_model \
+                   --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT \
+                   --shard-id=$$BUILDKITE_PARALLEL_JOB
+  parallelism: 2
 
 - label: Language Models Test (Extended Generation) # 80min
   timeout_in_minutes: 110
