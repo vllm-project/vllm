@@ -16,7 +16,6 @@ from vllm.distributed import (ensure_model_parallel_initialized,
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
                                           has_kv_transfer_group)
 from vllm.logger import init_logger
-from vllm.v1.worker.worker_utils import setup_worker_process_title_and_logging
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
@@ -29,6 +28,7 @@ from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheConfig,
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.utils import bind_kv_cache
+from vllm.v1.worker.worker_utils import setup_worker_process_title_and_logging
 
 logger = init_logger(__name__)
 

@@ -32,8 +32,8 @@ from vllm.executor.multiproc_worker_utils import (
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import worker_receiver_cache_from_config
-from vllm.utils import (get_distributed_init_method,
-                        get_loopback_ip, get_mp_context, get_open_port)
+from vllm.utils import (get_distributed_init_method, get_loopback_ip,
+                        get_mp_context, get_open_port)
 from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.executor.utils import get_and_update_mm_cache
 from vllm.v1.outputs import (AsyncModelRunnerOutput, DraftTokenIds,
@@ -671,4 +671,3 @@ class WorkerProc:
 
             if output_rank is None or self.rank == output_rank:
                 self.handle_output(output)
-

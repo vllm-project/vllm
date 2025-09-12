@@ -78,11 +78,11 @@ class CPUWorker(Worker):
                                             self.distributed_init_method,
                                             self.local_rank,
                                             current_platform.dist_backend)
-        
+
         # Set process title and logging prefix for better debugging
         setup_worker_process_title_and_logging(
             enable_ep=self.parallel_config.enable_expert_parallel)
-        
+
         # Set random seed.
         set_random_seed(self.model_config.seed)
 

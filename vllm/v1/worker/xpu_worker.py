@@ -167,7 +167,7 @@ class XPUWorker(Worker):
                                             self.distributed_init_method,
                                             self.local_rank,
                                             current_platform.dist_backend)
-        
+
         # Set up process title and logging prefix early for better debugging
         setup_worker_process_title_and_logging(
             enable_ep=self.parallel_config.enable_expert_parallel)
