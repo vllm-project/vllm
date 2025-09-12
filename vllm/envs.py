@@ -174,6 +174,7 @@ if TYPE_CHECKING:
     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
     VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
     VLLM_DEEPEP_BUFFER_SIZE_MB: int = 1024
+    VLLM_DBO_COMM_SMS: int = 20
 
 
 def get_default_cache_root():
@@ -1231,6 +1232,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # The size in MB of the buffers (NVL and RDMA) used by DeepEP
     "VLLM_DEEPEP_BUFFER_SIZE_MB":
     lambda: int(os.getenv("VLLM_DEEPEP_BUFFER_SIZE_MB", "1024")),
+    
+    # The number of SMs to allocate for communication kernels when running DBO
+    # the rest of the SMs on the device will be allocated to compute
+    "VLLM_DBO_COMM_SMS":
+    lambda: int(os.getenv("VLLM_DBO_COMM_SMS", "20")),
 }
 
 # --8<-- [end:env-vars-definition]

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from ast import Call
 import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
@@ -9,13 +10,17 @@ import torch
 
 import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.forward_context import (create_forward_context, get_forward_context,
                                   override_forward_context)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils import has_deep_gemm
 from vllm.v1.worker.ubatching import UBatchContext, make_ubatch_contexts
+from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
+from vllm.distributed import get_ep_group
+
 
 logger = init_logger(__name__)
 
@@ -37,6 +42,34 @@ class CUDAGraphMetaData:
     outputs: Optional[Any] = None
 
 
+class SMControlContextManager:
+    def __init__(self, 
+                 comm_sms: int,
+                 set_comm_sms: Callable[[int], None],
+                 set_compute_sms: Callable[[int], None]):
+        assert current_platform.is_cuda(), \
+            "SM control is currently only supported on CUDA"
+        
+        props = torch.cuda.get_device_properties(
+                torch.cuda.current_device())
+        total_sms = props.multi_processor_count
+        
+        assert comm_sms < total_sms
+        self.total_sms = total_sms
+        self.compute_sms = total_sms - comm_sms
+        self.comm_sms = comm_sms
+        self.set_comm_sms = set_comm_sms
+        self.set_compute_sms = set_compute_sms
+
+    def __enter__(self):
+        self.set_comm_sms(self.comm_sms)
+        self.set_compute_sms(self.compute_sms)
+        
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.set_comm_sms(self.total_sms)
+        self.set_compute_sms(self.total_sms)
+
+
 class UBatchWrapper:
 
     def __init__(self, runnable: Callable, vllm_config: VllmConfig,
@@ -56,6 +89,22 @@ class UBatchWrapper:
                 runnable, vllm_config, runtime_mode=runtime_mode)
             self.graph_pool = current_platform.get_global_graph_pool()
         self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
+        
+        set_comm_sms = lambda sms: None
+        if vllm_config.parallel_config.enable_expert_parallel:
+            all2all_manager = get_ep_group().device_communicator.all2all_manager
+            set_comm_sms = lambda sms: all2all_manager.set_num_sms(sms)
+
+        # TODO(lucas): support other kernels besides DeepGEMM
+        set_compute_sms = lambda sms: None
+        if has_deep_gemm():
+            import deep_gemm as dg
+            set_compute_sms = lambda sms: dg.set_num_sms(sms)
+
+        self.sm_control = SMControlContextManager(
+            comm_sms=envs.VLLM_DBO_COMM_SMS,
+            set_comm_sms=set_comm_sms,
+            set_compute_sms=set_compute_sms)
 
     def __getattr__(self, key: str):
         # allow accessing the attributes of the runnable.
@@ -283,7 +332,8 @@ class UBatchWrapper:
                 batch_descriptor=batch_descriptor,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE)
 
-            return self._capture_ubatches(ubatch_metadata, self.model)
+            with self.sm_control:
+                return self._capture_ubatches(ubatch_metadata, self.model)
         elif num_tokens in self.cudagraphs:
             cudagraph_metadata = self.cudagraphs[num_tokens]
             cudagraph_metadata.cudagraph.replay()
@@ -300,4 +350,5 @@ class UBatchWrapper:
                 dp_metadata=dp_metadata,
                 batch_descriptor=batch_descriptor,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE)
-            return self._run_ubatches(ubatch_metadata, self.model)
+            with self.sm_control:
+                return self._run_ubatches(ubatch_metadata, self.model)
