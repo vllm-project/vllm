@@ -165,6 +165,13 @@ endif()
 get_torch_gpu_compiler_flags(VLLM_GPU_FLAGS ${VLLM_GPU_LANG})
 
 #
+# Add line info for debugging.
+#
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  list(APPEND VLLM_GPU_FLAGS "-lineinfo")
+endif()
+
+#
 # Set nvcc parallelism.
 #
 if(NVCC_THREADS AND VLLM_GPU_LANG STREQUAL "CUDA")
