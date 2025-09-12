@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -58,6 +59,7 @@ class SpecDecodingLogging:
         self.num_draft_tokens: list[int] = []
         self.num_accepted_tokens: list[int] = []
         self.accepted_tokens_per_pos_lists: list[list[int]] = []
+        self.last_log_time = time.monotonic()
 
     def observe(self, spec_decoding_stats: SpecDecodingStats):
         self.num_drafts.append(spec_decoding_stats.num_drafts)
@@ -73,6 +75,13 @@ class SpecDecodingLogging:
         num_drafts = np.sum(self.num_drafts)
         num_draft_tokens = np.sum(self.num_draft_tokens)
         num_accepted_tokens = np.sum(self.num_accepted_tokens)
+        draft_throughput = 0
+        accepted_throughput = 0
+
+        elapsed_time = time.monotonic() - self.last_log_time
+        if elapsed_time > 0:
+            draft_throughput = num_draft_tokens / elapsed_time
+            accepted_throughput = num_accepted_tokens / elapsed_time
 
         draft_acceptance_rate = (num_accepted_tokens / num_draft_tokens *
                                  100 if num_draft_tokens > 0 else float("nan"))
@@ -86,16 +95,20 @@ class SpecDecodingLogging:
 
         log_fn(
             "SpecDecoding metrics: "
-            "Draft acceptance rate: %.1f%%, "
             "Mean acceptance length: %.2f, "
+            "Accepted throughput: %.2f tokens/s, "
+            "Drafted throughput: %.2f tokens/s, "
             "Accepted: %d tokens, "
             "Drafted: %d tokens, "
-            "Per-position acceptance rate: %s",
-            draft_acceptance_rate,
+            "Per-position acceptance rate: %s, "
+            "Avg Draft acceptance rate: %.1f%%",
             mean_acceptance_length,
+            accepted_throughput,
+            draft_throughput,
             num_accepted_tokens,
             num_draft_tokens,
             rates_str,
+            draft_acceptance_rate,
         )
         self.reset()
 
