@@ -493,9 +493,13 @@ __device__ inline void dequant<__nv_fp8x4_e4m3, vllm::kFE2M1f.id(), true>(
 template <>
 __device__ inline void dequant<int32_t, vllm::kU4B8.id(), true>(
     int q, int32_t* frag_b) {
-  frag_b[1] = q & 0xF0F0F0F0;
-  q <<= 4;
-  frag_b[0] = q & 0xF0F0F0F0;
+
+  constexpr int repeated_zp = 0x08080808;
+  constexpr int MASK = 0x80808080;
+
+  frag_b[0] = ((q & 0x0F0F0F0F | MASK) - repeated_zp) ^ MASK;
+  q >>= 4;
+  frag_b[1] = ((q & 0x0F0F0F0F | MASK) - repeated_zp) ^ MASK;
 }
 
 template <>
