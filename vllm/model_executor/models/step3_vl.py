@@ -634,8 +634,8 @@ class Step3VisionEmbeddings(nn.Module):
         # pad
         class_embeds = self.class_embedding.expand(batch_size, 1, -1)
         embeddings = torch.cat([class_embeds, patch_embeds], dim=1)
-        embeddings = embeddings + get_abs_pos(
-            self.position_embedding(self.position_ids), patch_embeds.size(1))
+        embeddings += get_abs_pos(self.position_embedding(self.position_ids),
+                                  patch_embeds.size(1))
         embeddings = torch.cat([
             embeddings[:, 0, :].unsqueeze(1).repeat(1, self.pad_tp_size - 1,
                                                     1), embeddings
@@ -764,10 +764,8 @@ class Step3VisionEncoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.FloatTensor:
-        hidden_states = hidden_states + self.layer_norm1(
-            self.self_attn(hidden_states))
-        hidden_states = hidden_states + self.layer_norm2(
-            self.mlp(hidden_states))
+        hidden_states += self.layer_norm1(self.self_attn(hidden_states))
+        hidden_states += self.layer_norm2(self.mlp(hidden_states))
         return hidden_states
 
 

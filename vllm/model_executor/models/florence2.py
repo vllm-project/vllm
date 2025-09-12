@@ -175,7 +175,7 @@ class PreNorm(nn.Module):
         else:
             x, size = self.fn(x, *args, **kwargs)
 
-        x = shortcut + x
+        x += shortcut
 
         return x, size
 
@@ -290,7 +290,7 @@ class ChannelAttention(nn.Module):
                                   C // self.groups).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
-        q = q * (float(N)**-0.5)
+        q *= float(N)**-0.5
         attention = q.transpose(-1, -2) @ k
         attention = attention.softmax(dim=-1)
         x = (attention @ v.transpose(-1, -2)).transpose(-1, -2)
@@ -399,7 +399,7 @@ class WindowAttention(nn.Module):
                                   C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
-        q = q * self.scale
+        q *= self.scale
         attn = (q @ k.transpose(-2, -1))
         attn = self.softmax(attn)
 
@@ -984,7 +984,7 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal,
                 'only support square feature maps for now')
             x = x.view(batch_size * T, h, w, x.shape[-1])
             pos_embed = self.image_pos_embed(x)
-            x = x + pos_embed
+            x += pos_embed
             x = x.view(batch_size, T * h * w, x.shape[-1])
 
         if self.visual_temporal_embed is not None:

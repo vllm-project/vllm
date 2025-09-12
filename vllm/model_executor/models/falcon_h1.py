@@ -76,7 +76,7 @@ class FalconH1MLP(nn.Module):
         x[:, :self.intermediate_size // self.tp_size] *= self.gate_multiplier
         x = self.act_fn(x)
         x, _ = self.down_proj(x)
-        x = x * self.down_multiplier
+        x *= self.down_multiplier
         return x
 
 
@@ -284,7 +284,7 @@ class FalconH1AttentionDecoderLayer(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        k = k * self.key_multiplier
+        k *= self.key_multiplier
 
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
@@ -396,13 +396,13 @@ class FalconH1ParallelHybrid(nn.Module):
         # dimensionality (config.hidden_size).
         hidden_states = (attn_hidden * self.attn_out_multiplier) + (
             ssm_hidden * self.ssm_out_multiplier)
-        hidden_states = hidden_states + residual
+        hidden_states += residual
 
         # feed-forward
         residual = hidden_states
         hidden_states = self.pre_ff_layernorm(hidden_states)
         hidden_states = self.feed_forward(hidden_states)
-        hidden_states = residual + hidden_states
+        hidden_states += residual
 
         return hidden_states
 

@@ -153,7 +153,7 @@ class InternS1VisionEmbeddings(nn.Module):
         embeddings = torch.cat((cls_tokens, embeddings), dim=1)
 
         if self.position_embeddings is not None:
-            embeddings = embeddings + self.interpolate_pos_encoding(
+            embeddings += self.interpolate_pos_encoding(
                 embeddings, height, width)
 
         return embeddings, (patch_height, patch_width)
@@ -307,10 +307,10 @@ class InternS1VisionLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
     ):
-        hidden_states = hidden_states + self.attention(
+        hidden_states += self.attention(
             self.layernorm_before(hidden_states)) * self.lambda_1
 
-        hidden_states = hidden_states + self.mlp(
+        hidden_states += self.mlp(
             self.layernorm_after(hidden_states)) * self.lambda_2
 
         return hidden_states

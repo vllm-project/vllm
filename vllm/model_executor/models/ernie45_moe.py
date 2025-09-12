@@ -165,7 +165,7 @@ class Ernie4_5_MoeMoE(nn.Module):
 
         if self.has_shared_experts and \
               shared_output is not None:
-            final_hidden_states = final_hidden_states + shared_output
+            final_hidden_states += shared_output
 
         if self.tp_size > 1:
             final_hidden_states = (

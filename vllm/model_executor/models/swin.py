@@ -113,9 +113,8 @@ class SwinSelfAttention(nn.Module):
                 1, mask_shape, 1, dim,
                 dim).expand(batch_size // mask_shape, mask_shape,
                             self.num_attention_heads, dim, dim)
-            attention_scores = attention_scores + \
-            attention_mask_expanded.unsqueeze(
-                1).unsqueeze(0)
+            attention_scores += attention_mask_expanded.unsqueeze(1).unsqueeze(
+                0)
             attention_scores = attention_scores.view(-1,
                                                      self.num_attention_heads,
                                                      dim, dim)

@@ -341,7 +341,7 @@ class ArcticDecoderLayer(nn.Module):
             positions=positions,
             hidden_states=hidden_states,
         )
-        hidden_states = residual_input + hidden_states
+        hidden_states += residual_input
 
         residual_attn = hidden_states
         if self.use_residual:
@@ -350,13 +350,13 @@ class ArcticDecoderLayer(nn.Module):
             residual_mlp = hidden_states
             hidden_states = self.post_attention_layernorm(residual_input)
             hidden_states = self.block_sparse_moe(hidden_states)
-            hidden_states = residual_mlp + hidden_states
+            hidden_states += residual_mlp
             hidden_states = tensor_model_parallel_all_reduce(hidden_states)
-            hidden_states = residual_attn + hidden_states
+            hidden_states += residual_attn
         else:
             hidden_states = self.post_attention_layernorm(hidden_states)
             hidden_states = self.block_sparse_moe(hidden_states)
-            hidden_states = residual_attn + hidden_states
+            hidden_states += residual_attn
         return hidden_states
 
 

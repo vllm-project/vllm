@@ -251,17 +251,17 @@ class Zamba2Attention(nn.Module):
             q_adapter = self.linear_q_adapter_list[block_idx]
             assert not isinstance(q_adapter, nn.Identity)
             q_lora_output = q_adapter(hidden_states)
-            query_states = query_states + q_lora_output
+            query_states += q_lora_output
 
             k_adapter = self.linear_k_adapter_list[block_idx]
             assert not isinstance(k_adapter, nn.Identity)
             k_lora_output = k_adapter(hidden_states)
-            key_states = key_states + k_lora_output
+            key_states += k_lora_output
 
             v_adapter = self.linear_v_adapter_list[block_idx]
             assert not isinstance(v_adapter, nn.Identity)
             v_lora_output = v_adapter(hidden_states)
-            value_states = value_states + v_lora_output
+            value_states += v_lora_output
 
         if self.config.use_mem_rope:
             query_states, key_states = self.rotary_emb(position_ids,
@@ -355,7 +355,7 @@ class Zamba2MLP(nn.Module):
         adapter = self.gate_up_proj_adapter_list[block_idx]
         assert not isinstance(adapter, nn.Identity)
         lora_output = adapter(hidden_states)
-        gate_up_states = gate_up_states + lora_output
+        gate_up_states += lora_output
 
         # Apply GELU activation with gating
         hidden_states = self.act_fn(gate_up_states)
@@ -546,7 +546,7 @@ class Zamba2MambaDecoderLayer(nn.Module):
         # layer below (as described in eq. (6) of
         # https://arxiv.org/pdf/2405.16712).
         if transformer_hidden_states is not None:
-            hidden_states = hidden_states + transformer_hidden_states
+            hidden_states += transformer_hidden_states
 
         # Apply input normalization
         hidden_states = self.input_layernorm(hidden_states)

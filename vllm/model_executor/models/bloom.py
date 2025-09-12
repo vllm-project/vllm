@@ -208,7 +208,7 @@ class BloomBlock(nn.Module):
             position_ids=position_ids,
             hidden_states=layernorm_output,
         )
-        attention_output = attention_output + residual
+        attention_output += residual
         layernorm_output = self.post_attention_layernorm(attention_output)
 
         # Get residual
