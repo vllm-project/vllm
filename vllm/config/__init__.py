@@ -3516,7 +3516,7 @@ class VllmConfig:
                     "when cudagraph_mode piecewise cudagraphs is used, "\
                     f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
 
-        if self.parallel_config.enable_microbatching:
+        if self.parallel_config.enable_dbo:
             a2a_backend = envs.VLLM_ALL2ALL_BACKEND
             assert a2a_backend == "deepep_low_latency", \
             "Microbatching currently only supports the deepep_low_latency "\

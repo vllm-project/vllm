@@ -944,7 +944,7 @@ class FusedMoE(CustomOp):
         if (self.moe_parallel_config.use_pplx_kernels
                 or self.moe_parallel_config.use_deepep_ll_kernels
                 or self.moe_config.use_flashinfer_cutlass_kernels):
-            if vllm_config.parallel_config.enable_microbatching:
+            if vllm_config.parallel_config.enable_dbo:
                 self.batched_hidden_states = torch.zeros(
                     (2, moe.max_num_tokens, self.hidden_size),
                     dtype=moe.in_dtype,

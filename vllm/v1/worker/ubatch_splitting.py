@@ -117,14 +117,14 @@ def ubatch_split(
     parallel_config = vllm_config.parallel_config
     # Don't bother with the should_ubatch handshaking unless microbatching
     # is enabled
-    if not parallel_config.enable_microbatching:
+    if not parallel_config.enable_dbo:
         return (None, None)
 
     # Check preconditions for microbatching
     should_attempt_ubatching = \
-        parallel_config.enable_microbatching and \
+        parallel_config.enable_dbo and \
         num_tokens_unpadded >= \
-        parallel_config.microbatching_token_threshold \
+        parallel_config.dbo_decode_token_threshold \
         and max_num_scheduled_tokens == 1
 
     # Don't microbatch unless every other DP worker is also microbatching
