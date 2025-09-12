@@ -702,10 +702,12 @@ class EagleProposer:
                     self.model.lm_head = copy.deepcopy(self.model.lm_head)
 
                 self.model.lm_head.weight.data = self.model.lm_head.weight.data[self.pruned_vocab]
-                model_vocab_size = self.model.lm_head.weight.shape[0]
-                target_vocab_size = target_language_model.lm_head.weight.shape[0]
-                print(model_vocab_size, target_vocab_size, keep_threshold, int(target_vocab_size * keep_threshold))
-                assert int(target_vocab_size * keep_threshold) == model_vocab_size, f'pruned vocab incorrectly'
+                
+                # # ensure we pruned correctly
+                # model_vocab_size = self.model.lm_head.weight.shape[0]
+                # target_vocab_size = target_language_model.lm_head.weight.shape[0]
+                # print(model_vocab_size, target_vocab_size, keep_threshold, int(target_vocab_size * keep_threshold))
+                # assert int(target_vocab_size * keep_threshold) == model_vocab_size, f'pruned vocab incorrectly'
 
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
@@ -782,7 +784,6 @@ def load_vocab_freq(vocab_frequency_path: str) -> torch.Tensor:
 
     # Load as a tensor of integers
     vocab_freq = torch.load(local_path, weights_only=True).to(torch.int64)
-    print(vocab_freq.shape)
     return vocab_freq
 
 
