@@ -7,16 +7,9 @@ Run `pytest tests/samplers/test_no_bad_words.py`.
 """
 from typing import Optional
 
-import pytest
 from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
-
-
-@pytest.fixture(autouse=True)
-def v1(monkeypatch):
-    """Only run on vLLM v1."""
-    monkeypatch.setenv('VLLM_USE_V1', '1')
 
 
 def _generate(
@@ -57,7 +50,7 @@ class TestOneTokenBadWord:
                                             add_special_tokens=False)[0]
 
     def test_one_token_bad_word(self, vllm_runner):
-        with vllm_runner(self.MODEL) as llm:
+        with vllm_runner(self.MODEL, enforce_eager=True) as llm:
             output_token_ids = self._generate(llm)
             assert output_token_ids[0] == self.target_token_id
 
@@ -104,7 +97,7 @@ class TestTwoTokenBadWord:
                                                 add_special_tokens=False)[0]
 
     def test_two_token_bad_word(self, vllm_runner):
-        with vllm_runner(self.MODEL, dtype="half") as llm:
+        with vllm_runner(self.MODEL, enforce_eager=True) as llm:
             output_token_ids = self._generate(llm)
             assert output_token_ids[:2] == [
                 self.target_token_id1, self.target_token_id2
