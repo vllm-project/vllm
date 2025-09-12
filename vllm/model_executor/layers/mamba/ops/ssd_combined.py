@@ -100,12 +100,15 @@ def _mamba_chunk_scan_combined_fwd(x,
 
 
     print("layer: ", layer)
+    has_init = initial_states is not None
+    print("has_init: ", has_init)
 
-
-    dA_cumsum_ref = torch.load("dump/dA_cumsum_%s_main" % (layer))
+    dA_cumsum_ref = torch.load("dump/dA_cumsum_%s_main_%d" % (layer, has_init))
+    torch.cuda.synchronize()
     torch.testing.assert_close(dA_cumsum, dA_cumsum_ref, atol=0.0, rtol=0.0)
 
-    dt_ref = torch.load("dump/dt_%s_main" % (layer))
+    dt_ref = torch.load("dump/dt_%s_main_%d" % (layer, has_init))
+    torch.cuda.synchronize()
     torch.testing.assert_close(dt, dt_ref, atol=0.0, rtol=0.0)
 
 
@@ -119,7 +122,8 @@ def _mamba_chunk_scan_combined_fwd(x,
                               seq_idx=seq_idx,
                               states_in_fp32=True)
 
-    states_ref = torch.load("dump/states_%s_main" % (layer))
+    states_ref = torch.load("dump/states_%s_main_%d" % (layer, has_init))
+    torch.cuda.synchronize()
     torch.testing.assert_close(states, states_ref, atol=0.0, rtol=0.0)
 
 
@@ -146,10 +150,15 @@ def _mamba_chunk_scan_combined_fwd(x,
         is_cont_batched=cu_seqlens is not None,
         chunk_offsets=chunk_offsets)
 
-    print("after state passing: ")
-    print("states: ", states[0 ,0, 0,:10])
-
     states = rearrange(states, "... (p n) -> ... p n", n=dstate)
+
+    '''
+    print("after state passing: ")
+    states_ref = torch.load("dump/final_states_%s_main_%d" % (layer, has_init)).unsqueeze(0)
+    print("states.shape: ", states.shape)
+    print("states_ref.shape: ", states_ref.shape)
+    torch.testing.assert_close(states, states_ref, atol=0.0, rtol=0.0)
+    '''
 
     # 4. Compute batched matrix multiply for C_j^T B_i terms
     CB = _bmm_chunk_fwd(C,
