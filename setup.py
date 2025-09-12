@@ -32,6 +32,60 @@ def load_module_from_path(module_name, path):
 ROOT_DIR = Path(__file__).parent
 logger = logging.getLogger(__name__)
 
+
+def is_installing_from_github() -> bool:
+    """Check if vLLM is being installed from GitHub repository."""
+    # Method 1: Check command line arguments for git+ URLs
+    if len(sys.argv) > 1:
+        for arg in sys.argv[1:]:
+            if arg.startswith('git+') and 'github.com/vllm-project/vllm' in arg:
+                return True
+
+    # Method 2: Check if we're in a temporary directory with vLLM repo
+    # This is the most reliable method for pip/uv GitHub installs
+    current_dir = os.getcwd()
+    
+    # Check if we're in a temp/cache directory (common for package managers)
+    is_temp_dir = any(pattern in current_dir.lower() for pattern in [
+        '/tmp/', '\\temp\\', 'cache', 'builds', '.cache'
+    ])
+    
+    if is_temp_dir:
+        # Check if this is a vLLM repository
+        try:
+            result = subprocess.run(['git', 'remote', 'get-url', 'origin'],
+                                    capture_output=True,
+                                    text=True,
+                                    cwd=ROOT_DIR)
+            if result.returncode == 0:
+                origin_url = result.stdout.strip()
+                return ('github.com/vllm-project/vllm' in origin_url or 
+                       'git@github.com:vllm-project/vllm.git' in origin_url)
+        except Exception:
+            pass
+
+    # Method 3: Check if we're in the actual vLLM repository (for local dev)
+    try:
+        result = subprocess.run(['git', 'remote', 'get-url', 'origin'],
+                                capture_output=True,
+                                text=True,
+                                cwd=ROOT_DIR)
+        if result.returncode == 0:
+            origin_url = result.stdout.strip()
+            return ('github.com/vllm-project/vllm' in origin_url or 
+                   'git@github.com:vllm-project/vllm.git' in origin_url)
+    except Exception:
+        pass
+
+    return False
+
+
+# Auto-enable precompiled wheels when installing from GitHub
+if is_installing_from_github():
+    print("Detected installation from GitHub repository. Automatically enabling precompiled wheels.")
+    os.environ["VLLM_USE_PRECOMPILED"] = "1"
+
+
 # cannot import envs directly because it depends on vllm,
 #  which is not installed yet
 envs = load_module_from_path('envs', os.path.join(ROOT_DIR, 'vllm', 'envs.py'))
