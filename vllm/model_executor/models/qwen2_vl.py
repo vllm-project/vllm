@@ -24,8 +24,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Qwen2-VL model compatible with HuggingFace weights."""
+import importlib
 from collections.abc import Iterable, Mapping, Sequence
-from functools import partial
+from functools import cache, partial
 from typing import Annotated, Any, Callable, Literal, Optional, Union
 
 import torch
@@ -272,18 +273,30 @@ def apply_rotary_emb_torch(x: torch.Tensor,
     )
 
 
+@cache
+def dispatch_rotary_emb_function():
+    if current_platform.is_cuda():
+        from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
+        return apply_rotary_emb
+
+    if current_platform.is_rocm():
+        if importlib.util.find_spec("flash_attn") is not None:
+            from flash_attn.ops.triton.rotary import apply_rotary
+            return apply_rotary
+        else:
+            logger.warning(
+                "flash_attn is not installed. Falling back to PyTorch "
+                "implementation for rotary embeddings.")
+
+    return apply_rotary_emb_torch
+
+
 def apply_rotary_pos_emb_vision(t: torch.Tensor,
                                 freqs: torch.Tensor) -> torch.Tensor:
     t_ = t.float()
     cos = freqs.cos()
     sin = freqs.sin()
-    apply_rotary_emb = apply_rotary_emb_torch
-    if current_platform.is_cuda():
-        from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
-
-    if current_platform.is_rocm():
-        from flash_attn.ops.triton.rotary import apply_rotary
-        apply_rotary_emb = apply_rotary
+    apply_rotary_emb = dispatch_rotary_emb_function()
 
     output = apply_rotary_emb(t_, cos, sin).type_as(t)
     return output
