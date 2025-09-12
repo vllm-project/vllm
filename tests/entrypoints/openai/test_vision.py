@@ -38,7 +38,7 @@ EXPECTED_MM_BEAM_SEARCH_RES = [
     ],
     [
         "This image displays a gradient of colors ranging from",
-        "The image displays a gradient of colors ranging from",
+        "This image displays a gradient of colors forming a spectrum",
     ],
 ]
 
