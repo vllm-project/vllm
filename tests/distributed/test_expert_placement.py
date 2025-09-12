@@ -50,8 +50,9 @@ def verify_round_robin_pattern(expert_map, ep_rank, ep_size,
     ), f"Expected local expert IDs {expected_local_ids}, got {local_expert_ids}"
 
 
+@pytest.mark.parametrize("expert_placement_strategy", ["round_robin"])
 @pytest.mark.parametrize("world_size", [2, 4])
-def test_round_robin_expert_placement_various_sizes(world_size):
+def test_expert_placement_various_sizes(expert_placement_strategy, world_size):
     """Test round_robin expert placement with various expert counts."""
 
     # Test with different global_num_experts values
@@ -94,7 +95,7 @@ def test_round_robin_expert_placement_various_sizes(world_size):
                 ep_size=test_ep_size,
                 ep_rank=ep_rank,
                 global_num_experts=test_global_experts,
-                round_robin_expert_placement=True,
+                expert_placement_strategy=expert_placement_strategy,
             )
 
             assert (
@@ -114,8 +115,9 @@ def test_round_robin_expert_placement_various_sizes(world_size):
                                            test_ep_size, test_global_experts)
 
 
+@pytest.mark.parametrize("expert_placement_strategy", ["round_robin"])
 @pytest.mark.parametrize("world_size", [2, 4])
-def test_round_robin_expert_placement_edge_cases(world_size):
+def test_expert_placement_edge_cases(expert_placement_strategy, world_size):
     """Test edge cases for round_robin expert placement."""
 
     # Test case 1: ep_size = 1 (should return None for expert_map)
@@ -123,7 +125,7 @@ def test_round_robin_expert_placement_edge_cases(world_size):
         ep_size=1,
         ep_rank=0,
         global_num_experts=8,
-        round_robin_expert_placement=True,
+        expert_placement_strategy=expert_placement_strategy,
     )
     assert local_num_experts == 8, "For ep_size=1, should get all experts"
     assert expert_map is None, "For ep_size=1, expert_map should be None"
@@ -134,51 +136,51 @@ def test_round_robin_expert_placement_edge_cases(world_size):
             ep_size=0,
             ep_rank=0,
             global_num_experts=8,
-            round_robin_expert_placement=True,
+            expert_placement_strategy=expert_placement_strategy,
         )
 
 
 def test_determine_expert_map_comprehensive():
     """Test of determine_expert_map function with various configurations."""
 
-    # Test cases: (ep_size, ep_rank, global_num_experts, round_robin,
-    # expected_local, expected_map_pattern)
+    # Test cases: (ep_size, ep_rank, global_num_experts,
+    # expert_placement_strategy, expected_local, expected_map_pattern)
     test_cases = [
         # Round robin placement tests
-        (2, 0, 8, True, 4, [0, -1, 1, -1, 2, -1, 3,
-                            -1]),  # rank 0 gets even experts
-        (2, 1, 8, True, 4, [-1, 0, -1, 1, -1, 2, -1,
-                            3]),  # rank 1 gets odd experts
-        (2, 0, 9, True, 5, [0, -1, 1, -1, 2, -1, 3, -1,
-                            4]),  # rank 0 gets 5 experts (even + last)
-        (2, 1, 9, True, 4, [-1, 0, -1, 1, -1, 2, -1, 3,
-                            -1]),  # rank 1 gets 4 experts (odd)
+        (2, 0, 8, "round_robin", 4, [0, -1, 1, -1, 2, -1, 3,
+                                     -1]),  # rank 0 gets even experts
+        (2, 1, 8, "round_robin", 4, [-1, 0, -1, 1, -1, 2, -1,
+                                     3]),  # rank 1 gets odd experts
+        (2, 0, 9, "round_robin", 5, [0, -1, 1, -1, 2, -1, 3, -1, 4
+                                     ]),  # rank 0 gets 5 experts (even + last)
+        (2, 1, 9, "round_robin", 4, [-1, 0, -1, 1, -1, 2, -1, 3,
+                                     -1]),  # rank 1 gets 4 experts (odd)
 
         # 4-rank tests
-        (4, 0, 8, True, 2, [0, -1, -1, -1, 1, -1, -1,
-                            -1]),  # rank 0 gets experts 0, 4
-        (4, 1, 8, True, 2, [-1, 0, -1, -1, -1, 1, -1,
-                            -1]),  # rank 1 gets experts 1, 5
-        (4, 2, 8, True, 2, [-1, -1, 0, -1, -1, -1, 1,
-                            -1]),  # rank 2 gets experts 2, 6
-        (4, 3, 8, True, 2, [-1, -1, -1, 0, -1, -1, -1,
-                            1]),  # rank 3 gets experts 3, 7
+        (4, 0, 8, "round_robin", 2, [0, -1, -1, -1, 1, -1, -1,
+                                     -1]),  # rank 0 gets experts 0, 4
+        (4, 1, 8, "round_robin", 2, [-1, 0, -1, -1, -1, 1, -1,
+                                     -1]),  # rank 1 gets experts 1, 5
+        (4, 2, 8, "round_robin", 2, [-1, -1, 0, -1, -1, -1, 1,
+                                     -1]),  # rank 2 gets experts 2, 6
+        (4, 3, 8, "round_robin", 2, [-1, -1, -1, 0, -1, -1, -1,
+                                     1]),  # rank 3 gets experts 3, 7
     ]
 
-    for ep_size, ep_rank, global_num_experts, round_robin, expected_local, \
-        expected_map_pattern in test_cases:
+    for ep_size, ep_rank, global_num_experts, expert_placement_strategy, \
+        expected_local, expected_map_pattern in test_cases:
         local_num_experts, expert_map = determine_expert_map(
             ep_size=ep_size,
             ep_rank=ep_rank,
             global_num_experts=global_num_experts,
-            round_robin_expert_placement=round_robin,
+            expert_placement_strategy=expert_placement_strategy,
         )
 
         assert local_num_experts == expected_local, \
             f"ep_size={ep_size}, ep_rank={ep_rank}, " \
             f"global_num_experts={global_num_experts}, " \
-            f"round_robin={round_robin}: expected {expected_local} " \
-            f"local experts, got {local_num_experts}"
+            f"expert_placement_strategy={expert_placement_strategy}: " \
+            f"expected {expected_local} local experts, got {local_num_experts}"
 
         if expected_map_pattern is None:
             assert expert_map is None, "Expected expert_map to be None"
@@ -188,5 +190,5 @@ def test_determine_expert_map_comprehensive():
             assert actual_map == expected_map_pattern, \
                 f"ep_size={ep_size}, ep_rank={ep_rank}, " \
                 f"global_num_experts={global_num_experts}, " \
-                f"round_robin={round_robin}: expected map " \
-                f"{expected_map_pattern}, got {actual_map}"
+                f"expert_placement_strategy={expert_placement_strategy}: " \
+                f"expected map {expected_map_pattern}, got {actual_map}"
