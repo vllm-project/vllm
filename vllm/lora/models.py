@@ -16,7 +16,7 @@ from vllm.adapter_commons.models import (AdapterLRUCache, AdapterModel,
 from vllm.adapter_commons.utils import (add_adapter, deactivate_adapter,
                                         get_adapter, list_adapters,
                                         remove_adapter, set_adapter_mapping)
-from vllm.config import LoRAConfig
+from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import BaseLayerWithLoRA, LoRAMapping
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights

@@ -686,7 +686,7 @@ async def test_invalid_grammar(client: openai.AsyncOpenAI, model_name: str):
 async def test_completion_with_empty_prompt_embeds(
         client: openai.AsyncOpenAI) -> None:
     """Test completion with empty prompt embeds."""
-    payload: dict[str, list] = {"prompt_embeds": []}
+    payload: dict[str, object] = {"prompt": "Hello", "prompt_embeds": []}
     headers: dict[str, str] = {"Content-Type": "application/json"}
     # base_url = http://localhost:8000/v1/completions
     response = requests.post(f"{client.base_url}completions",
