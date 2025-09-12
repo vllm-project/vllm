@@ -699,10 +699,14 @@ class EagleProposer:
 
                 # to prune the vocab, the draft lm_head cannot be shared with the target model lm_head
                 if self.model.lm_head == target_language_model.lm_head:
-                    self.model.lm_head = copy.deepcopy(target_language_model.lm_head)
+                    self.model.lm_head = copy.deepcopy(self.model.lm_head)
 
-                # self.model.lm_head.weight.data = self.model.lm_head.weight.data[self.pruned_vocab]
-                self.model.lm_head.weight = self.model.lm_head.weight[self.pruned_vocab]
+                self.model.lm_head.weight.data = self.model.lm_head.weight.data[self.pruned_vocab]
+                model_vocab_size = self.model.lm_head.weight.shape[0]
+                target_vocab_size = target_language_model.lm_head.weight.shape[0]
+                print(model_vocab_size, target_vocab_size, keep_threshold, int(target_vocab_size * keep_threshold))
+                assert int(target_vocab_size * keep_threshold) == model_vocab_size, f'pruned vocab incorrectly'
+
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
                 logger.info("Updated lm_head weights with pruned vocabulary.")

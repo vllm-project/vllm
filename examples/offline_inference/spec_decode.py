@@ -67,7 +67,7 @@ def parse_args():
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--top-k", type=int, default=-1)
     parser.add_argument("--print-output", action="store_true")
-    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--batch-size", type=int, default=None) # use vllm default
     parser.add_argument("--output-len", type=int, default=256)
     parser.add_argument("--model-dir", type=str, default=None)
     parser.add_argument("--eagle-dir", type=str, default=None)
@@ -156,6 +156,10 @@ def main():
         limit_mm_per_prompt={"image": 5},
         disable_chunked_mm_input=True,
     )
+
+    max_num_seqs = llm.llm_engine.engine_config.scheduler_config.max_num_seqs
+    print(f"max_num_seqs: {max_num_seqs}")
+
 
     sampling_params = SamplingParams(temperature=args.temp, max_tokens=args.output_len)
     if not args.custom_mm_prompts:
