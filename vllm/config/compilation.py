@@ -461,7 +461,7 @@ class CompilationConfig:
             self.cudagraph_mode = CUDAGraphMode.FULL
 
         for op in self.custom_ops:
-            if op[0] not in {'+', '-'}:
+            if op[0] not in {'+', '-'} and op not in {'all', 'none'}:
                 raise ValueError(f"Invalid syntax '{op}' for custom op, "
                                  "must be 'all', 'none', '+op' or '-op' "
                                  "(where 'op' is the registered op name)")

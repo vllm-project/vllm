@@ -83,7 +83,8 @@ class VllmPatternMatcherPass(VllmInductorPass):
         into the debug_dump_path folder next to the dumped fx graphs.
 
         This method does its best to print something that looks like Python code
-        for easier debugging and potentially navigation. Please add
+        for easier debugging and potentially navigation. If any errors appear in
+        the output, please add to this method.
         """
         debug_dump_path = config.compilation_config.debug_dump_path
         if not debug_dump_path:
@@ -117,7 +118,7 @@ class VllmPatternMatcherPass(VllmInductorPass):
                         lambda m: f"torch.ops.{m.group(1)}.{m.group(2)}",
                         repr(pattern),
                     )
-                    # Replace <function a.<locals>.b at 0x75d...> with 'a.b'
+                    # Replace '<function a.<locals>.b at 0x75d...>' with 'a.b'
                     pattern_repr = self._FUNC_PATTERN.sub(
                         lambda m: f"'{m.group(1).replace('<locals>.', '')}'",
                         pattern_repr,
