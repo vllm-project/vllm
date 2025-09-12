@@ -51,10 +51,10 @@ def poly_norm(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor,
     return out
 
 
-def dispatch_rocm_rmsnorm_func(with_fused_add: bool, dtype: torch.dtype):
-    use_aiter = rocm_aiter_ops.is_rmsnorm_enabled() and dtype in [
-        torch.float16, torch.bfloat16
-    ]
+def dispatch_rocm_rmsnorm_func(with_fused_add: bool,
+                               dtype: torch.dtype,
+                               use_aiter: bool = False):
+    use_aiter = use_aiter and dtype in [torch.float16, torch.bfloat16]
 
     if use_aiter and with_fused_add:
         return rocm_aiter_ops.rms_norm2d_with_add
@@ -99,10 +99,15 @@ class RMSNorm(CustomOp):
         weight_dtype = self.weight.data.dtype
 
         if current_platform.is_rocm():
+            aiter_rmsnorm_enabled = rocm_aiter_ops.is_rmsnorm_enabled()
             self.rocm_norm_func = dispatch_rocm_rmsnorm_func(
-                with_fused_add=False, dtype=weight_dtype)
+                with_fused_add=False,
+                dtype=weight_dtype,
+                use_aiter=aiter_rmsnorm_enabled)
             self.rocm_norm_func_with_add = dispatch_rocm_rmsnorm_func(
-                with_fused_add=True, dtype=weight_dtype)
+                with_fused_add=True,
+                dtype=weight_dtype,
+                use_aiter=aiter_rmsnorm_enabled)
 
     def forward_native(
         self,

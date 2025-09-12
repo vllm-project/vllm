@@ -895,8 +895,10 @@ def vllm_topk_softmax(topk_weights: torch.Tensor, topk_indices: torch.Tensor,
     return topk_weights, topk_indices
 
 
-def dispatch_topk_func() -> Callable[..., tuple[torch.Tensor, ...]]:
-    if rocm_aiter_ops.is_fused_moe_enabled():
+def dispatch_topk_func(
+        use_rocm_aiter: bool = False
+) -> Callable[..., tuple[torch.Tensor, ...]]:
+    if use_rocm_aiter:
         return rocm_aiter_ops.topk_softmax
     return vllm_topk_softmax
 
@@ -929,7 +931,8 @@ def fused_topk(
 
     gating_output_float = gating_output.float()  # TODO(woosuk): Optimize this.
 
-    topk_func = dispatch_topk_func()
+    topk_func = dispatch_topk_func(
+        use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled())
     topk_weights, topk_ids = topk_func(topk_weights, topk_ids,
                                        token_expert_indices,
                                        gating_output_float, renormalize)

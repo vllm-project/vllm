@@ -1,9 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-import importlib
-import sys
-
 import pytest
 import torch
 
@@ -115,44 +111,27 @@ def test_enabled_ops_invalid(env: str):
     not current_platform.is_rocm() or not current_platform.is_fp8_fnuz(),
     reason="AITER is a feature exclusive for ROCm and FP8_FNUZ")
 @pytest.mark.parametrize("use_cutlass", [True, False])
-@pytest.mark.parametrize("use_rocm_aiter", ["0", "1"])
-@pytest.mark.parametrize("use_rocm_aiter_gemm_w8a8_blockscale", ["0", "1"])
-def test_w8a8_blockscale_dispatch(use_cutlass: bool, use_rocm_aiter: str,
-                                  use_rocm_aiter_gemm_w8a8_blockscale: str,
-                                  monkeypatch):
+@pytest.mark.parametrize("use_rocm_aiter", [True, False])
+def test_w8a8_blockscale_dispatch(use_cutlass: bool, use_rocm_aiter: str):
 
-    monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_rocm_aiter)
-    monkeypatch.setenv("VLLM_ROCM_USE_AITER_LINEAR",
-                       use_rocm_aiter_gemm_w8a8_blockscale)
-
-    # Force reload aiter_ops to pick up the new environment variables.
-    if 'rocm_aiter_ops' in sys.modules:
-        importlib.reload(rocm_aiter_ops)
-
-    use_aiter_and_is_supported = (bool(int(use_rocm_aiter)) and bool(
-        int(use_rocm_aiter_gemm_w8a8_blockscale)))
     block_scale_func = dispatch_w8a8_blockscale_func(
-        use_cutlass, use_aiter_and_is_supported=use_aiter_and_is_supported)
+        use_cutlass, use_aiter_and_is_supported=use_rocm_aiter)
+
     if use_cutlass:
         assert block_scale_func == cutlass_scaled_mm
-    elif current_platform.is_rocm() and int(use_rocm_aiter) and int(
-            use_rocm_aiter_gemm_w8a8_blockscale):
-        assert block_scale_func == (rocm_aiter_ops.gemm_w8a8_blockscale)
+    elif current_platform.is_rocm() and use_rocm_aiter:
+        assert block_scale_func == rocm_aiter_ops.gemm_w8a8_blockscale
     else:
         assert block_scale_func == w8a8_block_fp8_matmul
 
 
-@pytest.mark.parametrize("use_rocm_aiter", ["0", "1"])
-def test_topk_dispatch(use_rocm_aiter: str, monkeypatch):
-    monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_rocm_aiter)
-    topk_func = dispatch_topk_func()
-    # Force reload aiter_ops to pick up the new environment variables.
-    if 'rocm_aiter_ops' in sys.modules:
-        importlib.reload(rocm_aiter_ops)
+@pytest.mark.parametrize("use_rocm_aiter", [True, False])
+def test_topk_dispatch(use_rocm_aiter: bool):
+    topk_func = dispatch_topk_func(use_rocm_aiter)
 
     if current_platform.is_rocm() and int(use_rocm_aiter):
 
-        assert topk_func == rocm_aiter_ops.rocm_aiter_topk_softmax
+        assert topk_func == rocm_aiter_ops.topk_softmax
     else:
         assert topk_func == vllm_topk_softmax
 
@@ -160,24 +139,16 @@ def test_topk_dispatch(use_rocm_aiter: str, monkeypatch):
 @pytest.mark.parametrize("add_residual", [True, False])
 @pytest.mark.parametrize("dtype",
                          [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("use_rocm_aiter", ["0", "1"])
-@pytest.mark.parametrize("use_rocm_aiter_norm", ["0", "1"])
+@pytest.mark.parametrize("use_rocm_aiter", [True, False])
 @pytest.mark.skipif(not current_platform.is_rocm(),
                     reason="AITER is a feature exclusive for ROCm")
 def test_rms_norm_dispatch(add_residual: bool, dtype: torch.dtype,
-                           use_rocm_aiter: str, use_rocm_aiter_norm: str,
-                           monkeypatch):
-    monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_rocm_aiter)
-    monkeypatch.setenv("VLLM_ROCM_USE_AITER_RMSNORM", use_rocm_aiter_norm)
-
-    # Force reload aiter_ops to pick up the new environment variables.
-    if 'rocm_aiter_ops' in sys.modules:
-        importlib.reload(rocm_aiter_ops)
-
-    rms_norm_func = dispatch_rocm_rmsnorm_func(add_residual, dtype)
+                           use_rocm_aiter: bool):
+    rms_norm_func = dispatch_rocm_rmsnorm_func(add_residual, dtype,
+                                               use_rocm_aiter)
 
     should_use_rocm_aiter = current_platform.is_rocm() and int(use_rocm_aiter) \
-        and int(use_rocm_aiter_norm) and dtype in RMS_NORM_SUPPORTED_DTYPES
+        and int(use_rocm_aiter) and dtype in RMS_NORM_SUPPORTED_DTYPES
 
     if add_residual and should_use_rocm_aiter:
         assert rms_norm_func == rocm_aiter_ops.rms_norm2d_with_add
