@@ -710,7 +710,7 @@ class Scheduler(SchedulerInterface):
     def _try_schedule_encoder_inputs(
         self,
         request: Request,
-        num_computed_tokens: int,
+        num_computed_tokens: float,
         num_new_tokens: int,
         encoder_compute_budget: int,
     ) -> tuple[list[int], int, int]:
