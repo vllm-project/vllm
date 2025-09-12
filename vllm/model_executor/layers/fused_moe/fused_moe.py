@@ -817,32 +817,36 @@ def get_default_config(
     - Different dtypes (fp8_w8a8, int8_w8a16) have distinct optimal patterns
     """
 
+    # num_warps: Consistently 4 across dtypes (80% of configs)
+    num_warps = 4
+    # num_stages=3 can cause triton.runtime.errors.OutOfResources
+    # on ROCm, set it to 2 instead.
+    num_stages = 3 if not current_platform.is_rocm() else 2
+
     if dtype == "fp8_w8a8" and block_shape is not None:
         # Block-wise quant: BLOCK_SIZE_N must be divisible by block_shape[0]
         # BLOCK_SIZE_K must be divisible by block_shape[1]
-        # num_stages=3 can cause triton.runtime.errors.OutOfResources
-        # on ROCm, set it to 2 instead.
 
         if M <= 16:
-            # Small batch: 69% use BLOCK_SIZE_M=16, GROUP_SIZE_M=1 preferred
+            # Small batch: 69% BLOCK_SIZE_M=16, GROUP_SIZE_M=1 preferred
             block_m = 16
             group_m = 1
         elif M <= 256:
-            # Medium batch: more BLOCK_SIZE_M=64 usage, GROUP_SIZE_M=1 common
+            # Medium batch: common BLOCK_SIZE_M=64 , GROUP_SIZE_M=16
             block_m = 64
-            group_m = 1
+            group_m = 16
         else:
             # Large batch: BLOCK_SIZE_M=64/128, GROUP_SIZE_M can be larger
             block_m = 64
-            group_m = 16
+            group_m = 32
 
         config = {
             "BLOCK_SIZE_M": block_m,
             "BLOCK_SIZE_N": block_shape[0],
             "BLOCK_SIZE_K": block_shape[1],
             "GROUP_SIZE_M": group_m,
-            "num_warps": 4,
-            "num_stages": 3 if not current_platform.is_rocm() else 2,
+            "num_warps": num_warps,
+            "num_stages": num_stages,
         }
     elif dtype in ["int4_w4a16", "int8_w8a16"] and block_shape is not None:
         # moe wna16 kernels
@@ -861,7 +865,6 @@ def get_default_config(
             config = {"BLOCK_SIZE_M": 64, "GROUP_SIZE_M": 1}
     else:
         # BLOCK_SIZE_M: Strong batch size correlation
-        # Analysis shows: tiny_batch(≤8): 96% use 16, small_batch: 69-89% use 16
         if M <= 8:
             block_m = 16  # 96% of tiny batch configs use 16
         elif M <= 64:
@@ -881,17 +884,18 @@ def get_default_config(
         # BLOCK_SIZE_N: Hidden dimension and dtype correlation
         # 128 is mode across all categories (37-57% of configs)
         if N <= 1024:
-            # Small N: analysis shows preference for 64-128
+            # Small N: common 64-128
             block_n = 64 if M <= 8 else 128
         elif N <= 4096:
-            block_n = 128  # 128 dominates medium N range
+            # Medium N: common 128
+            block_n = 128
         else:
             # Large N: 128 still preferred, 256 for very large batches
             block_n = 256 if M >= 512 else 128
 
         # BLOCK_SIZE_K: Dtype and batch size dependent
         if dtype == "fp8_w8a8":
-            # FP8 shows strong preference for 128 (57-66% of configs)
+            # FP8 preference for 128 (60% of configs)
             block_k = 128
         elif dtype == "int8_w8a16":
             # INT8_W8A16 has unique pattern: tiny batches prefer 256
@@ -904,17 +908,6 @@ def get_default_config(
         else:
             # Unquantized: 64 is mode (50-75% depending on category)
             block_k = 128 if M <= 8 else 64
-
-        # num_warps: Consistently 4 across all analyses (70-80% of configs)
-        num_warps = 4
-
-        # num_stages: Dtype dependent
-        if dtype in ["fp8_w8a8", "int8_w8a16", "int8_w8a8"]:
-            num_stages = 3  # FP8/INT8 analysis shows 3 is most common
-        else:
-            # Unquantized: 4 and 2 are equally common, use 3 as compromise
-            # Analysis shows tiny batches prefer 4, larger batches prefer 3
-            num_stages = 4 if M <= 16 else 3
 
         # GROUP_SIZE_M: Data shows 1=52%, 16=19%, 32=12%
         # Large batches show significant usage of 16 (31% for M>512)
