@@ -44,6 +44,7 @@ from transformers.models.glm4v.video_processing_glm4v import (
     Glm4vVideoProcessor)
 from transformers.video_utils import VideoMetadata
 
+from vllm.attention.layer import check_upstream_fa_availability
 from vllm.config import VllmConfig
 from vllm.distributed import (get_tensor_model_parallel_world_size,
                               parallel_state)
@@ -260,7 +261,15 @@ class Glm4vVisionAttention(nn.Module):
         )
 
         # Detect attention implementation.
-        self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
+        self.attn_backend = get_vit_attn_backend(
+            head_size=self.hidden_size_per_attention_head,
+            dtype=torch.get_default_dtype())
+        self.use_upstream_fa = False
+        if self.attn_backend != _Backend.FLASH_ATTN and \
+            check_upstream_fa_availability(torch.get_default_dtype()):
+            self.attn_backend = _Backend.FLASH_ATTN
+            self.use_upstream_fa = True
+
         if self.attn_backend not in {
                 _Backend.FLASH_ATTN,
                 _Backend.TORCH_SDPA,
@@ -272,22 +281,9 @@ class Glm4vVisionAttention(nn.Module):
     def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
         # [s, b, 3 * head * head_dim]
         seq_len, bs, _ = qkv.shape
-        if self.tp_size > 1:
-            qkv = all_gather_interleave(qkv, self.qkv.hidden_size,
-                                        self.tp_size)
 
         # [s, b, 3 * head * head_dim] -> 3 * [s, b, head * head_dim]
         q, k, v = qkv.chunk(3, dim=2)
-
-        # 3 * [s, b, head * head_dim]
-        if self.tp_size > 1:
-            splitter = partial(
-                dist_utils.split_tensor_along_last_dim,
-                num_partitions=self.tp_size,
-            )
-            q = splitter(q)[self.tp_rank]
-            k = splitter(k)[self.tp_rank]
-            v = splitter(v)[self.tp_rank]
 
         # 3 * [s, b, head * head_dim] -> 3 * [s, b, head, head_dim]
         new_shape = (
@@ -323,7 +319,10 @@ class Glm4vVisionAttention(nn.Module):
         if self.attn_backend == _Backend.FLASH_ATTN:
             # from vllm_flash_attn.flash_attn_interface import (
             #   flash_attn_varlen_func)
-            from flash_attn import flash_attn_varlen_func
+            if self.use_upstream_fa:
+                from flash_attn import flash_attn_varlen_func
+            else:
+                from vllm.vllm_flash_attn import flash_attn_varlen_func
 
             q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
 
@@ -729,7 +728,11 @@ class Glm4vVisionTransformer(nn.Module):
         self.post_layernorm = RMSNorm(vision_config.hidden_size,
                                       eps=vision_config.rms_norm_eps)
 
-        self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
+        self.attn_backend = get_vit_attn_backend(
+            head_size=head_dim, dtype=torch.get_default_dtype())
+        if self.attn_backend != _Backend.FLASH_ATTN and \
+            check_upstream_fa_availability(torch.get_default_dtype()):
+            self.attn_backend = _Backend.FLASH_ATTN
 
     @property
     def dtype(self) -> torch.dtype:
@@ -1037,6 +1040,43 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
             selected_timestamps.append(timestamps_list[idx])
         return selected_timestamps
 
+    def _construct_video_placeholder(
+        self,
+        video_array: np.ndarray,
+        metadata: dict[str, Any],
+        grid_thw: torch.Tensor,
+    ) -> str:
+        hf_processor = self.get_hf_processor()
+        tokenizer = self.get_tokenizer()
+        image_processor = hf_processor.image_processor
+
+        hf_config = self.get_hf_config()
+        boi_token_id = hf_config.image_start_token_id
+        eoi_token_id = hf_config.image_end_token_id
+        bov_token_id = hf_config.video_start_token_id
+        eov_token_id = hf_config.video_end_token_id
+        merge_length = image_processor.merge_size**2
+
+        assert isinstance(grid_thw, torch.Tensor)
+        timestamps = self._get_video_second_idx(metadata, len(video_array))
+        frames_idx_token = [
+            tokenizer.encode(str(i), add_special_tokens=False)
+            for i in timestamps
+        ]
+        T, H, W = grid_thw
+        num_tokens_per_frame = int(H * W) // merge_length
+        placeholder = []
+        placeholder.append(bov_token_id)
+        for frame_idx in frames_idx_token:
+            placeholder.append(boi_token_id)
+            placeholder.extend([hf_processor.video_token_id] *
+                               num_tokens_per_frame)
+            placeholder.append(eoi_token_id)
+            placeholder.extend(frame_idx)
+        placeholder.append(eov_token_id)
+
+        return placeholder
+
 
 class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
 
@@ -1132,17 +1172,10 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             for item in mm_data.pop("videos", []):
                 video_array, metadata = item
 
-                # FIXME(Isotr0py): Activate the below logic after we can disable
-                # resampling from video loader backend.
-                # assert metadata["total_num_frames"] == len(video_array), (
-                #     f"Total frames {metadata['total_num_frames']} does not "
-                #     f"match the length of video array {len(video_array)}.")
+                if metadata["video_backend"] == "opencv_dynamic":
+                    mm_kwargs["do_sample_frames"] = False
 
-                # NOTE: Temporary workaround for resampled videos.
-                # this can cause a divergence with HF implementation if
-                # the input video is resampled in advance.
-
-                if metadata["total_num_frames"] != len(video_array):
+                elif metadata["total_num_frames"] != len(video_array):
                     logger.warning(
                         "Total frames in metadata "
                         "(%s) does not match the length of "
@@ -1154,11 +1187,10 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                         len(video_array),
                     )
                     metadata["total_num_frames"] = len(video_array)
-                metadata = VideoMetadata(**metadata)
 
                 video_mm_data = dict()
                 video_mm_data["videos"] = [[video_array]]
-                video_mm_data["video_metadata"] = [[metadata]]
+                video_mm_data["video_metadata"] = [[VideoMetadata(**metadata)]]
 
                 video_outputs = super()._call_hf_processor(
                     prompt="<|begin_of_video|><|video|><|end_of_video|>",
@@ -1166,11 +1198,23 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                     mm_kwargs=mm_kwargs,
                     tok_kwargs=tok_kwargs,
                 )
-                input_ids = video_outputs.pop("input_ids")
-                input_ids[input_ids == processor.image_token_id] = (
-                    processor.video_token_id)
-                video_placeholder = processor.tokenizer.batch_decode(
-                    input_ids)[0]
+                if "do_sample_frames" in mm_kwargs and not mm_kwargs[
+                        "do_sample_frames"]:
+                    # Transformers v4.55 has incorrect timestamps issue for
+                    # skip sampling. We construct the placeholder manually to
+                    # get placeholders with correct timestamps.
+                    placeholder = self.info._construct_video_placeholder(
+                        video_array,
+                        metadata,
+                        video_outputs["video_grid_thw"].squeeze(0),
+                    )
+                    video_placeholder = processor.tokenizer.decode(placeholder)
+                else:
+                    input_ids = video_outputs.pop("input_ids")
+                    input_ids[input_ids == processor.image_token_id] = (
+                        processor.video_token_id)
+                    video_placeholder = processor.tokenizer.batch_decode(
+                        input_ids)[0]
                 prompt = prompt.replace(
                     "<|begin_of_video|><|video|><|end_of_video|>",
                     video_placeholder,
@@ -1216,14 +1260,6 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(
             **hf_processor_mm_kwargs)
-        tokenizer = self.info.get_tokenizer()
-        hf_config = self.info.get_hf_config()
-
-        boi_token_id = hf_config.image_start_token_id
-        eoi_token_id = hf_config.image_end_token_id
-
-        bov_token_id = hf_config.video_start_token_id
-        eov_token_id = hf_config.video_end_token_id
 
         merge_length = image_processor.merge_size**2
 
@@ -1241,21 +1277,8 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             assert isinstance(grid_thw, torch.Tensor)
 
             video, metadata = mm_items["video"][item_idx]
-            timestamps = self.info._get_video_second_idx(metadata, len(video))
-            frames_idx_token = [
-                tokenizer.encode(str(i), add_special_tokens=False)
-                for i in timestamps
-            ]
-            num_tokens_per_frame = int(grid_thw[1:].prod()) // merge_length
-            placeholder = []
-            placeholder.append(bov_token_id)
-            for frame_idx in frames_idx_token:
-                placeholder.append(boi_token_id)
-                placeholder.extend([hf_processor.video_token_id] *
-                                   num_tokens_per_frame)
-                placeholder.append(eoi_token_id)
-                placeholder.extend(frame_idx)
-            placeholder.append(eov_token_id)
+            placeholder = self.info._construct_video_placeholder(
+                video, metadata, grid_thw)
             return PromptUpdateDetails.select_token_id(
                 placeholder,
                 embed_token_id=hf_processor.video_token_id,
@@ -1356,7 +1379,7 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
                 raise ValueError(f"{name} should be 2D or batched 3D tensor. "
                                  f"Got ndim: {mm_input.ndim} "
                                  f"(shape={mm_input.shape})")
-            return torch.concat(list(mm_input))
+            return mm_input.reshape(-1, mm_input.shape[-1])
         else:
             return torch.concat(mm_input)
 
@@ -1577,17 +1600,10 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
                 **NOTE**: If mrope is enabled (default setting for GLM-4V
                 opensource models), the shape will be `(3, seq_len)`,
                 otherwise it will be `(seq_len,).
-            pixel_values: Pixel values to be fed to a model.
-                `None` if no images are passed.
-            image_grid_thw: Tensor `(n_images, 3)` of image 3D grid in LLM.
-                `None` if no images are passed.
-            pixel_values_videos: Pixel values of videos to be fed to a model.
-                `None` if no videos are passed.
-            video_grid_thw: Tensor `(n_videos, 3)` of video 3D grid in LLM.
-                `None` if no videos are passed.
-            second_per_grid_ts: Tensor `(num_videos)` of video time interval (
-                in seconds) for each grid along the temporal dimension in the
-                3D position IDs. `None` if no videos are passed.
+            intermediate_tensors: Optional intermediate tensors for pipeline
+                parallelism.
+            inputs_embeds: Optional pre-computed input embeddings.
+            **kwargs: Additional keyword arguments.
         """
         if intermediate_tensors is not None:
             inputs_embeds = None
