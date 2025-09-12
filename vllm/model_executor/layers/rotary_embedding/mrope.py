@@ -135,8 +135,8 @@ def triton_mrope(
     """Qwen2VL mrope kernel.
 
     Args:
-        query: [num_tokens, num_heads * head_size]
-        key: [num_tokens, num_kv_heads * head_size]
+        q: [num_tokens, num_heads * head_size]
+        k: [num_tokens, num_kv_heads * head_size]
         cos: [3, num_tokens, head_size //2 ]
             (T/H/W positions with multimodal inputs)
         sin: [3, num_tokens, head_size //2 ]

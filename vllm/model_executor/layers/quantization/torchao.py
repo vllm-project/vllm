@@ -144,9 +144,9 @@ def torchao_quantize_param_data(param: torch.Tensor,
     """Quantize a Tensor with torchao quantization specified by torchao_config
 
     Args:
-       `param`: weight parameter of the linear module
-       `torchao_config`: type of quantization and their arguments we want to
-        use to quantize the Tensor
+        param: weight parameter of the linear module
+        torchao_config: type of quantization and their arguments we want to
+            use to quantize the Tensor
     """
     from torchao.core.config import AOBaseConfig
     from torchao.quantization import quantize_
@@ -172,8 +172,8 @@ class TorchAOLinearMethod(LinearMethodBase):
     """Linear method for torchao.
 
     Args:
-        torchao_config: The torchao quantization config, a string
-        that encodes the type of quantization and all relevant arguments.
+        quant_config: The torchao quantization config, a string that encodes 
+            the type of quantization and all relevant arguments.
     """
 
     def __init__(self, quant_config: TorchAOConfig):
