@@ -256,13 +256,10 @@ class ExecutorBase(ABC):
         exception."""
         self.check_health()
 
-    def init_kv_output_aggregator(self) -> None:
+    def init_kv_output_aggregator(self, finished_count: Optional[int]) -> None:
         """Init KVOutputAggregator"""
-        if has_kv_transfer_group():
-            kv_connector = get_kv_transfer_group()
-            self.kv_output_aggregator = KVOutputAggregator(
-                kv_connector.get_finished_count()
-                or self.parallel_config.world_size)
+        self.kv_output_aggregator = KVOutputAggregator(
+            finished_count or self.parallel_config.world_size)
 
 
 class DistributedExecutorBase(ExecutorBase):

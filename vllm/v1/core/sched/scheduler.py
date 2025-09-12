@@ -11,8 +11,8 @@ from typing import Any, Optional, Union
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
-from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
-                                          get_kv_transfer_group)
+from vllm.distributed.kv_transfer.kv_connector.factory import (
+    KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
                                                           KVConnectorRole)
 from vllm.logger import init_logger
@@ -80,6 +80,7 @@ class Scheduler(SchedulerInterface):
         # will have a corresponding KVConnector with Role=WORKER.
         # KV Connector pushes/pull of remote KVs for P/D and offloading.
         self.connector = None
+        self.finished_count: Optional[int] = None
         if self.vllm_config.kv_transfer_config is not None:
             assert len(self.kv_cache_config.kv_cache_groups) == 1, (
                 "Multiple KV cache groups are not currently supported "
@@ -87,9 +88,9 @@ class Scheduler(SchedulerInterface):
             assert not self.is_encoder_decoder, (
                 "Encoder-decoder models are not currently supported "
                 "with KV connectors")
-            ensure_kv_transfer_initialized(self.vllm_config,
-                                           KVConnectorRole.SCHEDULER)
-            self.connector = get_kv_transfer_group()
+            self.connector = KVConnectorFactory.create_connector(
+                config=self.vllm_config, role=KVConnectorRole.SCHEDULER)
+            self.finished_count = self.connector.get_finished_count()
 
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
