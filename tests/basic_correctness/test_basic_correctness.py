@@ -16,7 +16,8 @@ from vllm.v1.engine.llm_engine import LLMEngine as LLMEngineV1
 
 from ..conftest import HfRunner, VllmRunner
 from ..models.utils import check_outputs_equal
-from ..utils import multi_gpu_marks, multi_gpu_test
+from ..utils import (create_new_process_for_each_test, multi_gpu_marks,
+                     multi_gpu_test)
 
 MODELS = [
     "google/gemma-2-2b-it",
@@ -58,6 +59,9 @@ def _fix_prompt_embed_outputs(
     return fixed_vllm_outputs
 
 
+# tensor parallel tests can cause CUDA forked initialization errors elsewhere
+# unless they are performed in a new process.
+@create_new_process_for_each_test()
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("backend", ["FLASH_ATTN"])
 @pytest.mark.parametrize("max_tokens", [5])
