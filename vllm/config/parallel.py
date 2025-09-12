@@ -29,6 +29,7 @@ else:
 
 logger = init_logger(__name__)
 
+ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 
 
@@ -102,6 +103,8 @@ class ParallelConfig:
     """Enable expert parallelism load balancing for MoE layers."""
     eplb_config: EPLBConfig = field(default_factory=EPLBConfig)
     """Expert parallelism configuration."""
+    expert_placement_strategy: ExpertPlacementStrategy = "linear"
+    """The expert placement strategy for MoE layers."""
     num_redundant_experts: Optional[int] = None
     """`num_redundant_experts` is deprecated and has been replaced with
     `eplb_config.num_redundant_experts`. This will be removed in v0.12.0.
