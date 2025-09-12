@@ -634,15 +634,15 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
     def get_fused_moe_quant_config(
             self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
 
-        if self.use_marlin:
+        if self.mxfp4_backend == Mxfp4Backend.MARLIN:
             return None
 
-        if should_use_flashinfer_mxfp4():
-            w1_scale = layer.w13_weight_scale
-            w2_scale = layer.w2_weight_scale
-        else:
+        if self.mxfp4_backend == Mxfp4Backend.TRITON:
             w1_scale = layer.w13_precision_config
             w2_scale = layer.w2_precision_config
+        else:
+            w1_scale = layer.w13_weight_scale
+            w2_scale = layer.w2_weight_scale
 
         return mxfp4_w4a4_moe_quant_config(
             w1_bias=layer.w13_bias,
