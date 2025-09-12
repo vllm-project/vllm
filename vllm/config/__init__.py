@@ -1781,7 +1781,8 @@ class ModelConfig:
         """
 
         if self.runner_type != "pooling":
-            return self.dtype
+            raise ValueError(
+                "`head_dtype` currently only supports pooling models.")
 
         head_dtype = _get_head_dtype(config=self.hf_config,
                                      dtype=self.dtype,
