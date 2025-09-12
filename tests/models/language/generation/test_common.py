@@ -119,6 +119,12 @@ def test_models(hf_runner, vllm_runner, example_prompts, model: str,
         # in parts of the operators
         pytest.skip(f"Skipping '{model}' model test with AITER kernel.")
 
+    # Note: can be removed when
+    # https://github.com/vllm-project/vllm/pull/24278 finished
+    if current_platform.is_cpu() and use_prompt_embeds:
+        pytest.skip("Skipping use_prompt_embeds=True with "
+                    "V1-only CPU backend.")
+
     with hf_runner(model) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs)
