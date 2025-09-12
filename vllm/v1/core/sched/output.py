@@ -6,6 +6,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
+from vllm import bc_linter_include
+
 if TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
@@ -20,6 +22,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_utils import KVPrefixAlignedGroups
 
 
+@bc_linter_include
 @dataclass
 class NewRequestData:
 
@@ -81,6 +84,7 @@ class NewRequestData:
                 ")")
 
 
+@bc_linter_include
 @dataclass
 class CachedRequestData:
 
@@ -110,6 +114,7 @@ class CachedRequestData:
         )
 
 
+@bc_linter_include
 @dataclass
 class SchedulerOutput:
 

@@ -5,7 +5,8 @@ from typing import Optional
 
 from typing_extensions import assert_never
 
-from vllm.config import LoRAConfig, ModelConfig, SchedulerConfig
+from vllm.config import ModelConfig, SchedulerConfig
+from vllm.config.lora import LoRAConfig
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, encode_tokens,
                                                get_lora_tokenizer,
@@ -23,6 +24,7 @@ class TokenizerGroup:
         self.tokenizer_config = tokenizer_config
         self.enable_lora = enable_lora
         self.max_input_length = max_input_length
+        self.truncation_side = tokenizer_config.get("truncation_side", "left")
         self.tokenizer = get_tokenizer(self.tokenizer_id, **tokenizer_config)
         max_loras = tokenizer_config.get("max_loras", 0)
         self.lora_tokenizers = LRUCache[int, AnyTokenizer](
