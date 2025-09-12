@@ -8,7 +8,7 @@ from typing import Union
 import partial_json_parser
 from partial_json_parser.core.options import Allow
 
-from vllm.entrypoints.chat_utils import random_tool_call_id
+from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
@@ -35,7 +35,7 @@ class Internlm2ToolParser(ToolParser):
             self, request: ChatCompletionRequest) -> ChatCompletionRequest:
         if request.tools and request.tool_choice != 'none':
             # do not skip special tokens because internlm use the special
-            # tokens to indicated the start and end of the tool calls
+            # tokens to indicate the start and end of the tool calls
             # information.
             request.skip_special_tokens = False
         return request
@@ -60,8 +60,8 @@ class Internlm2ToolParser(ToolParser):
         if '<|action_start|>' not in current_text:
             self.position = len(current_text)
             return DeltaMessage(content=delta_text)
-        # if the tool call is sended, return a empty delta message
-        # to make sure the finish_reason will be send correctly.
+        # if the tool call is sended, return an empty delta message
+        # to make sure the finish_reason will be sent correctly.
         if self.current_tool_id > 0:
             return DeltaMessage(content='')
 
@@ -107,7 +107,7 @@ class Internlm2ToolParser(ToolParser):
                     delta = DeltaMessage(tool_calls=[
                         DeltaToolCall(index=self.current_tool_id,
                                       type="function",
-                                      id=random_tool_call_id(),
+                                      id=make_tool_call_id(),
                                       function=DeltaFunctionCall(
                                           name=function_name).model_dump(
                                               exclude_none=True))

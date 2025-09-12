@@ -10,11 +10,15 @@ from vllm import _custom_ops as ops
 from vllm import envs
 from vllm._aiter_ops import aiter_ops
 from vllm.config import CompilationLevel, get_current_vllm_config
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape)
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
+from vllm.utils.flashinfer import flashinfer_scaled_fp8_mm, has_flashinfer
+
+logger = init_logger(__name__)
 
 # Input scaling factors are no longer optional in _scaled_mm starting
 # from pytorch 2.5. Allocating a dummy tensor to pass as input_scale
@@ -23,7 +27,7 @@ TORCH_DEVICE_IDENTITY = None
 # The condition to determine if it is on a platform that supports
 # torch._scaled_mm rowwise feature.
 # The condition is determined once as the operations
-# are time consuming.
+# are time-consuming.
 USE_ROWWISE_TORCH_SCALED_MM = (current_platform.is_rocm() and version.parse(
     torch.__version__) >= version.parse("2.7")
                                and current_platform.has_device_capability(94))
@@ -222,12 +226,23 @@ def rocm_aiter_per_tensor_w8a8_scaled_mm(qinput: torch.Tensor,
     return torch.narrow(output, 0, 0, input_2d.shape[0]).view(*output_shape)
 
 
-def rocm_per_tensor_w8a8_scaled_mm(qinput: torch.Tensor, weight: torch.Tensor,
-                                   out_dtype: torch.dtype,
-                                   scale_a: torch.Tensor,
-                                   scale_b: torch.Tensor, bias: torch.Tensor,
-                                   input_2d: torch.Tensor,
-                                   output_shape: list) -> torch.Tensor:
+def flashinfer_w8a8_scaled_mm(*, qinput: torch.Tensor, weight: torch.Tensor,
+                              out_dtype: torch.dtype, scale_a: torch.Tensor,
+                              scale_b: torch.Tensor, bias: torch.Tensor,
+                              output_shape: list, **kwargs) -> torch.Tensor:
+
+    return flashinfer_scaled_fp8_mm(qinput,
+                                    weight,
+                                    out_dtype=out_dtype,
+                                    scale_a=scale_a,
+                                    scale_b=scale_b,
+                                    bias=bias)
+
+
+def rocm_per_tensor_w8a8_scaled_mm_impl(
+        qinput: torch.Tensor, weight: torch.Tensor, out_dtype: torch.dtype,
+        scale_a: torch.Tensor, scale_b: torch.Tensor, bias: torch.Tensor,
+        input_2d: torch.Tensor) -> torch.Tensor:
     from vllm.platforms.rocm import on_mi3xx
     if envs.VLLM_ROCM_USE_SKINNY_GEMM and on_mi3xx(
     ) and qinput.shape[0] == 1 and qinput.shape[1] % 16 == 0:
@@ -240,8 +255,36 @@ def rocm_per_tensor_w8a8_scaled_mm(qinput: torch.Tensor, weight: torch.Tensor,
                                   scale_a=scale_a,
                                   scale_b=scale_b,
                                   bias=bias)
+    return output
 
+
+def rocm_per_tensor_w8a8_scaled_mm_fake(
+        qinput: torch.Tensor, weight: torch.Tensor, out_dtype: torch.dtype,
+        scale_a: torch.Tensor, scale_b: torch.Tensor, bias: torch.Tensor,
+        input_2d: torch.Tensor) -> torch.Tensor:
+    return qinput.new_empty((*qinput.shape[:-1], weight.shape[1]),
+                            dtype=out_dtype)
+
+
+def rocm_per_tensor_w8a8_scaled_mm(*, qinput: torch.Tensor,
+                                   weight: torch.Tensor,
+                                   out_dtype: torch.dtype,
+                                   scale_a: torch.Tensor,
+                                   scale_b: torch.Tensor, bias: torch.Tensor,
+                                   input_2d: torch.Tensor,
+                                   output_shape: list) -> torch.Tensor:
+    output = torch.ops.vllm.rocm_per_tensor_w8a8_scaled_mm_impl(
+        qinput, weight, out_dtype, scale_a, scale_b, bias, input_2d)
     return torch.narrow(output, 0, 0, input_2d.shape[0]).view(*output_shape)
+
+
+direct_register_custom_op(
+    op_name="rocm_per_tensor_w8a8_scaled_mm_impl",
+    op_func=rocm_per_tensor_w8a8_scaled_mm_impl,
+    mutates_args=[],
+    fake_impl=rocm_per_tensor_w8a8_scaled_mm_fake,
+    dispatch_key=current_platform.dispatch_key,
+)
 
 
 def torch_per_tensor_w8a8_scaled_mm(qinput: torch.Tensor, weight: torch.Tensor,
@@ -268,8 +311,8 @@ def torch_per_token_w8a8_scaled_mm(qinput: torch.Tensor, weight: torch.Tensor,
                                    out_dtype: torch.dtype,
                                    scale_a: torch.Tensor,
                                    scale_b: torch.Tensor, bias: torch.Tensor,
-                                   input_2d: torch.Tensor,
-                                   output_shape: list) -> torch.Tensor:
+                                   input_2d: torch.Tensor, output_shape: list,
+                                   **kwargs) -> torch.Tensor:
     # Note: Callers of this function should check USE_ROWWISE_TORCH_SCALED_MM
     #  when using it.
     #  For now it has only been validated on ROCm platform.
@@ -301,7 +344,7 @@ def rocm_aiter_per_token_w8a8_scaled_mm(qinput: torch.Tensor,
                                         bias: torch.Tensor,
                                         input_2d: torch.Tensor,
                                         output_shape: list) -> torch.Tensor:
-    output_shape = [*qinput.shape[:-1], weight.shape[0]]
+
     output = torch.ops.vllm.rocm_aiter_gemm_a8w8_bpreshuffle(
         qinput, weight, out_dtype=out_dtype, scale_a=scale_a, scale_b=scale_b)
     if bias is not None:
@@ -357,23 +400,26 @@ def torch_channelwise_w8a8_scaled_mm(qinput: torch.Tensor,
 
 
 def dispatch_w8a8_scaled_mm(
-        cutlass_fp8_supported: bool, use_aiter_and_is_supported: bool,
-        per_tensor_weights: bool,
+        preferred_backend: str, per_tensor_weights: bool,
         per_tensor_activations: bool) -> Callable[..., torch.Tensor]:
 
-    # cutlass_scaled_mm supports per tensor/channel W and per tensor/token A
-    if cutlass_fp8_supported:
-        return cutlass_w8a8_scaled_mm
     if per_tensor_weights and per_tensor_activations:
-        if use_aiter_and_is_supported:
-            return rocm_aiter_per_tensor_w8a8_scaled_mm
-        if current_platform.is_rocm():
+        if preferred_backend == "rocm":
             return rocm_per_tensor_w8a8_scaled_mm
+        if preferred_backend == "flashinfer":
+            return flashinfer_w8a8_scaled_mm
+        if preferred_backend == "cutlass":
+            return cutlass_w8a8_scaled_mm
         return torch_per_tensor_w8a8_scaled_mm
+
+    # cutlass_scaled_mm supports per tensor/channel W and per tensor/token A
+    if preferred_backend == "cutlass" or preferred_backend == "flashinfer":
+        return cutlass_w8a8_scaled_mm
+
     # If torch.scaled_mm supports per-channel (weights) per-token (inputs)
     if not per_tensor_weights and not per_tensor_activations \
             and USE_ROWWISE_TORCH_SCALED_MM:
-        if use_aiter_and_is_supported:
+        if preferred_backend == "aiter":
             return rocm_aiter_per_token_w8a8_scaled_mm
         return torch_per_token_w8a8_scaled_mm
     # Normally, torch.scaled_mm supports per tensor weights + activations only
@@ -393,10 +439,8 @@ class Fp8LinearOp:
 
     def __init__(self,
                  act_quant_static: bool,
-                 cutlass_fp8_supported: bool = cutlass_fp8_supported(),
                  act_quant_group_shape: GroupShape = GroupShape.PER_TENSOR,
                  pad_output: Optional[bool] = None):
-        self.cutlass_fp8_supported = cutlass_fp8_supported
 
         # AITER is only supported on ROCm and only for FP8_FNUZ
         # and at the moment are MI300 series
@@ -404,6 +448,19 @@ class Fp8LinearOp:
                                            and envs.VLLM_ROCM_USE_AITER
                                            and envs.VLLM_ROCM_USE_AITER_LINEAR
                                            and current_platform.is_fp8_fnuz())
+
+        if self.use_aiter_and_is_supported:
+            self.preferred_backend = "aiter"
+        elif current_platform.is_rocm():
+            self.preferred_backend = "rocm"
+        elif current_platform.is_cuda() and cutlass_fp8_supported():
+            if has_flashinfer() and current_platform.has_device_capability(
+                    100):
+                self.preferred_backend = "flashinfer"
+            else:
+                self.preferred_backend = "cutlass"
+        else:
+            self.preferred_backend = "torch"
 
         # Note: we pad the input because torch._scaled_mm is more performant
         # for matrices with batch dimension > 16.
@@ -413,8 +470,7 @@ class Fp8LinearOp:
         if pad_output is None:
             config = get_current_vllm_config().compilation_config
             pad_output = config.level < CompilationLevel.PIECEWISE and \
-                         not cutlass_fp8_supported and \
-                         not current_platform.is_rocm()
+                         self.preferred_backend == "torch"
 
         self.output_padding = 17 if pad_output else None
         self.act_quant_static = act_quant_static
@@ -439,6 +495,8 @@ class Fp8LinearOp:
 
         # View input as 2D matrix for fp8 methods
         input_2d = input.view(-1, input.shape[-1])
+
+        # weight is transposed (K, N)
         output_shape = [*input.shape[:-1], weight.shape[1]]
 
         if out_dtype is None:
@@ -459,10 +517,15 @@ class Fp8LinearOp:
                               == 1) and weight_scale.dim() < 2
         per_tensor_activations = (x_scale.numel() == 1) and x_scale.dim() < 2
 
+        if self.use_aiter_and_is_supported and not (per_tensor_weights and
+                                                    per_tensor_activations):
+            # weight is in (N, K)
+            output_shape = [*input.shape[:-1], weight.shape[0]]
+
         # TODO(luka) do this dispatch during init (after ScaledMM refactor)
-        w8a8_scaled_mm_func = dispatch_w8a8_scaled_mm(
-            self.cutlass_fp8_supported, self.use_aiter_and_is_supported,
-            per_tensor_weights, per_tensor_activations)
+        w8a8_scaled_mm_func = dispatch_w8a8_scaled_mm(self.preferred_backend,
+                                                      per_tensor_weights,
+                                                      per_tensor_activations)
 
         return w8a8_scaled_mm_func(qinput,
                                    weight=weight,

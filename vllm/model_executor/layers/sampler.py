@@ -13,14 +13,14 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
+from vllm.logprobs import Logprob, PromptLogprobs, SampleLogprobs
 from vllm.model_executor.layers.utils import apply_penalties
 from vllm.model_executor.sampling_metadata import (SamplingMetadata,
                                                    SamplingTensors,
                                                    SequenceGroupToSample)
 from vllm.sampling_params import SamplingType
 from vllm.sequence import (VLLM_INVALID_TOKEN_ID,
-                           CompletionSequenceGroupOutput, Logprob,
-                           PromptLogprobs, SampleLogprobs, SequenceOutput)
+                           CompletionSequenceGroupOutput, SequenceOutput)
 
 if envs.VLLM_USE_FLASHINFER_SAMPLER and find_spec("flashinfer"):
     # yapf: disable

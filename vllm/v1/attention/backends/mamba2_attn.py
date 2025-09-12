@@ -2,23 +2,72 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from dataclasses import dataclass
-from typing import ClassVar, Optional
+from typing import Optional
 
 import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import VllmConfig
-from vllm.v1.attention.backends.utils import (AttentionCGSupport,
-                                              AttentionMetadataBuilder,
-                                              CommonAttentionMetadata,
+from vllm.v1.attention.backends.mamba_attn import (
+    BaseMambaAttentionMetadataBuilder)
+from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
                                               split_decodes_and_prefills)
-from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 
-def _query_start_loc_to_chunk_indices_offsets(query_start_loc: torch.Tensor,
-                                              chunk_size: int,
-                                              total_seqlens: int):
+def _query_start_loc_to_chunk_indices_offsets(
+        query_start_loc: torch.Tensor, chunk_size: int,
+        total_seqlens: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Args:
+        query_start_loc (torch.Tensor): 1D tensor of cumulative sequence 
+            lengths, shape (num_seqs + 1,).
+            The first element should be 0. Each entry represents the starting
+            index of a sequence in the flattened token array.
+        chunk_size (int): The size of each physical mamba chunk
+            (number of tokens per chunk).
+        total_seqlens (int): The total number of tokens in the batch.
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor]: A tuple containing:
+            - chunk_indices (torch.Tensor): 1D tensor of indices 
+                indicating the physical chunk for each logical chunk.
+            - chunk_offsets (torch.Tensor): 1D tensor of offsets
+                indicating the starting index of each logical chunk within
+                its physical chunk.
+
+    This function computes the chunk indices and offsets for the given
+    query_start_loc and chunk_size. Both are tensors of integers with length N,
+    where N is the number of logical (pseudo) chunks.
+    A logical chunk is a sequence of tokens that are all part of the same
+    sequence and are all in the same physical mamba chunk.
+    In other words, a logical chunk changes every time we cross a sequence
+    boundary or a physical mamba chunk boundary.
+    Logical chunks are needed to handle batched requests with initial states
+    (see _state_passing_fwd and _chunk_scan_fwd).
+    The chunk_indices tensor contains the index of the physical chunk for each
+    logical chunk.
+    The chunk_offsets tensor contains the offset (AKA starting index) of the
+    logical chunk in the physical chunk.
+
+    Example:
+    query_start_loc = [0, 5, 10]
+    chunk_size = 8
+    total_seqlens = 10
+    -> chunk_indices = [0, 0, 1]
+    -> chunk_offsets = [0, 5, 0]
+
+    In this example, we have 2 sequences, each with 5 tokens. The physical
+    chunk size is 8 tokens.
+    We have three logical chunks:
+    - the first logical chunk starts at token 0 in the first physical chunk
+        and contains all 5 tokens from the first sequence
+    - the second logical chunk starts at token 5 in the first physical chunk
+        and contains first 3 tokens from the second sequence
+    - the third logical chunk starts at token 0 in the second physical chunk
+        and contains the remaining 2 tokens from the second sequence
+    """
 
     cu_seqlens = query_start_loc[1:]  # remove prepended 0
 
@@ -88,29 +137,14 @@ class Mamba2AttentionMetadata:
 
 
 class Mamba2AttentionMetadataBuilder(
-        AttentionMetadataBuilder[Mamba2AttentionMetadata]):
-    cudagraph_support: ClassVar[AttentionCGSupport] = \
-        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
-
-    reorder_batch_threshold: ClassVar[int] = 1
+        BaseMambaAttentionMetadataBuilder[Mamba2AttentionMetadata]):
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
-        assert isinstance(kv_cache_spec, MambaSpec)
-        self.kv_cache_spec = kv_cache_spec
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.chunk_size = vllm_config.model_config.get_mamba_chunk_size()
-        self.vllm_config = vllm_config
-        self.compilation_config = vllm_config.compilation_config
         assert self.chunk_size is not None, (
             "chunk_size needs to be set in the model config for Mamba2 models")
-        self.decode_cudagraph_max_bs = min(
-            self.vllm_config.scheduler_config.max_num_seqs,
-            self.compilation_config.max_capture_size)
-        self.state_indices_tensor = torch.empty(
-            (self.decode_cudagraph_max_bs, ),
-            dtype=torch.int32,
-            device=device,
-        )
 
     def build(self,
               common_prefix_len: int,
@@ -130,8 +164,9 @@ class Mamba2AttentionMetadataBuilder(
         state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
-            split_decodes_and_prefills(common_attn_metadata,
-                                       decode_threshold=1))
+            split_decodes_and_prefills(
+                common_attn_metadata,
+                decode_threshold=self.reorder_batch_threshold))
 
         # Compute seq_idx, chunk_indices and chunk_offsets for prefill only
         if num_prefills > 0:
@@ -187,19 +222,3 @@ class Mamba2AttentionMetadataBuilder(
             state_indices_tensor=state_indices_tensor,
         )
         return attn_metadata
-
-    def build_for_cudagraph_capture(
-            self, common_attn_metadata: CommonAttentionMetadata):
-        """
-        This method builds the metadata for full cudagraph capture.
-        Currently, only decode is supported for full cudagraphs with Mamba.
-        """
-        m = common_attn_metadata
-
-        assert m.num_reqs == m.num_actual_tokens, \
-            "Mamba only supports decode-only full CUDAGraph capture. " \
-            "Make sure all cudagraph capture sizes <= max_num_seq."
-
-        m.max_query_len = 1  # decode-only
-
-        return self.build(0, m)

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Jamba model."""
 from collections.abc import Iterable
+from itertools import islice
 from typing import Optional
 
 import torch
@@ -10,6 +11,7 @@ from transformers import JambaConfig
 
 from vllm import envs
 from vllm.attention.layer import Attention
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
@@ -154,10 +156,10 @@ class JambaMambaDecoderLayer(nn.Module):
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
 
-        hidden_states = self.mamba(hidden_states, mamba_cache_params)
+        output = torch.empty_like(hidden_states)
+        self.mamba(hidden_states, output, mamba_cache_params)
         # Fully Connected
-        hidden_states, residual = self.pre_ff_layernorm(
-            hidden_states, residual)
+        hidden_states, residual = self.pre_ff_layernorm(output, residual)
         hidden_states = self.feed_forward(hidden_states)
         return hidden_states, residual
 
@@ -278,6 +280,7 @@ ALL_DECODER_LAYER_TYPES = {
 }
 
 
+@support_torch_compile
 class JambaModel(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -348,7 +351,7 @@ class JambaModel(nn.Module):
 
         kv_cache_index = 0
         mamba_cache_index = 0
-        for layer in self.layers[self.start_layer:self.end_layer]:
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             layer_mamba_cache_params = None
             if isinstance(layer, JambaAttentionDecoderLayer):
                 kv_cache_index += 1
@@ -610,7 +613,7 @@ class JambaForSequenceClassification(JambaForCausalLM):
             config.hidden_size,
             num_labels,
             bias=score_bias,
-            dtype=torch.float32,
+            dtype=vllm_config.model_config.head_dtype,
         )
 
         pooler_config = vllm_config.model_config.pooler_config

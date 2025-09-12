@@ -7,6 +7,8 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
+    FlashInferCutlassMoEPrepareAndFinalize)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP)
 from vllm.utils.flashinfer import (flashinfer_cutlass_fused_moe,
@@ -59,8 +61,8 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 per_act_token_quant=False,
                 block_shape=None,
             ))
-        assert quant_dtype == "nvfp4", ("Only nvfp4 quantization is "
-                                        "currently supported.")
+        assert quant_dtype in ("nvfp4", torch.float8_e4m3fn), (
+            "Only nvfp4,fp8 quantization are currently supported.")
         self.ep_rank = ep_rank
         self.ep_size = ep_size
         self.tp_rank = tp_rank
@@ -120,7 +122,8 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         """
         aq_m, aq_n = aq.shape
         workspace2 = ()
-        output_shape = (aq_m, aq_n * 2)
+        output_shape = (aq_m, aq_n * 2) if self.quant_dtype != \
+            torch.float8_e4m3fn else (aq_m, aq_n)
         workspace_dtype = a.dtype
         workspace1 = output_shape
         # The workspace is determined by `aq`, since it comes after any
@@ -149,29 +152,39 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: Optional[bool],
     ):
-        # Flashinfer CUTLASS kernel takes scalar global scales,
-        # min because inv_scale.
+        if self.quant_dtype == torch.float8_e4m3fn:
+            quant_scales = [
+                self.g1_alphas, self.a2_gscale, self.g2_alphas, self.a1_gscale
+            ]
 
-        # Ensure w1_scale and w2_scale are not None before calling view
-        assert w1_scale is not None and w2_scale is not None, (
-            "w1_scale and w2_scale must not "
-            "be None for FlashInferExperts")
+            a1q_scale = None  # not passing input_sf in fp8
+            fc1_expert_weights = w1
+            fc2_expert_weights = w2
+        else:
+            # Ensure w1_scale and w2_scale are not None before calling view
+            assert w1_scale is not None and w2_scale is not None, (
+                "w1_scale and w2_scale must not "
+                "be None for FlashInferExperts")
+            # Flashinfer CUTLASS kernel takes scalar global scales,
+            # min because inv_scale.
+            quant_scales = [
+                self.a1_gscale,
+                w1_scale.view(torch.int32),
+                self.g1_alphas,
+                self.a2_gscale,
+                w2_scale.view(torch.int32),
+                self.g2_alphas,
+            ]
+            # FlashInfer API requires weight to be long for nvfp4
+            fc1_expert_weights = w1.view(torch.long)
+            fc2_expert_weights = w2.view(torch.long)
 
-        quant_scales = [
-            self.a1_gscale,
-            w1_scale.view(torch.int32),
-            self.g1_alphas,
-            self.a2_gscale,
-            w2_scale.view(torch.int32),
-            self.g2_alphas,
-        ]
         _ = flashinfer_cutlass_fused_moe(
             input=hidden_states,
             token_selected_experts=topk_ids.to(torch.int),
             token_final_scales=topk_weights,
-            # FlashInfer API requires weight to be long for nvfp4
-            fc1_expert_weights=w1.view(torch.long),
-            fc2_expert_weights=w2.view(torch.long),
+            fc1_expert_weights=fc1_expert_weights,
+            fc2_expert_weights=fc2_expert_weights,
             output_dtype=self.out_dtype,
             quant_scales=quant_scales,
             input_sf=a1q_scale,
@@ -181,3 +194,50 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             ep_rank=self.ep_rank,
             output=output,
         )
+
+
+def flashinfer_cutlass_moe_fp4(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    g1_alphas: torch.Tensor,
+    g2_alphas: torch.Tensor,
+    a1_gscale: torch.Tensor,
+    a2_gscale: torch.Tensor,
+    inplace: bool = False,
+    activation: str = "silu",
+    global_num_experts: int = -1,
+    expert_map: Optional[torch.Tensor] = None,
+    apply_router_weight_on_input: bool = False,
+) -> torch.Tensor:
+
+    fused_experts = mk.FusedMoEModularKernel(
+        FlashInferCutlassMoEPrepareAndFinalize(use_dp=False,
+                                               a1_gscale=a1_gscale),
+        FlashInferExperts(
+            g1_alphas=g1_alphas,
+            g2_alphas=g2_alphas,
+            a1_gscale=a1_gscale,
+            a2_gscale=a2_gscale,
+            out_dtype=hidden_states.dtype,
+            quant_dtype="nvfp4",
+        ))
+
+    return fused_experts(
+        hidden_states=hidden_states,
+        w1=w1,
+        w2=w2,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        inplace=inplace,
+        activation=activation,
+        global_num_experts=global_num_experts,
+        expert_map=expert_map,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        apply_router_weight_on_input=apply_router_weight_on_input,
+    )
