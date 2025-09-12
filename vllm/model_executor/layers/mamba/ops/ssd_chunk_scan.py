@@ -133,7 +133,6 @@ def _chunk_scan_fwd_kernel(
     batch,
     seqlen,
     nheads_ngroups_ratio,
-    nchunks,
     # Strides
     stride_cb_batch,
     stride_cb_chunk,
@@ -447,7 +446,6 @@ def _chunk_scan_fwd(
         batch,
         seqlen,
         nheads // ngroups,
-        nchunks,
         cb.stride(0),
         cb.stride(1),
         cb.stride(2),
