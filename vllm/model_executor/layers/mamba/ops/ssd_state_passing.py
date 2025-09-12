@@ -78,7 +78,7 @@ def _state_passing_fwd_kernel(
     out_ptrs = out_ptr + offs_m * stride_out_dim
 
     if HAS_INITSTATES:
-        initstates_ptrs = initstates_ptr + stride_initstates_batch \
+        initstates_ptrs = initstates_ptr \
             + pid_h * stride_initstates_head \
             + offs_m * stride_initstates_dim
 
