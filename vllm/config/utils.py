@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import MISSING, Field, field, fields, is_dataclass
 from typing import TYPE_CHECKING, TypeVar
 
 if TYPE_CHECKING:
@@ -27,3 +28,20 @@ def config(cls: ConfigT) -> ConfigT:
     script, which is invoked during the pre-commit checks.
     """
     return cls
+
+
+def get_field(cls: ConfigType, name: str) -> Field:
+    """Get the default factory field of a dataclass by name. Used for getting
+    default factory fields in `EngineArgs`."""
+    if not is_dataclass(cls):
+        raise TypeError("The given class is not a dataclass.")
+    cls_fields = {f.name: f for f in fields(cls)}
+    if name not in cls_fields:
+        raise ValueError(f"Field '{name}' not found in {cls.__name__}.")
+    named_field: Field = cls_fields[name]
+    if (default_factory := named_field.default_factory) is not MISSING:
+        return field(default_factory=default_factory)
+    if (default := named_field.default) is not MISSING:
+        return field(default=default)
+    raise ValueError(
+        f"{cls.__name__}.{name} must have a default value or default factory.")

@@ -120,8 +120,8 @@ def _compare_caches(
     cache_1_p1 = receiver_cache_from_config(config_1, mm_registry)
 
     cache_size_gb = max(
-        config_0.model_config.mm_processor_cache_gb,
-        config_1.model_config.mm_processor_cache_gb,
+        config_0.model_config.multimodal_config.mm_processor_cache_gb,
+        config_1.model_config.multimodal_config.mm_processor_cache_gb,
     )
     item_size_gb = int(cache_size_gb / item_capacity)
 
