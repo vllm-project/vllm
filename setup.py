@@ -107,8 +107,7 @@ class GitHubDetector(DebugLogger):
 
     # Original vLLM repository patterns
     ORIGINAL_PATTERNS = [
-        'github.com/vllm-project/vllm',
-        'git@github.com:vllm-project/vllm.git',
+        'github.com/vllm-project/vllm', 'git@github.com:vllm-project/vllm.git',
         'git+https://github.com/vllm-project/vllm.git',
         'git+ssh://git@github.com/vllm-project/vllm.git'
     ]
@@ -137,8 +136,8 @@ class GitHubDetector(DebugLogger):
         origin_url = GitUtils.get_origin_url()
 
         # Handle UV cache directory case
-        uv_cache_db_path = os.path.join(
-            os.path.expanduser('~'), '.cache', 'uv', 'git-v0', 'db') + os.sep
+        uv_cache_db_path = os.path.join(os.path.expanduser('~'), '.cache',
+                                        'uv', 'git-v0', 'db') + os.sep
         if origin_url.startswith(uv_cache_db_path):
             return self._resolve_uv_cache_url()
 
@@ -148,8 +147,8 @@ class GitHubDetector(DebugLogger):
         """Resolve original URL from UV cache directory."""
         # Try to get the original URL from git config
         config_url = GitUtils.get_config_url()
-        uv_cache_db_path = os.path.join(
-            os.path.expanduser('~'), '.cache', 'uv', 'git-v0', 'db') + os.sep
+        uv_cache_db_path = os.path.join(os.path.expanduser('~'), '.cache',
+                                        'uv', 'git-v0', 'db') + os.sep
         if config_url and not config_url.startswith(uv_cache_db_path):
             return config_url
 
@@ -175,8 +174,8 @@ class GitHubDetector(DebugLogger):
     def _check_uv_cache_directory(self) -> bool:
         """Check if we're in a UV cache directory with vLLM repo."""
         current_dir = os.getcwd()
-        expected_cache_path = os.path.join(
-            os.path.expanduser("~"), self.UV_CACHE_PATTERN)
+        expected_cache_path = os.path.join(os.path.expanduser("~"),
+                                           self.UV_CACHE_PATTERN)
         if not os.path.abspath(current_dir).startswith(expected_cache_path):
             return False
 
