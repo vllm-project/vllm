@@ -999,8 +999,8 @@ __global__ void Marlin(
   int4* sh_s = sh_zp + (stages * zp_sh_stage);
   // shared memory reused by reduction should be smaller than
   // shared memory used by weight.
-  // static_assert(thread_m_blocks * 16 * thread_n_blocks * 16 / 8 <=
-  //               stages * b_sh_stage);
+  static_assert(thread_m_blocks * 16 * thread_n_blocks * 16 / 8 <=
+                stages * b_sh_stage);
   int4* sh_a = sh_s + sh_s_size;
 
   // Register storage for double buffer of shared memory reads.

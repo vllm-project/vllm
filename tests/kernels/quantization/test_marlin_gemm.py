@@ -31,6 +31,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test_24 import (
     marlin_24_quantize)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     awq_pack, gptq_pack, gptq_quantize_weights, quantize_weights, sort_weights)
+from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 ACT_ORDER_OPTS = [False, True]

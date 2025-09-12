@@ -192,7 +192,7 @@ def generate_new_kernels():
                     #     we only need (64, 256, 256)
                     if m_blocks <= 1 and (thread_k, thread_n) != (128, 128):
                         continue
-                    if False and m_blocks > 1 and (thread_k, thread_n) != (64, 256):
+                    if m_blocks > 1 and (thread_k, thread_n) != (64, 256):
                         continue
 
                 config = {
@@ -270,7 +270,7 @@ def generate_new_kernels():
 
     if not SUPPORT_FP8 and kernel_selector_str != FILE_HEAD_COMMENT:
         kernel_selector_str += (
-            f"else if (a_type == vllm::{a_type})\n"
+            f"else if (a_type == vllm::kFE4M3fn)\n"
             "  TORCH_CHECK(false, "
             "\"marlin kernel with fp8 activation is not built.\");")
 

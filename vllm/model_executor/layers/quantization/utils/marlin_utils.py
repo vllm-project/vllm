@@ -190,11 +190,11 @@ def check_moe_marlin_supports_layer(layer: LinearBase, group_size: int) \
 
 
 def get_marlin_input_dtype(prefix):
-    if envs.VLLM_MARLIN_INPUT_DTYPE is None:
+    if envs.VLLM_MARLIN_ACTIVATION_DTYPE is None:
         return
-    elif envs.VLLM_MARLIN_INPUT_DTYPE.upper() == "INT8":
+    elif envs.VLLM_MARLIN_ACTIVATION_DTYPE.upper() == "INT8":
         return torch.int8
-    elif envs.VLLM_MARLIN_INPUT_DTYPE.upper() == "FP8":
+    elif envs.VLLM_MARLIN_ACTIVATION_DTYPE.upper() == "FP8":
         return torch.float8_e4m3fn
     else:
         return
