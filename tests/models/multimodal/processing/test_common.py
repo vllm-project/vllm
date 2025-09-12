@@ -62,7 +62,7 @@ def qwen3_vl_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
         video = mm_data["video"]
         if isinstance(video, list):
             # multiple videos
-            mm_data["video"] = [(video, create_metadata(vid)) for vid in video]
+            mm_data["video"] = [(vid, create_metadata(vid)) for vid in video]
         else:
             # single video
             mm_data["video"] = (video, create_metadata(video))
