@@ -2716,7 +2716,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         force_attention: bool = False,
         uniform_decode: bool = False,
-        allow_microbatching: bool = False,
+        allow_microbatching: bool = True,
         skip_eplb: bool = False,
         is_profile: bool = False,
         create_mixed_batch: bool = False,
@@ -2801,6 +2801,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         total_num_scheduled_tokens = int(num_scheduled_tokens.sum())
 
         ubatch_slices = None
+        num_tokens_after_padding = None
+
         # We currently only microbatch if the number of tokens is
         # over a certain threshold.
         if self.enable_ubatching and allow_microbatching:
@@ -2810,12 +2812,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 total_num_scheduled_tokens,
                 self.vllm_config,
             )
-            assert num_tokens_after_padding is not None
-            num_tokens_across_dp = num_tokens_after_padding
-            num_tokens_after_padding = int(num_tokens_after_padding[0].item())
-        else:
+
+        # If we failed to microbatch, currently need to resyncrhonize
+        # TODO(lucas,sage): we should be able to avoid this second sync by
+        #  refactoring `get_dp_padding_ubatch` and `get_dp_padding` into
+        #  a single `coordinate_batch_across_dp` function.
+        if num_tokens_after_padding is None:
             num_pad, num_tokens_across_dp = self.get_dp_padding(num_tokens)
             num_tokens_after_padding = num_tokens + num_pad
+        else:
+            num_tokens_across_dp = num_tokens_after_padding
+            num_tokens_after_padding = int(num_tokens_after_padding[0].item())
 
         attn_metadata: Optional[PerLayerAttnMetadata] = None
 
