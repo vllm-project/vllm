@@ -817,8 +817,8 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
 
     def get_multimodal_embeddings(self, **kwargs):
         image_embeds = kwargs.pop("image_embeds", None)
-        pixel_values = kwargs.pop(
-                    "pixel_values", kwargs.pop("image_patches", None))
+        pixel_values = kwargs.pop("pixel_values",
+                                  kwargs.pop("image_patches", None))
 
         # Early return if image embeddings are already provided
         if image_embeds is not None:
@@ -846,7 +846,8 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
         # Ensure num_image_patches is int or list of int
         num_image_patches = kwargs.pop("num_image_patches")
         # TODO: Why is this even a tensor?????
-        num_image_patches = num_image_patches.detach().to("cpu", torch.int).tolist()
+        num_image_patches = num_image_patches.detach().to("cpu",
+                                                          torch.int).tolist()
 
         vision_embeddings = self.model.get_image_features(
             pixel_values, **kwargs)
@@ -858,8 +859,8 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
             # Embeddings have to be 2D tensors of length `num_images`
             # but transformers returns concat tensors if each patch
             # is of different size. We split it back to make vLLM happy
-            vision_embeddings = torch.split(
-                vision_embeddings, num_image_patches)
+            vision_embeddings = torch.split(vision_embeddings,
+                                            num_image_patches)
             vision_embeddings = [
                 embed.flatten(start_dim=0, end_dim=-2)
                 for embed in vision_embeddings
