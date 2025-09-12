@@ -569,7 +569,6 @@ def _chunk_cumsum_fwd(dt,
                             dtype=torch.float32)
     grid_chunk_cs = lambda META: (batch, nchunks,
                                   triton.cdiv(nheads, META['BLOCK_SIZE_H']))
-
     with torch.cuda.device(dt.device.index):
         _chunk_cumsum_fwd_kernel[grid_chunk_cs](
             dt,
