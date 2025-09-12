@@ -23,7 +23,7 @@ from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import receiver_cache_from_config
+from vllm.multimodal.cache import engine_receiver_cache_from_config
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
@@ -131,7 +131,7 @@ class EngineCore:
         self.use_spec_decode = vllm_config.speculative_config is not None
 
         self.mm_registry = mm_registry = MULTIMODAL_REGISTRY
-        self.mm_receiver_cache = receiver_cache_from_config(
+        self.mm_receiver_cache = engine_receiver_cache_from_config(
             vllm_config, mm_registry)
 
         # Setup batch queue for pipeline parallelism.

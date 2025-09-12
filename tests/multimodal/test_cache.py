@@ -10,8 +10,8 @@ from vllm.config import ModelConfig, ParallelConfig, VllmConfig
 from vllm.multimodal.cache import (MultiModalCache,
                                    MultiModalProcessorCacheItem,
                                    MultiModalProcessorCacheItemMetadata,
-                                   processor_cache_from_config,
-                                   receiver_cache_from_config)
+                                   engine_receiver_cache_from_config,
+                                   processor_cache_from_config)
 from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.inputs import (MultiModalFieldElem, MultiModalKwargsItem,
                                     MultiModalKwargsItems,
@@ -115,9 +115,9 @@ def _compare_caches(
 ):
     mm_registry = MultiModalRegistry()
     cache_0_p0 = processor_cache_from_config(config_0, mm_registry)
-    cache_0_p1 = receiver_cache_from_config(config_0, mm_registry)
+    cache_0_p1 = engine_receiver_cache_from_config(config_0, mm_registry)
     cache_1_p0 = processor_cache_from_config(config_1, mm_registry)
-    cache_1_p1 = receiver_cache_from_config(config_1, mm_registry)
+    cache_1_p1 = engine_receiver_cache_from_config(config_1, mm_registry)
 
     cache_size_gb = max(
         config_0.model_config.mm_processor_cache_gb,

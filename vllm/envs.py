@@ -175,6 +175,7 @@ if TYPE_CHECKING:
     VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS: bool = False
     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
     VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
+    VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME: str = "VLLM_OBJECT_STORAGE_SHM_BUFFER"
 
 
 def get_default_cache_root():
@@ -1241,6 +1242,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # raw bytes. Defaults to True for backward compatibility.
     "VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES":
     lambda: bool(int(os.getenv("VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES", "1"))),
+
+    # Name of the shared memory buffer used for object storage.
+    # Only effective when mm_config.mm_processor_cache_type == "shm".
+    "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME":
+    lambda: os.getenv("VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
+                      "VLLM_OBJECT_STORAGE_SHM_BUFFER"),
 }
 
 # --8<-- [end:env-vars-definition]
