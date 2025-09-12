@@ -708,11 +708,7 @@ class AsyncMultiModalItemTracker(BaseMultiModalItemTracker[Awaitable[object]]):
                 if item is not None:
                     coros.append(item)
                 else:
-
-                    async def wrap_async_none() -> None:
-                        return None
-
-                    coros.append(wrap_async_none())
+                    coros.append(asyncio.sleep(0))
             items_by_modality[modality] = await asyncio.gather(*coros)
 
         if "image" in items_by_modality and "image_embeds" in items_by_modality:
@@ -1259,7 +1255,7 @@ def _parse_chat_message_content_mm_part(
     return part_type, "unknown part_type content"
 
 
-VALID_MESSAGE_CONTENT_MM_PART_TYPES = (
+PART_TYPES_TO_SKIP_NONE_CONTENT = (
     "text",
     "refusal",
 )
@@ -1322,7 +1318,7 @@ def _parse_chat_message_content_part(
     part_type, content = _parse_chat_message_content_mm_part(part)
     # if part_type is text/refusal/image_url/audio_url/video_url/input_audio but
     # content is None, log a warning and skip
-    if part_type in VALID_MESSAGE_CONTENT_MM_PART_TYPES and content is None:
+    if part_type in PART_TYPES_TO_SKIP_NONE_CONTENT and content is None:
         logger.warning(
             "Skipping multimodal part '%s' (type: '%s') "
             "with empty / unparsable content.",
