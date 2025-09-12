@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 class NewRequestData:
 
     req_id: str
-    prompt_token_ids: list[int]
+    prompt_token_ids: list[float]
     mm_kwargs: list[MultiModalKwargsItem]
     mm_hashes: list[str]
     mm_positions: list[PlaceholderRange]
