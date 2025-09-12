@@ -681,7 +681,7 @@ class OpenAIServingChat(OpenAIServing):
 
                     # just update previous_texts and previous_token_ids
                     if (tool_choice_auto or self.reasoning_parser
-                         or request.tool_choice == "required")
+                         or request.tool_choice == "required"):
                         assert previous_texts is not None
                         assert all_previous_token_ids is not None
                         previous_text = previous_texts[i]
