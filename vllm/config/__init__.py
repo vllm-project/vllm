@@ -1786,8 +1786,8 @@ class ModelConfig:
 
         if self.runner_type != "pooling" and head_dtype != self.dtype:
             logger.warning_once(
-                "`head_dtype` [%s] currently only supports pooling models."
-                "fallback to model dtype [%s].", head_dtype, self.dtype)
+                "`head_dtype` currently only supports pooling models."
+                "fallback to model dtype [%s].", self.dtype)
             return self.dtype
 
         if head_dtype not in current_platform.supported_dtypes:
