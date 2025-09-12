@@ -28,13 +28,22 @@ Supports a wide range of validated models including LLaMa, Mistral, and Qwen fam
 
 ## How to Use
 
+### 0. Clone the Repository
+
+Before proceeding with any of the steps below, make sure to clone the vLLM fork repository and navigate to the `.cd` directory. This ensures you have all necessary files and scripts for running the server or benchmarks.
+
+```bash
+git clone https://github.com/HabanaAI/vllm-fork.git
+cd vllm-fork/.cd/
+```
+
 ### 1. Run the server using Docker Compose
 
    The recommended and easiest way to start the vLLM server is with Docker Compose. At a minimum, set the following environment variables:
 
    - `MODEL` - Select a model from the table above.
    - `HF_TOKEN` - Your Hugging Face token (generate one at <https://huggingface.co>).
-   - `DOCKER_IMAGE` - The vLLM Docker image URL from Gaudi or local repository.
+   - `DOCKER_IMAGE` - The vLLM Docker image URL from Gaudi or local repository. When using the Gaudi repository, please select Docker images with the vllm-installer* prefix in the file name.
 
    **Example usage:**
 
@@ -42,7 +51,7 @@ Supports a wide range of validated models including LLaMa, Mistral, and Qwen fam
    cd vllm-fork/.cd/
    MODEL="Qwen/Qwen2.5-14B-Instruct" \
    HF_TOKEN="<your huggingface token>" \
-   DOCKER_IMAGE="<docker image url>" \
+   DOCKER_IMAGE="vault.habana.ai/gaudi-docker/1.22.0/ubuntu22.04/habanalabs/vllm-installer-2.7.1:latest" \
    docker compose up
    ```
 
@@ -54,7 +63,7 @@ Supports a wide range of validated models including LLaMa, Mistral, and Qwen fam
    cd vllm-fork/.cd/
    MODEL="Qwen/Qwen2.5-14B-Instruct" \
    HF_TOKEN="<your huggingface token>" \
-   DOCKER_IMAGE="<docker image url>" \
+   DOCKER_IMAGE="vault.habana.ai/gaudi-docker/1.22.0/ubuntu22.04/habanalabs/vllm-installer-2.7.1:latest" \
    docker compose --profile benchmark up
    ```
 
@@ -81,7 +90,7 @@ Supports a wide range of validated models including LLaMa, Mistral, and Qwen fam
    cd vllm-fork/.cd/
    MODEL="Qwen/Qwen2.5-14B-Instruct" \
    HF_TOKEN="<your huggingface token>" \
-   DOCKER_IMAGE="<docker image url>" \
+   DOCKER_IMAGE="vault.habana.ai/gaudi-docker/1.22.0/ubuntu22.04/habanalabs/vllm-installer-2.7.1:latest" \
    TENSOR_PARALLEL_SIZE=1 \
    MAX_MODEL_LEN=2048 \
    docker compose up
@@ -102,7 +111,7 @@ Supports a wide range of validated models including LLaMa, Mistral, and Qwen fam
    cd vllm-fork/.cd/
    MODEL="Qwen/Qwen2.5-14B-Instruct" \
    HF_TOKEN="<your huggingface token>" \
-   DOCKER_IMAGE="<docker image url>" \
+   DOCKER_IMAGE="vault.habana.ai/gaudi-docker/1.22.0/ubuntu22.04/habanalabs/vllm-installer-2.7.1:latest" \
    INPUT_TOK=128 \
    OUTPUT_TOK=128 \
    CON_REQ=16 \
@@ -122,7 +131,7 @@ Supports a wide range of validated models including LLaMa, Mistral, and Qwen fam
    cd vllm-fork/.cd/
    MODEL="Qwen/Qwen2.5-14B-Instruct" \
    HF_TOKEN="<your huggingface token>" \
-   DOCKER_IMAGE="<docker image url>" \
+   DOCKER_IMAGE="vault.habana.ai/gaudi-docker/1.22.0/ubuntu22.04/habanalabs/vllm-installer-2.7.1:latest" \
    TENSOR_PARALLEL_SIZE=1 \
    MAX_MODEL_LEN=2048 \
    INPUT_TOK=128 \
@@ -147,7 +156,7 @@ Supports a wide range of validated models including LLaMa, Mistral, and Qwen fam
 
    ```bash
    HF_TOKEN=<your huggingface token> \
-   DOCKER_IMAGE="<docker image url>" \
+   DOCKER_IMAGE="vault.habana.ai/gaudi-docker/1.22.0/ubuntu22.04/habanalabs/vllm-installer-2.7.1:latest" \
    VLLM_SERVER_CONFIG_FILE=server/server_scenarios_text.yaml \
    VLLM_SERVER_CONFIG_NAME=llama31_8b_instruct \
    VLLM_BENCHMARK_CONFIG_FILE=benchmark/benchmark_scenarios_text.yaml \
@@ -178,7 +187,7 @@ Supports a wide range of validated models including LLaMa, Mistral, and Qwen fam
      -p 8000:8000 \
      -e HF_HOME='mnt/hf_cache'
      --name vllm-server \
-     <docker image name>
+     vault.habana.ai/gaudi-docker/1.22.0/ubuntu22.04/habanalabs/vllm-installer-2.7.1:latest
    ```
 
    This method gives you full flexibility over Docker runtime options.
