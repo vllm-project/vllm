@@ -743,3 +743,68 @@ async def test_function_calling_full_history(client: OpenAI, model_name: str):
     assert response_2 is not None
     assert response_2.status == "completed"
     assert response_2.output_text is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_function_calling_with_stream(client: OpenAI, model_name: str):
+    tools = [{
+        "type": "function",
+        "name": "get_weather",
+        "description":
+        "Get current temperature for provided coordinates in celsius.",  # noqa
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "latitude": {
+                    "type": "number"
+                },
+                "longitude": {
+                    "type": "number"
+                },
+            },
+            "required": ["latitude", "longitude"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    }]
+    input_list = [{
+        "role": "user",
+        "content": "What's the weather like in Paris today?",
+    }]
+    stream = await client.responses.create(
+        model=model_name,
+        input=input_list,
+        tools=tools,
+        stream=True,
+    )
+    assert stream is not None
+    final_tool_calls = {}
+
+    for event in stream:
+        if event.type == 'response.output_item.added':
+            final_tool_calls[event.output_index] = event.item
+        elif event.type == 'response.function_call_arguments.delta':
+            index = event.output_index
+
+            if final_tool_calls[index]:
+                final_tool_calls[index].arguments += event.delta
+
+    for tool_call in final_tool_calls.values():
+        if tool_call and tool_call.type == "function_call" and tool_call.name == "get_weather":
+            args = json.loads(tool_call.arguments)
+            result = call_function(tool_call.name, args)
+            input_list += [tool_call]
+
+    response_2 = await client.responses.create(
+        model=model_name,
+        input=input_list + [{
+            "type": "function_call_output",
+            "call_id": tool_call.call_id,
+            "output": str(result),
+        }],
+        tools=tools,
+    )
+    assert response_2 is not None
+    assert response_2.status == "completed"
+    assert response_2.output_text is not None

@@ -1638,38 +1638,38 @@ class OpenAIServingResponses(OpenAIServing):
                                 status="completed",
                             ),
                         ))
-            if ctx.parser.current_channel == "commentary":
-                if ctx.parser.current_recipient and \
-                    ctx.parser.current_recipient.startswith("functions."):
-                    function_name = ctx.parser.current_recipient[
-                        len("functions."):]
-                    tool_call_item = ResponseFunctionToolCall(
-                        name=function_name,
-                        type="function_call",
-                        id=current_item_id,
-                        call_id=f"call_{random_uuid()}",
-                        arguments='',
-                        status="in_progress",
-                    )
-                    if sent_function_call_item_added is False:
-                        sent_function_call_item_added = True
-                        yield _send_event(
-                            openai_responses_types.
-                            ResponseOutputItemAddedEvent(
-                                type="response.output_item.added",
-                                sequence_number=-1,
-                                output_index=current_output_index,
-                                item=tool_call_item,
-                            ))
-                    else:
-                        yield _send_event(
-                            openai_responses_types.
-                            ResponseFunctionCallArgumentsDeltaEvent(
-                                item_id=current_item_id,
-                                delta=ctx.parser.last_content_delta,
-                                output_index=current_output_index,
-                                sequence_number=-1,
-                                type="response.function_call_arguments.delta"))
+            if ctx.parser.current_channel == "commentary" \
+               and ctx.parser.current_recipient and \
+               ctx.parser.current_recipient.startswith("functions."):
+                function_name = ctx.parser.current_recipient[len("functions."
+                                                                 ):]
+
+                tool_call_item = ResponseFunctionToolCall(
+                    name=function_name,
+                    type="function_call",
+                    id=current_item_id,
+                    call_id=f"call_{random_uuid()}",
+                    arguments='',
+                    status="in_progress",
+                )
+                if sent_function_call_item_added is False:
+                    sent_function_call_item_added = True
+                    yield _send_event(
+                        openai_responses_types.ResponseOutputItemAddedEvent(
+                            type="response.output_item.added",
+                            sequence_number=-1,
+                            output_index=current_output_index,
+                            item=tool_call_item,
+                        ))
+                else:
+                    yield _send_event(
+                        openai_responses_types.
+                        ResponseFunctionCallArgumentsDeltaEvent(
+                            item_id=current_item_id,
+                            delta=ctx.parser.last_content_delta,
+                            output_index=current_output_index,
+                            sequence_number=-1,
+                            type="response.function_call_arguments.delta"))
 
     async def responses_stream_generator(
         self,
