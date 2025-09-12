@@ -438,6 +438,7 @@ class ResponsesRequest(OpenAIBaseModel):
             data["input"] = fixed_input
         return data
 
+
 class ChatCompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/chat/create
