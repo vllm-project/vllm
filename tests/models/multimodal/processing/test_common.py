@@ -31,6 +31,7 @@ def glm4_1v_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
     """
     # Ensure video metadata is included
     if "video" in mm_data:
+        # GLM4.1V doesn't support multiple videos
         video = mm_data["video"]
         mm_data["video"] = (video, {
             "total_num_frames": len(video),
@@ -45,17 +46,26 @@ def qwen3_vl_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
     """
     Patch the multimodal data for Qwen3-VL model.
     """
-    # Ensure video metadata is included
-    if "video" in mm_data:
-        video = mm_data["video"]
-        num_frames = len(video)
-        mm_data["video"] = (video, {
+
+    def create_metadata(frames: np.ndarray):
+        num_frames = len(frames)
+        return {
             "total_num_frames": num_frames,
             "fps": 2.0,
             "duration": num_frames / 2.0,
             "video_backend": "opencv",
             "frames_indices": list(range(num_frames)),
-        })
+        }
+
+    # Ensure video metadata is included
+    if "video" in mm_data:
+        video = mm_data["video"]
+        if isinstance(video, list):
+            # multiple videos
+            mm_data["video"] = [(video, create_metadata(vid)) for vid in video]
+        else:
+            # single video
+            mm_data["video"] = (video, create_metadata(video))
     return mm_data
 
 
