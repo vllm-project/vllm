@@ -3,6 +3,7 @@
 import os
 from concurrent.futures import Future, ThreadPoolExecutor
 from functools import cached_property
+from multiprocessing import Lock
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -11,9 +12,12 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import worker_receiver_cache_from_config
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         run_method)
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
+from vllm.v1.executor.utils import get_and_update_mm_cache
 from vllm.v1.outputs import AsyncModelRunnerOutput
 from vllm.worker.worker_base import WorkerWrapperBase
 
@@ -38,6 +42,8 @@ class UniProcExecutor(ExecutorBase):
             distributed_init_method=distributed_init_method,
             is_driver_worker=is_driver_worker,
         )
+        self.mm_receiver_cache = worker_receiver_cache_from_config(
+            self.vllm_config, MULTIMODAL_REGISTRY, Lock())
 
         self.async_output_thread: Optional[ThreadPoolExecutor] = None
         if self.max_concurrent_batches > 1:
@@ -70,6 +76,8 @@ class UniProcExecutor(ExecutorBase):
                        non_block: bool = False) -> List[Any]:
         if kwargs is None:
             kwargs = {}
+        if self.mm_receiver_cache is not None and method == "execute_model":
+            get_and_update_mm_cache(self.mm_receiver_cache, args)
 
         if not non_block:
             return [run_method(self.driver_worker, method, args, kwargs)]
