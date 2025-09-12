@@ -228,7 +228,7 @@ if (has_flashinfer_cutlass_fused_moe()
     register_prepare_and_finalize(
         FlashInferCutlassMoEPrepareAndFinalize,
         standard_format,
-        nvfp4_types,
+        nv_fp4_types,  # + fp8_types,
         blocked_quantization_support=True,
         backend=None,
         force_multigpu=True,
