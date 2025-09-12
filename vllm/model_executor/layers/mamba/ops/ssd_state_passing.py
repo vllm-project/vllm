@@ -78,7 +78,7 @@ def _state_passing_fwd_kernel(
     out_ptrs = out_ptr + offs_m * stride_out_dim
 
     if HAS_INITSTATES:
-        initstates_ptrs = initstates_ptr + 0 * stride_initstates_batch \
+        initstates_ptrs = initstates_ptr + stride_initstates_batch \
             + pid_h * stride_initstates_head \
             + offs_m * stride_initstates_dim
 
@@ -90,16 +90,12 @@ def _state_passing_fwd_kernel(
 
     prev_seq_idx = 0
     for c in range(nchunks):
-
         chunk_seqlen_start = tl.load(cu_chunk_seqlens_ptr + c)
-
         new_states = tl.load(states_ptrs, mask=offs_m < dim,
                              other=0.0).to(tl.float32)
         dA_cs = tl.load(dA_cs_ptr).to(tl.float32)
-
         seq_idx = tl.load(seq_idx_ptr + chunk_seqlen_start * stride_seq_idx_seqlen)
-
-        # we are started a new sequence
+        # we have started a new sequence
         if prev_seq_idx != seq_idx:
             if HAS_INITSTATES:
                 initstates_ptrs = initstates_ptr + seq_idx * stride_initstates_batch \
@@ -112,7 +108,6 @@ def _state_passing_fwd_kernel(
                 states = tl.zeros((BLOCK_SIZE, ), dtype=tl.float32)
 
         prev_seq_idx = seq_idx
-
         states = tl.exp(dA_cs) * states + new_states
         tl.store(out_ptrs, states, mask=offs_m < dim)
         states_ptrs += stride_states_chunk
@@ -132,7 +127,6 @@ def _state_passing_fwd(
     chunk_offsets=None,
 ):
     batch, nchunks, nheads, dim = states.shape
-    assert batch == 1
     if chunk_size is None:
         chunk_size = dA_cumsum.shape[-1]
     else:
@@ -160,7 +154,6 @@ def _state_passing_fwd(
     out = torch.empty((batch, nchunks, nheads, dim),
                       device=states.device,
                       dtype=out_dtype)
-
     grid = lambda META: (triton.cdiv(dim, META['BLOCK_SIZE']), batch, nheads)
     with torch.cuda.device(states.device.index):
         _state_passing_fwd_kernel[grid](

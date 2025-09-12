@@ -126,8 +126,6 @@ class Mamba2AttentionMetadata:
     seq_idx_p: Optional[torch.Tensor]
     chunk_indices_p: Optional[torch.Tensor]
     chunk_offsets_p: Optional[torch.Tensor]
-
-    # tpa
     cu_chunk_seqlen_p: Optional[torch.Tensor]
     last_chunk_p: Optional[torch.Tensor]
 
@@ -164,8 +162,6 @@ class Mamba2AttentionMetadataBuilder(
         # currently we really only support the FlashAttention backend
         has_initial_states_p = None
         prep_initial_states = False
-
-
         cu_chunk_seqlen_p = None
         last_chunk_p = None
 
@@ -175,11 +171,6 @@ class Mamba2AttentionMetadataBuilder(
             split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.reorder_batch_threshold))
-
-        #print("num_decodes: ", num_decodes)
-        #print("num_prefills: ", num_prefills)
-        #print("num_decode_tokens: ", num_decode_tokens)
-        #print("num_prefill_tokens: ", num_prefill_tokens)
 
         # Compute seq_idx, chunk_indices and chunk_offsets for prefill only
         if num_prefills > 0:
@@ -191,10 +182,8 @@ class Mamba2AttentionMetadataBuilder(
             has_initial_states_p = has_initial_states_cpu.to(
                 query_start_loc.device)
 
-
             query_start_loc_p = common_attn_metadata.query_start_loc[
                 -num_prefills - 1:] - num_decode_tokens
-
 
             seq_idx_p = torch.repeat_interleave(torch.arange(
                 num_prefills,
@@ -204,25 +193,20 @@ class Mamba2AttentionMetadataBuilder(
                                                 output_size=num_prefill_tokens)
             seq_idx_p.unsqueeze_(0)
 
-
             num_computed_tokens_p = common_attn_metadata.num_computed_tokens_cpu[num_reqs - num_prefills:num_reqs]
             query_start_loc_p_cpu = common_attn_metadata.query_start_loc_cpu[
                 -num_prefills - 1:] - num_decode_tokens
 
-            #print("num_computed_tokens_p: ", num_computed_tokens_p)
-            #print("query_start_loc_p: ", query_start_loc_p)
-
+            # TODO (tdoublep): Optimize the code
             cu_chunk_seqlen = []
             last_chunk = []
             seqlen_pos = 0
             for req_idx in range(num_prefills):
                 this_num_computed = num_computed_tokens_p[req_idx].item()
                 this_new_tokens = query_start_loc_p_cpu[req_idx+1].item() - query_start_loc_p_cpu[req_idx].item()
-                #print(req_idx, this_num_computed, this_new_tokens)
 
                 # if computed tokens are not chunk-aligned, use the first
                 # chunk to finish it off
-                # TODO(tdoublep): I guess we need block size actually?
                 if this_num_computed % self.chunk_size != 0:
                     cu_chunk_seqlen.append(seqlen_pos)
                     # how many tokens to finish the chunk?
@@ -246,9 +230,6 @@ class Mamba2AttentionMetadataBuilder(
 
             cu_chunk_seqlen_p = torch.as_tensor(cu_chunk_seqlen, device=query_start_loc.device, dtype=torch.int32)
             last_chunk_p = torch.as_tensor(last_chunk, device=query_start_loc.device, dtype=torch.int32)
-
-            #print("cu_chunk_seqlen: ", cu_chunk_seqlen)
-            #print("cu_chunk_seqlen_p: ", cu_chunk_seqlen_p)
 
             # We compute metadata for chunked prefill once at the top level
             # model forward and reuse them in mamba layers. If not needed,
