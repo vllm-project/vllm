@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 @dataclass
 class NewRequestData:
 
-    req_id: str
+    req_id: int
     prompt_token_ids: list[int]
     mm_kwargs: list[MultiModalKwargsItem]
     mm_hashes: list[str]
