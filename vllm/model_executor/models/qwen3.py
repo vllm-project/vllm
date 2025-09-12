@@ -286,16 +286,15 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         self.quant_config = quant_config
         self.model = Qwen3Model(vllm_config=vllm_config,
                                 prefix=maybe_prefix(prefix, "model"))
+        self.head_dtype = vllm_config.model_config.head_dtype
 
         if get_pp_group().is_last_rank:
-            if config.tie_word_embeddings:
-                self.lm_head = self.model.embed_tokens
-            else:
-                self.lm_head = ParallelLMHead(config.vocab_size,
-                                              config.hidden_size,
-                                              quant_config=quant_config,
-                                              prefix=maybe_prefix(
-                                                  prefix, "lm_head"))
+            self.lm_head = ParallelLMHead(config.vocab_size,
+                                          config.hidden_size,
+                                          params_dtype=self.head_dtype,
+                                          quant_config=quant_config,
+                                          prefix=maybe_prefix(
+                                              prefix, "lm_head"))
         else:
             self.lm_head = PPMissingLayer()
 
@@ -330,15 +329,32 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
+        hidden_states = hidden_states.to(self.head_dtype)
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
+
+        word_embeddings_weight = {}
+
+        def get_word_embeddings_weight(weights):
+            for name, weight in weights:
+                if name == "model.embed_tokens.weight":
+                    word_embeddings_weight["weight"] = weight
+                    print(name, weight.dtype)
+                yield name, weight
+
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=(["lm_head."]
                            if self.config.tie_word_embeddings else None),
         )
-        return loader.load_weights(weights)
+
+        loaded = loader.load_weights(get_word_embeddings_weight(weights))
+
+        self.lm_head.weight_loader(self.lm_head.weight,
+                                   word_embeddings_weight["weight"])
+        loaded.add("lm_head.weight")
+        return loaded

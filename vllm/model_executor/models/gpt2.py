@@ -276,16 +276,15 @@ class GPT2LMHeadModel(nn.Module, SupportsPP):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
+        self.head_dtype = vllm_config.model_config.head_dtype
         self.transformer = GPT2Model(vllm_config=vllm_config,
                                      prefix=maybe_prefix(
                                          prefix, "transformer"))
         self.lm_head = ParallelLMHead(self.config.vocab_size,
                                       self.config.hidden_size,
+                                      params_dtype=self.head_dtype,
                                       quant_config=quant_config,
                                       prefix=f"{prefix}.lm_head")
-        if self.config.tie_word_embeddings:
-            self.lm_head = self.lm_head.tie_weights(self.transformer.wte)
-
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.transformer.make_empty_intermediate_tensors)
@@ -309,15 +308,30 @@ class GPT2LMHeadModel(nn.Module, SupportsPP):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
+        hidden_states = hidden_states.to(self.head_dtype)
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
+        word_embeddings_weight = {}
+
+        def get_word_embeddings_weight(weights):
+            for name, weight in weights:
+                if name == "transformer.wte.weight":
+                    word_embeddings_weight["weight"] = weight
+                    print(name, weight.dtype)
+                yield name, weight
+
         loader = AutoWeightsLoader(self)
         weights = _add_transformer_prefix(weights)
-        return loader.load_weights(weights)
+        loaded = loader.load_weights(get_word_embeddings_weight(weights))
+
+        self.lm_head.weight_loader(self.lm_head.weight,
+                                   word_embeddings_weight["weight"])
+        loaded.add("lm_head.weight")
+        return loaded
 
 
 class GPT2ForSequenceClassification(nn.Module):

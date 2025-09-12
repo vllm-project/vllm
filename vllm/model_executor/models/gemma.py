@@ -39,7 +39,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
+    ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
@@ -394,6 +394,13 @@ class GemmaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
+        self.head_dtype = vllm_config.model_config.head_dtype
+
+        self.lm_head = ParallelLMHead(config.vocab_size,
+                                      config.hidden_size,
+                                      params_dtype=self.head_dtype,
+                                      quant_config=quant_config,
+                                      prefix=maybe_prefix(prefix, "lm_head"))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -414,15 +421,30 @@ class GemmaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.model.embed_tokens, hidden_states,
+        hidden_states = hidden_states.to(self.head_dtype)
+        logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
+        word_embeddings_weight = {}
+
+        def get_word_embeddings_weight(weights):
+            for name, weight in weights:
+                if name == "model.embed_tokens.weight":
+                    print(name, weight.dtype)
+                    word_embeddings_weight["weight"] = weight
+                yield name, weight
+
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=(["lm_head."]
                            if self.config.tie_word_embeddings else None),
         )
-        return loader.load_weights(weights)
+
+        loaded = loader.load_weights(get_word_embeddings_weight(weights))
+        self.lm_head.weight_loader(self.lm_head.weight,
+                                   word_embeddings_weight["weight"])
+        loaded.add("lm_head.weight")
+        return loaded
