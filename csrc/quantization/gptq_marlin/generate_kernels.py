@@ -4,9 +4,9 @@ import glob
 import itertools
 import os
 import subprocess
+import sys
 
 import jinja2
-import sys
 
 ARCHS = []
 SUPPORT_FP8 = False
