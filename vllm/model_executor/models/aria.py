@@ -143,7 +143,8 @@ class AriaProjector(nn.Module):
     projects ViT's outputs into MoE's inputs.
 
     Args:
-        config: AriaConfig containing projector configuration parameters.
+        config: [AriaConfig](https://huggingface.co/docs/transformers/main/model_doc/aria#transformers.AriaConfig)
+            containing projector configuration parameters.
 
     Outputs:
         A tensor with the shape of (batch_size, query_number, output_dim)
