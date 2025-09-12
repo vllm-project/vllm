@@ -188,7 +188,7 @@ class KVCacheManager:
             self.prefix_cache_stats.hits += num_new_computed_tokens
 
             # log tool call cache stats for turn > 0
-            if (request.toolcall_turn is not None and request.toolcall_turn > 0):
+            if request.toolcall_turn is not None and request.toolcall_turn > 0:
                 self.prefix_cache_stats.toolcall_non_1st_turn_hits += num_new_computed_tokens
                 self.prefix_cache_stats.toolcall_non_1st_turn_queries += request.num_tokens
 
