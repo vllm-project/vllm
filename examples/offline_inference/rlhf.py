@@ -26,6 +26,12 @@ This example assumes a single-node cluster with three GPUs, but Ray
 supports multi-node clusters. vLLM expects the GPUs are only used for vLLM
 workloads. Residual GPU activity interferes with vLLM memory profiling and
 causes unexpected behavior.
+
+It is important to set `VLLM_HOST_IP` to an address on a secure network when
+using this example. Unsecured communications between components will be used
+over this IP address and should NOT be exposed to untrusted networks. For more
+information, see:
+https://docs.vllm.ai/en/latest/deployment/security.html
 """
 
 import os

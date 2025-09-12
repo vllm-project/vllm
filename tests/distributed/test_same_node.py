@@ -7,7 +7,7 @@ import torch.distributed as dist
 
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.distributed.utils import StatelessProcessGroup
-from vllm.utils import get_ip, get_open_port
+from vllm.utils import get_open_port
 
 if __name__ == "__main__":
     dist.init_process_group(backend="gloo")
@@ -15,12 +15,12 @@ if __name__ == "__main__":
     rank = dist.get_rank()
     if rank == 0:
         port = get_open_port()
-        ip = get_ip()
+        ip = "127.0.0.1"
         dist.broadcast_object_list([ip, port], src=0)
     else:
-        recv = [None, None]
+        recv = [None, None]  # type: ignore
         dist.broadcast_object_list(recv, src=0)
-        ip, port = recv
+        ip, port = recv  # type: ignore
 
     stateless_pg = StatelessProcessGroup.create(ip, port, rank,
                                                 dist.get_world_size())
