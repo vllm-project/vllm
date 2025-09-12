@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 class GitUtils:
     """Utility class for Git operations."""
-    
+
     @staticmethod
     def run_git_command(args: list, cwd: str = None) -> tuple[bool, str]:
         """Run a git command and return success status and output."""
@@ -47,48 +47,49 @@ class GitUtils:
             return result.returncode == 0, result.stdout.strip()
         except Exception:
             return False, ""
-    
+
     @staticmethod
     def get_origin_url() -> str:
         """Get the origin URL of the current git repository."""
-        success, output = GitUtils.run_git_command(['remote', 'get-url', 'origin'])
+        success, output = GitUtils.run_git_command(
+            ['remote', 'get-url', 'origin'])
         return output if success else ""
-    
+
     @staticmethod
     def get_config_url() -> str:
         """Get the origin URL from git config."""
-        success, output = GitUtils.run_git_command(['config', '--get', 'remote.origin.url'])
+        success, output = GitUtils.run_git_command(
+            ['config', '--get', 'remote.origin.url'])
         return output if success else ""
-    
+
     @staticmethod
     def get_log_refs() -> str:
         """Get git log references."""
-        success, output = GitUtils.run_git_command(['log', '--format=%D', '-1'])
+        success, output = GitUtils.run_git_command(
+            ['log', '--format=%D', '-1'])
         return output if success else ""
 
 
 class DebugLogger:
     """Base class for components that need debug logging."""
-    
+
     DEFAULT_LOG_PATH = "/tmp/vllm_debug.log"
-    
+
     def __init__(self, debug_log_path: str = None):
         self.debug_log_path = debug_log_path or self.DEFAULT_LOG_PATH
-    
+
     def _log_debug(self, message: str) -> None:
         """Write debug message to log file."""
         with open(self.debug_log_path, "a") as f:
             f.write(f"DEBUG: {message}\n")
-    
+
     @classmethod
     def write_initial_log(cls) -> None:
         """Write initial debug information to log file."""
         with open(cls.DEFAULT_LOG_PATH, "w") as f:
-            f.write("DEBUG: SETUP.PY IS RUNNING - Starting GitHub detection...\n")
-            f.write(f"DEBUG: Current working directory: {os.getcwd()}\n")
-            f.write(f"DEBUG: Command line arguments: {sys.argv}\n")
-            f.write(f"DEBUG: Environment variables: {dict(os.environ)}\n")
-    
+            f.write("DEBUG: SETUP.PY IS RUNNING - "
+                    "Starting GitHub detection...\n")
+
     @classmethod
     def log_github_detection_result(cls, is_github: bool) -> None:
         """Log the result of GitHub detection."""
@@ -102,60 +103,60 @@ class DebugLogger:
 
 class GitHubDetector(DebugLogger):
     """Detects if vLLM is being installed from a GitHub repository."""
-    
+
     # Original vLLM repository patterns
     ORIGINAL_PATTERNS = [
-        'github.com/vllm-project/vllm',
-        'git@github.com:vllm-project/vllm.git'
+        'github.com/vllm-project/vllm', 'git@github.com:vllm-project/vllm.git'
     ]
-    
+
     # Temporary directory patterns
     TEMP_DIR_PATTERNS = ['/tmp/', '\\temp\\', 'cache', 'builds', '.cache']
-    
+
     # UV cache directory pattern
     UV_CACHE_PATTERN = '/.cache/uv/git-v0/checkouts/'
-    
+
     def _is_vllm_github_repo(self, origin_url: str) -> bool:
-        """Check if the given URL is a vLLM GitHub repository (original or fork)."""
+        """Check given URL is a vLLM GitHub repository (original or fork)."""
         if not origin_url:
             return False
-        
+
         # Check for original repository
         if any(pattern in origin_url for pattern in self.ORIGINAL_PATTERNS):
             return True
-        
+
         # Check for any fork: github.com/*/vllm.git
-        return ('github.com/' in origin_url and 
-                '/vllm' in origin_url and 
-                origin_url.endswith('.git'))
-    
+        return ('github.com/' in origin_url and '/vllm' in origin_url
+                and origin_url.endswith('.git'))
+
     def _get_git_origin_url(self) -> str:
         """Get the origin URL of the current git repository."""
         origin_url = GitUtils.get_origin_url()
-        
+
         # Handle UV cache directory case
         if origin_url.startswith('/root/.cache/uv/git-v0/db/'):
             return self._resolve_uv_cache_url()
-        
+
         return origin_url
-    
+
     def _resolve_uv_cache_url(self) -> str:
         """Resolve original URL from UV cache directory."""
         # Try to get the original URL from git config
         config_url = GitUtils.get_config_url()
-        if config_url and not config_url.startswith('/root/.cache/uv/git-v0/db/'):
+        if config_url and not config_url.startswith(
+                '/root/.cache/uv/git-v0/db/'):
             return config_url
-        
+
         # Try to get URL from git log
         log_output = GitUtils.get_log_refs()
         if 'github.com' in log_output and '/vllm' in log_output:
             import re
-            url_match = re.search(r'https://github\.com/[^/]+/vllm', log_output)
+            url_match = re.search(r'https://github\.com/[^/]+/vllm',
+                                  log_output)
             if url_match:
                 return url_match.group(0) + '.git'
-        
+
         return ""
-    
+
     def _check_command_line_args(self) -> bool:
         """Check command line arguments for git+ URLs."""
         if len(sys.argv) > 1:
@@ -163,73 +164,57 @@ class GitHubDetector(DebugLogger):
                 if arg.startswith('git+') and self._is_vllm_github_repo(arg):
                     return True
         return False
-    
+
     def _check_uv_cache_directory(self) -> bool:
         """Check if we're in a UV cache directory with vLLM repo."""
         current_dir = os.getcwd()
         if self.UV_CACHE_PATTERN not in current_dir:
             return False
-        
-        # Check if this is a vLLM repository by looking for setup.py and vllm directory
+
         has_setup_py = os.path.exists(os.path.join(ROOT_DIR, 'setup.py'))
         has_vllm_dir = os.path.exists(os.path.join(ROOT_DIR, 'vllm'))
         is_vllm_project = has_setup_py and has_vllm_dir
-        
-        self._log_debug(f"UV cache detected, has_setup_py: {has_setup_py}, "
-                       f"has_vllm_dir: {has_vllm_dir}, is_vllm_project: {is_vllm_project}")
-        
+
         if is_vllm_project:
-            self._log_debug("UV cache vLLM project detected")
             return True
-        
+
         # Fallback to git remote check
         origin_url = self._get_git_origin_url()
-        self._log_debug(f"UV cache fallback, origin_url: {origin_url}")
-        if self._is_vllm_github_repo(origin_url):
-            self._log_debug("UV cache vLLM repo detected via git")
-            return True
-        
+        return self._is_vllm_github_repo(origin_url)
+
         return False
-    
+
     def _check_temp_directory(self) -> bool:
         """Check if we're in a temporary directory with vLLM repo."""
         current_dir = os.getcwd()
-        is_temp_dir = any(pattern in current_dir.lower() 
-                         for pattern in self.TEMP_DIR_PATTERNS)
-        
+        is_temp_dir = any(pattern in current_dir.lower()
+                          for pattern in self.TEMP_DIR_PATTERNS)
+
         if not is_temp_dir:
             return False
-        
+
         origin_url = self._get_git_origin_url()
-        self._log_debug(f"Temp dir detected, origin_url: {origin_url}")
-        if self._is_vllm_github_repo(origin_url):
-            self._log_debug("Temp dir vLLM repo detected")
-            return True
-        
-        return False
-    
+        return self._is_vllm_github_repo(origin_url)
+
     def _check_local_repository(self) -> bool:
         """Check if we're in the actual vLLM repository (for local dev)."""
         origin_url = self._get_git_origin_url()
-        self._log_debug(f"Method 4, origin_url: {origin_url}")
-        result = self._is_vllm_github_repo(origin_url)
-        self._log_debug(f"Method 4 result: {result}")
-        return result
-    
+        return self._is_vllm_github_repo(origin_url)
+
     def is_installing_from_github(self) -> bool:
         """Check if vLLM is being installed from GitHub repository."""
         # Method 1: Check command line arguments
         if self._check_command_line_args():
             return True
-        
+
         # Method 2: Check UV cache directory
         if self._check_uv_cache_directory():
             return True
-        
+
         # Method 3: Check temporary directory
         if self._check_temp_directory():
             return True
-        
+
         # Method 4: Check local repository
         return self._check_local_repository()
 
@@ -251,7 +236,6 @@ if is_installing_from_github():
     DebugLogger.log_github_detection_result(True)
 else:
     DebugLogger.log_github_detection_result(False)
-
 
 # cannot import envs directly because it depends on vllm,
 #  which is not installed yet
@@ -825,79 +809,76 @@ package_data = {
     ]
 }
 
+
 class PrecompiledWheelManager(DebugLogger):
     """Manages precompiled wheel extraction and installation."""
-    
+
     WHEEL_BASE_URL = "https://wheels.vllm.ai"
     WHEEL_VERSION = "1.0.0.dev-cp38-abi3"
-    
+
     # Architecture to wheel tag mapping
     ARCH_WHEEL_TAGS = {
         "x86_64": "manylinux1_x86_64",
         "aarch64": "manylinux2014_aarch64"
     }
-    
+
     def _get_wheel_tag(self) -> str:
         """Get the appropriate wheel tag for the current architecture."""
         import platform
         arch = platform.machine()
-        
+
         if arch not in self.ARCH_WHEEL_TAGS:
             raise ValueError(f"Unsupported architecture: {arch}")
-        
+
         return self.ARCH_WHEEL_TAGS[arch]
-    
+
     def _get_wheel_urls(self) -> tuple[str, str]:
         """Get base and nightly wheel URLs."""
         wheel_tag = self._get_wheel_tag()
         base_commit = precompiled_wheel_utils.get_base_commit_in_main_branch()
-        
-        base_url = f"{self.WHEEL_BASE_URL}/{base_commit}/vllm-{self.WHEEL_VERSION}-{wheel_tag}.whl"
-        nightly_url = f"{self.WHEEL_BASE_URL}/nightly/vllm-{self.WHEEL_VERSION}-{wheel_tag}.whl"
-        
+
+        base_url = (f"{self.WHEEL_BASE_URL}/{base_commit}/"
+                    f"vllm-{self.WHEEL_VERSION}-{wheel_tag}.whl")
+        nightly_url = (f"{self.WHEEL_BASE_URL}/nightly/"
+                       f"vllm-{self.WHEEL_VERSION}-{wheel_tag}.whl")
+
+        # Log key information for debugging
         self._log_debug(f"Base commit: {base_commit}")
-        self._log_debug(f"Wheel URL: {base_url}")
-        self._log_debug(f"Nightly wheel URL: {nightly_url}")
-        
+
         return base_url, nightly_url
-    
+
     def _select_wheel_url(self) -> str:
         """Select the appropriate wheel URL (custom, base, or nightly)."""
         # Check for custom wheel location
         wheel_location = os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION")
         if wheel_location:
-            self._log_debug(f"Using custom wheel location: {wheel_location}")
             return wheel_location
-        
+
         # Get base and nightly URLs
         base_url, nightly_url = self._get_wheel_urls()
-        
+
         # Try base URL first
         from urllib.request import urlopen
         try:
             with urlopen(base_url) as resp:
                 if resp.status == 200:
                     return base_url
-        except Exception as e:
-            self._log_debug(f"Base wheel not available: {e}")
-        
+        except Exception:
+            pass
+
         # Fall back to nightly
-        self._log_debug(f"Falling back to nightly wheel: {nightly_url}")
         return nightly_url
-    
+
     def extract_and_patch(self) -> dict:
         """Extract precompiled wheel and return package data patch."""
-        self._log_debug("Starting precompiled wheel extraction...")
-        
         wheel_url = self._select_wheel_url()
-        self._log_debug(f"Final wheel URL: {wheel_url}")
-        
+
         try:
-            patch = precompiled_wheel_utils.extract_precompiled_and_patch_package(wheel_url)
-            self._log_debug(f"Wheel extraction successful, patch: {patch}")
+            patch = precompiled_wheel_utils.\
+               extract_precompiled_and_patch_package(wheel_url)
+            self._log_debug("Wheel extraction successful")
             return patch
         except Exception as e:
-            self._log_debug(f"Wheel extraction failed: {e}")
             print(f"[error] Failed to extract precompiled wheel: {e}")
             return {}
 
@@ -905,10 +886,10 @@ class PrecompiledWheelManager(DebugLogger):
 # If using precompiled, extract and patch package_data (in advance of setup)
 if envs.VLLM_USE_PRECOMPILED:
     assert _is_cuda(), "VLLM_USE_PRECOMPILED is only supported for CUDA builds"
-    
+
     wheel_manager = PrecompiledWheelManager()
     patch = wheel_manager.extract_and_patch()
-    
+
     # Apply patch to package_data
     for pkg, files in patch.items():
         package_data.setdefault(pkg, []).extend(files)
