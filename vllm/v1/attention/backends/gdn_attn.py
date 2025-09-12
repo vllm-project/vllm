@@ -115,7 +115,8 @@ class GDNAttentionMetadataBuilder(
 
     def build(  # type: ignore[override]
         self,
-        common_prefix_len: int,
+        group_indices: list[int],
+        common_prefix_lens: list[int],
         common_attn_metadata: CommonAttentionMetadata,
         num_accepted_tokens: Optional[torch.Tensor] = None,
         num_draft_tokens: Optional[torch.Tensor] = None,

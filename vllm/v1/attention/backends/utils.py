@@ -294,7 +294,6 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     ) -> bool:
         return False
 
-
 @functools.lru_cache
 def get_kv_cache_layout():
     # Format specified by the code.
@@ -834,9 +833,11 @@ def create_fast_prefill_custom_backend(
     class FastPrefillAttentionBuilder(underlying_builder):  # type: ignore
 
         def build(self,
-                  common_prefix_len: int,
+                  group_indices: list[int],
+                  common_prefix_lens: list[int],
                   common_attn_metadata: CommonAttentionMetadata,
                   fast_build: bool = False) -> AttentionMetadata:
+            common_prefix_len = common_prefix_lens[0]
             new_common_attn_metadata =\
             make_kv_sharing_fast_prefill_common_attn_metadata(common_attn_metadata)
             metadata = super().build(common_prefix_len,

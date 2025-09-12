@@ -90,9 +90,11 @@ class TritonAttentionMetadataBuilder(
         return attn_metadata
 
     def build(self,
-              common_prefix_len: int,
+              group_indices: list[int],
+              common_prefix_lens: list[int],
               common_attn_metadata: CommonAttentionMetadata,
               fast_build: bool = False) -> TritonAttentionMetadata:
+        common_prefix_len = common_prefix_lens[0]
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
 
@@ -186,6 +188,10 @@ class TritonAttentionBackend(AttentionBackend):
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
+        return False
+
+    @staticmethod
+    def use_multi_cascade_attention(*args, **kwargs) -> bool:
         return False
 
     @staticmethod

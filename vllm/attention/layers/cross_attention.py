@@ -80,9 +80,11 @@ def create_cross_attention_backend(
     class CrossAttentionBuilder(underlying_builder):  # type: ignore
 
         def build(self,
-                  common_prefix_len: int,
+                  group_indices: list[int],
+                  common_prefix_lens: list[int],
                   common_attn_metadata: CommonAttentionMetadata,
                   fast_build: bool = False) -> AttentionMetadata:
+            common_prefix_len = common_prefix_lens[0]
             new_metadata = copy(common_attn_metadata)
             new_metadata.causal = False
             max_encoder_len = _get_max_encoder_len(self.vllm_config)

@@ -30,9 +30,11 @@ def create_chunked_local_attention_backend(
     class ChunkedLocalAttentionBuilder(underlying_builder):  # type: ignore
 
         def build(self,
-                  common_prefix_len: int,
+                  group_indices: list[int],
+                  common_prefix_lens: list[int],
                   common_attn_metadata: CommonAttentionMetadata,
                   fast_build: bool = False) -> AttentionMetadata:
+            common_prefix_len = common_prefix_lens[0]
             common_attn_metadata = make_local_attention_virtual_batches(
                 attention_chunk_size, common_attn_metadata, block_size)
             return super().build(common_prefix_len, common_attn_metadata,

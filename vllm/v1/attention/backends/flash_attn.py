@@ -301,7 +301,13 @@ class FlashAttentionMetadataBuilder(
             prefix_kv_lens = torch.tensor(common_prefix_lens,
                                           dtype=torch.int32,
                                           device=self.device)
-            suffix_kv_lens = (seq_lens_cpu[:num_reqs] - common_prefix_lens).to(
+
+            expanded_prefix_lens = torch.tensor([
+                common_prefix_lens[i]
+                for i, (start, end) in enumerate(zip(group_indices[:-1], group_indices[1:]))
+                for _ in range(end - start)
+            ], dtype=torch.int32, device=seq_lens_cpu.device)
+            suffix_kv_lens = (seq_lens_cpu[:num_reqs] - expanded_prefix_lens).to(
                 self.device, non_blocking=True)
 
             prefix_scheduler_metadata = schedule(
@@ -852,7 +858,7 @@ def cascade_attention(
             start = cu_prefix_query_lens[i]
             end = cu_prefix_query_lens[i + 1]
             suffix_block_table[start: end] = block_table[start: end,
-                                             prefix_kv_lens[i]:]
+                                             prefix_kv_lens[i] // block_size:]
 
     # Process suffix per query.
     suffix_output, suffix_lse = flash_attn_varlen_func(

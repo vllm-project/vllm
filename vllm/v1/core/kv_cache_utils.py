@@ -361,9 +361,9 @@ class KVPrefixTrie:
         If request does not have a path in the prefix trie:
           1. Traces through KVCacheBlocks which prefix the request's tokens
           2. If a KVCacheBlock is not in the trie, add a KVPrefixTrieNode                corresponding to that block along will all blocks thereon for the request              to the trie.
-          4. Update each traversed node's metadata (useful for allocating requests
+          3. Update each traversed node's metadata (useful for allocating requests
              into groups based on their common prefixes).
-          3. Mark this path as the proper sequence of cached KVCacheBlocks to
+          4. Mark this path as the proper sequence of cached KVCacheBlocks to
              associate with this request.
         Else:
           1. Get the last node in the prefix trie corresponding to the request and
