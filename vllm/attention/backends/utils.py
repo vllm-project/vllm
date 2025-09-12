@@ -42,9 +42,9 @@ if TYPE_CHECKING:
 
 BACKEND_MAPPING = {
     _Backend.FLASH_ATTN:
-    "vllm.attention.backends.flash_attn.FlashAttnBackend",  # noqa: E501
+    "vllm.attention.backends.flash_attn.FlashAttentionBackend",  # noqa: E501
     _Backend.FLASH_ATTN_VLLM_V1:
-    "vllm.v1.attention.backends.flash_attn.FlashAttnBackend",  # noqa: E501
+    "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend",  # noqa: E501
     _Backend.TRITON_ATTN_VLLM_V1:
     "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend",  # noqa: E501
     _Backend.XFORMERS:

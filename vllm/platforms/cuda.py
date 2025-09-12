@@ -17,7 +17,8 @@ from typing_extensions import ParamSpec
 # import custom ops, trigger op registration
 import vllm._C  # noqa
 import vllm.envs as envs
-from vllm.attention.backends.utils import backend_to_class
+from vllm.attention.backends.utils import (backend_to_class,
+                                           backend_to_class_str)
 from vllm.logger import init_logger
 from vllm.utils import cuda_device_count_stateless, import_pynvml
 
@@ -198,7 +199,7 @@ class CudaPlatformBase(Platform):
             return _Backend.XFORMERS
 
         if cls.has_device_capability(80):
-            FLASH_ATTN_V1 = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"  # noqa: E501
+            FLASH_ATTN_V1 = backend_to_class_str(_Backend.FLASH_ATTN_VLLM_V1)
             from vllm.attention.selector import is_attn_backend_supported
             is_default_fa_supported = is_attn_backend_supported(
                 FLASH_ATTN_V1, head_size, dtype, allow_import_error=False)
@@ -236,19 +237,10 @@ class CudaPlatformBase(Platform):
             use_triton = selected_backend == _Backend.TRITON_MLA or (
                 selected_backend is None)
 
-            def _get_version(name, import_suffix) -> str:
-                if use_v1:
-                    logger.info_once(f"Using {name} backend on V1 engine.")
-                    return f"vllm.v1.attention.backends.mla.{import_suffix}"
-                else:
-                    logger.info_once(f"Using {name} backend.")
-                    return f"vllm.attention.backends.{import_suffix}"
-
             if use_cutlassmla:
                 if use_v1:
                     logger.info_once("Using Cutlass MLA backend on V1 engine.")
-                    return ("vllm.v1.attention.backends.mla."
-                            "cutlass_mla.CutlassMLABackend")
+                    return backend_to_class_str(_Backend.CUTLASS_MLA, use_v1)
                 else:
                     logger.warning(
                         "Cutlass MLA backend is only supported on V1 engine")
@@ -259,8 +251,8 @@ class CudaPlatformBase(Platform):
                     set_kv_cache_layout("HND")
                     logger.info_once(
                         "Using FlashInfer MLA backend on V1 engine.")
-                    return ("vllm.v1.attention.backends.mla."
-                            "flashinfer_mla.FlashInferMLABackend")
+                    return backend_to_class_str(_Backend.FLASHINFER_MLA,
+                                                use_v1)
                 else:
                     logger.warning(
                         "FlashInfer MLA backend is only supported on V1 engine"
@@ -272,56 +264,50 @@ class CudaPlatformBase(Platform):
                         " (currently only supports block size 64).",
                         block_size)
                 else:
-                    return _get_version("FlashMLA", "flashmla.FlashMLABackend")
+                    return backend_to_class_str(_Backend.FLASHMLA, use_v1)
             if use_flashattn:
                 if use_v1:
                     logger.info_once(
                         "Using FlashAttention MLA backend on V1 engine.")
-                    return ("vllm.v1.attention.backends.mla."
-                            "flashattn_mla.FlashAttnMLABackend")
+                    return backend_to_class_str(_Backend.FLASH_ATTN_MLA,
+                                                use_v1)
                 else:
                     logger.warning(
                         "FlashAttention MLA backend is only supported on V1 "
                         "engine.")
             if use_triton:
-                return _get_version("Triton MLA",
-                                    "triton_mla.TritonMLABackend")
+                return backend_to_class_str(_Backend.TRITON_MLA, use_v1)
         if use_v1:
-            FLASHINFER_V1 = "vllm.v1.attention.backends.flashinfer.FlashInferBackend"  # noqa: E501
-            FLEX_ATTENTION_V1 = "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"  # noqa: E501
-            TRITON_ATTN_VLLM_V1 = "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"  # noqa: E501
-            FLASH_ATTN_V1 = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"  # noqa: E501
-            TREE_ATTN_V1 = "vllm.v1.attention.backends.tree_attn.TreeAttentionBackend"  # noqa: E501
-            XFORMERS_V1 = "vllm.v1.attention.backends.xformers.XFormersAttentionBackend"  # noqa: E501
-
             if selected_backend == _Backend.FLASHINFER:
                 logger.info_once("Using FlashInfer backend on V1 engine.")
                 if cls.has_device_capability(100):
                     from vllm.v1.attention.backends.utils import (
                         set_kv_cache_layout)
                     set_kv_cache_layout("HND")
-                return FLASHINFER_V1
+                return backend_to_class_str(selected_backend, use_v1)
             elif selected_backend == _Backend.FLEX_ATTENTION:
                 logger.info_once("Using FlexAttention backend on V1 engine.")
-                return FLEX_ATTENTION_V1
+                return backend_to_class_str(selected_backend, use_v1)
             elif selected_backend == _Backend.TRITON_ATTN_VLLM_V1:
                 logger.info_once("Using Triton backend on V1 engine.")
-                return TRITON_ATTN_VLLM_V1
+                return backend_to_class_str(selected_backend, use_v1)
             elif selected_backend == _Backend.FLASH_ATTN:
                 logger.info_once("Using Flash Attention backend on V1 engine.")
-                return FLASH_ATTN_V1
+                return backend_to_class_str(selected_backend, use_v1)
             elif selected_backend == _Backend.TREE_ATTN:
                 logger.info_once("Using Tree Attention backend on V1 engine.")
-                return TREE_ATTN_V1
+                return backend_to_class_str(selected_backend, use_v1)
             elif selected_backend == _Backend.XFORMERS_VLLM_V1:
                 logger.info_once("Using XFormers backend on V1 engine.")
-                return XFORMERS_V1
+                return backend_to_class_str(selected_backend, use_v1)
 
             from vllm.attention.selector import is_attn_backend_supported
 
             # Default backends for V1 engine
             # Prefer FlashInfer for Blackwell GPUs if installed
             if cls.is_device_capability(100):
+                FLASHINFER_V1 = backend_to_class_str(_Backend.FLASHINFER,
+                                                     use_v1)
                 if is_default_backend_supported := is_attn_backend_supported(
                         FLASHINFER_V1, head_size, dtype):
                     from vllm.v1.attention.backends.utils import (
@@ -344,7 +330,11 @@ class CudaPlatformBase(Platform):
             if cls.has_device_capability(80):
                 if has_sink and not cls.is_device_capability(90):
                     logger.info_once("Using Triton backend on V1 engine.")
-                    return TRITON_ATTN_VLLM_V1
+                    return backend_to_class_str(_Backend.TRITON_ATTN_VLLM_V1,
+                                                use_v1)
+
+                FLASH_ATTN_V1 = backend_to_class_str(_Backend.FLASH_ATTN,
+                                                     use_v1)
                 if is_default_backend_supported := is_attn_backend_supported(
                         FLASH_ATTN_V1, head_size, dtype,
                         allow_import_error=False):
@@ -355,7 +345,7 @@ class CudaPlatformBase(Platform):
             # FlexAttention is the default for older GPUs
             else:
                 logger.info_once("Using FlexAttention backend on V1 engine.")
-                return FLEX_ATTENTION_V1
+                return backend_to_class_str(_Backend.FLEX_ATTENTION, use_v1)
 
             assert not is_default_backend_supported
 
@@ -370,20 +360,19 @@ class CudaPlatformBase(Platform):
                 ", ".join(f"{k}={v}"
                           for k, v in use_flex_attention_reason.items()),
             )
-            return FLEX_ATTENTION_V1
+            return backend_to_class_str(_Backend.FLEX_ATTENTION, use_v1)
 
         # Backends for V0 engine
         if selected_backend == _Backend.XFORMERS:
             logger.info("Using XFormers backend.")
-            return "vllm.attention.backends.xformers.XFormersBackend"
+            return backend_to_class_str(_Backend.XFORMERS, use_v1)
         elif selected_backend == _Backend.DUAL_CHUNK_FLASH_ATTN:
             logger.info("Using DualChunkFlashAttention backend.")
-            return ("vllm.attention.backends.dual_chunk_flash_attn."
-                    "DualChunkFlashAttentionBackend")
+            return backend_to_class_str(_Backend.DUAL_CHUNK_FLASH_ATTN, use_v1)
         elif selected_backend == _Backend.DIFFERENTIAL_FLASH_ATTN:
             logger.info("Using DifferentialFlashAttention backend.")
-            return ("vllm.attention.backends.differential_flash_attn."
-                    "DifferentialFlashAttentionBackend")
+            return backend_to_class_str(_Backend.DIFFERENTIAL_FLASH_ATTN,
+                                        use_v1)
         elif selected_backend == _Backend.FLASH_ATTN:
             pass
         elif selected_backend:
@@ -440,10 +429,10 @@ class CudaPlatformBase(Platform):
 
         if target_backend == _Backend.XFORMERS:
             logger.info("Using XFormers backend.")
-            return "vllm.attention.backends.xformers.XFormersBackend"
+            return backend_to_class_str(_Backend.XFORMERS, use_v1)
 
         logger.info("Using Flash Attention backend.")
-        return "vllm.attention.backends.flash_attn.FlashAttentionBackend"
+        return backend_to_class_str(_Backend.FLASH_ATTN, use_v1)
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
