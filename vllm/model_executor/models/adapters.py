@@ -307,7 +307,6 @@ def as_seq_cls_model(cls: _T) -> _T:
                 hidden_size,
                 config.num_labels,
                 bias=False,
-                params_dtype=torch.float32,
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "score"),
             )
