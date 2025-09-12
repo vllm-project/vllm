@@ -103,12 +103,11 @@ def _mamba_chunk_scan_combined_fwd(x,
 
 
     dA_cumsum_ref = torch.load("dump/dA_cumsum_%s_main" % (layer))
-
-    print("dA_cumsum: ", dA_cumsum[0,0,0,:10])
-    print("dA_cumsum_ref: ", dA_cumsum_ref[0,0,0,:10])
     torch.testing.assert_close(dA_cumsum, dA_cumsum_ref, atol=0.0, rtol=0.0)
 
-    print("dt: ", dt[0,0,0,:10])
+    dt_ref = torch.load("dump/dt_%s_main" % (layer))
+    torch.testing.assert_close(dt, dt_ref, atol=0.0, rtol=0.0)
+
 
     # 2. Compute the state for each intra-chunk
     # (right term of low-rank factorization of off-diagonal blocks; B terms)
@@ -120,7 +119,9 @@ def _mamba_chunk_scan_combined_fwd(x,
                               seq_idx=seq_idx,
                               states_in_fp32=True)
 
-    print("states: ", states[0,0,0,0,:10])
+    states_ref = torch.load("dump/states_%s_main" % (layer))
+    torch.testing.assert_close(states, states_ref, atol=0.0, rtol=0.0)
+
 
     # 3. Compute the inter-chunk SSM recurrence; produces correct SSM states at chunk boundaries
     # (middle term of factorization of off-diag blocks; A terms)
