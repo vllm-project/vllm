@@ -175,21 +175,6 @@ def marlin_quantize(w: torch.Tensor,
                                      group_size,
                                      is_a_8bit=is_a_8bit)
 
-    if input_dtype == torch.int8 and quant_type == scalar_types.uint8b128:
-        # uint8b128 -> int8
-        marlin_q_w = marlin_q_w.view(torch.int8) - 128
-        marlin_q_w = marlin_q_w.view(torch.int32)
-
-    if input_dtype == torch.int8 and quant_type == scalar_types.uint4b8:
-        # to fit the dequantizition method of GPTQ-W4A8
-        marlin_q_w0 = (marlin_q_w & 0x0F0F0F0F | 0x80808080) - 0x08080808
-        marlin_q_w0 = marlin_q_w0 & 0x0F0F0F0F
-
-        marlin_q_w1 = (marlin_q_w & 0xF0F0F0F0 | 0x08080808) - 0x80808080
-        marlin_q_w1 = marlin_q_w1 & 0xF0F0F0F0
-
-        marlin_q_w = marlin_q_w0 | marlin_q_w1
-
     if input_dtype == torch.float8_e4m3fn and \
             quant_type == scalar_types.uint4b8:
         ops.marlin_int4_fp8_preprocess(marlin_q_w, inplace=True)

@@ -24,11 +24,11 @@ from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     apply_awq_marlin_linear, awq_to_marlin_zero_points, check_marlin_supported,
     check_marlin_supports_layer, check_moe_marlin_supports_layer,
-    get_marlin_input_dtype, marlin_act_int8_process_qweight,
-    marlin_act_int8_process_scales, marlin_make_empty_g_idx,
-    marlin_make_workspace_new, marlin_moe_permute_scales, marlin_permute_bias,
-    marlin_permute_scales, moe_awq_to_marlin_zero_points,
-    verify_marlin_supported, verify_marlin_supports_shape)
+    get_marlin_input_dtype, marlin_act_int8_process_scales,
+    marlin_make_empty_g_idx, marlin_make_workspace_new,
+    marlin_moe_permute_scales, marlin_permute_bias, marlin_permute_scales,
+    moe_awq_to_marlin_zero_points, verify_marlin_supported,
+    verify_marlin_supports_shape)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.parameter import (GroupQuantScaleParameter,
                                            PackedvLLMParameter)
@@ -298,9 +298,6 @@ class AWQMarlinLinearMethod(LinearMethodBase):
             size_n=layer.output_size_per_partition,
             num_bits=self.quant_config.quant_type.size_bits,
             is_a_8bit=is_a_8bit)
-        if self.input_dtype == torch.int8:
-            marlin_qweight = marlin_act_int8_process_qweight(
-                marlin_qweight, self.quant_type)
         replace_parameter(layer, "qweight", marlin_qweight)
 
         # Permute scales from AWQ format to marlin format.
@@ -482,9 +479,6 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
             size_n=layer.w13_qweight.shape[2] * self.quant_config.pack_factor,
             num_bits=self.quant_config.weight_bits,
             is_a_8bit=is_a_8bit)
-        if self.input_dtype == torch.int8:
-            marlin_w13_qweight = marlin_act_int8_process_qweight(
-                marlin_w13_qweight, self.quant_type)
         replace_parameter(layer, "w13_qweight", marlin_w13_qweight)
 
         marlin_w2_qweight = ops.awq_marlin_moe_repack(
@@ -494,9 +488,6 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
             size_n=layer.w2_qweight.shape[2] * self.quant_config.pack_factor,
             num_bits=self.quant_config.weight_bits,
             is_a_8bit=is_a_8bit)
-        if self.input_dtype == torch.int8:
-            marlin_w2_qweight = marlin_act_int8_process_qweight(
-                marlin_w2_qweight, self.quant_type)
         replace_parameter(layer, "w2_qweight", marlin_w2_qweight)
 
         # Why does this take the intermediate size for size_k?

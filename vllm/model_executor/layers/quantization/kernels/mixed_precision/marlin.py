@@ -8,11 +8,10 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     MARLIN_SUPPORTED_GROUP_SIZES, apply_gptq_marlin_linear,
-    check_marlin_supports_shape, marlin_act_int8_process_qweight,
-    marlin_act_int8_process_scales, marlin_is_k_full, marlin_make_empty_g_idx,
-    marlin_make_workspace_new, marlin_permute_bias, marlin_permute_scales,
-    marlin_sort_g_idx, marlin_zero_points, query_marlin_supported_quant_types,
-    unpack_cols)
+    check_marlin_supports_shape, marlin_act_int8_process_scales,
+    marlin_is_k_full, marlin_make_empty_g_idx, marlin_make_workspace_new,
+    marlin_permute_bias, marlin_permute_scales, marlin_sort_g_idx,
+    marlin_zero_points, query_marlin_supported_quant_types, unpack_cols)
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            permute_param_layout_)
 from vllm.platforms import current_platform
@@ -91,8 +90,6 @@ class MarlinLinearKernel(MPLinearKernel):
                                             size_n=c.partition_weight_shape[1],
                                             num_bits=c.weight_type.size_bits,
                                             is_a_8bit=is_a_8bit)
-            if c.act_type == torch.int8:
-                x.data = marlin_act_int8_process_qweight(x.data, c.weight_type)
             return x
 
         def transform_w_s(x):

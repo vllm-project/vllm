@@ -440,9 +440,6 @@ def test_gptq_marlin_gemm(
         a_input_ref = a_input.to(a_scales.dtype) * a_scales.view(-1, 1)
         a_input_ref = a_input_ref.to(dtype)
 
-        if b_type == scalar_types.uint4b8:
-            a_scales = a_scales / 16
-
         if group_size != -1:
             a_scales = a_scales / 4096 * marlin_s.max()
             a_scales = a_scales.float()

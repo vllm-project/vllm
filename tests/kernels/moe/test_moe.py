@@ -746,20 +746,12 @@ def test_fused_marlin_moe(a_type, b_type, c_type, group_blocks, m, n, k, e,
         if group_size != -1:
             a_scales1_factor = 1 / 4096 * scales1.max().float()
             a_scales2_factor = 1 / 4096 * scales2.max().float()
-            if b_type == scalar_types.uint4b8:
-                a_scales1_factor = a_scales1_factor / 16
-                a_scales2_factor = a_scales2_factor / 16
 
             scales1 = (scales1 / scales1.max() * 4096)
             scales1 = scales1.round().to(torch.int16).view(dtype)
 
             scales2 = (scales2 / scales2.max() * 4096)
             scales2 = scales2.round().to(torch.int16).view(dtype)
-        elif b_type == scalar_types.uint4b8:
-            a_scales1_factor = torch.tensor([1 / 16],
-                                            dtype=torch.float32,
-                                            device=scales1.device)
-            a_scales2_factor = a_scales1_factor
         else:
             a_scales1_factor = None
             a_scales2_factor = None

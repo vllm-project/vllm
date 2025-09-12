@@ -24,9 +24,8 @@ from vllm.model_executor.layers.quantization.utils.gptq_utils import (
     get_dynamic_override, get_linear_quant_method, override_config)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_marlin_supported, check_moe_marlin_supports_layer,
-    get_marlin_input_dtype, marlin_act_int8_process_qweight,
-    marlin_act_int8_process_scales, marlin_make_workspace_new,
-    marlin_moe_permute_scales, marlin_permute_bias,
+    get_marlin_input_dtype, marlin_act_int8_process_scales,
+    marlin_make_workspace_new, marlin_moe_permute_scales, marlin_permute_bias,
     marlin_repeat_scales_on_all_ranks, verify_marlin_supported)
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            GroupQuantScaleParameter,
@@ -264,13 +263,14 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         output_size_per_partition = sum(output_partition_sizes)
         is_row_parallel = input_size != input_size_per_partition
         weight_loader = extra_weight_attrs.get("weight_loader")
+        input_dtype = self.input_dtype
 
         mp_linear_kernel_config = MPLinearLayerConfig(
             full_weight_shape=(input_size, output_size),
             partition_weight_shape=\
                 (input_size_per_partition, output_size_per_partition),
             weight_type=self.quant_config.quant_type,
-            act_type=params_dtype,
+            act_type=params_dtype if input_dtype is None else input_dtype,
             group_size=self.quant_config.group_size,
             zero_points=False,
             has_g_idx=self.quant_config.desc_act
@@ -637,9 +637,6 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             layer.w13_qweight.shape[2],
             self.quant_config.quant_type.size_bits,
             is_a_8bit=is_a_8bit)
-        if self.input_dtype == torch.int8:
-            marlin_w13_qweight = marlin_act_int8_process_qweight(
-                marlin_w13_qweight, self.quant_type)
         replace_parameter(layer, "w13_qweight", marlin_w13_qweight)
         marlin_w2_qweight = ops.gptq_marlin_moe_repack(
             layer.w2_qweight,
@@ -648,9 +645,6 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             layer.w2_qweight.shape[2],
             self.quant_config.quant_type.size_bits,
             is_a_8bit=is_a_8bit)
-        if self.input_dtype == torch.int8:
-            marlin_w2_qweight = marlin_act_int8_process_qweight(
-                marlin_w2_qweight, self.quant_type)
         replace_parameter(layer, "w2_qweight", marlin_w2_qweight)
         # Repack scales
         marlin_w13_scales = marlin_moe_permute_scales(

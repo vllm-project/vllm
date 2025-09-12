@@ -190,11 +190,11 @@ def check_moe_marlin_supports_layer(layer: LinearBase, group_size: int) \
 
 
 def get_marlin_input_dtype(prefix):
-    if envs.VLLM_MARLIN_ACTIVATION_DTYPE is None:
+    if envs.VLLM_MARLIN_INPUT_DTYPE is None:
         return
-    elif envs.VLLM_MARLIN_ACTIVATION_DTYPE.upper() == "INT8":
+    elif envs.VLLM_MARLIN_INPUT_DTYPE.upper() == "INT8":
         return torch.int8
-    elif envs.VLLM_MARLIN_ACTIVATION_DTYPE.upper() == "FP8":
+    elif envs.VLLM_MARLIN_INPUT_DTYPE.upper() == "FP8":
         return torch.float8_e4m3fn
     else:
         return
@@ -286,31 +286,9 @@ def marlin_permute_bias(s: torch.Tensor) -> torch.Tensor:
 
 def marlin_act_int8_process_scales(s: torch.Tensor, b_type: ScalarType):
     a_scales_scale_factor = 1 / 4096 * s.max().float()
-    if b_type == scalar_types.uint4b8:
-        a_scales_scale_factor = a_scales_scale_factor / 16
-
     s = s / s.max() * 4096
     s = s.round().to(torch.int16).view(s.dtype)
     return s, a_scales_scale_factor
-
-
-def marlin_act_int8_process_qweight(qweight: torch.Tensor, b_type: ScalarType):
-    if b_type == scalar_types.uint8b128:
-        # uint8b128 -> int8
-        qweight = qweight.view(torch.int8) - 128
-        qweight = qweight.view(torch.int32)
-
-    if b_type == scalar_types.uint4b8:
-        # to fit the dequantizition method of GPTQ-W4A8
-        qweight0 = (qweight & 0x0F0F0F0F | 0x80808080) - 0x08080808
-        qweight0 = qweight0 & 0x0F0F0F0F
-
-        qweight1 = (qweight & 0xF0F0F0F0 | 0x08080808) - 0x80808080
-        qweight1 = qweight1 & 0xF0F0F0F0
-
-        qweight = qweight0 | qweight1
-
-    return qweight
 
 
 def marlin_moe_permute_scales(s: torch.Tensor,
