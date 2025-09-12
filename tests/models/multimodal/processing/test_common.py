@@ -41,6 +41,23 @@ def glm4_1v_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
     return mm_data
 
 
+def qwen3_vl_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
+    """
+    Patch the multimodal data for Qwen3-VL model.
+    """
+    # Ensure video metadata is included
+    if "video" in mm_data:
+        video = mm_data["video"]
+        mm_data["video"] = (video, {
+            "total_num_frames": len(video),
+            "fps": len(video),
+            "duration": 1,
+            "video_backend": "opencv",
+            "frames_indices": list(range(len(video))),
+        })
+    return mm_data
+
+
 def _test_processing_correctness(
     model_id_or_arch: str,
     hit_rate: float,
@@ -181,8 +198,10 @@ _IGNORE_MM_KEYS = {
 }
 
 MM_DATA_PATCHES = {
-    # GLM4.1V requires video metadata to be included in the input
+    # GLM4.1V and Qwen3-VL requires video metadata to be included in the input
     "glm4v": glm4_1v_patch_mm_data,
+    "qwen3_vl": qwen3_vl_patch_mm_data,
+    "qwen3_vl_moe": qwen3_vl_patch_mm_data,
 }
 
 
@@ -328,6 +347,8 @@ def _test_processing_correctness_one(
     "Qwen/Qwen2.5-VL-3B-Instruct",
     "Qwen/Qwen2-Audio-7B-Instruct",
     "Qwen/Qwen2.5-Omni-3B",
+    "Qwen/Qwen3-VL-4B-Instruct",
+    "Qwen/Qwen3-VL-30B-A3B-Instruct",
     "YannQi/R-4B",
     "Skywork/Skywork-R1V-38B",
     "HuggingFaceTB/SmolVLM2-2.2B-Instruct",
