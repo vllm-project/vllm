@@ -27,8 +27,8 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          DistributedExecutorBackend, EPLBConfig,
                          GuidedDecodingBackend, HfOverrides, KVEventsConfig,
                          KVTransferConfig, LoadConfig, LogprobsMode,
-                         LoRAConfig, MambaDType, MMEncoderTPMode, ModelConfig,
-                         ModelDType, ModelImpl, MultiModalConfig,
+                         LoRAConfig, MambaDType, MMCacheType, MMEncoderTPMode,
+                         ModelConfig, ModelDType, ModelImpl, MultiModalConfig,
                          ObservabilityConfig, ParallelConfig, PoolerConfig,
                          PrefixCachingHashAlgo, RunnerOption, SchedulerConfig,
                          SchedulerPolicy, SpeculativeConfig, TaskOption,
@@ -373,6 +373,10 @@ class EngineArgs:
         MultiModalConfig.mm_processor_kwargs
     disable_mm_preprocessor_cache: bool = False  # DEPRECATED
     mm_processor_cache_gb: float = MultiModalConfig.mm_processor_cache_gb
+    mm_processor_cache_type: Optional[MMCacheType] = \
+        MultiModalConfig.mm_processor_cache_type
+    mm_shm_cache_max_object_size_mb: int = \
+        MultiModalConfig.mm_shm_cache_max_object_size_mb
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
     io_processor_plugin: Optional[str] = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
@@ -783,6 +787,12 @@ class EngineArgs:
                                       action="store_true",
                                       deprecated=True)
         multimodal_group.add_argument(
+            "--mm-processor-cache-type",
+            **multimodal_kwargs["mm_processor_cache_type"])
+        multimodal_group.add_argument(
+            "--mm-shm-cache-max-object-size-mb",
+            **multimodal_kwargs["mm_shm_cache_max_object_size_mb"])
+        multimodal_group.add_argument(
             "--mm-encoder-tp-mode", **multimodal_kwargs["mm_encoder_tp_mode"])
         multimodal_group.add_argument(
             "--interleave-mm-strings",
@@ -998,6 +1008,9 @@ class EngineArgs:
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,
             mm_processor_cache_gb=self.mm_processor_cache_gb,
+            mm_processor_cache_type=self.mm_processor_cache_type,
+            mm_shm_cache_max_object_size_mb=self.
+            mm_shm_cache_max_object_size_mb,
             mm_encoder_tp_mode=self.mm_encoder_tp_mode,
             override_pooler_config=self.override_pooler_config,
             logits_processor_pattern=self.logits_processor_pattern,
