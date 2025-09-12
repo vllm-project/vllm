@@ -551,7 +551,7 @@ class RandomDataset(BenchmarkDataset):
         [6880, 6881] -> ['Ġcalls', 'here'] ->
         [1650, 939, 486] -> ['Ġcall', 'sh', 'ere']
         To avoid uncontrolled change of the prompt length,
-        the encoded sequence is truncated before being decode again.
+        the encoded sequence is truncated before being decoded again.
         """
         # Build the inner sequence by sampling sequentially from the vocab
         inner_seq = ((offset + index + np.arange(input_len)) 

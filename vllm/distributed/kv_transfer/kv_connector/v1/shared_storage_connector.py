@@ -300,11 +300,12 @@ class SharedStorageConnector(KVConnectorBase_V1):
         total_need_load = 0
         for new_req in scheduler_output.scheduled_new_reqs:
             if new_req.req_id in self._requests_need_load:
-                meta.add_request(token_ids=new_req.prompt_token_ids,
-                                 block_ids=new_req.block_ids[0],
-                                 block_size=self._block_size,
-                                 is_store=False,
-                                 mm_hashes=new_req.mm_hashes)
+                meta.add_request(
+                    token_ids=new_req.prompt_token_ids,
+                    block_ids=new_req.block_ids[0],
+                    block_size=self._block_size,
+                    is_store=False,
+                    mm_hashes=[f.identifier for f in new_req.mm_features])
                 total_need_load += 1
             else:
                 # NOTE: here, we set the store and load being exclusive,
@@ -312,11 +313,12 @@ class SharedStorageConnector(KVConnectorBase_V1):
                 # NOTE(rob): for this debug implementation, we only cache
                 # the original prompt tokens.
                 if not self._found_match_for_request(new_req):
-                    meta.add_request(token_ids=new_req.prompt_token_ids,
-                                     block_ids=new_req.block_ids[0],
-                                     block_size=self._block_size,
-                                     is_store=True,
-                                     mm_hashes=new_req.mm_hashes)
+                    meta.add_request(
+                        token_ids=new_req.prompt_token_ids,
+                        block_ids=new_req.block_ids[0],
+                        block_size=self._block_size,
+                        is_store=True,
+                        mm_hashes=[f.identifier for f in new_req.mm_features])
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for i, req_id in enumerate(cached_reqs.req_ids):
@@ -341,11 +343,12 @@ class SharedStorageConnector(KVConnectorBase_V1):
                 # of the block_ids for the request.
                 block_ids = new_block_ids[0]
 
-                meta.add_request(token_ids=token_ids,
-                                 block_ids=block_ids,
-                                 block_size=self._block_size,
-                                 is_store=False,
-                                 mm_hashes=request.mm_hashes)
+                meta.add_request(
+                    token_ids=token_ids,
+                    block_ids=block_ids,
+                    block_size=self._block_size,
+                    is_store=False,
+                    mm_hashes=[f.identifier for f in request.mm_features])
                 total_need_load += 1
 
         assert total_need_load == len(self._requests_need_load)
@@ -364,10 +367,10 @@ class SharedStorageConnector(KVConnectorBase_V1):
         """
         num_tokens_to_check = align_to_block_size(
             len(request.prompt_token_ids) - 1, self._block_size)
-        foldername = self._generate_foldername_debug(torch.tensor(
-            request.prompt_token_ids)[:num_tokens_to_check],
-                                                     request.mm_hashes,
-                                                     create_folder=False)
+        foldername = self._generate_foldername_debug(
+            torch.tensor(request.prompt_token_ids)[:num_tokens_to_check],
+            [f.identifier for f in request.mm_features],
+            create_folder=False)
         return os.path.exists(foldername)
 
     def _generate_foldername_debug(
