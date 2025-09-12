@@ -6,7 +6,7 @@ import json
 import os
 import sys
 import tempfile
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 if TYPE_CHECKING:
     VLLM_HOST_IP: str = ""
@@ -204,6 +204,48 @@ def maybe_convert_bool(value: Optional[str]) -> Optional[bool]:
     return bool(int(value))
 
 
+def env_with_choices(
+        env_name: str,
+        default: Optional[str],
+        choices: Union[list[str], Callable[[], list[str]]],
+        case_sensitive: bool = True) -> Callable[[], Optional[str]]:
+    """
+    Create a lambda that validates environment variable against allowed choices
+    
+    Args:
+        env_name: Name of the environment variable
+        default: Default value if not set (can be None)
+        choices: List of valid string options or callable that returns list
+        case_sensitive: Whether validation should be case sensitive
+        
+    Returns:
+        Lambda function for environment_variables dict
+    """
+
+    def _get_validated_env() -> Optional[str]:
+        value = os.getenv(env_name)
+        if value is None:
+            return default
+
+        # Resolve choices if it's a callable (for lazy loading)
+        actual_choices = choices() if callable(choices) else choices
+
+        if not case_sensitive:
+            check_value = value.lower()
+            check_choices = [choice.lower() for choice in actual_choices]
+        else:
+            check_value = value
+            check_choices = actual_choices
+
+        if check_value not in check_choices:
+            raise ValueError(f"Invalid value '{value}' for {env_name}. "
+                             f"Valid options: {actual_choices}.")
+
+        return value
+
+    return _get_validated_env
+
+
 def get_vllm_port() -> Optional[int]:
     """Get the port from VLLM_PORT environment variable.
 
@@ -279,7 +321,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If not set, defaults to "Debug" or "RelWithDebInfo"
     # Available options: "Debug", "Release", "RelWithDebInfo"
     "CMAKE_BUILD_TYPE":
-    lambda: os.getenv("CMAKE_BUILD_TYPE"),
+    env_with_choices("CMAKE_BUILD_TYPE", None,
+        ["Debug", "Release", "RelWithDebInfo"]),
 
     # If set, vllm will print verbose logs during installation
     "VERBOSE":
@@ -468,16 +511,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("VLLM_TRACE_FUNCTION", "0")),
 
     # Backend for attention computation
-    # Available options:
-    # - "TORCH_SDPA": use torch.nn.MultiheadAttention
-    # - "FLASH_ATTN": use FlashAttention
-    # - "XFORMERS": use XFormers
-    # - "ROCM_FLASH": use ROCmFlashAttention
-    # - "FLASHINFER": use flashinfer
-    # - "FLASHMLA": use FlashMLA
-    # - "FLASH_ATTN_MLA": use FlashAttention for MLA
+    # Available options loaded dynamically from _Backend enum
     "VLLM_ATTENTION_BACKEND":
-    lambda: os.getenv("VLLM_ATTENTION_BACKEND", None),
+    env_with_choices("VLLM_ATTENTION_BACKEND", None,
+                     lambda: list(__import__('vllm.platforms.interface', \
+                        fromlist=['_Backend'])._Backend.__members__.keys())),
 
     # If set, vllm will use flashinfer sampler
     "VLLM_USE_FLASHINFER_SAMPLER":
@@ -540,7 +578,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "shm": use shared memory and gRPC for communication
     # This flag is ignored if VLLM_USE_RAY_COMPILED_DAG is not set.
     "VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE":
-    lambda: os.getenv("VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE", "auto"),
+    env_with_choices("VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE", "auto",
+        ["auto", "nccl", "shm"]),
 
     # If the env var is set, it enables GPU communication overlap
     # (experimental feature) in Ray's Compiled Graph. This flag is ignored if
@@ -559,7 +598,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use dedicated multiprocess context for workers.
     # Both spawn and fork work
     "VLLM_WORKER_MULTIPROC_METHOD":
-    lambda: os.getenv("VLLM_WORKER_MULTIPROC_METHOD", "fork"),
+    env_with_choices("VLLM_WORKER_MULTIPROC_METHOD", "fork",
+       ["spawn", "fork"]),
 
     # Path to the cache for storing downloaded assets
     "VLLM_ASSETS_CACHE":
@@ -816,7 +856,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Choice of quantization level: FP, INT8, INT6, INT4 or NONE
     # Recommended for large models to get allreduce
     "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION":
-    lambda: os.getenv("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION", "NONE").upper(),
+    lambda: env_with_choices("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION", "NONE",
+                            ["FP", "INT8", "INT6", "INT4", "NONE"]),
 
     # Custom quick allreduce kernel for MI3* cards
     # Due to the lack of the bfloat16 asm instruction, bfloat16
@@ -1058,21 +1099,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "deepep_high_throughput", use deepep high-throughput kernels
     # - "deepep_low_latency", use deepep low-latency kernels
     "VLLM_ALL2ALL_BACKEND":
-    lambda: os.getenv("VLLM_ALL2ALL_BACKEND", "naive"),
+    env_with_choices("VLLM_ALL2ALL_BACKEND", "naive",
+                     ["naive", "pplx",
+                     "deepep_high_throughput", "deepep_low_latency"]),
 
-    # Flashinfer MoE backend for vLLM's fused Mixture-of-Experts support. Both
-    # require compute capability 10.0 or above.
+    # Flashinfer MoE backend for vLLM's fused Mixture-of-Experts support.
+    # Both require compute capability 10.0 or above.
     # Available options:
     # - "throughput":  [default]
     #     Uses CUTLASS kernels optimized for high-throughput batch inference.
     # - "latency":
     #     Uses TensorRT-LLM kernels optimized for low-latency inference.
-    # To set this backend, define the environment variable:
-    #     export VLLM_FLASHINFER_MOE_BACKEND=latency.
-    # If not set, defaults to "throughput".
-    "VLLM_FLASHINFER_MOE_BACKEND": lambda: os.getenv(
-    "VLLM_FLASHINFER_MOE_BACKEND", "throughput"
-    ),
+    "VLLM_FLASHINFER_MOE_BACKEND":
+    env_with_choices("VLLM_FLASHINFER_MOE_BACKEND", "throughput",
+    ["throughput", "latency"]),
 
     # Control the maximum number of tokens per expert supported by the
     # NVFP4 MoE CUTLASS Kernel. This value is used to create a buffer for
@@ -1128,7 +1168,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # leave the layout choice to the backend. Mind that backends may only
     # implement and support a subset of all possible layouts.
     "VLLM_KV_CACHE_LAYOUT":
-    lambda: os.getenv("VLLM_KV_CACHE_LAYOUT", None),
+    env_with_choices("VLLM_KV_CACHE_LAYOUT", None, ["NHD", "HND"]),
 
     # Enable checking whether the generated logits contain NaNs,
     # indicating corrupted output. Useful for debugging low level bugs
