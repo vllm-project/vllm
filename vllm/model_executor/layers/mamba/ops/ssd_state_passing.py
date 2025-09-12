@@ -82,8 +82,7 @@ def _state_passing_fwd_kernel(
             + pid_h * stride_initstates_head \
             + offs_m * stride_initstates_dim
 
-        states = tl.load(initstates_ptrs,
-                         mask=offs_m < dim,
+        states = tl.load(initstates_ptrs, mask=offs_m < dim,
                          other=0.0).to(tl.float32)
     else:
         states = tl.zeros((BLOCK_SIZE, ), dtype=tl.float32)
@@ -94,15 +93,15 @@ def _state_passing_fwd_kernel(
         new_states = tl.load(states_ptrs, mask=offs_m < dim,
                              other=0.0).to(tl.float32)
         dA_cs = tl.load(dA_cs_ptr).to(tl.float32)
-        seq_idx = tl.load(seq_idx_ptr + chunk_seqlen_start * stride_seq_idx_seqlen)
+        seq_idx = tl.load(seq_idx_ptr +
+                          chunk_seqlen_start * stride_seq_idx_seqlen)
         # we have started a new sequence
         if prev_seq_idx != seq_idx:
             if HAS_INITSTATES:
                 initstates_ptrs = initstates_ptr + seq_idx * stride_initstates_batch \
                     + pid_h * stride_initstates_head \
                     + offs_m * stride_initstates_dim
-                states = tl.load(initstates_ptrs,
-                                 mask=offs_m < dim,
+                states = tl.load(initstates_ptrs, mask=offs_m < dim,
                                  other=0.0).to(tl.float32)
             else:
                 states = tl.zeros((BLOCK_SIZE, ), dtype=tl.float32)
