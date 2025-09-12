@@ -379,6 +379,11 @@ class AutoRoundConfig(QuantizationConfig):
             return None
 
     def get_quant_method(self, layer: torch.nn.Module, prefix: str):
+        if prefix and self.extra_config:
+            for layer_name in self.extra_config:
+                if (layer_name == prefix or layer_name == f"model.{prefix}"
+                    ) and self.extra_config[layer_name].get('bits', 16) >= 16:
+                    return UnquantizedLinearMethod()
         if (current_platform.is_cpu() or current_platform.is_xpu()
                 or self.backend == "ipex"):
             return self.apply_ipex_quant_layer(layer, prefix)
