@@ -17,9 +17,9 @@ from typing_extensions import ParamSpec
 # import custom ops, trigger op registration
 import vllm._C  # noqa
 import vllm.envs as envs
+from vllm.attention.backends.utils import backend_to_class
 from vllm.logger import init_logger
-from vllm.utils import (cuda_device_count_stateless, import_pynvml,
-                        resolve_obj_by_qualname)
+from vllm.utils import cuda_device_count_stateless, import_pynvml
 
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
@@ -160,8 +160,7 @@ class CudaPlatformBase(Platform):
 
             # Adjust block sizes for MLA backends based on their requirements
             backend_enum = _Backend[envs.VLLM_ATTENTION_BACKEND]
-            backend_class_name = backend_mapping[backend_enum]
-            backend_class = resolve_obj_by_qualname(backend_class_name)
+            backend_class = backend_to_class(backend_enum)
             if backend_class.supports_block_size(cache_config.block_size):
                 cache_config.block_size = \
                     backend_class.get_supported_block_sizes()[0]
