@@ -67,6 +67,7 @@ def parse_args():
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--top-k", type=int, default=-1)
     parser.add_argument("--print-output", action="store_true")
+    parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--output-len", type=int, default=256)
     parser.add_argument("--model-dir", type=str, default=None)
     parser.add_argument("--eagle-dir", type=str, default=None)
@@ -151,6 +152,7 @@ def main():
         speculative_config=speculative_config,
         disable_log_stats=False,
         max_model_len=4096,
+        max_num_seqs=args.batch_size,
         limit_mm_per_prompt={"image": 5},
         disable_chunked_mm_input=True,
     )

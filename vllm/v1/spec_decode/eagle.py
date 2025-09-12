@@ -693,23 +693,16 @@ class EagleProposer:
             self.pruned_vocab = prune_draft_vocab(vocab_freq, keep_threshold)
             self.pruned_vocab = self.pruned_vocab.to(self.model.lm_head.weight.device)
 
-            # to prune the vocab, the draft lm_head cannot be shared with the target model lm_head
-            ic(id(self.model.lm_head), id(target_language_model.lm_head))
-            if self.model.lm_head == target_language_model.lm_head:
-                self.model.lm_head = copy.deepcopy(target_language_model.lm_head)
-            ic(id(self.model.lm_head), id(target_language_model.lm_head))
-
-            # # if pruning the draft model vocabulary, we must make a copy of the lm_head
-            # if self.vllm_config.speculative_config.draft_vocab_frequency_path is not None:
-            #     self.model.lm_head = copy.deepcopy(target_language_model.lm_head)
-            # else:
-                
-
             # Update lm_head weights with pruned vocabulary
-            ic(self.model.lm_head.weight.shape, target_language_model.lm_head.weight.shape)
             if hasattr(self.model, "lm_head"):
-                # head = self.lm_head.weight
-                self.model.lm_head.weight.data = self.model.lm_head.weight.data[self.pruned_vocab]
+                ic(self.model.lm_head.weight.shape, target_language_model.lm_head.weight.shape)
+
+                # to prune the vocab, the draft lm_head cannot be shared with the target model lm_head
+                if self.model.lm_head == target_language_model.lm_head:
+                    self.model.lm_head = copy.deepcopy(target_language_model.lm_head)
+
+                # self.model.lm_head.weight.data = self.model.lm_head.weight.data[self.pruned_vocab]
+                self.model.lm_head.weight = self.model.lm_head.weight[self.pruned_vocab]
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
                 logger.info("Updated lm_head weights with pruned vocabulary.")
