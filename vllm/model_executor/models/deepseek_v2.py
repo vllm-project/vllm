@@ -63,7 +63,6 @@ from .utils import (PPMissingLayer, is_pp_missing_parameter,
                     maybe_prefix)
 
 
-@CustomOp.register("deepseekv2_mlp")
 class DeepseekV2MLP(CustomOp):
 
     def __init__(
