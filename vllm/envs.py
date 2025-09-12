@@ -856,7 +856,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Choice of quantization level: FP, INT8, INT6, INT4 or NONE
     # Recommended for large models to get allreduce
     "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION":
-    lambda: env_with_choices("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION", "NONE",
+    env_with_choices("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION", "NONE",
                             ["FP", "INT8", "INT6", "INT4", "NONE"]),
 
     # Custom quick allreduce kernel for MI3* cards
