@@ -37,7 +37,7 @@ def get_dp_padding_ubatch(
     1. Decides if each DP rank is going to microbatch. Either all ranks
     run with microbatching or none of them do. If this function decides
     not to run with microbatching. It will "abort" meaning that no padding
-    information will be returned to the caller. It will return (False, 0, None)
+    information will be returned to the caller. It will return (False, None)
 
     2. Determines the total number of tokens that each rank will run.
     All ranks will be padded out so that the run with the same number

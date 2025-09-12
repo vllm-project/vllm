@@ -13,6 +13,7 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.v1.worker.ubatch_utils import UBatchSlices, is_second_ubatch_empty
 
 if TYPE_CHECKING:
@@ -90,8 +91,26 @@ class DPMetadata:
             should_ubatch: bool, orig_num_tokens_per_ubatch: int,
             padded_num_tokens_per_ubatch: int, dp_size: int,
             dp_rank: int) -> tuple[bool, Optional[torch.Tensor]]:
+        """
+        1. Decides if each DP rank is going to microbatch. Either all ranks
+        run with microbatching or none of them do. If this function decides
+        not to run with microbatching. It will "abort" meaning that no padding
+        information will be returned to the caller. It will return (False, None)
 
-        tensor = torch.zeros(3, dp_size, device="cuda", dtype=torch.int32)
+        2. Determines the total number of tokens that each rank will run.
+        All ranks will be padded out so that the run with the same number
+        of tokens
+
+        Returns: tuple[
+            should_ubatch: Are all DP ranks going to microbatch
+            num_tokens_after_padding: A tensor containing the total number of
+            tokens per-microbatch for each DP rank including padding. Will be
+            None if should_ubatch if False
+        ]
+        """
+
+        device = current_platform.device_type
+        tensor = torch.zeros(3, dp_size, device=device, dtype=torch.int32)
         tensor[0][dp_rank] = orig_num_tokens_per_ubatch
         tensor[1][dp_rank] = padded_num_tokens_per_ubatch
         tensor[2][dp_rank] = 1 if should_ubatch else 0
@@ -112,7 +131,7 @@ class DPMetadata:
             logger.debug("Aborting ubatching %s %s", orig_min_num_tokens,
                          padded_max_num_tokens)
             return False, None
-        return result, padded_num_tokens_tensor
+        return result, padded_num_tokens_tensor.cpu()
 
     @staticmethod
     def make(
