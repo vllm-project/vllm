@@ -206,9 +206,14 @@ class CuMemAllocator:
 
         assert isinstance(offload_tags, tuple)
 
+        total_bytes = 0
+        backup_bytes = 0
+
         for ptr, data in self.pointer_to_data.items():
             handle = data.handle
+            total_bytes += handle[1]
             if data.tag in offload_tags:
+                backup_bytes += handle[1]
                 size_in_bytes = handle[1]
                 cpu_backup_tensor = torch.empty(
                     size_in_bytes,
@@ -219,6 +224,12 @@ class CuMemAllocator:
                 libcudart.cudaMemcpy(cpu_ptr, ptr, size_in_bytes)
                 data.cpu_backup_tensor = cpu_backup_tensor
             unmap_and_release(handle)
+
+        logger.info(
+            "CuMemAllocator: sleep freed %s GiB memory in total, of which"
+            "%s GiB is backed up in CPU and the rest %s GiB is discarded"
+            "directly.", total_bytes / 1024**3, backup_bytes / 1024**3,
+            (total_bytes - backup_bytes) / 1024**3)
 
         gc.collect()
         torch.cuda.empty_cache()
