@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 from typing import Optional
 
 import pytest
@@ -99,9 +98,10 @@ AITER_MODEL_LIST = [
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize(
     "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False])
+@pytest.mark.parametrize("use_prompt_embeds", [True, False])
 def test_models(hf_runner, vllm_runner, example_prompts, model: str,
                 max_tokens: int, num_logprobs: int, use_rocm_aiter: bool,
-                monkeypatch) -> None:
+                use_prompt_embeds: bool, monkeypatch) -> None:
 
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
@@ -119,7 +119,11 @@ def test_models(hf_runner, vllm_runner, example_prompts, model: str,
         # in parts of the operators
         pytest.skip(f"Skipping '{model}' model test with AITER kernel.")
 
-    use_prompt_embeds = os.getenv("VLLM_USE_V1") == "0"
+    # Note: can be removed when
+    # https://github.com/vllm-project/vllm/pull/24278 finished
+    if current_platform.is_cpu() and use_prompt_embeds:
+        pytest.skip("Skipping use_prompt_embeds=True with "
+                    "V1-only CPU backend.")
 
     with hf_runner(model) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
