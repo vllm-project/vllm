@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Optional, Union
+from typing import Optional, Union
 
 import msgspec
 
@@ -42,7 +42,6 @@ class KVTransferStats(
     def is_empty(self) -> bool:
         """Return True if the stats are empty."""
         raise NotImplementedError
-
 
 
 class KVTransferLogging:

@@ -1379,4 +1379,5 @@ class NixlKVTransferStats(KVTransferStats,
         # TODO: reduce stats to a single value, calculate latency/throughput
         return {"num_successful_transfers": self.num_successful_transfers}
 
+
 EMPTY_NIXL_KV_TRANSFER_STATS = NixlKVTransferStats()
