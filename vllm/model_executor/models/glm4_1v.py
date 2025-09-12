@@ -419,15 +419,16 @@ class Glm4vVisionBlock(nn.Module):
             max_seqlen: Optional[int] = None,  # Only used for Flash Attention
             seqlens: Optional[list[int]] = None,  # Only used for xFormers
     ) -> torch.Tensor:
-        x = x + self.attn(
+        x_attn = self.attn(
             self.norm1(x),
             cu_seqlens=cu_seqlens,
             rotary_pos_emb=rotary_pos_emb,
             max_seqlen=max_seqlen,
             seqlens=seqlens,
         )
+        x_fused_norm, residual = self.norm2(x, residual=x_attn)
+        x = residual + self.mlp(x_fused_norm)
 
-        x = x + self.mlp(self.norm2(x))
         return x
 
 
@@ -1378,7 +1379,7 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
                 raise ValueError(f"{name} should be 2D or batched 3D tensor. "
                                  f"Got ndim: {mm_input.ndim} "
                                  f"(shape={mm_input.shape})")
-            return torch.concat(list(mm_input))
+            return mm_input.reshape(-1, mm_input.shape[-1])
         else:
             return torch.concat(mm_input)
 
