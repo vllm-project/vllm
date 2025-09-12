@@ -114,6 +114,18 @@ livenessProbe:
     # -- Name or number of the port to access on the container, on which the server is listening
     port: 8000
 
+startupProbe:
+  # -- Number of times after which if a probe fails in a row, Kubernetes considers that the overall check has failed: the container has failed to start
+  failureThreshold: 14
+  # -- How often (in seconds) to perform the liveness probe
+  periodSeconds: 10
+  # -- Configuration of the Kubelet http request on the server
+  httpGet:
+    # -- Path to access on the HTTP server
+    path: /health
+    # -- Name or number of the port to access on the container, on which the server is listening
+    port: 8000
+
 labels:
   environment: "test"
   release: "test"
