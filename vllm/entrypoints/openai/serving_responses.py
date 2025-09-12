@@ -1504,7 +1504,7 @@ class OpenAIServingResponses(OpenAIServing):
                         raise ValueError(
                             f"Unknown function name: {function_name}")
 
-                    current_item_id = f"tool_{random_uuid()}",
+                    current_item_id = f"tool_{random_uuid()}"
                     yield _send_event(
                         openai_responses_types.ResponseOutputItemAddedEvent(
                             type="response.output_item.added",
