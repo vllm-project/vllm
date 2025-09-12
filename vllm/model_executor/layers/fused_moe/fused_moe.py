@@ -817,8 +817,13 @@ def get_default_config(
     - Different dtypes (fp8_w8a8, int8_w8a16) have distinct optimal patterns
     """
 
-    # num_warps: Consistently 4 across dtypes (80% of configs)
-    num_warps = 4
+    # num_warps: Adaptive based on batch size and expert count
+    if M <= 64:
+        num_warps = 4  # Small batches consistently use 4
+    elif E <= 64:
+        num_warps = 8  # Large batches + small E (like Mixtral) need 8 warps
+    else:
+        num_warps = 4  # Large batches + large E (like DeepSeek) prefer 4 warps
     # num_stages=3 can cause triton.runtime.errors.OutOfResources
     # on ROCm, set it to 2 instead.
     num_stages = 3 if not current_platform.is_rocm() else 2
