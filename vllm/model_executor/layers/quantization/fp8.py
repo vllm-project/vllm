@@ -31,7 +31,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     select_cutlass_fp8_gemm_impl, swap_w13_to_w31)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     W8A8BlockFp8LinearOp, get_col_major_tma_aligned_tensor,
-    requant_weight_ue8m0_inplace)
+    requant_weight_ue8m0_inplace, should_use_deepgemm_for_fp8_linear)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear, prepare_fp8_layer_for_marlin,
     prepare_moe_fp8_layer_for_marlin)
@@ -456,10 +456,10 @@ class Fp8LinearMethod(LinearMethodBase):
             # Activations not quantized for marlin.
             del layer.input_scale
 
-        # On B200, if E8M0 for DeepGemm is used, we need to
+        # On Blackwell or Hopper, if E8M0 for DeepGemm is used, we need to
         # requantize the weight and input to the specific scale
         # at the same time.
-        if is_deep_gemm_e8m0_used():
+        if is_deep_gemm_e8m0_used() and self.block_quant:
             assert layer.weight_block_size is not None
             block_sz = tuple(layer.weight_block_size)
             requant_weight_ue8m0_inplace(
@@ -468,6 +468,15 @@ class Fp8LinearMethod(LinearMethodBase):
                     layer, "weight_scale_inv") else layer.weight_scale.data,
                 block_sz,
             )
+
+        # SM90 Block FP8 CUTLASS requires row-major weight scales
+        if (self.block_quant and current_platform.is_device_capability(90)
+                and self.cutlass_block_fp8_supported
+                and not should_use_deepgemm_for_fp8_linear(
+                    torch.bfloat16, layer.weight)):
+            layer.weight_scale_inv = Parameter(
+                layer.weight_scale_inv.data.T.contiguous(),
+                requires_grad=False)
 
     def apply(self,
               layer: torch.nn.Module,
@@ -900,7 +909,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             del layer.w13_input_scale
             del layer.w2_input_scale
 
-        if is_deep_gemm_e8m0_used():
+        if is_deep_gemm_e8m0_used() and self.block_quant:
             assert layer.weight_block_size is not None
             # Re-quantise the expert weights so their scales are UE8M0.
             block_sz = tuple(layer.weight_block_size)
