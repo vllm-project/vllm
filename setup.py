@@ -98,9 +98,17 @@ def is_installing_from_github() -> bool:
 
 
 # Auto-enable precompiled wheels when installing from GitHub
+print("DEBUG: SETUP.PY IS RUNNING - Starting GitHub detection...")
+print(f"DEBUG: Current working directory: {os.getcwd()}")
+print(f"DEBUG: Command line arguments: {sys.argv}")
+print(f"DEBUG: Environment variables: {dict(os.environ)}")
+
 if is_installing_from_github():
     print("Detected installation from GitHub repository. Automatically enabling precompiled wheels.")
     os.environ["VLLM_USE_PRECOMPILED"] = "1"
+    print(f"DEBUG: VLLM_USE_PRECOMPILED set to: {os.environ.get('VLLM_USE_PRECOMPILED')}")
+else:
+    print("DEBUG: No GitHub installation detected")
 
 
 # cannot import envs directly because it depends on vllm,
