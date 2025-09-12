@@ -631,16 +631,14 @@ class Florence2LanguageModel(nn.Module):
     ) -> torch.Tensor:
         r"""
         Args:
-            input_ids
-                Indices of *decoder* input sequence tokens in the vocabulary.
+            input_ids: Indices of *decoder* input sequence tokens 
+                in the vocabulary.
                 Padding will be ignored by default should you
                 provide it.
-            positions
-                Positions of *decoder* input sequence tokens.
-            encoder_input_ids
-                Indices of *encoder* input sequence tokens in the vocabulary.
-            encoder_positions:
-                Positions of *encoder* input sequence tokens.
+            positions: Positions of *decoder* input sequence tokens.
+            encoder_input_ids: Indices of *encoder* input sequence tokens 
+                in the vocabulary.
+            encoder_positions: Positions of *encoder* input sequence tokens.
         Returns:
             Model output torch.Tensor
         """
@@ -699,14 +697,10 @@ class Florence2LanguageForConditionalGeneration(nn.Module, SupportsV0Only):
     ) -> torch.Tensor:
         r"""
         Args:
-            input_ids
-                torch.Tensor of *decoder* input token ids.
-            positions
-                torch.Tensor of *decoder* position indices.
-            encoder_input_ids
-                torch.Tensor of *encoder* input token ids.
-            encoder_positions
-                torch.Tensor of *encoder* position indices
+            input_ids: torch.Tensor of *decoder* input token ids.
+            positions: torch.Tensor of *decoder* position indices.
+            encoder_input_ids: torch.Tensor of *encoder* input token ids.
+            encoder_positions: torch.Tensor of *encoder* position indices
         Returns:
             Output torch.Tensor
         """
@@ -1068,14 +1062,10 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> torch.Tensor:
         r"""
         Args:
-            input_ids
-                torch.Tensor of *decoder* input token ids.
-            positions
-                torch.Tensor of *decoder* position indices.
-            encoder_input_ids
-                torch.Tensor of *encoder* input token ids.
-            encoder_positions
-                torch.Tensor of *encoder* position indices
+            input_ids: torch.Tensor of *decoder* input token ids.
+            positions: torch.Tensor of *decoder* position indices.
+            encoder_input_ids: torch.Tensor of *encoder* input token ids.
+            encoder_positions: torch.Tensor of *encoder* position indices
         Returns:
             Output torch.Tensor
         """
