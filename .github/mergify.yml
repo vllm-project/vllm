@@ -125,6 +125,7 @@ pull_request_rules:
       - files~=^examples/.*gpt[-_]?oss.*\.py
       - files~=^tests/.*gpt[-_]?oss.*\.py
       - files~=^tests/entrypoints/openai/test_response_api_with_harmony.py
+      - files~=^tests/entrypoints/test_context.py
       - files~=^vllm/model_executor/models/.*gpt[-_]?oss.*\.py
       - files~=^vllm/model_executor/layers/.*gpt[-_]?oss.*\.py
       - files~=^vllm/entrypoints/harmony_utils.py
