@@ -40,15 +40,17 @@ def cutlass_scaled_mm(
     Bs: torch.Tensor,
     block_size: list[int],
     output_dtype: torch.dtype = torch.float16,
+    is_hopper: Optional[bool] = None,
 ) -> torch.Tensor:
+    if is_hopper is None:
+        is_hopper = current_platform.is_device_capability(90)
     return ops.cutlass_scaled_mm(
         A,
         B.T,
         out_dtype=output_dtype,
         scale_a=As,
         # SM90 block FP8 requires row-major scale_b, which we do ahead of time
-        scale_b=Bs if block_size is not None
-        and current_platform.is_device_capability(90) else Bs.T)
+        scale_b=Bs if block_size is not None and is_hopper else Bs.T)
 
 
 def rocm_aiter_gemm_w8a8_blockscale_impl(
@@ -126,13 +128,11 @@ class W8A8BlockFp8LinearOp:
         cutlass_block_fp8_supported: bool = CUTLASS_BLOCK_FP8_SUPPORTED,
         use_aiter_and_is_supported: bool = False,
     ):
-        self.cutlass_block_fp8_supported = cutlass_block_fp8_supported
-        self.use_aiter_and_is_supported = use_aiter_and_is_supported
         self.is_deep_gemm_supported = is_deep_gemm_supported()
         self.ue8m0_deepgemm_supported = is_deep_gemm_e8m0_used()
-        self.is_hopper = current_platform.has_device_capability(90)
+        self.is_hopper = current_platform.is_device_capability(90)
         self.w8a8_blockscale_op = self._dispatch_w8a8_blockscale_op(
-            self.cutlass_block_fp8_supported, self.use_aiter_and_is_supported)
+            cutlass_block_fp8_supported, use_aiter_and_is_supported)
 
     def apply(
         self,
@@ -157,22 +157,8 @@ class W8A8BlockFp8LinearOp:
                 output = output + bias
             return output.to(dtype=input.dtype).view(*output_shape)
 
-        num_pad = 0
-        if cutlass_block_fp8_supported and self.is_hopper:
-            # pad first dimension to be divisible by 4 due to
-            # cutlass blockwise gemm limitation for hopper
-            num_pad = 4 - (input_2d.shape[0] % 4)
-            if num_pad > 0:
-                input_2d = torch.nn.functional.pad(input_2d,
-                                                (0, 0, 0, num_pad),
-                                                "constant", 0)
-
         output = self.w8a8_blockscale_op(input_2d, weight, block_size,
                                          weight_scale)
-
-        if num_pad > 0:
-            output = output[:-num_pad]
-
         if bias is not None:
             output = output + bias
         return output.to(dtype=input.dtype).view(*output_shape)
@@ -209,7 +195,7 @@ class W8A8BlockFp8LinearOp:
         weight_scale: torch.Tensor,
     ) -> torch.Tensor:
         num_pad = 0
-        if current_platform.is_device_capability(90):
+        if self.is_hopper:
             # pad first dimension to be divisible by 4 due to
             # cutlass blockwise gemm limitation for hopper
             num_pad = 4 - (input_2d.shape[0] % 4)
@@ -221,8 +207,11 @@ class W8A8BlockFp8LinearOp:
                                                      block_size[1],
                                                      column_major_scales=True,
                                                      use_ue8m0=False)
-        return cutlass_scaled_mm(q_input, weight, x_scale, weight_scale,
-                                 block_size, input_2d.dtype)
+        output = cutlass_scaled_mm(q_input, weight, x_scale, weight_scale,
+                                   block_size, input_2d.dtype, self.is_hopper)
+        if num_pad > 0:
+            output = output[:-num_pad]
+        return output
 
     def _run_aiter(
         self,
@@ -236,7 +225,7 @@ class W8A8BlockFp8LinearOp:
         return torch.ops.vllm.rocm_aiter_gemm_w8a8_blockscale(
             q_input, weight, x_scale, weight_scale, block_size, input_2d.dtype)
 
-    def _w8a8_block_fp8_matmul(
+    def _run_w8a8_block_fp8_matmul(
         self,
         input_2d: torch.Tensor,
         weight: torch.Tensor,
@@ -249,6 +238,24 @@ class W8A8BlockFp8LinearOp:
                                                      use_ue8m0=False)
         return w8a8_block_fp8_matmul(q_input, weight, x_scale, weight_scale,
                                      block_size, input_2d.dtype)
+
+    def _dispatch_w8a8_blockscale_op(
+        self,
+        use_cutlass: bool,
+        use_aiter_and_is_supported: bool,
+    ) -> Callable[[
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            list[int],
+            torch.dtype,
+    ], torch.Tensor]:
+        if use_cutlass:
+            return self._run_cutlass
+        if use_aiter_and_is_supported:
+            return self._run_aiter
+        return self._run_w8a8_block_fp8_matmul
 
 
 def input_to_float8(
