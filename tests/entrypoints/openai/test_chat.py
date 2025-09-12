@@ -54,11 +54,9 @@ def default_server_args(
 
 
 @pytest.fixture(scope="module", params=[False, True])
-def server(default_server_args, request, monkeypatch_module):
+def server(default_server_args, request):
     if marker := request.node.get_closest_marker("extra_server_args"):
         default_server_args.append(marker.args[0])
-
-    monkeypatch_module.setenv('VLLM_USE_V1', '1')
 
     with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
         yield remote_server
