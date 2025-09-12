@@ -34,6 +34,7 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 from transformers import BatchFeature
 
+from vllm.attention.layer import check_upstream_fa_availability
 from vllm.config import VllmConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
@@ -170,9 +171,16 @@ class Ernie4_5_VisionAttention(nn.Module):
                                       prefix=f"{prefix}.proj")
 
         # Detect attention implementation.
-        self.attn_backend, self.use_upstream_fa = get_vit_attn_backend(
+        self.attn_backend = get_vit_attn_backend(
             head_size=self.hidden_size_per_attention_head,
             dtype=torch.get_default_dtype())
+
+        self.use_upstream_fa = False
+        if self.attn_backend != _Backend.FLASH_ATTN and \
+            check_upstream_fa_availability(torch.get_default_dtype()):
+            self.attn_backend = _Backend.FLASH_ATTN
+            self.use_upstream_fa = True
+
         if self.attn_backend not in {
                 _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS,
                 _Backend.ROCM_AITER_FA
@@ -462,8 +470,11 @@ class Ernie4_5_VisionTransformer(nn.Module):
                 ), "vit's config.hidden must be equal to config.embed_dim"
         self.ln = nn.LayerNorm(hidden_size, eps=1e-6)
 
-        self.attn_backend, _ = get_vit_attn_backend(
+        self.attn_backend = get_vit_attn_backend(
             head_size=head_dim, dtype=torch.get_default_dtype())
+        if self.attn_backend != _Backend.FLASH_ATTN and \
+        check_upstream_fa_availability(torch.get_default_dtype()):
+            self.attn_backend = _Backend.FLASH_ATTN
 
     @property
     def dtype(self) -> torch.dtype:

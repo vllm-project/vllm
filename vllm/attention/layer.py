@@ -369,8 +369,8 @@ class MultiHeadAttention(nn.Module):
         # to upstream flash attention if available.
         # If vllm native fa is selected, we use it directly.
         use_upstream_fa = False
-        if check_upstream_fa_availability(
-                dtype) and backend != _Backend.FLASH_ATTN:
+        if backend != _Backend.FLASH_ATTN and check_upstream_fa_availability(
+                dtype):
             backend = _Backend.FLASH_ATTN
             use_upstream_fa = True
 

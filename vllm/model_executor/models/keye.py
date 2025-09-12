@@ -17,6 +17,7 @@ from transformers.modeling_outputs import (BaseModelOutput,
                                            BaseModelOutputWithPooling)
 from transformers.utils import torch_int
 
+from vllm.attention.layer import check_upstream_fa_availability
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
@@ -374,8 +375,16 @@ class KeyeSiglipAttention(nn.Module):
         )
 
         # Detect attention implementation.
-        self.attn_backend, self.use_upstream_fa = get_vit_attn_backend(
+        self.attn_backend = get_vit_attn_backend(
             head_size=self.head_dim, dtype=torch.get_default_dtype())
+
+        self.use_upstream_fa = False
+        if self.attn_backend != _Backend.FLASH_ATTN and \
+            check_upstream_fa_availability(
+                torch.get_default_dtype()):
+            self.attn_backend = _Backend.FLASH_ATTN
+            self.use_upstream_fa = True
+
         if self.attn_backend not in {_Backend.FLASH_ATTN, _Backend.XFORMERS}:
             raise RuntimeError(
                 f"Keye-VL does not support {self.attn_backend} backend now.")
