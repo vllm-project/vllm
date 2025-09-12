@@ -68,6 +68,7 @@ class RequestFuncInput:
     model: str
     model_name: Optional[str] = None
     logprobs: Optional[int] = None
+    extra_headers: Optional[dict] = None
     extra_body: Optional[dict] = None
     multi_modal_content: Optional[Union[dict, list[dict]]] = None
     ignore_eos: bool = False
@@ -129,6 +130,8 @@ async def async_request_openai_completions(
     headers = {
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"
     }
+    if request_func_input.extra_headers:
+        headers |= request_func_input.extra_headers
     if request_func_input.request_id:
         headers["x-request-id"] = request_func_input.request_id
 
@@ -258,6 +261,8 @@ async def async_request_openai_chat_completions(
         "Content-Type": "application/json",
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
     }
+    if request_func_input.extra_headers:
+        headers |= request_func_input.extra_headers
     if request_func_input.request_id:
         headers["x-request-id"] = request_func_input.request_id
 
@@ -364,6 +369,8 @@ async def async_request_openai_audio(
     headers = {
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
     }
+    if request_func_input.extra_headers:
+        headers |= request_func_input.extra_headers
     if request_func_input.request_id:
         headers["x-request-id"] = request_func_input.request_id
 
