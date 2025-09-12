@@ -144,7 +144,7 @@ if TYPE_CHECKING:
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5557
-    VLLM_ALL2ALL_BACKEND: str = "allgather_reducescatter"
+    VLLM_ALL2ALL_BACKEND: str = "naive"
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_SLEEP_WHEN_IDLE: bool = False
@@ -1059,7 +1059,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "deepep_high_throughput", use deepep high-throughput kernels
     # - "deepep_low_latency", use deepep low-latency kernels
     "VLLM_ALL2ALL_BACKEND":
-    lambda: os.getenv("VLLM_ALL2ALL_BACKEND", "allgather_reducescatter"),
+    lambda: os.getenv("VLLM_ALL2ALL_BACKEND", "naive"),
 
     # Flashinfer MoE backend for vLLM's fused Mixture-of-Experts support. Both
     # require compute capability 10.0 or above.
