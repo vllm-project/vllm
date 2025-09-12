@@ -233,7 +233,7 @@ def _chunk_scan_fwd_kernel(
 
     offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     dA_cs_m = tl.load(dA_cumsum_ptr + offs_m * stride_dA_cs_csize,
-                      mask=offs_m < chunk_size,
+                      mask=offs_m < chunk_size_limit,
                       other=0.0).to(tl.float32)
 
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
@@ -248,7 +248,8 @@ def _chunk_scan_fwd_kernel(
         C_ptrs = C_ptr + (offs_m[:, None] * stride_C_seqlen +
                           offs_k_dstate[None, :] * stride_C_dstate)
 
-        scale_m = tl.exp(dA_cs_m)
+        scale_m = tl.where(seq_idx == seq_idx_prev, tl.exp(dA_cs_m), 0.0)
+
         if BLOCK_SIZE_DSTATE <= 128:
             C = tl.load(C_ptrs,
                         mask=(offs_m[:, None] < chunk_size_limit) &
@@ -284,6 +285,7 @@ def _chunk_scan_fwd_kernel(
             prev_states = prev_states.to(C_ptr.dtype.element_ty)
             acc = tl.dot(C, prev_states) * scale_m[:, None]
         else:
+            offset_tpa = 0
             for k in range(0, dstate, BLOCK_SIZE_K):
                 C = tl.load(C_ptrs,
                             mask=(offs_m[:, None] < chunk_size_limit) &
@@ -296,9 +298,10 @@ def _chunk_scan_fwd_kernel(
                         init_states_ptrs = initstates_ptr + seq_idx * stride_init_states_batch \
                             + pid_h * stride_init_states_head \
                             + offs_n[None, :] * stride_init_states_hdim \
-                            + offs_k_dstate[:, None] * stride_init_states_dstate
+                            + offs_k_dstate[:, None] * stride_init_states_dstate \
+                            + offset_tpa
                         prev_states = tl.load(init_states_ptrs,
-                                      mask=(offs_k_dstate[:, None] < dstate) &
+                                      mask=(offs_k_dstate[:, None] < dstate-k) &
                                       (offs_n[None, :] < hdim),
                                       other=0.0)
                     else:
@@ -309,16 +312,18 @@ def _chunk_scan_fwd_kernel(
                     states_ptrs = states_ptr + seq_idx_prev * stride_states_batch \
                         + pid_h * stride_states_head \
                         + offs_n[None, :] * stride_states_hdim \
-                        + offs_k_dstate[:, None] * stride_states_dstate
+                        + offs_k_dstate[:, None] * stride_states_dstate \
+                        + offset_tpa
                     prev_states = tl.load(states_ptrs,
-                                  mask=(offs_k_dstate[:, None] < dstate) &
+                                  mask=(offs_k_dstate[:, None] < dstate-k) &
                                   (offs_n[None, :] < hdim),
                                   other=0.0)
 
                 prev_states = prev_states.to(C_ptr.dtype.element_ty)
                 acc += tl.dot(C, prev_states)
                 C_ptrs += BLOCK_SIZE_K
-                prev_states_ptrs += BLOCK_SIZE_K
+                offset_tpa += BLOCK_SIZE_K
+
             acc *= scale_m[:, None]
 
     offs_k = tl.arange(0, BLOCK_SIZE_K) + c_off
@@ -332,16 +337,16 @@ def _chunk_scan_fwd_kernel(
         (pid_m + 1) * BLOCK_SIZE_M, chunk_size_limit)
     for k in range(0, K_MAX, BLOCK_SIZE_K):
         cb = tl.load(cb_ptrs,
-                     mask=(offs_m[:, None] < chunk_size) &
-                     (offs_k[None, :] < chunk_size - k),
+                     mask=(offs_m[:, None] < chunk_size_limit) &
+                     (offs_k[None, :] < chunk_size_limit - k),
                      other=0.0).to(tl.float32)
         dA_cs_k = tl.load(dA_cumsum_ptrs,
-                          mask=offs_k < chunk_size - k,
+                          mask=offs_k < chunk_size_limit - k,
                           other=0.0).to(tl.float32)
         # If there's seq_idx, we already set cb[i, j] = 0 for seq_idx[i] != seq_idx[j].
         # So we don't need masking wrt seq_idx here.
         cb *= tl.exp(dA_cs_m[:, None] - dA_cs_k[None, :])
-        dt_k = tl.load(dt_ptrs, mask=offs_k < chunk_size - k,
+        dt_k = tl.load(dt_ptrs, mask=offs_k < chunk_size_limit - k,
                        other=0.0).to(tl.float32)
         cb *= dt_k
         if IS_CAUSAL:

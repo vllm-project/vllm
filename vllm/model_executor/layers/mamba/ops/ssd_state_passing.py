@@ -69,11 +69,6 @@ def _state_passing_fwd_kernel(
     dA_cs_ptr += pid_b * stride_dA_cs_batch + pid_h * stride_dA_cs_head + (
         chunk_size - 1) * stride_dA_cs_csize
     out_ptr += pid_b * stride_out_batch + pid_h * stride_out_head
-    if HAS_INITSTATES:
-        initstates_ptr += pid_h * stride_initstates_head
-        if not IS_CONT_BATCHED:
-            initstates_ptr += pid_b * stride_initstates_batch
-        initstates_ptr += offs_m * stride_initstates_dim
 
     if HAS_SEQ_IDX:
         seq_idx_ptr += pid_b * stride_seq_idx_batch
@@ -83,7 +78,10 @@ def _state_passing_fwd_kernel(
     out_ptrs = out_ptr + offs_m * stride_out_dim
 
     if HAS_INITSTATES:
-        initstates_ptrs = initstates_ptr + 0 * stride_initstates_batch
+        initstates_ptrs = initstates_ptr + 0 * stride_initstates_batch \
+            + pid_h * stride_initstates_head \
+            + offs_m * stride_initstates_dim
+
         states = tl.load(initstates_ptrs,
                          mask=offs_m < dim,
                          other=0.0).to(tl.float32)
@@ -104,7 +102,9 @@ def _state_passing_fwd_kernel(
         # we are started a new sequence
         if prev_seq_idx != seq_idx:
             if HAS_INITSTATES:
-                initstates_ptrs = initstates_ptr + seq_idx * stride_initstates_batch
+                initstates_ptrs = initstates_ptr + seq_idx * stride_initstates_batch \
+                    + pid_h * stride_initstates_head \
+                    + offs_m * stride_initstates_dim
                 states = tl.load(initstates_ptrs,
                                  mask=offs_m < dim,
                                  other=0.0).to(tl.float32)

@@ -136,8 +136,6 @@ def _mamba_chunk_scan_combined_fwd(x,
         chunk_offsets=chunk_offsets)
 
     print("after state passing: ")
-    print("states.shape: ", states.shape)
-
     print("states: ", states[0 ,0, 0,:10])
 
     states = rearrange(states, "... (p n) -> ... p n", n=dstate)
@@ -181,9 +179,7 @@ def _mamba_chunk_scan_combined_fwd(x,
     else:
         assert batch == 1, "passing cu_seqlens to get the varlen states is only supported if batch dimension is 1"
         print("last_chunk: ", last_chunk)
-        print(states.shape)
-        varlen_states = states[:, last_chunk, ...].clone()
-        print(varlen_states.shape)
+        varlen_states = states[:, last_chunk, ...].clone().squeeze(0)
         print("varlen_states: ", varlen_states[0,0,0,:10])
         final_states = states[:, -1, ...]
         return out_x, dt, dA_cumsum, states, final_states, varlen_states
