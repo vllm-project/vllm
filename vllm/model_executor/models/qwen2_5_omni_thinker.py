@@ -551,6 +551,8 @@ class Qwen2_5OmniConditionalGenerationMixin:
             raise ValueError(f"Incorrect type of {name}. "
                              f"Got type: {type(mm_input)}")
         if isinstance(mm_input, torch.Tensor):
+            if dim == 0:
+                return mm_input.reshape(-1, *mm_input.shape[2:])
             return torch.concat(list(mm_input), dim=dim)
         else:
             return torch.concat(mm_input, dim=dim)
