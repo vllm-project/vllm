@@ -34,16 +34,18 @@ SHARED_STORAGE_PATH="/path/to/your/share/storage"
 # Encoder worker
 ###############################################################################
 CUDA_VISIBLE_DEVICES="$GPU_E" vllm serve "$MODEL" \
-    --gpu-memory-utilization 0.7 \
+    --gpu-memory-utilization 0.0 \
     --port "$ENCODE_PORT" \
     --enable-request-id-headers \
+    --no-enable-prefix-caching \
     --max-num-seqs 128 \
     --enforce-eager \
     --ec-transfer-config '{
         "ec_connector": "ECSharedStorageConnector",
         "ec_role": "ec_producer",
         "ec_connector_extra_config": {
-            "shared_storage_path": "'"$SHARED_STORAGE_PATH"'"
+            "shared_storage_path": "'"$SHARED_STORAGE_PATH"'",
+            "ec_max_num_scheduled_tokens": "4096"
         }
     }' \
     >"$ENC_LOG" 2>&1 &

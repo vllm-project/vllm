@@ -3287,7 +3287,7 @@ class ECTransferConfig:
             self.ec_role in get_args(ECProducer)
 
     @property
-    def is_kv_consumer(self) -> bool:
+    def is_ec_consumer(self) -> bool:
         return self.ec_connector is not None and \
             self.ec_role in get_args(ECConsumer)
 

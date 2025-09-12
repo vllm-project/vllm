@@ -65,7 +65,7 @@ class ECConnectorBase(ABC):
         self._connector_metadata: Optional[ECConnectorMetadata] = None
         self._vllm_config = vllm_config
         self._role = role
-        self._is_producer = (vllm_config.ec_transfer_config.ec_role == 'ec_producer')
+        self._is_producer = vllm_config.ec_transfer_config.is_ec_producer
 
     @property
     def role(self) -> ECConnectorRole:

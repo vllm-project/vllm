@@ -1,5 +1,6 @@
 # api_proxy.py
 import asyncio
+import copy
 import json
 import time
 import uuid
@@ -61,10 +62,14 @@ async def forward_streaming_request(
     headers = {"x-request-id": request_id}
     # Skip request to encoder instance if we don't have mm input
     if has_mm_input(request_data):
+        encoder_request_data = copy.deepcopy(request_data)
+        encoder_request_data["max_tokens"] = 1
+        if "max_completion_tokens" in encoder_request_data:
+            encoder_request_data["max_completion_tokens"] = 1
         task1 = asyncio.create_task(
             encode_session.post(
                 f"{e_server_url}/v1/chat/completions",
-                json=request_data,
+                json=encoder_request_data,
                 headers=headers
             )
         )
@@ -107,11 +112,15 @@ async def forward_non_streaming_request(
     headers = {"x-request-id": request_id}
     # Skip request to encoder instance if we don't have mm input
     if has_mm_input(request_data):
+        encoder_request_data = copy.deepcopy(request_data)
+        encoder_request_data["max_tokens"] = 1
+        if "max_completion_tokens" in encoder_request_data:
+            encoder_request_data["max_completion_tokens"] = 1
         # Start request to encode server
         task1 = asyncio.create_task(
             encode_session.post(
                 f"{e_server_url}/v1/chat/completions",
-                json=request_data,
+                json=encoder_request_data,
                 headers=headers
             )
         )

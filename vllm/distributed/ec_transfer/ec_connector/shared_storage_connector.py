@@ -50,7 +50,7 @@ class ECSharedStorageConnector(ECConnectorBase):
     # NOTE: This is Simple debug implementation of the EC connector.
     # It save / load the EC cache to / from the disk.
 
-    def __init__(self, vllm_config: "VllmConfig", role: ECConnectorBase):
+    def __init__(self, vllm_config: "VllmConfig", role: ECConnectorRole):
         super().__init__(vllm_config=vllm_config, role=role)
         # req_id -> index -> MMMeta
         self._mm_datas_need_loads: dict[str, int] = {}
