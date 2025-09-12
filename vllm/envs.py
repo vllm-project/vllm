@@ -175,7 +175,8 @@ if TYPE_CHECKING:
     VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS: bool = False
     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
     VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
-
+    VLLM_USE_NCCL_SYMM_MEM: bool = False
+    VLLM_NCCL_INCLUDE_PATH: Optional[str] = None
 
 def get_default_cache_root():
     return os.getenv(
@@ -1241,6 +1242,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # raw bytes. Defaults to True for backward compatibility.
     "VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES":
     lambda: bool(int(os.getenv("VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES", "1"))),
+
+    # Flag to enable NCCL symmetric memory allocation and registration
+    "VLLM_USE_NCCL_SYMM_MEM":
+    lambda: bool(int(os.getenv("VLLM_USE_NCCL_SYMM_MEM", "0"))),
+
+    # NCCL header path
+    "VLLM_NCCL_INCLUDE_PATH":
+    lambda: os.environ.get("VLLM_NCCL_INCLUDE_PATH", None),
+
 }
 
 # --8<-- [end:env-vars-definition]

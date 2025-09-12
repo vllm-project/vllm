@@ -7,6 +7,10 @@ import torch
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
+from vllm.distributed.device_communicators.pynccl_allocator import (
+    is_symmetric_memory_enabled,)
+from vllm.distributed.device_communicators.pynccl import (
+  register_nccl_symmetric_ops,)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -53,6 +57,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 group=self.cpu_group,
                 device=self.device,
             )
+            if is_symmetric_memory_enabled():
+                register_nccl_symmetric_ops(self.pynccl_comm)
 
         self.ca_comm: Optional[CustomAllreduce] = None
         self.qr_comm: Optional[QuickAllReduce] = None
@@ -103,6 +109,13 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 raise ValueError(f"Unknown all2all backend: {all2all_backend}")
 
     def all_reduce(self, input_):
+        # since currently we perform copy input -> symm_input -> out-of-place AR
+        # return symm_output, we don't need to check if input is symmetric
+        if self.pynccl_comm is not None and \
+            self.pynccl_comm.should_use_nccl_symm_mem_allreduce(input_):
+            out = torch.ops.vllm.all_reduce_symmetric_with_copy(input_)
+            if out is not None:
+                return out
         # always try quick reduce first, then custom allreduce,
         # and then pynccl. (quick reduce just for ROCM MI3*)
         qr_comm = self.qr_comm
@@ -132,6 +145,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             # when we run the model, allreduce only happens for the TP
             # group, where we always have either custom allreduce or pynccl.
             out = input_.clone()
+            print("doing torch dist all reduce")
             torch.distributed.all_reduce(out, group=self.device_group)
         return out
 
