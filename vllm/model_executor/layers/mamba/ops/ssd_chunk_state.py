@@ -15,7 +15,13 @@ from .mamba_ssm import softplus
 
 @triton.autotune(
     configs=[
+        triton.Config({'BLOCK_SIZE_H': 1}),
+        triton.Config({'BLOCK_SIZE_H': 2}),
+        triton.Config({'BLOCK_SIZE_H': 4}),
         triton.Config({'BLOCK_SIZE_H': 8}),
+        triton.Config({'BLOCK_SIZE_H': 16}),
+        triton.Config({'BLOCK_SIZE_H': 32}),
+        triton.Config({'BLOCK_SIZE_H': 64}),
     ],
     key=['chunk_size', 'nheads'],
 )
@@ -110,6 +116,70 @@ def _chunk_cumsum_fwd_kernel(
 
 @triton.autotune(
     configs=[
+        triton.Config(
+            {
+                'BLOCK_SIZE_M': 128,
+                'BLOCK_SIZE_N': 256,
+                'BLOCK_SIZE_K': 64
+            },
+            num_stages=3,
+            num_warps=8),
+        triton.Config(
+            {
+                'BLOCK_SIZE_M': 64,
+                'BLOCK_SIZE_N': 256,
+                'BLOCK_SIZE_K': 32
+            },
+            num_stages=4,
+            num_warps=4),
+        triton.Config(
+            {
+                'BLOCK_SIZE_M': 128,
+                'BLOCK_SIZE_N': 128,
+                'BLOCK_SIZE_K': 32
+            },
+            num_stages=4,
+            num_warps=4),
+        triton.Config(
+            {
+                'BLOCK_SIZE_M': 128,
+                'BLOCK_SIZE_N': 64,
+                'BLOCK_SIZE_K': 32
+            },
+            num_stages=4,
+            num_warps=4),
+        triton.Config(
+            {
+                'BLOCK_SIZE_M': 64,
+                'BLOCK_SIZE_N': 128,
+                'BLOCK_SIZE_K': 32
+            },
+            num_stages=4,
+            num_warps=4),
+        triton.Config(
+            {
+                'BLOCK_SIZE_M': 128,
+                'BLOCK_SIZE_N': 32,
+                'BLOCK_SIZE_K': 32
+            },
+            num_stages=4,
+            num_warps=4),
+        triton.Config(
+            {
+                'BLOCK_SIZE_M': 64,
+                'BLOCK_SIZE_N': 32,
+                'BLOCK_SIZE_K': 32
+            },
+            num_stages=5,
+            num_warps=2),
+        triton.Config(
+            {
+                'BLOCK_SIZE_M': 32,
+                'BLOCK_SIZE_N': 64,
+                'BLOCK_SIZE_K': 32
+            },
+            num_stages=5,
+            num_warps=2),
         triton.Config(
             {
                 'BLOCK_SIZE_M': 64,

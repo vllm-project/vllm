@@ -14,6 +14,11 @@ from vllm.triton_utils import tl, triton
 @triton.autotune(
     configs=[
         triton.Config({'BLOCK_SIZE': 64}),
+        triton.Config({'BLOCK_SIZE': 128}),
+        triton.Config({'BLOCK_SIZE': 256}),
+        triton.Config({'BLOCK_SIZE': 512}),
+        triton.Config({'BLOCK_SIZE': 1024}),
+        triton.Config({'BLOCK_SIZE': 2048}),
     ],
     key=['dim'],
 )
