@@ -657,8 +657,15 @@ class MambaManager(SingleTypeKVCacheManager):
         The maximum # of blocks we need is the last sliding window in the
         prefix cache, plus the blocks for new tokens.
         """
-
-        # We only need 1 mamba block for the entire prefix.
+        # Extra blocks to handle mamba speculative decoding.
+        assert isinstance(self.kv_cache_spec, MambaSpec)
+        if self.kv_cache_spec.num_speculative_blocks > 0:
+            blocks_for_spec_decode = \
+                (self.kv_cache_spec.block_size *
+                self.kv_cache_spec.num_speculative_blocks) // self.block_size \
+                + 1
+        else:
+            blocks_for_spec_decode = 0
         num_new_tokens = total_tokens_need_slots - total_computed_tokens
         max_blocks = cdiv(num_new_tokens, self.block_size) + 1
         return min(
@@ -667,7 +674,8 @@ class MambaManager(SingleTypeKVCacheManager):
                 total_tokens_need_slots,
                 new_computed_blocks,
                 total_computed_tokens,
-            ), max_blocks + 1)
+            ) + blocks_for_spec_decode,
+            max_blocks + 1 + blocks_for_spec_decode)
 
 
 class CrossAttentionManager(SingleTypeKVCacheManager):
