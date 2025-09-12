@@ -218,3 +218,4 @@ csrc/moe/marlin_moe_wna16/kernel_*
 
 # Ignore ep_kernels_workspace folder
 ep_kernels_workspace/
+xgrammar/

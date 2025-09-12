@@ -92,7 +92,6 @@ from .utils import (AttentionGroup, MultiModalBudget,
 
 if TYPE_CHECKING:
     import xgrammar as xgr
-
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.core.sched.output import SchedulerOutput
 else:
