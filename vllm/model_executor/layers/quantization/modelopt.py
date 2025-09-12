@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Callable, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 import torch
 from torch.nn import Module
@@ -45,6 +45,9 @@ from vllm.utils import next_power_of_2
 from vllm.utils.flashinfer import (flashinfer_scaled_fp4_mm, has_flashinfer,
                                    has_flashinfer_moe)
 
+if TYPE_CHECKING:
+    from vllm.model_executor.models.utils import WeightsMapper
+
 logger = init_logger(__name__)
 
 QUANT_ALGOS = ["FP8", "NVFP4"]
@@ -63,7 +66,7 @@ class ModelOptFp8Config(QuantizationConfig):
         super().__init__()
         self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
         self.kv_cache_quant_method = kv_cache_quant_method
-        self.exclude_modules = exclude_modules
+        self.exclude_modules = exclude_modules or []
         if is_checkpoint_fp8_serialized:
             logger.warning("Detected ModelOpt fp8 checkpoint. Please note that"
                            " the format is experimental and could change.")
@@ -83,6 +86,11 @@ class ModelOptFp8Config(QuantizationConfig):
     @classmethod
     def get_config_filenames(cls) -> list[str]:
         return ["hf_quant_config.json"]
+
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+        if self.exclude_modules is not None:
+            self.exclude_modules = hf_to_vllm_mapper.apply_list(
+                self.exclude_modules)
 
     @classmethod
     def override_quantization_method(
@@ -170,7 +178,9 @@ class ModelOptFp8Config(QuantizationConfig):
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention  # Avoid circular import
         if isinstance(layer, LinearBase):
-            if self.is_layer_excluded(prefix):
+            if (is_layer_skipped(prefix, self.exclude_modules,
+                                 self.packed_modules_mapping)
+                    or self.is_layer_excluded(prefix)):
                 return UnquantizedLinearMethod()
             return ModelOptFp8LinearMethod(self)
         elif isinstance(layer, Attention):
@@ -311,6 +321,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         moe: FusedMoEConfig,
+        layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
         experts = select_cutlass_fp8_gemm_impl(
             moe,
@@ -482,6 +493,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
@@ -489,7 +501,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `ModelOptFp8MoEMethod` yet.")
@@ -520,6 +532,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype,
         )
@@ -611,6 +624,11 @@ class ModelOptNvFp4Config(QuantizationConfig):
     @classmethod
     def get_config_filenames(cls) -> list[str]:
         return ["hf_quant_config.json"]
+
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+        if self.exclude_modules is not None:
+            self.exclude_modules = hf_to_vllm_mapper.apply_list(
+                self.exclude_modules)
 
     @classmethod
     def override_quantization_method(
@@ -760,7 +778,8 @@ class ModelOptNvFp4Config(QuantizationConfig):
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention  # Avoid circular import
         if isinstance(layer, LinearBase):
-            if (is_layer_skipped(prefix, self.exclude_modules)
+            if (is_layer_skipped(prefix, self.exclude_modules,
+                                 self.packed_modules_mapping)
                     or self.is_layer_excluded(prefix, self.exclude_modules)):
                 return UnquantizedLinearMethod()
             return ModelOptNvFp4LinearMethod(self)
@@ -884,13 +903,21 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         layer.alpha = Parameter(layer.input_scale * layer.weight_scale_2,
                                 requires_grad=False)
 
+        # Calculate `1 / input_scale` so that we don't need to do so at runtime
+        layer.input_scale_inv = Parameter(
+            (1 / layer.input_scale).to(torch.float32), requires_grad=False)
+
         # Swizzle the weight blockscale.
         # contracting dimension is input dimension
         # block_size = 16;
         assert (layer.weight_scale.dtype == torch.float8_e4m3fn), (
             "Weight Block scale must be represented as FP8-E4M3")
 
-        if self.backend == "flashinfer-trtllm":
+        if self.backend == "marlin":
+            prepare_fp4_layer_for_marlin(layer)
+            del layer.alpha
+            del layer.input_scale
+        elif self.backend == "flashinfer-trtllm":
             # FlashInfer TRTLLM FP4 GEMM requires a different weight layout.
             # FlashInfer provides nvfp4_quantize to quantize + shuffle the
             # layout but we use our own quantization so we have to call
@@ -915,11 +942,6 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
                                            requires_grad=False)
             layer.weight = Parameter(layer.weight.data, requires_grad=False)
 
-            if self.backend == "marlin":
-                prepare_fp4_layer_for_marlin(layer)
-                del layer.alpha
-                del layer.input_scale
-
     def apply(
         self,
         layer: torch.nn.Module,
@@ -941,8 +963,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         output_shape = [x.shape[0], layer.weight.shape[0]]
 
         # quantize BF16 or FP16 to (FP4 and interleaved block scale)
-        s_quant = 1 / layer.input_scale
-        x_fp4, x_blockscale = scaled_fp4_quant(x, s_quant)
+        x_fp4, x_blockscale = scaled_fp4_quant(x, layer.input_scale_inv)
 
         # validate dtypes of quantized input, input block scale,
         # weight and weight_blockscale
@@ -1032,6 +1053,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         moe: FusedMoEConfig,
+        layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
         experts = select_nvfp4_gemm_impl(
             moe,
@@ -1310,6 +1332,13 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             del layer.w2_weight_scale
             del layer.w13_weight
             del layer.w13_weight_scale
+        elif self.use_marlin:
+            # Marlin processing
+            prepare_moe_fp4_layer_for_marlin(layer)
+            del layer.g1_alphas
+            del layer.g2_alphas
+            del layer.w13_input_scale_quant
+            del layer.w2_input_scale_quant
         else:
             # Non-TRT-LLM processing (Cutlass or non-flashinfer)
             assert (layer.w13_weight_scale.shape[2] % 16 == 0), (
@@ -1331,13 +1360,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             layer.w2_weight = Parameter(layer.w2_weight.data,
                                         requires_grad=False)
 
-        if self.use_marlin:
-            prepare_moe_fp4_layer_for_marlin(layer)
-            del layer.g1_alphas
-            del layer.g2_alphas
-            del layer.w13_input_scale_quant
-            del layer.w2_input_scale_quant
-
     def apply(
         self,
         layer: torch.nn.Module,
@@ -1352,6 +1374,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
@@ -1359,7 +1382,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
-    ):
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `ModelOptNvFp4FusedMoE` yet.")
@@ -1430,6 +1453,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype)
 
