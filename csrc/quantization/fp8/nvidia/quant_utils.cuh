@@ -488,6 +488,21 @@ __inline__ __device__ uint8_t scaled_vec_conversion<uint8_t, float>(
   return (uint8_t)res;
 }
 
+// float -> c10::Float8_e4m3fn
+template <>
+__inline__ __device__ c10::Float8_e4m3fn
+scaled_vec_conversion<c10::Float8_e4m3fn, float>(
+    const float& a, const float scale,
+    const __nv_fp8_interpretation_t fp8_type) {
+    #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+  return static_cast<c10::Float8_e4m3fn>(a / scale);
+    #else
+  return c10::Float8_e4m3fn(
+      __nv_cvt_float_to_fp8(a / scale, __NV_SATFINITE, fp8_type),
+      c10::Float8_e4m3fn::from_bits());
+    #endif
+}
+
 // fp8x4 -> float4
 template <>
 __inline__ __device__ float4 scaled_vec_conversion<float4, uint32_t>(
