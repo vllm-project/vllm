@@ -1897,6 +1897,9 @@ class ResponsesResponse(OpenAIBaseModel):
         incomplete_details: Optional[IncompleteDetails] = None
         if status == 'incomplete':
             incomplete_details = IncompleteDetails(reason='max_output_tokens')
+        # TODO: implement the other reason for incomplete_details,
+        # which is content_filter
+        # incomplete_details = IncompleteDetails(reason='content_filter')
 
         return cls(
             id=request.request_id,

@@ -1029,7 +1029,6 @@ class OpenAIServing:
         priority: int = 0,
         **kwargs,
     ):
-
         orig_priority = priority
         while True:
             self._log_inputs(

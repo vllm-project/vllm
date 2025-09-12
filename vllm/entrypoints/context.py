@@ -136,11 +136,9 @@ class HarmonyContext(ConversationContext):
         if self.parser.current_channel in {"analysis", "commentary"}:
             self.num_reasoning_tokens += 1
 
-    def append_output(self, output) -> None:
-        # requestOutput contains completionOutput,
-        # which contains the real finish_reason
+    def append_output(self, output: Union[RequestOutput,
+                                          list[Message]]) -> None:
         if isinstance(output, RequestOutput):
-            # NOTE: output contains information about the finish reason
             output_token_ids = output.outputs[0].token_ids
             self.parser = get_streamable_parser_for_assistant()
             for token_id in output_token_ids:
@@ -154,14 +152,12 @@ class HarmonyContext(ConversationContext):
             # Move current turn to previous turn for next turn's calculations
             self.previous_turn = self.current_turn.copy()
             output_msgs = self.parser.messages
+            # The responses finish reason is set in the last message
+            self.finish_reason = output.outputs[0].finish_reason
         else:
             # Tool output.
             output_msgs = output
         self._messages.extend(output_msgs)
-
-        # HACK
-        if len(output.outputs) > 0 and output.outputs[-1].finish_reason:
-            self.finish_reason = output.outputs[-1].finish_reason
 
     def _update_prefill_token_usage(self, output: RequestOutput) -> None:
         """Update token usage statistics for the prefill phase of generation.
@@ -393,7 +389,8 @@ class StreamingHarmonyContext(HarmonyContext):
     def messages(self) -> list:
         return self.parser.messages
 
-    def append_output(self, output) -> None:
+    def append_output(self, output: Union[RequestOutput,
+                                          list[Message]]) -> None:
         if isinstance(output, RequestOutput):
             # append_output is called for each output token in streaming case,
             # so we only want to add the prompt tokens once for each message.

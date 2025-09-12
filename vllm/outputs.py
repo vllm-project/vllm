@@ -111,7 +111,6 @@ class RequestOutput:
         prompt_logprobs: Optional[PromptLogprobs],
         outputs: list[CompletionOutput],
         finished: bool,
-        # finish_reason: Optional[FinishReason] = None,
         metrics: Optional[RequestMetrics] = None,
         lora_request: Optional[LoRARequest] = None,
         encoder_prompt: Optional[str] = None,
@@ -134,7 +133,6 @@ class RequestOutput:
         self.prompt_logprobs = prompt_logprobs
         self.outputs = outputs
         self.finished = finished
-        # self.finish_reason = finish_reason
         self.metrics = metrics
         self.lora_request = lora_request
         self.encoder_prompt = encoder_prompt
@@ -146,8 +144,6 @@ class RequestOutput:
         """Merge subsequent RequestOutput into this one"""
 
         self.finished |= next_output.finished
-        # if self.finish_reason is None:
-        #     self.finish_reason = next_output.finish_reason
         self.kv_transfer_params = next_output.kv_transfer_params
 
         for next_completion in next_output.outputs:

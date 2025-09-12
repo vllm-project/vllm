@@ -364,6 +364,7 @@ class AsyncLLM(EngineClient):
                 truncate_prompt_tokens,
                 tokenization_kwargs,
             )
+
             q = await self.add_request(
                 request_id,
                 prompt,

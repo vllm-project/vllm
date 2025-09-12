@@ -27,7 +27,7 @@ from openai.types.responses import (ResponseCreatedEvent,
                                     ResponseReasoningItem,
                                     ResponseReasoningTextDeltaEvent,
                                     ResponseReasoningTextDoneEvent,
-                                    response_text_delta_event)
+                                    ResponseStatus, response_text_delta_event)
 from openai.types.responses.response_output_text import (Logprob,
                                                          LogprobTopLogprob)
 # yapf: enable
@@ -461,7 +461,10 @@ class OpenAIServingResponses(OpenAIServing):
                 # TODO: Use a vllm-specific Validation Error
                 return self.create_error_response(str(e))
 
-        status = 'completed'
+        # NOTE: Implementation of stauts is still WIP, but for now
+        # we guarantee that if the status is not "completed", it is accurate.
+        # "completed" is implemented as the "catch-all" for now.
+        status: ResponseStatus = "completed"
 
         if self.use_harmony:
             assert isinstance(context, HarmonyContext)
@@ -469,9 +472,11 @@ class OpenAIServingResponses(OpenAIServing):
             num_tool_output_tokens = context.num_tool_output_tokens
             if len(output) > 0:
                 if context.finish_reason == "length":
-                    status = 'incomplete'
+                    status = "incomplete"
+                elif context.finish_reason == "abort":
+                    status = "cancelled"
             else:
-                status = 'incomplete'
+                status = "incomplete"
         else:
             assert isinstance(context, SimpleContext)
             final_res = context.last_output
