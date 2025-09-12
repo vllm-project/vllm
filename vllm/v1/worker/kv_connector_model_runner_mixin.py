@@ -6,7 +6,9 @@ Define KV connector functionality mixin for model runners.
 import copy
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from typing import Generator  # noqa: UP035
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Any, List
+
+import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_shutdown,
@@ -19,6 +21,7 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, KVConnectorOutput,
                              ModelRunnerOutput)
 
 if TYPE_CHECKING:
+    from vllm.v1.core.encoder_cache_manager import MemorySegment
     from vllm.v1.core.sched.output import SchedulerOutput
 
 logger = init_logger(__name__)
@@ -120,3 +123,23 @@ class KVConnectorModelRunnerMixin:
                 kv_connector.get_finished(scheduler_output.finished_req_ids))
 
             kv_connector.clear_connector_metadata()
+
+    @staticmethod
+    def maybe_get_kv_connector_encoder_outputs(
+            req_mm_hashes: List[str]) -> Optional[dict[str, torch.Tensor]]:
+        """
+        Pop received encoder tokens from the connector.
+        """
+        if has_kv_transfer_group():
+            kv_connector = get_kv_transfer_group()
+            assert isinstance(kv_connector, KVConnectorBase)
+            return kv_connector.get_mm_outputs(req_mm_hashes)
+
+    @staticmethod
+    def register_encoder_recv_tensor(mm_hash: str, recv_tensor: torch.Tensor,
+                                     local_segments: list["MemorySegment"]):
+        if has_kv_transfer_group():
+            kv_connector = get_kv_transfer_group()
+            assert isinstance(kv_connector, KVConnectorBase)
+            kv_connector.register_encoder_recv_tensor(mm_hash, recv_tensor,
+                                                      local_segments)

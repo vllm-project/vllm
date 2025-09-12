@@ -99,6 +99,7 @@ if TYPE_CHECKING:
 
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.core.encoder_cache_manager import MemorySegment
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
@@ -403,6 +404,28 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             device="cpu",
             pin_memory=self.pin_memory)
 
+        if vllm_config.kv_transfer_config is not None:
+            self.is_mm_encoder_only_model = vllm_config.kv_transfer_config.is_encoder_only
+            self.uses_encoder_memory_pool = vllm_config.kv_transfer_config.is_encode_sender
+            encoder_budget = self.mm_budget.get_encoder_budget()
+            encoder_cache_size = max(
+                vllm_config.scheduler_config.encoder_cache_size,
+                encoder_budget)
+
+            if self.uses_encoder_memory_pool:
+                self.encoder_memory_pool = torch.empty(encoder_cache_size,
+                                                       self.hidden_size,
+                                                       dtype=self.dtype,
+                                                       device=self.device)
+                logger.info("initialize encoder memory pool with size %s",
+                            encoder_cache_size)
+            else:
+                self.encoder_memory_pool = None
+        else:
+            self.is_mm_encoder_only_model = False
+            self.uses_encoder_memory_pool = False
+            self.encoder_memory_pool = None
+
     def _make_buffer(self,
                      *size: Union[int, torch.SymInt],
                      dtype: torch.dtype,
@@ -514,6 +537,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         for mm_hash in scheduler_output.free_encoder_mm_hashes:
             self.encoder_cache.pop(mm_hash, None)
 
+        for mm_hash, (num_tokens, local_segments
+                      ) in scheduler_output.local_encoder_segments.items():
+            # TODO: set local segments and scatter_mm_placeholders
+            recv_tensor = torch.empty(num_tokens,
+                                      self.hidden_size,
+                                      dtype=self.dtype,
+                                      device=self.device)
+            self.register_encoder_recv_tensor(mm_hash, recv_tensor,
+                                              local_segments)
+            self.encoder_cache[mm_hash] = recv_tensor
+
         # Remove the unscheduled requests from the persistent batch.
         # NOTE(woosuk): The unscheduled requests are either preempted requests
         # or running requests that are not scheduled in this step. We remove
@@ -573,6 +607,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self._init_mrope_positions(req_state)
 
             reqs_to_add.append(req_state)
+
+        # use only part of the model if the node is only for encoder
+        if self.is_mm_encoder_only_model:
+            return
 
         # Update the states of the running/resumed requests.
         is_last_rank = get_pp_group().is_last_rank
@@ -1374,7 +1412,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             scheduler_output)
 
         if not mm_kwargs:
-            return
+            return [], []
 
         # Batch mm inputs as much as we can: if a request in the batch has
         # multiple modalities or a different modality than the previous one,
@@ -1406,6 +1444,26 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             for output in curr_group_outputs:
                 encoder_outputs.append(output)
+
+        if self.encoder_memory_pool is not None:
+            output_views = []
+            sched_segments = scheduler_output.scheduled_encoder_segments
+            for (mm_hash, _), output in zip(mm_hashes_pos, encoder_outputs):
+                if mm_hash in sched_segments:
+                    segments = sched_segments[mm_hash]
+                    offset = 0
+                    for segment in segments:
+                        mem_slice = self.encoder_memory_pool[
+                            segment.address:segment.address + segment.size]
+                        mem_slice.copy_(output[offset:offset + segment.size])
+                        offset += segment.size
+
+                    if len(segments) == 1:
+                        # alter the output to the view of the main memory pool
+                        output = mem_slice
+
+                output_views.append(output)
+            encoder_outputs = output_views
 
         # Cache the encoder outputs by mm_hash
         for (mm_hash, pos_info), output in zip(mm_hashes_pos, encoder_outputs):
@@ -2010,6 +2068,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     return EMPTY_MODEL_RUNNER_OUTPUT
                 return self.kv_connector_no_forward(scheduler_output,
                                                     self.vllm_config)
+
+            if self.is_mm_encoder_only_model:
+                self._execute_mm_encoder(scheduler_output)
+
+                return self.kv_connector_no_forward(scheduler_output,
+                                                    self.vllm_config)
+
             if self.cache_config.kv_sharing_fast_prefill:
                 assert not self.input_batch.num_prompt_logprobs, (
                     "--kv-sharing-fast-prefill produces incorrect logprobs for "
@@ -2652,6 +2717,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
         }
 
+        # TODO: check it
+        if self.is_mm_encoder_only_model:
+            return None, None
+
         # Padding for DP
         num_pad, num_tokens_across_dp = self.get_dp_padding(num_tokens)
         num_tokens += num_pad
@@ -2841,6 +2910,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        if hidden_states is None:
+            return
+
         # The dummy hidden states may contain special values,
         # like `inf` or `nan`.
         # To avoid breaking the sampler, we use a random tensor here instead.
@@ -2916,6 +2988,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         hidden_states: torch.Tensor,
         task: PoolingTask,
     ) -> PoolerOutput:
+        if hidden_states is None:
+            return
+
         num_tokens = hidden_states.shape[0]
         max_num_reqs = self.scheduler_config.max_num_seqs
         num_reqs = min(num_tokens, max_num_reqs)
@@ -3573,6 +3648,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.kv_cache_config = kv_cache_config
         self.may_reinitialize_input_batch(kv_cache_config)
         self.may_add_encoder_only_layers_to_kv_cache_config()
+
+        if self.is_mm_encoder_only_model:
+            # skip kv-cache allocation if there is only encoder part
+            assert has_kv_transfer_group()
+            get_kv_transfer_group().register_encoder_cache(
+                self.encoder_memory_pool)
+            return
+
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         self.initialize_attn_backend(kv_cache_config)
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
@@ -3584,6 +3667,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.drafter.validate_same_kv_cache_group(kv_cache_config)
 
         if has_kv_transfer_group():
+            if self.uses_encoder_memory_pool:
+                get_kv_transfer_group().register_encoder_cache(
+                    self.encoder_memory_pool)
             get_kv_transfer_group().register_kv_caches(kv_caches)
             if self.device.type == 'xpu':
                 get_kv_transfer_group().set_host_xfer_buffer_ops(

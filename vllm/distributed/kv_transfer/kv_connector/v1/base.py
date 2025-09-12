@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.distributed.kv_events import KVCacheEvent
     from vllm.forward_context import ForwardContext
+    from vllm.v1.core.encoder_cache_manager import MemorySegment
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
 
@@ -140,6 +141,15 @@ class KVConnectorBase_V1(ABC):
         """
         return
 
+    def register_encoder_cache(
+            self, encoder_cache: torch.Tensor) -> Optional[list[Any]]:
+        """
+        Register the encoder cache to transfer the result of encoder layers.
+        Args:
+            encoder_cache (torch.Tensor): the transfer targets.
+        """
+        return
+
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
         """
         Set the xPU-specific ops for copying KV between host and device.
@@ -163,6 +173,15 @@ class KVConnectorBase_V1(ABC):
             The number of elements in kv_caches and layer_names should be 
             the same.
             
+        """
+        pass
+
+    @abstractmethod
+    def register_encoder_recv_tensor(
+            self, mm_hash: str, recv_tensor: torch.Tensor,
+            local_segments: list["MemorySegment"]) -> None:
+        """
+        register a target tensor to receive encoder tokens from a remote encoder node.
         """
         pass
 
@@ -252,6 +271,7 @@ class KVConnectorBase_V1(ABC):
             request (Request): the request object.
             num_computed_tokens (int): the number of locally
                 computed tokens for this request
+            required_mm_hashes (list[str]): the list of required multimodal
 
         Returns:
             A tuple with the following elements:
@@ -263,6 +283,23 @@ class KVConnectorBase_V1(ABC):
                 - `True` if external KV cache tokens will be loaded
                   asynchronously (between scheduler steps). Must be
                   'False' if the first element is 0.
+        """
+        pass
+
+    @abstractmethod
+    def get_available_remote_encoder_inputs(
+            self, request: "Request",
+            required_encoder_inputs: list[int]) -> Optional[list[int]]:
+        """
+        Get available remote multi-modal tokens from the remote encoder node.
+        
+        Args:
+            request (Request): the request object.
+            required_encoder_inputs (list[int]): the indices of required multimodal
+                inputs that are not cached locally.
+
+        Returns:
+            list of available remote multimodal inputs
         """
         pass
 
@@ -284,6 +321,14 @@ class KVConnectorBase_V1(ABC):
             blocks (KVCacheBlocks): the blocks allocated for the request.
             num_external_tokens (int): the number of tokens that will be
                 loaded from the external KV cache.
+        """
+        pass
+
+    @abstractmethod
+    def update_mm_state_after_alloc(self, request: "Request",
+                                    remote_encoder_inputs: list[int]):
+        """
+        Update KVConnector state after memory allocation for multimodal inputs.
         """
         pass
 
@@ -312,9 +357,8 @@ class KVConnectorBase_V1(ABC):
         return
 
     def request_finished(
-        self,
-        request: "Request",
-        block_ids: list[int],
+        self, request: "Request", block_ids: list[int],
+        mm_segments: dict[str, list[tuple[int, int]]]
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         """
         Called when a request has finished, before its blocks are freed.

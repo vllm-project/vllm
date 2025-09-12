@@ -203,6 +203,7 @@ class RequestStatus(enum.IntEnum):
     WAITING = enum.auto()
     WAITING_FOR_FSM = enum.auto()
     WAITING_FOR_REMOTE_KVS = enum.auto()
+    WAITING_FOR_REMOTE_MMS = enum.auto()
     RUNNING = enum.auto()
     PREEMPTED = enum.auto()
     # Note: anything after PREEMPTED will be considered

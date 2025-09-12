@@ -14,6 +14,9 @@ KVProducer = Literal["kv_producer", "kv_both"]
 KVConsumer = Literal["kv_consumer", "kv_both"]
 KVRole = Literal[KVProducer, KVConsumer]
 
+# E-node / E-P node, respectively.
+KVEncoderRole = Literal["encoder_only", "ep_encoder"]
+
 
 @config
 @dataclass
@@ -61,6 +64,10 @@ class KVTransferConfig:
     """The Python module path to dynamically load the KV connector from.
     Only supported in V1."""
 
+    kv_encoder_mode: Optional[KVEncoderRole] = None
+    """The role for EPD-disaggeregation. Choices are 'encoder_only' and
+    'ep_encoder'."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -106,6 +113,15 @@ class KVTransferConfig:
     def is_kv_consumer(self) -> bool:
         return self.kv_connector is not None and \
             self.kv_role in get_args(KVConsumer)
+
+    @property
+    def is_encoder_only(self) -> bool:
+        return self.kv_encoder_mode is not None and \
+            self.kv_encoder_mode == "encoder_only"
+
+    @property
+    def is_encode_sender(self) -> bool:
+        return self.kv_encoder_mode is not None
 
     def get_from_extra_config(self, key, default) -> Any:
         return self.kv_connector_extra_config.get(key, default)

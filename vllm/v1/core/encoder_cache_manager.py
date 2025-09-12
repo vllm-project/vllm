@@ -3,7 +3,10 @@
 
 from collections import OrderedDict
 from collections.abc import Mapping
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Optional
+
+from sortedcontainers import SortedList
 
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalRegistry
@@ -70,6 +73,9 @@ class EncoderCacheManager:
         # mm_hash of mm_data => num_encoder_tokens of the mm_data
         self.freeable: OrderedDict[str, int] = OrderedDict()
         self.freed: list[str] = []
+
+        # mm_hash of receiving mm_data by encoder disaggregation
+        self.receiving: set[str] = set()
 
     def check_and_update_cache(self, request: Request, input_id: int) -> bool:
         """Check if encoder output for a specific multimodal input is cached.
@@ -150,11 +156,17 @@ class EncoderCacheManager:
         # NOTE: Eviction takes place here, but physical memory is not freed
         # until model runner is notified by the scheduler output.
         while num_tokens > self.num_free_slots:
-            mm_hash, num_free_token = self.freeable.popitem(last=False)
-            del self.cached[mm_hash]
-            self.freed.append(mm_hash)
-            self.num_free_slots += num_free_token
+            self._evict()
         return True
+
+    def _evict(self) -> None:
+        """Evict a freeable slot"""
+        mm_hash, num_free_token = self.freeable.popitem(last=False)
+        del self.cached[mm_hash]
+        self.freed.append(mm_hash)
+        self.num_free_slots += num_free_token
+
+        return mm_hash
 
     def allocate(self, request: Request, input_id: int) -> None:
         """Allocate cache space for a multimodal input's encoder output.
@@ -182,6 +194,13 @@ class EncoderCacheManager:
         self.cached[mm_hash].add(request_id)
         self.num_free_slots -= num_encoder_tokens
         self.num_freeable_slots -= num_encoder_tokens
+
+    def allocate_remote(self, request: Request, input_id: int) -> None:
+        """Allocate cache space for remote encoder input.
+        """
+        mm_hash = request.mm_hashes[input_id]
+        self.allocate(request, input_id)
+        self.receiving.add(mm_hash)
 
     def get_cached_input_ids(self, request: Request) -> set[int]:
         """Get all cached multimodal input IDs for a request.
@@ -243,6 +262,205 @@ class EncoderCacheManager:
         freed = self.freed
         self.freed = []
         return freed
+
+    def get_segments(self, mm_hash: str):
+        """Used for EncoderBlockCacheManager"""
+        return []
+
+    def get_required_encoder_inputs(self, request: Request):
+        """Get the list of mm_hash that is neither cached nor in the encoder disaggregation
+        receiving queue
+        """
+        required_inputs = list()
+        receving_mm_hashes = list()
+        for i, mm_hash in enumerate(request.mm_hashes):
+            if mm_hash not in self.cached:
+                required_inputs.append(i)
+            if mm_hash in self.receiving:
+                receving_mm_hashes.append(mm_hash)
+
+        return required_inputs, receving_mm_hashes
+
+    def recv_finished(self, request: Request):
+        for mm_hash in request.mm_hashes:
+            if mm_hash in self.receiving:
+                return False
+        return True
+
+    def finish_recv(self, request: Request):
+        for mm_hash in request.mm_hashes:
+            if mm_hash in self.receiving:
+                self.receiving.remove(mm_hash)
+
+
+@dataclass
+class MemorySegment:
+    """Represents a contiguous memory segment"""
+    address: int
+    size: int
+
+    @property
+    def end_address(self):
+        return self.address + self.size
+
+
+class EncoderBlockCacheManager(EncoderCacheManager):
+
+    def __init__(self, cache_size: int):
+        super().__init__(cache_size)
+
+        # Track free segments sorted by address for coalescing
+        self.free_segments_by_addr = SortedList(key=lambda x: x.address)
+
+        # Track free segments sorted by size for allocation
+        self.free_segments_by_size = SortedList(
+            key=lambda x: (-x.size, x.address))  # Negative for largest-first
+
+        # Track allocations by hash key
+        # hash -> list of segments that store this tensor
+        self.allocations = dict[str, list[MemorySegment]]()
+
+        init_segment = MemorySegment(address=0, size=cache_size)
+        self.free_segments_by_addr.add(init_segment)
+        self.free_segments_by_size.add(init_segment)
+
+    def _find_segments_for_size(self, size: int) -> list[MemorySegment]:
+        """
+        Find a combination of free segments to fit the requested size.
+        Uses a greedy approach: takes largest segments first.
+        """
+        needed_size = size
+        selected_segments = []
+
+        # First, try to find a single segment that fits
+        for segment in self.free_segments_by_size:
+            if segment.size >= size:
+                # Found a single segment that's large enough
+                return [segment]
+
+        # Otherwise, collect multiple segments
+        # Copy the list since we'll be modifying it
+        available = list(self.free_segments_by_size)
+
+        for segment in available:
+            if needed_size <= 0:
+                break
+
+            if segment.size <= needed_size:
+                # Take the entire segment
+                selected_segments.append(segment)
+                needed_size -= segment.size
+            else:
+                # Take only what we need (will split later)
+                selected_segments.append(segment)
+                needed_size = 0
+                break
+
+        if needed_size > 0:
+            # Couldn't find enough space
+            return []
+
+        return selected_segments
+
+    def _coalesce_free_segments(self):
+        """Merge all adjacent free segments to reduce fragmentation"""
+        if len(self.free_segments_by_addr) <= 1:
+            return
+
+        merged_segments = []
+        current = None
+
+        for segment in self.free_segments_by_addr:
+            if current is None:
+                current = MemorySegment(segment.address, segment.size)
+            elif current.end_address == segment.address:
+                # Merge with current
+                current.size += segment.size
+            else:
+                # Can't merge, save current and start new
+                merged_segments.append(current)
+                current = MemorySegment(segment.address, segment.size)
+
+        if current:
+            merged_segments.append(current)
+
+        # Replace the free segment lists
+        self.free_segments_by_addr.clear()
+        self.free_segments_by_size.clear()
+
+        for segment in merged_segments:
+            self.free_segments_by_addr.add(segment)
+            self.free_segments_by_size.add(segment)
+
+    def allocate(self, request: Request, input_id: int):
+        """Allocate cache space for a multimodal input's encoder output.
+        Returns:
+            mm_hash ->  allocated segments in the multi-modal hash.
+        """
+        super().allocate(request, input_id)
+
+        mm_hash = request.mm_hashes[input_id]
+        num_encoder_tokens = request.get_num_encoder_tokens(input_id)
+        # Find segments to use
+        segments_to_use = self._find_segments_for_size(num_encoder_tokens)
+        if not segments_to_use:
+            logger.error(
+                "Failed to allocate %s tokens to the encoder cache for hash %s",
+                num_encoder_tokens, mm_hash)
+            return []
+
+        allocated_segments = []
+        total_used = 0
+
+        for segment in segments_to_use:
+            # Remove from free lists
+            self.free_segments_by_addr.remove(segment)
+            self.free_segments_by_size.remove(segment)
+
+            # Determine how much of this segment to use
+            remaining_tokens = num_encoder_tokens - total_used
+            use_size = min(segment.size, remaining_tokens)
+
+            # If segment is larger than needed, split it
+            if segment.size > use_size:
+                # Create remainder free segment
+                remainder = MemorySegment(address=segment.address + use_size,
+                                          size=segment.size - use_size)
+                self.free_segments_by_addr.add(remainder)
+                self.free_segments_by_size.add(remainder)
+
+                # Adjust current segment size
+                segment.size = use_size
+
+            # Track allocation
+            allocated_segments.append(segment)
+
+            total_used += use_size
+
+            if total_used >= num_encoder_tokens:
+                break
+
+        # Store allocation info
+        self.allocations[mm_hash] = allocated_segments
+
+    def get_segments(self, mm_hash: str) -> list[MemorySegment]:
+        return self.allocations.get(mm_hash, [])
+
+    def _evict(self) -> None:
+        """Evict a freeable slot
+
+        From the block cache manager, it actually frees the memory in the
+        segment tree.
+        """
+        mm_hash = super()._evict()
+        segments = self.allocations.pop(mm_hash)
+
+        for segment in segments:
+            segment.freed = True
+            self.free_segments_by_addr.add(segment)
+            self.free_segments_by_size.add(segment)
+
+        self._coalesce_free_segments()
 
 
 def compute_encoder_budget(

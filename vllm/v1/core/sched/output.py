@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
+    from vllm.v1.core.encoder_cache_manager import MemorySegment
     from vllm.v1.request import Request
 
 
@@ -140,6 +141,13 @@ class SchedulerOutput:
     # E.g., if a request has [0, 1], it could mean the vision encoder needs
     # to process that the request's 0-th and 1-th images in the current step.
     scheduled_encoder_inputs: dict[str, list[int]]
+    # mm_hash -> list of new allocated memory segments for encoded multimodal inputs
+    # Only used for remote prefill or decode.
+    scheduled_encoder_segments: dict[str, list[MemorySegment]]
+    # mm_hash -> (token length, list of local memory segments to receive remote multimodal inputs).
+    # If the list is empty, there is no pre-allocated segment but new target tensor
+    # will be allocated. Only used for remote encode.
+    local_encoder_segments: dict[str, tuple[int, list[MemorySegment]]]
     # Number of common prefix blocks for all requests in each KV cache group.
     # This can be used for cascade attention.
     num_common_prefix_blocks: list[int]
