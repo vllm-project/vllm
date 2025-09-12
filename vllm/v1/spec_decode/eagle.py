@@ -782,6 +782,7 @@ def load_vocab_freq(vocab_frequency_path: str) -> torch.Tensor:
 
     # Load as a tensor of integers
     vocab_freq = torch.load(local_path, weights_only=True).to(torch.int64)
+    print(vocab_freq.shape)
     return vocab_freq
 
 
