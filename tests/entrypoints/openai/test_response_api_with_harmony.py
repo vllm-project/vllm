@@ -713,7 +713,8 @@ async def test_function_calling_with_stream(client: OpenAI, model_name: str):
                 final_tool_calls[index].arguments += event.delta
 
     for tool_call in final_tool_calls.values():
-        if tool_call and tool_call.type == "function_call" and tool_call.name == "get_weather":
+        if tool_call and tool_call.type == "function_call" \
+            and tool_call.name == "get_weather":
             args = json.loads(tool_call.arguments)
             result = call_function(tool_call.name, args)
             input_list += [tool_call]
