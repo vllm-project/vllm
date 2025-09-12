@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from multiprocessing import Lock
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -10,9 +11,12 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import worker_receiver_cache_from_config
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         run_method)
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
+from vllm.v1.executor.utils import get_and_update_mm_cache
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
@@ -44,6 +48,8 @@ class UniProcExecutor(ExecutorBase):
             distributed_init_method=distributed_init_method,
             is_driver_worker=is_driver_worker,
         )
+        self.mm_receiver_cache = worker_receiver_cache_from_config(
+            self.vllm_config, MULTIMODAL_REGISTRY, Lock())
         self.collective_rpc("init_worker", args=([kwargs], ))
         self.collective_rpc("init_device")
         self.collective_rpc("load_model")
@@ -55,6 +61,8 @@ class UniProcExecutor(ExecutorBase):
                        kwargs: Optional[Dict] = None) -> List[Any]:
         if kwargs is None:
             kwargs = {}
+        if self.mm_receiver_cache is not None and method == "execute_model":
+            get_and_update_mm_cache(self.mm_receiver_cache, args)
         answer = run_method(self.driver_worker, method, args, kwargs)
         return [answer]
 
@@ -128,6 +136,8 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
             distributed_init_method=distributed_init_method,
             is_driver_worker=is_driver_worker,
         )
+        self.mm_receiver_cache = worker_receiver_cache_from_config(
+            self.vllm_config, MULTIMODAL_REGISTRY, Lock())
         self.collective_rpc("init_worker", args=([kwargs], ))
         self.collective_rpc("init_device")
         self.collective_rpc("load_model")
