@@ -240,8 +240,8 @@ class MRotaryEmbedding(RotaryEmbedding):
         if positions.ndim == 2:
             assert self.mrope_section
             if self.mrope_interleaved:
-                cos = self.apply_interleaved_rope(cos, self.mrope_section)
-                sin = self.apply_interleaved_rope(sin, self.mrope_section)
+                cos = apply_interleaved_rope(cos, self.mrope_section)
+                sin = apply_interleaved_rope(sin, self.mrope_section)
             else:
                 cos = torch.cat([
                     m[i] for i, m in enumerate(
