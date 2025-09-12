@@ -307,6 +307,48 @@ def _rocm_aiter_gemm_w8a8_blockscale_fake(
     return Y
 
 
+def _rocm_aiter_rms_norm_impl(x: torch.Tensor, weight: torch.Tensor,
+                              variance_epsilon: float) -> torch.Tensor:
+    from aiter import rms_norm
+    if x.dim() > 2:
+        x_original_shape = x.shape
+        x = x.reshape(-1, x_original_shape[-1])
+        x = rms_norm(x, weight, variance_epsilon)
+        return x.reshape(x_original_shape)
+
+    return rms_norm(x, weight, variance_epsilon)
+
+
+def _rocm_aiter_rms_norm_fake(x: torch.Tensor, weight: torch.Tensor,
+                              variance_epsilon: float) -> torch.Tensor:
+    return torch.empty_like(x)
+
+
+def _rocm_aiter_rmsnorm2d_fwd_with_add_impl(
+        x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
+        variance_epsilon: float) -> tuple[torch.Tensor, torch.Tensor]:
+
+    from aiter import rmsnorm2d_fwd_with_add
+
+    residual_out = torch.empty_like(residual)
+    output = torch.empty_like(x)
+    rmsnorm2d_fwd_with_add(
+        output,  # output
+        x,  # input
+        residual,  # residual input
+        residual_out,  # residual output
+        weight,
+        variance_epsilon,
+    )
+    return output, residual_out
+
+
+def _rocm_aiter_rmsnorm2d_fwd_with_add_fake(
+        x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
+        variance_epsilon: float) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.empty_like(x), torch.empty_like(residual)
+
+
 # Global flag to ensure ops are registered only once
 _OPS_REGISTERED = False
 
@@ -451,7 +493,35 @@ class rocm_aiter_ops:
                 dispatch_key=current_platform.dispatch_key,
             )
 
+            direct_register_custom_op(
+                op_name="rocm_aiter_rms_norm",
+                op_func=_rocm_aiter_rms_norm_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_rms_norm_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_rmsnorm2d_fwd_with_add",
+                op_func=_rocm_aiter_rmsnorm2d_fwd_with_add_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_rmsnorm2d_fwd_with_add_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
             _OPS_REGISTERED = True
+
+    @staticmethod
+    def rms_norm2d_with_add(
+            x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
+            variance_epsilon: float) -> tuple[torch.Tensor, torch.Tensor]:
+        return torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add(
+            x, residual, weight, variance_epsilon)
+
+    @staticmethod
+    def rms_norm(x: torch.Tensor, weight: torch.Tensor,
+                 variance_epsilon: float) -> torch.Tensor:
+        return torch.ops.vllm.rocm_aiter_rms_norm(x, weight, variance_epsilon)
 
     @staticmethod
     def gemm_w8a8(
