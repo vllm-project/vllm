@@ -175,6 +175,7 @@ if TYPE_CHECKING:
     VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS: bool = False
     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
     VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
+    VLLM_USE_UCC: bool = False
 
 
 def get_default_cache_root():
@@ -1241,6 +1242,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # raw bytes. Defaults to True for backward compatibility.
     "VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES":
     lambda: bool(int(os.getenv("VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES", "1"))),
+
+    # If set to 1, use UCC allreduce
+    "VLLM_USE_UCC":
+    lambda: bool(int(os.getenv("VLLM_USE_UCC", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]
