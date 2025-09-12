@@ -15,6 +15,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
 from .inductor_pass import InductorPass
+from ..utils import unique_filepath
 
 logger = init_logger(__name__)
 
@@ -92,8 +93,12 @@ class VllmPatternMatcherPass(VllmInductorPass):
 
         rank = config.parallel_config.rank
         debug_dump_path = Path(debug_dump_path) / f"rank_{rank}"
-        with (debug_dump_path /
-              f"patterns.{self.pass_name}.py").open("w") as f:
+        debug_dump_path.mkdir(parents=True, exist_ok=True)
+
+        file_path = unique_filepath(
+            lambda i: debug_dump_path / f"patterns.{self.pass_name}.{i}.py")
+
+        with file_path.open("w") as f:
             print(
                 f'# This file was produced by VllmPatternMatcherPass.'
                 f'dump_patterns for {self.pass_name}.\n'

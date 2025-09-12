@@ -130,9 +130,10 @@ class RMSNormStaticQuantPattern(RMSNormQuantPattern):
 
         inputs = [
             empty_bf16(5, 4),  # input
-            empty_bf16(1, 5),  # weight
+            empty_bf16(4,),  # weight
             empty_fp32(1, 1)  # scale
         ]
+        pattern(*inputs)
 
         pm.register_replacement(pattern, replacement, inputs, pm.fwd_only,
                                 pm_pass)
@@ -177,7 +178,7 @@ class FusedAddRMSNormStaticQuantPattern(RMSNormQuantPattern):
         inputs = [
             empty_bf16(5, 4),  # input
             empty_bf16(5, 4),  # residual
-            empty_bf16(1, 5),  # weight
+            empty_bf16(4, ),   # weight
             empty_fp32(1, 1)  # scale
         ]
 
@@ -228,7 +229,7 @@ class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
 
         inputs = [
             empty_bf16(5, 4),  # input
-            empty_bf16(1, 5),  # weight
+            empty_bf16(4),  # weight
         ]
 
         pm.register_replacement(
@@ -283,7 +284,7 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
         inputs = [
             empty_bf16(5, 4),  # input
             empty_bf16(5, 4),  # residual
-            empty_bf16(1, 5),  # weight
+            empty_bf16(4),  # weight
         ]
 
         pm.register_replacement(
