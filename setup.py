@@ -33,71 +33,72 @@ ROOT_DIR = Path(__file__).parent
 logger = logging.getLogger(__name__)
 
 
-def is_installing_from_github() -> bool:
-    """Check if vLLM is being installed from GitHub repository."""
-    # Method 1: Check command line arguments for git+ URLs
-    if len(sys.argv) > 1:
-        for arg in sys.argv[1:]:
-            if arg.startswith('git+') and 'github.com/vllm-project/vllm' in arg:
-                return True
-
-    # Method 2: Check if we're in a uv cache directory with vLLM repo
-    # This is the most reliable method for uv GitHub installs
-    current_dir = os.getcwd()
+def _is_vllm_github_repo(origin_url: str) -> bool:
+    """Check if the given URL is a vLLM GitHub repository (original or fork)."""
+    if not origin_url:
+        return False
     
-    # Check if we're in a uv cache directory
-    is_uv_cache = '/.cache/uv/git-v0/checkouts/' in current_dir
+    # Original vLLM repository patterns
+    original_patterns = [
+        'github.com/vllm-project/vllm',
+        'git@github.com:vllm-project/vllm.git'
+    ]
     
-    if is_uv_cache:
-        # Check if this is a vLLM repository
-        try:
-            result = subprocess.run(['git', 'remote', 'get-url', 'origin'],
-                                    capture_output=True,
-                                    text=True,
-                                    cwd=ROOT_DIR)
-            if result.returncode == 0:
-                origin_url = result.stdout.strip()
-                is_vllm_repo = ('github.com/vllm-project/vllm' in origin_url or 
-                               'git@github.com:vllm-project/vllm.git' in origin_url)
-                if is_vllm_repo:
-                    return True
-        except Exception:
-            pass
-
-    # Method 3: Check if we're in a temporary directory with vLLM repo
-    # This covers other package managers like pip
-    is_temp_dir = any(pattern in current_dir.lower() for pattern in [
-        '/tmp/', '\\temp\\', 'cache', 'builds', '.cache'
-    ])
+    # Check for original repository
+    if any(pattern in origin_url for pattern in original_patterns):
+        return True
     
-    if is_temp_dir:
-        # Check if this is a vLLM repository
-        try:
-            result = subprocess.run(['git', 'remote', 'get-url', 'origin'],
-                                    capture_output=True,
-                                    text=True,
-                                    cwd=ROOT_DIR)
-            if result.returncode == 0:
-                origin_url = result.stdout.strip()
-                return ('github.com/vllm-project/vllm' in origin_url or 
-                       'git@github.com:vllm-project/vllm.git' in origin_url)
-        except Exception:
-            pass
+    # Check for any fork: github.com/*/vllm.git
+    return ('github.com/' in origin_url and 
+            '/vllm' in origin_url and 
+            origin_url.endswith('.git'))
 
-    # Method 4: Check if we're in the actual vLLM repository (for local dev)
+
+def _get_git_origin_url() -> str:
+    """Get the origin URL of the current git repository."""
     try:
         result = subprocess.run(['git', 'remote', 'get-url', 'origin'],
                                 capture_output=True,
                                 text=True,
                                 cwd=ROOT_DIR)
         if result.returncode == 0:
-            origin_url = result.stdout.strip()
-            return ('github.com/vllm-project/vllm' in origin_url or 
-                   'git@github.com:vllm-project/vllm.git' in origin_url)
+            return result.stdout.strip()
     except Exception:
         pass
+    return ""
 
-    return False
+
+def is_installing_from_github() -> bool:
+    """Check if vLLM is being installed from GitHub repository."""
+    
+    # Method 1: Check command line arguments for git+ URLs
+    if len(sys.argv) > 1:
+        for arg in sys.argv[1:]:
+            if arg.startswith('git+') and _is_vllm_github_repo(arg):
+                return True
+
+    # Method 2: Check if we're in a uv cache directory with vLLM repo
+    current_dir = os.getcwd()
+    is_uv_cache = '/.cache/uv/git-v0/checkouts/' in current_dir
+    
+    if is_uv_cache:
+        origin_url = _get_git_origin_url()
+        if _is_vllm_github_repo(origin_url):
+            return True
+
+    # Method 3: Check if we're in a temporary directory with vLLM repo
+    temp_dir_patterns = ['/tmp/', '\\temp\\', 'cache', 'builds', '.cache']
+    is_temp_dir = any(pattern in current_dir.lower() 
+                     for pattern in temp_dir_patterns)
+    
+    if is_temp_dir:
+        origin_url = _get_git_origin_url()
+        if _is_vllm_github_repo(origin_url):
+            return True
+
+    # Method 4: Check if we're in the actual vLLM repository (for local dev)
+    origin_url = _get_git_origin_url()
+    return _is_vllm_github_repo(origin_url)
 
 
 # Auto-enable precompiled wheels when installing from GitHub
@@ -109,10 +110,12 @@ with open("/tmp/vllm_debug.log", "w") as f:
     f.write(f"DEBUG: Environment variables: {dict(os.environ)}\n")
 
 if is_installing_from_github():
-    print("Detected installation from GitHub repository. Automatically enabling precompiled wheels.")
+    print("Detected installation from GitHub repository. "
+          "Automatically enabling precompiled wheels.")
     os.environ["VLLM_USE_PRECOMPILED"] = "1"
     with open("/tmp/vllm_debug.log", "a") as f:
-        f.write(f"DEBUG: VLLM_USE_PRECOMPILED set to: {os.environ.get('VLLM_USE_PRECOMPILED')}\n")
+        f.write(f"DEBUG: VLLM_USE_PRECOMPILED set to: "
+                f"{os.environ.get('VLLM_USE_PRECOMPILED')}\n")
 else:
     with open("/tmp/vllm_debug.log", "a") as f:
         f.write("DEBUG: No GitHub installation detected\n")
