@@ -276,12 +276,17 @@ class CuMemAllocator:
             # when using pluggable allocator, see
             # https://github.com/pytorch/pytorch/issues/145168 .
             # if we have some memory allocated and then freed,
-            # the memory will not be released.
-            # right now it is fine, because we only use this allocator
-            # during weight loading and kv cache creation, where we only
-            # allocate memory.
-            # TODO: we need to find a way to release the memory,
-            # i.e. calling torch.cuda.empty_cache()
+            # the memory will not be released, e.g. in online quantization,
+            # where the model is created in higher precision, and then
+            # quantized in lower precision.
+            # Find all unused allocations and manually release them.
+            # TODO: we should expose `empty_cache` method in the memory pool.
+            # TODO: ask for help from PyTorch team to expose this method.
+            allocations = data[0].snapshot()
+            for allocation in allocations:
+                if allocation["allocated_size"] == 0:
+                    handle = self._python_free_callback(allocation["ptr"])
+                    unmap_and_release(handle)
             self.current_tag = old_tag
 
     def get_current_usage(self) -> int:
