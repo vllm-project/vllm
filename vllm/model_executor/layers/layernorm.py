@@ -189,9 +189,9 @@ class RMSNorm(CustomOp):
         x: torch.Tensor,
         variance_epsilon: float,
         hidden_size: int,
-        variance_size_override: Optional[int],
         weight: Optional[torch.Tensor] = None,
         residual: Optional[torch.Tensor] = None,
+        variance_size_override: Optional[int] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """PyTorch-native implementation equivalent to forward()."""
         orig_dtype = x.dtype
@@ -237,9 +237,9 @@ class RMSNorm(CustomOp):
             x,
             self.variance_epsilon,
             self.hidden_size,
-            self.variance_size_override,
             self.weight.data,
             residual,
+            self.variance_size_override,
         )
 
     def forward_cuda(

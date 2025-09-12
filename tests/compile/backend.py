@@ -4,10 +4,13 @@
 import weakref
 from collections.abc import Sequence
 from copy import deepcopy
+from pathlib import Path
 from typing import Callable, Union
 
+import depyf
 from torch import fx
 from torch._ops import OpOverload
+from torch.fx._utils import lazy_format_graph_code
 
 from vllm.compilation.fx_utils import find_op_nodes
 from vllm.compilation.inductor_pass import InductorPass
@@ -46,10 +49,19 @@ class TestBackend:
 
     def __init__(self, *passes: Union[InductorPass, Callable[[fx.Graph], None]]):
         self.custom_passes = list(passes)
-        compile_config = get_current_vllm_config().compilation_config
+        vllm_config = get_current_vllm_config()
+        compile_config = vllm_config.compilation_config
         self.inductor_config = compile_config.inductor_compile_config
         self.inductor_config["force_disable_caches"] = True
         self.inductor_config["post_grad_custom_post_pass"] = self.post_pass
+
+        if compile_config.debug_dump_path:
+            self.debug_dump_path = (Path(compile_config.debug_dump_path) /
+                                    f"rank_{vllm_config.parallel_config.rank}")
+            self.ctx = depyf.prepare_debug(str(self.debug_dump_path))
+            self.ctx.__enter__()
+        else:
+            self.ctx = None
 
     def __call__(self, graph: fx.GraphModule, example_inputs):
         self.graph_pre_compile = deepcopy(graph)
@@ -60,6 +72,7 @@ class TestBackend:
     @with_pattern_match_debug
     def post_pass(self, graph: fx.Graph):
         self.graph_pre_pass = deepcopy(graph)
+        lazy_format_graph_code("graph_pre_pass", graph.owning_module)
 
         VllmInductorPass.dump_prefix = 0
         for pass_ in self.custom_passes:
@@ -69,8 +82,12 @@ class TestBackend:
         VllmInductorPass.dump_prefix = None
 
         self.graph_post_pass = deepcopy(graph)
+        lazy_format_graph_code("graph_post_pass", graph.owning_module)
         # assign by reference, will reflect the final state of the graph
         self.final_graph = graph
+
+        if self.ctx is not None:
+            self.ctx.__exit__(None, None, None)
 
     def check_before_ops(self, ops: Sequence[OpOverload], fully_replaced=True):
         for op in ops:
