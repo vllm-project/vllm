@@ -148,7 +148,6 @@ class W8A8BlockFp8LinearOp:
         input_2d = input.view(-1, input.shape[-1])
         output_shape = [*input.shape[:-1], weight.shape[0]]
         output_dtype = input.dtype
-
         if should_use_deepgemm_for_fp8_linear(self.is_deep_gemm_supported,
                                               output_dtype, weight):
             output = self._run_deepgemm(input, weight, block_size,
@@ -246,10 +245,8 @@ class W8A8BlockFp8LinearOp:
     ) -> Callable[[
             torch.Tensor,
             torch.Tensor,
-            torch.Tensor,
-            torch.Tensor,
             list[int],
-            torch.dtype,
+            torch.Tensor,
     ], torch.Tensor]:
         if use_cutlass:
             return self._run_cutlass

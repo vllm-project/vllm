@@ -473,7 +473,7 @@ class Fp8LinearMethod(LinearMethodBase):
         if (self.block_quant and current_platform.is_device_capability(90)
                 and self.cutlass_block_fp8_supported
                 and not should_use_deepgemm_for_fp8_linear(
-                    torch.bfloat16, layer.weight)):
+                    is_deep_gemm_supported(), torch.bfloat16, layer.weight)):
             layer.weight_scale_inv = Parameter(
                 layer.weight_scale_inv.data.T.contiguous(),
                 requires_grad=False)
