@@ -16,7 +16,10 @@ from typing import Any, Callable, Optional, Union
 
 import torch
 
+from vllm.logger import init_logger
 from vllm.utils import is_pin_memory_available
+
+logger = init_logger(__name__)
 
 
 def find_loaded_library(lib_name) -> Optional[str]:
@@ -165,6 +168,9 @@ class CuMemAllocator:
         py_d_mem = allocation_handle[2]
         self.pointer_to_data[py_d_mem] = AllocationData(
             allocation_handle, self.current_tag)
+        logger.debug(
+            "Allocated %s bytes for %s with address %s from cumem allocator",
+            allocation_handle[1], self.current_tag, py_d_mem)
         return
 
     def _python_free_callback(self, ptr: int) -> HandleType:
@@ -174,6 +180,9 @@ class CuMemAllocator:
         data = self.pointer_to_data.pop(ptr)
         if data.cpu_backup_tensor is not None:
             data.cpu_backup_tensor = None
+        logger.debug(
+            "Freed %s bytes for %s with address %s from cumem allocator",
+            data.handle[1], data.tag, ptr)
         return data.handle
 
     def sleep(
