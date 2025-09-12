@@ -14,6 +14,10 @@ class UBatchSlice:
         return self.request_slice.start == self.request_slice.stop \
             or self.token_slice.start == self.token_slice.stop
 
+    @property
+    def num_tokens(self) -> int:
+        return self.token_slice.stop - self.token_slice.start
+
 
 UBatchSlices: TypeAlias = list[UBatchSlice]
 
