@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 from functools import partial
 from typing import Optional, Union
 
@@ -48,12 +49,13 @@ def qwen3_vl_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
     # Ensure video metadata is included
     if "video" in mm_data:
         video = mm_data["video"]
+        num_frames = len(video)
         mm_data["video"] = (video, {
-            "total_num_frames": len(video),
-            "fps": len(video),
-            "duration": 1,
+            "total_num_frames": num_frames,
+            "fps": 2.0,
+            "duration": num_frames / 2.0,
             "video_backend": "opencv",
-            "frames_indices": list(range(len(video))),
+            "frames_indices": list(range(num_frames)),
         })
     return mm_data
 
@@ -233,13 +235,15 @@ def _test_processing_correctness_one(
 
     baseline_tokenized_result = baseline_processor.apply(
         token_prompt,
-        mm_data=mm_data,
+        mm_data=(copy.deepcopy(mm_data)
+                 if model_type in MM_DATA_PATCHES else mm_data),
         hf_processor_mm_kwargs={},
     )
 
     cached_tokenized_result = cached_processor.apply(
         token_prompt,
-        mm_data=mm_data,
+        mm_data=(copy.deepcopy(mm_data)
+                 if model_type in MM_DATA_PATCHES else mm_data),
         hf_processor_mm_kwargs={},
     )
 
