@@ -49,7 +49,6 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
-                                               ReplicatedLinear,
                                                RowParallelLinear)
 # yapf: enable
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -510,32 +509,32 @@ class Qwen2_5_VisionPatchMerger(nn.Module):
             norm_layer = partial(nn.LayerNorm, eps=1e-6)
         self.ln_q = norm_layer(context_dim)
 
-        cls_fc1 = (ReplicatedLinear
-                   if use_data_parallel else ColumnParallelLinear)
-        cls_fc2 = (ReplicatedLinear
-                   if use_data_parallel else RowParallelLinear)
-        self.mlp = nn.ModuleList([
-            cls_fc1(self.hidden_size,
-                    self.hidden_size,
-                    bias=True,
-                    quant_config=quant_config,
-                    prefix=f"{prefix}.mlp.0"),
+        self.mlp = nn.Sequential(
+            ColumnParallelLinear(
+                self.hidden_size,
+                self.hidden_size,
+                bias=True,
+                quant_config=quant_config,
+                prefix=f"{prefix}.mlp.0",
+                return_bias=False,
+                disable_tp=use_data_parallel,
+            ),
             nn.GELU(),
-            cls_fc2(self.hidden_size,
-                    d_model,
-                    bias=True,
-                    quant_config=quant_config,
-                    prefix=f"{prefix}.mlp.2"),
-        ])
+            RowParallelLinear(
+                self.hidden_size,
+                d_model,
+                bias=True,
+                quant_config=quant_config,
+                prefix=f"{prefix}.mlp.2",
+                return_bias=False,
+                disable_tp=use_data_parallel,
+            ),
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.ln_q(x)
         x = x.view(-1, self.hidden_size)
-
-        mlp_fc1, mlp_act, mlp_fc2 = self.mlp
-        x_parallel, _ = mlp_fc1(x)
-        x_parallel = mlp_act(x_parallel)
-        out, _ = mlp_fc2(x_parallel)
+        out = self.mlp(x)
         return out
 
 
@@ -1193,21 +1192,9 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             input_ids: Flattened (concatenated) input_ids corresponding to a
                 batch.
             positions: Flattened (concatenated) position ids corresponding to a
-                batch.
-                **NOTE**: If mrope is enabled (default setting for Qwen2.5-VL
-                opensource models), the shape will be `(3, seq_len)`,
+                batch. **NOTE**: If mrope is enabled (default setting for
+                Qwen2.5-VL opensource models), the shape will be `(3, seq_len)`,
                 otherwise it will be `(seq_len,).
-            pixel_values: Pixel values to be fed to a model.
-                `None` if no images are passed.
-            image_grid_thw: Tensor `(n_images, 3)` of image 3D grid in LLM.
-                `None` if no images are passed.
-            pixel_values_videos: Pixel values of videos to be fed to a model.
-                `None` if no videos are passed.
-            video_grid_thw: Tensor `(n_videos, 3)` of video 3D grid in LLM.
-                `None` if no videos are passed.
-            second_per_grid_ts: Tensor `(num_videos)` of video time interval (
-                in seconds) for each grid along the temporal dimension in the
-                3D position IDs. `None` if no videos are passed.
         """
 
         if intermediate_tensors is not None:
