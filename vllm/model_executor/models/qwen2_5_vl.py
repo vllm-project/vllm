@@ -1167,7 +1167,7 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             else:
                 ids = self._mm_placeholder_lut.to(device=input_ids.device)
                 is_multimodal = (input_ids.unsqueeze(-1) == ids.view(
-                    1,-1)).any(dim=-1)
+                    1, -1)).any(dim=-1)
             inputs_embeds = merge_multimodal_embeddings_from_mask(
                 inputs_embeds=inputs_embeds,
                 is_multimodal=is_multimodal,
