@@ -703,6 +703,106 @@ class LLM:
 
         return outputs
 
+    def preprocess_chat(
+        self,
+        messages: Union[list[ChatCompletionMessageParam],
+                        list[list[ChatCompletionMessageParam]]],
+        lora_request: Optional[LoRARequest] = None,
+        chat_template: Optional[str] = None,
+        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
+        add_generation_prompt: bool = True,
+        continue_final_message: bool = False,
+        tools: Optional[list[dict[str, Any]]] = None,
+        chat_template_kwargs: Optional[dict[str, Any]] = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
+    ) -> list[TokensPrompt]:
+        """
+        Generate prompt for a chat conversation. The pre-processed
+        prompt can then be used as input for the other LLM methods.
+
+        Refer to `chat` for a complete description of the arguments.
+        Returns:
+            A list of `TokensPrompts` objects containing the tokenized
+            prompt after chat template interpolation, and the
+            pre-processed multi-modal inputs.
+        """
+        list_of_messages: list[list[ChatCompletionMessageParam]]
+
+        # Handle multi and single conversations
+        if is_list_of(messages, list):
+            # messages is list[list[...]]
+            list_of_messages = cast(list[list[ChatCompletionMessageParam]],
+                                    messages)
+        else:
+            # messages is list[...]
+            list_of_messages = [
+                cast(list[ChatCompletionMessageParam], messages)
+            ]
+
+        tokenizer = self.get_tokenizer(lora_request)
+        model_config = self.llm_engine.get_model_config()
+        resolved_content_format = resolve_chat_template_content_format(
+            chat_template,
+            tools,
+            chat_template_content_format,
+            tokenizer,
+            model_config=model_config,
+        )
+
+        _chat_template_kwargs: dict[str, Any] = dict(
+            chat_template=chat_template,
+            add_generation_prompt=add_generation_prompt,
+            continue_final_message=continue_final_message,
+            tools=tools,
+        )
+        _chat_template_kwargs.update(chat_template_kwargs or {})
+
+        prompts: list[TokensPrompt] = []
+
+        for msgs in list_of_messages:
+            # NOTE: _parse_chat_message_content_parts() currently doesn't
+            # handle mm_processor_kwargs, since there is no implementation in
+            # the chat message parsing for it.
+            conversation, mm_data, mm_uuids = parse_chat_messages(
+                msgs,
+                model_config,
+                tokenizer,
+                content_format=resolved_content_format,
+            )
+
+            if isinstance(tokenizer, MistralTokenizer):
+                prompt_token_ids = apply_mistral_chat_template(
+                    tokenizer,
+                    messages=msgs,
+                    **_chat_template_kwargs,
+                )
+            else:
+                prompt_str = apply_hf_chat_template(
+                    tokenizer=tokenizer,
+                    conversation=conversation,
+                    model_config=model_config,
+                    **_chat_template_kwargs,
+                )
+                # Special tokens are already included in chat templates so
+                # should not be added by the tokenizer in this case.
+                prompt_token_ids = tokenizer.encode(prompt_str,
+                                                    add_special_tokens=False)
+
+            prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
+
+            if mm_data is not None:
+                prompt["multi_modal_data"] = mm_data
+
+            if mm_uuids is not None:
+                prompt["multi_modal_uuids"] = mm_uuids
+
+            if mm_processor_kwargs is not None:
+                prompt["mm_processor_kwargs"] = mm_processor_kwargs
+
+            prompts.append(prompt)
+
+        return prompts
+
     def chat(
         self,
         messages: Union[list[ChatCompletionMessageParam],
@@ -769,80 +869,18 @@ class LLM:
             A list of `RequestOutput` objects containing the generated
             responses in the same order as the input messages.
         """
-        list_of_messages: list[list[ChatCompletionMessageParam]]
 
-        # Handle multi and single conversations
-        if is_list_of(messages, list):
-            # messages is list[list[...]]
-            list_of_messages = cast(list[list[ChatCompletionMessageParam]],
-                                    messages)
-        else:
-            # messages is list[...]
-            list_of_messages = [
-                cast(list[ChatCompletionMessageParam], messages)
-            ]
-
-        tokenizer = self.get_tokenizer(lora_request)
-        model_config = self.llm_engine.get_model_config()
-        resolved_content_format = resolve_chat_template_content_format(
-            chat_template,
-            tools,
-            chat_template_content_format,
-            tokenizer,
-            model_config=model_config,
-        )
-
-        _chat_template_kwargs: dict[str, Any] = dict(
+        prompts = self.preprocess_chat(
+            messages=messages,
+            lora_request=lora_request,
             chat_template=chat_template,
+            chat_template_content_format=chat_template_content_format,
             add_generation_prompt=add_generation_prompt,
             continue_final_message=continue_final_message,
             tools=tools,
+            chat_template_kwargs=chat_template_kwargs,
+            mm_processor_kwargs=mm_processor_kwargs,
         )
-        _chat_template_kwargs.update(chat_template_kwargs or {})
-
-        prompts: list[Union[TokensPrompt, TextPrompt]] = []
-
-        for msgs in list_of_messages:
-            # NOTE: _parse_chat_message_content_parts() currently doesn't
-            # handle mm_processor_kwargs, since there is no implementation in
-            # the chat message parsing for it.
-            conversation, mm_data, mm_uuids = parse_chat_messages(
-                msgs,
-                model_config,
-                tokenizer,
-                content_format=resolved_content_format,
-            )
-
-            if isinstance(tokenizer, MistralTokenizer):
-                prompt_token_ids = apply_mistral_chat_template(
-                    tokenizer,
-                    messages=msgs,
-                    **_chat_template_kwargs,
-                )
-            else:
-                prompt_str = apply_hf_chat_template(
-                    tokenizer=tokenizer,
-                    conversation=conversation,
-                    model_config=model_config,
-                    **_chat_template_kwargs,
-                )
-                # Special tokens are already included in chat templates so
-                # should not be added by the tokenizer in this case.
-                prompt_token_ids = tokenizer.encode(prompt_str,
-                                                    add_special_tokens=False)
-
-            prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
-
-            if mm_data is not None:
-                prompt["multi_modal_data"] = mm_data
-
-            if mm_uuids is not None:
-                prompt["multi_modal_uuids"] = mm_uuids
-
-            if mm_processor_kwargs is not None:
-                prompt["mm_processor_kwargs"] = mm_processor_kwargs
-
-            prompts.append(prompt)
 
         return self.generate(
             prompts,
