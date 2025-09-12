@@ -106,7 +106,10 @@ class GitHubDetector(DebugLogger):
 
     # Original vLLM repository patterns
     ORIGINAL_PATTERNS = [
-        'github.com/vllm-project/vllm', 'git@github.com:vllm-project/vllm.git'
+        'github.com/vllm-project/vllm',
+        'git@github.com:vllm-project/vllm.git',
+        'git+https://github.com/vllm-project/vllm.git',
+        'git+ssh://git@github.com/vllm-project/vllm.git'
     ]
 
     # Temporary directory patterns
