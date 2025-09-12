@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
+from collections import defaultdict
 from dataclasses import dataclass
-from typing import NamedTuple, Optional
+from typing import NamedTuple, Optional, Union
 
 import torch
 
@@ -74,9 +75,38 @@ class SamplerOutput:
 
 @dataclass
 class KVConnectorOutput:
-    # [req_ids]
+    # [req_ids], only updated by the aggregator
     finished_sending: Optional[set[str]] = None
     finished_recving: Optional[set[str]] = None
+
+    # {req_id -> n_finished_workers}, only updated by the workers
+    cu_finished_sending: Optional[dict[str, int]] = None
+    cu_finished_recving: Optional[dict[str, int]] = None
+
+    def add_finished(self, finished_sending: Optional[Union[set[str],
+                                                            dict[str, int]]],
+                     finished_recving: Optional[Union[set[str], dict[str,
+                                                                     int]]]):
+        if finished_sending is not None:
+            if self.cu_finished_sending is None:
+                self.cu_finished_sending = defaultdict(int)
+            if isinstance(finished_sending, set):
+                for req_id in finished_sending:
+                    self.cu_finished_sending[req_id] += 1
+            else:
+                for req_id in finished_sending:
+                    self.cu_finished_sending[req_id] += finished_sending[
+                        req_id]
+        if finished_recving is not None:
+            if self.cu_finished_recving is None:
+                self.cu_finished_recving = defaultdict(int)
+            if isinstance(finished_recving, set):
+                for req_id in finished_recving:
+                    self.cu_finished_recving[req_id] += 1
+            else:
+                for req_id in finished_recving:
+                    self.cu_finished_recving[req_id] += finished_recving[
+                        req_id]
 
 
 # ModelRunnerOutput is serialized and sent to the scheduler process.
