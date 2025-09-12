@@ -1641,11 +1641,9 @@ class OpenAIServingResponses(OpenAIServing):
             if ctx.parser.current_channel == "commentary" \
                and ctx.parser.current_recipient and \
                ctx.parser.current_recipient.startswith("functions."):
-                function_name = ctx.parser.current_recipient[len("functions."
-                                                                 ):]
-
+                fc_name = ctx.parser.current_recipient[len("functions."):]
                 tool_call_item = ResponseFunctionToolCall(
-                    name=function_name,
+                    name=fc_name,
                     type="function_call",
                     id=current_item_id,
                     call_id=f"call_{random_uuid()}",
