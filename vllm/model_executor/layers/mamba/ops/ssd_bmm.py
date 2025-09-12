@@ -6,8 +6,6 @@
 
 # ruff: noqa: E501,SIM102
 
-import math
-
 import torch
 
 from vllm.triton_utils import tl, triton
@@ -209,7 +207,7 @@ def _bmm_chunk_fwd(a,
         a = a.contiguous()
     if b.stride(-1) != 1 and b.stride(1) != 1:
         b = b.contiguous()
-    nchunks = len(cu_chunk_seqlens)-1
+    nchunks = len(cu_chunk_seqlens) - 1
     # Allocates output.
     out_dtype = a.dtype if output_dtype is None else output_dtype
     out = torch.empty(

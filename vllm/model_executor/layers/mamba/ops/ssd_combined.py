@@ -14,8 +14,7 @@ from vllm.triton_utils import triton
 
 from .ssd_bmm import _bmm_chunk_fwd
 from .ssd_chunk_scan import _chunk_scan_fwd
-from .ssd_chunk_state import (_chunk_cumsum_fwd, _chunk_state_fwd,
-                              chunk_state_varlen)
+from .ssd_chunk_state import _chunk_cumsum_fwd, _chunk_state_fwd
 from .ssd_state_passing import _state_passing_fwd
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse('2.2.0')
@@ -165,12 +164,12 @@ def _mamba_chunk_scan_combined_fwd(x,
         initial_states=initial_states,
         out=out,
     )
+    final_states = states[:, -1, ...]
     if cu_seqlens is None:
         return out_x, dt, dA_cumsum, states, final_states
     else:
         assert batch == 1, "passing cu_seqlens to get the varlen states is only supported if batch dimension is 1"
         varlen_states = states[:, last_chunk, ...].clone().squeeze(0)
-        final_states = states[:, -1, ...]
         return out_x, dt, dA_cumsum, states, final_states, varlen_states
 
 
