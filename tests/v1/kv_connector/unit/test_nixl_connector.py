@@ -492,9 +492,7 @@ def test_kv_transfer_stats(dist_init):
 
     # Verify that xfer_stats starts empty
     initial_stats = connector.get_kv_transfer_stats()
-    assert isinstance(initial_stats, NixlKVTransferStats)
-    assert initial_stats.is_empty()
-    assert initial_stats.num_successful_transfers == 0
+    assert initial_stats is None
 
     # Create transfer metadata
     request_id = "test_req_for_stats"
@@ -544,9 +542,7 @@ def test_kv_transfer_stats(dist_init):
 
     # Verify stats are reset after retrieval
     stats_after_reset = connector.get_kv_transfer_stats()
-    assert isinstance(stats_after_reset, NixlKVTransferStats)
-    assert stats_after_reset.is_empty()
-    assert stats_after_reset.num_successful_transfers == 0
+    assert stats_after_reset is None
 
 
 def test_kv_transfer_stats_aggregation():

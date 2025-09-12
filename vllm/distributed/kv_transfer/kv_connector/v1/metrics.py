@@ -1,16 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING, Optional, Union
+from typing import Any, Optional, Union
 
 import msgspec
 
 from vllm.logger import init_logger
-
-if TYPE_CHECKING:
-    from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
-        MultiKVTransferStats)
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
-        NixlKVTransferStats)
 
 logger = init_logger(__name__)
 
@@ -49,9 +43,6 @@ class KVTransferStats(
         """Return True if the stats are empty."""
         raise NotImplementedError
 
-
-# Union type for serialization/deserialization
-KVTransferStatsType = Union["NixlKVTransferStats", "MultiKVTransferStats"]
 
 
 class KVTransferLogging:

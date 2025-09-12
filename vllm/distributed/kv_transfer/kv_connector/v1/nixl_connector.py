@@ -35,7 +35,6 @@ from vllm.platforms import _Backend, current_platform
 from vllm.utils import make_zmq_path, make_zmq_socket
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.request import RequestStatus
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -207,7 +206,7 @@ class NixlConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
 
-    def get_kv_transfer_stats(self) -> KVTransferStats:
+    def get_kv_transfer_stats(self) -> Optional[KVTransferStats]:
         assert self.connector_worker is not None
         return self.connector_worker.get_kv_transfer_stats()
 
@@ -382,6 +381,7 @@ class NixlConnectorScheduler:
         Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
         """
+        from vllm.v1.request import RequestStatus
 
         params = request.kv_transfer_params
         logger.debug(
@@ -1356,7 +1356,7 @@ class NixlKVTransferStats(KVTransferStats,
         self.num_successful_transfers += 1
 
     def clone_and_reset(self) -> "NixlKVTransferStats":
-        old = copy.deepcopy(self)
+        old = copy.copy(self)
         self.reset()
         return old
 
@@ -1378,6 +1378,5 @@ class NixlKVTransferStats(KVTransferStats,
     def reduce(self) -> dict[str, Union[int, float]]:
         # TODO: reduce stats to a single value, calculate latency/throughput
         return {"num_successful_transfers": self.num_successful_transfers}
-
 
 EMPTY_NIXL_KV_TRANSFER_STATS = NixlKVTransferStats()
