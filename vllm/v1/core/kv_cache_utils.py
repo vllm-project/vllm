@@ -418,9 +418,9 @@ def need_extra_keys(request: Request) -> bool:
     # Multimodal requests need to include the MM hash.
     # LoRA requests need to include the LoRA ID.
     # Request with provided cache salt need to include the salt.
-    return bool(request.mm_hashes) or (request.lora_request
-                                       is not None) or (request.cache_salt
-                                                        is not None)
+    return bool(request.mm_features) or (request.lora_request
+                                         is not None) or (request.cache_salt
+                                                          is not None)
 
 
 def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
@@ -442,32 +442,28 @@ def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
     """
     extra_keys: list[Any] = []
 
-    mm_positions, mm_hashes = request.mm_positions, request.mm_hashes
-    if not mm_positions:
+    mm_features = request.mm_features
+    if not mm_features:
         return extra_keys, start_mm_idx
 
-    if mm_positions and len(mm_positions) != len(mm_hashes):
-        raise ValueError(
-            "The number of multi-modal positions and hashes must match. This "
-            "is likely because you did not enable MM hashing. "
-            "Please set `mm_processor_cache_gb > 0`.")
-
-    # Note that we assume mm_positions is sorted by offset.
+    # Note that we assume mm_features are sorted by mm_position.offset.
     # We do not need to check all mm inputs if the start token index is out of
     # range. This usually happens in the late prefill phase and decoding phase.
-    if mm_positions[-1].offset + mm_positions[-1].length < start_token_idx:
+    last_pos = mm_features[-1].mm_position
+    if last_pos.offset + last_pos.length < start_token_idx:
         return extra_keys, start_mm_idx
 
     # Support start_mm_idx == -1 to indicate the last mm input.
     if start_mm_idx < 0:
-        assert -start_mm_idx <= len(mm_positions)
-        start_mm_idx = len(mm_positions) + start_mm_idx
+        assert -start_mm_idx <= len(mm_features)
+        start_mm_idx = len(mm_features) + start_mm_idx
 
     curr_mm_idx = start_mm_idx
-    while mm_positions and curr_mm_idx < len(mm_positions):
-        assert mm_hashes[curr_mm_idx] is not None
-        offset = mm_positions[curr_mm_idx].offset
-        length = mm_positions[curr_mm_idx].length
+    while mm_features and curr_mm_idx < len(mm_features):
+        mm_feature = mm_features[curr_mm_idx]
+        assert mm_feature.identifier is not None
+        offset = mm_feature.mm_position.offset
+        length = mm_feature.mm_position.length
         if end_token_idx > offset:
             if start_token_idx > offset + length:
                 # This block has passed the current mm input.
@@ -475,7 +471,7 @@ def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
                 continue
 
             # The block contains the current mm input.
-            extra_keys.append(mm_hashes[curr_mm_idx])
+            extra_keys.append(mm_feature.identifier)
 
             if end_token_idx >= offset + length:
                 # If this block contains the end of the current mm input,
