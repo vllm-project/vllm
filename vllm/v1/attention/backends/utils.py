@@ -189,7 +189,8 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
 
     @abstractmethod
     def build(self,
-              common_prefix_len: int,
+              group_indices: list[int],
+              common_prefix_lens: list[int],
               common_attn_metadata: CommonAttentionMetadata,
               fast_build: bool = False) -> M:
         """
@@ -197,7 +198,9 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         Some builders (MLA) require reorder_batch to be called prior to build.
         
         Args:
-            common_prefix_len: The length of the common prefix of the batch.
+            group_indices: Indices in the input batch where a new group of
+                requests with shared prefixes begins.
+            common_prefix_lens: The lengths of common prefixes in the batch.
             common_attn_metadata: The common attention metadata.
             fast_build: The meta-data will prioritize speed of building over
                 then speed at execution. Can be used for spec-decode where the
@@ -238,6 +241,19 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     def use_cascade_attention(
         self,
         common_prefix_len: int,
+        query_lens: np.ndarray,
+        num_query_heads: int,
+        num_kv_heads: int,
+        use_alibi: bool,
+        use_sliding_window: bool,
+        use_local_attention: bool,
+        num_sms: int,
+    ) -> bool:
+        return False
+
+    def use_multi_cascade_attention(
+        self,
+        common_prefix_lens: list[int],
         query_lens: np.ndarray,
         num_query_heads: int,
         num_kv_heads: int,
@@ -665,6 +681,29 @@ KV_SHARING_FAST_PREFILL_METADATA_FIELDS = [
     ('num_logits_indices', int, 0),
 ]
 
+def reorder_batch_to_group_common_prefixes(
+    input_batch: InputBatch,
+    scheduler_output: SchedulerOutput
+):
+    kv_prefix_aligned_groups = scheduler_output.kv_prefix_aligned_groups
+    if kv_prefix_aligned_groups:
+        insert_set: set[str] = set([req_data.req_id for req_data in scheduler_output.scheduled_new_reqs])
+        request_ids = kv_prefix_aligned_groups.request_ids
+        group_metadata = kv_prefix_aligned_groups.group_metadata
+        for group in group_metadata:
+            _, start, end = group
+            desired_request_set = set(request_ids[start: end])
+            actual_request_set = set(input_batch.req_ids[start: end])
+            desired_not_actual = desired_request_set - actual_request_set
+            actual_not_desired = actual_request_set - desired_request_set
+            for actual_id, desired_id in zip(desired_not_actual, actual_not_desired):
+                actual_index = input_batch.req_id_to_index[actual_id]
+                desired_index = input_batch.req_id_to_index[desired_id]
+                input_batch.swap_states(actual_index, desired_index)
+                insert_set.remove(desired_id)
+                insert_set.add(actual_id)
+        return True
+    return False
 
 def subclass_attention_metadata(
     name_prefix: str,

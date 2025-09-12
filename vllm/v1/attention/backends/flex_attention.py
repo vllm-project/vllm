@@ -99,6 +99,10 @@ class FlexAttentionBackend(AttentionBackend):
     def use_cascade_attention(*args, **kwargs) -> bool:
         return False
 
+    @staticmethod
+    def use_multi_cascade_attention(*args, **kwargs) -> bool:
+        return False
+
 
 #@torch.compile(fullgraph=True, mode="reduce-overhead")
 def physical_to_logical_mapping(block_table: torch.Tensor,
@@ -539,9 +543,11 @@ class FlexAttentionMetadataBuilder(
         return False
 
     def build(self,
-              common_prefix_len: int,
+              group_indices: list[int],
+              common_prefix_lens: list[int],
               common_attn_metadata: CommonAttentionMetadata,
               fast_build: bool = False) -> FlexAttentionMetadata:
+        common_prefix_len = common_prefix_lens[0]
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
@@ -602,6 +608,9 @@ class FlexAttentionMetadataBuilder(
         return out
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
+        return False
+
+    def use_multi_cascade_attention(self, *args, **kwargs) -> bool:
         return False
 
 

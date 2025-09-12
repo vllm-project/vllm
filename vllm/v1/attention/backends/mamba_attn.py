@@ -52,4 +52,4 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
         m.max_query_len = 1  # decode-only
 
-        return self.build(0, m)
+        return self.build([0, m.num_reqs], [0], m)

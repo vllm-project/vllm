@@ -27,7 +27,8 @@ from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv, is_pin_memory_available
 from vllm.utils.flashinfer import (supports_trtllm_attention,
                                    use_trtllm_attention)
-from vllm.v1.attention.backends.flash_attn import use_cascade_attention
+from vllm.v1.attention.backends.flash_attn import (use_cascade_attention,
+                                                   use_multi_cascade_attention)
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.v1.attention.backends.utils import (AttentionCGSupport,
@@ -309,7 +310,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         return self._cascade_wrapper
 
     def build(self,
-              common_prefix_len: int,
+              group_indices: list[int],
+              common_prefix_lens: list[int],
               common_attn_metadata: CommonAttentionMetadata,
               fast_build: bool = False) -> FlashInferMetadata:
         num_reqs = common_attn_metadata.num_reqs
@@ -327,6 +329,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         num_blocks_np = (seq_lens_np + (page_size - 1)) // page_size
 
+        common_prefix_len = common_prefix_lens[0]
         use_cascade = common_prefix_len > 0
         if use_cascade:
             # Grab the blocks of the shared prefix from the first request.
@@ -556,6 +559,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # kv cache dtype to something different from query dtype.
             return False
         return use_cascade_attention(*args, **kwargs)
+
+    def use_multi_cascade_attention(self, *args, **kwargs) -> bool:
+        if self.kv_cache_spec.dtype != self.vllm_config.model_config.dtype:
+            # TODO: The cascade wrapper currently does not support setting
+            # kv cache dtype to something different from query dtype.
+            return False
+        return use_multi_cascade_attention(*args, *kwargs)
+
 
 
 class FlashInferImpl(AttentionImpl):

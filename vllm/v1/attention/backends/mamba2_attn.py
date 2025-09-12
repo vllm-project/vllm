@@ -98,7 +98,8 @@ class Mamba2AttentionMetadataBuilder(
             "chunk_size needs to be set in the model config for Mamba2 models")
 
     def build(self,
-              common_prefix_len: int,
+              group_indices: list[int],
+              common_prefix_lens: list[int],
               common_attn_metadata: CommonAttentionMetadata,
               fast_build: bool = False) -> Mamba2AttentionMetadata:
         num_reqs = common_attn_metadata.num_reqs

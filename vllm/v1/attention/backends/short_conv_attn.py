@@ -49,9 +49,11 @@ class ShortConvAttentionMetadataBuilder(
         self.kv_cache_spec = kv_cache_spec
 
     def build(self,
-              common_prefix_len: int,
+              group_indices: list[int],
+              common_prefix_lens: list[int],
               common_attn_metadata: CommonAttentionMetadata,
               fast_build: bool = False) -> ShortConvAttentionMetadata:
+        common_prefix_len = common_prefix_lens[0]
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc
 

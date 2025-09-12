@@ -128,7 +128,8 @@ class FlashAttentionMetadata:
 
     # For cascade attention.
     use_cascade: bool
-    common_prefix_len: int
+    group_indices: list[int]
+    common_prefix_lens: list[int]
     cu_prefix_query_lens: Optional[torch.Tensor]
     prefix_kv_lens: Optional[torch.Tensor]
     suffix_kv_lens: Optional[torch.Tensor]
@@ -223,7 +224,8 @@ class FlashAttentionMetadataBuilder(
         self.aot_sliding_window: Optional[tuple[int, int]] = None
 
     def build(self,
-              common_prefix_len: int,
+              group_indices: list[int],
+              common_prefix_lens: list[int],
               common_attn_metadata: CommonAttentionMetadata,
               fast_build: bool = False) -> FlashAttentionMetadata:
         """
@@ -287,31 +289,36 @@ class FlashAttentionMetadataBuilder(
                 )
             return None
 
-        use_cascade = common_prefix_len > 0
+        # The common_prefix_lens must always be non-empty
+        use_cascade = common_prefix_lens[0] > 0
 
         if use_cascade:
-            cu_prefix_query_lens = torch.tensor([0, num_actual_tokens],
+            #TODO: Must find request token count in current batch.
+            token_indices = [*[query_start_loc[group_indices[:-1]]],
+                             num_actual_tokens]
+            cu_prefix_query_lens = torch.tensor(token_indices,
                                                 dtype=torch.int32,
                                                 device=self.device)
-            prefix_kv_lens = torch.tensor([common_prefix_len],
+            prefix_kv_lens = torch.tensor(common_prefix_lens,
                                           dtype=torch.int32,
                                           device=self.device)
-            suffix_kv_lens = (seq_lens_cpu[:num_reqs] - common_prefix_len).to(
+            suffix_kv_lens = (seq_lens_cpu[:num_reqs] - common_prefix_lens).to(
                 self.device, non_blocking=True)
+
             prefix_scheduler_metadata = schedule(
-                batch_size=1,
+                batch_size=len(common_prefix_lens),
                 cu_query_lens=cu_prefix_query_lens,
                 max_query_len=num_actual_tokens,
                 seqlens=prefix_kv_lens,
-                max_seq_len=common_prefix_len,
+                max_seq_len=torch.max(prefix_kv_lens),
                 causal=False)
-            scheduler_metadata = schedule(batch_size=num_reqs,
-                                          cu_query_lens=query_start_loc,
-                                          max_query_len=max_query_len,
-                                          seqlens=suffix_kv_lens,
-                                          max_seq_len=max_seq_len -
-                                          common_prefix_len,
-                                          causal=True)
+            scheduler_metadata = schedule(
+                batch_size=num_reqs,
+                cu_query_lens=query_start_loc,
+                max_query_len=max_query_len,
+                seqlens=suffix_kv_lens,
+                max_seq_len=max_seq_len - torch.min(prefix_kv_lens),
+                causal=True)
         else:
             cu_prefix_query_lens = None
             prefix_kv_lens = None
@@ -351,7 +358,8 @@ class FlashAttentionMetadataBuilder(
             block_table=block_table_tensor,
             slot_mapping=slot_mapping,
             use_cascade=use_cascade,
-            common_prefix_len=common_prefix_len,
+            group_indices=group_indices,
+            common_prefix_lens=common_prefix_lens,
             scheduler_metadata=scheduler_metadata,
             cu_prefix_query_lens=cu_prefix_query_lens,
             prefix_kv_lens=prefix_kv_lens,
@@ -363,6 +371,9 @@ class FlashAttentionMetadataBuilder(
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         return use_cascade_attention(*args, **kwargs)
+
+    def use_multi_cascade_attention(self, *args, **kwargs) -> bool:
+        return use_multi_cascade_attention(*args, **kwargs)
 
 
 class FlashAttentionImpl(AttentionImpl):
@@ -571,7 +582,7 @@ class FlashAttentionImpl(AttentionImpl):
             sliding_window=self.sliding_window,
             logits_soft_cap=self.logits_soft_cap,
             block_table=attn_metadata.block_table,
-            common_prefix_len=attn_metadata.common_prefix_len,
+            common_prefix_lens=attn_metadata.common_prefix_lens,
             fa_version=self.vllm_flash_attn_version,
             prefix_scheduler_metadata=attn_metadata.prefix_scheduler_metadata,
             suffix_scheduler_metadata=attn_metadata.scheduler_metadata,
@@ -707,6 +718,56 @@ def use_cascade_attention(
     # Use cascade attention if it is faster than FlashDecoding.
     return cascade_time < flash_decoding_time
 
+#TODO: Figure out if we would ever use vanilla cascade over
+#   multi-cascade attention.
+def use_multi_cascade_attention(
+    group_indices: list[int],
+    common_prefix_lens: list[int],
+    query_lens: np.ndarray,
+    num_query_heads: int,
+    num_kv_heads: int,
+    use_alibi: bool,
+    use_sliding_window: bool,
+    use_local_attention: bool,
+    num_sms: int,
+) -> bool:
+    if max(common_prefix_lens) < 256:
+        return False
+    if use_alibi or use_sliding_window or use_local_attention:
+        return False
+    num_reqs = len(query_lens)
+    if num_reqs < 8:
+        return False
+
+    num_queries_per_kv = num_query_heads // num_kv_heads
+    use_flash_decoding = (num_queries_per_kv > 1 and not use_sliding_window
+                          and not use_alibi and np.all(query_lens == 1))
+    if not use_flash_decoding:
+        # Assumes multi-cascade is favorable to vanilla cascade
+        return True
+
+    # NOTE(woosuk): These are default tile sizes. flash-attn might use
+    # different tile sizes (e.g., 64 or 256) depending on the configuration.
+    q_tile_size = 128
+    kv_tile_size = 128
+
+    cascade_time = 0
+    flash_decoding_time = 0
+
+    for i in range(len(common_prefix_lens)):
+        num_reqs_in_batch = group_indices[i+1] - group_indices[i]
+        cascade_ctas = num_query_heads * cdiv(num_reqs_in_batch, q_tile_size)
+        cascade_waves = cdiv(cascade_ctas, num_sms)
+        num_prefix_tiles = cdiv(common_prefix_lens[i], kv_tile_size)
+        cascade_time += cascade_waves * num_prefix_tiles
+
+        flash_decoding_ctas = (num_reqs_in_batch * num_kv_heads *
+                               cdiv(num_queries_per_kv, q_tile_size))
+        flash_decoding_ctas *= num_prefix_tiles
+        flash_decoding_time += cdiv(flash_decoding_ctas, num_sms)
+
+    # Use cascade attention if it is faster than FlashDecoding.
+    return cascade_time < flash_decoding_time
 
 def cascade_attention(
     output: torch.Tensor,
@@ -724,7 +785,7 @@ def cascade_attention(
     sliding_window: tuple[int, int],
     logits_soft_cap: float,
     block_table: torch.Tensor,
-    common_prefix_len: int,
+    common_prefix_lens: list[int],
     fa_version: int,
     prefix_scheduler_metadata: Optional[torch.Tensor] = None,
     suffix_scheduler_metadata: Optional[torch.Tensor] = None,
@@ -739,9 +800,22 @@ def cascade_attention(
 
     num_tokens = query.shape[0]
     block_size = key_cache.shape[-3]
-    assert common_prefix_len % block_size == 0
-    num_common_kv_blocks = common_prefix_len // block_size
-    assert num_common_kv_blocks > 0
+
+    if len(common_prefix_lens) == 1:
+        common_prefix_len = common_prefix_lens[0]
+        assert common_prefix_len % block_size == 0
+        num_common_kv_blocks = common_prefix_len // block_size
+        assert num_common_kv_blocks > 0
+        max_num_common_tokens = min_num_common_tokens = common_prefix_len
+        max_num_common_blocks = min_num_common_blocks = num_common_kv_blocks
+    else:
+        assert torch.all(torch.eq(prefix_kv_lens % block_size, 0)).item()
+        assert torch.all(torch.gt(prefix_kv_lens // block_size, 0)).item()
+        max_num_common_tokens = torch.max(prefix_kv_lens)
+        min_num_common_tokens = torch.min(prefix_kv_lens)
+        max_num_common_blocks = max_num_common_tokens // block_size
+        min_num_common_blocks = min_num_common_tokens // block_size
+
     descale_shape = (cu_prefix_query_lens.shape[0] - 1, key_cache.shape[-2])
 
     # Process shared prefix.
@@ -752,11 +826,11 @@ def cascade_attention(
         cu_seqlens_q=cu_prefix_query_lens,
         seqused_k=prefix_kv_lens,
         max_seqlen_q=num_tokens,
-        max_seqlen_k=common_prefix_len,
+        max_seqlen_k=max_num_common_tokens,
         softmax_scale=softmax_scale,
         causal=False,
         window_size=sliding_window,
-        block_table=block_table[:1],
+        block_table=block_table[:, :max_num_common_blocks],
         softcap=logits_soft_cap,
         return_softmax_lse=True,
         scheduler_metadata=prefix_scheduler_metadata,
@@ -771,6 +845,16 @@ def cascade_attention(
 
     descale_shape = (cu_query_lens.shape[0] - 1, key_cache.shape[-2])
 
+    suffix_block_table = block_table[:, min_num_common_blocks:]
+    # Only create new block table if multiple differing common_prefixes
+    if len(common_prefix_lens) != 1:
+        suffix_block_table = torch.empty_like(block_table[:, min_num_common_blocks:])
+        for i in range(len(common_prefix_lens)):
+            start = cu_prefix_query_lens[i]
+            end = cu_prefix_query_lens[i + 1]
+            suffix_block_table[start: end] = block_table[start: end,
+                                             prefix_kv_lens[i]:]
+
     # Process suffix per query.
     suffix_output, suffix_lse = flash_attn_varlen_func(
         q=query,
@@ -779,11 +863,11 @@ def cascade_attention(
         cu_seqlens_q=cu_query_lens,
         seqused_k=suffix_kv_lens,
         max_seqlen_q=max_query_len,
-        max_seqlen_k=max_kv_len - common_prefix_len,
+        max_seqlen_k=max_kv_len - min_num_common_tokens,
         softmax_scale=softmax_scale,
         causal=True,
         window_size=sliding_window,
-        block_table=block_table[:, num_common_kv_blocks:],
+        block_table=suffix_block_table,
         softcap=logits_soft_cap,
         return_softmax_lse=True,
         scheduler_metadata=suffix_scheduler_metadata,
@@ -799,3 +883,5 @@ def cascade_attention(
     # Merge prefix and suffix outputs, and store the result in output.
     merge_attn_states(output, prefix_output, prefix_lse, suffix_output,
                       suffix_lse)
+
+    return output
