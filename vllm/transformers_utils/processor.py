@@ -36,7 +36,7 @@ class HashableList(list):
     """
 
     def __hash__(self) -> int:  # type: ignore[override]
-        return hash(tuple(self))
+        return hash(str(self))
 
 
 def _get_processor_factory_fn(processor_cls: Union[type, tuple[type, ...]]):
