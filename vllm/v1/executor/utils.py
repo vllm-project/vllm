@@ -19,6 +19,5 @@ def get_and_update_mm_cache(
     """
     scheduler_output = args[0]
     for request_data in scheduler_output.scheduled_new_reqs:
-        for feats in request_data.mm_features:
-            feats.data = receiver_cache.get_and_update_item(
-                feats.data, feats.identifier)
+        request_data.mm_features = receiver_cache.get_and_update_features(
+            request_data.mm_features)
