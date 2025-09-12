@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, TypeVar
+from collections.abc import Iterable
+from typing import TYPE_CHECKING, Any, TypeVar
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
@@ -27,3 +28,15 @@ def config(cls: ConfigT) -> ConfigT:
     script, which is invoked during the pre-commit checks.
     """
     return cls
+
+
+def getattr_iter(object: object, names: Iterable[str], default: Any) -> Any:
+    """
+    A helper function that retrieves an attribute from an object which may
+    have multiple possible names. This is useful when fetching attributes from
+    arbitrary `transformers.PretrainedConfig` instances.
+    """
+    for name in names:
+        if hasattr(object, name):
+            return getattr(object, name)
+    return default
