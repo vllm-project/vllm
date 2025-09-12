@@ -152,13 +152,11 @@ def _mamba_chunk_scan_combined_fwd(x,
 
     states = rearrange(states, "... (p n) -> ... p n", n=dstate)
 
-    '''
     print("after state passing: ")
     states_ref = torch.load("dump/final_states_%s_main_%d" % (layer, has_init)).unsqueeze(0)
     print("states.shape: ", states.shape)
     print("states_ref.shape: ", states_ref.shape)
     torch.testing.assert_close(states, states_ref, atol=0.0, rtol=0.0)
-    '''
 
     # 4. Compute batched matrix multiply for C_j^T B_i terms
     CB = _bmm_chunk_fwd(C,
@@ -168,7 +166,8 @@ def _mamba_chunk_scan_combined_fwd(x,
                         seq_idx=seq_idx,
                         output_dtype=torch.float32)
 
-    print("CB: ", CB[0,0,0,0,:10])
+    CB_ref = torch.load("dump/CB_%s_main_%d" % (layer, has_init))
+    torch.testing.assert_close(CB, CB_ref, atol=0.0, rtol=0.0)
 
     # 5. Scan and compute the diagonal blocks, taking into
     #    account past causal states.
@@ -196,6 +195,14 @@ def _mamba_chunk_scan_combined_fwd(x,
         initial_states=initial_states,
         out=out,
     )
+
+    out_x_ref = torch.load("dump/out_x_%s_main_%d" % (layer, has_init))
+    torch.testing.assert_close(out_x, out_x_ref, atol=0.0, rtol=0.0)
+
+    out_ref = torch.load("dump/out_%s_main_%d" % (layer, has_init))
+    torch.testing.assert_close(out, out_ref, atol=0.0, rtol=0.0)
+
+
     if cu_seqlens is None:
         return out_x, dt, dA_cumsum, states, final_states
     else:
