@@ -6,7 +6,7 @@ import torch
 
 from tests.kernels.quant_utils import FP8_DTYPE
 from tests.kernels.utils import opcheck
-from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.layernorm import PolyNorm, RMSNorm
 from vllm.platforms import current_platform
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
@@ -68,6 +68,37 @@ def test_rms_norm(
     else:
         opcheck(torch.ops._C.rms_norm,
                 (out, x, layer.weight.data, layer.variance_epsilon))
+
+
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@torch.inference_mode()
+def test_poly_norm(
+    num_tokens: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+) -> None:
+    current_platform.seed_everything(seed)
+    torch.set_default_device(device)
+    layer = PolyNorm().to(dtype=dtype)
+    layer.weight.data.normal_(mean=1.0, std=0.1)
+    layer.bias.data.normal_(mean=1.0, std=0.1)
+    scale = 1 / (2 * hidden_size)
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype)
+    x *= scale
+
+    ref_out = layer.forward_native(x)
+    out = layer(x)
+    torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)
+
+    opcheck(
+        torch.ops._C.poly_norm,
+        (out, x, layer.weight.data, layer.bias.data, layer.variance_epsilon))
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
