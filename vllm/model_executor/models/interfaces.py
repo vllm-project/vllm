@@ -8,6 +8,7 @@ from typing import (TYPE_CHECKING, ClassVar, Literal, Optional, Protocol,
 import numpy as np
 import torch
 from torch import Tensor
+from transformers import PretrainedConfig
 from transformers.models.whisper.tokenization_whisper import LANGUAGES
 from typing_extensions import Self, TypeIs
 
@@ -202,6 +203,88 @@ def supports_score_template(
     model: Union[type[object], object],
 ) -> Union[TypeIs[type[SupportsScoreTemplate]], TypeIs[SupportsScoreTemplate]]:
     return getattr(model, "supports_score_template", False)
+
+
+@runtime_checkable
+class SupportsMRoPE(Protocol):
+    """The interface required for all models that support M-RoPE"""
+
+    supports_mrope: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model supports M-RoPE inputs.
+
+    Note:
+        There is no need to redefine this flag if this class is in the
+        MRO of your model class.
+    """
+
+    @classmethod
+    def get_mrope_input_positions(
+        cls,
+        input_tokens: list[int],
+        hf_config: PretrainedConfig,
+        image_grid_thw: Optional[Union[list[list[int]], torch.Tensor]],
+        video_grid_thw: Optional[Union[list[list[int]], torch.Tensor]],
+        second_per_grid_ts: Optional[list[float]],
+        context_len: int = 0,
+        seq_len: Optional[int] = None,
+        audio_feature_lengths: Optional[torch.Tensor] = None,
+        use_audio_in_video: bool = False,
+    ) -> tuple[list[list[int]], int]:
+        """
+        Returns mrope input positions and delta value.
+        """
+
+        image_grid_thw = [] if image_grid_thw is None else image_grid_thw
+        video_grid_thw = [] if video_grid_thw is None else video_grid_thw
+        second_per_grid_ts = [] if second_per_grid_ts is None else \
+            second_per_grid_ts
+
+        llm_positions, mrope_position_delta = \
+            cls.get_input_positions_tensor(
+                input_tokens=input_tokens,
+                hf_config=hf_config,
+                image_grid_thw=image_grid_thw,
+                video_grid_thw=video_grid_thw,
+                second_per_grid_ts=second_per_grid_ts,
+                context_len=context_len,
+                seq_len=seq_len,
+                audio_feature_lengths=audio_feature_lengths,
+                use_audio_in_video=use_audio_in_video,
+            )
+
+        return llm_positions.tolist(), mrope_position_delta
+
+    @classmethod
+    def get_input_positions_tensor(
+        cls,
+        input_tokens: list[int],
+        hf_config: PretrainedConfig,
+        image_grid_thw: Union[list[list[int]], torch.Tensor],
+        video_grid_thw: Union[list[list[int]], torch.Tensor],
+        second_per_grid_ts: list[float],
+        context_len: int = 0,
+        seq_len: Optional[int] = None,
+        audio_feature_lengths: Optional[torch.Tensor] = None,
+        use_audio_in_video: bool = False,
+    ) -> tuple[torch.Tensor, int]:
+        ...
+
+
+@overload
+def supports_mrope(model: type[object]) -> TypeIs[type[SupportsMRoPE]]:
+    ...
+
+
+@overload
+def supports_mrope(model: object) -> TypeIs[SupportsMRoPE]:
+    ...
+
+
+def supports_mrope(
+    model: Union[type[object], object],
+) -> Union[TypeIs[type[SupportsMRoPE]], TypeIs[SupportsMRoPE]]:
+    return getattr(model, "supports_mrope", False)
 
 
 @runtime_checkable

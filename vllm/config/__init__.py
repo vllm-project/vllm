@@ -1737,6 +1737,10 @@ class ModelConfig:
                 or self.convert_type == "classify")
 
     @property
+    def is_mrope_supported(self) -> bool:
+        return self._model_info.supports_mrope
+
+    @property
     def is_pp_supported(self) -> bool:
         return self._model_info.supports_pp
 
