@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorStats
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
 if TYPE_CHECKING:
@@ -45,6 +46,8 @@ class SchedulerStats:
     spec_decoding_stats: Optional[SpecDecodingStats] = None
 
     num_corrupted_reqs: int = 0
+
+    kv_connector_stats: Optional[KVConnectorStats] = None
 
 
 @dataclass

@@ -62,6 +62,8 @@ CopyBlocksOp = Callable[[
 logger = init_logger(__name__)
 
 
+KVConnectorStats = dict[str, int]
+
 class KVConnectorRole(enum.Enum):
     # Connector running in the scheduler process
     SCHEDULER = 0
@@ -75,7 +77,10 @@ class KVConnectorMetadata(ABC):  # noqa: B024
     Abstract Metadata used to communicate between the
     Scheduler KVConnector and Worker KVConnector.
     """
+
     pass
+
+
 
 
 class KVConnectorBase_V1(ABC):
@@ -85,6 +90,7 @@ class KVConnectorBase_V1(ABC):
             "Initializing KVConnectorBase_V1. This API is experimental and "
             "subject to change in the future as we iterate the design.")
         self._connector_metadata: Optional[KVConnectorMetadata] = None
+        self._connector_stats: Optional[KVConnectorStats] = None
         self._vllm_config = vllm_config
         self._role = role
 
@@ -129,6 +135,26 @@ class KVConnectorBase_V1(ABC):
         # Should only be called while set to valid metadata.
         assert self._connector_metadata is not None
         return self._connector_metadata
+    
+    def _set_connector_stats(self, connector_stats: KVConnectorStats) -> None:
+        """Set the connector stats from the scheduler.
+
+        This function should only be called inside the connector
+
+        Args:
+            connector_stats (KVConnectorStats): the connector stats.
+        """
+        self._connector_stats = connector_stats
+    
+    def get_kv_connector_stats(self) -> Optional[KVConnectorStats]:
+        """Get the connector stats.
+
+        This function should only be called from scheduler.
+
+        Returns:
+            KVConnectorStats: the connector stats, or None if not available.
+        """
+        return self._connector_stats
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """
@@ -225,14 +251,6 @@ class KVConnectorBase_V1(ABC):
             call to this method (this call or a prior one).
         """
         return None, None
-
-    def shutdown(self):
-        """
-        Shutdown the connector. This is called when the worker process
-        is shutting down to ensure that all the async operations are
-        completed and the connector is cleaned up properly.
-        """
-        return None
 
     # ==============================
     # Scheduler-side methods

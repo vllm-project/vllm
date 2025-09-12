@@ -9,6 +9,7 @@ from typing import Callable, Optional, Union
 import prometheus_client
 
 from vllm.config import SupportsMetricsInfo, VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.connector_metrics import KVConnectorMetrics
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import PrefixCachingMetrics
 from vllm.v1.engine import FinishReason
@@ -59,6 +60,8 @@ class LoggingStatLogger(StatLoggerBase):
         # TODO: Make the interval configurable.
         self.prefix_caching_metrics = PrefixCachingMetrics()
         self.spec_decoding_logging = SpecDecodingLogging()
+        # KV connector metrics for aggregating connector stats
+        self.kv_connector_metrics = KVConnectorMetrics(time_interval_seconds=60.0)
         self.last_prompt_throughput: float = 0.0
         self.last_generation_throughput: float = 0.0
 
@@ -98,6 +101,10 @@ class LoggingStatLogger(StatLoggerBase):
                 self.spec_decoding_logging.observe(
                     scheduler_stats.spec_decoding_stats)
 
+            # Observe KV connector stats if available
+            if scheduler_stats.kv_connector_stats is not None:
+                self.kv_connector_metrics.observe(scheduler_stats.kv_connector_stats)
+
             self.last_scheduler_stats = scheduler_stats
 
     def log(self):
@@ -136,6 +143,16 @@ class LoggingStatLogger(StatLoggerBase):
             self.prefix_caching_metrics.hit_rate * 100,
         )
         self.spec_decoding_logging.log(log_fn=log_fn)
+        
+        # Log KV connector metrics if available
+        kv_aggregated_stats = self.kv_connector_metrics.get_current_aggregated_stats()
+        if kv_aggregated_stats and kv_aggregated_stats.metrics:
+            log_fn("Engine %03d KV Connector Metrics: %d samples", 
+                   self.engine_index, kv_aggregated_stats.stats_count)
+            for metric_name, aggregation in kv_aggregated_stats.metrics.items():
+                log_fn("  %s - avg: %.2f, p50: %.2f, p90: %.2f, p99: %.2f",
+                       metric_name, aggregation.avg, aggregation.p50, 
+                       aggregation.p90, aggregation.p99)
 
     def log_engine_initialized(self):
         if self.vllm_config.cache_config.num_gpu_blocks:
@@ -652,7 +669,6 @@ class StatLoggerManager:
         engine_idxs: Optional[list[int]] = None,
         custom_stat_loggers: Optional[list[StatLoggerFactory]] = None,
         enable_default_loggers: bool = True,
-        client_count: int = 1,
     ):
         self.engine_idxs = engine_idxs if engine_idxs else [0]
 
@@ -661,12 +677,7 @@ class StatLoggerManager:
             factories.extend(custom_stat_loggers)
 
         if enable_default_loggers and logger.isEnabledFor(logging.INFO):
-            if client_count > 1:
-                logger.warning(
-                    "AsyncLLM created with api_server_count more than 1; "
-                    "disabling stats logging to avoid incomplete stats.")
-            else:
-                factories.append(LoggingStatLogger)
+            factories.append(LoggingStatLogger)
 
         # engine_idx: StatLogger
         self.per_engine_logger_dict: dict[int, list[StatLoggerBase]] = {}
