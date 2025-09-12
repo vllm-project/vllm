@@ -74,7 +74,6 @@ def get_all_moe_loads(self):
         (num_physical_experts) or (num_ranks, num_physical_experts)).
     """
     if self.num_moe_layers == 0:
-        # 空 MoE：返回空张量，避免 torch.stack([]) 抛错
         return torch.empty((0, 0), dtype=torch.int64)
 
     return torch.stack(

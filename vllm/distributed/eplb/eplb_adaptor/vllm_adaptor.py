@@ -200,8 +200,8 @@ class VllmEplbAdaptor(BaseAdaptor):
             expert_map_tensor, layers_num, ranks_num = \
                 self._expert_file_to_tensor(expert_map_path)
             expert_map_all = self.local2global(expert_map_tensor)
-        except (TypeError, FileNotFoundError, OSError,
-                json.JSONDecodeError, KeyError):
+        except (TypeError, FileNotFoundError, OSError, json.JSONDecodeError,
+                KeyError):
             expert_map_all = self.determine_expert_map_all()
 
         for layer_idx in range(num_moe_layers):
@@ -333,7 +333,7 @@ class VllmEplbAdaptor(BaseAdaptor):
         E_global = (max_id + 1).item() if max_id >= 0 else 0
 
         if E_global == 0:
-            return torch.empty((L, G, 0), dtype=torch.long,device=device)
+            return torch.empty((L, G, 0), dtype=torch.long, device=device)
 
         placement_global = torch.full((L, G, E_global),
                                       fill_value=-1,
