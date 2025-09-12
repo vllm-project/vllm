@@ -127,6 +127,7 @@ pull_request_rules:
       - files~=^vllm/model_executor/models/.*gpt[-_]?oss.*\.py
       - files~=^vllm/model_executor/layers/.*gpt[-_]?oss.*\.py
       - title~=(?i)gpt[-_]?oss
+      - title~=(?i)harmony
   actions:
     label:
       add:
