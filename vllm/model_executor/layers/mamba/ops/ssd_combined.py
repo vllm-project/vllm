@@ -44,7 +44,8 @@ def _mamba_chunk_scan_combined_fwd(x,
                                    dt_softplus=False,
                                    dt_limit=(0.0, float("inf")),
                                    state_dtype=None,
-                                   out=None):
+                                   out=None,
+                                   layer=None):
     assert is_int_pow_2(chunk_size), "chunk_size must be integer power of 2"
     batch, seqlen, nheads, headdim = x.shape
     _, _, ngroups, dstate = B.shape
@@ -97,7 +98,16 @@ def _mamba_chunk_scan_combined_fwd(x,
                                       dt_softplus=dt_softplus,
                                       dt_limit=dt_limit)
 
+
+    print("layer: ", layer)
+
+
+    dA_cumsum_ref = torch.load("dump/dA_cumsum_%s_main" % (layer))
+
     print("dA_cumsum: ", dA_cumsum[0,0,0,:10])
+    print("dA_cumsum_ref: ", dA_cumsum_ref[0,0,0,:10])
+    torch.testing.assert_close(dA_cumsum, dA_cumsum_ref, atol=0.0, rtol=0.0)
+
     print("dt: ", dt[0,0,0,:10])
 
     # 2. Compute the state for each intra-chunk
@@ -208,7 +218,8 @@ def mamba_chunk_scan_combined(x,
                               out=None,
                               return_final_states=False,
                               return_varlen_states=False,
-                              state_dtype=None):
+                              state_dtype=None,
+                              layer=None):
     """
     Argument:
         x: (batch, seqlen, nheads, headdim)
@@ -253,7 +264,8 @@ def mamba_chunk_scan_combined(x,
         dt_softplus=dt_softplus,
         dt_limit=dt_limit,
         out=out,
-        state_dtype=state_dtype)
+        state_dtype=state_dtype,
+        layer=layer)
     if not return_varlen_states:
         if not return_final_states:
             return
