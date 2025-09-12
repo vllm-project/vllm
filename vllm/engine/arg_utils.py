@@ -1296,11 +1296,8 @@ class EngineArgs:
             # Async scheduling does not work with the uniprocess backend.
             if self.distributed_executor_backend is None:
                 self.distributed_executor_backend = "mp"
-                logger.info("Using mp-based distributed executor backend "
-                            "for async scheduling.")
-            if self.distributed_executor_backend == "uni":
-                raise ValueError("Async scheduling is not supported with "
-                                 "uni-process backend.")
+                logger.info("Defaulting to mp-based distributed executor "
+                            "backend for async scheduling.")
             if self.pipeline_parallel_size > 1:
                 raise ValueError("Async scheduling is not supported with "
                                  "pipeline-parallel-size > 1.")

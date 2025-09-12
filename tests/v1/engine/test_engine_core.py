@@ -257,8 +257,12 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
         def execute_model(
             self,
             scheduler_output,
+            non_block=False,
         ) -> Future[ModelRunnerOutput]:
             """Make execute_model non-blocking."""
+
+            # DummyExecutor used only for testing async case.
+            assert non_block
 
             def _execute():
                 output = self.collective_rpc("execute_model",

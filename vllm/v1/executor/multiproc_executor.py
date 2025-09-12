@@ -11,7 +11,7 @@ import weakref
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum, auto
-from functools import partial
+from functools import cached_property, partial
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from multiprocessing.synchronize import Lock as LockType
@@ -37,6 +37,7 @@ from vllm.multimodal.cache import worker_receiver_cache_from_config
 from vllm.utils import (decorate_logs, get_distributed_init_method,
                         get_loopback_ip, get_mp_context, get_open_port,
                         set_process_title)
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.executor.utils import get_and_update_mm_cache
 from vllm.v1.outputs import (AsyncModelRunnerOutput, DraftTokenIds,
@@ -174,9 +175,9 @@ class MultiprocExecutor(Executor):
 
     def execute_model(
         self,
-        scheduler_output,
+        scheduler_output: SchedulerOutput,
+        non_block: bool = False,
     ) -> Union[ModelRunnerOutput, Future[ModelRunnerOutput]]:
-        non_block = self.max_concurrent_batches > 1
 
         if not self.has_connector:
             # get output only from a single worker (output_rank)
@@ -328,7 +329,7 @@ class MultiprocExecutor(Executor):
         self.collective_rpc("check_health", timeout=10)
         return
 
-    @property
+    @cached_property
     def max_concurrent_batches(self) -> int:
         if self.scheduler_config.async_scheduling:
             return 2
@@ -632,7 +633,8 @@ class WorkerProc:
             result = (WorkerProc.ResponseStatus.FAILURE, str(output))
         else:
             result = (WorkerProc.ResponseStatus.SUCCESS, output)
-        self.worker_response_mq.enqueue(result)
+        if (response_mq := self.worker_response_mq) is not None:
+            response_mq.enqueue(result)
 
     def handle_output(self, output: Any):
         """Handles output from the worker. If async scheduling is enabled,
