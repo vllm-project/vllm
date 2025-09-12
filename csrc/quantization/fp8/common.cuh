@@ -52,7 +52,7 @@ __device__ __forceinline__ fp8_type scaled_fp8_conversion(float const val,
 #ifndef USE_ROCM
   // Use hardware cvt instruction for fp8 on nvidia
   // Currently only support fp8_type = c10::Float8_e4m3fn
-  return fp8::scaled_vec_conversion<fp8_type, float>(r, 1.0f, __NV_E4M3);
+  return fp8::vec_conversion<fp8_type, float>(r);
 #else
   // Use hardware cvt instruction for fp8 on rocm
   return fp8::cvt_c10<fp8_type>(r);
