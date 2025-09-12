@@ -226,8 +226,8 @@ class CuMemAllocator:
             unmap_and_release(handle)
 
         logger.info(
-            "CuMemAllocator: sleep freed %s GiB memory in total, of which"
-            "%s GiB is backed up in CPU and the rest %s GiB is discarded"
+            "CuMemAllocator: sleep freed %.2f GiB memory in total, of which "
+            "%.2f GiB is backed up in CPU and the rest %.2f GiB is discarded "
             "directly.", total_bytes / 1024**3, backup_bytes / 1024**3,
             (total_bytes - backup_bytes) / 1024**3)
 
