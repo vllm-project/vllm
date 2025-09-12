@@ -12,6 +12,7 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape)
 from vllm.platforms import current_platform
+from vllm.utils import direct_register_custom_op
 
 # Using the default value (240.0) from pytorch will cause accuracy
 # issue on dynamic quantization models. Here use 224.0 for fnuz on ROCm.
@@ -20,6 +21,42 @@ _FP8_FINFO = torch.finfo(_FP8_DTYPE)
 _FP8_MAX = 224.0 if current_platform.is_fp8_fnuz() else _FP8_FINFO.max
 _FP8_MIN = -224.0 if current_platform.is_fp8_fnuz() else _FP8_FINFO.min
 _FP8_MIN_SCALING_FACTOR = 1.0 / (_FP8_MAX * 512.0)
+
+# import importlib
+# aiter_module_quant = importlib.import_module("aiter.jit.module_quant")
+# dynamic_per_tensor_quant = getattr(
+#     aiter_module_quant, "dynamic_per_tensor_quant")
+# static_per_tensor_quant = getattr(
+#     aiter_module_quant, "static_per_tensor_quant")
+
+
+def per_tensor_quant_impl(
+        x: torch.Tensor, scale: torch.Tensor,
+        dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
+    from aiter.ops.quant import per_tensor_quant_hip
+
+    # scale = torch.empty(1, dtype=torch.float, device=x.device)
+    # y = torch.empty(x.shape, dtype=dtype, device=x.device)
+    # dynamic_per_tensor_quant(y, x, scale)
+    # return y, scale.view(1)
+    return per_tensor_quant_hip(x, scale, dtype)
+
+
+def per_tensor_quant_fake(
+        x: torch.Tensor, scale: torch.Tensor,
+        dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.empty_like(x, dtype=dtype), torch.empty(1,
+                                                         dtype=torch.float32,
+                                                         device=x.device)
+
+
+direct_register_custom_op(
+    op_name="per_tensor_quant",
+    op_func=per_tensor_quant_impl,
+    mutates_args=[],
+    fake_impl=per_tensor_quant_fake,
+    dispatch_key=current_platform.dispatch_key,
+)
 
 
 @cache
@@ -39,7 +76,6 @@ class QuantFP8(CustomOp):
                  group_shape: GroupShape,
                  num_token_padding: Optional[int] = None):
         """
-
         :param static: static or dynamic quantization
         :param group_shape: quantization group shape (PER_TOKEN or PER_TENSOR)
         :param num_token_padding: Pad the token dimension of output to this size
@@ -77,10 +113,7 @@ class QuantFP8(CustomOp):
         scale: Optional[torch.Tensor] = None,
         scale_ub: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if use_aiter() and self.group_shape == GroupShape.PER_TENSOR:
-            from aiter.ops.quant import per_tensor_quant_hip
-            return per_tensor_quant_hip(x, scale, _FP8_DTYPE)
-        return self.forward_cuda(x, scale, scale_ub)
+        return torch.ops.vllm.per_tensor_quant(x, scale, _FP8_DTYPE)
 
     def forward_native(
         self,
