@@ -20,7 +20,8 @@ import vllm.envs as envs
 from vllm.attention.backends.utils import (backend_to_class,
                                            backend_to_class_str)
 from vllm.logger import init_logger
-from vllm.utils import cuda_device_count_stateless, import_pynvml
+from vllm.utils import (cuda_device_count_stateless, import_pynvml,
+                        resolve_obj_by_qualname)
 
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
@@ -213,9 +214,83 @@ class CudaPlatformBase(Platform):
             return _Backend.XFORMERS
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
-                             kv_cache_dtype, block_size, use_v1, use_mla,
-                             has_sink) -> str:
+    def get_valid_backends(
+            cls, head_size, dtype, kv_cache_dtype, block_size, use_v1, use_mla,
+            has_sink) -> tuple[list[_Backend], dict[_Backend, str]]:
+        valid_backends = []
+        invalid_reasons = {}
+        for backend in _Backend:
+            backend_class = backend_to_class(backend)
+            maybe_invalid_reason = backend_class.validate_configuration(
+                head_size, dtype, kv_cache_dtype, block_size, use_v1, use_mla,
+                has_sink)
+            if maybe_invalid_reason is None:
+                valid_backends.append(backend)
+            else:
+                invalid_reasons[backend] = maybe_invalid_reason
+
+        return valid_backends, invalid_reasons
+
+    @classmethod
+    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
+                             dtype: torch.dtype, kv_cache_dtype: Optional[str],
+                             block_size: int, use_v1: bool, use_mla: bool,
+                             has_sink: bool) -> str:
+        # First try checking just the selected backend, if there is one.
+        if selected_backend is not None:
+            backend_class_str = backend_to_class_str(selected_backend, use_v1)
+            backend_class = resolve_obj_by_qualname(backend_class_str)
+            maybe_invalid_reason = backend_class.validate_configuration(
+                head_size, dtype, kv_cache_dtype, block_size, use_v1, use_mla,
+                has_sink)
+            if maybe_invalid_reason is not None:
+                logger.warning(
+                    "Selected backend %s is not valid for this configuration. "
+                    "Reason: %s", selected_backend, maybe_invalid_reason)
+            else:
+                engine_version = 'V1' if use_v1 else 'V0'
+                logger.info("Using %s backend on %s engine.", selected_backend,
+                            engine_version)
+                return backend_class_str
+
+        # No selected backend or the selected backend is invalid,
+        # so we try finding a valid backend.
+        valid_backends, invalid_reasons = cls.get_valid_backends(
+            head_size, dtype, kv_cache_dtype, block_size, use_v1, use_mla,
+            has_sink)
+
+        if len(valid_backends) == 0:
+            raise ValueError(
+                f"No valid attention backend for {cls.device_name}, "
+                f"with head_size: {head_size}, dtype: {dtype}, "
+                f"kv_cache_dtype: {kv_cache_dtype}, "
+                f"use_v1: {use_v1}, use_mla: {use_mla}, has_sink: {has_sink}. "
+                f"Reasons: {invalid_reasons}")
+
+        logger.info("Valid backends: %s", valid_backends)
+
+        valid_backends_classes_str = [
+            backend_to_class_str(b, use_v1) for b in valid_backends
+        ]
+        valid_backends_classes = [
+            resolve_obj_by_qualname(b) for b in valid_backends_classes_str
+        ]
+        valid_backends_priorities = [
+            b.get_selection_priority() for b in valid_backends_classes
+        ]
+        sorted_indices = sorted(range(len(valid_backends_priorities)),
+                                key=lambda i: valid_backends_priorities[i])
+        selected_index = sorted_indices[0]
+
+        engine_version = 'V1' if use_v1 else 'V0'
+        logger.info("Using %s backend on %s engine.",
+                    valid_backends[selected_index].name, engine_version)
+        return valid_backends_classes_str[selected_index]
+
+    @classmethod
+    def get_attn_backend_cls_old(cls, selected_backend, head_size, dtype,
+                                 kv_cache_dtype, block_size, use_v1, use_mla,
+                                 has_sink) -> str:
         if use_mla:
             # TODO(lucas): refactor to be more concise
             #  we should probably consider factoring out V1 here
