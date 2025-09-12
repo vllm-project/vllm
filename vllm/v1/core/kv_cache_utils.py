@@ -5,71 +5,92 @@
 import os
 from collections import defaultdict, deque
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
-from typing import Any, Callable, NamedTuple, Optional
+from dataclasses import astuple, dataclass
+from typing import Any, Callable, NewType, Optional, Union
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import GiB_bytes, cdiv, sha256_cbor_64bit
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
+from vllm.utils import GiB_bytes, cdiv, sha256_cbor
+from vllm.v1.kv_cache_interface import (ChunkedLocalAttentionSpec,
+                                        FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheSpec,
                                         KVCacheTensor, SlidingWindowSpec)
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
 
-logger = init_logger(__name__)
+# BlockHash represents the hash of a single KV-cache block used for
+# prefix caching.  Treating it as a distinct type from ``bytes`` helps
+# catch accidental misuse when passing around raw byte strings.
+BlockHash = NewType("BlockHash", bytes)
+
+# ``BlockHashWithGroupId`` combines a ``BlockHash`` with its KV cache group ID.
+# It is represented as raw bytes for compactness and efficiency. The helper
+# functions below pack/unpack the ``BlockHash`` and group id into/from the key.
+BlockHashWithGroupId = NewType("BlockHashWithGroupId", bytes)
+
+# ExternalBlockHash is used for reproducible prefix-cache block hashing.
+# It's a union of ``bytes`` and ``int`` to keep backward compatibility
+# after we default block hashing to use sha256 bytes.
+ExternalBlockHash = Union[bytes, int]
 
 
-class BlockHash(NamedTuple):
-    """Hash value of a block (int), the token IDs in the block, and extra keys.
-    We keep a tuple of token IDs and extra keys to reduce the likelihood of
-    hash collisions when the hash value is the same. By using SHA256 however,
-    hash collisions are practically impossible.
+def make_block_hash_with_group_id(block_hash: BlockHash,
+                                  group_id: int) -> BlockHashWithGroupId:
+    """Pack a ``BlockHash`` and group id into a ``BlockHashWithGroupId``.
+
+    The group id is encoded using 4 bytes in big-endian order and appended to
+    the block hash bytes.  This representation avoids creating tuples while
+    still allowing us to recover both components when needed.
     """
-    # Hash value of the block in an integer.
-    hash_value: int
-    # Token IDs in the block.
-    token_ids: tuple[int, ...]
-    # Extra keys for the block.
-    extra_keys: Optional[Any] = None
+    return BlockHashWithGroupId(block_hash +
+                                group_id.to_bytes(4, "big", signed=False))
 
 
-class BlockHashWithGroupId(NamedTuple):
-    # The hash value for the contents (e.g., token_ids) of a block without group
-    # ID. The value is the same for blocks representing the same tokens but for
-    # different groups.
-    block_hash: BlockHash
-    # The KV cache group ID.
-    group_id: int
+def get_block_hash(key: BlockHashWithGroupId) -> BlockHash:
+    """Extract the ``BlockHash`` from a ``BlockHashWithGroupId``."""
+    return BlockHash(key[:-4])
 
-    def get_hash_value(self) -> int:
-        return self.block_hash.hash_value
 
+def get_group_id(key: BlockHashWithGroupId) -> int:
+    """Extract the group id from a ``BlockHashWithGroupId``."""
+    return int.from_bytes(key[-4:], "big", signed=False)
+
+
+def maybe_convert_block_hash(hash_bytes: BlockHash) -> ExternalBlockHash:
+    if not envs.VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES:
+        return hash_bytes
+    return int.from_bytes(hash_bytes, byteorder="big") & ((1 << 64) - 1)
+
+
+logger = init_logger(__name__)
 
 # The hash seed for the first block of any prefix block sequence.
 #
 # We use a random value to avoid hash collisions or PYTHONHASHSEED environment
-# variable if set such that processes can share the seed if needed.
-# This aligns with the behavior of Python's hash() function, which also uses
-# a random seed if PYTHONHASHSEED is not set.
+# variable if set such that processes can share the seed if needed. This aligns
+# with the behavior of Python's hash() function, which also uses a random seed
+# if PYTHONHASHSEED is not set.
 #
 # The function `init_none_hash` initializes this variable globally.
-NONE_HASH: int
+NONE_HASH: BlockHash
 
 
-def init_none_hash(hash_fn: Callable):
+def init_none_hash(hash_fn: Callable[[Any], bytes]):
     global NONE_HASH
 
     hash_seed = os.getenv("PYTHONHASHSEED")
-    if hash_seed is None and hash_fn is sha256_cbor_64bit:
+    if hash_seed is None and hash_fn is sha256_cbor:
         logger.warning(
             "PYTHONHASHSEED is not set. This will lead to non-reproducible "
-            "block-hashes when using sha256_cbor_64bit as the hash function."
+            "block-hashes when using sha256_cbor as the hash function."
             "Consider setting PYTHONHASHSEED to a fixed value for "
             "reproducibility.")
 
-    NONE_HASH = (int.from_bytes(os.urandom(32), byteorder="big")
-                 if hash_seed is None else hash_fn(hash_seed))
+    if hash_seed is None:
+        NONE_HASH = BlockHash(os.urandom(32))
+    else:
+        NONE_HASH = BlockHash(hash_fn(hash_seed))
 
 
 class PrefixCachingMetrics:
@@ -141,8 +162,8 @@ class KVCacheBlock:
     block_id: int
     # Reference count.
     ref_cnt: int = 0
-    # The hash of the block composed of (block hash, tuple of token IDs).
-    # It is only available when the block is full.
+    # The hash key (block hash + group id) of the block, only available
+    # when the block is full and cached.
     _block_hash: Optional[BlockHashWithGroupId] = None
 
     # Used to construct a doubly linked list for free blocks.
@@ -152,12 +173,6 @@ class KVCacheBlock:
 
     # Whether the block is a null block that should never be cached.
     is_null: bool = False
-
-    def incr_ref(self):
-        self.ref_cnt += 1
-
-    def decr_ref(self):
-        self.ref_cnt -= 1
 
     @property
     def block_hash(self) -> Optional[BlockHashWithGroupId]:
@@ -182,7 +197,7 @@ class KVCacheBlock:
                          if self.next_free_block else None)
         return (f"KVCacheBlock(block_id={self.block_id}, "
                 f"ref_cnt={self.ref_cnt}, "
-                f"_block_hash={self._block_hash}, "
+                f"_block_hash={self._block_hash!r}, "
                 f"prev_free_block={prev_block_id}, "
                 f"next_free_block={next_block_id})")
 
@@ -212,14 +227,32 @@ class FreeKVCacheBlockQueue:
     def __init__(self, blocks: list[KVCacheBlock]) -> None:
         self.num_free_blocks = len(blocks)
 
-        # Initialize the doubly linked list of free blocks.
-        self.free_list_head: Optional[KVCacheBlock] = blocks[0]
-        self.free_list_tail: Optional[KVCacheBlock] = blocks[-1]
+        # Initialize doubly links of consecutive blocks
         for i in range(self.num_free_blocks):
             if i > 0:
                 blocks[i].prev_free_block = blocks[i - 1]
             if i < self.num_free_blocks - 1:
                 blocks[i].next_free_block = blocks[i + 1]
+
+        # Create a fake head and a tail block for the doubly linked list to
+        # reduce branching in the code
+        #
+        # The implementation guaranteed that the fake head and tail
+        # are NEVER got popped, so we could safely assume each real blocks
+        # in the queue has prev and next blocks.
+        self.fake_free_list_head = KVCacheBlock(block_id=-1)
+        self.fake_free_list_tail = KVCacheBlock(block_id=-1)
+        if self.num_free_blocks > 0:
+            # Connect fake_head and fake_tail to the first and last block
+            # respectively.
+            self.fake_free_list_head.next_free_block = blocks[0]
+            blocks[0].prev_free_block = self.fake_free_list_head
+            self.fake_free_list_tail.prev_free_block = blocks[-1]
+            blocks[-1].next_free_block = self.fake_free_list_tail
+        else:
+            # For empty list, simply connect the fake head and tail.
+            self.fake_free_list_head.next_free_block = self.fake_free_list_tail
+            self.fake_free_list_tail.prev_free_block = self.fake_free_list_head
 
     def popleft(self) -> KVCacheBlock:
         """Pop the first free block and reduce num_free_blocks by 1.
@@ -227,12 +260,65 @@ class FreeKVCacheBlockQueue:
         Returns:
             The first free block.
         """
-        if not self.free_list_head:
+        if (self.fake_free_list_head.next_free_block
+                is self.fake_free_list_tail
+                or self.fake_free_list_head.next_free_block is None):
+            assert self.num_free_blocks == 0, (
+                f"num_free_blocks ({self.num_free_blocks}) is out of sync "
+                "with the free list.")
             raise ValueError("No free blocks available")
 
-        block = self.free_list_head
-        self.remove(block)
-        return block
+        first_block: KVCacheBlock = self.fake_free_list_head.next_free_block
+
+        if first_block.next_free_block is None:
+            # This should not happen if the block is from the free list.
+            # It indicates a bug in the caller's logic.
+            raise RuntimeError("Invalid block found in popleft() "
+                               "which doesn't have a valid next_free_block")
+
+        # Connect fake_head and the next block of first_block (i.e. second block
+        # or fake tail).
+        self.fake_free_list_head.next_free_block = first_block.next_free_block
+        first_block.next_free_block.prev_free_block = self.fake_free_list_head
+
+        # Remove the block from the linked list.
+        first_block.prev_free_block = first_block.next_free_block = None
+
+        self.num_free_blocks -= 1
+        return first_block
+
+    def popleft_n(self, n: int) -> list[KVCacheBlock]:
+        """Pop the first n free blocks and reduce num_free_blocks by n.
+
+        Args:
+            n: The number of blocks to pop.
+
+        Returns:
+            A list of n free blocks.
+        """
+        if n == 0:
+            return []
+        assert self.num_free_blocks >= n
+        self.num_free_blocks -= n
+
+        curr_block = self.fake_free_list_head.next_free_block
+        # Pop n blocks from the head of the list
+        ret = []
+        for _ in range(n):
+            assert curr_block is not None
+            ret.append(curr_block)
+            last_block = curr_block
+            curr_block = curr_block.next_free_block
+            # Reset prev_free_block and next_free_block of all popped blocks
+            last_block.prev_free_block = None
+            last_block.next_free_block = None
+
+        if curr_block is not None:
+            # The queue is not empty, connect the fake head to
+            # the new first block.
+            self.fake_free_list_head.next_free_block = curr_block
+            curr_block.prev_free_block = self.fake_free_list_head
+        return ret
 
     def remove(self, block: KVCacheBlock) -> None:
         """Remove a block in the free list and reduce num_free_blocks by 1.
@@ -240,19 +326,15 @@ class FreeKVCacheBlockQueue:
         Args:
             block: The block to remove.
         """
-        if block.prev_free_block is not None:
-            # Link the previous block to the next block.
-            block.prev_free_block.next_free_block = block.next_free_block
-        if block.next_free_block is not None:
-            # Link the next block to the previous block.
-            block.next_free_block.prev_free_block = block.prev_free_block
+        if block.prev_free_block is None or block.next_free_block is None:
+            # This should not happen if the block is from the free list.
+            # It indicates a bug in the caller's logic.
+            raise RuntimeError(f"remove() called on an invalid block: {block}")
 
-        if block == self.free_list_head:
-            # Update the head if the block is the head.
-            self.free_list_head = block.next_free_block
-        if block == self.free_list_tail:
-            # Update the tail if the block is the tail.
-            self.free_list_tail = block.prev_free_block
+        # Link the previous block to the next block.
+        block.prev_free_block.next_free_block = block.next_free_block
+        # Link the next block to the previous block.
+        block.next_free_block.prev_free_block = block.prev_free_block
 
         # Remove the block from the linked list.
         block.prev_free_block = block.next_free_block = None
@@ -265,18 +347,43 @@ class FreeKVCacheBlockQueue:
         Args:
             block: The block to append.
         """
-        if self.free_list_tail is not None:
-            # Link the last block to the new block.
-            self.free_list_tail.next_free_block = block
-            block.prev_free_block = self.free_list_tail
-            self.free_list_tail = block
-        else:
-            # The free list is empty.
-            assert self.free_list_head is None
-            self.free_list_head = self.free_list_tail = block
+        if self.fake_free_list_tail.prev_free_block is None:
+            raise RuntimeError(
+                "prev_free_block of fake_free_list_tail should always exist")
+        last_block: KVCacheBlock = self.fake_free_list_tail.prev_free_block
 
-        block.next_free_block = None
+        # Connect the new block after the last block.
+        last_block.next_free_block = block
+        block.prev_free_block = last_block
+
+        # Connect the fake tail after the new block.
+        block.next_free_block = self.fake_free_list_tail
+        self.fake_free_list_tail.prev_free_block = block
+
         self.num_free_blocks += 1
+
+    def append_n(self, blocks: list[KVCacheBlock]) -> None:
+        """Put a list of blocks back into the free list
+
+        Args:
+            blocks: The blocks to append.
+        """
+        if len(blocks) == 0:
+            return
+        self.num_free_blocks += len(blocks)
+
+        last_block = self.fake_free_list_tail.prev_free_block
+        assert last_block is not None, (
+            "prev_free_block of fake_free_list_tail should always exist")
+        # Add inter-connections between consecutive blocks
+        for block in blocks:
+            block.prev_free_block = last_block
+            last_block.next_free_block = block
+            last_block = block
+
+        # Connect the last block of <blocks> to the fake tail
+        last_block.next_free_block = self.fake_free_list_tail
+        self.fake_free_list_tail.prev_free_block = last_block
 
     def get_all_free_blocks(self) -> list[KVCacheBlock]:
         """Get all free blocks in the free list. Mainly used for testing.
@@ -285,8 +392,14 @@ class FreeKVCacheBlockQueue:
             A list of free blocks.
         """
         ret = []
-        curr_block = self.free_list_head
-        while curr_block is not None:
+        if self.fake_free_list_head.next_free_block is None:
+            raise RuntimeError(
+                "next_free_block of fake_free_list_head should always exist")
+        # Start from the first block
+        curr_block: KVCacheBlock = self.fake_free_list_head.next_free_block
+        # As long as next_free_block is available, we haven't reached to
+        # the fake tail yet.
+        while curr_block.next_free_block is not None:
             ret.append(curr_block)
             curr_block = curr_block.next_free_block
         return ret
@@ -305,9 +418,9 @@ def need_extra_keys(request: Request) -> bool:
     # Multimodal requests need to include the MM hash.
     # LoRA requests need to include the LoRA ID.
     # Request with provided cache salt need to include the salt.
-    return bool(request.mm_positions) or (request.lora_request
-                                          is not None) or (request.cache_salt
-                                                           is not None)
+    return bool(request.mm_features) or (request.lora_request
+                                         is not None) or (request.cache_salt
+                                                          is not None)
 
 
 def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
@@ -329,32 +442,28 @@ def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
     """
     extra_keys: list[Any] = []
 
-    mm_positions, mm_hashes = request.mm_positions, request.mm_hashes
-    if not mm_positions:
+    mm_features = request.mm_features
+    if not mm_features:
         return extra_keys, start_mm_idx
 
-    if mm_positions and len(mm_positions) != len(mm_hashes):
-        raise ValueError(
-            "The number of multi-modal positions and hashes must match. This "
-            "is likely because you do not enable MM preprocessor hashing. "
-            "Please set disable_mm_preprocessor_cache=False.")
-
-    # Note that we assume mm_positions is sorted by offset.
+    # Note that we assume mm_features are sorted by mm_position.offset.
     # We do not need to check all mm inputs if the start token index is out of
     # range. This usually happens in the late prefill phase and decoding phase.
-    if mm_positions[-1].offset + mm_positions[-1].length < start_token_idx:
+    last_pos = mm_features[-1].mm_position
+    if last_pos.offset + last_pos.length < start_token_idx:
         return extra_keys, start_mm_idx
 
     # Support start_mm_idx == -1 to indicate the last mm input.
     if start_mm_idx < 0:
-        assert -start_mm_idx <= len(mm_positions)
-        start_mm_idx = len(mm_positions) + start_mm_idx
+        assert -start_mm_idx <= len(mm_features)
+        start_mm_idx = len(mm_features) + start_mm_idx
 
     curr_mm_idx = start_mm_idx
-    while mm_positions and curr_mm_idx < len(mm_positions):
-        assert mm_hashes[curr_mm_idx] is not None
-        offset = mm_positions[curr_mm_idx].offset
-        length = mm_positions[curr_mm_idx].length
+    while mm_features and curr_mm_idx < len(mm_features):
+        mm_feature = mm_features[curr_mm_idx]
+        assert mm_feature.identifier is not None
+        offset = mm_feature.mm_position.offset
+        length = mm_feature.mm_position.length
         if end_token_idx > offset:
             if start_token_idx > offset + length:
                 # This block has passed the current mm input.
@@ -362,7 +471,7 @@ def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
                 continue
 
             # The block contains the current mm input.
-            extra_keys.append(mm_hashes[curr_mm_idx])
+            extra_keys.append(mm_feature.identifier)
 
             if end_token_idx >= offset + length:
                 # If this block contains the end of the current mm input,
@@ -424,22 +533,21 @@ def generate_block_hash_extra_keys(
 
 
 def hash_block_tokens(
-        hash_function: Callable,
-        parent_block_hash: Optional[int],
+        hash_function: Callable[[Any], bytes],
+        parent_block_hash: Optional[BlockHash],
         curr_block_token_ids: Sequence[int],
         extra_keys: Optional[tuple[Any, ...]] = None) -> BlockHash:
     """Computes a hash value corresponding to the contents of a block and
     the contents of the preceding block(s). The hash value is used for
     prefix caching. We use LRU cache for this function to avoid recomputing
     hash values for the same block contents.
-
     Args:
+        hash_function: The hash function used to compute block hash.
         parent_block_hash: The hash of the parent block. None
             if this is the first block.
         curr_block_token_ids: A list of token ids in the current
             block. The current block is assumed to be full.
         extra_keys: Extra keys for the block.
-
     Returns:
         The hash value of the block and the token ids in the block.
         The entire tuple is used as the hash key of the block.
@@ -450,47 +558,55 @@ def hash_block_tokens(
     curr_block_token_ids_tuple = tuple(curr_block_token_ids)
     return BlockHash(
         hash_function(
-            (parent_block_hash, curr_block_token_ids_tuple, extra_keys)),
-        curr_block_token_ids_tuple, extra_keys)
+            (parent_block_hash, curr_block_token_ids_tuple, extra_keys)))
 
 
-def hash_request_tokens(hash_function: Any, block_size: int,
-                        request: Request) -> list[BlockHash]:
-    """Computes hash values of a chain of blocks given a sequence of
-    token IDs. The hash value is used for prefix caching.
-
-    Args:
-        block_size: The size of each block.
-        request: The request object.
-
-    Returns:
-        The list of computed hash values.
+def get_request_block_hasher(
+    block_size: int,
+    caching_hash_fn: Callable[[Any], bytes],
+) -> Callable[[Request], list[BlockHash]]:
     """
-    token_ids = request.all_token_ids
+    Returns a function which computes the list of un-computed block hashes
+    of a request."""
 
-    req_need_extra_keys = need_extra_keys(request)
-    req_extra_keys = None
-    curr_mm_idx = 0
+    def request_block_hasher(request: Request) -> list[BlockHash]:
+        start_token_idx = len(request.block_hashes) * block_size
+        num_tokens = request.num_tokens
 
-    ret = []
-    parent_block_hash_value = None
-    for start in range(0, len(token_ids), block_size):
-        end = start + block_size
-        block_token_ids = token_ids[start:end]
-        # Do not hash the block if it is not full.
-        if len(block_token_ids) < block_size:
-            break
+        curr_mm_idx = 0
+        if start_token_idx > 0:
+            # Set curr_mm_idx = -1 to indicate the last mm input.
+            # Note that since we reach to this branch only when the block is
+            # completed with generated tokens, we only need to consider the
+            # last mm input.
+            curr_mm_idx = -1
 
-        if req_need_extra_keys:
+        prev_block_hash_value = (request.block_hashes[-1]
+                                 if request.block_hashes else None)
+        new_block_hashes: list[BlockHash] = []
+        while True:
+            end_token_idx = start_token_idx + block_size
+            if end_token_idx > num_tokens:
+                # We only hash full blocks
+                break
+
             # MM and LoRA requests need extra keys for block-hash computation.
-            req_extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
-                request, start, end, curr_mm_idx)
+            extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
+                request, start_token_idx, end_token_idx, curr_mm_idx)
 
-        block_hash = hash_block_tokens(hash_function, parent_block_hash_value,
-                                       block_token_ids, req_extra_keys)
-        ret.append(block_hash)
-        parent_block_hash_value = block_hash.hash_value
-    return ret
+            # Compute the hash of the current block
+            block_tokens = request.all_token_ids[start_token_idx:end_token_idx]
+            block_hash = hash_block_tokens(caching_hash_fn,
+                                           prev_block_hash_value, block_tokens,
+                                           extra_keys)
+
+            new_block_hashes.append(block_hash)
+            start_token_idx += block_size
+            prev_block_hash_value = block_hash
+
+        return new_block_hashes
+
+    return request_block_hasher
 
 
 def max_memory_usage_bytes(vllm_config: VllmConfig,
@@ -626,7 +742,9 @@ def create_kv_cache_group_specs(
 
 def is_kv_cache_type_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
     """
-    Whether all layers in the given KVCacheSpec have the same type of KV cache.
+    Whether all layers in the given KVCacheSpec have the same KV cache spec.
+    Note that we regard FullAttentionSpec with and without sliding window as
+    the same type.
 
     Args:
         kv_cache_spec: The kv cache spec of each attention layer in the model
@@ -635,8 +753,12 @@ def is_kv_cache_type_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
         True if all layers have the same type, False otherwise.
     """
 
-    layer_keys = set(layer.type_id for layer in kv_cache_spec.values())
-    return len(layer_keys) == 1
+    try:
+        kv_cache_spec_values = list(kv_cache_spec.values())
+        _ = kv_cache_spec_values[0].merge(kv_cache_spec_values)
+    except AssertionError:
+        return False
+    return True
 
 
 def get_max_concurrency_for_kv_cache_config(
@@ -728,6 +850,12 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
     )
 
     num_tokens = num_blocks * vllm_config.cache_config.block_size
+    if vllm_config.parallel_config.decode_context_parallel_size > 1:
+        num_tokens *= vllm_config.parallel_config.decode_context_parallel_size
+        logger.info(
+            "Multiplying the GPU KV cache size by the dcp_world_size %d.",
+            vllm_config.parallel_config.decode_context_parallel_size)
+
     num_tokens_str = f"{num_tokens:,}"
     logger.info("GPU KV cache size: %s tokens", num_tokens_str)
     max_model_len_str = f"{vllm_config.model_config.max_model_len:,}"
@@ -827,12 +955,12 @@ def _get_kv_cache_config_uniform_page_size(
     Returns:
         The generated KVCacheConfig
     """
-    # Group all layers by type_id.
+    # Group all layers by kv_cache_spec.
     # E.g., 2 full attention layers and 3 sliding window attention layers,
     # -> (full.0, full.1), (sw.0, sw.1, sw.2).
-    same_type_layers: dict[str, list[str]] = defaultdict(list)
+    same_type_layers: dict[KVCacheSpec, list[str]] = defaultdict(list)
     for layer_name, layer_spec in kv_cache_spec.items():
-        same_type_layers[layer_spec.type_id].append(layer_name)
+        same_type_layers[layer_spec].append(layer_name)
 
     # Split each group into smaller groups, to make the number of layers in each
     # group identical. Add padding to the last group of each type if necessary.
@@ -916,12 +1044,7 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
         kv_cache_spec: The kv cache spec of each attention layer in the model
     """
 
-    def is_hybrid(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
-        type_ids = set(layer_spec.type_id
-                       for layer_spec in kv_cache_spec.values())
-        return len(type_ids) > 1
-
-    if not is_hybrid(kv_cache_spec):
+    if is_kv_cache_type_uniform(kv_cache_spec):
         return
 
     logger.warning(
@@ -934,7 +1057,11 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
         isinstance(spec, FullAttentionSpec) for spec in kv_cache_spec.values())
     has_sliding_window = any(
         isinstance(spec, SlidingWindowSpec) for spec in kv_cache_spec.values())
-    if has_full_attention and has_sliding_window:
+    has_chunked_local_attention = any(
+        isinstance(spec, ChunkedLocalAttentionSpec)
+        for spec in kv_cache_spec.values())
+    if has_full_attention and (has_sliding_window
+                               or has_chunked_local_attention):
         for layer_name, spec in kv_cache_spec.items():
             if isinstance(spec, SlidingWindowSpec):
                 kv_cache_spec[layer_name] = FullAttentionSpec(
@@ -945,8 +1072,17 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
                     use_mla=spec.use_mla,
                     sliding_window=spec.sliding_window,
                 )
+            elif isinstance(spec, ChunkedLocalAttentionSpec):
+                kv_cache_spec[layer_name] = FullAttentionSpec(
+                    block_size=spec.block_size,
+                    num_kv_heads=spec.num_kv_heads,
+                    head_size=spec.head_size,
+                    dtype=spec.dtype,
+                    use_mla=spec.use_mla,
+                    attention_chunk_size=spec.attention_chunk_size,
+                )
 
-    if is_hybrid(kv_cache_spec):
+    if not is_kv_cache_type_uniform(kv_cache_spec):
         raise ValueError("Hybrid KV cache manager is disabled but failed to "
                          "convert the KV cache specs to one unified type.")
 
@@ -968,7 +1104,6 @@ def get_kv_cache_config(
         The generated KVCacheConfigs
     """
     check_enough_kv_cache_memory(vllm_config, kv_cache_spec, available_memory)
-
     if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
         unify_hybrid_kv_cache_specs(kv_cache_spec)
 
@@ -1006,11 +1141,11 @@ def unify_kv_cache_configs(kv_cache_configs: list[KVCacheConfig]):
             in-place modified to make them consistent.
     """
 
-    # Sort the kv cache groups by the type_id of their KV cache spec.
+    # Sort the kv cache groups by their KV cache spec.
     # This can avoid the inconsistency caused by the order of groups.
     for kv_cache_config in kv_cache_configs:
-        kv_cache_config.kv_cache_groups.sort(
-            key=lambda x: x.kv_cache_spec.type_id)
+        kv_cache_config.kv_cache_groups.sort(key=lambda x: (type(
+            x.kv_cache_spec).__name__, astuple(x.kv_cache_spec)))
 
     # Verify that the groups of each rank are the same.
     for kv_cache_config in kv_cache_configs[1:]:

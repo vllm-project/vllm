@@ -13,7 +13,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 
 from .inputs import (MultiModalDataDict, MultiModalEncDecInputs,
-                     MultiModalInputs, MultiModalKwargs,
+                     MultiModalInputs, MultiModalKwargsOptionalItems,
                      MultiModalPlaceholderDict)
 from .processing import (BaseMultiModalProcessor, BaseProcessingInfo,
                          EncDecMultiModalProcessor)
@@ -43,7 +43,7 @@ class DummyDecoderData(NamedTuple):
     """Dummy data used for profiling."""
 
     prompt_token_ids: list[int]
-    multi_modal_data: MultiModalKwargs
+    multi_modal_data: MultiModalKwargsOptionalItems
     multi_modal_placeholders: MultiModalPlaceholderDict
 
 
@@ -156,7 +156,7 @@ class MultiModalProfiler(Generic[_I]):
         return self.processor.dummy_inputs
 
     def get_mm_limits(self) -> Mapping[str, int]:
-        return self.processing_info.get_allowed_mm_limits()
+        return self.processor.allowed_mm_limits
 
     def _get_dummy_mm_inputs(
         self,
@@ -180,11 +180,14 @@ class MultiModalProfiler(Generic[_I]):
     def _get_mm_num_tokens(
         self,
         mm_inputs: MultiModalInputs,
+        mm_embeddings_only: bool = True,
     ) -> Mapping[str, int]:
         placeholders_by_modality = mm_inputs["mm_placeholders"]
 
         return {
-            modality: sum(item.get_num_embeds() for item in placeholders)
+            modality:
+            sum(item.get_num_embeds() if mm_embeddings_only else item.length
+                for item in placeholders)
             for modality, placeholders in placeholders_by_modality.items()
         }
 
@@ -206,7 +209,7 @@ class MultiModalProfiler(Generic[_I]):
         if processor.pad_dummy_encoder_prompt:
             num_tokens_to_pad = max(total_len, seq_len) - total_len
             encoder_prompt_token_ids.extend([0] * num_tokens_to_pad)
-        # NOTE: Whisper allows total_len > seq_len.
+        # NOTE: Whisper and Donut allows total_len > seq_len.
         elif total_len > seq_len and not envs.VLLM_USE_V1:
             # `max_num_batched_tokens` is defined by `SchedulerConfig`
             logger.warning_once(
@@ -253,10 +256,11 @@ class MultiModalProfiler(Generic[_I]):
             multi_modal_placeholders=mm_inputs["mm_placeholders"],
         )
 
-    def get_mm_max_tokens(
+    def _get_mm_max_tokens(
         self,
         seq_len: int,
         mm_counts: Optional[Mapping[str, int]] = None,
+        mm_embeddings_only: bool = True,
     ) -> Mapping[str, int]:
         if mm_counts is None:
             mm_counts = self.get_mm_limits()
@@ -275,7 +279,7 @@ class MultiModalProfiler(Generic[_I]):
             if total_mm_tokens > seq_len:
                 logger.warning_once(
                     "The sequence length (%d) is smaller than the pre-defined"
-                    " wosrt-case total number of multimodal tokens (%d). "
+                    " worst-case total number of multimodal tokens (%d). "
                     "This may cause certain multi-modal inputs to fail during "
                     "inference. To avoid this, you should increase "
                     "`max_model_len` or reduce `mm_counts`.",
@@ -285,4 +289,25 @@ class MultiModalProfiler(Generic[_I]):
             return max_tokens_per_item
 
         mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
-        return self._get_mm_num_tokens(mm_inputs)
+        return self._get_mm_num_tokens(mm_inputs,
+                                       mm_embeddings_only=mm_embeddings_only)
+
+    def get_mm_max_contiguous_tokens(
+        self,
+        seq_len: int,
+        mm_counts: Optional[Mapping[str, int]] = None,
+    ):
+        """
+        Returns the maximum length of the multimodal (image placeholders+text)
+        tokens, including any break/text tokens in-between image embeddings.
+
+        <im_start> [IMG] [IMG] [IMG] <row_break> [IMG] [IMG] [IMG] <im_end>
+        Returns 9, even when the number of image embeddings is 6.
+        
+        This is important to take into account when profiling and
+        initializing the encoder cache size.
+        """
+
+        return self._get_mm_max_tokens(seq_len,
+                                       mm_counts,
+                                       mm_embeddings_only=False)

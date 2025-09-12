@@ -11,8 +11,8 @@ from datetime import datetime
 from typing import Any
 
 import torch
-import tqdm
 import triton
+from tqdm import tqdm
 
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     _w8a8_block_fp8_matmul,
@@ -56,7 +56,7 @@ def w8a8_block_matmul(
         Bs: The per-block quantization scale for `B`.
         block_size: The block size for per-block quantization.
                     It should be 2-dim, e.g., [128, 128].
-        output_dytpe: The dtype of the returned tensor.
+        output_dtype: The dtype of the returned tensor.
 
     Returns:
         torch.Tensor: The result of matmul.
@@ -141,6 +141,7 @@ def get_weight_shapes(tp_size):
     # cannot TP
     total = [
         (512 + 64, 7168),
+        (2112, 7168),
         ((128 + 64) * 128, 7168),
         (128 * (128 + 128), 512),
         (7168, 16384),

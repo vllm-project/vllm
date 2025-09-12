@@ -13,15 +13,14 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
+from vllm.logprobs import Logprob, PromptLogprobs, SampleLogprobs
 from vllm.model_executor.layers.utils import apply_penalties
 from vllm.model_executor.sampling_metadata import (SamplingMetadata,
                                                    SamplingTensors,
                                                    SequenceGroupToSample)
 from vllm.sampling_params import SamplingType
 from vllm.sequence import (VLLM_INVALID_TOKEN_ID,
-                           CompletionSequenceGroupOutput, Logprob,
-                           PromptLogprobs, SampleLogprobs, SequenceOutput)
-from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
+                           CompletionSequenceGroupOutput, SequenceOutput)
 
 if envs.VLLM_USE_FLASHINFER_SAMPLER and find_spec("flashinfer"):
     # yapf: disable
@@ -119,9 +118,6 @@ class SamplerOutput(
     # specified in lieu of prompt token ids or text.
     sampled_token_embeds: Optional[torch.Tensor] = None
 
-    # Spec decode metrics populated by workers.
-    spec_decode_worker_metrics: Optional[SpecDecodeWorkerMetrics] = None
-
     # Optional last hidden states from the model.
     hidden_states: Optional[torch.Tensor] = None
 
@@ -159,11 +155,9 @@ class SamplerOutput(
                                     else self.sampled_token_probs.shape)
         sampled_token_ids_repr = ("None" if self.sampled_token_ids is None else
                                   self.sampled_token_ids.shape)
-        return (
-            f"SamplerOutput(outputs={self.outputs}, "
-            f"sampled_token_probs={sampled_token_probs_repr}, "
-            f"sampled_token_ids={sampled_token_ids_repr}, "
-            f"spec_decode_worker_metrics={self.spec_decode_worker_metrics})")
+        return (f"SamplerOutput(outputs={self.outputs}, "
+                f"sampled_token_probs={sampled_token_probs_repr}, "
+                f"sampled_token_ids={sampled_token_ids_repr})")
 
 
 class Sampler(nn.Module):

@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import json
-import pathlib
 from asyncio import Lock
 from collections import defaultdict
 from dataclasses import dataclass
@@ -11,7 +9,7 @@ from typing import Optional, Union
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.openai.protocol import (ErrorResponse,
+from vllm.entrypoints.openai.protocol import (ErrorInfo, ErrorResponse,
                                               LoadLoRAAdapterRequest,
                                               ModelCard, ModelList,
                                               ModelPermission,
@@ -19,7 +17,6 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse,
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
-from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.utils import AtomicCounter
 
 logger = init_logger(__name__)
@@ -29,12 +26,6 @@ logger = init_logger(__name__)
 class BaseModelPath:
     name: str
     model_path: str
-
-
-@dataclass
-class PromptAdapterPath:
-    name: str
-    local_path: str
 
 
 @dataclass
@@ -60,7 +51,6 @@ class OpenAIServingModels:
         base_model_paths: list[BaseModelPath],
         *,
         lora_modules: Optional[list[LoRAModulePath]] = None,
-        prompt_adapters: Optional[list[PromptAdapterPath]] = None,
     ):
         super().__init__()
 
@@ -81,20 +71,6 @@ class OpenAIServingModels:
                 LoRAResolverRegistry.get_resolver(lora_resolver_name))
         self.lora_resolver_lock: dict[str, Lock] = defaultdict(Lock)
 
-        self.prompt_adapter_requests = []
-        if prompt_adapters is not None:
-            for i, prompt_adapter in enumerate(prompt_adapters, start=1):
-                with pathlib.Path(prompt_adapter.local_path,
-                                  "adapter_config.json").open() as f:
-                    adapter_config = json.load(f)
-                    num_virtual_tokens = adapter_config["num_virtual_tokens"]
-                self.prompt_adapter_requests.append(
-                    PromptAdapterRequest(
-                        prompt_adapter_name=prompt_adapter.name,
-                        prompt_adapter_id=i,
-                        prompt_adapter_local_path=prompt_adapter.local_path,
-                        prompt_adapter_num_virtual_tokens=num_virtual_tokens))
-
     async def init_static_loras(self):
         """Loads all static LoRA modules.
         Raises if any fail to load"""
@@ -106,7 +82,7 @@ class OpenAIServingModels:
             load_result = await self.load_lora_adapter(
                 request=load_request, base_model_name=lora.base_model_name)
             if isinstance(load_result, ErrorResponse):
-                raise ValueError(load_result.message)
+                raise ValueError(load_result.error.message)
 
     def is_base_model(self, model_name) -> bool:
         return any(model.name == model_name for model in self.base_model_paths)
@@ -141,14 +117,7 @@ class OpenAIServingModels:
                       permission=[ModelPermission()])
             for lora in self.lora_requests.values()
         ]
-        prompt_adapter_cards = [
-            ModelCard(id=prompt_adapter.prompt_adapter_name,
-                      root=self.base_model_paths[0].name,
-                      permission=[ModelPermission()])
-            for prompt_adapter in self.prompt_adapter_requests
-        ]
         model_cards.extend(lora_cards)
-        model_cards.extend(prompt_adapter_cards)
         return ModelList(data=model_cards)
 
     async def load_lora_adapter(
@@ -315,6 +284,5 @@ def create_error_response(
         message: str,
         err_type: str = "BadRequestError",
         status_code: HTTPStatus = HTTPStatus.BAD_REQUEST) -> ErrorResponse:
-    return ErrorResponse(message=message,
-                         type=err_type,
-                         code=status_code.value)
+    return ErrorResponse(error=ErrorInfo(
+        message=message, type=err_type, code=status_code.value))

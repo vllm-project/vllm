@@ -18,6 +18,7 @@
 """Inference-only Gemma model compatible with HuggingFace weights."""
 from collections.abc import Iterable
 from functools import cache
+from itertools import islice
 from typing import Optional, Union
 
 import torch
@@ -43,7 +44,6 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .adapters import as_seq_cls_model
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
@@ -309,7 +309,7 @@ class GemmaModel(nn.Module):
         else:
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        for layer in self.layers[self.start_layer:self.end_layer]:
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
@@ -426,6 +426,3 @@ class GemmaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                            if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)
-
-
-GemmaForSequenceClassification = as_seq_cls_model(GemmaForCausalLM)

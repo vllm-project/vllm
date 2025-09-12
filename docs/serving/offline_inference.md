@@ -30,8 +30,31 @@ This API adds several batteries-included capabilities that simplify large-scale,
 - Automatic sharding, load balancing, and autoscaling distribute work across a Ray cluster with built-in fault tolerance.
 - Continuous batching keeps vLLM replicas saturated and maximizes GPU utilization.
 - Transparent support for tensor and pipeline parallelism enables efficient multi-GPU inference.
+- Reading and writing to most popular file formats and cloud object storage.
+- Scaling up the workload without code changes.
 
-The following example shows how to run batched inference with Ray Data and vLLM:
-<gh-file:examples/offline_inference/batch_llm_inference.py>
+??? code
+
+    ```python
+    import ray  # Requires ray>=2.44.1
+    from ray.data.llm import vLLMEngineProcessorConfig, build_llm_processor
+
+    config = vLLMEngineProcessorConfig(model_source="unsloth/Llama-3.2-1B-Instruct")
+    processor = build_llm_processor(
+        config,
+        preprocess=lambda row: {
+            "messages": [
+                {"role": "system", "content": "You are a bot that completes unfinished haikus."},
+                {"role": "user", "content": row["item"]},
+            ],
+            "sampling_params": {"temperature": 0.3, "max_tokens": 250},
+        },
+        postprocess=lambda row: {"answer": row["generated_text"]},
+    )
+
+    ds = ray.data.from_items(["An old silent pond..."])
+    ds = processor(ds)
+    ds.write_parquet("local:///tmp/data/")
+    ```
 
 For more information about the Ray Data LLM API, see the [Ray Data LLM documentation](https://docs.ray.io/en/latest/data/working-with-llms.html).

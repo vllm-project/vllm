@@ -42,7 +42,7 @@ def adapt_config_dict(config_dict: dict[str, Any],
 
     config = PretrainedConfig.from_dict(config_dict)
 
-    logger.debug("Initialized config", config)
+    logger.debug("Initialized config %s", config)
 
     return config
 
@@ -157,6 +157,7 @@ def _remap_mistral_audio_args(config: dict) -> dict:
             encoder_attention_heads=encoder_args["n_heads"],
             vocab_size=encoder_args["vocab_size"],
             max_source_positions=encoder_args["max_source_positions"],
+            is_encoder_decoder=False,  # Override WhisperConfig default
         )
     }
     if quant_config:

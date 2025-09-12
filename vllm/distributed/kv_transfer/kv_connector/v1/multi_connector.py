@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 
-from vllm.config import KVTransferConfig, VllmConfig
+from vllm.config import VllmConfig
+from vllm.config.kv_transfer import KVTransferConfig
+from vllm.distributed.kv_events import KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -14,6 +17,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -52,7 +56,7 @@ class MultiConnector(KVConnectorBase_V1):
             temp_config.kv_transfer_config = KVTransferConfig(
                 **ktc, engine_id=engine_id)
             self._connectors.append(
-                KVConnectorFactory.create_connector_v1(temp_config, role))
+                KVConnectorFactory.create_connector(temp_config, role))
 
         # A mapping from request id to the index of the connector chosen to
         # load the request from (if any).
@@ -83,6 +87,18 @@ class MultiConnector(KVConnectorBase_V1):
     def clear_connector_metadata(self) -> None:
         for c in self._connectors:
             c.clear_connector_metadata()
+
+    def shutdown(self):
+        exception: Optional[Exception] = None
+        for c in self._connectors:
+            try:
+                c.shutdown()
+            except Exception as e:
+                logger.exception("Exception during connector %s shutdown.",
+                                 c.__class__.__name__)
+                exception = e
+        if exception:
+            raise exception
 
     # ==============================
     # Worker-side methods
@@ -139,11 +155,15 @@ class MultiConnector(KVConnectorBase_V1):
         self,
         request: "Request",
         num_computed_tokens: int,
-    ) -> tuple[int, bool]:
+    ) -> tuple[Optional[int], bool]:
         to_return = (0, False)
         for i, c in enumerate(self._connectors):
             toks, load_async = c.get_num_new_matched_tokens(
                 request, num_computed_tokens)
+            # If there is a connector still looking up the matches,
+            # we return None to indicate that we are not done yet.
+            if toks is None:
+                return (None, False)
             # The first connector that has new matched tokens will be assigned
             # to this request.
             if to_return[0] == 0 and toks > 0:
@@ -177,6 +197,10 @@ class MultiConnector(KVConnectorBase_V1):
             self._extra_async_saves = {}
         return metadata
 
+    def update_connector_output(self, connector_output: KVConnectorOutput):
+        for c in self._connectors:
+            c.update_connector_output(connector_output)
+
     def request_finished(
         self,
         request: "Request",
@@ -202,3 +226,41 @@ class MultiConnector(KVConnectorBase_V1):
         self._requests_to_connector.pop(request.request_id, None)
 
         return async_saves > 0, kv_txfer_params
+
+    def take_events(self) -> Iterable[KVCacheEvent]:
+        for c in self._connectors:
+            yield from c.take_events()
+
+    @classmethod
+    def get_required_kvcache_layout(
+            cls, vllm_config: "VllmConfig") -> Optional[str]:
+        """
+        Get the required KV cache layout for this connector.
+        Args:
+            vllm_config (VllmConfig): the vllm config.
+
+        Returns:
+            str: the required KV cache layout. e.g. HND, or NHD.
+            None if the connector does not require a specific layout.
+        """
+        ktcs = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "connectors")
+        assert ktcs is not None
+        layouts: set[str] = set()
+        temp_vllm_config = copy.copy(vllm_config)
+        for ktc in ktcs:
+            kv_transfer_config = KVTransferConfig(**ktc)
+            temp_vllm_config.kv_transfer_config = kv_transfer_config
+            connector_cls = KVConnectorFactory.get_connector_class(
+                kv_transfer_config)
+            required_kvcache_layout = (
+                connector_cls.get_required_kvcache_layout(temp_vllm_config))
+            if required_kvcache_layout is not None:
+                layouts.add(required_kvcache_layout)
+
+        if len(layouts) > 1:
+            raise ValueError(f"KV cache layout mismatch: "
+                             f"found {len(layouts)} different layouts "
+                             f"({', '.join(layouts) })."
+                             f"All connectors must use the same layout.")
+        return next(iter(layouts), None)

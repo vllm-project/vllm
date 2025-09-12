@@ -12,7 +12,6 @@ import pytest
 import torch
 
 from vllm import LLM, envs
-from vllm.platforms import current_platform
 from vllm.v1.engine.llm_engine import LLMEngine as LLMEngineV1
 
 from ..conftest import HfRunner, VllmRunner
@@ -78,11 +77,7 @@ def test_models(
             "VLLM_USE_V1") and envs.VLLM_USE_V1:
         pytest.skip("enable_prompt_embeds is not supported in v1.")
 
-    if backend == "FLASHINFER" and current_platform.is_rocm():
-        pytest.skip("Flashinfer does not support ROCm/HIP.")
-
-    if backend in ("XFORMERS",
-                   "FLASHINFER") and model == "google/gemma-2-2b-it":
+    if backend == "XFORMERS" and model == "google/gemma-2-2b-it":
         pytest.skip(
             f"{backend} does not support gemma2 with full context length.")
 
@@ -141,8 +136,6 @@ def test_models(
         ("meta-llama/Llama-3.2-1B-Instruct", "mp", "", "L4", {}),
         ("distilbert/distilgpt2", "ray", "", "A100", {}),
         ("distilbert/distilgpt2", "mp", "", "A100", {}),
-        ("distilbert/distilgpt2", "mp", "FLASHINFER", "A100", {}),
-        ("meta-llama/Meta-Llama-3-8B", "ray", "FLASHINFER", "A100", {}),
     ])
 @pytest.mark.parametrize("enable_prompt_embeds", [True, False])
 def test_models_distributed(
@@ -236,13 +229,13 @@ def test_failed_model_execution(vllm_runner, monkeypatch) -> None:
     monkeypatch.setenv('VLLM_ENABLE_V1_MULTIPROCESSING', '0')
 
     with vllm_runner('facebook/opt-125m', enforce_eager=True) as vllm_model:
-        if isinstance(vllm_model.model.llm_engine, LLMEngineV1):
+        if isinstance(vllm_model.llm.llm_engine, LLMEngineV1):
             v1_test_failed_model_execution(vllm_model)
 
 
 def v1_test_failed_model_execution(vllm_model):
 
-    engine = vllm_model.model.llm_engine
+    engine = vllm_model.llm.llm_engine
     mocked_execute_model = Mock(
         side_effect=RuntimeError("Mocked Critical Error"))
     engine.engine_core.engine_core.model_executor.execute_model =\

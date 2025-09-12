@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterable, MutableSequence
+from collections.abc import Iterable, Mapping, MutableSequence
 from typing import (TYPE_CHECKING, ClassVar, Literal, Optional, Protocol,
                     Union, overload, runtime_checkable)
 
 import numpy as np
 import torch
 from torch import Tensor
+from transformers.models.whisper.tokenization_whisper import LANGUAGES
 from typing_extensions import Self, TypeIs
 
 from vllm.config import ModelConfig, SpeechToTextConfig
@@ -49,6 +50,18 @@ class SupportsMultiModal(Protocol):
     Note:
         There is no need to redefine this flag if this class is in the
         MRO of your model class.
+    """
+
+    supports_multimodal_raw_input_only: ClassVar[bool] = False
+    """
+    A flag that indicates this model supports multi-modal inputs and processes
+    them in their raw form and not embeddings.
+    """
+
+    supports_encoder_tp_data: ClassVar[bool] = False
+    """
+    A flag that indicates whether this model supports
+    `multimodal_config.mm_encoder_tp_mode="data"`.
     """
 
     @classmethod
@@ -119,13 +132,6 @@ class SupportsMultiModal(Protocol):
         ...
 
 
-# We can't use runtime_checkable with ClassVar for issubclass checks
-# so we need to treat the class as an instance and use isinstance instead
-@runtime_checkable
-class _SupportsMultiModalType(Protocol):
-    supports_multimodal: Literal[True]
-
-
 @overload
 def supports_multimodal(
         model: type[object]) -> TypeIs[type[SupportsMultiModal]]:
@@ -140,10 +146,17 @@ def supports_multimodal(model: object) -> TypeIs[SupportsMultiModal]:
 def supports_multimodal(
     model: Union[type[object], object],
 ) -> Union[TypeIs[type[SupportsMultiModal]], TypeIs[SupportsMultiModal]]:
-    if isinstance(model, type):
-        return isinstance(model, _SupportsMultiModalType)
+    return getattr(model, "supports_multimodal", False)
 
-    return isinstance(model, SupportsMultiModal)
+
+def supports_multimodal_raw_input_only(
+        model: Union[type[object], object]) -> bool:
+    return getattr(model, "supports_multimodal_raw_input_only", False)
+
+
+def supports_multimodal_encoder_tp_data(
+        model: Union[type[object], object]) -> bool:
+    return getattr(model, "supports_encoder_tp_data", False)
 
 
 @runtime_checkable
@@ -174,13 +187,6 @@ class SupportsScoreTemplate(Protocol):
         ...
 
 
-# We can't use runtime_checkable with ClassVar for issubclass checks
-# so we need to treat the class as an instance and use isinstance instead
-@runtime_checkable
-class _SupportsScoreTemplateType(Protocol):
-    supports_score_template: Literal[True]
-
-
 @overload
 def supports_score_template(
         model: type[object]) -> TypeIs[type[SupportsScoreTemplate]]:
@@ -195,11 +201,7 @@ def supports_score_template(model: object) -> TypeIs[SupportsScoreTemplate]:
 def supports_score_template(
     model: Union[type[object], object],
 ) -> Union[TypeIs[type[SupportsScoreTemplate]], TypeIs[SupportsScoreTemplate]]:
-
-    if isinstance(model, type):
-        return isinstance(model, _SupportsScoreTemplateType)
-
-    return isinstance(model, SupportsScoreTemplate)
+    return getattr(model, "supports_score_template", False)
 
 
 @runtime_checkable
@@ -409,11 +411,6 @@ class HasInnerState(Protocol):
     """
 
 
-@runtime_checkable
-class _HasInnerStateType(Protocol):
-    has_inner_state: ClassVar[Literal[True]]
-
-
 @overload
 def has_inner_state(model: object) -> TypeIs[HasInnerState]:
     ...
@@ -427,10 +424,7 @@ def has_inner_state(model: type[object]) -> TypeIs[type[HasInnerState]]:
 def has_inner_state(
     model: Union[type[object], object]
 ) -> Union[TypeIs[type[HasInnerState]], TypeIs[HasInnerState]]:
-    if isinstance(model, type):
-        return isinstance(model, _HasInnerStateType)
-
-    return isinstance(model, HasInnerState)
+    return getattr(model, "has_inner_state", False)
 
 
 @runtime_checkable
@@ -446,11 +440,6 @@ class IsAttentionFree(Protocol):
     """
 
 
-@runtime_checkable
-class _IsAttentionFreeType(Protocol):
-    is_attention_free: ClassVar[Literal[True]]
-
-
 @overload
 def is_attention_free(model: object) -> TypeIs[IsAttentionFree]:
     ...
@@ -464,10 +453,7 @@ def is_attention_free(model: type[object]) -> TypeIs[type[IsAttentionFree]]:
 def is_attention_free(
     model: Union[type[object], object]
 ) -> Union[TypeIs[type[IsAttentionFree]], TypeIs[IsAttentionFree]]:
-    if isinstance(model, type):
-        return isinstance(model, _IsAttentionFreeType)
-
-    return isinstance(model, IsAttentionFree)
+    return getattr(model, "is_attention_free", False)
 
 
 @runtime_checkable
@@ -502,11 +488,6 @@ class IsHybrid(Protocol):
         ...
 
 
-@runtime_checkable
-class _IsHybridType(Protocol):
-    is_hybrid: ClassVar[Literal[True]]
-
-
 @overload
 def is_hybrid(model: object) -> TypeIs[IsHybrid]:
     ...
@@ -520,10 +501,7 @@ def is_hybrid(model: type[object]) -> TypeIs[type[IsHybrid]]:
 def is_hybrid(
     model: Union[type[object], object]
 ) -> Union[TypeIs[type[IsHybrid]], TypeIs[IsHybrid]]:
-    if isinstance(model, type):
-        return isinstance(model, _IsHybridType)
-
-    return isinstance(model, IsHybrid)
+    return getattr(model, "is_hybrid", False)
 
 
 @runtime_checkable
@@ -588,6 +566,13 @@ class MixtureOfExperts(Protocol):
         """
         ...
 
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        ...
+
 
 def is_mixture_of_experts(model: object) -> TypeIs[MixtureOfExperts]:
     return isinstance(model, MixtureOfExperts)
@@ -596,11 +581,6 @@ def is_mixture_of_experts(model: object) -> TypeIs[MixtureOfExperts]:
 @runtime_checkable
 class HasNoOps(Protocol):
     has_noops: ClassVar[Literal[True]] = True
-
-
-@runtime_checkable
-class _HasNoOpsType(Protocol):
-    has_noops: ClassVar[Literal[True]]
 
 
 @overload
@@ -616,10 +596,7 @@ def has_noops(model: type[object]) -> TypeIs[type[HasNoOps]]:
 def has_noops(
     model: Union[type[object], object]
 ) -> Union[TypeIs[type[HasNoOps]], TypeIs[HasNoOps]]:
-    if isinstance(model, type):
-        return isinstance(model, _HasNoOpsType)
-
-    return isinstance(model, HasNoOps)
+    return getattr(model, "has_noops", False)
 
 
 @runtime_checkable
@@ -643,23 +620,13 @@ def supports_cross_encoding(model: object) -> TypeIs[SupportsCrossEncoding]:
 def _supports_cross_encoding(
     model: Union[type[object], object],
 ) -> Union[TypeIs[type[SupportsCrossEncoding]], TypeIs[SupportsCrossEncoding]]:
-
-    if isinstance(model, type):
-        return isinstance(model, SupportsCrossEncoding)
-
-    return isinstance(model, SupportsCrossEncoding)
+    return getattr(model, "supports_cross_encoding", False)
 
 
 def supports_cross_encoding(
     model: Union[type[object], object],
 ) -> Union[TypeIs[type[SupportsCrossEncoding]], TypeIs[SupportsCrossEncoding]]:
     return is_pooling_model(model) and _supports_cross_encoding(model)
-
-
-def has_step_pooler(model: Union[type[object], object]) -> bool:
-    """Check if the model uses step pooler."""
-    return is_pooling_model(model) and any(
-        type(module).__name__ == "StepPooler" for module in model.modules())
 
 
 class SupportsQuant:
@@ -680,13 +647,9 @@ class SupportsQuant:
             instance.quant_config = quant_config
 
             # apply model mappings to config for proper config-model matching
-            # NOTE: `TransformersForCausalLM` is not supported due to how this
-            # class defines `hf_to_vllm_mapper` as a post-init `@property`.
-            # After this is fixed, get `instance.hf_to_vllm_mapper` directly
-            if getattr(instance, "hf_to_vllm_mapper", None) is not None:
-                instance.quant_config.apply_vllm_mapper(
-                    instance.hf_to_vllm_mapper)
-            if getattr(instance, "packed_modules_mapping", None) is not None:
+            if (hf_to_vllm_mapper := instance.hf_to_vllm_mapper) is not None:
+                instance.quant_config.apply_vllm_mapper(hf_to_vllm_mapper)
+            if instance.packed_modules_mapping is not None:
                 instance.quant_config.packed_modules_mapping.update(
                     instance.packed_modules_mapping)
 
@@ -711,6 +674,8 @@ class SupportsQuant:
 @runtime_checkable
 class SupportsTranscription(Protocol):
     """The interface required for all models that support transcription."""
+    # Mapping from ISO639_1 language codes: language names
+    supported_languages: ClassVar[Mapping[str, str]]
 
     supports_transcription: ClassVar[Literal[True]] = True
 
@@ -720,21 +685,61 @@ class SupportsTranscription(Protocol):
     `True`.
     """
 
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        # language codes in supported_languages
+        # that don't exist in the full language map
+        invalid = set(cls.supported_languages) - set(LANGUAGES.keys())
+        if invalid:
+            raise ValueError(
+                f"{cls.__name__}.supported_languages contains invalid "
+                f"language codes: {sorted(invalid)}\n. "
+                f"Valid choices are: {sorted(LANGUAGES.keys())}")
+
     @classmethod
     def get_generation_prompt(cls, audio: np.ndarray,
                               stt_config: SpeechToTextConfig,
-                              model_config: ModelConfig, language: str,
-                              task_type: str,
-                              request_prompt: str) -> PromptType:
+                              model_config: ModelConfig,
+                              language: Optional[str],
+                              task_type: Literal["transcribe", "translate"],
+                              request_prompt: str,
+                              to_language: Optional[str]) -> PromptType:
         """Get the prompt for the ASR model.
         The model has control over the construction, as long as it
         returns a valid PromptType."""
         ...
 
     @classmethod
-    def validate_language(cls, language: str) -> bool:
-        """Check if the model supports a specific ISO639_1 language."""
-        ...
+    def get_other_languages(cls) -> Mapping[str, str]:
+        # other possible language codes from the whisper map
+        return {
+            k: v
+            for k, v in LANGUAGES.items() if k not in cls.supported_languages
+        }
+
+    @classmethod
+    def validate_language(cls, language: Optional[str]) -> Optional[str]:
+        """
+        Ensure the language specified in the transcription request 
+        is a valid ISO 639-1 language code. If the request language is 
+        valid, but not natively supported by the model, trigger a 
+        warning (but not an exception).
+        """
+        if language is None or language in cls.supported_languages:
+            return language
+        elif language in cls.get_other_languages():
+            logger.warning(
+                "Language %r is not natively supported by %s; "
+                "results may be less accurate. Supported languages: %r",
+                language,
+                cls.__name__,
+                list(cls.supported_languages.keys()),
+            )
+            return language
+        else:
+            raise ValueError(
+                f"Unsupported language: {language!r}.  Must be one of "
+                f"{list(cls.supported_languages.keys())}.")
 
     @classmethod
     def get_speech_to_text_config(
@@ -770,10 +775,7 @@ def supports_transcription(model: object) -> TypeIs[SupportsTranscription]:
 def supports_transcription(
     model: Union[type[object], object],
 ) -> Union[TypeIs[type[SupportsTranscription]], TypeIs[SupportsTranscription]]:
-    if isinstance(model, type):
-        return isinstance(model, SupportsTranscription)
-
-    return isinstance(model, SupportsTranscription)
+    return getattr(model, "supports_transcription", False)
 
 
 @runtime_checkable
@@ -796,7 +798,57 @@ def supports_v0_only(model: object) -> TypeIs[SupportsV0Only]:
 def supports_v0_only(
     model: Union[type[object], object],
 ) -> Union[TypeIs[type[SupportsV0Only]], TypeIs[SupportsV0Only]]:
-    if isinstance(model, type):
-        return isinstance(model, SupportsV0Only)
+    return getattr(model, "supports_v0_only", False)
 
-    return isinstance(model, SupportsV0Only)
+
+@runtime_checkable
+class SupportsEagle3(Protocol):
+    """The interface required for models that support 
+    EAGLE3 speculative decoding."""
+
+    supports_eagle3: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model supports EAGLE3 
+    speculative decoding.
+
+    Note:
+        There is no need to redefine this flag if this class is in the
+        MRO of your model class.
+    """
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        """
+        Set which layers should output auxiliary
+        hidden states for EAGLE3.
+        
+        Args:
+            layers: Tuple of layer indices that should output auxiliary
+              hidden states.
+        """
+        ...
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        """
+        Get the layer indices that should output auxiliary hidden states
+        for EAGLE3.
+        
+        Returns:
+            Tuple of layer indices for auxiliary hidden state outputs.
+        """
+        ...
+
+
+@overload
+def supports_eagle3(model: type[object]) -> TypeIs[type[SupportsEagle3]]:
+    ...
+
+
+@overload
+def supports_eagle3(model: object) -> TypeIs[SupportsEagle3]:
+    ...
+
+
+def supports_eagle3(
+    model: Union[type[object], object],
+) -> Union[TypeIs[type[SupportsEagle3]], TypeIs[SupportsEagle3]]:
+    return isinstance(model, SupportsEagle3)

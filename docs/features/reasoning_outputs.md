@@ -14,6 +14,8 @@ vLLM currently supports the following reasoning models:
 | [QwQ-32B](https://huggingface.co/Qwen/QwQ-32B) | `deepseek_r1` | `guided_json`, `guided_regex` | ✅ |
 | [IBM Granite 3.2 language models](https://huggingface.co/collections/ibm-granite/granite-32-language-models-67b3bc8c13508f6d064cff9a) | `granite` | ❌ | ❌ |
 | [Qwen3 series](https://huggingface.co/collections/Qwen/qwen3-67dd247413f0e2e4f653967f) | `qwen3` | `guided_json`, `guided_regex` | ✅ |
+| [Hunyuan A13B series](https://huggingface.co/collections/tencent/hunyuan-a13b-685ec38e5b46321e3ea7c4be) | `hunyuan_a13b` | `guided_json`, `guided_regex` | ✅ |
+| [GLM-4.5 series](https://huggingface.co/collections/zai-org/glm-45-687c621d34bda8c9e4bf503b) | `glm45` | `guided_json`, `guided_regex` | ✅ |
 
 !!! note
     IBM Granite 3.2 reasoning is disabled by default; to enable it, you must also pass `thinking=True` in your `chat_template_kwargs`.
@@ -122,13 +124,12 @@ OpenAI Python client library does not officially support `reasoning_content` att
     printed_content = False
 
     for chunk in stream:
-        reasoning_content = None
-        content = None
-        # Check the content is reasoning_content or content
-        if hasattr(chunk.choices[0].delta, "reasoning_content"):
-            reasoning_content = chunk.choices[0].delta.reasoning_content
-        elif hasattr(chunk.choices[0].delta, "content"):
-            content = chunk.choices[0].delta.content
+        # Safely extract reasoning_content and content from delta,
+        # defaulting to None if attributes don't exist or are empty strings
+        reasoning_content = (
+            getattr(chunk.choices[0].delta, "reasoning_content", None) or None
+        )
+        content = getattr(chunk.choices[0].delta, "content", None) or None
 
         if reasoning_content is not None:
             if not printed_reasoning_content:
@@ -143,7 +144,7 @@ OpenAI Python client library does not officially support `reasoning_content` att
             print(content, end="", flush=True)
     ```
 
-Remember to check whether the `reasoning_content` exists in the response before accessing it. You could checkout the [example](https://github.com/vllm-project/vllm/blob/main/examples/online_serving/openai_chat_completion_with_reasoning_streaming.py).
+Remember to check whether the `reasoning_content` exists in the response before accessing it. You could check out the [example](https://github.com/vllm-project/vllm/blob/main/examples/online_serving/openai_chat_completion_with_reasoning_streaming.py).
 
 ## Tool Calling
 
