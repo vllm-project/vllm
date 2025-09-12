@@ -330,10 +330,7 @@ def marlin_generate_valid_test_cases():
         if not act_order and is_k_full:
             return False
 
-        if a_type.size_bits >= 16 and a_type is not c_type:
-            return False
-
-        return True
+        return a_type.size_bits < 16 or a_type is c_type
 
     cases = []
     for case in all_combinations:
@@ -390,7 +387,7 @@ def test_gptq_marlin_gemm(
     elif c_type == scalar_types.bfloat16:
         dtype = torch.bfloat16
     else:
-        assert False
+        raise RuntimeError("unsupported c_type")
 
     if a_type == scalar_types.int8:
         a_dtype = torch.int8
@@ -405,10 +402,12 @@ def test_gptq_marlin_gemm(
     if b_type == scalar_types.float4_e2m1f:
         if group_size == 16:
             w_ref, marlin_q_w, marlin_s, marlin_s2 = \
-                rand_marlin_weight_nvfp4_like(b_weight.T, group_size, input_dtype=a_dtype)
+                rand_marlin_weight_nvfp4_like(b_weight.T, group_size,
+                                              input_dtype=a_dtype)
         else:
             w_ref, marlin_q_w, marlin_s = \
-                rand_marlin_weight_mxfp4_like(b_weight.T, group_size, input_dtype=a_dtype)
+                rand_marlin_weight_mxfp4_like(b_weight.T, group_size,
+                                              input_dtype=a_dtype)
             marlin_s2 = None
 
         g_idx = None

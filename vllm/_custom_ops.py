@@ -1582,8 +1582,8 @@ def moe_wna16_marlin_gemm(input: torch.Tensor,
         b_qzeros, g_idx, perm, workspace, sorted_token_ids, expert_ids,
         num_tokens_past_padded, topk_weights, moe_block_size, top_k,
         mul_topk_weights, is_ep, b_q_type.id, size_m, size_n, size_k,
-        is_k_full, use_atomic_add, use_fp32_reduce, is_zp_float,
-        thread_k, thread_n, blocks_per_sm)
+        is_k_full, use_atomic_add, use_fp32_reduce, is_zp_float, thread_k,
+        thread_n, blocks_per_sm)
 
 
 if supports_moe_ops and hasattr(torch.ops._moe_C, "marlin_gemm_moe"):
@@ -1605,33 +1605,19 @@ if supports_moe_ops and hasattr(torch.ops._moe_C, "marlin_gemm_moe"):
                            device=a.device)
 
     @register_fake("_moe_C::moe_wna16_marlin_gemm")
-    def moe_wna16_marlin_gemm_fake(input: torch.Tensor,
-                                   output: Optional[torch.Tensor],
-                                   b_qweight: torch.Tensor,
-                                   b_bias: Optional[torch.Tensor],
-                                   b_scales: torch.Tensor,
-                                   a_scales: Optional[torch.Tensor],
-                                   global_scale: Optional[torch.Tensor],
-                                   b_qzeros: Optional[torch.Tensor],
-                                   g_idx: Optional[torch.Tensor],
-                                   perm: Optional[torch.Tensor],
-                                   workspace: torch.Tensor,
-                                   sorted_token_ids: torch.Tensor,
-                                   expert_ids: torch.Tensor,
-                                   num_tokens_past_padded: torch.Tensor,
-                                   topk_weights: torch.Tensor,
-                                   moe_block_size: int,
-                                   top_k: int,
-                                   mul_topk_weights: bool,
-                                   is_ep: bool,
-                                   b_q_type: ScalarType,
-                                   size_m: int,
-                                   size_n: int,
-                                   size_k: int,
-                                   is_k_full: bool,
-                                   use_atomic_add: bool,
-                                   use_fp32_reduce: bool,
-                                   is_zp_float: bool):
+    def moe_wna16_marlin_gemm_fake(
+            input: torch.Tensor, output: Optional[torch.Tensor],
+            b_qweight: torch.Tensor, b_bias: Optional[torch.Tensor],
+            b_scales: torch.Tensor, a_scales: Optional[torch.Tensor],
+            global_scale: Optional[torch.Tensor],
+            b_qzeros: Optional[torch.Tensor], g_idx: Optional[torch.Tensor],
+            perm: Optional[torch.Tensor], workspace: torch.Tensor,
+            sorted_token_ids: torch.Tensor, expert_ids: torch.Tensor,
+            num_tokens_past_padded: torch.Tensor, topk_weights: torch.Tensor,
+            moe_block_size: int, top_k: int, mul_topk_weights: bool,
+            is_ep: bool, b_q_type: ScalarType, size_m: int, size_n: int,
+            size_k: int, is_k_full: bool, use_atomic_add: bool,
+            use_fp32_reduce: bool, is_zp_float: bool):
         return torch.empty((size_m * top_k, size_n),
                            dtype=input.dtype,
                            device=input.device)

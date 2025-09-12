@@ -107,20 +107,23 @@ __global__ void awq_marlin_repack_kernel(
     uint32_t vals[8];
 #pragma unroll
     for (int i = 0; i < 4; i++) {
-      if constexpr  (is_a_8bit) {
+      if constexpr (is_a_8bit) {
         int cur_elem = tc_row + i;
 
-        int packed_src_0 = sh_stage_int_ptr[cur_n_packed + (8 / pack_factor) * (warp_id % 2) + 
-                                            sh_stride * cur_elem];
-        int packed_src_1 = sh_stage_int_ptr[cur_n_packed + (8 / pack_factor) * (warp_id % 2) +
-                                            sh_stride * (cur_elem + 16)];
+        int packed_src_0 =
+            sh_stage_int_ptr[cur_n_packed + (8 / pack_factor) * (warp_id % 2) +
+                             sh_stride * cur_elem];
+        int packed_src_1 =
+            sh_stage_int_ptr[cur_n_packed + (8 / pack_factor) * (warp_id % 2) +
+                             sh_stride * (cur_elem + 16)];
 
         vals[i] = (packed_src_0 >> (cur_n_pos_unpacked * num_bits)) & mask;
         vals[4 + i] = (packed_src_1 >> (cur_n_pos_unpacked * num_bits)) & mask;
       } else {
         int cur_elem = tc_row + tc_offsets[i];
 
-        int packed_src_0 = sh_stage_int_ptr[cur_n_packed + sh_stride * cur_elem];
+        int packed_src_0 =
+            sh_stage_int_ptr[cur_n_packed + sh_stride * cur_elem];
         int packed_src_1 = sh_stage_int_ptr[cur_n_packed + (8 / pack_factor) +
                                             sh_stride * cur_elem];
 
@@ -129,7 +132,8 @@ __global__ void awq_marlin_repack_kernel(
       }
     }
 
-    constexpr int tile_size = target_tile_k_size * target_tile_n_size / pack_factor;
+    constexpr int tile_size =
+        target_tile_k_size * target_tile_n_size / pack_factor;
     int out_offset = (k_tile_id * n_tiles + n_tile_id) * tile_size;
 
     // Result of:
@@ -202,18 +206,21 @@ __global__ void awq_marlin_repack_kernel(
 
 }  // namespace marlin
 
-#define CALL_IF(NUM_BITS, IS_A_8BIT)                                                   \
-  else if (num_bits == NUM_BITS && is_a_8bit == IS_A_8BIT) {                                          \
-    cudaFuncSetAttribute(                                                   \
-        marlin::awq_marlin_repack_kernel<marlin::repack_threads, NUM_BITS, IS_A_8BIT>, \
-        cudaFuncAttributeMaxDynamicSharedMemorySize, max_shared_mem);       \
-    marlin::awq_marlin_repack_kernel<marlin::repack_threads, NUM_BITS, IS_A_8BIT>      \
-        <<<blocks, marlin::repack_threads, max_shared_mem, stream>>>(       \
-            b_q_weight_ptr, out_ptr, size_k, size_n);                       \
+#define CALL_IF(NUM_BITS, IS_A_8BIT)                                       \
+  else if (num_bits == NUM_BITS && is_a_8bit == IS_A_8BIT) {               \
+    cudaFuncSetAttribute(                                                  \
+        marlin::awq_marlin_repack_kernel<marlin::repack_threads, NUM_BITS, \
+                                         IS_A_8BIT>,                       \
+        cudaFuncAttributeMaxDynamicSharedMemorySize, max_shared_mem);      \
+    marlin::awq_marlin_repack_kernel<marlin::repack_threads, NUM_BITS,     \
+                                     IS_A_8BIT>                            \
+        <<<blocks, marlin::repack_threads, max_shared_mem, stream>>>(      \
+            b_q_weight_ptr, out_ptr, size_k, size_n);                      \
   }
 
 torch::Tensor awq_marlin_repack(torch::Tensor& b_q_weight, int64_t size_k,
-                                int64_t size_n, int64_t num_bits, bool is_a_8bit) {
+                                int64_t size_n, int64_t num_bits,
+                                bool is_a_8bit) {
   // Verify compatibility with marlin tile of 16x64
   TORCH_CHECK(size_k % marlin::tile_k_size == 0, "size_k = ", size_k,
               " is not divisible by tile_k_size = ", marlin::tile_k_size);
@@ -269,7 +276,8 @@ torch::Tensor awq_marlin_repack(torch::Tensor& b_q_weight, int64_t size_k,
   CALL_IF(4, true)
   CALL_IF(8, true)
   else {
-    TORCH_CHECK(false, "Unsupported repack config: num_bits = ", num_bits, ", is_a_8bit = ", is_a_8bit);
+    TORCH_CHECK(false, "Unsupported repack config: num_bits = ", num_bits,
+                ", is_a_8bit = ", is_a_8bit);
   }
 
   return out;

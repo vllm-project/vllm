@@ -153,9 +153,9 @@ class AWQMarlinConfig(QuantizationConfig):
                     "Falling back to Moe WNA16 kernels.")
                 return MoeWNA16Config.from_config(
                     self.full_config).get_quant_method(layer, prefix)
-            quant_method = AWQMarlinMoEMethod(self, layer.moe_config)
-            quant_method.input_dtype = get_marlin_input_dtype(prefix)
-            return quant_method
+            moe_quant_method = AWQMarlinMoEMethod(self, layer.moe_config)
+            moe_quant_method.input_dtype = get_marlin_input_dtype(prefix)
+            return moe_quant_method
         return None
 
     @classmethod
@@ -191,8 +191,7 @@ class AWQMarlinLinearMethod(LinearMethodBase):
         quant_config: The AWQ Marlin quantization config.
     """
 
-    def __init__(self,
-                 quant_config: AWQMarlinConfig) -> None:
+    def __init__(self, quant_config: AWQMarlinConfig) -> None:
         self.quant_config = quant_config
         self.quant_type = scalar_types.uint4
         self.input_dtype = None
@@ -455,6 +454,7 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
         device = layer.w13_qweight.device
         is_a_8bit = self.input_dtype is not None and \
             self.input_dtype.itemsize == 1
+        quant_type = self.quant_type
 
         if self.input_dtype == torch.float8_e4m3fn:
             ops.marlin_int4_fp8_preprocess(layer.w13_qweight,
@@ -508,7 +508,7 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
             is_a_8bit=is_a_8bit)
         if self.input_dtype == torch.int8 and layer.num_groups_w13 > 1:
             marlin_w13_scales, w13_input_global_scale = \
-                marlin_act_int8_process_scales(marlin_w13_scales, self.quant_type)
+                marlin_act_int8_process_scales(marlin_w13_scales, quant_type)
             layer.register_parameter(
                 "w13_input_global_scale",
                 Parameter(w13_input_global_scale, requires_grad=False))
@@ -525,7 +525,7 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
             is_a_8bit=is_a_8bit)
         if self.input_dtype == torch.int8 and layer.num_groups_w2 > 1:
             marlin_w2_scales, w2_input_global_scale = \
-                marlin_act_int8_process_scales(marlin_w2_scales, self.quant_type)
+                marlin_act_int8_process_scales(marlin_w2_scales, quant_type)
             layer.register_parameter(
                 "w2_input_global_scale",
                 Parameter(w2_input_global_scale, requires_grad=False))

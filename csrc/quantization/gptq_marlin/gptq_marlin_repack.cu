@@ -4,8 +4,8 @@
 
 namespace marlin {
 
-template <int const num_threads, int const num_bits,
-          bool const has_perm, bool is_a_8bit>
+template <int const num_threads, int const num_bits, bool const has_perm,
+          bool is_a_8bit>
 __global__ void gptq_marlin_repack_kernel(
     uint32_t const* __restrict__ b_q_weight_ptr,
     uint32_t const* __restrict__ perm_ptr, uint32_t* __restrict__ out_ptr,
@@ -161,7 +161,8 @@ __global__ void gptq_marlin_repack_kernel(
 #pragma unroll
       for (int i = 0; i < tile_ints; i++) {
         if constexpr (is_a_8bit) {
-          b1_vals[i] = sh_stage_int_ptr[cur_n + sh_stride * i + (warp_id % 2) * 8];
+          b1_vals[i] =
+              sh_stage_int_ptr[cur_n + sh_stride * i + (warp_id % 2) * 8];
         } else {
           b1_vals[i] = sh_stage_int_ptr[cur_n + sh_stride * i];
           b2_vals[i] = sh_stage_int_ptr[cur_n + 8 + sh_stride * i];
@@ -176,13 +177,15 @@ __global__ void gptq_marlin_repack_kernel(
 
         vals[i] = (b1_vals[cur_int] >> (cur_pos * num_bits)) & mask;
         if constexpr (is_a_8bit)
-          vals[4 + i] = (b1_vals[cur_int + tile_ints / 2] >> (cur_pos * num_bits)) & mask;
+          vals[4 + i] =
+              (b1_vals[cur_int + tile_ints / 2] >> (cur_pos * num_bits)) & mask;
         else
           vals[4 + i] = (b2_vals[cur_int] >> (cur_pos * num_bits)) & mask;
       }
     }
 
-    constexpr int tile_size = target_tile_k_size * target_tile_n_size / pack_factor;
+    constexpr int tile_size =
+        target_tile_k_size * target_tile_n_size / pack_factor;
     int out_offset = (k_tile_id * n_tiles + n_tile_id) * tile_size;
 
     // Result of:
@@ -260,7 +263,8 @@ __global__ void gptq_marlin_repack_kernel(
 }  // namespace marlin
 
 #define CALL_IF(NUM_BITS, HAS_PERM, IS_A_8BIT)                              \
-  else if (num_bits == NUM_BITS && has_perm == HAS_PERM && is_a_8bit == IS_A_8BIT) {                  \
+  else if (num_bits == NUM_BITS && has_perm == HAS_PERM &&                  \
+           is_a_8bit == IS_A_8BIT) {                                        \
     cudaFuncSetAttribute(                                                   \
         marlin::gptq_marlin_repack_kernel<marlin::repack_threads, NUM_BITS, \
                                           HAS_PERM, IS_A_8BIT>,             \

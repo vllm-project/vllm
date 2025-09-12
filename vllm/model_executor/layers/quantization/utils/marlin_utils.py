@@ -383,8 +383,11 @@ def awq_to_marlin_zero_points(q_zp_packed: torch.Tensor,
     return marlin_zp
 
 
-def moe_awq_to_marlin_zero_points(q_zp_packed: torch.Tensor, size_k: int,
-                                  size_n: int, num_bits: int, is_a_8bit: bool = False):
+def moe_awq_to_marlin_zero_points(q_zp_packed: torch.Tensor,
+                                  size_k: int,
+                                  size_n: int,
+                                  num_bits: int,
+                                  is_a_8bit: bool = False):
     num_experts = q_zp_packed.shape[0]
     output = torch.empty(
         (num_experts, q_zp_packed.shape[1], q_zp_packed.shape[2]),

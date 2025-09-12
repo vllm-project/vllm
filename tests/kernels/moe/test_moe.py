@@ -37,52 +37,52 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     quantize_weights)
 from vllm.model_executor.models.mixtral import MixtralMoE
 from vllm.platforms import current_platform
-from vllm.scalar_type import ScalarType, scalar_types
+from vllm.scalar_type import scalar_types
 
 NUM_EXPERTS = [8, 64, 192]
 EP_SIZE = [1, 4]
 TOP_KS = [2, 6]
 
 MOE_MARLIN_QUANT_TEST_CONFIGS = [
-    # # AWQ-INT4
-    # {
-    #     "b_type": scalar_types.uint4,
-    #     "group_blocks": [-1, 2, 4, 8]
-    # },
-    # # GPTQ-INT4
-    # {
-    #     "b_type": scalar_types.uint4b8,
-    #     "support_act_order": True,
-    #     "group_blocks": [-1, 2, 4, 8]
-    # },
-    # # GPTQ-INT8
-    # {
-    #     "b_type": scalar_types.uint8b128,
-    #     "support_act_order": True,
-    #     "group_blocks": [-1, 2, 4, 8]
-    # },
-    # # FP8
-    # {
-    #     "b_type": scalar_types.float8_e4m3fn,
-    #     "group_blocks": [-1, 8]
-    # },
-    # # NVFP4
-    # {
-    #     "b_type": scalar_types.float4_e2m1f,
-    #     "group_blocks": [1]
-    # },
-    # # MXFP4
-    # {
-    #     "a_type": [scalar_types.bfloat16],
-    #     "b_type": scalar_types.float4_e2m1f,
-    #     "group_blocks": [2]
-    # },
-    # # AWQ-INT4 with INT8 activation
-    # {
-    #     "a_type": [scalar_types.int8],
-    #     "b_type": scalar_types.uint4,
-    #     "group_blocks": [-1, 2, 4, 8]
-    # },
+    # AWQ-INT4
+    {
+        "b_type": scalar_types.uint4,
+        "group_blocks": [-1, 2, 4, 8]
+    },
+    # GPTQ-INT4
+    {
+        "b_type": scalar_types.uint4b8,
+        "support_act_order": True,
+        "group_blocks": [-1, 2, 4, 8]
+    },
+    # GPTQ-INT8
+    {
+        "b_type": scalar_types.uint8b128,
+        "support_act_order": True,
+        "group_blocks": [-1, 2, 4, 8]
+    },
+    # FP8
+    {
+        "b_type": scalar_types.float8_e4m3fn,
+        "group_blocks": [-1, 8]
+    },
+    # NVFP4
+    {
+        "b_type": scalar_types.float4_e2m1f,
+        "group_blocks": [1]
+    },
+    # MXFP4
+    {
+        "a_type": [scalar_types.bfloat16],
+        "b_type": scalar_types.float4_e2m1f,
+        "group_blocks": [2]
+    },
+    # AWQ-INT4 with INT8 activation
+    {
+        "a_type": [scalar_types.int8],
+        "b_type": scalar_types.uint4,
+        "group_blocks": [-1, 2, 4, 8]
+    },
     # GPTQ-INT4 with INT8 activation
     {
         "a_type": [scalar_types.int8],
@@ -557,10 +557,7 @@ def marlin_moe_generate_valid_test_cases():
         if not act_order and is_k_full:
             return False
 
-        if a_type.size_bits >= 16 and a_type is not c_type:
-            return False
-
-        return True
+        return a_type.size_bits < 16 or a_type is c_type
 
     cases = []
     for case in all_combinations:
@@ -602,7 +599,7 @@ def test_fused_marlin_moe(a_type, b_type, c_type, group_blocks, m, n, k, e,
     elif c_type == scalar_types.bfloat16:
         dtype = torch.bfloat16
     else:
-        assert False
+        raise RuntimeError("unsupported c_type")
 
     if a_type == scalar_types.int8:
         a_dtype = torch.int8
@@ -637,11 +634,13 @@ def test_fused_marlin_moe(a_type, b_type, c_type, group_blocks, m, n, k, e,
         if b_type == scalar_types.float4_e2m1f:
             if group_size == 16:
                 w_ref1, qweight1, scales1, global_scale1 = \
-                    rand_marlin_weight_nvfp4_like(w1[i], group_size, input_dtype=a_dtype)
+                    rand_marlin_weight_nvfp4_like(w1[i],group_size,
+                                                  input_dtype=a_dtype)
                 global_scale1_l.append(global_scale1)
             else:
                 w_ref1, qweight1, scales1 = \
-                    rand_marlin_weight_mxfp4_like(w1[i], group_size, input_dtype=a_dtype)
+                    rand_marlin_weight_mxfp4_like(w1[i], group_size,
+                                                  input_dtype=a_dtype)
 
             w_ref1_l.append(w_ref1.T)
             qweight1_l.append(qweight1)
@@ -664,7 +663,8 @@ def test_fused_marlin_moe(a_type, b_type, c_type, group_blocks, m, n, k, e,
             test_perm = torch.randperm(k)
             w_ref1, qweight1, scales1, g_idx1, sort_indices1, _ = \
                 marlin_quantize(w1[i].transpose(1, 0), b_type,
-                                group_size, act_order, test_perm, input_dtype=a_dtype)
+                                group_size, act_order, test_perm,
+                                input_dtype=a_dtype)
 
             w_ref1_l.append(w_ref1.T)
             qweight1_l.append(qweight1)
@@ -692,11 +692,13 @@ def test_fused_marlin_moe(a_type, b_type, c_type, group_blocks, m, n, k, e,
         if b_type == scalar_types.float4_e2m1f:
             if group_size == 16:
                 w_ref2, qweight2, scales2, global_scale2 = \
-                    rand_marlin_weight_nvfp4_like(w2[i], group_size, input_dtype=a_dtype)
+                    rand_marlin_weight_nvfp4_like(w2[i], group_size,
+                                                  input_dtype=a_dtype)
                 global_scale2_l.append(global_scale2)
             else:
                 w_ref2, qweight2, scales2 = \
-                    rand_marlin_weight_mxfp4_like(w2[i], group_size, input_dtype=a_dtype)
+                    rand_marlin_weight_mxfp4_like(w2[i], group_size,
+                                                  input_dtype=a_dtype)
 
             w_ref2_l.append(w_ref2.T)
             qweight2_l.append(qweight2)
@@ -719,7 +721,8 @@ def test_fused_marlin_moe(a_type, b_type, c_type, group_blocks, m, n, k, e,
             test_perm = torch.randperm(n)
             w_ref2, qweight2, scales2, g_idx2, sort_indices2, _ = \
                 marlin_quantize(w2[i].transpose(1, 0), b_type,
-                                group_size, act_order, test_perm, input_dtype=a_dtype)
+                                group_size, act_order, test_perm,
+                                input_dtype=a_dtype)
 
             w_ref2_l.append(w_ref2.T)
             qweight2_l.append(qweight2)

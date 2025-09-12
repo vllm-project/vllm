@@ -790,9 +790,11 @@ class ModelOptNvFp4Config(QuantizationConfig):
         elif isinstance(layer, Attention):
             return ModelOptFp8KVCacheMethod(self)
         elif isinstance(layer, FusedMoE):
-            quant_method = ModelOptNvFp4FusedMoE(self, layer.moe_config, layer)
-            quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
-            return quant_method
+            moe_quant_method = ModelOptNvFp4FusedMoE(self, layer.moe_config,
+                                                     layer)
+            moe_quant_method.marlin_input_dtype = get_marlin_input_dtype(
+                prefix)
+            return moe_quant_method
         return None
 
 

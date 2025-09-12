@@ -82,9 +82,8 @@ def marlin_weights(q_w, size_k, size_n, num_bits, perm, is_a_8bit=False):
 def get_weight_perm(num_bits: int, is_a_8bit: bool = False):
     perm_list: list[int] = []
     if is_a_8bit:
-        perm_list: list[int] = []
         for i in range(32):
-            perm1: list[int] = []
+            perm1 = []
             col = i // 4
             for block in [0, 1]:
                 for row in [
@@ -102,7 +101,7 @@ def get_weight_perm(num_bits: int, is_a_8bit: bool = False):
                 perm_list.extend([p + 512 * j for p in perm1])
     else:
         for i in range(32):
-            perm1: list[int] = []
+            perm1 = []
             col = i // 4
             for block in [0, 1]:
                 for row in [
@@ -191,7 +190,8 @@ def marlin_quantize(w: torch.Tensor,
 
         marlin_q_w = marlin_q_w0 | marlin_q_w1
 
-    if input_dtype == torch.float8_e4m3fn and quant_type == scalar_types.uint4b8:
+    if input_dtype == torch.float8_e4m3fn and \
+            quant_type == scalar_types.uint4b8:
         ops.marlin_int4_fp8_preprocess(marlin_q_w, inplace=True)
         marlin_s = marlin_s * 512
 
@@ -235,8 +235,12 @@ def awq_marlin_quantize(w: torch.Tensor,
 
     # Reformat to marlin
     weight_perm = get_weight_perm(quant_type.size_bits, is_a_8bit)
-    marlin_q_w = marlin_weights(q_w, size_k, size_n, quant_type.size_bits,
-                                weight_perm, is_a_8bit=is_a_8bit)
+    marlin_q_w = marlin_weights(q_w,
+                                size_k,
+                                size_n,
+                                quant_type.size_bits,
+                                weight_perm,
+                                is_a_8bit=is_a_8bit)
     marlin_s = marlin_permute_scales(s,
                                      size_k,
                                      size_n,

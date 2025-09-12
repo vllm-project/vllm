@@ -28,7 +28,6 @@ FILE_HEAD = FILE_HEAD_COMMENT + """
 namespace MARLIN_NAMESPACE_NAME {
 """
 
-
 TEMPLATE = ("template __global__ void Marlin<"
             "{{a_type_id}}, "
             "{{b_type_id}}, "
@@ -47,7 +46,6 @@ TEMPLATE = ("template __global__ void Marlin<"
 THREAD_CONFIGS = [(128, 128, 256), (64, 256, 256), (64, 128, 128)]
 
 THREAD_M_BLOCKS = [0.5, 1, 2, 3, 4]
-
 
 QUANT_CONFIGS = [
     # AWQ-INT4
@@ -212,10 +210,8 @@ def generate_new_kernels():
             all_template_str_list.append(template_str)
 
             conditions = [
-                f"a_type == vllm::{a_type}",
-                f"b_type == vllm::{b_type}",
-                f"c_type == vllm::{c_type}",
-                f"s_type == vllm::{s_type}",
+                f"a_type == vllm::{a_type}", f"b_type == vllm::{b_type}",
+                f"c_type == vllm::{c_type}", f"s_type == vllm::{s_type}",
                 f"threads == {config['threads']}",
                 f"thread_m_blocks == {config['thread_m_blocks']}",
                 f"thread_n_blocks == {config['thread_n_blocks']}",
@@ -232,10 +228,11 @@ def generate_new_kernels():
                 kernel_selector_str += f"else if ({conditions})\n  kernel = "
 
             kernel_template2 = (
-                "Marlin<{{a_type_id}}, {{b_type_id}}, {{c_type_id}}, {{s_type_id}}, {{threads}}, "
-                "{{thread_m_blocks}}, {{thread_n_blocks}}, {{thread_k_blocks}}, "
-                "{{m_block_size_8}}, {{stages}}, {{group_blocks}}, {{is_zp_float}}>;"
-            )
+                "Marlin<{{a_type_id}}, {{b_type_id}}, {{c_type_id}}, "
+                "{{s_type_id}}, {{threads}}, {{thread_m_blocks}}, "
+                "{{thread_n_blocks}}, {{thread_k_blocks}}, "
+                "{{m_block_size_8}}, {{stages}}, {{group_blocks}}, "
+                "{{is_zp_float}}>;")
 
             kernel_selector_str += jinja2.Template(kernel_template2).render(
                 a_type_id=f"vllm::{a_type}.id()",
@@ -258,11 +255,12 @@ def generate_new_kernels():
 
     if not SUPPORT_FP8 and kernel_selector_str != FILE_HEAD_COMMENT:
         kernel_selector_str += (
-            f"else if (a_type == vllm::kFE4M3fn)\n"
+            "else if (a_type == vllm::kFE4M3fn)\n"
             "  TORCH_CHECK(false, "
             "\"marlin kernel with fp8 activation is not built.\");")
 
-    with open(os.path.join(os.path.dirname(__file__), "kernel_selector.h"), "w") as f:
+    with open(os.path.join(os.path.dirname(__file__), "kernel_selector.h"),
+              "w") as f:
         f.write(kernel_selector_str)
 
 

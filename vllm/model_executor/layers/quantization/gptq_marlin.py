@@ -35,7 +35,6 @@ from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            RowvLLMParameter)
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
-from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 
 logger = init_logger(__name__)
 
@@ -194,17 +193,17 @@ class GPTQMarlinConfig(QuantizationConfig):
                     "Falling back to Moe WNA16 kernels.")
                 return MoeWNA16Config.from_config(
                     self.full_config).get_quant_method(layer, prefix)
-            quant_method = get_moe_quant_method(self, layer, prefix,
-                                                GPTQMarlinMoEMethod)
-            if quant_method is None:
-                return
-            quant_method.input_dtype = get_marlin_input_dtype(prefix)
-            return quant_method
+            moe_quant_method = get_moe_quant_method(self, layer, prefix,
+                                                    GPTQMarlinMoEMethod)
+            if moe_quant_method is None:
+                return None
+            moe_quant_method.input_dtype = get_marlin_input_dtype(prefix)
+            return moe_quant_method
 
         quant_method = get_linear_quant_method(self, layer, prefix,
                                                GPTQMarlinLinearMethod)
         if quant_method is None:
-            return
+            return None
         quant_method.input_dtype = get_marlin_input_dtype(prefix)
         return quant_method
 
@@ -243,8 +242,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
 
     _kernel_backends_being_used: set[str] = set()
 
-    def __init__(self,
-                 quant_config: GPTQMarlinConfig) -> None:
+    def __init__(self, quant_config: GPTQMarlinConfig) -> None:
         self.quant_config = quant_config
         self.input_dtype = None
         self.quant_type = self.quant_config.quant_type
@@ -572,6 +570,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         is_a_8bit = self.input_dtype is not None and \
             self.input_dtype.itemsize == 1
+        quant_type = self.quant_type
 
         if is_a_8bit:
             assert self.quant_type == scalar_types.uint4b8, \
@@ -662,7 +661,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             is_a_8bit=is_a_8bit)
         if self.input_dtype == torch.int8 and layer.num_groups_w13 > 1:
             marlin_w13_scales, w13_input_global_scale = \
-                marlin_act_int8_process_scales(marlin_w13_scales, self.quant_type)
+                marlin_act_int8_process_scales(marlin_w13_scales, quant_type)
             layer.register_parameter(
                 "w13_input_global_scale",
                 torch.nn.Parameter(w13_input_global_scale,
@@ -679,7 +678,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             is_a_8bit=is_a_8bit)
         if self.input_dtype == torch.int8 and layer.num_groups_w2 > 1:
             marlin_w2_scales, w2_input_global_scale = \
-                marlin_act_int8_process_scales(marlin_w2_scales, self.quant_type)
+                marlin_act_int8_process_scales(marlin_w2_scales, quant_type)
             layer.register_parameter(
                 "w2_input_global_scale",
                 torch.nn.Parameter(w2_input_global_scale, requires_grad=False))

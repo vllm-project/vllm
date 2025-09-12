@@ -298,7 +298,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
     def process_weights_after_loading(self, layer):
         if self.mxfp4_backend == Mxfp4Backend.MARLIN:
-            prepare_moe_fp4_layer_for_marlin(layer, input_dtype=self.marlin_input_dtype)
+            prepare_moe_fp4_layer_for_marlin(
+                layer, input_dtype=self.marlin_input_dtype)
         elif (self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
               or self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16):
             from flashinfer.fp4_quantization import (

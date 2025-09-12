@@ -106,7 +106,8 @@ def apply_fp4_marlin_linear(
     is_nvfp4 = weight_scale_2 is not None
     if input_dtype is not None and input_dtype.itemsize == 1:
         if is_nvfp4:
-            raise RuntimeError("NVFP4 weight + INT8/FP8 activation is not supported.")
+            raise RuntimeError(
+                "NVFP4 weight + INT8/FP8 activation is not supported.")
         elif input_dtype != torch.float8_e4m3fn:
             raise RuntimeError(
                 "MXFP4 weight + INT8 activation is not supported.")
@@ -352,14 +353,15 @@ def rand_marlin_weight_nvfp4_like(weight, group_size, input_dtype=None):
     weight_ref = weight_ref * global_scale.to(weight.dtype) * \
         scales.repeat_interleave(group_size, 1).to(weight.dtype)
 
-    marlin_qweight = ops.gptq_marlin_repack(
-        b_q_weight=fp4_weight.view(torch.int32).T.contiguous(),
-        perm=torch.empty(0, dtype=torch.int, device=device),
-        size_k=size_k,
-        size_n=size_n,
-        num_bits=4,
-        is_a_8bit=is_a_8bit
-    )
+    marlin_qweight = ops.gptq_marlin_repack(b_q_weight=fp4_weight.view(
+        torch.int32).T.contiguous(),
+                                            perm=torch.empty(0,
+                                                             dtype=torch.int,
+                                                             device=device),
+                                            size_k=size_k,
+                                            size_n=size_n,
+                                            num_bits=4,
+                                            is_a_8bit=is_a_8bit)
 
     marlin_scales = marlin_permute_scales(s=scales.T.to(weight.dtype),
                                           size_k=size_k,

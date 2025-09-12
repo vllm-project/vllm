@@ -107,7 +107,7 @@ class MarlinLinearKernel(MPLinearKernel):
             if c.group_size == -1:
                 num_groups = 1
             else:
-                num_groups = c.partition_weight_shape[0] / c.group_size
+                num_groups = c.partition_weight_shape[0] // c.group_size
 
             if c.act_type == torch.int8 and num_groups > 1:
                 x.data, input_global_scale = \

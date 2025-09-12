@@ -501,7 +501,6 @@ __device__ inline void dequant<int32_t, vllm::kU4B8.id(), true>(
 template <>
 __device__ inline void dequant<__nv_fp8x4_e4m3, vllm::kU4B8.id(), true>(
     int q, __nv_fp8x4_e4m3* frag_b) {
-
   int s = q & 0x08080808;
   int Out1 = ((q & 0x07070707) | (s << 4)) + (s >> 3);
   q >>= 4;
@@ -566,7 +565,6 @@ __device__ inline void dequant_and_sub_zp(int q, scalar_t2* frag_b, int zp);
 template <>
 __device__ inline void dequant_and_sub_zp<int32_t, vllm::kU4.id(), true>(
     int q, int32_t* frag_b, int zp) {
-
   int repeated_zp = 0x01010101 * zp;
   int MASK = 0x80808080;
 
@@ -576,9 +574,9 @@ __device__ inline void dequant_and_sub_zp<int32_t, vllm::kU4.id(), true>(
 }
 
 template <>
-__device__ inline void dequant_and_sub_zp<__nv_fp8x4_e4m3, vllm::kU4.id(), true>(
-    int q, __nv_fp8x4_e4m3* frag_b, int zp) {
-
+__device__ inline void dequant_and_sub_zp<__nv_fp8x4_e4m3, vllm::kU4.id(),
+                                          true>(int q, __nv_fp8x4_e4m3* frag_b,
+                                                int zp) {
   uint32_t u_q = *reinterpret_cast<uint32_t*>(&q);
   uint32_t u_zp = *reinterpret_cast<uint32_t*>(&zp);
   uint32_t u_zp1 = u_zp + 1;

@@ -178,9 +178,10 @@ class Fp8Config(QuantizationConfig):
             quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
             return quant_method
         elif isinstance(layer, FusedMoE):
-            quant_method = Fp8MoEMethod(self, layer)
-            quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
-            return quant_method
+            moe_quant_method = Fp8MoEMethod(self, layer)
+            moe_quant_method.marlin_input_dtype = get_marlin_input_dtype(
+                prefix)
+            return moe_quant_method
         elif isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)
         return None
@@ -911,8 +912,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 layer.w13_weight.data = w13_weight.data
 
         if self.use_marlin:
-            prepare_moe_fp8_layer_for_marlin(layer, False,
-                                             input_dtype=self.marlin_input_dtype)
+            prepare_moe_fp8_layer_for_marlin(
+                layer, False, input_dtype=self.marlin_input_dtype)
             # Activations not quantized for marlin.
             del layer.w13_input_scale
             del layer.w2_input_scale

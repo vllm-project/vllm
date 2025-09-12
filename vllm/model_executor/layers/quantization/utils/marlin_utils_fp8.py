@@ -87,9 +87,10 @@ def apply_fp8_marlin_linear(
     return output.reshape(out_shape)
 
 
-def prepare_fp8_layer_for_marlin(layer: torch.nn.Module,
-                                 size_k_first: bool = True,
-                                 input_dtype: Optional[torch.dtype] = None) -> None:
+def prepare_fp8_layer_for_marlin(
+        layer: torch.nn.Module,
+        size_k_first: bool = True,
+        input_dtype: Optional[torch.dtype] = None) -> None:
     logger.warning_once(
         "Your GPU does not have native support for FP8 computation but "
         "FP8 quantization is being used. Weight-only FP8 compression will "
@@ -178,9 +179,10 @@ def prepare_fp8_layer_for_marlin(layer: torch.nn.Module,
         layer.bias = torch.nn.Parameter(bias, requires_grad=False)
 
 
-def prepare_moe_fp8_layer_for_marlin(layer: torch.nn.Module,
-                                     size_k_first: bool = True,
-                                     input_dtype: Optional[torch.dtype] = None) -> None:
+def prepare_moe_fp8_layer_for_marlin(
+        layer: torch.nn.Module,
+        size_k_first: bool = True,
+        input_dtype: Optional[torch.dtype] = None) -> None:
     logger.warning_once(
         "Your GPU does not have native support for FP8 computation but "
         "FP8 quantization is being used. Weight-only FP8 compression will "
