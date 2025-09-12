@@ -46,7 +46,7 @@ class UltravoxConfig(transformers.PretrainedConfig):
             projector or at the end. Versions v0.4.1 and below
             use `False`, but v0.5 and above use `True`.
     """
-
+    wrapped_model_config: transformers.PretrainedConfig
     model_type = "ultravox"
     audio_token = "<|audio|>"
     is_composition = False
@@ -113,9 +113,8 @@ class UltravoxConfig(transformers.PretrainedConfig):
         return super().__setattr__(key, value)
 
     @property
-    def text_config(self) -> Optional[transformers.PretrainedConfig]:
+    def text_config(self) -> transformers.PretrainedConfig:
         # When Ultravox wraps a multi-modal model (e.g. Gemma), we instantiate
         # the full model, but the text config is the text config of the inner
         # model.
-        return (self.wrapped_model_config.get_text_config()
-                if self.wrapped_model_config else None)
+        return self.wrapped_model_config.get_text_config()
