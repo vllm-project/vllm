@@ -383,7 +383,7 @@ class StreamingHarmonyContext(HarmonyContext):
 
     @property
     def messages(self) -> list:
-        return self.parser.messages
+        return self._messages
 
     def append_output(self, output) -> None:
         if isinstance(output, RequestOutput):
@@ -407,6 +407,11 @@ class StreamingHarmonyContext(HarmonyContext):
             # Check if the current token is part of reasoning content
             self._update_num_reasoning_tokens()
             self.last_tok = tok
+            if len(self._messages) - self.num_init_messages < len(
+                    self.parser.messages):
+                self._messages.extend(
+                    self.parser.messages[len(self._messages) -
+                                         self.num_init_messages:])
         else:
             # Handle the case of tool output in direct message format
             assert len(output) == 1, "Tool output should be a single message"
@@ -419,6 +424,7 @@ class StreamingHarmonyContext(HarmonyContext):
             for tok in toks:
                 self.parser.process(tok)
             self.last_tok = toks[-1]
+            # TODO: add tool_output messages to self._messages
 
     def is_expecting_start(self) -> bool:
         return self.parser.state == StreamState.EXPECT_START
