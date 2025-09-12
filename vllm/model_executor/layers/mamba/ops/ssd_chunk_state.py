@@ -6,7 +6,6 @@
 
 # ruff: noqa: E501
 
-import math
 
 import torch
 
@@ -60,7 +59,6 @@ def _chunk_cumsum_fwd_kernel(
 
     chunk_seqlen_start = tl.load(cu_chunk_seqlens_ptr + pid_c)
     chunk_seqlen_end = tl.load(cu_chunk_seqlens_ptr + pid_c + 1)
-
 
     dt_ptr += pid_b * stride_dt_batch + chunk_seqlen_start * stride_dt_seqlen
     dt_out_ptr += pid_b * stride_dt_out_batch + pid_c * stride_dt_out_chunk
@@ -237,7 +235,6 @@ def _chunk_state_fwd_kernel(
     pid_m = tl.program_id(axis=0) // num_pid_n
     pid_n = tl.program_id(axis=0) % num_pid_n
 
-
     chunk_seqlen_start = tl.load(cu_chunk_seqlens_ptr + pid_c)
     chunk_seqlen_end = tl.load(cu_chunk_seqlens_ptr + pid_c + 1)
 
@@ -259,7 +256,8 @@ def _chunk_state_fwd_kernel(
     chunk_size_limit = chunk_seqlen_end - chunk_seqlen_start
 
     dA_cs_last = tl.load(dA_cumsum_ptr +
-                         (chunk_size_limit - 1) * stride_dA_cs_csize).to(tl.float32)
+                         (chunk_size_limit - 1) * stride_dA_cs_csize).to(
+                             tl.float32)
 
     dA_cumsum_ptrs = dA_cumsum_ptr + offs_k * stride_dA_cs_csize
 
@@ -552,7 +550,7 @@ def _chunk_cumsum_fwd(dt,
     assert A.shape == (nheads, )
     if dt_bias is not None:
         assert dt_bias.shape == (nheads, )
-    nchunks = cu_chunk_seqlens.shape[0]-1
+    nchunks = cu_chunk_seqlens.shape[0] - 1
     dt_out = torch.empty(batch,
                          nheads,
                          nchunks,
