@@ -85,12 +85,15 @@ run_tests_for_model() {
     echo "Starting prefill instance $i on GPU $GPU_ID, port $PORT"
 
     # Build the command with or without model-specific args
-    BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT vllm serve $model_name \
+    BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID \
+    UCX_NET_DEVICES=all \
+    VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
+    vllm serve $model_name \
     --port $PORT \
     --enforce-eager \
     --gpu-memory-utilization 0.2 \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
-    --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}'"
+    --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_producer\"}'"
 
     if [ -n "$model_args" ]; then
     FULL_CMD="$BASE_CMD $model_args"
@@ -117,12 +120,15 @@ run_tests_for_model() {
     echo "Starting decode instance $i on GPU $GPU_ID, port $PORT"
 
     # Build the command with or without model-specific args
-    BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT vllm serve $model_name \
+    BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID \
+    UCX_NET_DEVICES=all \
+    VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
+    vllm serve $model_name \
     --port $PORT \
     --enforce-eager \
     --gpu-memory-utilization 0.2 \
     --tensor-parallel-size $DECODER_TP_SIZE \
-    --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}'"
+    --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_consumer\"}'"
 
     if [ -n "$model_args" ]; then
     FULL_CMD="$BASE_CMD $model_args"
