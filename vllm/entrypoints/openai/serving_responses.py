@@ -1250,7 +1250,7 @@ class OpenAIServingResponses(OpenAIServing):
     ) -> AsyncGenerator[BaseModel, None]:
         current_content_index = 0  # FIXME: this number is never changed
         current_output_index = 0
-        current_item_id = request.request_id
+        current_item_id = ""  # FIXME: this number is never changed
         sent_output_item_added = False
 
         async for ctx in result_generator:

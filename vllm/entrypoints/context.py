@@ -149,9 +149,6 @@ class HarmonyContext(ConversationContext):
             self._update_decode_token_usage(output)
             # Move current turn to previous turn for next turn's calculations
             self.previous_turn = self.current_turn.copy()
-            # append_output is called only once before tool calling
-            # in non-streaming case
-            # so we can append all the parser messages to _messages
             output_msgs = self.parser.messages
         else:
             # Tool output.
@@ -160,6 +157,7 @@ class HarmonyContext(ConversationContext):
 
     def _update_prefill_token_usage(self, output: RequestOutput) -> None:
         """Update token usage statistics for the prefill phase of generation.
+
         The prefill phase processes the input prompt tokens. This method:
         1. Counts the prompt tokens for this turn
         2. Calculates tool output tokens for multi-turn conversations
@@ -170,6 +168,7 @@ class HarmonyContext(ConversationContext):
         current_prompt_tokens - last_turn_prompt_tokens -
         last_turn_output_tokens
         This represents tokens added between turns (typically tool responses).
+
         Args:
             output: The RequestOutput containing prompt token information
         """
@@ -215,14 +214,18 @@ class HarmonyContext(ConversationContext):
 
     def _update_decode_token_usage(self, output: RequestOutput) -> int:
         """Update token usage statistics for the decode phase of generation.
+
         The decode phase processes the generated output tokens. This method:
         1. Counts output tokens from all completion outputs
         2. Updates the total output token count
         3. Tracks tokens generated in the current turn
+
         In streaming mode, this is called for each token generated.
         In non-streaming mode, this is called once with all output tokens.
+
         Args:
             output: The RequestOutput containing generated token information
+
         Returns:
             int: Number of output tokens processed in this call
         """
