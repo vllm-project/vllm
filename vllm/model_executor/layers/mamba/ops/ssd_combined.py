@@ -44,8 +44,7 @@ def _mamba_chunk_scan_combined_fwd(x,
                                    dt_softplus=False,
                                    dt_limit=(0.0, float("inf")),
                                    state_dtype=None,
-                                   out=None,
-                                   layer=None):
+                                   out=None):
     assert is_int_pow_2(chunk_size), "chunk_size must be integer power of 2"
     batch, seqlen, nheads, headdim = x.shape
     _, _, ngroups, dstate = B.shape
@@ -98,21 +97,6 @@ def _mamba_chunk_scan_combined_fwd(x,
                                       dt_softplus=dt_softplus,
                                       dt_limit=dt_limit)
 
-    '''
-    print("layer: ", layer)
-    has_init = initial_states is not None
-    print("has_init: ", has_init)
-
-    dA_cumsum_ref = torch.load("dump/dA_cumsum_%s_main_%d" % (layer, has_init))
-    torch.cuda.synchronize()
-    torch.testing.assert_close(dA_cumsum, dA_cumsum_ref, atol=0.0, rtol=0.0)
-
-    dt_ref = torch.load("dump/dt_%s_main_%d" % (layer, has_init))
-    torch.cuda.synchronize()
-    torch.testing.assert_close(dt, dt_ref, atol=0.0, rtol=0.0)
-    '''
-
-
     # 2. Compute the state for each intra-chunk
     # (right term of low-rank factorization of off-diagonal blocks; B terms)
     states = _chunk_state_fwd(B,
@@ -122,12 +106,6 @@ def _mamba_chunk_scan_combined_fwd(x,
                               cu_chunk_seqlens,
                               seq_idx=seq_idx,
                               states_in_fp32=True)
-
-    '''
-    states_ref = torch.load("dump/states_%s_main_%d" % (layer, has_init))
-    torch.cuda.synchronize()
-    torch.testing.assert_close(states, states_ref, atol=0.0, rtol=0.0)
-    '''
 
     # 3. Compute the inter-chunk SSM recurrence; produces correct SSM states at chunk boundaries
     # (middle term of factorization of off-diag blocks; A terms)
@@ -151,16 +129,7 @@ def _mamba_chunk_scan_combined_fwd(x,
         out_dtype=state_dtype if state_dtype is not None else C.dtype,
         is_cont_batched=cu_seqlens is not None,
         chunk_offsets=chunk_offsets)
-
     states = rearrange(states, "... (p n) -> ... p n", n=dstate)
-
-    '''
-    print("after state passing: ")
-    states_ref = torch.load("dump/final_states_%s_main_%d" % (layer, has_init)).unsqueeze(0)
-    print("states.shape: ", states.shape)
-    print("states_ref.shape: ", states_ref.shape)
-    torch.testing.assert_close(states, states_ref, atol=0.0, rtol=0.0)
-    '''
 
     # 4. Compute batched matrix multiply for C_j^T B_i terms
     CB = _bmm_chunk_fwd(C,
@@ -169,11 +138,6 @@ def _mamba_chunk_scan_combined_fwd(x,
                         cu_chunk_seqlens,
                         seq_idx=seq_idx,
                         output_dtype=torch.float32)
-
-    '''
-    CB_ref = torch.load("dump/CB_%s_main_%d" % (layer, has_init))
-    torch.testing.assert_close(CB, CB_ref, atol=0.0, rtol=0.0)
-    '''
 
     # 5. Scan and compute the diagonal blocks, taking into
     #    account past causal states.
@@ -201,21 +165,11 @@ def _mamba_chunk_scan_combined_fwd(x,
         initial_states=initial_states,
         out=out,
     )
-    '''
-    out_x_ref = torch.load("dump/out_x_%s_main_%d" % (layer, has_init))
-    torch.testing.assert_close(out_x, out_x_ref, atol=0.0, rtol=0.0)
-
-    out_ref = torch.load("dump/out_%s_main_%d" % (layer, has_init))
-    torch.testing.assert_close(out, out_ref, atol=0.0, rtol=0.0)
-    '''
-
     if cu_seqlens is None:
         return out_x, dt, dA_cumsum, states, final_states
     else:
         assert batch == 1, "passing cu_seqlens to get the varlen states is only supported if batch dimension is 1"
-        #print("last_chunk: ", last_chunk)
         varlen_states = states[:, last_chunk, ...].clone().squeeze(0)
-        #print("varlen_states: ", varlen_states[0,0,0,:10])
         final_states = states[:, -1, ...]
         return out_x, dt, dA_cumsum, states, final_states, varlen_states
 
@@ -241,8 +195,7 @@ def mamba_chunk_scan_combined(x,
                               out=None,
                               return_final_states=False,
                               return_varlen_states=False,
-                              state_dtype=None,
-                              layer=None):
+                              state_dtype=None):
     """
     Argument:
         x: (batch, seqlen, nheads, headdim)
@@ -287,8 +240,7 @@ def mamba_chunk_scan_combined(x,
         dt_softplus=dt_softplus,
         dt_limit=dt_limit,
         out=out,
-        state_dtype=state_dtype,
-        layer=layer)
+        state_dtype=state_dtype)
     if not return_varlen_states:
         if not return_final_states:
             return
