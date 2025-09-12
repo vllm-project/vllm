@@ -2059,6 +2059,7 @@ class MMVUDataset(HuggingFaceDataset):
         output_len: Optional[int] = None,
         enable_multimodal_chat: bool = False,
         request_id_prefix: str = "",
+        no_oversample: bool = False,
         **kwargs,
     ) -> list:
         output_len = (output_len
@@ -2088,7 +2089,7 @@ class MMVUDataset(HuggingFaceDataset):
                     request_id=request_id_prefix + str(i),
                 ))
         self.maybe_oversample_requests(sampled_requests, num_requests,
-                                       request_id_prefix)
+                                       request_id_prefix, no_oversample)
         return sampled_requests
 
 
