@@ -285,7 +285,7 @@ class CuMemAllocator:
             allocations = data[0].snapshot()
             for allocation in allocations:
                 if allocation["allocated_size"] == 0:
-                    handle = self._python_free_callback(allocation["ptr"])
+                    handle = self._python_free_callback(allocation["address"])
                     unmap_and_release(handle)
             self.current_tag = old_tag
 
