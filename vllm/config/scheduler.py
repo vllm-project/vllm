@@ -305,9 +305,9 @@ class SchedulerConfig:
                 f"max_long_partial_prefills ({self.max_long_partial_prefills}) "
                 "must be greater than or equal to 1 and less than or equal to "
                 f"max_num_partial_prefills ({self.max_num_partial_prefills}).")
-        if self.max_waiting_queue_length is not None:
-            if self.max_waiting_queue_length < 1:
-                raise ValueError(
-                    f"max_waiting_queue_length ({self.max_waiting_queue_length})"
-                    " must be greater than or equal to 1 or None.")
+        if self.max_waiting_queue_length is not None and \
+            self.max_waiting_queue_length < 1:
+            raise ValueError(
+                f"max_waiting_queue_length ({self.max_waiting_queue_length})"
+                " must be greater than or equal to 1 or None.")
         return self
