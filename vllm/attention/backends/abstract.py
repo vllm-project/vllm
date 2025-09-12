@@ -104,6 +104,16 @@ class AttentionBackend(ABC):
     def full_cls_name(cls) -> tuple[str, str]:
         return (cls.__module__, cls.__qualname__)
 
+    @classmethod
+    def get_supported_block_sizes(cls) -> list[int]:
+        return []
+
+    @classmethod
+    def supports_block_size(cls, block_size: int) -> bool:
+        supported_block_sizes = cls.get_supported_block_sizes()
+        return ((not supported_block_sizes)
+                or block_size in supported_block_sizes)
+
 
 @dataclass
 class AttentionMetadata:

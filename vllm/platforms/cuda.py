@@ -18,7 +18,8 @@ from typing_extensions import ParamSpec
 import vllm._C  # noqa
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils import cuda_device_count_stateless, import_pynvml
+from vllm.utils import (cuda_device_count_stateless, import_pynvml,
+                        resolve_obj_by_qualname)
 
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
@@ -158,31 +159,15 @@ class CudaPlatformBase(Platform):
                     envs.VLLM_ATTENTION_BACKEND = "FLASHMLA"
 
             # Adjust block sizes for MLA backends based on their requirements
-            mla_backends = {
-                "FLASHMLA":
-                ("vllm.attention.backends.flashmla", "FlashMLABackend"),
-                "CUTLASS_MLA": ("vllm.v1.attention.backends.mla.cutlass_mla",
-                                "CutlassMLABackend"),
-                "FLASHINFER_MLA":
-                ("vllm.v1.attention.backends.mla.flashinfer_mla",
-                 "FlashInferMLABackend")
-            }
-
-            if envs.VLLM_ATTENTION_BACKEND in mla_backends:
-                module_name, class_name = mla_backends[
-                    envs.VLLM_ATTENTION_BACKEND]
-
-                # Import and get supported block sizes for other MLA backends
-                import importlib
-                module = importlib.import_module(module_name)
-                backend_class = getattr(module, class_name)
-                supported_sizes = backend_class.get_supported_block_sizes()
-
-                if cache_config.block_size not in supported_sizes:
-                    cache_config.block_size = supported_sizes[0]
-                    logger.info(
-                        "Forcing kv cache block size to %s for %s backend.",
-                        supported_sizes[0], envs.VLLM_ATTENTION_BACKEND)
+            backend_enum = _Backend[envs.VLLM_ATTENTION_BACKEND]
+            backend_class_name = backend_mapping[backend_enum]
+            backend_class = resolve_obj_by_qualname(backend_class_name)
+            if backend_class.supports_block_size(cache_config.block_size):
+                cache_config.block_size = \
+                    backend_class.get_supported_block_sizes()[0]
+                logger.info(
+                    "Forcing kv cache block size to %s for %s backend.",
+                    cache_config.block_size, envs.VLLM_ATTENTION_BACKEND)
 
         # lazy import to avoid circular import
         from vllm.config import CUDAGraphMode

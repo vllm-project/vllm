@@ -32,16 +32,16 @@ class CutlassMLABackend(MLACommonBackend):
         return "CUTLASS_MLA"
 
     @staticmethod
-    def get_supported_block_sizes() -> list[int]:
-        return [128]
-
-    @staticmethod
     def get_impl_cls() -> type["CutlassMLAImpl"]:
         return CutlassMLAImpl
 
     @staticmethod
     def get_builder_cls() -> type["CutlassMLAMetadataBuilder"]:
         return CutlassMLAMetadataBuilder
+
+    @classmethod
+    def get_supported_block_sizes(cls) -> list[int]:
+        return [128]
 
 
 class SM100Workspace:

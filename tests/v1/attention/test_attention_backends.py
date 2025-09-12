@@ -9,7 +9,7 @@ from tests.v1.attention.utils import (BatchSpec, _Backend,
                                       create_common_attn_metadata,
                                       create_standard_kv_cache_spec,
                                       create_vllm_config,
-                                      get_attention_backend)
+                                      try_get_attention_backend)
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv, is_torch_equal_or_newer
 from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
                                               set_kv_cache_layout)
@@ -199,7 +199,7 @@ def run_attention_backend(backend: _Backend, kv_cache_spec: FullAttentionSpec,
         actual_backend = _Backend.FLEX_ATTENTION
         use_direct_block_mask = False
 
-    builder_cls, impl_cls = get_attention_backend(actual_backend)
+    builder_cls, impl_cls = try_get_attention_backend(actual_backend)
 
     # Mock flashinfer's get_per_layer_parameters if needed
     if actual_backend == _Backend.FLASHINFER_VLLM_V1:
