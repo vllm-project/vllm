@@ -93,7 +93,7 @@ if current_platform.is_rocm():
         aiter_per1x128_quant = get_hip_quant(rocm_aiter.QuantType.per_1x128)
 
 
-def dispatch_w8a8_blockscale_op(
+def dispatch_w8a8_blockscale_func(
     use_cutlass: bool, use_aiter_and_is_supported: bool
 ) -> Callable[[
         torch.Tensor,
