@@ -1775,15 +1775,20 @@ class ModelConfig:
         such as the lm_head in a generation model,
         or the score or classifier in a classification model.
 
-        The default head_dtype based on runner_type.\n
+        `head_dtype` currently only supports pooling models.\n
         - The pooling model defaults to using fp32 head,
-        you can use --hf-overrides '{"head_dtype": "model"}' to disable it.\n
-        - The generate model defaults to not using fp32 head,
-        you can use --hf-overrides '{"head_dtype": "float32"}' to enable it.
+        you can use --hf-overrides '{"head_dtype": "model"}' to disable it.
         """
+
         head_dtype = _get_head_dtype(config=self.hf_config,
                                      dtype=self.dtype,
                                      runner_type=self.runner_type)
+
+        if self.runner_type != "pooling" and head_dtype != self.dtype:
+            logger.warning_once(
+                "`head_dtype` currently only supports pooling models."
+                "fallback to model dtype [%s].", self.dtype)
+            return self.dtype
 
         if head_dtype not in current_platform.supported_dtypes:
             logger.warning_once(
