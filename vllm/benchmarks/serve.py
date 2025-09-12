@@ -41,7 +41,7 @@ from vllm.benchmarks.lib.endpoint_request_func import (
     RequestFuncOutput)
 from vllm.benchmarks.lib.ready_checker import wait_for_endpoint
 from vllm.benchmarks.lib.utils import (convert_to_pytorch_benchmark_format,
-                                       write_to_json)
+                                       maybe_increase_ulimit, write_to_json)
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
@@ -502,6 +502,11 @@ async def benchmark(
 
     print(f"Burstiness factor: {burstiness} ({distribution})")
     print(f"Maximum request concurrency: {max_concurrency}")
+
+    if max_concurrency is not None:
+        ULIMIT_BUFFER = 100  # Buffer for system/other FDs.
+        # Ensure that the ulimit is sufficiently high to handle the concurrency.
+        maybe_increase_ulimit(max_concurrency + ULIMIT_BUFFER)
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 
