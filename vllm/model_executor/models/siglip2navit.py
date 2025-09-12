@@ -1,25 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Implementation of SiglipVisionModel intended to be only used
-within a vision language model."""
 
 from collections.abc import Iterable
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 from einops import rearrange, repeat
 from torch import nn
 from torch.nn import functional as F
-from transformers import Siglip2VisionConfig
+from transformers import Siglip2TextConfig, Siglip2VisionConfig
 from transformers.configuration_utils import PretrainedConfig
 
-from vllm.config import QuantizationConfig
+from vllm.config import QuantizationConfig, VllmConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase, QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import _Backend
 
@@ -195,7 +195,7 @@ class Siglip2Attention(nn.Module):
 
     def __init__(
         self,
-        config: Siglip2VisionConfig,
+        config: Union[Siglip2VisionConfig, Siglip2TextConfig],
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
         use_data_parallel: bool = False,
@@ -233,7 +233,7 @@ class Siglip2Attention(nn.Module):
         self.tp_size = (1 if use_data_parallel else
                         get_tensor_model_parallel_world_size())
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
-        self.use_rope = config.use_rope
+        self.use_rope = getattr(config, "use_rope", False)
 
         # Detect attention implementation.
         self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
@@ -320,7 +320,7 @@ class Siglip2MLP(nn.Module):
 
     def __init__(
         self,
-        config: Siglip2VisionConfig,
+        config: Union[Siglip2VisionConfig, Siglip2TextConfig],
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
         use_data_parallel: bool = False,
@@ -354,7 +354,7 @@ class Siglip2EncoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: Siglip2VisionConfig,
+        config: Union[Siglip2VisionConfig, Siglip2TextConfig],
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
         use_data_parallel: bool = False,
@@ -374,8 +374,12 @@ class Siglip2EncoderLayer(nn.Module):
                               prefix=f"{prefix}.mlp",
                               use_data_parallel=use_data_parallel)
 
-    def forward(self, hidden_states: torch.Tensor, cu_seqlens: torch.Tensor,
-                position_embeddings: torch.Tensor) -> tuple[torch.FloatTensor]:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        position_embeddings: Optional[torch.Tensor] = None
+    ) -> tuple[torch.FloatTensor]:
         """
         Args:
             hidden_states (`torch.FloatTensor`):
@@ -411,7 +415,7 @@ class Siglip2Encoder(nn.Module):
 
     def __init__(
         self,
-        config: Siglip2VisionConfig,
+        config: Union[Siglip2VisionConfig, Siglip2TextConfig],
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
         use_data_parallel: bool = False,
@@ -426,18 +430,22 @@ class Siglip2Encoder(nn.Module):
             for idx in range(config.num_hidden_layers)
         ])
 
-        self.rotary_pos_emb = VisionRotaryEmbedding(
-            config.hidden_size // config.num_attention_heads // 2)
-        self.patch_size = config.patch_size
-        self.hidden_stride = config.hidden_stride
-        self.window_size = config.window_size
-        self.spatial_merge_unit = config.hidden_stride * config.hidden_stride
-        if config.fullatt_block_indexes is None:
-            self.fullatt_block_indexes = None
-        else:
-            self.fullatt_block_indexes = [
-                int(i) for i in config.fullatt_block_indexes.split('|')
-            ]
+        model_type = getattr(config, "model_type", None)
+
+        if model_type == "siglip2_navit":
+            self.rotary_pos_emb = VisionRotaryEmbedding(
+                config.hidden_size // config.num_attention_heads // 2)
+            self.patch_size = config.patch_size
+            self.hidden_stride = config.hidden_stride
+            self.window_size = config.window_size
+            self.spatial_merge_unit = config.hidden_stride * \
+                config.hidden_stride
+            if config.fullatt_block_indexes is None:
+                self.fullatt_block_indexes = None
+            else:
+                self.fullatt_block_indexes = [
+                    int(i) for i in config.fullatt_block_indexes.split('|')
+                ]
 
     # copied from qwen2.5_vl
     def rot_pos_emb(self, grid_thw):
@@ -518,76 +526,82 @@ class Siglip2Encoder(nn.Module):
     def forward(
         self,
         inputs_embeds: torch.Tensor,
-        grid_thws: torch.Tensor,
+        grid_thws: Optional[torch.Tensor] = None,
+        cu_seqlens: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         r"""
         Args:
-            inputs_embeds (`torch.FloatTensor` of shape
-                `(batch_size, sequence_length, hidden_size)`):
-                Optionally, instead of passing `input_ids` you can choose to
-                directly pass an embedded representation. This is useful if
-                you want more control over how to convert `input_ids` indices
-                into associated vectors than the model's internal embedding
-                lookup matrix.
+            inputs_embeds (`torch.FloatTensor`):
+                Flattened text input tensor of shape 
+                    `(seq_len, hidden_state_size)`.
             grid_thws (`torch.LongTensor`):
                 grid shape (num_patches, 3)
-            output_hidden_states (`bool`, *optional*):
-                Whether or not to return the hidden states of all layers. See
-                `hidden_states` under returned tensors for more detail.
-            return_dict (`bool`, *optional*):
-                Whether or not to return a [`~utils.ModelOutput`] instead of
-                a plain tuple.
+            cu_seqlens (`torch.Tensor`):
+                1-D tensor of cumulative sequence length for text input.
         """
-        rotary_pos_emb = self.rot_pos_emb(grid_thws)
-        window_index, cu_window_seqlens = self.get_window_index(grid_thws)
-        cu_window_seqlens = torch.tensor(
-            cu_window_seqlens,
-            device=inputs_embeds.device,
-            dtype=grid_thws.dtype if torch.jit.is_tracing() else torch.int32,
-        )
-        cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
+        if grid_thws is not None:  # vision input
+            rotary_pos_emb = self.rot_pos_emb(grid_thws)
+            window_index, cu_window_seqlens = self.get_window_index(grid_thws)
+            cu_window_seqlens = torch.tensor(
+                cu_window_seqlens,
+                device=inputs_embeds.device,
+                dtype=grid_thws.dtype
+                if torch.jit.is_tracing() else torch.int32,
+            )
+            cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
 
-        seq_len, _ = inputs_embeds.size()
-        inputs_embeds = inputs_embeds.reshape(
-            seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
-        inputs_embeds = inputs_embeds[window_index, :, :]
-        inputs_embeds = inputs_embeds.reshape(seq_len, -1)
-        rotary_pos_emb = rotary_pos_emb.reshape(
-            seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
-        rotary_pos_emb = rotary_pos_emb[window_index, :, :]
-        rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
-        emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
-        position_embeddings = (emb.cos(), emb.sin())
+            seq_len, _ = inputs_embeds.size()
+            inputs_embeds = inputs_embeds.reshape(
+                seq_len // self.spatial_merge_unit, self.spatial_merge_unit,
+                -1)
+            inputs_embeds = inputs_embeds[window_index, :, :]
+            inputs_embeds = inputs_embeds.reshape(seq_len, -1)
+            rotary_pos_emb = rotary_pos_emb.reshape(
+                seq_len // self.spatial_merge_unit, self.spatial_merge_unit,
+                -1)
+            rotary_pos_emb = rotary_pos_emb[window_index, :, :]
+            rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
+            emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
+            position_embeddings = (emb.cos(), emb.sin())
 
-        cu_seqlens = torch.repeat_interleave(
-            grid_thws[:, 1] * grid_thws[:, 2], grid_thws[:, 0]
-        ).cumsum(
-            dim=0,
-            # Select dtype based on the following factors:
-            #  - FA2 requires that cu_seqlens_q must have dtype int32
-            #  - torch.onnx.export requires that cu_seqlens_q must have
-            #    same dtype as grid_thw
-            # See https://github.com/huggingface/transformers/pull/34852
-            # for more information
-            dtype=grid_thws.dtype if torch.jit.is_tracing() else torch.int32,
-        )
-        cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
+            cu_seqlens = torch.repeat_interleave(
+                grid_thws[:, 1] * grid_thws[:, 2], grid_thws[:, 0]
+            ).cumsum(
+                dim=0,
+                # Select dtype based on the following factors:
+                #  - FA2 requires that cu_seqlens_q must have dtype int32
+                #  - torch.onnx.export requires that cu_seqlens_q must have
+                #    same dtype as grid_thw
+                # See https://github.com/huggingface/transformers/pull/34852
+                # for more information
+                dtype=grid_thws.dtype
+                if torch.jit.is_tracing() else torch.int32,
+            )
+            cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
-        reverse_indices = torch.argsort(window_index)
+            reverse_indices = torch.argsort(window_index)
 
-        hidden_states = inputs_embeds
-        for index, block in enumerate(self.layers):
-            if (not self.fullatt_block_indexes
-                    or index in self.fullatt_block_indexes):
-                cu_seqlens_tmp = cu_seqlens
-            else:
-                cu_seqlens_tmp = cu_window_seqlens
-            hidden_states = block(hidden_states, cu_seqlens_tmp,
-                                  position_embeddings)
+            hidden_states = inputs_embeds
+            for index, block in enumerate(self.layers):
+                if (not self.fullatt_block_indexes
+                        or index in self.fullatt_block_indexes):
+                    cu_seqlens_tmp = cu_seqlens
+                else:
+                    cu_seqlens_tmp = cu_window_seqlens
+                hidden_states = block(hidden_states, cu_seqlens_tmp,
+                                      position_embeddings)
 
-        hidden_states = hidden_states.reshape(
-            seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
-        hidden_states = hidden_states[reverse_indices, :].reshape(seq_len, -1)
+            hidden_states = hidden_states.reshape(
+                seq_len // self.spatial_merge_unit, self.spatial_merge_unit,
+                -1)
+            hidden_states = hidden_states[reverse_indices, :].reshape(
+                seq_len, -1)
+
+        else:  # text input
+            hidden_states = inputs_embeds
+            for layer in self.layers:
+                hidden_states = layer(hidden_states=hidden_states,
+                                      cu_seqlens=cu_seqlens)
 
         return hidden_states
 
@@ -684,5 +698,140 @@ class Siglip2NavitModel(torch.nn.Module):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
+
+
+class Siglip2TextEmbeddings(nn.Module):
+
+    def __init__(self, config: Siglip2TextConfig, prefix: str = ""):
+        super().__init__()
+        embed_dim = config.hidden_size
+
+        self.token_embedding = VocabParallelEmbedding(
+            config.vocab_size, embed_dim, prefix=f"{prefix}.token_embedding")
+        self.position_embedding = VocabParallelEmbedding(
+            config.max_position_embeddings,
+            embed_dim,
+            prefix=f"{prefix}.position_embedding")
+
+        self.register_buffer("position_ids",
+                             torch.arange(config.max_position_embeddings),
+                             persistent=False)
+
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+    ) -> torch.Tensor:
+
+        input_embeddings = self.token_embedding(input_ids)
+
+        position_embeddings = self.position_embedding(position_ids)
+        embeddings = input_embeddings + position_embeddings
+
+        return embeddings
+
+
+class Siglip2TextTransformer(nn.Module):
+
+    def __init__(
+        self,
+        config: Siglip2TextConfig,
+        prefix: str = "",
+    ):
+        super().__init__()
+        self.config = config
+        embed_dim = config.hidden_size
+        self.embeddings = Siglip2TextEmbeddings(config)
+        self.encoder = Siglip2Encoder(config)
+        self.final_layer_norm = nn.LayerNorm(embed_dim,
+                                             eps=config.layer_norm_eps)
+
+    def forward(self,
+                input_ids: Optional[torch.Tensor] = None,
+                positions: Optional[torch.Tensor] = None,
+                **kwargs) -> torch.Tensor:
+
+        if input_ids is None:
+            raise ValueError("You have to specify input_ids")
+
+        hidden_states = self.embeddings(input_ids=input_ids,
+                                        position_ids=positions)
+
+        # Calculate cumulative sequence length.
+        # For input of 2 sequences size 4 and 3, `positions`
+        # will be [0, 1, 2, 3, 0, 1, 2].
+        # The corresponding cu_seqlens is [0, 4, 7].
+        cu_seqlens = []
+        for i, pos in enumerate(positions):
+            if pos == 0:
+                cu_seqlens.append(i)
+        cu_seqlens.append(len(positions))
+        cu_seqlens = torch.tensor(cu_seqlens)
+
+        last_hidden_state = self.encoder(inputs_embeds=hidden_states,
+                                         cu_seqlens=cu_seqlens)
+        last_hidden_state = self.final_layer_norm(last_hidden_state)
+
+        return last_hidden_state
+
+
+class Siglip2TextModel(torch.nn.Module):
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ):
+        super().__init__()
+        config = vllm_config.model_config.hf_config.text_config
+        self.text_model = Siglip2TextTransformer(config)
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.text_model.embeddings(input_ids)
+
+    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
+                **kwargs) -> torch.Tensor:
+
+        return self.text_model(input_ids=input_ids,
+                               positions=positions,
+                               **kwargs)
+
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+        ]
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+
+        for name, loaded_weight in weights:
+            if not name.startswith('text_model'):
+                continue
+
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                if name not in params_dict:
+                    continue
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
+
             loaded_params.add(name)
         return loaded_params
