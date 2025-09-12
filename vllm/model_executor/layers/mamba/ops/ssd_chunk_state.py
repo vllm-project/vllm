@@ -96,13 +96,13 @@ def _chunk_cumsum_fwd_kernel(
         0.0)
     tl.store(dt_out_ptrs,
              dt,
-             mask=(offs_h[:, None] < nheads) & (offs_c[None, :] < chunk_size_limit))
+             mask=(offs_h[:, None] < nheads) & (offs_c[None, :] < chunk_size))
     A = tl.load(A_ptrs, mask=offs_h < nheads, other=0.0).to(tl.float32)
     dA = dt * A[:, None]
     dA_cs = tl.cumsum(dA, axis=1)
     tl.store(dA_cs_ptrs,
              dA_cs,
-             mask=(offs_h[:, None] < nheads) & (offs_c[None, :] < chunk_size_limit))
+             mask=(offs_h[:, None] < nheads) & (offs_c[None, :] < chunk_size))
 
 
 @triton.autotune(
