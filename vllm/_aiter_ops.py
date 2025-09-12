@@ -422,10 +422,8 @@ class rocm_aiter_ops:
     def register_ops_once() -> None:
         global _OPS_REGISTERED
         if not _OPS_REGISTERED:
-            if is_torch_equal_or_newer("2.7.0"):
-                tags = ()
-            else:
-                tags = (torch.Tag.needs_fixed_stride_order, )
+            tags = tuple() if is_torch_equal_or_newer("2.7.0") else (
+                torch.Tag.needs_fixed_stride_order, )
 
             # register all the custom ops here
             direct_register_custom_op(
