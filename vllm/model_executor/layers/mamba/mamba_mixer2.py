@@ -687,8 +687,8 @@ class MambaMixer2(MambaBase, CustomOp):
             )
 
 
-            print("preallocated_ssm_out_p: ", preallocated_ssm_out_p[0,:10])
-            print("varlen_state: ", varlen_state[0,0,0,:10])
+            #print("preallocated_ssm_out_p: ", preallocated_ssm_out_p[0,:10])
+            #print("varlen_state: ", varlen_state[0,0,0,:10])
 
             # update ssm states
             # - varlen state is a (num_prefills, nheads, headdim, dstate) tensor

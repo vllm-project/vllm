@@ -188,9 +188,11 @@ def _chunk_scan_fwd_kernel(
                                   mask=(offs_k_dstate[:, None] < dstate) &
                                   (offs_n[None, :] < hdim),
                                   other=0.0)
+                    prev_states = prev_states.to(C_ptr.dtype.element_ty)
                 else:
                     #  Set to zero
                     prev_states = tl.zeros((BLOCK_SIZE_DSTATE, BLOCK_SIZE_N), dtype=tl.float32)
+                    prev_states = prev_states.to(C_ptr.dtype.element_ty)
             else:
                 # Load from previous chunk
                 states_ptrs = states_ptr + seq_idx_prev * stride_states_batch \
@@ -201,8 +203,8 @@ def _chunk_scan_fwd_kernel(
                               mask=(offs_k_dstate[:, None] < dstate) &
                               (offs_n[None, :] < hdim),
                               other=0.0)
+                prev_states = prev_states.to(C_ptr.dtype.element_ty)
 
-            prev_states = prev_states.to(C_ptr.dtype.element_ty)
             acc = tl.dot(C, prev_states) * scale_m[:, None]
         else:
             offset_tpa = 0
@@ -224,9 +226,11 @@ def _chunk_scan_fwd_kernel(
                                       mask=(offs_k_dstate[:, None] < dstate-k) &
                                       (offs_n[None, :] < hdim),
                                       other=0.0)
+                        prev_states = prev_states.to(C_ptr.dtype.element_ty)
                     else:
                         #  Set to zero
                         prev_states = tl.zeros((BLOCK_SIZE_DSTATE, BLOCK_SIZE_K), dtype=tl.float32)
+                        prev_states = prev_states.to(C_ptr.dtype.element_ty)
                 else:
                     # Load from previous chunk
                     states_ptrs = states_ptr + seq_idx_prev * stride_states_batch \
@@ -238,8 +242,8 @@ def _chunk_scan_fwd_kernel(
                                   mask=(offs_k_dstate[:, None] < dstate-k) &
                                   (offs_n[None, :] < hdim),
                                   other=0.0)
+                    prev_states = prev_states.to(C_ptr.dtype.element_ty)
 
-                prev_states = prev_states.to(C_ptr.dtype.element_ty)
                 acc += tl.dot(C, prev_states)
                 C_ptrs += BLOCK_SIZE_K
                 offset_tpa += BLOCK_SIZE_K
@@ -357,7 +361,7 @@ def _chunk_scan_fwd(
     assert dA_cumsum.shape == (batch, nheads, nchunks, chunk_size)
     assert states.shape == (batch, nchunks, nheads, headdim, dstate)
 
-    print("out.shape: ", out.shape)
+    #print("out.shape: ", out.shape)
 
     if seq_idx is not None:
         assert seq_idx.shape == (batch, seqlen)

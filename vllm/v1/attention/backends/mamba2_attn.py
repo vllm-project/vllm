@@ -176,10 +176,10 @@ class Mamba2AttentionMetadataBuilder(
                 common_attn_metadata,
                 decode_threshold=self.reorder_batch_threshold))
 
-        print("num_decodes: ", num_decodes)
-        print("num_prefills: ", num_prefills)
-        print("num_decode_tokens: ", num_decode_tokens)
-        print("num_prefill_tokens: ", num_prefill_tokens)
+        #print("num_decodes: ", num_decodes)
+        #print("num_prefills: ", num_prefills)
+        #print("num_decode_tokens: ", num_decode_tokens)
+        #print("num_prefill_tokens: ", num_prefill_tokens)
 
         # Compute seq_idx, chunk_indices and chunk_offsets for prefill only
         if num_prefills > 0:
@@ -209,8 +209,8 @@ class Mamba2AttentionMetadataBuilder(
             query_start_loc_p_cpu = common_attn_metadata.query_start_loc_cpu[
                 -num_prefills - 1:] - num_decode_tokens
 
-            print("num_computed_tokens_p: ", num_computed_tokens_p)
-            print("query_start_loc_p: ", query_start_loc_p)
+            #print("num_computed_tokens_p: ", num_computed_tokens_p)
+            #print("query_start_loc_p: ", query_start_loc_p)
 
             cu_chunk_seqlen = []
             last_chunk = []
@@ -218,7 +218,7 @@ class Mamba2AttentionMetadataBuilder(
             for req_idx in range(num_prefills):
                 this_num_computed = num_computed_tokens_p[req_idx].item()
                 this_new_tokens = query_start_loc_p_cpu[req_idx+1].item() - query_start_loc_p_cpu[req_idx].item()
-                print(req_idx, this_num_computed, this_new_tokens)
+                #print(req_idx, this_num_computed, this_new_tokens)
 
                 # if computed tokens are not chunk-aligned, use the first
                 # chunk to finish it off
@@ -247,8 +247,8 @@ class Mamba2AttentionMetadataBuilder(
             cu_chunk_seqlen_p = torch.as_tensor(cu_chunk_seqlen, device=query_start_loc.device, dtype=torch.int32)
             last_chunk_p = torch.as_tensor(last_chunk, device=query_start_loc.device, dtype=torch.int32)
 
-            print("cu_chunk_seqlen: ", cu_chunk_seqlen)
-            print("cu_chunk_seqlen_p: ", cu_chunk_seqlen_p)
+            #print("cu_chunk_seqlen: ", cu_chunk_seqlen)
+            #print("cu_chunk_seqlen_p: ", cu_chunk_seqlen_p)
 
             # We compute metadata for chunked prefill once at the top level
             # model forward and reuse them in mamba layers. If not needed,
