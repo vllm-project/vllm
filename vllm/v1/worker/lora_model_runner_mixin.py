@@ -188,5 +188,5 @@ class LoRAModelRunnerMixin:
         return self.lora_manager.pin_adapter(lora_id)
 
     def list_loras(self) -> set[int]:
-
+        self._ensure_lora_enabled()
         return self.lora_manager.list_adapters()
