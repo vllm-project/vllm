@@ -97,6 +97,6 @@ class AITERPagedAttention(PagedAttention):
         max_num_blocks_per_seq = cdiv(max_seq_len, block_size)
 
         rocm_aiter.pa_fwd_asm(query, key_cache, value_cache, block_tables,
-                              seq_lens, max_num_blocks_per_seq, k_scale,
+                              seq_lens, max_num_blocks_per_seq, 1, k_scale,
                               v_scale, output)
         return output
