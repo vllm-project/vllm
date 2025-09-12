@@ -757,10 +757,15 @@ package_data = {
 
 # If using precompiled, extract and patch package_data (in advance of setup)
 if envs.VLLM_USE_PRECOMPILED:
+    with open("/tmp/vllm_debug.log", "a") as f:
+        f.write("DEBUG: Starting precompiled wheel extraction...\n")
+    
     assert _is_cuda(), "VLLM_USE_PRECOMPILED is only supported for CUDA builds"
     wheel_location = os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION", None)
     if wheel_location is not None:
         wheel_url = wheel_location
+        with open("/tmp/vllm_debug.log", "a") as f:
+            f.write(f"DEBUG: Using custom wheel location: {wheel_url}\n")
     else:
         import platform
         arch = platform.machine()
@@ -770,22 +775,44 @@ if envs.VLLM_USE_PRECOMPILED:
             wheel_tag = "manylinux2014_aarch64"
         else:
             raise ValueError(f"Unsupported architecture: {arch}")
+        
         base_commit = precompiled_wheel_utils.get_base_commit_in_main_branch()
         wheel_url = f"https://wheels.vllm.ai/{base_commit}/vllm-1.0.0.dev-cp38-abi3-{wheel_tag}.whl"
         nightly_wheel_url = f"https://wheels.vllm.ai/nightly/vllm-1.0.0.dev-cp38-abi3-{wheel_tag}.whl"
+        
+        with open("/tmp/vllm_debug.log", "a") as f:
+            f.write(f"DEBUG: Base commit: {base_commit}\n")
+            f.write(f"DEBUG: Wheel URL: {wheel_url}\n")
+            f.write(f"DEBUG: Nightly wheel URL: {nightly_wheel_url}\n")
+        
         from urllib.request import urlopen
         try:
             with urlopen(wheel_url) as resp:
                 if resp.status != 200:
                     wheel_url = nightly_wheel_url
+                    with open("/tmp/vllm_debug.log", "a") as f:
+                        f.write(f"DEBUG: Base wheel not available, using nightly: {wheel_url}\n")
         except Exception as e:
             print(f"[warn] Falling back to nightly wheel: {e}")
             wheel_url = nightly_wheel_url
+            with open("/tmp/vllm_debug.log", "a") as f:
+                f.write(f"DEBUG: Exception occurred, using nightly: {e}\n")
 
-    patch = precompiled_wheel_utils.extract_precompiled_and_patch_package(
-        wheel_url)
-    for pkg, files in patch.items():
-        package_data.setdefault(pkg, []).extend(files)
+    with open("/tmp/vllm_debug.log", "a") as f:
+        f.write(f"DEBUG: Final wheel URL: {wheel_url}\n")
+    
+    try:
+        patch = precompiled_wheel_utils.extract_precompiled_and_patch_package(
+            wheel_url)
+        with open("/tmp/vllm_debug.log", "a") as f:
+            f.write(f"DEBUG: Wheel extraction successful, patch: {patch}\n")
+        for pkg, files in patch.items():
+            package_data.setdefault(pkg, []).extend(files)
+    except Exception as e:
+        with open("/tmp/vllm_debug.log", "a") as f:
+            f.write(f"DEBUG: Wheel extraction failed: {e}\n")
+        print(f"[error] Failed to extract precompiled wheel: {e}")
+        # Continue without precompiled wheels
 
 if _no_device():
     ext_modules = []
