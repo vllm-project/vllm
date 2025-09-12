@@ -669,6 +669,8 @@ class FusedMoEModularKernel(torch.nn.Module):
                                                 local_num_experts,
                                                 expert_tokens_meta))
 
+        print(f"WS {workspace13_shape, workspace2_shape, fused_out_shape}")
+
         # We can reuse the memory between cache1 and cache3 because by the
         # time we need cache3, we're done with cache1.
         workspace13 = torch.zeros(prod(workspace13_shape),
@@ -859,8 +861,12 @@ class FusedMoEModularKernel(torch.nn.Module):
                 hidden_states.dtype, a1q.device, M, N, K, top_k,
                 global_num_experts, local_num_experts, expert_tokens_meta)
 
+            print(f"XXX {num_chunks}, {CHUNK_SIZE}, {M, N, K}")
+
             for chunk_idx in range(num_chunks):
                 s, e = input_chunk_range(chunk_idx)
+
+                print(f"S, E = {s, e}")
 
                 c_expert_tokens_meta = self._slice_expert_tokens_metadata(
                     num_chunks, expert_tokens_meta, topk_ids[s:e],
