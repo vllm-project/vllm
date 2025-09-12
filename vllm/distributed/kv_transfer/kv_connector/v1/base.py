@@ -77,10 +77,7 @@ class KVConnectorMetadata(ABC):  # noqa: B024
     Abstract Metadata used to communicate between the
     Scheduler KVConnector and Worker KVConnector.
     """
-
     pass
-
-
 
 
 class KVConnectorBase_V1(ABC):
@@ -251,6 +248,14 @@ class KVConnectorBase_V1(ABC):
             call to this method (this call or a prior one).
         """
         return None, None
+
+    def shutdown(self):
+        """
+        Shutdown the connector. This is called when the worker process
+        is shutting down to ensure that all the async operations are
+        completed and the connector is cleaned up properly.
+        """
+        return None
 
     # ==============================
     # Scheduler-side methods
