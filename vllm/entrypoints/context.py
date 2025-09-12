@@ -112,7 +112,7 @@ class HarmonyContext(ConversationContext):
         available_tools: list[str],
     ):
         self._messages = messages
-        self.finish_reason = None
+        self.finish_reason: Optional[str] = None
         self.available_tools = available_tools
         self._tool_sessions: dict[str, Union[ClientSession, Tool]] = {}
         self.called_tools: set[str] = set()
