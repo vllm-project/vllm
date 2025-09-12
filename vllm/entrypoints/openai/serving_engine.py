@@ -1029,10 +1029,6 @@ class OpenAIServing:
         priority: int = 0,
         **kwargs,
     ):
-        # logger.info(f'prompt {request_prompt}')
-        # logger.info(f'engine_prompt {engine_prompt}')
-        # logger.info(
-        #     f'sampling_params {sampling_params}')  # this contains max_tokens
 
         orig_priority = priority
         while True:
@@ -1042,7 +1038,6 @@ class OpenAIServing:
                 params=sampling_params,
                 lora_request=lora_request,
             )
-            # goes in here, somehow it stops with max_tokens from sampling params
             generator = self.engine_client.generate(
                 engine_prompt,
                 sampling_params,
@@ -1052,7 +1047,6 @@ class OpenAIServing:
                 **kwargs,
             )
             async for res in generator:
-                # fbvscode.set_trace()
                 context.append_output(res)
                 # NOTE(woosuk): The stop condition is handled by the engine.
                 yield context

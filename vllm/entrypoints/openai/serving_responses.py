@@ -10,7 +10,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from contextlib import AsyncExitStack
 from copy import copy
 from http import HTTPStatus
-from typing import Callable, Final, List, Optional, Union
+from typing import Callable, Final, Optional, Union
 
 import jinja2
 import openai.types.responses as openai_responses_types
@@ -665,7 +665,7 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         context: HarmonyContext,
     ) -> list[ResponseOutputItem]:
-        output_items: List[ResponseOutputItem] = []
+        output_items: list[ResponseOutputItem] = []
         num_init_messages = context.num_init_messages
         for msg in context.messages[num_init_messages:]:
             output_items.extend(parse_output_message(msg))

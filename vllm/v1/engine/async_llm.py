@@ -97,7 +97,7 @@ class AsyncLLM(EngineClient):
 
         self.model_config = vllm_config.model_config
         self.vllm_config = vllm_config
-        self.log_requests = True
+        self.log_requests = log_requests
 
         self.log_stats = log_stats or (stat_loggers is not None)
         if not log_stats and stat_loggers is not None:
@@ -308,7 +308,6 @@ class AsyncLLM(EngineClient):
                                           queue)
 
         # Add the EngineCoreRequest to EngineCore (separate process).
-        # go in here
         await self.engine_core.add_request_async(request)
 
         if self.log_requests:
@@ -365,7 +364,6 @@ class AsyncLLM(EngineClient):
                 truncate_prompt_tokens,
                 tokenization_kwargs,
             )
-            logger.info("HELLO")
             q = await self.add_request(
                 request_id,
                 prompt,
@@ -388,7 +386,6 @@ class AsyncLLM(EngineClient):
                 # Note: both OutputProcessor and EngineCore handle their
                 # own request cleanup based on finished.
                 finished = out.finished
-                # fbvscode.set_trace()
                 yield out
 
         # If the request is disconnected by the client, generate()

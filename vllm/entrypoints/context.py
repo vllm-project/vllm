@@ -137,7 +137,8 @@ class HarmonyContext(ConversationContext):
             self.num_reasoning_tokens += 1
 
     def append_output(self, output) -> None:
-        # requestOutput contains completionOutput, which contains the real finish_reason
+        # requestOutput contains completionOutput,
+        # which contains the real finish_reason
         if isinstance(output, RequestOutput):
             # NOTE: output contains information about the finish reason
             output_token_ids = output.outputs[0].token_ids

@@ -534,7 +534,6 @@ class LLMEngine:
             self.lora_config.verify_with_scheduler_config(
                 self.scheduler_config)
 
-    # we somehow go into here
     def _add_processed_request(
         self,
         request_id: str,
