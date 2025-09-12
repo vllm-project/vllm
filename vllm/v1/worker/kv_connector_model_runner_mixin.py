@@ -45,7 +45,8 @@ class KVConnectorModelRunnerMixin:
 
     @staticmethod
     def ensure_kv_transfer_shutdown() -> None:
-        if has_kv_transfer_group():
+        # has_kv_transfer_group can be None during interpreter shutdown.
+        if has_kv_transfer_group and has_kv_transfer_group():
             ensure_kv_transfer_shutdown()
 
     @staticmethod

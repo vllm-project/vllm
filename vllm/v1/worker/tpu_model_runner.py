@@ -387,9 +387,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
-                mm_kwargs=new_req_data.mm_kwargs,
-                mm_positions=new_req_data.mm_positions,
-                mm_hashes=new_req_data.mm_hashes,
+                mm_features=new_req_data.mm_features,
                 sampling_params=sampling_params,
                 pooling_params=None,
                 generator=None,
@@ -822,10 +820,10 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_state = self.requests[req_id]
 
             for mm_input_id in encoder_input_ids:
-                mm_hash = req_state.mm_hashes[mm_input_id]
-                mm_kwargs.append(req_state.mm_kwargs[mm_input_id])
-                mm_hashes_pos.append(
-                    (mm_hash, req_state.mm_positions[mm_input_id]))
+                mm_feature = req_state.mm_features[mm_input_id]
+                mm_hash = mm_feature.identifier
+                mm_kwargs.append(mm_feature.data)
+                mm_hashes_pos.append((mm_hash, mm_feature.mm_position))
 
         # Batch mm inputs as much as we can: if a request in the batch has
         # multiple modalities or a different modality than the previous one,
@@ -883,13 +881,12 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 req_id]
             req_state = self.requests[req_id]
             num_computed_tokens = req_state.num_computed_tokens
-            mm_positions = req_state.mm_positions
-            mm_hashes = req_state.mm_hashes
             # TODO unroll loop and assume/enforce --disable_chunked_mm_input
             # NOTE (NickLucche) here we diverge from logic in other runners, as
             # we assume to only have whole mm items to process. Hence we avoid
             # the intrinsic dynamism that `gather_mm_placeholders` introduces.
-            for i, pos_info in enumerate(mm_positions):
+            for mm_feature in req_state.mm_features:
+                pos_info = mm_feature.mm_position
                 start_pos = pos_info.offset
                 num_encoder_tokens = pos_info.length
 
@@ -904,8 +901,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     # The encoder output is already processed and stored
                     # in the decoder's KV cache.
                     continue
-
-                mm_hash = mm_hashes[i]
+                mm_hash = mm_feature.identifier
                 encoder_output = self.encoder_cache.get(mm_hash, None)
                 assert encoder_output is not None,\
                       f"Encoder cache miss for {mm_hash}."

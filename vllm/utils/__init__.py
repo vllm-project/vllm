@@ -163,6 +163,12 @@ STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
 STR_DUAL_CHUNK_FLASH_ATTN_VAL: str = "DUAL_CHUNK_FLASH_ATTN"
 STR_INVALID_VAL: str = "INVALID"
 
+MB_bytes = 1_000_000
+"""The number of bytes in one megabyte (MB)."""
+
+MiB_bytes = 1 << 20
+"""The number of bytes in one mebibyte (MiB)."""
+
 GB_bytes = 1_000_000_000
 """The number of bytes in one gigabyte (GB)."""
 
@@ -2791,7 +2797,10 @@ def memory_profiling(
     result.torch_peak_increase = diff_profile.torch_peak
     result.non_torch_increase = diff_from_create.non_torch_memory
     result.profile_time = diff_profile.timestamp
-    result.non_kv_cache_memory = result.non_torch_increase + result.torch_peak_increase + result.weights_memory  # noqa
+
+    non_torch_memory = result.non_torch_increase
+    peak_activation_memory = result.torch_peak_increase
+    result.non_kv_cache_memory = non_torch_memory + peak_activation_memory + result.weights_memory  # noqa
 
 
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L630 # noqa: E501

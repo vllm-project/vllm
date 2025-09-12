@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.config import LoRAConfig
+from vllm.config.lora import LoRAConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 
 from .base_linear import BaseLinearLayerWithLoRA

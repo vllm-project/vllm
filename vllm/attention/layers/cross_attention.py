@@ -6,14 +6,13 @@ from typing import Optional
 
 import numpy as np
 import torch
-from transformers import CacheConfig
 
 from vllm import envs
 from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.layer import Attention
 from vllm.attention.selector import get_attn_backend
-from vllm.config import VllmConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.utils import cdiv

@@ -36,8 +36,8 @@ CUSTOM_ALL_REDUCE_MAX_SIZES = {
     "10.0": {
         2: 2 * MiB,  # 2 MB
         4: 2 * MiB,  # 2 MB
-        6: 2 * MiB,  # 2 MB
-        8: 2 * MiB,  # 2 MB
+        6: 1 * MiB,  # 1 MB
+        8: 1 * MiB,  # 1 MB
     }
 }
 

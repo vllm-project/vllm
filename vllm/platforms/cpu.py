@@ -347,3 +347,7 @@ class CpuPlatform(Platform):
     @classmethod
     def opaque_attention_op(cls) -> bool:
         return True
+
+    @classmethod
+    def support_hybrid_kv_cache(cls) -> bool:
+        return True

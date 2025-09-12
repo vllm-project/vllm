@@ -44,6 +44,7 @@ nav:
       - contributing/model/registration.md
       - contributing/model/tests.md
       - contributing/model/multimodal.md
+      - contributing/model/transcription.md
     - CI: contributing/ci
     - Design Documents: design
   - API Reference:

@@ -29,7 +29,8 @@ from transformers import BartConfig
 from transformers.utils import logging
 
 from vllm.attention import Attention, AttentionType
-from vllm.config import CacheConfig, LoRAConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig
+from vllm.config.lora import LoRAConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -400,8 +401,7 @@ class BartEncoderLayer(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         r"""
         Args:
-            hidden_states
-                torch.Tensor of *encoder* input embeddings.
+            hidden_states: torch.Tensor of *encoder* input embeddings.
         Returns:
             Encoder layer output torch.Tensor
         """
@@ -489,10 +489,8 @@ class BartDecoderLayer(nn.Module):
     ) -> torch.Tensor:
         r"""
         Args:
-            decoder_hidden_states
-                torch.Tensor of *decoder* input embeddings.
-            encoder_hidden_states
-                torch.Tensor of *encoder* input embeddings.
+            decoder_hidden_states: torch.Tensor of *decoder* input embeddings.
+            encoder_hidden_states: torch.Tensor of *encoder* input embeddings.
         Returns:
             Decoder layer output torch.Tensor
         """
@@ -583,12 +581,10 @@ class BartEncoder(nn.Module):
     ) -> torch.Tensor:
         r"""
         Args:
-            input_ids
-                Indices of *encoder* input sequence tokens in the vocabulary.
-                Padding will be ignored by default should you
-                provide it.
-            positions
-                Positions of *encoder* input sequence tokens.
+            input_ids: Indices of *encoder* input sequence tokens in the 
+                vocabulary.
+                Padding will be ignored by default should you provide it.
+            positions: Positions of *encoder* input sequence tokens.
         Returns:
             Decoder output torch.Tensor
         """
@@ -662,14 +658,11 @@ class BartDecoder(nn.Module):
     ) -> torch.Tensor:
         r"""
         Args:
-            decoder_input_ids
-                Indices of *decoder* input sequence tokens in the vocabulary.
-                Padding will be ignored by default should you
-                provide it.
-            decoder_positions
-                Positions of *decoder* input sequence tokens.
-            encoder_hidden_states:
-                Tensor of encoder output embeddings
+            decoder_input_ids: Indices of *decoder* input sequence tokens 
+                in the vocabulary.
+                Padding will be ignored by default should you provide it.
+            decoder_positions: Positions of *decoder* input sequence tokens.
+            encoder_hidden_states: Tensor of encoder output embeddings.
         Returns:
             Decoder output torch.Tensor
         """
@@ -731,16 +724,13 @@ class BartModel(nn.Module, SupportsQuant):
                 encoder_positions: torch.Tensor) -> torch.Tensor:
         r"""
         Args:
-            input_ids
-                Indices of *decoder* input sequence tokens in the vocabulary.
-                Padding will be ignored by default should you
-                provide it.
-            positions
-                Positions of *decoder* input sequence tokens.
-            encoder_input_ids
-                Indices of *encoder* input sequence tokens in the vocabulary.
-            encoder_positions:
-                Positions of *encoder* input sequence tokens.
+            input_ids: Indices of *decoder* input sequence tokens 
+                in the vocabulary.
+                Padding will be ignored by default should you provide it.
+            positions: Positions of *decoder* input sequence tokens.
+            encoder_input_ids: Indices of *encoder* input sequence tokens 
+                in the vocabulary.
+            encoder_positions: Positions of *encoder* input sequence tokens.
         Returns:
             Model output torch.Tensor
         """
@@ -847,14 +837,10 @@ class BartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
     ) -> torch.Tensor:
         r"""
         Args:
-            input_ids
-                torch.Tensor of *decoder* input token ids.
-            positions
-                torch.Tensor of *decoder* position indices.
-            encoder_input_ids
-                torch.Tensor of *encoder* input token ids.
-            encoder_positions
-                torch.Tensor of *encoder* position indices
+            input_ids: torch.Tensor of *decoder* input token ids.
+            positions: torch.Tensor of *decoder* position indices.
+            encoder_input_ids: torch.Tensor of *encoder* input token ids.
+            encoder_positions: torch.Tensor of *encoder* position indices.
         Returns:
             Output torch.Tensor
         """
@@ -911,8 +897,7 @@ class MBartEncoderLayer(BartEncoderLayer):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         r"""
         Args:
-            hidden_states
-                torch.Tensor of *encoder* input embeddings.
+            hidden_states: torch.Tensor of *encoder* input embeddings.
         Returns:
             Encoder layer output torch.Tensor
         """
@@ -1034,12 +1019,10 @@ class MBartEncoder(nn.Module):
     ) -> torch.Tensor:
         r"""
         Args:
-            input_ids
-                Indices of *encoder* input sequence tokens in the vocabulary.
-                Padding will be ignored by default should you
-                provide it.
-            positions
-                Positions of *encoder* input sequence tokens.
+            input_ids: Indices of *encoder* input sequence tokens in the 
+                vocabulary.
+                Padding will be ignored by default should you provide it.
+            positions: Positions of *encoder* input sequence tokens.
         Returns:
             Decoder output torch.Tensor
         """
@@ -1115,14 +1098,11 @@ class MBartDecoder(nn.Module):
     ) -> torch.Tensor:
         r"""
         Args:
-            decoder_input_ids
-                Indices of *decoder* input sequence tokens in the vocabulary.
-                Padding will be ignored by default should you
-                provide it.
-            decoder_positions
-                Positions of *decoder* input sequence tokens.
-            encoder_hidden_states:
-                Tensor of encoder output embeddings
+            decoder_input_ids: Indices of *decoder* input sequence tokens 
+                in the vocabulary.
+                Padding will be ignored by default should you provide it.
+            decoder_positions: Positions of *decoder* input sequence tokens.
+            encoder_hidden_states: Tensor of encoder output embeddings.
         Returns:
             Decoder output torch.Tensor
         """
@@ -1184,16 +1164,13 @@ class MBartModel(nn.Module, SupportsQuant):
                 encoder_positions: torch.Tensor) -> torch.Tensor:
         r"""
         Args:
-            input_ids
-                Indices of *decoder* input sequence tokens in the vocabulary.
-                Padding will be ignored by default should you
-                provide it.
-            positions
-                Positions of *decoder* input sequence tokens.
-            encoder_input_ids
-                Indices of *encoder* input sequence tokens in the vocabulary.
-            encoder_positions:
-                Positions of *encoder* input sequence tokens.
+            input_ids: Indices of *decoder* input sequence tokens 
+                in the vocabulary.
+                Padding will be ignored by default should you provide it.
+            positions: Positions of *decoder* input sequence tokens.
+            encoder_input_ids: Indices of *encoder* input sequence tokens 
+                in the vocabulary.
+            encoder_positions: Positions of *encoder* input sequence tokens.
         Returns:
             Model output torch.Tensor
         """

@@ -6,6 +6,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
+from vllm import bc_linter_include
+
 if TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
@@ -13,20 +15,19 @@ if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.base import (
         KVConnectorMetadata)
     from vllm.lora.request import LoRARequest
-    from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
+    from vllm.multimodal.inputs import MultiModalFeatureSpec
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.v1.request import Request
 
 
+@bc_linter_include
 @dataclass
 class NewRequestData:
 
     req_id: str
     prompt_token_ids: list[int]
-    mm_kwargs: list[MultiModalKwargsItem]
-    mm_hashes: list[str]
-    mm_positions: list[PlaceholderRange]
+    mm_features: list[MultiModalFeatureSpec]
     sampling_params: Optional[SamplingParams]
     pooling_params: Optional[PoolingParams]
     block_ids: tuple[list[int], ...]
@@ -42,9 +43,7 @@ class NewRequestData:
         return cls(
             req_id=request.request_id,
             prompt_token_ids=request.prompt_token_ids,
-            mm_kwargs=request.mm_kwargs,
-            mm_hashes=request.mm_hashes,
-            mm_positions=request.mm_positions,
+            mm_features=request.mm_features,
             sampling_params=request.sampling_params,
             pooling_params=request.pooling_params,
             block_ids=block_ids,
@@ -56,9 +55,7 @@ class NewRequestData:
         return (f"NewRequestData("
                 f"req_id={self.req_id},"
                 f"prompt_token_ids={self.prompt_token_ids},"
-                f"mm_kwargs={self.mm_kwargs},"
-                f"mm_hashes={self.mm_hashes},"
-                f"mm_positions={self.mm_positions},"
+                f"mm_features={self.mm_features},"
                 f"sampling_params={self.sampling_params},"
                 f"block_ids={self.block_ids},"
                 f"num_computed_tokens={self.num_computed_tokens},"
@@ -70,9 +67,7 @@ class NewRequestData:
         return (f"NewRequestData("
                 f"req_id={self.req_id},"
                 f"prompt_token_ids_len={len(self.prompt_token_ids)},"
-                f"mm_kwargs={self.mm_kwargs},"
-                f"mm_hashes={self.mm_hashes},"
-                f"mm_positions={self.mm_positions},"
+                f"mm_features={self.mm_features},"
                 f"sampling_params={self.sampling_params},"
                 f"block_ids={self.block_ids},"
                 f"num_computed_tokens={self.num_computed_tokens},"
@@ -80,6 +75,7 @@ class NewRequestData:
                 ")")
 
 
+@bc_linter_include
 @dataclass
 class CachedRequestData:
 
@@ -109,6 +105,7 @@ class CachedRequestData:
         )
 
 
+@bc_linter_include
 @dataclass
 class SchedulerOutput:
 

@@ -14,7 +14,7 @@ import torch
 from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
-from .op import safe_exp
+from .op import exp
 
 
 @triton.heuristics({
@@ -56,7 +56,8 @@ def chunk_scaled_dot_kkt_fwd_kernel(
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
-    o_t = tl.arange(0, BT)
+    o_t = i_t * BT + tl.arange(0, BT)
+    m_t = o_t < T
 
     p_beta = tl.make_block_ptr(beta + bos * H + i_h, (T, ), (H, ),
                                (i_t * BT, ), (BT, ), (0, ))
@@ -76,9 +77,10 @@ def chunk_scaled_dot_kkt_fwd_kernel(
                                 (i_t * BT, ), (BT, ), (0, ))
         b_g = tl.load(p_g, boundary_check=(0, ))
         b_g_diff = b_g[:, None] - b_g[None, :]
-        b_A = b_A * safe_exp(b_g_diff)
+        b_A = b_A * exp(b_g_diff)
 
-    b_A = tl.where(o_t[:, None] > o_t[None, :], b_A, 0)
+    m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)
+    b_A = tl.where(m_A, b_A, 0)
     p_A = tl.make_block_ptr(A + (bos * H + i_h) * BT, (T, BT), (BT * H, 1),
                             (i_t * BT, 0), (BT, BT), (1, 0))
     tl.store(p_A, b_A.to(p_A.dtype.element_ty), boundary_check=(0, 1))

@@ -3,6 +3,7 @@
 
 import enum
 import time
+from collections.abc import Mapping
 from functools import partial
 from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
@@ -35,6 +36,7 @@ class Request:
         structured_output_request: Optional["StructuredOutputRequest"] = None,
         cache_salt: Optional[str] = None,
         priority: int = 0,
+        trace_headers: Optional[Mapping[str, str]] = None,
         block_hasher: Optional[Callable[["Request"],
                                         list["BlockHash"]]] = None,
     ) -> None:
@@ -89,18 +91,14 @@ class Request:
         self.mm_features = mm_features or []
         self.num_encoder_inputs = len(self.mm_features)
         self.has_encoder_inputs = self.num_encoder_inputs > 0
-        # TODO(sfeng33): Remove these legacy fields after clearing out all
-        # references in scheduler and model runner
-        self.mm_positions = [f.mm_position for f in self.mm_features]
-        self.mm_kwargs = [f.data for f in self.mm_features]
-        self.mm_hashes = [f.identifier for f in self.mm_features]
 
         # Read-only views
         # Prevent directly appending to these lists since
         # they should also be updated simultaneously.
         self.output_token_ids = ConstantList(self._output_token_ids)
         self.all_token_ids = ConstantList(self._all_token_ids)
-
+        # trace_headers
+        self.trace_headers = trace_headers
         # State
         # The number of tokens with prefix cache hits.
         self.num_cached_tokens = -1
@@ -136,6 +134,7 @@ class Request:
                     if request.sampling_params else None,
             cache_salt=request.cache_salt,
             priority=request.priority,
+            trace_headers=request.trace_headers,
             block_hasher=block_hasher,
         )
 
@@ -176,8 +175,8 @@ class Request:
         return RequestStatus.get_finished_reason(self.status)
 
     def get_num_encoder_tokens(self, input_id: int) -> int:
-        assert input_id < len(self.mm_positions)
-        num_tokens = self.mm_positions[input_id].length
+        assert input_id < len(self.mm_features)
+        num_tokens = self.mm_features[input_id].mm_position.length
         return num_tokens
 
     def record_event(

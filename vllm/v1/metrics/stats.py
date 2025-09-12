@@ -68,6 +68,9 @@ class RequestStateStats:
     first_token_ts: float = 0.0
     last_token_ts: float = 0.0
 
+    # first token latency
+    first_token_latency: float = 0.0
+
 
 @dataclass
 class FinishedRequestStats:
@@ -116,6 +119,7 @@ class IterationStats:
 
             first_token_latency = self._time_since(req_stats.arrival_time)
             self.time_to_first_tokens_iter.append(first_token_latency)
+            req_stats.first_token_latency = first_token_latency
 
         req_stats.num_generation_tokens += num_new_generation_tokens
 
