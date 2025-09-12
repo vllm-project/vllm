@@ -262,6 +262,7 @@ def is_init_field(cls: ConfigType, name: str) -> bool:
 TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 MMEncoderTPMode = Literal["weights", "data"]
+MMCacheType = Literal["shm", "lru"]
 
 
 class LogprobsMode(enum.Enum):
@@ -450,6 +451,13 @@ class ModelConfig:
     `mm_processor_cache_gb * (api_server_count + data_parallel_size)`.
 
     Set to `0` to disable this cache completely (not recommended)."""
+    mm_processor_cache_type: MMCacheType = "lru"
+    """Type of cache to use for the multi-modal preprocessor/mapper. If `shm`,
+    use shared memory FIFO cache. If `lru`, use mirrored LRU cache."""
+    mm_shm_cache_max_object_size_mb: int = 128
+    """Size limit (in MiB) for each object stored in the multi-modal processor
+    shared memory cache. Only effective when `mm_processor_cache_type` is
+    `"shm"`."""
     mm_encoder_tp_mode: MMEncoderTPMode = "weights"
     """Indicates how to optimize multi-modal encoder inference using
     tensor parallelism (TP).
@@ -881,6 +889,9 @@ class ModelConfig:
                 media_io_kwargs=self.media_io_kwargs,
                 mm_processor_kwargs=self.mm_processor_kwargs,
                 mm_processor_cache_gb=self.mm_processor_cache_gb,
+                mm_processor_cache_type=self.mm_processor_cache_type,
+                mm_shm_cache_max_object_size_mb=self.
+                mm_shm_cache_max_object_size_mb,
                 mm_encoder_tp_mode=self.mm_encoder_tp_mode,
                 interleave_mm_strings=self.interleave_mm_strings,
                 skip_mm_profiling=self.skip_mm_profiling,
@@ -1775,15 +1786,20 @@ class ModelConfig:
         such as the lm_head in a generation model,
         or the score or classifier in a classification model.
 
-        The default head_dtype based on runner_type.\n
+        `head_dtype` currently only supports pooling models.\n
         - The pooling model defaults to using fp32 head,
-        you can use --hf-overrides '{"head_dtype": "model"}' to disable it.\n
-        - The generate model defaults to not using fp32 head,
-        you can use --hf-overrides '{"head_dtype": "float32"}' to enable it.
+        you can use --hf-overrides '{"head_dtype": "model"}' to disable it.
         """
+
         head_dtype = _get_head_dtype(config=self.hf_config,
                                      dtype=self.dtype,
                                      runner_type=self.runner_type)
+
+        if self.runner_type != "pooling" and head_dtype != self.dtype:
+            logger.warning_once(
+                "`head_dtype` currently only supports pooling models."
+                "fallback to model dtype [%s].", self.dtype)
+            return self.dtype
 
         if head_dtype not in current_platform.supported_dtypes:
             logger.warning_once(
@@ -2442,6 +2458,15 @@ class MultiModalConfig:
 
     Set to `0` to disable this cache completely (not recommended).
     """
+
+    mm_processor_cache_type: MMCacheType = "lru"
+    """Type of cache to use for the multi-modal preprocessor/mapper. If `shm`,
+    use shared memory FIFO cache. If `lru`, use mirrored LRU cache."""
+
+    mm_shm_cache_max_object_size_mb: int = 128
+    """Size limit (in MiB) for each object stored in the multi-modal processor
+    shared memory cache. Only effective when `mm_processor_cache_type` is
+    `"shm"`."""
 
     mm_encoder_tp_mode: MMEncoderTPMode = "weights"
     """
@@ -3587,30 +3612,40 @@ class VllmConfig:
 
     def _set_cudagraph_sizes(self):
         """
-        cudagraph batchsize padding logic:
+        vLLM defines the default candidate list of batch sizes for CUDA graph
+        capture as:
 
-        `[1, 2, 4] + [8 * i for i in range(1, 1025)]` is a list of all possible
-        batch sizes that cudagraph will capture.
-
-        Depending on the engine's configuration of `max_num_seqs`, the
-        candidate batch sizes to capture cudagraph will shrink to the subset
-        which just cover the range of `[1, max_num_seqs]`. In the common case,
-        `max_num_seqs` is 256, and the cudagraph batch sizes will be
-        `[1, 2, 4, 8, 16, 24, 32, 40, ..., 256]`.
-
-        However, if users specify the cudagraph capture sizes through
-        compilation config, we will use the specified sizes instead.
+        ```python
+        max_graph_size = min(max_num_seqs * 2, 512)
+        # 1, 2, 4, then multiples of 8 up to max_graph_size
+        cuda_graph_sizes = [1, 2, 4, 8, 16, 24, 32, 40, ..., max_graph_size]
 
         In the end, `vllm_config.compilation_config.cudagraph_capture_sizes`
         will be the final sizes to capture cudagraph (in descending order).
 
-        During runtime, if batchsize is larger than
-        `vllm_config.compilation_config.cudagraph_capture_sizes`,
-        no cudagraph will be used.
-        If the batch size is no larger than
-        `vllm_config.compilation_config.cudagraph_capture_sizes`,
-        we can quickly find the padded graph size for a given batch size by
-        looking up `vllm_config.compilation_config.bs_to_padded_graph_size`.
+        These sizes are used to capture and reuse CUDA graphs for
+        performance-critical paths (e.g., decoding). Capturing enables
+        significantly faster kernel dispatch by avoiding Python overhead. The
+        list is then filtered based on `max_num_batched_tokens` (e.g., 8192 on
+        most GPUs), which controls the total allowed number of tokens in a
+        batch. Since each sequence may have a variable number of tokens, the
+        maximum usable batch size will depend on actual sequence lengths.
+
+        Example:
+            With `max_num_batched_tokens = 8192`, and typical sequences
+            averaging ~32 tokens, most practical batch sizes fall below 256.
+            However, the system will still allow capture sizes up to 512 if
+            shape and memory permit.
+
+        Note:
+            If users explicitly specify cudagraph capture sizes in the
+            compilation config, those will override this default logic.
+            At runtime:
+
+            - If batch size <= one of the `cudagraph_capture_sizes`, the closest
+            padded CUDA graph will be used.
+            - If batch size > largest `cudagraph_capture_sizes`, cudagraph will
+            not be used.
         """
 
         # calculate the default `batch_size_capture_list`
