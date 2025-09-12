@@ -444,12 +444,11 @@ class OpenAIServing:
         status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
     ) -> ErrorResponse:
         if isinstance(message, SchedulerWaitingQueueFullError):
-            return ErrorResponse(
-                ErrorInfo(
-                    message=str(message),
-                    type="ServiceUnavailableError",
-                    code=HTTPStatus.SERVICE_UNAVAILABLE.value,
-                ))
+            return ErrorResponse(error=ErrorInfo(
+                message=str(message),
+                type="ServiceUnavailableError",
+                code=HTTPStatus.SERVICE_UNAVAILABLE.value,
+            ))
         elif isinstance(message, Exception):
             message_str = str(message)
         else:
