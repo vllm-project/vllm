@@ -53,6 +53,7 @@ class VllmEplbAdaptor(BaseAdaptor):
         num_moe_layers: Number of MoE layers in the model
         expert_weight_names: List of parameter names for expert weights
     """
+
     def __init__(self, model, **args):
         """Initialize adaptor with model configuration.
 
@@ -121,7 +122,7 @@ class VllmEplbAdaptor(BaseAdaptor):
             complete_name = "model.layers." + str(
                 self.num_dense_layers) + ".mlp.experts." + name
             expert_tensor = self.param_dict[complete_name].data[
-                            0:num_buffer_tensor]
+                0:num_buffer_tensor]
             buffer_tensors = torch.empty_like(expert_tensor)
             for buffer_id in range(num_buffer_tensor):
                 self.buffer_tensor_list[buffer_id].append(
@@ -200,14 +201,14 @@ class VllmEplbAdaptor(BaseAdaptor):
                 self._expert_file_to_tensor(expert_map_path)
             expert_map_all = self.local2global(expert_map_tensor)
         except (TypeError, FileNotFoundError, OSError,
-            json.JSONDecodeError, KeyError):
+                json.JSONDecodeError, KeyError):
             expert_map_all = self.determine_expert_map_all()
 
         for layer_idx in range(num_moe_layers):
             if self.model.config.model_type == "qwen3_moe":
                 self.expert_map_per_layer_cpu[layer_idx] = \
                     expert_map_all[layer_idx][self.rank_id]
-            else: #adapt both dsv3 and kimik2
+            else:  #adapt both dsv3 and kimik2
                 self.expert_map_per_layer_cpu[layer_idx + \
                     self.num_dense_layers] = \
                     expert_map_all[layer_idx][self.rank_id]
@@ -234,7 +235,7 @@ class VllmEplbAdaptor(BaseAdaptor):
                 json.JSONDecodeError: If the file content is not valid JSON.
             KeyError: If the JSON structure does not conform to expectations.
         """
-        with open(expert_map_path, "r") as f:
+        with open(expert_map_path) as f:
             data = json.load(f)
             layers_num = data["moe_layer_count"]
             gpus_num = data["layer_list"][0]["device_count"]
@@ -332,8 +333,7 @@ class VllmEplbAdaptor(BaseAdaptor):
         E_global = (max_id + 1).item() if max_id >= 0 else 0
 
         if E_global == 0:
-            return torch.empty((L, G, 0),
-                dtype=torch.long,device=device)
+            return torch.empty((L, G, 0), dtype=torch.long,device=device)
 
         placement_global = torch.full((L, G, E_global),
                                       fill_value=-1,

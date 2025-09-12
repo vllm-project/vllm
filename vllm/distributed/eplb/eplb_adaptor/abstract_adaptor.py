@@ -14,6 +14,7 @@ class BaseAdaptor(ABC):
     expert weights. Specific adaptor implementations (e.g., for vLLM)
     should inherit from this base class and implement all abstract methods.
     """
+    @abstractmethod
     def __init__(self, **args):
         """
         Initializes the adaptor.
