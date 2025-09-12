@@ -23,6 +23,7 @@ from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.models.vision import get_vit_attn_backend
 from vllm.platforms import _Backend, current_platform
 from vllm.utils import direct_register_custom_op
 
@@ -53,6 +54,14 @@ def check_xformers_availability():
         logger.warning("Xformers is not available, falling back.")
 
     return USE_XFORMERS_OPS
+
+
+def check_upstream_fa_availability(dtype: torch.dtype):
+    if dtype in (torch.float16, torch.bfloat16) and current_platform.is_cuda(
+    ) and current_platform.has_device_capability(80):
+        from transformers.utils import is_flash_attn_2_available
+        return is_flash_attn_2_available()
+    return False
 
 
 class Attention(nn.Module, AttentionLayerBase):
@@ -349,28 +358,54 @@ class MultiHeadAttention(nn.Module):
             f"divisible by num_kv_heads ({self.num_kv_heads})"
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
+        # During model initialization, the default dtype is set as the model
+        # weight and activation dtype.
         dtype = torch.get_default_dtype()
-        attn_backend = get_attn_backend(head_size,
-                                        dtype,
-                                        kv_cache_dtype=None,
-                                        block_size=16,
-                                        is_attention_free=False)
-        backend = backend_name_to_enum(attn_backend.get_name())
+
+        # Determine the attention backend
+        backend = get_vit_attn_backend(head_size=head_size, dtype=dtype)
+
+        # Some auto-selected backends can be upgraded
+        # to upstream flash attention if available.
+        # If vllm native fa is selected, we use it directly.
+        use_upstream_fa = False
+        if backend != _Backend.FLASH_ATTN and check_upstream_fa_availability(
+                dtype):
+            backend = _Backend.FLASH_ATTN
+            use_upstream_fa = True
+
         if current_platform.is_rocm():
             # currently, only torch_sdpa is supported on rocm
             self.attn_backend = _Backend.TORCH_SDPA
         else:
+
             self.attn_backend = backend if backend in {
                 _Backend.TORCH_SDPA,
                 _Backend.TORCH_SDPA_VLLM_V1,
                 _Backend.XFORMERS,
                 _Backend.PALLAS_VLLM_V1,
                 _Backend.ROCM_AITER_FA,
-            } else current_platform.get_vit_attn_backend()
+                _Backend.FLASH_ATTN,
+                _Backend.FLASH_ATTN_VLLM_V1,
+            } else _Backend.TORCH_SDPA
 
         if (self.attn_backend == _Backend.XFORMERS
                 and not check_xformers_availability()):
             self.attn_backend = _Backend.TORCH_SDPA
+
+        if self.attn_backend in {
+                _Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1
+        }:
+            if use_upstream_fa:
+                from flash_attn import flash_attn_varlen_func
+                self._flash_attn_varlen_func = flash_attn_varlen_func
+            else:
+                from vllm.vllm_flash_attn import flash_attn_varlen_func
+                self._flash_attn_varlen_func = flash_attn_varlen_func
+
+        logger.info_once(
+            f"MultiHeadAttention attn_backend: {self.attn_backend}, "
+            f"use_upstream_fa: {use_upstream_fa}")
 
     def forward(
         self,
@@ -392,7 +427,31 @@ class MultiHeadAttention(nn.Module):
             key = torch.repeat_interleave(key, num_repeat, dim=2)
             value = torch.repeat_interleave(value, num_repeat, dim=2)
 
-        if self.attn_backend == _Backend.XFORMERS:
+        if self.attn_backend in {
+                _Backend.FLASH_ATTN,
+                _Backend.FLASH_ATTN_VLLM_V1,
+        }:
+
+            cu_seqlens_q = torch.arange(0, (bsz + 1) * q_len,
+                                        step=q_len,
+                                        dtype=torch.int32,
+                                        device=query.device)
+            cu_seqlens_k = torch.arange(0, (bsz + 1) * kv_len,
+                                        step=kv_len,
+                                        dtype=torch.int32,
+                                        device=key.device)
+
+            out = self._flash_attn_varlen_func(
+                query.flatten(0, 1),
+                key.flatten(0, 1),
+                value.flatten(0, 1),
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_k,
+                max_seqlen_q=q_len,
+                max_seqlen_k=kv_len,
+                softmax_scale=self.scale,
+            )
+        elif self.attn_backend == _Backend.XFORMERS:
             from xformers import ops as xops
 
             out = xops.memory_efficient_attention_forward(query,
