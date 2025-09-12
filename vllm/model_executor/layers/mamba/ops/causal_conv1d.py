@@ -728,8 +728,7 @@ def _causal_conv1d_update_kernel(
         conv_state_token_offset * stride_conv_state_tok +
         (idx_feats * stride_conv_state_dim)[None, :] +
         ((idx_tokens + (1 if IS_SPEC_DECODING else seqlen)) *
-         stride_conv_state_tok)[:, None]
-    )  # [BLOCK_M, BLOCK_N]
+         stride_conv_state_tok)[:, None])  # [BLOCK_M, BLOCK_N]
     mask = ((conv_state_batch_coord < num_cache_lines)
             & ((idx_tokens + seqlen) < state_len)[:, None]
             & (idx_feats < dim)[None, :])
