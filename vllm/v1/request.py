@@ -3,6 +3,7 @@
 
 import enum
 import time
+from collections.abc import Mapping
 from functools import partial
 from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
@@ -35,6 +36,7 @@ class Request:
         structured_output_request: Optional["StructuredOutputRequest"] = None,
         cache_salt: Optional[str] = None,
         priority: int = 0,
+        trace_headers: Optional[Mapping[str, str]] = None,
         block_hasher: Optional[Callable[["Request"],
                                         list["BlockHash"]]] = None,
     ) -> None:
@@ -100,7 +102,8 @@ class Request:
         # they should also be updated simultaneously.
         self.output_token_ids = ConstantList(self._output_token_ids)
         self.all_token_ids = ConstantList(self._all_token_ids)
-
+        # trace_headers
+        self.trace_headers = trace_headers
         # State
         # The number of tokens with prefix cache hits.
         self.num_cached_tokens = -1
@@ -136,6 +139,7 @@ class Request:
                     if request.sampling_params else None,
             cache_salt=request.cache_salt,
             priority=request.priority,
+            trace_headers=request.trace_headers,
             block_hasher=block_hasher,
         )
 
