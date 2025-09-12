@@ -41,28 +41,31 @@ def is_installing_from_github() -> bool:
             if arg.startswith('git+') and 'github.com/vllm-project/vllm' in arg:
                 return True
 
-    # Method 2: Check environment variables that might indicate GitHub installation
-    # Some package managers set these during installation
-    github_env_vars = [
-        'PIP_REQ_TRACKER',
-        'PIP_DISABLE_PIP_VERSION_CHECK', 
-        'PIP_NO_DEPS',
-        'PIP_INDEX_URL',
-        'UV_CACHE_DIR',
-        'UV_TARGET_PYTHON'
-    ]
-    for var in github_env_vars:
-        if os.environ.get(var):
-            # If we're in a temp directory and have package manager env vars, likely GitHub install
-            current_dir = os.getcwd()
-            if any(pattern in current_dir.lower() for pattern in ['/tmp/', '\\temp\\', 'cache', 'builds', '.cache']):
-                return True
-
-    # Method 3: Check if we're in a temporary directory with vLLM repo
-    # This is the most reliable method for pip/uv GitHub installs
+    # Method 2: Check if we're in a uv cache directory with vLLM repo
+    # This is the most reliable method for uv GitHub installs
     current_dir = os.getcwd()
     
-    # Check if we're in a temp/cache directory (common for package managers)
+    # Check if we're in a uv cache directory
+    is_uv_cache = '/.cache/uv/git-v0/checkouts/' in current_dir
+    
+    if is_uv_cache:
+        # Check if this is a vLLM repository
+        try:
+            result = subprocess.run(['git', 'remote', 'get-url', 'origin'],
+                                    capture_output=True,
+                                    text=True,
+                                    cwd=ROOT_DIR)
+            if result.returncode == 0:
+                origin_url = result.stdout.strip()
+                is_vllm_repo = ('github.com/vllm-project/vllm' in origin_url or 
+                               'git@github.com:vllm-project/vllm.git' in origin_url)
+                if is_vllm_repo:
+                    return True
+        except Exception:
+            pass
+
+    # Method 3: Check if we're in a temporary directory with vLLM repo
+    # This covers other package managers like pip
     is_temp_dir = any(pattern in current_dir.lower() for pattern in [
         '/tmp/', '\\temp\\', 'cache', 'builds', '.cache'
     ])
