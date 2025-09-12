@@ -73,7 +73,8 @@ class GitUtils:
 class DebugLogger:
     """Base class for components that need debug logging."""
 
-    DEFAULT_LOG_PATH = "/tmp/vllm_debug.log"
+    DEFAULT_LOG_PATH = os.path.join(
+        __import__("tempfile").gettempdir(), "vllm_debug.log")
 
     def __init__(self, debug_log_path: str = None):
         self.debug_log_path = debug_log_path or self.DEFAULT_LOG_PATH
@@ -116,7 +117,7 @@ class GitHubDetector(DebugLogger):
     TEMP_DIR_PATTERNS = ['/tmp/', '\\temp\\', 'cache', 'builds', '.cache']
 
     # UV cache directory pattern
-    UV_CACHE_PATTERN = '/.cache/uv/git-v0/checkouts/'
+    UV_CACHE_PATTERN = os.path.join('.cache', 'uv', 'git-v0', 'checkouts')
 
     def _is_vllm_github_repo(self, origin_url: str) -> bool:
         """Check given URL is a vLLM GitHub repository (original or fork)."""
@@ -136,7 +137,9 @@ class GitHubDetector(DebugLogger):
         origin_url = GitUtils.get_origin_url()
 
         # Handle UV cache directory case
-        if origin_url.startswith('/root/.cache/uv/git-v0/db/'):
+        uv_cache_db_path = os.path.join(
+            os.path.expanduser('~'), '.cache', 'uv', 'git-v0', 'db') + os.sep
+        if origin_url.startswith(uv_cache_db_path):
             return self._resolve_uv_cache_url()
 
         return origin_url
@@ -145,8 +148,9 @@ class GitHubDetector(DebugLogger):
         """Resolve original URL from UV cache directory."""
         # Try to get the original URL from git config
         config_url = GitUtils.get_config_url()
-        if config_url and not config_url.startswith(
-                '/root/.cache/uv/git-v0/db/'):
+        uv_cache_db_path = os.path.join(
+            os.path.expanduser('~'), '.cache', 'uv', 'git-v0', 'db') + os.sep
+        if config_url and not config_url.startswith(uv_cache_db_path):
             return config_url
 
         # Try to get URL from git log
@@ -171,7 +175,9 @@ class GitHubDetector(DebugLogger):
     def _check_uv_cache_directory(self) -> bool:
         """Check if we're in a UV cache directory with vLLM repo."""
         current_dir = os.getcwd()
-        if self.UV_CACHE_PATTERN not in current_dir:
+        expected_cache_path = os.path.join(
+            os.path.expanduser("~"), self.UV_CACHE_PATTERN)
+        if not os.path.abspath(current_dir).startswith(expected_cache_path):
             return False
 
         has_setup_py = os.path.exists(os.path.join(ROOT_DIR, 'setup.py'))
@@ -866,8 +872,10 @@ class PrecompiledWheelManager(DebugLogger):
             with urlopen(base_url) as resp:
                 if resp.status == 200:
                     return base_url
-        except Exception:
-            pass
+        except Exception as e:
+            self._log_debug(
+                f"Failed to access base wheel URL '{base_url}': {e}. "
+                "Falling back to nightly.")
 
         # Fall back to nightly
         return nightly_url
