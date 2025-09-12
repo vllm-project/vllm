@@ -18,6 +18,26 @@ from .registry import (_TRANSFORMERS_BACKEND_MODELS, AUTO_EXAMPLE_MODELS,
                        HF_EXAMPLE_MODELS, HfExampleModels)
 from .utils import dummy_hf_overrides
 
+# This minimal list of model architectures is smaller than the total list of
+# supported models. The intention is that in the "typical" regression testing
+# scenario, we only test initializing these models. This subset was chosen
+# to include representative examples of model varieties/workloads (conditional
+# generation, sequence classification, causal LM, ranking, chat, reward model,
+# multimodal, geospatial, voice, embedding, MTP)
+MINIMAL_MODEL_ARCH_LIST = [
+    "LlavaForConditionalGeneration", "Llama4ForConditionalGeneration",
+    "BertForSequenceClassification", "Gemma3nForCausalLM", "JinaVLForRanking",
+    "InternVLChatModel", "InternLM2ForRewardModel",
+    "TransformersForMultimodalLM", "PrithviGeoSpatialMAE", "UltravoxModel",
+    "DeepSeekMTPModel", "XLMRobertaModel"
+]
+
+# This list is the complement of the minimal list above. The intention is that
+# this list of models is only tested in a "special case" i.e. most PRs should
+# not test these models
+OTHER_MODEL_ARCH_LIST = (set(HF_EXAMPLE_MODELS.get_supported_archs()) -
+                         set(MINIMAL_MODEL_ARCH_LIST))
+
 
 @create_new_process_for_each_test()
 def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
@@ -101,8 +121,23 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
             max_num_seqs=model_info.max_num_seqs)
 
 
-@pytest.mark.parametrize("model_arch", HF_EXAMPLE_MODELS.get_supported_archs())
-def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize("model_arch", MINIMAL_MODEL_ARCH_LIST)
+def test_can_initialize_small_subset(model_arch: str,
+                                     monkeypatch: pytest.MonkeyPatch):
+    """Test initializing small subset of supported models"""
+    if model_arch == "Lfm2ForCausalLM":
+        pytest.skip("Skipping until test supports V1-only models")
+    can_initialize(model_arch, monkeypatch, HF_EXAMPLE_MODELS)
+
+
+@pytest.mark.parametrize("model_arch", OTHER_MODEL_ARCH_LIST)
+def test_can_initialize_large_subset(model_arch: str,
+                                     monkeypatch: pytest.MonkeyPatch):
+    """Test initializing large subset of supported models
+    
+    This test covers the complement of the tests covered in the "small subset"
+    test.
+    """
     if model_arch == "Lfm2ForCausalLM":
         pytest.skip("Skipping until test supports V1-only models")
     can_initialize(model_arch, monkeypatch, HF_EXAMPLE_MODELS)
