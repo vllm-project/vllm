@@ -146,10 +146,6 @@ class W8A8BlockFp8LinearOp:
 
         if should_use_deepgemm_for_fp8_linear(self.is_deep_gemm_supported,
                                               output_dtype, weight):
-
-            input_2d = input.view(-1, input.shape[-1])
-            output_shape = [*input.shape[:-1], weight.shape[0]]
-
             q_input, x_scale = per_token_group_quant_fp8(
                 input_2d,
                 block_size[1],
