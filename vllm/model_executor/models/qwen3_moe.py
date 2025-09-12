@@ -170,7 +170,8 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         return quant_config
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        # NOTE: hidden_states can have either 1D or 2D shape.
+        assert hidden_states.dim(
+        ) <= 2, "Qwen3MoeSparseMoeBlock only supports 1D or 2D inputs"
         is_input_1d = hidden_states.dim() == 1
         hidden_dim = hidden_states.shape[-1]
         hidden_states = hidden_states.view(-1, hidden_dim)
