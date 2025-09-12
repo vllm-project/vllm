@@ -324,7 +324,7 @@ class MambaMixer2(MambaBase, CustomOp):
         # - the weight already has a "weight_loader" attribute
         #   which set_weight_attrs will raise if we do not
         #   delete before trying to override it
-        # - ditto for the otther two weights below
+        # - ditto for the other two weights below
         delattr(self.conv1d.bias, "weight_loader")
         set_weight_attrs(
             self.conv1d.bias,
