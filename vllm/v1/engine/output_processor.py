@@ -308,8 +308,6 @@ class OutputProcessor:
     def propagate_error(self, e: Exception):
         """Propagate error to all generate() tasks."""
         if isinstance(e, SchedulerWaitingQueueFullError):
-            # If the exception has a request_id, it is likely a
-            # SchedulerWaitingQueueFullError.
             request_id = e.request_id
             if request_id in self.request_states:
                 state = self.request_states.get(request_id)

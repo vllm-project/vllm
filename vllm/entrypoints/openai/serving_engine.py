@@ -445,10 +445,11 @@ class OpenAIServing:
     ) -> ErrorResponse:
         if isinstance(message, SchedulerWaitingQueueFullError):
             return ErrorResponse(
-                message=str(message),
-                type="ServiceUnavailableError",
-                code=HTTPStatus.SERVICE_UNAVAILABLE.value,
-            )
+                ErrorInfo(
+                    message=str(message),
+                    type="ServiceUnavailableError",
+                    code=HTTPStatus.SERVICE_UNAVAILABLE.value,
+                ))
         elif isinstance(message, Exception):
             message_str = str(message)
         else:
@@ -460,15 +461,14 @@ class OpenAIServing:
             else:
                 traceback.print_stack()
         return ErrorResponse(error=ErrorInfo(
-            message=message, type=err_type, code=status_code.value))
+            message=message_str, type=err_type, code=status_code.value))
 
     def create_streaming_error_response(
             self,
             message: Union[str, Exception],
             err_type: str = "BadRequestError",
             status_code: HTTPStatus = HTTPStatus.BAD_REQUEST) -> str:
-        json_str = json.dumps({
-            "error":
+        json_str = json.dumps(
             self.create_error_response(message=message,
                                        err_type=err_type,
                                        status_code=status_code).model_dump())
