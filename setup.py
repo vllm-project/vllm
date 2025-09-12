@@ -41,7 +41,24 @@ def is_installing_from_github() -> bool:
             if arg.startswith('git+') and 'github.com/vllm-project/vllm' in arg:
                 return True
 
-    # Method 2: Check if we're in a temporary directory with vLLM repo
+    # Method 2: Check environment variables that might indicate GitHub installation
+    # Some package managers set these during installation
+    github_env_vars = [
+        'PIP_REQ_TRACKER',
+        'PIP_DISABLE_PIP_VERSION_CHECK', 
+        'PIP_NO_DEPS',
+        'PIP_INDEX_URL',
+        'UV_CACHE_DIR',
+        'UV_TARGET_PYTHON'
+    ]
+    for var in github_env_vars:
+        if os.environ.get(var):
+            # If we're in a temp directory and have package manager env vars, likely GitHub install
+            current_dir = os.getcwd()
+            if any(pattern in current_dir.lower() for pattern in ['/tmp/', '\\temp\\', 'cache', 'builds', '.cache']):
+                return True
+
+    # Method 3: Check if we're in a temporary directory with vLLM repo
     # This is the most reliable method for pip/uv GitHub installs
     current_dir = os.getcwd()
     
@@ -64,7 +81,7 @@ def is_installing_from_github() -> bool:
         except Exception:
             pass
 
-    # Method 3: Check if we're in the actual vLLM repository (for local dev)
+    # Method 4: Check if we're in the actual vLLM repository (for local dev)
     try:
         result = subprocess.run(['git', 'remote', 'get-url', 'origin'],
                                 capture_output=True,
