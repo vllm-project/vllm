@@ -92,7 +92,7 @@ class CPUWorker(Worker):
         logger.warning("sleep mode is not supported on CPU, ignore it.")
         pass
 
-    def determine_available_memory(self) -> int:
+    def determine_kv_cache_available_memory(self) -> int:
         return self.cache_config.cpu_kvcache_space_bytes  # type: ignore
 
     def compile_or_warm_up_model(self) -> None:
