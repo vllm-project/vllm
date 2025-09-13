@@ -659,6 +659,9 @@ class FusedMoEModularKernel(torch.nn.Module):
                 f"{fused_experts.__class__.__name__}."
                 f"{fused_experts.activation_formats[0]}")
 
+    def output_is_reduced(self) -> bool:
+        return self.prepare_finalize.output_is_reduced()
+
     def _do_fused_experts(
         self,
         fused_out: Optional[torch.Tensor],

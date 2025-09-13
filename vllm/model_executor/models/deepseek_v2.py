@@ -218,7 +218,7 @@ class DeepseekV2MoE(nn.Module):
                 top_k=config.num_experts_per_tok,
                 hidden_size=config.hidden_size,
                 intermediate_size=config.moe_intermediate_size,
-                reduce_results=False,
+                reduce_results=True,
                 renormalize=config.norm_topk_prob,
                 quant_config=quant_config,
                 use_grouped_topk=True,
@@ -267,7 +267,7 @@ class DeepseekV2MoE(nn.Module):
                 top_k=config.num_experts_per_tok,
                 hidden_size=config.hidden_size,
                 intermediate_size=config.moe_intermediate_size,
-                reduce_results=False,
+                reduce_results=False,  # remove?
                 renormalize=config.norm_topk_prob,
                 quant_config=quant_config,
                 use_grouped_topk=True,
@@ -306,7 +306,7 @@ class DeepseekV2MoE(nn.Module):
             final_hidden_states = tensor_model_parallel_all_gather(
                 final_hidden_states, 0)
             final_hidden_states = final_hidden_states[:num_tokens]
-        elif self.tp_size > 1:
+        elif False and self.tp_size > 1:
             final_hidden_states = (
                 self.experts.maybe_all_reduce_tensor_model_parallel(
                     final_hidden_states))

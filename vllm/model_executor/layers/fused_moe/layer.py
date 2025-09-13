@@ -1796,8 +1796,7 @@ class FusedMoE(CustomOp):
         early.
         """
         if self.quant_method.fused_experts is not None:
-            return (self.quant_method.fused_experts.prepare_finalize.
-                    output_is_reduced())  # noqa: E501
+            return self.quant_method.fused_experts.output_is_reduced()
         else:
             return False
 
@@ -1972,15 +1971,16 @@ class FusedMoE(CustomOp):
 
         if self.shared_experts is not None:
             assert full_shared_final_hidden_states is not None
-            if self.tp_size > 1 and self.must_reduce_shared_expert_outputs():
-                full_shared_final_hidden_states = (
-                    tensor_model_parallel_all_reduce(
-                        full_shared_final_hidden_states))
 
             assert self.shared_fused_combine is not None
             full_fused_final_hidden_states = self.shared_fused_combine(
                 full_shared_final_hidden_states,
                 full_fused_final_hidden_states)
+
+            if self.tp_size > 1:
+                full_fused_final_hidden_states = (
+                    self.maybe_all_reduce_tensor_model_parallel(
+                        full_fused_final_hidden_states))
 
         return full_fused_final_hidden_states
 
@@ -2062,36 +2062,26 @@ class FusedMoE(CustomOp):
             if do_naive_dispatch_combine and do_combine:
                 states = get_ep_group().combine(states)
 
-            if ((self.reduce_results
-                 or self.must_reduce_shared_expert_outputs())
-                    and (self.tp_size > 1 or self.ep_size > 1)):
+            if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
                 states = self.maybe_all_reduce_tensor_model_parallel(states)
 
             return states
 
-        if self.shared_experts is not None:
+        if shared_output is not None:
+            assert not isinstance(final_hidden_states, tuple)
+            assert self.shared_experts is not None
             assert self.shared_fused_combine is not None
-
-            #if self.tp_size > 1 and self.must_reduce_shared_expert_outputs():
-            #    shared_output = final_hidden_states[0]
-            #    final_hidden_states = final_hidden_states[1]
-            #else:
-            #    shared_output, final_hidden_states = final_hidden_states
-
             final_hidden_states = self.shared_fused_combine(
-                combine_and_reduce_output(final_hidden_states[0],
-                                          do_combine=False),
-                combine_and_reduce_output(final_hidden_states[1]),
-            )
+                shared_output, final_hidden_states)
+        elif self.shared_fused_combine is not None:
+            final_hidden_states = self.shared_fused_combine(
+                final_hidden_states[0], final_hidden_states[1])
         elif self.zero_expert_num is not None and self.zero_expert_num > 0:
             assert isinstance(final_hidden_states, torch.Tensor)
             return combine_and_reduce_output(final_hidden_states) + zero_expert_result
-        else:
-            assert not isinstance(final_hidden_states, tuple)
-            final_hidden_states = combine_and_reduce_output(
-                final_hidden_states)
 
-        return final_hidden_states
+        assert not isinstance(final_hidden_states, tuple)
+        return combine_and_reduce_output(final_hidden_states)
 
     @classmethod
     def make_expert_params_mapping(
