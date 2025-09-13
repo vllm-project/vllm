@@ -685,20 +685,6 @@ VLM_TEST_SETTINGS = {
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[pytest.mark.cpu_model],
     ),
-    "skywork_r1v": VLMTestInfo(
-        models=["Skywork/Skywork-R1V-38B"],
-        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"<｜begin▁of▁sentence｜><｜User｜>\n{img_prompt}<｜Assistant｜><think>\n", # noqa: E501
-        single_image_prompts=IMAGE_ASSETS.prompts({
-            "stop_sign": "<image>\nWhat's the content in the center of the image?",  # noqa: E501
-            "cherry_blossom": "<image>\nWhat is the season?",
-        }),
-        multi_image_prompt="<image>\n<image>\nDescribe the two images in short.",  # noqa: E501
-        max_model_len=4096,
-        use_tokenizer_eos=True,
-        patch_hf_runner=model_utils.skyworkr1v_patch_hf_runner,
-        marks=[large_gpu_mark(min_gb=80)],
-    ),
     "smolvlm": VLMTestInfo(
         models=["HuggingFaceTB/SmolVLM2-2.2B-Instruct"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),

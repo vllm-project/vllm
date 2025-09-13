@@ -164,8 +164,6 @@ def _test_processing_correctness(
 # incorrect token ids. So we need use `add_special_tokens=False` here
 # to leave bos_token to be added by the processor.
 _ADD_SPECIAL_TOKENS_OVERRIDES = {
-    "donut": False,
-    "mllama": False,
     "ovis": False,
     "ovis2_5": False,
     "paligemma": False,
