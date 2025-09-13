@@ -87,8 +87,14 @@ class PassConfig:
     """Whether to enable async TP."""
     enable_fi_allreduce_fusion: bool = False
     """Whether to enable flashinfer allreduce fusion."""
-    fi_allreduce_fusion_max_token_num: int = 16384
-    """Max number of tokens to used in flashinfer allreduce fusion."""
+    fi_allreduce_fusion_max_size_mb: dict[int,
+                                          float] = field(default_factory=dict)
+    """The thresholds of the communicated tensor sizes under which
+    vLLM should use flashinfer fused allreduce. Specified as a
+    dictionary mapping each world size to the threshold in MiB
+        { <world size>: <max size in MiB> }
+    Unspecified world sizes will fallback to
+        { 2: 64, 4: 1, <everything else>: 0.5 }"""
 
     # TODO(luka) better pass enabling system.
 
@@ -460,6 +466,17 @@ class CompilationConfig:
                                  "mutually exclusive, prefer cudagraph_mode "
                                  "since full_cuda_graph is deprecated.")
             self.cudagraph_mode = CUDAGraphMode.FULL
+
+        fi_allreduce_fusion_max_size_mb = {
+            2: 64,
+            4: 1,
+            6: 0.5,
+            8: 0.5,
+        }
+        fi_allreduce_fusion_max_size_mb.update(
+            self.pass_config.fi_allreduce_fusion_max_size_mb)
+        self.pass_config.fi_allreduce_fusion_max_size_mb = \
+            fi_allreduce_fusion_max_size_mb
 
     def init_backend(self, vllm_config: "VllmConfig") -> Union[str, Callable]:
         if self.level == CompilationLevel.NO_COMPILATION:
