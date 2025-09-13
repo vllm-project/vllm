@@ -19,7 +19,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.cpu_model_runner import CPUModelRunner
 from vllm.v1.worker.gpu_worker import (Worker,
                                        init_worker_distributed_environment)
-from vllm.v1.worker.utils import is_residual_scattered
+from vllm.v1.worker.utils import is_residual_scattered_for_sp
 
 logger = init_logger(__name__)
 
@@ -113,7 +113,8 @@ class CPUWorker(Worker):
             num_scheduled_tokens)
         all_gather_tensors = {
             "residual":
-            not is_residual_scattered(self.vllm_config, num_input_tokens)
+            not is_residual_scattered_for_sp(self.vllm_config,
+                                             num_input_tokens)
         }
         if not get_pp_group().is_first_rank:
             intermediate_tensors = IntermediateTensors(

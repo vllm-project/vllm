@@ -82,7 +82,7 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.kv_connector_model_runner_mixin import (
     KVConnectorModelRunnerMixin, KVConnectorOutput)
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
-from vllm.v1.worker.utils import is_residual_scattered
+from vllm.v1.worker.utils import is_residual_scattered_for_sp
 
 from .utils import (AttentionGroup, MultiModalBudget,
                     add_kv_sharing_layers_to_kv_cache_groups, bind_kv_cache,
@@ -1348,7 +1348,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         assert self.intermediate_tensors is not None
 
         tp = self.vllm_config.parallel_config.tensor_parallel_size
-        is_rs = is_residual_scattered(self.vllm_config, num_tokens)
+        is_rs = is_residual_scattered_for_sp(self.vllm_config, num_tokens)
 
         # When sequence parallelism is enabled, the "residual" tensor is sharded
         # across tensor parallel ranks, so each rank only needs its own slice.
@@ -1598,7 +1598,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             all_gather_tensors = {
                 "residual":
-                not is_residual_scattered(self.vllm_config, num_input_tokens)
+                not is_residual_scattered_for_sp(self.vllm_config,
+                                                 num_input_tokens)
             }
             get_pp_group().send_tensor_dict(
                 hidden_states.tensors,

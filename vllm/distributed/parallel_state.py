@@ -666,6 +666,21 @@ class GroupCoordinator:
     ) -> Optional[dict[str, Union[torch.Tensor, Any]]]:
         """Send the input tensor dictionary.
         NOTE: `dst` is the local rank of the source rank.
+
+        all_gather_group: The group for the all-gather operation. If provided,
+            an optimization is enabled where each rank in the group sends a
+            slice of a tensor and the receiver reconstructs it using an
+            all-gather, which can improve performance. This is typically the
+            tensor-parallel group.
+        all_gather_tensors: A dictionary to specify which tensors should use
+            the all-gather optimization, which is only effective when
+            `all_gather_group` is provided. By default, this optimization is
+            on for any tensor whose size is divisible by the
+            `all_gather_group`'s world size. However, it should be disabled
+            for tensors that are not fully replicated across the group (e.g.,
+            the residual tensor when sequence parallelism is enabled). This
+            dictionary allows overriding the default behavior on a per-tensor
+            basis.
         """
         # Bypass the function if we are using only 1 GPU.
         if not torch.distributed.is_initialized() or self.world_size == 1:
@@ -737,6 +752,21 @@ class GroupCoordinator:
     ) -> Optional[dict[str, Union[torch.Tensor, Any]]]:
         """Recv the input tensor dictionary.
         NOTE: `src` is the local rank of the source rank.
+
+        all_gather_group: The group for the all-gather operation. If provided,
+            an optimization is enabled where each rank in the group sends a
+            slice of a tensor and the receiver reconstructs it using an
+            all-gather, which can improve performance. This is typically the
+            tensor-parallel group.
+        all_gather_tensors: A dictionary to specify which tensors should use
+            the all-gather optimization, which is only effective when
+            `all_gather_group` is provided. By default, this optimization is
+            on for any tensor whose size is divisible by the
+            `all_gather_group`'s world size. However, it should be disabled
+            for tensors that are not fully replicated across the group (e.g.,
+            the residual tensor when sequence parallelism is enabled). This
+            dictionary allows overriding the default behavior on a per-tensor
+            basis.
         """
         # Bypass the function if we are using only 1 GPU.
         if not torch.distributed.is_initialized() or self.world_size == 1:

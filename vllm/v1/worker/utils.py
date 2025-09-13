@@ -279,8 +279,8 @@ def bind_kv_cache(
         forward_context[layer_name].kv_cache = [kv_cache]
 
 
-def is_residual_scattered(vllm_config: VllmConfig,
-                          num_input_tokens: int) -> bool:
+def is_residual_scattered_for_sp(vllm_config: VllmConfig,
+                                 num_input_tokens: int) -> bool:
     """Check if the residual tensor is scattered for sequence parallelism.
 
     The residual tensor is scattered across tensor parallel ranks when sequence
@@ -292,12 +292,13 @@ def is_residual_scattered(vllm_config: VllmConfig,
         return False
 
     tp = vllm_config.parallel_config.tensor_parallel_size
+
+    if tp == 1:
+        return False
+
     # When sequence parallelism is enabled, we always pad num_input_tokens
     # to be a multiple of tensor_parallel_size (tp) earlier.
-    if tp > 1:
-        assert num_input_tokens % tp == 0
+    assert num_input_tokens % tp == 0
 
-    is_residual_scattered = (tp > 1 and num_input_tokens
-                             in vllm_config.compilation_config.compile_sizes)
-
-    return is_residual_scattered
+    # Currently, SP is only enabled for static size fx graphs.
+    return (num_input_tokens in vllm_config.compilation_config.compile_sizes)
