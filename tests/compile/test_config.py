@@ -4,7 +4,8 @@ import pytest
 
 import vllm
 from vllm.compilation.counter import compilation_counter
-from vllm.config import VllmConfig
+from vllm.config import (CompilationConfig, CUDAGraphMode, ModelConfig,
+                         VllmConfig)
 from vllm.utils import _is_torch_equal_or_newer
 
 
@@ -18,12 +19,35 @@ def test_version():
 
 def test_use_cudagraphs_dynamic(monkeypatch):
     assert vllm.envs.VLLM_USE_V1
-    vllm_config = VllmConfig()
-    assert vllm_config.compilation_config.use_cudagraph
+    # cudagraph_mode=PIECEWISE by default
+    config = VllmConfig()
+    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
+
+    config2 = VllmConfig(compilation_config=CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.NONE))
+    config3 = VllmConfig(compilation_config=CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL))
+    config4 = VllmConfig(model_config=ModelConfig(enforce_eager=True))
+    assert config2.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+    assert config3.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
+    assert config4.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
 
     monkeypatch.setenv('VLLM_USE_V1', '0')
-    vllm_config = VllmConfig()
-    assert not vllm_config.compilation_config.use_cudagraph
+    # TODO remove when V0 fully removed:
+    # https://github.com/vllm-project/vllm/issues/18571
+
+    config = VllmConfig()  # cudagraph_mode=NONE by default
+    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+
+    config2 = VllmConfig(compilation_config=CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.PIECEWISE))
+    config3 = VllmConfig(compilation_config=CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL))
+    config4 = VllmConfig(model_config=ModelConfig(enforce_eager=True))
+
+    assert config2.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
+    assert config3.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
+    assert config4.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
 
 
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
