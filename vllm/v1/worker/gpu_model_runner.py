@@ -397,7 +397,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Cached outputs.
         self._draft_token_ids: Optional[Union[list[list[int]],
                                               torch.Tensor]] = None
-        self._req_id_to_draft_token_len: Optional[dict] = {}
+        self._req_id_to_draft_token_len: dict = {}
         self.num_spec_tokens = 0
         if self.speculative_config:
             self.num_spec_tokens = self.speculative_config.num_speculative_tokens
@@ -821,7 +821,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _get_total_num_scheduled_without_spec(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> tuple[int, np.ndarray]:
+    ) -> int:
         total_num_scheduled_tokens_without_spec = scheduler_output.total_num_scheduled_tokens
         for req_id in scheduler_output.num_scheduled_tokens:
             draft_len = self._req_id_to_draft_token_len.get(req_id, 0)
@@ -935,7 +935,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # _draft_token_ids is a tensor, the length of draft tokens for different
         # requests are the same.
         spec_flattened_indices = list(
-            chain.from_iterable(spec_flattened_indices))
+            chain.from_iterable(spec_flattened_indices))  # type: ignore
         draft_tokens_index_tensor = torch.tensor(
             spec_flattened_indices,
             dtype=torch.int64,
