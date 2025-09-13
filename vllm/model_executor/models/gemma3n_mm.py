@@ -586,10 +586,10 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         # ruff: noqa
         # The Gemma3nProcessor expects all audio will be 30s in length and inserts 188 audio soft tokens into the
-        # text to account for this. However, the audio preprocessing and encoder do not gurarantee they will
+        # text to account for this. However, the audio preprocessing and encoder do not guarantee they will
         # produce 188 soft tokens; they will produce at most that many tokens, but they may produce fewer tokens
         # depending on the length of the longest audio input in the batch. When we encounter this situation, we pad
-        # the audio feature out to 188 soft tokens with the emebedding of the last token in the embed_audio vocab.
+        # the audio feature out to 188 soft tokens with the embedding of the last token in the embed_audio vocab.
         # TODO precompute and cache padding
         audio_padding_toks = torch.tensor([[self.vocab_size - 1]],
                                           dtype=torch.long,
