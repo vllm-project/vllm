@@ -258,7 +258,7 @@ class VocabParallelEmbedding(CustomOp):
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
-        # Divide the weight matrix along the vocaburaly dimension.
+        # Divide the weight matrix along the vocabulary dimension.
         self.num_added_embeddings = self.num_embeddings - self.org_vocab_size
         self.num_embeddings_per_partition = divide(self.num_embeddings_padded,
                                                    self.tp_size)
