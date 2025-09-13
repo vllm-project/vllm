@@ -5,28 +5,52 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
-    silu_mul_fp8_quant_deep_gemm)
+    silu_mul_fp8_quant_deep_gemm_cuda)
 from vllm.platforms import current_platform
+from vllm.utils import cdiv
 
-# (E, T, H, group_size, seed)
+fp8_dtype = torch.float8_e4m3fn
+
 CASES = [
-    (1, 1, 128, 64, 0),
-    (1, 4, 128, 128, 0),
-    (2, 4, 256, 128, 0),
-    (32, 64, 256, 128, 0),
-    (17, 31, 768, 128, 0),
+    (1, 1, 128, fp8_dtype),
+    (1, 4, 128, fp8_dtype),
+    (2, 4, 256, fp8_dtype),
+    (32, 64, 256, fp8_dtype),
+    (17, 31, 768, fp8_dtype),
+    (1, 1, 128 * 1, fp8_dtype),
+    (1, 1, 128 * 2, fp8_dtype),
+    (1, 1, 128 * 3, fp8_dtype),
+    (1, 1, 128 * 4, fp8_dtype),
+    (8, 16, 128 * 1, fp8_dtype),
+    (8, 16, 128 * 2, fp8_dtype),
+    (8, 16, 128 * 3, fp8_dtype),
+    (8, 16, 128 * 4, fp8_dtype),
+    (8, 64, 7168, fp8_dtype),
+    (8, 128, 7168, fp8_dtype),
+    (8, 256, 7168, fp8_dtype),
+    (8, 512, 7168, fp8_dtype),
+    (8, 1024, 7168, fp8_dtype),
+    (256, 8, 7168, fp8_dtype),
+    (256, 16, 7168, fp8_dtype),
+    (256, 32, 7168, fp8_dtype),
+    (256, 64, 7168, fp8_dtype),
+
+    # Only add a few fnuz tests to help with long CI times.
+    (8, 512, 7168, torch.float8_e4m3fnuz),
+    (8, 1024, 7168, torch.float8_e4m3fnuz),
 ]
 
 
-@pytest.mark.parametrize("E,T,H,group_size,seed", CASES)
+@pytest.mark.parametrize("E,T,H,fp8_type", CASES)
 @torch.inference_mode()
-def test_silu_mul_fp8_quant_deep_gemm(E, T, H, group_size, seed):
-    current_platform.seed_everything(seed)
+def test_silu_mul_fp8_quant_deep_gemm(E, T, H, fp8_type):
+    group_size = 128
+    current_platform.seed_everything(42)
 
     # Input tensor of shape (E, T, 2*H)
     y = torch.randn((E, T, 2 * H), dtype=torch.bfloat16, device="cuda")
     tokens_per_expert = torch.randint(
-        low=0,
+        low=T // 2,
         high=T,
         size=(E, ),
         dtype=torch.int32,
@@ -34,45 +58,59 @@ def test_silu_mul_fp8_quant_deep_gemm(E, T, H, group_size, seed):
     )
 
     # Run the Triton kernel
-    y_q, y_s = silu_mul_fp8_quant_deep_gemm(y,
-                                            tokens_per_expert,
-                                            group_size=group_size,
-                                            eps=1e-10)
+    y_q, y_s = silu_mul_fp8_quant_deep_gemm_cuda(y,
+                                                 tokens_per_expert,
+                                                 group_size=group_size)
 
-    # Reference implementation
-    fp8_info = torch.finfo(torch.float8_e4m3fn)
+    torch.cuda.synchronize()
+    fp8_info = torch.finfo(fp8_dtype)
     fp8_max = fp8_info.max
     fp8_min = fp8_info.min
     eps = 1e-10
 
-    # Compute silu activation and elementwise multiplication
-    y1 = y[..., :H]
+    y1 = y[..., :H].float()
     y2 = y[..., H:]
     silu_x = y1 * torch.sigmoid(y1)
     merged = silu_x * y2
 
-    # Compute reference scales and quantized output, skipping padded tokens
     for e in range(E):
         nt = tokens_per_expert[e].item()
-        ref_s = torch.empty((T, H // group_size),
+        ref_s = torch.empty((T, cdiv(H, group_size)),
                             dtype=torch.float32,
                             device="cuda")
-        ref_q = torch.empty((T, H), dtype=torch.float8_e4m3fn, device="cuda")
+        ref_q = torch.empty((T, H), dtype=fp8_dtype, device="cuda")
+
         for t in range(nt):
-            data = merged[e, t]
-            data_grp = data.view(H // group_size, group_size)
-            amax = data_grp.abs().amax(dim=1).clamp(min=eps)
-            scale = amax / fp8_max
+            data = merged[e, t].float()
+            ref_q_row = torch.empty_like(data)
 
-            scaled = data / scale.repeat_interleave(group_size)
-            clamped = scaled.clamp(fp8_min, fp8_max)
-            q = clamped.to(torch.float8_e4m3fn)
+            # process full groups
+            n_full_groups = H // group_size
+            if n_full_groups > 0:
+                data_grp = data[:n_full_groups * group_size].view(
+                    n_full_groups, group_size)
+                amax = data_grp.abs().amax(dim=1).clamp(min=eps)
+                scale = amax / fp8_max
+                scaled = data[:n_full_groups *
+                              group_size] / scale.repeat_interleave(group_size)
+                ref_q_row[:n_full_groups * group_size] = scaled.clamp(
+                    fp8_min, fp8_max).to(fp8_dtype)
+                ref_s[t, :n_full_groups] = scale
 
-            ref_s[t] = scale
-            ref_q[t] = q
+            # process remainder group
+            rem = H % group_size
+            if rem > 0:
+                data_rem = data[-rem:]
+                amax = data_rem.abs().amax().clamp(min=eps)
+                scale = amax / fp8_max
+                scaled = data_rem / scale
+                ref_q_row[-rem:] = scaled.clamp(fp8_min, fp8_max).to(fp8_dtype)
+                ref_s[t, -1] = scale
 
-        y_se = y_s[e]
-        y_qe = y_q[e]
+            ref_q[t] = ref_q_row
+
+        y_se = y_s[e].float()
+        y_qe = y_q[e].float()
 
         torch.testing.assert_close(y_se[:nt], ref_s[:nt], atol=1e-4, rtol=1e-2)
         torch.testing.assert_close(
