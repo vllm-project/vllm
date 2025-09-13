@@ -31,6 +31,7 @@ def glm4_1v_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
     """
     # Ensure video metadata is included
     if "video" in mm_data:
+        # GLM4.1V doesn't support multiple videos
         video = mm_data["video"]
         mm_data["video"] = (video, {
             "total_num_frames": len(video),
@@ -38,6 +39,33 @@ def glm4_1v_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
             "duration": 1,
             "video_backend": "opencv"
         })
+    return mm_data
+
+
+def qwen3_vl_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
+    """
+    Patch the multimodal data for Qwen3-VL model.
+    """
+
+    def create_metadata(frames: np.ndarray):
+        num_frames = len(frames)
+        return {
+            "total_num_frames": num_frames,
+            "fps": 2.0,
+            "duration": num_frames / 2.0,
+            "video_backend": "opencv",
+            "frames_indices": list(range(num_frames)),
+        }
+
+    # Ensure video metadata is included
+    if "video" in mm_data:
+        video = mm_data["video"]
+        if isinstance(video, list):
+            # multiple videos
+            mm_data["video"] = [(vid, create_metadata(vid)) for vid in video]
+        else:
+            # single video
+            mm_data["video"] = (video, create_metadata(video))
     return mm_data
 
 
@@ -181,8 +209,10 @@ _IGNORE_MM_KEYS = {
 }
 
 MM_DATA_PATCHES = {
-    # GLM4.1V requires video metadata to be included in the input
+    # GLM4.1V and Qwen3-VL requires video metadata to be included in the input
     "glm4v": glm4_1v_patch_mm_data,
+    "qwen3_vl": qwen3_vl_patch_mm_data,
+    "qwen3_vl_moe": qwen3_vl_patch_mm_data,
 }
 
 
@@ -328,6 +358,8 @@ def _test_processing_correctness_one(
     "Qwen/Qwen2.5-VL-3B-Instruct",
     "Qwen/Qwen2-Audio-7B-Instruct",
     "Qwen/Qwen2.5-Omni-3B",
+    "Qwen/Qwen3-VL-4B-Instruct",
+    "Qwen/Qwen3-VL-30B-A3B-Instruct",
     "YannQi/R-4B",
     "Skywork/Skywork-R1V-38B",
     "HuggingFaceTB/SmolVLM2-2.2B-Instruct",

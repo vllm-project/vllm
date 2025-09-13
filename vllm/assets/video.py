@@ -76,7 +76,7 @@ def video_to_pil_images_list(path: str,
     return [Image.fromarray(frame) for frame in frames]
 
 
-def video_get_metadata(path: str) -> dict[str, Any]:
+def video_get_metadata(path: str, num_frames: int = -1) -> dict[str, Any]:
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise ValueError(f"Could not open video file {path}")
@@ -85,11 +85,15 @@ def video_get_metadata(path: str) -> dict[str, Any]:
     fps = cap.get(cv2.CAP_PROP_FPS)
     duration = total_frames / fps if fps > 0 else 0
 
+    if num_frames == -1 or num_frames > total_frames:
+        num_frames = total_frames
+
     metadata = {
-        "total_num_frames": total_frames,
-        "fps": fps,
+        "total_num_frames": num_frames,
+        "fps": 1,
         "duration": duration,
-        "video_backend": "opencv"
+        "video_backend": "opencv",
+        "frames_indices": list(range(num_frames)),
     }
     return metadata
 
@@ -126,7 +130,7 @@ class VideoAsset:
 
     @property
     def metadata(self) -> dict[str, Any]:
-        ret = video_get_metadata(self.video_path)
+        ret = video_get_metadata(self.video_path, self.num_frames)
         return ret
 
     def get_audio(self, sampling_rate: Optional[float] = None) -> npt.NDArray:
