@@ -5,56 +5,12 @@ from typing import Optional
 
 import torch
 
-import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.platforms import current_platform
-from vllm.utils import direct_register_custom_op
 
 from .cutlass import CutlassScaledMMLinearKernel
 from .ScaledMMLinearKernel import ScaledMMLinearLayerConfig
-
-
-def rocm_aiter_gemm_w8a8_impl(
-    A: torch.Tensor,
-    B: torch.Tensor,
-    As: torch.Tensor,
-    Bs: torch.Tensor,
-    bias: Optional[torch.Tensor] = None,
-    output_dtype: torch.dtype = torch.float16,
-) -> torch.Tensor:
-
-    from aiter import gemm_a8w8_CK
-
-    # gemm_a8w8_CK(a, b, scale_a, scale_b, bias) expects
-    # a to be [M, K]
-    # b to be [N, K]
-    # CutlassScaledMMLinearKernel prepare weight `w_q` in [K, N] format
-    return gemm_a8w8_CK(A, B, As, Bs, bias, output_dtype)
-
-
-def rocm_aiter_gemm_w8a8_fake(
-    A: torch.Tensor,
-    B: torch.Tensor,
-    As: torch.Tensor,
-    Bs: torch.Tensor,
-    bias: Optional[torch.Tensor] = None,
-    output_dtype: torch.dtype = torch.float16,
-) -> torch.Tensor:
-
-    m = A.shape[0]
-    n = B.shape[0]
-    Y = torch.empty(m, n, dtype=output_dtype, device=A.device)
-    return Y
-
-
-if current_platform.is_rocm():
-    direct_register_custom_op(
-        op_name="rocm_aiter_gemm_w8a8",
-        op_func=rocm_aiter_gemm_w8a8_impl,
-        mutates_args=[],
-        fake_impl=rocm_aiter_gemm_w8a8_fake,
-        dispatch_key=current_platform.dispatch_key,
-    )
 
 
 class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
@@ -80,10 +36,7 @@ class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
                 "AiterScaledMMLinearKernel requires `aiter` which is not " +
                 "installed on ROCm.")
         # Check if rocm_aiter_gemm_w8a8_scaled_mm is enabled
-        if not (
-            envs.VLLM_ROCM_USE_AITER_LINEAR \
-            and envs.VLLM_ROCM_USE_AITER
-        ):
+        if not (rocm_aiter_ops.is_linear_enabled()):
             return (False, "AiterScaledMMLinearKernel is disabled. " +
                     "Enable by setting `VLLM_ROCM_USE_AITER=1` " +
                     "and `VLLM_ROCM_USE_AITER_LINEAR=1`. " +
@@ -159,5 +112,5 @@ class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
         # a to be [M, K]
         # b to be [N, K]
         # CutlassScaledMMLinearKernel prepare weight `w_q` in [K, N] format
-        return torch.ops.vllm.rocm_aiter_gemm_w8a8(x_q, w_q.t(), x_s, w_s,
-                                                   bias, out_dtype)
+        return rocm_aiter_ops.gemm_w8a8(x_q, w_q.t(), x_s, w_s, bias,
+                                        out_dtype)
