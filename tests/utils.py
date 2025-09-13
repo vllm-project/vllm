@@ -40,7 +40,8 @@ from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import (FlexibleArgumentParser, GB_bytes,
-                        cuda_device_count_stateless, get_open_port)
+                        cuda_device_count_stateless, get_open_port,
+                        join_host_port)
 
 if current_platform.is_rocm():
     from amdsmi import (amdsmi_get_gpu_vram_usage,
@@ -201,11 +202,15 @@ class RemoteOpenAIServer:
 
     @property
     def url_root(self) -> str:
-        return (f"http://{self.uds.split('/')[-1]}"
-                if self.uds else f"http://{self.host}:{self.port}")
+        if self.uds:
+            return f"http://{self.uds.split('/')[-1]}"
+        return f"http://{join_host_port(self.host, self.port)}"
 
     def url_for(self, *parts: str) -> str:
         return self.url_root + "/" + "/".join(parts)
+
+    def url_for_host(self, host: str, *parts: str):
+        return f"http://{join_host_port(host, self.port)}/" + "/".join(parts)
 
     def get_client(self, **kwargs):
         if "timeout" not in kwargs:
