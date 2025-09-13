@@ -873,7 +873,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # sample_flattened_indices = [0, 2, 5]
                 # spec_flattened_indices = [[1], [3, 4], [6, 7]]
                 sample_flattened_indices.append(flattened_index - draft_len)
-                spec_flattened_indices.append(
+                spec_flattened_indices.extend(
                     range(flattened_index - draft_len + 1,
                           flattened_index + 1))
                 indices_match &= (prev_index == flattened_index)
@@ -916,31 +916,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # scatter the draft tokens after the sampled tokens are scattered.
         if self._draft_token_ids is None:
             return
-
-        # TODO(Ronald1995): _draft_token_ids may have different lengths
-        # for different requests, we need to handle that case.
-        # this may be slow, optimize it.
-        if isinstance(self._draft_token_ids, list):
-            for i, req_idx in enumerate(prev_common_req_indices_tensor):
-                draft_token: list[int] = self._draft_token_ids[req_idx]
-                draft_token_gpu = torch.tensor(draft_token,
-                                               dtype=torch.int64,
-                                               pin_memory=self.pin_memory).to(
-                                                   self.device,
-                                                   non_blocking=True)
-                spec_flattened_index = torch.tensor(
-                    spec_flattened_indices[i],
-                    dtype=torch.int64,
-                    pin_memory=self.pin_memory).to(self.device,
-                                                   non_blocking=True)
-                self.input_ids.gpu.scatter_(dim=0,
-                                            index=spec_flattened_index,
-                                            src=draft_token_gpu)
-            return
+        assert not isinstance(self._draft_token_ids, list)
         # _draft_token_ids is a tensor, the length of draft tokens for different
         # requests are the same.
-        spec_flattened_indices = list(
-            chain.from_iterable(spec_flattened_indices))  # type: ignore
         draft_tokens_index_tensor = torch.tensor(
             spec_flattened_indices,
             dtype=torch.int64,
