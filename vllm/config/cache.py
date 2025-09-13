@@ -112,6 +112,8 @@ class CacheConfig:
     attention metadata for eligible layers to be overridden with metadata
     necessary for implementing this optimization in some models (e.g. Gemma3n)
     """
+    delay_batch_size: int = 16
+    """The batch size of the delayed release"""
 
     kv_cache_memory_bytes: Optional[int] = None
     """Size of KV Cache per GPU in bytes. By default, this is set to None

@@ -36,11 +36,13 @@ class BlockPool:
     def __init__(
         self,
         num_gpu_blocks: int,
+        delay_batch_size: int,
         enable_caching: bool,
         enable_kv_cache_events: bool = False,
     ):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
+        self.delay_batch_size = delay_batch_size
         self.enable_caching = enable_caching
         # All kv-cache blocks.
         self.blocks: list[KVCacheBlock] = [
@@ -50,6 +52,7 @@ class BlockPool:
         # list of free blocks (including eviction candidates when caching is
         # enabled).
         self.free_block_queue = FreeKVCacheBlockQueue(self.blocks)
+        self.delay_free_blocks: list[list[KVCacheBlock]] = []
 
         # {block_hash: {block ID: block}}. A cached block is
         # a full block with a block hash that can be used for prefix caching.
@@ -179,8 +182,10 @@ class BlockPool:
             A list of new block.
         """
         if num_blocks > self.get_num_free_blocks():
-            raise ValueError(
-                f"Cannot get {num_blocks} free blocks from the pool")
+            self._free_delay_blocks()
+            if num_blocks > self.get_num_free_blocks():
+                raise ValueError(
+                    f"Cannot get {num_blocks} free blocks from the pool")
 
         ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
 
@@ -249,22 +254,37 @@ class BlockPool:
                     self.free_block_queue.remove(block)
                 block.ref_cnt += 1
 
-    def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
+    def free_blocks(self,
+                    ordered_blocks: Iterable[KVCacheBlock],
+                    refresh: bool = False) -> None:
         """Free a list of blocks. The blocks should be ordered by their
         eviction priority, where the first block will be evicted first.
 
         Args:
             ordered_blocks: A list of blocks to free ordered by their eviction
                 priority.
+            refresh: Default is False, refresh blocks.
         """
         # Materialize the iterable to allow multiple passes.
-        blocks_list = list(ordered_blocks)
-        for block in blocks_list:
-            block.ref_cnt -= 1
-        self.free_block_queue.append_n([
-            block for block in blocks_list
-            if block.ref_cnt == 0 and not block.is_null
-        ])
+        self.delay_free_blocks.append(list(ordered_blocks))
+        if len(self.delay_free_blocks) >= self.delay_batch_size or refresh:
+            self._free_delay_blocks()
+
+    def _free_delay_blocks(self):
+        if not self.delay_free_blocks:
+            return
+        max_len = max(len(req) for req in self.delay_free_blocks)
+        for col in range(max_len - 1, -1, -1):
+            for row in range(len(self.delay_free_blocks)):
+                blocks = self.delay_free_blocks[row]
+                blocks_len = len(blocks)
+                if col < blocks_len:
+                    block = blocks[blocks_len - col - 1]
+                    block.ref_cnt -= 1
+                    if block.ref_cnt == 0:
+                        self.free_block_queue.append(block)
+
+        self.delay_free_blocks.clear()
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
@@ -275,7 +295,7 @@ class BlockPool:
             bool: True if the prefix cache is successfully reset,
             False otherwise.
         """
-        num_used_blocks = self.num_gpu_blocks - self.get_num_free_blocks()
+        num_used_blocks = self.num_gpu_blocks - self.get_num_free_blocks(True)
         if num_used_blocks != 1:  # The null block is always marked as used
             logger.warning(
                 "Failed to reset prefix cache because some "
@@ -296,13 +316,26 @@ class BlockPool:
 
         return True
 
-    def get_num_free_blocks(self) -> int:
+    def get_num_free_blocks(self, refresh: bool = False) -> int:
         """Get the number of free blocks in the pool.
 
         Returns:
             The number of free blocks.
         """
+        if refresh:
+            self._free_delay_blocks()
         return self.free_block_queue.num_free_blocks
+
+    def check_blocks_enough(self, needBlocks: int) -> bool:
+        """Check if there is enough for allocation.
+        When it is not enough, actively clean up the delayed requests.
+        
+        Returns:
+            bool: True if there are enough blocks,
+            False otherwise.
+        """
+        return self.get_num_free_blocks(
+        ) >= needBlocks or self.get_num_free_blocks(refresh=True) >= needBlocks
 
     def get_usage(self) -> float:
         """Get the KV cache usage.

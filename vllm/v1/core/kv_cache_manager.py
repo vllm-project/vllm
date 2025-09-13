@@ -267,7 +267,7 @@ class KVCacheManager:
             num_encoder_tokens=num_encoder_tokens,
         )
 
-        if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
+        if not self.block_pool.check_blocks_enough(num_blocks_to_allocate):
             # Cannot allocate new blocks
             return None
 

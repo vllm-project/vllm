@@ -273,3 +273,7 @@ class KVCacheConfig:
     see `_get_kv_cache_config_uniform_page_size` for more details.
     """
     kv_cache_groups: list[KVCacheGroupSpec]
+    """
+    The batch size of the delayed release
+    """
+    delay_batch_size: int = 16
