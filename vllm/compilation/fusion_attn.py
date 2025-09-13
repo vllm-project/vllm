@@ -18,7 +18,7 @@ from vllm.utils import round_up
 
 from .fusion import QUANT_OPS, empty_bf16, empty_fp32, empty_i32
 from .inductor_pass import enable_fake_mode
-from .vllm_inductor_pass import VllmInductorPass
+from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 logger = init_logger(__name__)
 
@@ -245,7 +245,7 @@ class AttentionNvfp4QuantPattern(AttentionQuantPattern):
             pm_pass)
 
 
-class AttnFusionPass(VllmInductorPass):
+class AttnFusionPass(VllmPatternMatcherPass):
     """
     This pass fuses post-attention quantization onto attention if supported.
 
@@ -282,20 +282,12 @@ class AttnFusionPass(VllmInductorPass):
                 "were found in CompilationConfig.static_forward_context "
                 "so no fusion patterns were registered.")
 
+        self.dump_patterns(config, self.patterns)
+
+    @VllmInductorPass.time_and_log
     def __call__(self, graph: torch.fx.graph.Graph) -> None:
-        self.begin()
-        self.dump_graph(graph, "before_attn_fusion")
-
-        count = self.patterns.apply(graph)
-
-        # TODO: Move this to pass_manager.py after the fx graph broken issue
-        # has been resolved.
-        # see https://github.com/vllm-project/vllm/issues/23091
-        graph.eliminate_dead_code()
-
-        logger.debug("Fused quantization onto %s attention nodes", count)
-        self.dump_graph(graph, "after_attn_fusion")
-        self.end_and_log()
+        self.matched_count = self.patterns.apply(graph)
+        logger.debug("Fused quant onto %s attention nodes", self.matched_count)
 
     def uuid(self):
         return VllmInductorPass.hash_source(self, AttentionQuantPattern,
