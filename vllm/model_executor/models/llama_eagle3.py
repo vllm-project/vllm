@@ -126,14 +126,19 @@ class LlamaModel(nn.Module):
                 prefix=maybe_prefix(prefix, f"layers.{start_layer_id}"),
             )
         ])
-        if hasattr(self.config, "target_hidden_size"):
-            self.fc = torch.nn.Linear(self.config.target_hidden_size * 3,
-                                      self.config.hidden_size,
-                                      bias=False)
+        # For EAGLE3, we need to handle the case where target_hidden_size
+        # might not be set in the config. We should use the target model's
+        # hidden size from the vllm_config instead.
+        if (hasattr(self.config, "target_hidden_size")
+                and self.config.target_hidden_size is not None):
+            input_size = self.config.target_hidden_size * 3
         else:
-            self.fc = torch.nn.Linear(self.config.hidden_size * 3,
-                                      self.config.hidden_size,
-                                      bias=False)
+            # Fallback to using the draft model's hidden size
+            input_size = self.config.hidden_size * 3
+
+        self.fc = torch.nn.Linear(input_size,
+                                  self.config.hidden_size,
+                                  bias=False)
         self.norm = RMSNorm(
             self.config.hidden_size,
             eps=self.config.rms_norm_eps,
@@ -197,6 +202,10 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         nn.Module.__init__(self)
         self.config = vllm_config. \
             speculative_config.draft_model_config.hf_config
+        
+        # Ensure draft_vocab_size and target_hidden_size are set
+        self._ensure_draft_vocab_size(vllm_config)
+        
         target_layer_num = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config)
 
@@ -220,6 +229,32 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             torch.zeros(self.config.draft_vocab_size, dtype=torch.long),
             requires_grad=False,
         )
+
+    def _ensure_draft_vocab_size(self, vllm_config: VllmConfig):
+        """Ensure draft_vocab_size and target_hidden_size are set in draft 
+        model config."""
+        if (vllm_config.speculative_config
+                and vllm_config.speculative_config.draft_model_config
+                and hasattr(vllm_config.speculative_config.draft_model_config,
+                            'hf_config')):
+
+            hf_config = (
+                vllm_config.speculative_config.draft_model_config.hf_config)
+
+            # If draft_vocab_size is not set, use the target model's vocab_size
+            if (not hasattr(hf_config, 'draft_vocab_size')
+                    or hf_config.draft_vocab_size is None):
+                target_vocab_size = vllm_config.model_config.get_vocab_size()
+                hf_config.draft_vocab_size = target_vocab_size
+
+            # If target_hidden_size is not set, we need to infer it from the fc layer
+            # The fc layer expects input_size = target_hidden_size * 3
+            if (not hasattr(hf_config, 'target_hidden_size')
+                    or hf_config.target_hidden_size is None):
+                # For GPT-OSS models, the actual target_hidden_size might be different
+                # from the model's hidden_size. We'll set it to None and let the
+                # model initialization handle it based on the actual fc layer weights.
+                hf_config.target_hidden_size = None
 
     def forward(
         self,
@@ -261,12 +296,54 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         # combine multiple auxiliary hidden states returned by eagle3
+        print(f"DEBUG: combine_hidden_states input shape: {hidden_states.shape}")
+        print(f"DEBUG: fc layer weight shape: {self.model.fc.weight.shape}")
+        print(f"DEBUG: target_hidden_size: {getattr(self.config, 'target_hidden_size', 'None')}")
+        print(f"DEBUG: hidden_size: {getattr(self.config, 'hidden_size', 'None')}")
+        
+        # Check if we need to resize the fc layer based on input dimensions
+        input_size = hidden_states.shape[-1]
+        current_input_size = self.model.fc.weight.shape[1]
+        
+        if input_size != current_input_size:
+            print(f"DEBUG: Resizing fc layer from {current_input_size} to {input_size} input dimensions")
+            # Recreate the fc layer with correct dimensions
+            output_size = self.model.fc.weight.shape[0]
+            self.model.fc = torch.nn.Linear(input_size, output_size, bias=False)
+            # Update target_hidden_size in config for future reference
+            if hasattr(self.config, 'target_hidden_size'):
+                self.config.target_hidden_size = input_size // 3
+            print(f"DEBUG: New fc layer weight shape: {self.model.fc.weight.shape}")
+        
         return self.model.fc(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         model_weights = {}
         includes_draft_id_mapping = False
         includes_embed_tokens = False
+        
+        # Check if we need to resize the fc layer based on actual weights
+        fc_weight_shape = None
+        for name, loaded_weight in weights:
+            if name == "model.fc.weight":
+                fc_weight_shape = loaded_weight.shape
+                break
+        
+        # If we found the fc weight and it doesn't match our current fc layer,
+        # we need to recreate the fc layer with the correct dimensions
+        if fc_weight_shape is not None:
+            expected_input_size = fc_weight_shape[1]  # weight shape is [output, input]
+            expected_output_size = fc_weight_shape[0]
+            current_input_size = self.model.fc.weight.shape[1]
+            
+            if expected_input_size != current_input_size:
+                print(f"DEBUG: Resizing fc layer from {current_input_size} to {expected_input_size} input dimensions")
+                # Recreate the fc layer with correct dimensions
+                self.model.fc = torch.nn.Linear(expected_input_size, expected_output_size, bias=False)
+                # Update target_hidden_size in config for future reference
+                if hasattr(self.config, 'target_hidden_size'):
+                    self.config.target_hidden_size = expected_input_size // 3
+        
         for name, loaded_weight in weights:
             if "t2d" in name:
                 continue
@@ -290,3 +367,40 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             skip_substrs=skip_substrs,
         )
         loader.load_weights(model_weights.items())
+
+
+class LlamaForCausalLMEagle3(Eagle3LlamaForCausalLM):
+    """
+    LlamaForCausalLMEagle3 extends Eagle3LlamaForCausalLM to support models
+    that may not have `draft_vocab_size` set in their config.
+    """
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        # Store vllm_config for later use
+        self.vllm_config = vllm_config
+        # Ensure draft_vocab_size is set before calling parent constructor
+        self._ensure_draft_vocab_size(vllm_config)
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+
+    def _ensure_draft_vocab_size(self, vllm_config: VllmConfig):
+        """Ensure draft_vocab_size and target_hidden_size are set in draft 
+        model config."""
+        if (vllm_config.speculative_config
+                and vllm_config.speculative_config.draft_model_config
+                and hasattr(vllm_config.speculative_config.draft_model_config,
+                            'hf_config')):
+
+            hf_config = (
+                vllm_config.speculative_config.draft_model_config.hf_config)
+
+            # If draft_vocab_size is not set, use the target model's vocab_size
+            if (not hasattr(hf_config, 'draft_vocab_size')
+                    or hf_config.draft_vocab_size is None):
+                target_vocab_size = vllm_config.model_config.get_vocab_size()
+                hf_config.draft_vocab_size = target_vocab_size
+
+            # If target_hidden_size is not set, use target model's hidden_size
+            if (not hasattr(hf_config, 'target_hidden_size')
+                    or hf_config.target_hidden_size is None):
+                target_hidden_size = vllm_config.model_config.get_hidden_size()
+                hf_config.target_hidden_size = target_hidden_size

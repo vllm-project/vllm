@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 import torch.distributed as dist
@@ -28,7 +28,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.utils import cdiv
 
-from .interfaces import SupportsPP
+from .interfaces import SupportsEagle3, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, extract_layer_index,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
@@ -251,7 +251,8 @@ class GptOssModel(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+        aux_hidden_state_layers: Optional[list[int]] = None,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 x = inputs_embeds
@@ -264,15 +265,34 @@ class GptOssModel(nn.Module):
             x = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        # Store auxiliary hidden states if requested
+        aux_hidden_states = None
+        if aux_hidden_state_layers is not None:
+            aux_hidden_states = []
+
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             x, residual = layer(x, positions, residual)
+
+            # Collect auxiliary hidden states from specified layers
+            if (aux_hidden_state_layers is not None
+                    and i in aux_hidden_state_layers):
+                aux_hidden_states.append(x.clone())
+
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": x,
                 "residual": residual
             })
+
         x, _ = self.norm(x, residual)
+
+        # Return auxiliary hidden states if collected
+        if aux_hidden_states is not None and aux_hidden_states:
+            # Use the middle layer's hidden states as auxiliary
+            middle_idx = len(aux_hidden_states) // 2
+            return x, aux_hidden_states[middle_idx]
+
         return x
 
     def _load_weights_mxfp4(
@@ -613,7 +633,7 @@ class GptOssModel(nn.Module):
                                             weights, stacked_params_mapping)
 
 
-class GptOssForCausalLM(nn.Module, SupportsPP):
+class GptOssForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     packed_modules_mapping = {"qkv": ["q_proj", "k_proj", "v_proj"]}
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -663,13 +683,39 @@ class GptOssForCausalLM(nn.Module, SupportsPP):
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
 
-    def forward(self,
-                input_ids: torch.Tensor,
-                positions: torch.Tensor,
-                intermediate_tensors: Optional[IntermediateTensors] = None,
-                inputs_embeds: Optional[torch.Tensor] = None) -> torch.Tensor:
-        return self.model(input_ids, positions, intermediate_tensors,
-                          inputs_embeds)
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        # Determine auxiliary layers for EAGLE3
+        aux_layers = None
+        if hasattr(
+                self,
+                '_aux_hidden_state_layers') and self._aux_hidden_state_layers:
+            aux_layers = self._aux_hidden_state_layers
+        else:
+            # Default: use middle layers for auxiliary hidden states
+            num_layers = self.config.num_hidden_layers
+            aux_layers = [
+                num_layers // 2 - 1, num_layers // 2, num_layers // 2 + 1
+            ]
+
+        # Get hidden states with potential auxiliary states
+        model_output = self.model(input_ids,
+                                  positions,
+                                  intermediate_tensors,
+                                  inputs_embeds,
+                                  aux_hidden_state_layers=aux_layers)
+
+        # Handle return type based on whether auxiliary states were collected
+        if isinstance(model_output, tuple):
+            hidden_states, aux_hidden_states = model_output
+            return hidden_states, aux_hidden_states
+        else:
+            return model_output
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
@@ -685,3 +731,39 @@ class GptOssForCausalLM(nn.Module, SupportsPP):
                            if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    # EAGLE3 support methods
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        """
+        Set which layers should output auxiliary hidden states for EAGLE3.
+        
+        Args:
+            layers: Tuple of layer indices that should output auxiliary
+              hidden states.
+        """
+        # Store the auxiliary hidden state layers for use in forward method
+        self._aux_hidden_state_layers = layers
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        """
+        Get the layer indices that should output auxiliary hidden states
+        for EAGLE3.
+        
+        Returns:
+            Tuple of layer indices for auxiliary hidden state outputs.
+        """
+        # For GPT-OSS models, we typically want to extract auxiliary hidden
+        # states from the middle layers. This is a common pattern for EAGLE3.
+        # You can adjust these layer indices based on your specific model
+        # requirements.
+        num_layers = self.config.num_hidden_layers
+        if num_layers >= 4:
+            # Use middle layers for auxiliary hidden states
+            middle_layer = num_layers // 2
+            return (middle_layer - 1, middle_layer, middle_layer + 1)
+        elif num_layers >= 2:
+            # For smaller models, use the last few layers
+            return (num_layers - 2, num_layers - 1)
+        else:
+            # For very small models, use the last layer
+            return (num_layers - 1, )

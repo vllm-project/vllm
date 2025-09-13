@@ -794,13 +794,6 @@ class ModelConfig:
         self._verify_cuda_graph()
         self._verify_bnb_config()
 
-    @field_validator("quantization", mode="before")
-    @classmethod
-    def validate_quantization_before(cls, value: Any) -> Any:
-        if isinstance(value, str):
-            return value.lower()
-        return value
-
     @model_validator(mode="after")
     def validate_model_config_after(self: "ModelConfig") -> "ModelConfig":
         if not isinstance(self.tokenizer, str):
@@ -1122,6 +1115,8 @@ class ModelConfig:
                 elif quant_algo is not None:
                     raise ValueError(
                         f"Unknown ModelOpt quant algo: {quant_algo}")
+                else:
+                    quant_cfg = None
 
         return quant_cfg
 
@@ -2385,7 +2380,7 @@ class SpeculativeConfig:
                              "speculative decoding is > 1, but got "
                              f"{self.disable_by_batch_size=}")
 
-        eagle3_target_supported = ["llama", "qwen"]
+        eagle3_target_supported = ["llama", "qwen", "gpt_oss"]
         if self.method == "eagle3" and self.target_model_config and not any(
                 supported_model in
                 self.target_model_config.hf_text_config.model_type
