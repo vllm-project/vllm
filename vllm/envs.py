@@ -476,6 +476,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "FLASHINFER": use flashinfer
     # - "FLASHMLA": use FlashMLA
     # - "FLASH_ATTN_MLA": use FlashAttention for MLA
+    # - "FLASHINFER_MLA": use FlashInfer for MLA
+    # - "CUTLASS_MLA": use CUTLASS for MLA
     "VLLM_ATTENTION_BACKEND":
     lambda: os.getenv("VLLM_ATTENTION_BACKEND", None),
 
