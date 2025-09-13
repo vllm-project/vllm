@@ -25,6 +25,12 @@ class AsyncScheduler(Scheduler):
                 # The request will generate a new token in this scheduling step.
                 # TODO(woosuk): Support speculative decoding.
                 request.num_output_placeholders += 1
+                # Add a placeholder for the new token in spec_token_ids.
+                # because the actual token id is not known yet. so just use -1
+                # as a placeholder and the length of spec_token_ids is set to
+                # self.num_spec_tokens. we will update the actual spec token id
+                # in worker process.
+                request.spec_token_ids = [-1] * self.num_spec_tokens
 
     def _update_request_with_output(
         self,
