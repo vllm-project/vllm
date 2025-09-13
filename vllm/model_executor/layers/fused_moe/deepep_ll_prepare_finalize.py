@@ -6,6 +6,8 @@ import deep_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate)
@@ -146,6 +148,16 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             assert topk == 1, (
                 "apply_router_weight_on_input is only implemented for topk=1")
             a1 = a1 * topk_weights.to(a1.dtype)
+
+        # Only DP leader ranks (tp_rank == 0) should dispatch when TP > 1.
+        tp_world_size = get_tensor_model_parallel_world_size()
+        tp_rank_in_group = get_tp_group(
+        ).rank_in_group if tp_world_size > 1 else 0
+        if tp_world_size > 1 and tp_rank_in_group != 0:
+            # Non-leader TP ranks send zero tokens to avoid duplicate dispatch.
+            a1 = a1[:0]
+            topk_ids = topk_ids[:0]
+            topk_weights = topk_weights[:0]
 
         # Dispatch
         expert_x, expert_num_tokens, self.handle, event, hook = \

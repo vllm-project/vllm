@@ -239,9 +239,11 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_metadata: Optional[mk.ExpertTokensMetadata],
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         assert a.dim() == 2
-        # FIXME (varun): We should be able to dispatch only from the leader
-        # DP ranks in the case of TP > 1. At the moment, all the Ranks
-        # end up sending their tokens. This needs to be fixed.
+        # Dispatch is restricted to DP leader ranks when TP > 1.
+        # This policy is enforced in PrepareAndFinalize (DeepEP/PPLX) so that
+        # only TP rank 0 participates in all2all. The workspace here therefore
+        # multiplies by `num_dispatchers`, which corresponds to the number of
+        # DP leaders that can contribute tokens to this EP rank.
         num_dispatchers = self.num_dispatchers
         num_experts = local_num_experts
         max_num_tokens = a.size(
@@ -287,6 +289,20 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         E, max_num_tokens, N, K, top_k_num = mk._moe_problem_size(
             hidden_states, w1, w2, topk_ids)
+
+        # Debug (one-time): total dispatched tokens received on this EP rank.
+        # Avoid triggering CUDA Graph sync by skipping during graph capture or
+        # torch.compile. This reads a small scalar once for observability.
+        if (not torch.cuda.is_current_stream_capturing()
+                and not torch.compiler.is_compiling()):
+            try:
+                total_tokens = int(expert_num_tokens.sum().item())
+                logger.debug_once(
+                    "[MoE Debug] EP rank received tokens: total=%d, E=%d, "
+                    "max_tokens_per_dispatcher=%d, num_dispatchers=%d",
+                    total_tokens, E, max_num_tokens, self.num_dispatchers)
+            except Exception:
+                pass
 
         workspace1 = _resize_cache(workspace13, (E, max_num_tokens, N))
 

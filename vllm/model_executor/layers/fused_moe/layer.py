@@ -154,9 +154,15 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
             all_to_all_args = dict()
             handle = all2all_manager.get_handle(all_to_all_args)
+            # Only DP leader ranks should dispatch when TP > 1.
+            # Use number of DP ranks (leaders) as dispatchers in that case.
+            tp_world_size = all2all_manager.tp_group.world_size
+            num_dispatchers = (all2all_manager.world_size //
+                               tp_world_size) if tp_world_size > 1 else \
+                all2all_manager.world_size
             prepare_finalize = DeepEPHTPrepareAndFinalize(
                 handle,
-                num_dispatchers=all2all_manager.world_size,
+                num_dispatchers=num_dispatchers,
                 dp_size=all2all_manager.dp_world_size,
                 rank_expert_offset=all2all_manager.rank *
                 moe.num_local_experts,
@@ -183,7 +189,12 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             prepare_finalize = DeepEPLLPrepareAndFinalize(
                 handle,
                 max_tokens_per_rank=moe.max_num_tokens,
-                num_dispatchers=all2all_manager.world_size,
+                # Only DP leader ranks should dispatch when TP > 1.
+                # Use number of DP ranks (leaders) as dispatchers in that case.
+                num_dispatchers=(all2all_manager.world_size //
+                                 all2all_manager.tp_group.world_size)
+                if all2all_manager.tp_group.world_size > 1 else
+                all2all_manager.world_size,
                 use_fp8_dispatch=use_fp8_dispatch,
             )
 
@@ -212,6 +223,16 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 f"Attempt to override experts for {id(self)}!"
             self.topk_indices_dtype = prepare_finalize.topk_indices_dtype()
             experts = self.select_gemm_impl(prepare_finalize, self.moe, layer)
+
+            # Log which expert implementation was selected
+            allow = getattr(experts, "allow_deep_gemm", None)
+            use_fp8 = getattr(experts, "use_fp8_w8a8", None)
+            block_shape = getattr(experts, "block_shape", None)
+            logger.info(
+                "[MoE Debug] Expert implementation selected: %s, "
+                "allow_deep_gemm=%s, use_fp8_w8a8=%s, block_shape=%s",
+                type(experts).__name__, allow, use_fp8, block_shape)
+
             self.fused_experts = FusedMoEModularKernel(
                 prepare_finalize,
                 experts,
@@ -278,15 +299,22 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         moe: FusedMoEConfig,
         layer: torch.nn.Module,
     ) -> FusedMoEPermuteExpertsUnpermute:
+        logger.debug(
+            "[MoE Debug] select_gemm_impl called, activation_format=%s, "
+            "prepare_finalize=%s", prepare_finalize.activation_format,
+            type(prepare_finalize).__name__)
         if (prepare_finalize.activation_format ==
                 FusedMoEActivationFormat.BatchedExperts):
-            logger.debug("BatchedTritonExperts %s", self.moe)
+            logger.debug(
+                "[MoE Debug] Creating BatchedTritonExperts with moe=%s",
+                self.moe)
             return BatchedTritonExperts(
                 max_num_tokens=self.moe.max_num_tokens,
                 num_dispatchers=prepare_finalize.num_dispatchers(),
             )
         else:
-            logger.debug("TritonExperts %s", self.moe)
+            logger.debug("[MoE Debug] Creating TritonExperts with moe=%s",
+                         self.moe)
             return TritonExperts()
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
@@ -788,6 +816,14 @@ class FusedMoE(CustomOp):
         has_bias: bool = False,
         is_sequence_parallel=False,
     ):
+        logger.debug(
+            "[MoE Debug] *** FusedMoE.__init__ ENTRY *** "
+            "Creating MoE layer with num_experts=%s, prefix='%s', "
+            "quant_config=%s, tp_size=%s, dp_size=%s, ep_size=%s", num_experts,
+            prefix,
+            type(quant_config).__name__ if quant_config else None, tp_size,
+            dp_size, ep_size)
+
         super().__init__()
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -902,15 +938,32 @@ class FusedMoE(CustomOp):
         self.moe_config = moe
         self.quant_config = quant_config
 
+        logger.debug(
+            "[MoE Debug] MoE Config created: global_experts=%s, "
+            "local_experts=%s, max_tokens=%s, parallel_config=%s, "
+            "use_pplx=%s, use_deepep_ht=%s, use_deepep_ll=%s, "
+            "use_flashinfer_cutlass=%s", self.global_num_experts,
+            self.local_num_experts, moe.max_num_tokens,
+            f"tp={self.tp_size},dp={self.dp_size},ep={self.ep_size}",
+            moe.use_pplx_kernels, moe.use_deepep_ht_kernels,
+            moe.use_deepep_ll_kernels, moe.use_flashinfer_cutlass_kernels)
+
         # Note: get_quant_method will look at the layer's local_num_experts
         # for heuristic purposes, so it must be initialized first.
         quant_method: Optional[QuantizeMethodBase] = None
+        logger.debug(
+            "[MoE Debug] Selecting quantization method: quant_config=%s",
+            type(quant_config).__name__ if quant_config else "None")
+
         quant_method = (UnquantizedFusedMoEMethod(moe) if quant_config is None
                         else quant_config.get_quant_method(self, prefix))
 
         assert quant_method is not None
         assert isinstance(quant_method, FusedMoEMethodBase)
         self.quant_method = quant_method
+
+        logger.debug("[MoE Debug] Quantization method selected: %s",
+                     type(quant_method).__name__)
 
         if self.enable_eplb:
             from vllm.model_executor.layers.quantization.fp8 import (
