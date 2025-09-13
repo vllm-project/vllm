@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import pytest
 from unittest.mock import Mock
+
+import pytest
 
 from vllm.entrypoints.harmony_utils import parse_output_message
 
@@ -29,10 +30,24 @@ class TestHarmonyUtils:
         message.author.role = "assistant"
         message.channel = "commentary"
         message.recipient = "functions.my_custom_function"
-        message.content = [Mock(text="custom function reasoning")]
-
+        message.content = [Mock(text='{"arg": "value"}')]
+        
         result = parse_output_message(message)
+        
+        assert len(result) == 1
+        assert result[0].type == "function_call"
+        assert result[0].name == "my_custom_function"
 
+    def test_commentary_channel_with_python_tool(self):
+        """Test python tool recipient is supported for reasoning."""
+        message = Mock()
+        message.author.role = "assistant"
+        message.channel = "commentary"
+        message.recipient = "python"
+        message.content = [Mock(text="python tool reasoning")]
+        
+        result = parse_output_message(message)
+        
         assert len(result) == 1
         assert result[0].type == "reasoning"
 
