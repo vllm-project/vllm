@@ -215,7 +215,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   message(STATUS "Enabling cumem allocator extension.")
   # link against cuda driver library
   list(APPEND CUMEM_LIBS CUDA::cuda_driver)
-  define_gpu_extension_target(
+  define_extension_target(
     cumem_allocator
     DESTINATION vllm
     LANGUAGE CXX
@@ -791,7 +791,7 @@ if (VLLM_GPU_LANG STREQUAL "HIP")
 endif()
 
 message(STATUS "Enabling C extension.")
-define_gpu_extension_target(
+define_extension_target(
   _C
   DESTINATION vllm
   LANGUAGE ${VLLM_GPU_LANG}
@@ -905,7 +905,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 endif()
 
 message(STATUS "Enabling moe extension.")
-define_gpu_extension_target(
+define_extension_target(
   _moe_C
   DESTINATION vllm
   LANGUAGE ${VLLM_GPU_LANG}
@@ -926,7 +926,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/rocm/skinny_gemms.cu"
     "csrc/rocm/attention.cu")
 
-  define_gpu_extension_target(
+  define_extension_target(
     _rocm_C
     DESTINATION vllm
     LANGUAGE ${VLLM_GPU_LANG}
