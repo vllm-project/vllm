@@ -202,7 +202,7 @@ class CudaPlatformBase(Platform):
             # Adjust block sizes for MLA backends based on their requirements
             backend_enum = _Backend[envs.VLLM_ATTENTION_BACKEND]
             backend_class = backend_to_class(backend_enum)
-            if backend_class.supports_block_size(cache_config.block_size):
+            if not backend_class.supports_block_size(cache_config.block_size):
                 cache_config.block_size = \
                     backend_class.get_supported_block_sizes()[0]
                 logger.info(
