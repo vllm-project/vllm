@@ -6,8 +6,6 @@
 
 # ruff: noqa: E501,SIM102
 
-import math
-
 import torch
 
 from vllm.triton_utils import tl, triton
@@ -97,6 +95,7 @@ def _bmm_chunk_fwd_kernel(
     b_ptr,
     out_ptr,
     seq_idx_ptr,
+    cu_chunk_seqlens_ptr,
     # Matrix dimensions
     seqlen,
     chunk_size,
@@ -135,10 +134,12 @@ def _bmm_chunk_fwd_kernel(
     if IS_CAUSAL:
         if pid_n * BLOCK_SIZE_N >= (pid_m + 1) * BLOCK_SIZE_M:
             return
-    a_ptr += pid_b * stride_a_batch + pid_c * chunk_size * stride_a_seqlen + pid_h * stride_a_head
-    b_ptr += pid_b * stride_b_batch + pid_c * chunk_size * stride_b_seqlen + pid_h * stride_b_head
-    if HAS_SEQ_IDX:
-        seq_idx_ptr += pid_b * stride_seq_idx_batch + pid_c * chunk_size * stride_seq_idx_seqlen
+
+    chunk_seqlen_start = tl.load(cu_chunk_seqlens_ptr + pid_c)
+    chunk_seqlen_end = tl.load(cu_chunk_seqlens_ptr + pid_c + 1)
+
+    a_ptr += pid_b * stride_a_batch + chunk_seqlen_start * stride_a_seqlen + pid_h * stride_a_head
+    b_ptr += pid_b * stride_b_batch + chunk_seqlen_start * stride_b_seqlen + pid_h * stride_b_head
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
@@ -147,7 +148,7 @@ def _bmm_chunk_fwd_kernel(
                       offs_k[None, :] * stride_ak)
     b_ptrs = b_ptr + (offs_k[:, None] * stride_bk +
                       offs_n[None, :] * stride_b_seqlen)
-    chunk_size_limit = min(chunk_size, seqlen - pid_c * chunk_size)
+    chunk_size_limit = chunk_seqlen_end - chunk_seqlen_start
 
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
@@ -165,15 +166,6 @@ def _bmm_chunk_fwd_kernel(
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    if HAS_SEQ_IDX:
-        chunk_size_limit = min(chunk_size, seqlen - pid_c * chunk_size)
-        seq_idx_m = tl.load(seq_idx_ptr + offs_m * stride_seq_idx_seqlen,
-                            mask=offs_m < chunk_size_limit,
-                            other=-1)
-        seq_idx_n = tl.load(seq_idx_ptr + offs_n * stride_seq_idx_seqlen,
-                            mask=offs_n < chunk_size_limit,
-                            other=-2)
-        acc = tl.where(seq_idx_m[:, None] == seq_idx_n[None, :], acc, 0.0)
     out = acc.to(out_ptr.dtype.element_ty)
 
     out_ptr += pid_b * stride_out_batch + pid_c * stride_out_chunk + pid_h * stride_out_head
@@ -188,6 +180,7 @@ def _bmm_chunk_fwd_kernel(
 def _bmm_chunk_fwd(a,
                    b,
                    chunk_size,
+                   cu_chunk_seqlens,
                    seq_idx=None,
                    causal=False,
                    output_dtype=None):
@@ -214,7 +207,7 @@ def _bmm_chunk_fwd(a,
         a = a.contiguous()
     if b.stride(-1) != 1 and b.stride(1) != 1:
         b = b.contiguous()
-    nchunks = math.ceil(seqlen / chunk_size)
+    nchunks = len(cu_chunk_seqlens) - 1
     # Allocates output.
     out_dtype = a.dtype if output_dtype is None else output_dtype
     out = torch.empty(
@@ -236,6 +229,7 @@ def _bmm_chunk_fwd(a,
             b,
             out,
             seq_idx,
+            cu_chunk_seqlens,
             seqlen,
             chunk_size,
             k,

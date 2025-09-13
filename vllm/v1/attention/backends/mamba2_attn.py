@@ -9,6 +9,7 @@ import torch
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import VllmConfig
+from vllm.utils import cdiv
 from vllm.v1.attention.backends.mamba_attn import (
     BaseMambaAttentionMetadataBuilder)
 from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
@@ -126,6 +127,8 @@ class Mamba2AttentionMetadata:
     seq_idx_p: Optional[torch.Tensor]
     chunk_indices_p: Optional[torch.Tensor]
     chunk_offsets_p: Optional[torch.Tensor]
+    cu_chunk_seqlen_p: Optional[torch.Tensor]
+    last_chunk_p: Optional[torch.Tensor]
 
     state_indices_tensor: torch.Tensor  # shape: [batch,]
 
@@ -160,6 +163,8 @@ class Mamba2AttentionMetadataBuilder(
         # currently we really only support the FlashAttention backend
         has_initial_states_p = None
         prep_initial_states = False
+        cu_chunk_seqlen_p = None
+        last_chunk_p = None
 
         state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
 
@@ -188,6 +193,52 @@ class Mamba2AttentionMetadataBuilder(
                                                 query_start_loc_p.diff(),
                                                 output_size=num_prefill_tokens)
             seq_idx_p.unsqueeze_(0)
+
+            num_computed_tokens_p = \
+                common_attn_metadata.num_computed_tokens_cpu[
+                    num_reqs - num_prefills:num_reqs]
+            query_start_loc_p_cpu = common_attn_metadata.query_start_loc_cpu[
+                -num_prefills - 1:] - num_decode_tokens
+
+            # TODO (tdoublep): Optimize the code
+            cu_chunk_seqlen = []
+            last_chunk = []
+            seqlen_pos = 0
+            for req_idx in range(num_prefills):
+                this_num_computed = num_computed_tokens_p[req_idx].item()
+                this_new_tokens = query_start_loc_p_cpu[req_idx + 1].item(
+                ) - query_start_loc_p_cpu[req_idx].item()
+
+                # if computed tokens are not chunk-aligned, use the first
+                # chunk to finish it off
+                if this_num_computed % self.chunk_size != 0:
+                    cu_chunk_seqlen.append(seqlen_pos)
+                    # how many tokens to finish the chunk?
+                    chunk_len = cdiv(this_num_computed, self.chunk_size
+                                     ) * self.chunk_size - this_num_computed
+                    # we can only use at most this_new_tokens
+                    chunk_len = min(chunk_len, this_new_tokens)
+                    seqlen_pos += chunk_len
+                    this_new_tokens -= chunk_len
+
+                n_chunks = cdiv(this_new_tokens, self.chunk_size)
+                for chunk in range(n_chunks):
+                    cu_chunk_seqlen.append(seqlen_pos)
+                    chunk_len = min(self.chunk_size, this_new_tokens)
+                    seqlen_pos += chunk_len
+                    this_new_tokens -= chunk_len
+
+                assert this_new_tokens == 0
+                last_chunk.append(len(cu_chunk_seqlen) - 1)
+
+            cu_chunk_seqlen.append(seqlen_pos)
+
+            cu_chunk_seqlen_p = torch.as_tensor(cu_chunk_seqlen,
+                                                device=query_start_loc.device,
+                                                dtype=torch.int32)
+            last_chunk_p = torch.as_tensor(last_chunk,
+                                           device=query_start_loc.device,
+                                           dtype=torch.int32)
 
             # We compute metadata for chunked prefill once at the top level
             # model forward and reuse them in mamba layers. If not needed,
@@ -220,5 +271,7 @@ class Mamba2AttentionMetadataBuilder(
             chunk_indices_p=chunk_indices_p,
             chunk_offsets_p=chunk_offsets_p,
             state_indices_tensor=state_indices_tensor,
+            cu_chunk_seqlen_p=cu_chunk_seqlen_p,
+            last_chunk_p=last_chunk_p,
         )
         return attn_metadata
