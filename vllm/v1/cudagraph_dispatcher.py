@@ -39,11 +39,23 @@ class CudagraphDispatcher:
             CUDAGraphMode.FULL: set(),
         }
 
-        assert not self.cudagraph_mode.requires_piecewise_compilation() or \
-            (self.compilation_config.level == CompilationLevel.PIECEWISE and
-             self.compilation_config.splitting_ops_contain_attention()), \
+        not_use_piecewise_compilation = (
+            not self.cudagraph_mode.requires_piecewise_compilation())
+
+        use_fx_graph_piecewise_compilation = (
+            self.compilation_config.level == CompilationLevel.PIECEWISE
+            and self.compilation_config.splitting_ops_contain_attention())
+
+        use_inductor_piecewise_compilation = (
+            self.compilation_config.use_inductor_graph_partition
+            and not self.compilation_config.splitting_ops_contain_attention())
+
+        assert not_use_piecewise_compilation or \
+            use_fx_graph_piecewise_compilation or\
+            use_inductor_piecewise_compilation, \
             "Compilation level should be CompilationLevel.PIECEWISE when "\
             "cudagraph_mode piecewise cudagraphs is used, "\
+            "and attention should be in splitting_ops or inductor splitting should be used" \
             f"cudagraph_mode={self.cudagraph_mode}, "\
             f"compilation_level={self.compilation_config.level}, "\
             f"splitting_ops={self.compilation_config.splitting_ops}"
