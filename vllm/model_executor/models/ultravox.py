@@ -597,10 +597,11 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         with the `input_ids`.
 
         Args:
-            audio_features: A batch of audio input chunks [B, N, 80, M].
-            audio_lens: Length of audio frames for each audio chunk [B].
-            audio_token_len: Length of audio tokens for each audio chunk [B'].
-                Note: batch dim is different from batch dim in audio chunks.
+            input_ids: Flattened (concatenated) input_ids corresponding to a
+                batch.
+            positions: Position indices for the input tokens.
+            intermediate_tensors: Intermediate tensors from prior forward pass.
+            inputs_embeds: Optional tensor of input embeddings.
 
         """
 
