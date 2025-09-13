@@ -28,6 +28,8 @@ def server(monkeypatch_module: pytest.MonkeyPatch):
 
     with monkeypatch_module.context() as m:
         m.setenv("VLLM_ENABLE_RESPONSES_API_STORE", "1")
+        # Use dummy browser in CI
+        m.setenv("VLLM_GPT_OSS_USE_DUMMY_BROWSER_TOOL", "1")
         with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
             yield remote_server
 
@@ -346,7 +348,7 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
     prompts = [
         "tell me a story about a cat in 20 words",
         # "What is 13 * 24? Use python to calculate the result.",
-        # "When did Jensen found NVIDIA? Search it and answer the year only.",
+        "When did Jensen found NVIDIA? Search it and answer the year only.",
     ]
 
     for prompt in prompts:
@@ -355,9 +357,9 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
             input=prompt,
             reasoning={"effort": "low"},
             tools=[
-                # {
-                #     "type": "web_search_preview"
-                # },
+                {
+                    "type": "web_search_preview"
+                },
                 # {
                 #     "type": "code_interpreter",
                 #     "container": {
@@ -435,7 +437,6 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.skip(reason="Web search tool is not available in CI yet.")
 async def test_web_search(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
