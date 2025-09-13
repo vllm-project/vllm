@@ -822,12 +822,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> tuple[int, np.ndarray]:
-        num_tokens_without_spec = []
         total_num_scheduled_tokens_without_spec = scheduler_output.total_num_scheduled_tokens
-        for req_id, num_tokens in scheduler_output.num_scheduled_tokens.items(
-        ):
+        for req_id in scheduler_output.num_scheduled_tokens:
             draft_len = self._req_id_to_draft_token_len.get(req_id, 0)
-            num_tokens_without_spec.append(num_tokens - draft_len)
             total_num_scheduled_tokens_without_spec -= draft_len
         return total_num_scheduled_tokens_without_spec
 
@@ -872,7 +869,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # spec_flattened_indices = [[1], [3, 4], [6, 7]]
                 sample_flattened_indices.append(flattened_index - draft_len)
                 spec_flattened_indices.append(
-                    range(flattened_index - 1 - draft_len,
+                    range(flattened_index - draft_len + 1,
                           flattened_index + 1))
                 indices_match &= (prev_index == flattened_index)
                 max_flattened_index = max(max_flattened_index, flattened_index)
@@ -921,11 +918,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if isinstance(self._draft_token_ids, list):
             for i, req_idx in enumerate(prev_common_req_indices_tensor):
                 draft_token: list[int] = self._draft_token_ids[req_idx]
-                draft_token_gpu = torch.tensor(draft_token).to(
-                    self.device, non_blocking=True)
-                self.input_ids.gpu.scatter(dim=0,
-                                           index=spec_flattened_indices[i],
-                                           src=draft_token_gpu)
+                draft_token_gpu = torch.tensor(draft_token,
+                                               dtype=torch.int64,
+                                               pin_memory=self.pin_memory).to(
+                                                   self.device,
+                                                   non_blocking=True)
+                self.input_ids.gpu.scatter_(dim=0,
+                                            index=spec_flattened_indices[i],
+                                            src=draft_token_gpu)
             return
         # _draft_token_ids is a tensor, the length of draft tokens for different
         # requests are the same.
