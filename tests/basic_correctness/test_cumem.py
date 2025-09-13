@@ -122,7 +122,7 @@ def test_cumem_with_cudagraph():
         # sleep mode with safetensors
         ("hmellor/tiny-random-LlamaForCausalLM", True),
         # sleep mode with pytorch checkpoint
-        ("hmellor/tiny-random-LlamaForCausalLM", False),
+        ("facebook/opt-125m", False),
     ])
 def test_end_to_end(monkeypatch: pytest.MonkeyPatch, model: str, use_v1: bool):
     with monkeypatch.context() as m:
