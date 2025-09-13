@@ -247,8 +247,24 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # DP leaders that can contribute tokens to this EP rank.
         num_dispatchers = self.num_dispatchers
         num_experts = local_num_experts
-        max_num_tokens = a.size(
-            0) if self.max_num_tokens is None else self.max_num_tokens
+
+        # Use the observed M to guard against cases where multiple TP ranks
+        # still participate in all2all (e.g., misconfiguration or backend
+        # behavior), which would otherwise lead to insufficient workspace
+        # capacity at runtime when we reshape caches.
+        observed_M = a.size(0)
+        if self.max_num_tokens is None:
+            max_num_tokens = observed_M
+        else:
+            max_num_tokens = max(self.max_num_tokens, observed_M)
+            if observed_M > self.max_num_tokens:
+                with contextlib.suppress(Exception):
+                    logger.debug_once(
+                        "[MoE Debug] Increasing workspace max_num_tokens "
+                        "from configured=%d to observed=%d to avoid OOM. "
+                        "(num_dispatchers=%d, E=%d, N=%d, K=%d)",
+                        self.max_num_tokens, observed_M, num_dispatchers,
+                        num_experts, N, K)
         workspace13 = (num_experts, max_num_tokens * num_dispatchers,
                        max(K, N))
         workspace2 = (num_experts, max_num_tokens * num_dispatchers, (N // 2))
