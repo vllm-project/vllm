@@ -312,6 +312,153 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
         requests[2].request_id] == 800 - 224 - 224
 
 
+@pytest.mark.parametrize("enable_prefix_caching", [True, False])
+def test_schedule_concurrent_long_partial_requests(
+        enable_prefix_caching: bool):
+    """Test scheduling behavior with concurrent long partial requests.
+
+    This test verifies:
+    1. Multiple long prefill requests are in the RUNNING state simultaneously.
+    2. Only `max_long_partial_prefills` can be scheduled at any given time.
+
+    """
+    scheduler = create_scheduler(
+        model="facebook/opt-125m",
+        max_long_partial_prefills=1,
+        long_prefill_token_threshold=400,
+        enable_prefix_caching=enable_prefix_caching,
+    )
+    short_requests = create_requests(
+        num_requests=3,
+        num_tokens=400,
+    )
+    long_requests = create_requests(
+        num_requests=3,
+        num_tokens=800,
+        start_id=3,
+    )
+    requests = []
+    requests.extend(short_requests)
+    requests.extend(long_requests)
+    for request in requests:
+        scheduler.add_request(request)
+
+    # Step 1: Initial schedule (prefill all short requests + the first long
+    # request).
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 4
+    assert output.scheduled_cached_reqs.num_reqs == 0
+    assert len(output.finished_req_ids) == 0
+
+    assert output.num_scheduled_tokens[requests[0].request_id] == 400
+    assert output.num_scheduled_tokens[requests[1].request_id] == 400
+    assert output.num_scheduled_tokens[requests[2].request_id] == 400
+    assert output.num_scheduled_tokens[requests[3].request_id] == 400
+    req_to_index = {
+        request.request_id: i
+        for i, request in enumerate(requests)
+    }
+
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[request.request_id for request in requests],
+        req_id_to_index=req_to_index,
+        sampled_token_ids=[[0], [0], [0]] +
+        [[] for _ in range(len(requests) - 3)],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_runner_output)
+
+    # Step 2: Decode short requests + partial prefill of remaining long
+    # requests + schedule the third long request.
+    output1 = scheduler.schedule()
+    assert len(scheduler.running) == 5
+    assert len(output1.scheduled_new_reqs) == 1
+    assert output1.scheduled_cached_reqs.num_reqs == 4
+    assert len(output1.finished_req_ids) == 0
+
+    assert output1.num_scheduled_tokens[requests[0].request_id] == 1
+    assert output1.num_scheduled_tokens[requests[1].request_id] == 1
+    assert output1.num_scheduled_tokens[requests[2].request_id] == 1
+    assert output1.num_scheduled_tokens[requests[3].request_id] == 400
+    # The second long request (requests[4]) hits the
+    # `max_long_partial_prefills` limit and is moved to the end of the waiting
+    # queue.
+    assert output1.num_scheduled_tokens[requests[5].request_id] == 400
+
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[request.request_id for request in requests],
+        req_id_to_index=req_to_index,
+        sampled_token_ids=[[0], [0], [0], [0]] +
+        [[] for _ in range(len(requests) - 4)],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output1, model_runner_output)
+
+    # Step 3: Continue decoding + process next long request.
+    output2 = scheduler.schedule()
+    assert len(scheduler.running) == 6
+    assert len(output2.scheduled_new_reqs) == 1
+    assert output2.scheduled_cached_reqs.num_reqs == 5
+    assert len(output2.finished_req_ids) == 0
+
+    assert output2.num_scheduled_tokens[requests[0].request_id] == 1
+    assert output2.num_scheduled_tokens[requests[1].request_id] == 1
+    assert output2.num_scheduled_tokens[requests[2].request_id] == 1
+    assert output2.num_scheduled_tokens[requests[3].request_id] == 1
+    assert output2.num_scheduled_tokens[requests[5].request_id] == 400
+    assert output2.num_scheduled_tokens[requests[4].request_id] == 400
+
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[request.request_id for request in requests],
+        req_id_to_index=req_to_index,
+        sampled_token_ids=[[0], [0], [0], [0]] + [[]] + [[0]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output2, model_runner_output)
+
+    # Step 4: Finalize the last prefill and continue decoding.
+    output3 = scheduler.schedule()
+    assert len(scheduler.running) == 6
+    assert len(output3.scheduled_new_reqs) == 0
+    assert output3.scheduled_cached_reqs.num_reqs == 6
+    assert len(output3.finished_req_ids) == 0
+    assert output3.num_scheduled_tokens[requests[0].request_id] == 1
+    assert output3.num_scheduled_tokens[requests[1].request_id] == 1
+    assert output3.num_scheduled_tokens[requests[2].request_id] == 1
+    assert output3.num_scheduled_tokens[requests[3].request_id] == 1
+    assert output3.num_scheduled_tokens[requests[5].request_id] == 1
+    assert output3.num_scheduled_tokens[requests[4].request_id] == 400
+
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[request.request_id for request in requests],
+        req_id_to_index=req_to_index,
+        sampled_token_ids=[[0] for _ in range(len(requests))],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output3, model_runner_output)
+
+    # Step 5: All requests are in the decode stage.
+    output4 = scheduler.schedule()
+    assert len(scheduler.running) == 6
+    assert len(output4.scheduled_new_reqs) == 0
+    assert output4.scheduled_cached_reqs.num_reqs == 6
+    assert len(output4.finished_req_ids) == 0
+    assert output4.num_scheduled_tokens[requests[0].request_id] == 1
+    assert output4.num_scheduled_tokens[requests[1].request_id] == 1
+    assert output4.num_scheduled_tokens[requests[2].request_id] == 1
+    assert output4.num_scheduled_tokens[requests[3].request_id] == 1
+    assert output4.num_scheduled_tokens[requests[5].request_id] == 1
+    assert output4.num_scheduled_tokens[requests[4].request_id] == 1
+
+
 def test_stop_via_update_from_output():
     """Test stopping behavior through update_from_output"""
     scheduler = create_scheduler(num_speculative_tokens=1)

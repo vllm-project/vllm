@@ -347,10 +347,13 @@ class PartialPrefillMetadata:
         we limit the number of long requests and only accept
         shorter requests from the queue while running them
         concurrently"""
+        max_long_partial_prefills = \
+            self.scheduler_config.max_long_partial_prefills
+        if max_long_partial_prefills is None:
+            max_long_partial_prefills = 1
         return not (seq_group.first_seq.get_num_new_tokens()
                     > self.scheduler_config.long_prefill_token_threshold
-                    and self.long_prefills
-                    >= self.scheduler_config.max_long_partial_prefills
+                    and self.long_prefills >= max_long_partial_prefills
                     and self.scheduler_config.max_num_partial_prefills > 1)
 
     def maybe_increment_partial_prefills(self,
@@ -396,8 +399,12 @@ class PartialPrefillMetadata:
             # going to schedule them anyway
             if (sg.first_seq.get_num_new_tokens()
                     > scheduler_config.long_prefill_token_threshold):
+                max_long_partial_prefills = \
+                    scheduler_config.max_long_partial_prefills
+                if max_long_partial_prefills is None:
+                    max_long_partial_prefills = 1
                 if (long_prefills + waiting_long_prefills
-                        >= scheduler_config.max_long_partial_prefills):
+                        >= max_long_partial_prefills):
                     continue
                 waiting_long_prefills += 1
             prefills += 1
