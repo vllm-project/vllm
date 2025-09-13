@@ -67,8 +67,8 @@ class FlexAttentionBackend(AttentionBackend):
         return [torch.float16, torch.bfloat16, torch.float32]
 
     @classmethod
-    def validate_head_size(cls, head_size: int) -> None:
-        return  # FlexAttention supports any head size
+    def get_supported_head_sizes(cls) -> list[int]:
+        return []
 
     @staticmethod
     def get_name() -> str:
@@ -659,7 +659,6 @@ class FlexAttentionImpl(AttentionImpl):
             raise NotImplementedError(
                 "FlexAttention does not support kv sharing yet.")
 
-        FlexAttentionBackend.validate_head_size(head_size)
         if is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError(
                 "FlexAttention does not support quantized kv-cache. Yet")

@@ -105,14 +105,68 @@ class AttentionBackend(ABC):
         return (cls.__module__, cls.__qualname__)
 
     @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        raise NotImplementedError
+
+    @classmethod
+    def supports_head_size(cls, head_size: int) -> bool:
+        supported_head_sizes = cls.get_supported_head_sizes()
+        return ((not supported_head_sizes)
+                or head_size in supported_head_sizes)
+
+    @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        raise NotImplementedError
+
+    @classmethod
+    def supports_dtype(cls, dtype: torch.dtype) -> bool:
+        supported_dtypes = cls.get_supported_dtypes()
+        return ((not supported_dtypes) or dtype in supported_dtypes)
+
+    @classmethod
+    def get_supported_kv_cache_dtypes(cls) -> list[Optional[str]]:
+        raise NotImplementedError
+
+    @classmethod
+    def supports_kv_cache_dtype(cls, kv_cache_dtype: Optional[str]) -> bool:
+        supported_kv_cache_dtypes = cls.get_supported_kv_cache_dtypes()
+        return ((not supported_kv_cache_dtypes)
+                or (kv_cache_dtype in supported_kv_cache_dtypes))
+
+    @classmethod
     def get_supported_block_sizes(cls) -> list[int]:
-        return []
+        raise NotImplementedError
 
     @classmethod
     def supports_block_size(cls, block_size: int) -> bool:
         supported_block_sizes = cls.get_supported_block_sizes()
         return ((not supported_block_sizes)
                 or block_size in supported_block_sizes)
+
+    @classmethod
+    def is_v1(cls) -> bool:
+        raise NotImplementedError
+
+    @classmethod
+    def is_mla(cls) -> bool:
+        raise NotImplementedError
+
+    @classmethod
+    def validate_configuration(cls, head_size: int, dtype: torch.dtype,
+                               kv_cache_dtype: Optional[str], block_size: int,
+                               use_v1: bool, use_mla: bool,
+                               has_sink: bool) -> bool:
+        if not cls.supports_head_size(head_size):
+            return False
+        if not cls.supports_dtype(dtype):
+            return False
+        if not cls.supports_kv_cache_dtype(kv_cache_dtype):
+            return False
+        if not cls.supports_block_size(block_size):
+            return False
+        if (use_v1 != cls.is_v1()):
+            return False
+        return (use_mla != cls.is_mla())
 
 
 @dataclass

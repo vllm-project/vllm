@@ -143,6 +143,20 @@ def backend_to_class(backend: _Backend,
     return resolve_obj_by_qualname(backend_class_name)
 
 
+def backend_name_to_enum(backend_name: str) -> Optional[_Backend]:
+    """
+    Convert a string backend name to a _Backend enum value.
+
+    Returns:
+    * _Backend: enum value if backend_name is a valid in-tree type
+    * None: otherwise it's an invalid in-tree type or an out-of-tree platform is
+            loaded.
+    """
+    assert backend_name is not None
+    return _Backend[backend_name] if backend_name in _Backend.__members__ else \
+          None
+
+
 def is_block_tables_empty(block_tables: Union[None, Dict]):
     """
     Check if block_tables is None or a dictionary with all None values.
