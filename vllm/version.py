@@ -39,3 +39,10 @@ def _prev_minor_version():
     # In dev tree, this will return "0.-1", but that will work fine"
     assert isinstance(__version_tuple__[1], int)
     return f"{__version_tuple__[0]}.{__version_tuple__[1] - 1}"
+
+
+# Optional dependency versions
+# This should be kept in sync with:
+# - setup.py extras_require
+# - docker/Dockerfile version specifications
+FLASHINFER_VERSION = "0.3.0"

@@ -35,6 +35,8 @@ logger = logging.getLogger(__name__)
 # cannot import envs directly because it depends on vllm,
 #  which is not installed yet
 envs = load_module_from_path('envs', os.path.join(ROOT_DIR, 'vllm', 'envs.py'))
+version = load_module_from_path('version',
+                                os.path.join(ROOT_DIR, 'vllm', 'version.py'))
 
 VLLM_TARGET_DEVICE = envs.VLLM_TARGET_DEVICE
 
@@ -664,7 +666,7 @@ setup(
                   "mistral_common[audio]"],  # Required for audio processing
         "video": [],  # Kept for backwards compatibility
         # FlashInfer should be updated together with the Dockerfile
-        "flashinfer": ["flashinfer-python==0.3.0"],
+        "flashinfer": [f"flashinfer-python=={version.FLASHINFER_VERSION}"],
         # Optional deps for AMD FP4 quantization support
         "petit-kernel": ["petit-kernel"],
     },
