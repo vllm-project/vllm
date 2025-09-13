@@ -456,6 +456,8 @@ class OpenAIServingResponses(OpenAIServing):
                 async for _ in result_generator:
                     pass
             except asyncio.CancelledError:
+                # Cancel the backend request as well
+                await self.engine_client.abort(request.request_id)
                 return self.create_error_response("Client disconnected")
             except ValueError as e:
                 # TODO: Use a vllm-specific Validation Error

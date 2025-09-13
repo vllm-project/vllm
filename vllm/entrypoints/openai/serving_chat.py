@@ -1131,6 +1131,10 @@ class OpenAIServingChat(OpenAIServing):
                         delta=False,
                     )
 
+        except asyncio.CancelledError:
+            # Cancel the backend request as well
+            await self.engine_client.abort(request_id)
+            raise
         except Exception as e:
             # TODO: Use a vllm-specific Validation Error
             logger.exception("Error in chat completion stream generator.")
@@ -1157,6 +1161,8 @@ class OpenAIServingChat(OpenAIServing):
             async for res in result_generator:
                 final_res = res
         except asyncio.CancelledError:
+            # Cancel the backend request as well
+            await self.engine_client.abort(request_id)
             return self.create_error_response("Client disconnected")
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
