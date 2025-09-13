@@ -387,11 +387,10 @@ class Llama4VisionEncoder(nn.Module):
     ) -> torch.Tensor:
         r"""
         Args:
-            inputs_embeds (`torch.FloatTensor` of shape
-                    `(batch_size, sequence_length, hidden_size)`):
-                Optionally, instead of passing `input_ids` you can choose to
-                directly pass an embedded representation. This is useful if you
-                want more control over how to convert `input_ids` indices into
+            hidden_states: Input tensor of shape 
+                (batch_size, sequence_length, hidden_size).
+                Hidden states from the model embeddings, representing 
+                the input tokens.
                 associated vectors than the model's internal embedding
                 lookup matrix.
         """

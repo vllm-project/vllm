@@ -823,7 +823,7 @@ class SupportsEagle3(Protocol):
         
         Args:
             layers: Tuple of layer indices that should output auxiliary
-              hidden states.
+                hidden states.
         """
         ...
 

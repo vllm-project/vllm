@@ -251,8 +251,8 @@ class PyNcclPipe(KVPipeBase):
         """
         Receives a tensor and its metadata from the source rank. Blocking call.
 
-        Args:
-            tensor: The received tensor, or `None` if no tensor is received.
+        Returns:
+            The received tensor, or `None` if no tensor is received.
         """
         if self.transport_thread is None:
             self.transport_thread = ThreadPoolExecutor(max_workers=1)

@@ -390,12 +390,9 @@ class Siglip2EncoderLayer(nn.Module):
                 position_embeddings: torch.Tensor) -> tuple[torch.FloatTensor]:
         """
         Args:
-            hidden_states (`torch.FloatTensor`):
-                Input to the layer of shape `(batch, seq_len, embed_dim)`.
-            output_attentions (`bool`, *optional*, defaults to `False`):
-                Whether or not to return the attentions tensors of all 
-                attention layers. See `attentions` under
-                returned tensors for more detail.
+            hidden_states: Input tensor of shape (batch, seq_len, embed_dim).
+            cu_seqlens: Cumulative sequence lengths tensor.
+            position_embeddings: Position embeddings tensor.
         """
         residual = hidden_states
 
@@ -534,19 +531,11 @@ class Siglip2Encoder(nn.Module):
     ) -> torch.Tensor:
         r"""
         Args:
-            inputs_embeds (`torch.FloatTensor` of shape
-                `(batch_size, sequence_length, hidden_size)`):
-                Optionally, instead of passing `input_ids` you can choose to
-                directly pass an embedded representation. This is useful if
-                you want more control over how to convert `input_ids` indices
-                into associated vectors than the model's internal embedding
-                lookup matrix.
-            grid_thws (`torch.LongTensor`):
-                grid shape (num_patches, 3)
-            output_hidden_states (`bool`, *optional*):
-                Whether or not to return the hidden states of all layers. See
-                `hidden_states` under returned tensors for more detail.
-            return_dict (`bool`, *optional*):
+            inputs_embeds: Input tensor of shape 
+                (batch_size, sequence_length, hidden_size).
+                Embedded representation of the input tokens.
+            grid_thws: Grid tensor of shape (num_patches, 3) 
+                containing grid dimensions.
                 Whether or not to return a [`~utils.ModelOutput`] instead of
                 a plain tuple.
         """
