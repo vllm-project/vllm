@@ -36,6 +36,7 @@ from vllm.config.compilation import (CompilationConfig, CompilationLevel,
 from vllm.config.kv_events import KVEventsConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.config.load import LoadConfig
+from vllm.config.lora import LoRAConfig
 from vllm.config.parallel import (DistributedExecutorBackend, EPLBConfig,
                                   ParallelConfig)
 from vllm.config.scheduler import SchedulerConfig, SchedulerPolicy
@@ -261,6 +262,7 @@ def is_init_field(cls: ConfigType, name: str) -> bool:
 TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 MMEncoderTPMode = Literal["weights", "data"]
+MMCacheType = Literal["shm", "lru"]
 
 
 class LogprobsMode(enum.Enum):
@@ -449,6 +451,13 @@ class ModelConfig:
     `mm_processor_cache_gb * (api_server_count + data_parallel_size)`.
 
     Set to `0` to disable this cache completely (not recommended)."""
+    mm_processor_cache_type: MMCacheType = "lru"
+    """Type of cache to use for the multi-modal preprocessor/mapper. If `shm`,
+    use shared memory FIFO cache. If `lru`, use mirrored LRU cache."""
+    mm_shm_cache_max_object_size_mb: int = 128
+    """Size limit (in MiB) for each object stored in the multi-modal processor
+    shared memory cache. Only effective when `mm_processor_cache_type` is
+    `"shm"`."""
     mm_encoder_tp_mode: MMEncoderTPMode = "weights"
     """Indicates how to optimize multi-modal encoder inference using
     tensor parallelism (TP).
@@ -880,6 +889,9 @@ class ModelConfig:
                 media_io_kwargs=self.media_io_kwargs,
                 mm_processor_kwargs=self.mm_processor_kwargs,
                 mm_processor_cache_gb=self.mm_processor_cache_gb,
+                mm_processor_cache_type=self.mm_processor_cache_type,
+                mm_shm_cache_max_object_size_mb=self.
+                mm_shm_cache_max_object_size_mb,
                 mm_encoder_tp_mode=self.mm_encoder_tp_mode,
                 interleave_mm_strings=self.interleave_mm_strings,
                 skip_mm_profiling=self.skip_mm_profiling,
@@ -1091,11 +1103,11 @@ class ModelConfig:
 
         assert_never(runner_type)
 
-    def _parse_quant_hf_config(self):
-        quant_cfg = getattr(self.hf_config, "quantization_config", None)
+    def _parse_quant_hf_config(self, hf_config: PretrainedConfig):
+        quant_cfg = getattr(hf_config, "quantization_config", None)
         if quant_cfg is None:
             # compressed-tensors uses a "compression_config" key
-            quant_cfg = getattr(self.hf_config, "compression_config", None)
+            quant_cfg = getattr(hf_config, "compression_config", None)
 
         else:
             # Set quant_method for ModelOpt models.
@@ -1136,7 +1148,11 @@ class ModelConfig:
                                      self.quantization)
 
         # Parse quantization method from the HF model config, if available.
-        quant_cfg = self._parse_quant_hf_config()
+        quant_cfg = self._parse_quant_hf_config(self.hf_config)
+        if quant_cfg is None and (text_config := getattr(
+                self.hf_config, "text_config", None)):
+            # Check the text config as well for multi-modal models.
+            quant_cfg = self._parse_quant_hf_config(text_config)
 
         if quant_cfg is not None:
             # Use the community standard 'quant_method'
@@ -1504,7 +1520,8 @@ class ModelConfig:
         if (self.hf_text_config.model_type == "deepseek_mtp"
                 or self.hf_config.model_type == "mimo_mtp"
                 or self.hf_config.model_type == "glm4_moe_mtp"
-                or self.hf_config.model_type == "ernie_mtp"):
+                or self.hf_config.model_type == "ernie_mtp"
+                or self.hf_config.model_type == "qwen3_next_mtp"):
             total_num_hidden_layers = getattr(self.hf_text_config,
                                               "num_nextn_predict_layers", 0)
         else:
@@ -1567,14 +1584,27 @@ class ModelConfig:
             if attn_type_list:
                 return sum(t == 1 for t in attn_type_list[start:end])
 
-            if layers_block_type_value is None and attn_type_list is None:
+            # Hybrid model Qwen3Next
+            layer_types_value = getattr(self.hf_config, "layer_types", None)
+            if layer_types_value is not None:
+                if getattr(block_type, "value", block_type) == "attention":
+                    return sum(t == "full_attention"
+                               for t in layer_types_value[start:end])
+                elif getattr(block_type, "value",
+                             block_type) == "linear_attention":
+                    return sum(t == "linear_attention"
+                               for t in layer_types_value[start:end])
+                else:
+                    return sum(t == getattr(block_type, "value", block_type)
+                               for t in layer_types_value[start:end])
+
+            if (layers_block_type_value is None and attn_type_list is None
+                    and layer_types_value is None):
                 raise ValueError(
                     "The model is an hybrid without a"
-                    "layers_block_type or an attn_type_list in the hf_config,"
-                    "cannot determine the num of "
+                    "layers_block_type or an attn_type_list, or a layer_types "
+                    "in the hf_config, cannot determine the num of "
                     f"{block_type.value} layers")
-
-            return sum(t == 1 for t in attn_type_list[start:end])
 
     def get_mamba_chunk_size(self) -> Optional[int]:
         """
@@ -1756,15 +1786,20 @@ class ModelConfig:
         such as the lm_head in a generation model,
         or the score or classifier in a classification model.
 
-        The default head_dtype based on runner_type.\n
+        `head_dtype` currently only supports pooling models.\n
         - The pooling model defaults to using fp32 head,
-        you can use --hf-overrides '{"head_dtype": "model"}' to disable it.\n
-        - The generate model defaults to not using fp32 head,
-        you can use --hf-overrides '{"head_dtype": "float32"}' to enable it.
+        you can use --hf-overrides '{"head_dtype": "model"}' to disable it.
         """
+
         head_dtype = _get_head_dtype(config=self.hf_config,
                                      dtype=self.dtype,
                                      runner_type=self.runner_type)
+
+        if self.runner_type != "pooling" and head_dtype != self.dtype:
+            logger.warning_once(
+                "`head_dtype` currently only supports pooling models."
+                "fallback to model dtype [%s].", self.dtype)
+            return self.dtype
 
         if head_dtype not in current_platform.supported_dtypes:
             logger.warning_once(
@@ -1862,7 +1897,7 @@ class DeviceConfig:
 
 SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "medusa",
                             "mlp_speculator", "draft_model", "deepseek_mtp",
-                            "ernie_mtp"]
+                            "ernie_mtp", "qwen3_next_mtp"]
 
 
 @config
@@ -2003,7 +2038,15 @@ class SpeculativeConfig:
                 "n_predict": n_predict,
                 "architectures": ["ErnieMTPModel"]
             })
-            return hf_config
+
+        if hf_config.model_type == "qwen3_next":
+            hf_config.model_type = "qwen3_next_mtp"
+        if hf_config.model_type == "qwen3_next_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update({
+                "n_predict": n_predict,
+                "architectures": ["Qwen3NextMTP"]
+            })
 
         return hf_config
 
@@ -2024,9 +2067,13 @@ class SpeculativeConfig:
                 (self.target_model_config.hf_text_config.model_type \
                         == "deepseek_v3" or
                     self.target_model_config.hf_text_config.model_type in
-                        ("mimo","ernie4_5_moe")):
+                        ("mimo","ernie4_5_moe", "qwen3_next")):
                 # use the draft model from the same model:
                 self.model = self.target_model_config.model
+                # Align the quantization of draft model for cases such as
+                # --quantization fp8 with a bf16 checkpoint.
+                if not self.quantization:
+                    self.quantization = self.target_model_config.quantization
             elif self.method in ("ngram", "[ngram]"):
                 self.model = "ngram"
             else:
@@ -2133,6 +2180,15 @@ class SpeculativeConfig:
                     if self.num_speculative_tokens > 1:
                         logger.warning(
                                 "All Ernie MTP models only have " \
+                                "one layer. Might need some code changes " \
+                                "to support multiple layers."
+                            )
+                elif (self.draft_model_config.hf_config.model_type ==
+                      "qwen3_next_mtp"):
+                    self.method = "qwen3_next_mtp"
+                    if self.num_speculative_tokens > 1:
+                        logger.warning(
+                                "All Qwen3Next MTP models only have " \
                                 "one layer. Might need some code changes " \
                                 "to support multiple layers."
                             )
@@ -2351,123 +2407,14 @@ class SpeculativeConfig:
         return self.num_speculative_tokens
 
     def use_eagle(self) -> bool:
-        return self.method in ("eagle", "eagle3", "deepseek_mtp", "ernie_mtp")
+        return self.method in ("eagle", "eagle3", "deepseek_mtp", "ernie_mtp",
+                               "qwen3_next_mtp")
 
     def __repr__(self) -> str:
         method = self.method
         model = None if method == "ngram" else self.draft_model_config.model
         num_spec_tokens = self.num_speculative_tokens
         return f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=})"
-
-
-LoRADType = Literal["auto", "float16", "bfloat16"]
-
-
-@config
-@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
-class LoRAConfig:
-    """Configuration for LoRA."""
-
-    max_lora_rank: int = 16
-    """Max LoRA rank."""
-    max_loras: int = 1
-    """Max number of LoRAs in a single batch."""
-    fully_sharded_loras: bool = False
-    """By default, only half of the LoRA computation is sharded with tensor
-    parallelism. Enabling this will use the fully sharded layers. At high
-    sequence length, max rank or tensor parallel size, this is likely faster.
-    """
-    max_cpu_loras: Optional[int] = None
-    """Maximum number of LoRAs to store in CPU memory. Must be >= than
-    `max_loras`."""
-    lora_dtype: Union[torch.dtype, LoRADType] = "auto"
-    """Data type for LoRA. If auto, will default to base model dtype."""
-    lora_extra_vocab_size: int = 256
-    """(Deprecated) Maximum size of extra vocabulary that can be present in a 
-    LoRA adapter. Will be removed in v0.12.0."""
-    lora_vocab_padding_size: ClassVar[int] = current_platform\
-        .get_lora_vocab_padding_size()
-    default_mm_loras: Optional[dict[str, str]] = None
-    """Dictionary mapping specific modalities to LoRA model paths; this field
-    is only applicable to multimodal models and should be leveraged when a
-    model always expects a LoRA to be active when a given modality is present.
-    Note that currently, if a request provides multiple additional
-    modalities, each of which have their own LoRA, we do NOT apply
-    default_mm_loras because we currently only support one lora adapter
-    per prompt. When run in offline mode, the lora IDs for n modalities
-    will be automatically assigned to 1-n with the names of the modalities
-    in alphabetic order."""
-    bias_enabled: bool = False
-    """[DEPRECATED] Enable bias for LoRA adapters. This option will be
-    removed in v0.12.0."""
-
-    def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
-
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
-        """
-        factors: list[Any] = []
-        factors.append(self.max_lora_rank)
-        factors.append(self.max_loras)
-        factors.append(self.fully_sharded_loras)
-        factors.append(self.lora_dtype)
-        factors.append(self.lora_extra_vocab_size)
-        factors.append(self.lora_vocab_padding_size)
-        factors.append(self.bias_enabled)
-        hash_str = hashlib.md5(str(factors).encode(),
-                               usedforsecurity=False).hexdigest()
-        return hash_str
-
-    def __post_init__(self):
-        # Deprecation warning for lora_extra_vocab_size
-        logger.warning(
-            "`lora_extra_vocab_size` is deprecated and will be removed "
-            "in v0.12.0. Additional vocabulary support for "
-            "LoRA adapters is being phased out.")
-
-        # Deprecation warning for enable_lora_bias
-        if self.bias_enabled:
-            logger.warning("`enable_lora_bias` is deprecated "
-                           "and will be removed in v0.12.0.")
-
-        # Setting the maximum rank to 512 should be able to satisfy the vast
-        # majority of applications.
-        possible_max_ranks = (8, 16, 32, 64, 128, 256, 320, 512)
-        possible_lora_extra_vocab_size = (256, 512)
-        if self.max_lora_rank not in possible_max_ranks:
-            raise ValueError(
-                f"max_lora_rank ({self.max_lora_rank}) must be one of "
-                f"{possible_max_ranks}.")
-        if self.lora_extra_vocab_size not in possible_lora_extra_vocab_size:
-            raise ValueError(
-                f"lora_extra_vocab_size ({self.lora_extra_vocab_size}) "
-                f"must be one of {possible_lora_extra_vocab_size}.")
-        if self.max_loras < 1:
-            raise ValueError(f"max_loras ({self.max_loras}) must be >= 1.")
-        if self.max_cpu_loras is None:
-            self.max_cpu_loras = self.max_loras
-        elif self.max_cpu_loras < self.max_loras:
-            raise ValueError(
-                f"max_cpu_loras ({self.max_cpu_loras}) must be >= "
-                f"max_loras ({self.max_loras})")
-
-    def verify_with_cache_config(self, cache_config: CacheConfig):
-        if cache_config.cpu_offload_gb > 0 and not envs.VLLM_USE_V1:
-            raise ValueError(
-                "V0 LoRA does not support CPU offload, please use V1.")
-
-    def verify_with_model_config(self, model_config: ModelConfig):
-        if self.lora_dtype in (None, "auto"):
-            self.lora_dtype = model_config.dtype
-        elif isinstance(self.lora_dtype, str):
-            self.lora_dtype = getattr(torch, self.lora_dtype)
 
 
 @config
@@ -2511,6 +2458,15 @@ class MultiModalConfig:
 
     Set to `0` to disable this cache completely (not recommended).
     """
+
+    mm_processor_cache_type: MMCacheType = "lru"
+    """Type of cache to use for the multi-modal preprocessor/mapper. If `shm`,
+    use shared memory FIFO cache. If `lru`, use mirrored LRU cache."""
+
+    mm_shm_cache_max_object_size_mb: int = 128
+    """Size limit (in MiB) for each object stored in the multi-modal processor
+    shared memory cache. Only effective when `mm_processor_cache_type` is
+    `"shm"`."""
 
     mm_encoder_tp_mode: MMEncoderTPMode = "weights"
     """
@@ -3518,6 +3474,10 @@ class VllmConfig:
                     disable_chunked_prefill_reasons.append(
                         "Only \"last\" pooling supports chunked "
                         "prefill and prefix caching; disabling both.")
+                if not getattr(self.model_config.hf_config, "is_causal", True):
+                    disable_chunked_prefill_reasons.append(
+                        "Only models using causal attention supports chunked "
+                        "prefill and prefix caching; disabling both.")
             elif self.model_config.is_encoder_decoder:
                 self.scheduler_config.max_num_encoder_input_tokens = \
                     MULTIMODAL_REGISTRY.get_encdec_max_encoder_len(self.model_config)
@@ -3594,8 +3554,7 @@ class VllmConfig:
             # logger should only print warning message for hybrid models. As we
             # can't know whether the model is hybrid or not now, so we don't log
             # warning message here and will log it later.
-            if not (current_platform.is_cuda() or current_platform.is_rocm()
-                    or current_platform.is_cpu()):
+            if not current_platform.support_hybrid_kv_cache():
                 # Hybrid KV cache manager is not supported on non-GPU platforms.
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True
             if self.kv_transfer_config is not None:
@@ -3645,30 +3604,40 @@ class VllmConfig:
 
     def _set_cudagraph_sizes(self):
         """
-        cudagraph batchsize padding logic:
+        vLLM defines the default candidate list of batch sizes for CUDA graph
+        capture as:
 
-        `[1, 2, 4] + [8 * i for i in range(1, 1025)]` is a list of all possible
-        batch sizes that cudagraph will capture.
-
-        Depending on the engine's configuration of `max_num_seqs`, the
-        candidate batch sizes to capture cudagraph will shrink to the subset
-        which just cover the range of `[1, max_num_seqs]`. In the common case,
-        `max_num_seqs` is 256, and the cudagraph batch sizes will be
-        `[1, 2, 4, 8, 16, 24, 32, 40, ..., 256]`.
-
-        However, if users specify the cudagraph capture sizes through
-        compilation config, we will use the specified sizes instead.
+        ```python
+        max_graph_size = min(max_num_seqs * 2, 512)
+        # 1, 2, 4, then multiples of 8 up to max_graph_size
+        cuda_graph_sizes = [1, 2, 4, 8, 16, 24, 32, 40, ..., max_graph_size]
 
         In the end, `vllm_config.compilation_config.cudagraph_capture_sizes`
         will be the final sizes to capture cudagraph (in descending order).
 
-        During runtime, if batchsize is larger than
-        `vllm_config.compilation_config.cudagraph_capture_sizes`,
-        no cudagraph will be used.
-        If the batch size is no larger than
-        `vllm_config.compilation_config.cudagraph_capture_sizes`,
-        we can quickly find the padded graph size for a given batch size by
-        looking up `vllm_config.compilation_config.bs_to_padded_graph_size`.
+        These sizes are used to capture and reuse CUDA graphs for
+        performance-critical paths (e.g., decoding). Capturing enables
+        significantly faster kernel dispatch by avoiding Python overhead. The
+        list is then filtered based on `max_num_batched_tokens` (e.g., 8192 on
+        most GPUs), which controls the total allowed number of tokens in a
+        batch. Since each sequence may have a variable number of tokens, the
+        maximum usable batch size will depend on actual sequence lengths.
+
+        Example:
+            With `max_num_batched_tokens = 8192`, and typical sequences
+            averaging ~32 tokens, most practical batch sizes fall below 256.
+            However, the system will still allow capture sizes up to 512 if
+            shape and memory permit.
+
+        Note:
+            If users explicitly specify cudagraph capture sizes in the
+            compilation config, those will override this default logic.
+            At runtime:
+
+            - If batch size <= one of the `cudagraph_capture_sizes`, the closest
+            padded CUDA graph will be used.
+            - If batch size > largest `cudagraph_capture_sizes`, cudagraph will
+            not be used.
         """
 
         # calculate the default `batch_size_capture_list`
@@ -3877,7 +3846,7 @@ def contains_object_print(text):
     Check if the text looks like a printed Python object, e.g.
     contains any substring matching the pattern: "at 0xFFFFFFF>"
     We match against 0x followed by 2-16 hex chars (there's
-    a max of 16 on a 64 bit system).
+    a max of 16 on a 64-bit system).
 
     Args:
         text (str): The text to check
