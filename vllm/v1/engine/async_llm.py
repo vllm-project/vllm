@@ -263,9 +263,9 @@ class AsyncLLM(EngineClient):
     async def add_request(
         self,
         request_id: str,
-        prompt: PromptType,
+        request: Union[EngineCoreRequest, PromptType],
+        prompt_str: Optional[str],
         params: Union[SamplingParams, PoolingParams],
-        arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
@@ -283,9 +283,15 @@ class AsyncLLM(EngineClient):
         queue = RequestOutputCollector(output_kind=params.output_kind)
 
         # Convert Input --> Request.
-        prompt_str, request = self.processor.process_inputs(
-            request_id, prompt, params, arrival_time, lora_request,
-            tokenization_kwargs, trace_headers, priority, data_parallel_rank)
+        if not isinstance(request, EngineCoreRequest):
+            assert prompt_str is None
+            logger.warning_once(
+                "Processor has been moved under OpenAIServing/LLM and will "
+                "be removed from AsyncLLM in v0.13.")
+            prompt_str, request = self.processor.process_inputs(
+                request_id, request, params, None, lora_request,
+                tokenization_kwargs, trace_headers, priority,
+                data_parallel_rank)
 
         if is_pooling or params.n == 1:
             await self._add_request(request, prompt_str, None, 0, queue)
@@ -324,10 +330,13 @@ class AsyncLLM(EngineClient):
     # re-multiplexed in the API server anyhow.
     async def generate(
         self,
-        prompt: PromptType,
+        request: Union[EngineCoreRequest, PromptType],
         sampling_params: SamplingParams,
         request_id: str,
+        *,
+        prompt_str: Optional[str] = None,
         lora_request: Optional[LoRARequest] = None,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
@@ -360,23 +369,25 @@ class AsyncLLM(EngineClient):
             # to handle startup failure gracefully in the OpenAI server.
             self._run_output_handler()
 
-            tokenization_kwargs: dict[str, Any] = {}
-            truncate_prompt_tokens = sampling_params.truncate_prompt_tokens
+            if tokenization_kwargs is None:
+                tokenization_kwargs = {}
+                truncate_prompt_tokens = sampling_params.truncate_prompt_tokens
 
-            _validate_truncation_size(
-                self.model_config.max_model_len,
-                truncate_prompt_tokens,
-                tokenization_kwargs,
-            )
+                _validate_truncation_size(
+                    self.model_config.max_model_len,
+                    truncate_prompt_tokens,
+                    tokenization_kwargs,
+                )
 
             q = await self.add_request(
                 request_id,
-                prompt,
+                request,
+                prompt_str,
                 sampling_params,
                 lora_request=lora_request,
+                tokenization_kwargs=tokenization_kwargs,
                 trace_headers=trace_headers,
                 priority=priority,
-                tokenization_kwargs=tokenization_kwargs,
                 data_parallel_rank=data_parallel_rank,
             )
 
@@ -527,7 +538,7 @@ class AsyncLLM(EngineClient):
             self._run_output_handler()
 
             if tokenization_kwargs is None:
-                tokenization_kwargs = dict[str, Any]()
+                tokenization_kwargs = {}
             _validate_truncation_size(
                 self.model_config.max_model_len,
                 truncate_prompt_tokens,
@@ -537,11 +548,12 @@ class AsyncLLM(EngineClient):
             q = await self.add_request(
                 request_id,
                 prompt,
+                None,
                 pooling_params,
                 lora_request=lora_request,
+                tokenization_kwargs=tokenization_kwargs,
                 trace_headers=trace_headers,
                 priority=priority,
-                tokenization_kwargs=tokenization_kwargs,
             )
 
             # The output_handler task pushes items into the queue.
