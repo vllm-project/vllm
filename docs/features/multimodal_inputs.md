@@ -45,6 +45,32 @@ When using multi-modal inputs, vLLM normally hashes each media item by content t
         print(o.outputs[0].text)
     ```
 
+Using UUIDs, you can also skip sending media data entirely if you expect cache hits for respective items. Note that the request will fail if the skipped media doesn't have a corresponding UUID, or if the UUID fails to hit the cache.
+
+??? code
+
+    ```python
+    from vllm import LLM
+    from PIL import Image
+
+    # Qwen2.5-VL example with two images
+    llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct")
+
+    prompt = "USER: <image><image>\nDescribe the differences.\nASSISTANT:"
+    img_b = Image.open("/path/to/b.jpg")
+
+    outputs = llm.generate({
+        "prompt": prompt,
+        "multi_modal_data": {"image": [None, img_b]},
+        # Since img_a is expected to be cached, we can skip sending the actual
+        # image entirely.
+        "multi_modal_uuids": {"image": ["sku-1234-a", None]},
+    })
+
+    for o in outputs:
+        print(o.outputs[0].text)
+    ```
+
 !!! warning
     If both multimodal processor caching and prefix caching are disabled, user-provided `multi_modal_uuids` are ignored.
 
@@ -753,6 +779,39 @@ The following example demonstrates how to pass image embeddings to the OpenAI se
     ],
         model=model,
     )
+    ```
+
+For Online Serving, you can also skip sending media if you expect cache hits with provided UUIDs. You can do so by sending media like this:
+
+    ```python
+        # Image/video/audio URL:
+        {
+            "type": "image_url",
+            "image_url": None,
+            "uuid": image_uuid,
+        },
+
+        # image_embeds
+        {
+            "type": "image_embeds",
+            "image_embeds": None,
+            "uuid": image_uuid
+        },
+
+        # input_audio:
+        {
+            "type": "input_audio",
+            "input_audio": None,
+            "uuid": audio_uuid
+        },
+
+        # PIL Image:
+        {
+            "type": "image_pil",
+            "image_pil": None
+            "uuid": image_uuid
+        }
+
     ```
 
 !!! note
