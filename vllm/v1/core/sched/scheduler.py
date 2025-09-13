@@ -274,6 +274,9 @@ class Scheduler(SchedulerInterface):
                     self.encoder_cache_manager.free(preempted_req)
                     preempted_req.status = RequestStatus.PREEMPTED
                     preempted_req.num_computed_tokens = 0
+                    # both sync and async scheduling don'use spec_token_ids
+                    # in waitting queue, so we can just clear it here.
+                    preempted_req.spec_token_ids.clear()
                     if self.log_stats:
                         preempted_req.record_event(
                             EngineCoreEventType.PREEMPTED, scheduled_timestamp)
