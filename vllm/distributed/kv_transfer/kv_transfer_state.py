@@ -8,6 +8,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
                                                           KVConnectorRole)
+from vllm.v1.kv_cache_interface import KVCacheConfig
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -47,7 +48,10 @@ def is_v1_kv_transfer_group(
     return isinstance(connector, KVConnectorBase_V1)
 
 
-def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
+def ensure_kv_transfer_initialized(
+    vllm_config: "VllmConfig",
+    kv_cache_config: Optional[KVCacheConfig],
+) -> None:
     """
     Initialize KV cache transfer parallel group.
     """
@@ -60,8 +64,13 @@ def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
     if (vllm_config.kv_transfer_config.is_kv_transfer_instance
             and _KV_CONNECTOR_AGENT is None):
         if envs.VLLM_USE_V1:
+            assert kv_cache_config is not None, ("kv_cache_config is required "
+                                                 "when initializing the v1 "
+                                                 "connector.")
             _KV_CONNECTOR_AGENT = KVConnectorFactory.create_connector(
-                config=vllm_config, role=KVConnectorRole.WORKER)
+                config=vllm_config,
+                kv_cache_config=kv_cache_config,
+                role=KVConnectorRole.WORKER)
         else:
             raise ValueError("V0 is no longer supported")
 
