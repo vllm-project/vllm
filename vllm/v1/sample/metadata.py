@@ -19,6 +19,8 @@ class SamplingMetadata:
     top_p: Optional[torch.Tensor]
     top_k: Optional[torch.Tensor]
 
+    predicted_outputs: list[list[int]]
+
     generators: dict[int, torch.Generator]
 
     # None means no logprobs, 0 means sampled token logprobs only
