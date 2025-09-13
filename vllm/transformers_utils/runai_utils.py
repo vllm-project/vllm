@@ -63,9 +63,6 @@ class ObjectStorageModel:
 
         self.dir = tempfile.mkdtemp()
 
-    def __del__(self):
-        self._close()
-
     def _close(self) -> None:
         if os.path.exists(self.dir):
             shutil.rmtree(self.dir)
