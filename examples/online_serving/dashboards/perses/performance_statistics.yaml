@@ -1,0 +1,514 @@
+kind: Dashboard
+metadata:
+    name: performance-statistics
+    createdAt: 0001-01-01T00:00:00Z
+    updatedAt: 0001-01-01T00:00:00Z
+    version: 0
+    project: ""
+spec:
+    display:
+        name: Performance Statistics
+    variables:
+        - kind: ListVariable
+          spec:
+            display:
+                name: datasource
+                hidden: false
+            defaultValue: prometheus
+            allowAllValue: false
+            allowMultiple: false
+            plugin:
+                kind: StaticListVariable
+                spec:
+                    values:
+                        - grafana
+                        - migration
+                        - not
+                        - supported
+            name: DS_PROMETHEUS
+        - kind: ListVariable
+          spec:
+            display:
+                name: Aggregation
+                hidden: false
+            defaultValue: |-
+                avg : Average
+                0.50 : P50
+                0.90 : P90
+                0.99 : P99
+                0.999 : Max (Approx)
+            allowAllValue: false
+            allowMultiple: false
+            plugin:
+                kind: SomeVariable
+                spec:
+                    values:
+                        - |-
+                          avg : Average
+                          0.50 : P50
+                          0.90 : P90
+                          0.99 : P99
+                          0.999 : Max (Approx)
+            name: agg_method
+        - kind: ListVariable
+          spec:
+            display:
+                name: Deployment_ID
+                hidden: false
+            defaultValue:
+                - granite-33-2b-instruct
+            allowAllValue: true
+            allowMultiple: true
+            plugin:
+                kind: StaticListVariable
+                spec:
+                    values:
+                        - grafana
+                        - migration
+                        - not
+                        - supported
+            name: Deployment_id
+    panels:
+        "0_0":
+            kind: Panel
+            spec:
+                display:
+                    name: E2E Latency over Time
+                    description: End-to-End latency of requests, showing average and key percentiles over time.
+                plugin:
+                    kind: FooChart
+                    spec:
+                        iwas: timeseries
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: migration_from_grafana_not_supported
+        "0_1":
+            kind: Panel
+            spec:
+                display:
+                    name: E2E Latency (P99)
+                    description: 99th percentile of End-to-End request latency over the selected time range.
+                plugin:
+                    kind: BarChart
+                    spec:
+                        nested:
+                            iwas: stat
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: migration_from_grafana_not_supported
+        "0_2":
+            kind: Panel
+            spec:
+                display:
+                    name: E2E Latency (P90)
+                    description: 90th percentile of End-to-End request latency over the selected time range.
+                plugin:
+                    kind: BarChart
+                    spec:
+                        nested:
+                            iwas: stat
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: migration_from_grafana_not_supported
+        "0_3":
+            kind: Panel
+            spec:
+                display:
+                    name: E2E Latency (Avg)
+                    description: Average End-to-End request latency over the selected time range.
+                plugin:
+                    kind: BarChart
+                    spec:
+                        nested:
+                            iwas: stat
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: migration_from_grafana_not_supported
+        "0_4":
+            kind: Panel
+            spec:
+                display:
+                    name: E2E Latency (P50)
+                    description: 50th percentile (median) of End-to-End request latency over the selected time range.
+                plugin:
+                    kind: BarChart
+                    spec:
+                        nested:
+                            iwas: stat
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: migration_from_grafana_not_supported
+        "1_0":
+            kind: Panel
+            spec:
+                display:
+                    name: TTFT Over Time
+                    description: Time to first token (TTFT) latency, showing average and key percentiles over time.
+                plugin:
+                    kind: FooChart
+                    spec:
+                        iwas: timeseries
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: migration_from_grafana_not_supported
+        "1_1":
+            kind: Panel
+            spec:
+                display:
+                    name: TTFT (P99)
+                    description: 99th percentile of Time To First Token latency over the selected time range.
+                plugin:
+                    kind: BarChart
+                    spec:
+                        nested:
+                            iwas: stat
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: migration_from_grafana_not_supported
+        "1_2":
+            kind: Panel
+            spec:
+                display:
+                    name: TTFT (P90)
+                    description: 90th percentile of Time To First Token latency over the selected time range.
+                plugin:
+                    kind: BarChart
+                    spec:
+                        nested:
+                            iwas: stat
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: migration_from_grafana_not_supported
+        "1_3":
+            kind: Panel
+            spec:
+                display:
+                    name: TTFT (Avg)
+                    description: Average Time To First Token latency over the selected time range.
+                plugin:
+                    kind: BarChart
+                    spec:
+                        nested:
+                            iwas: stat
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: migration_from_grafana_not_supported
+        "1_4":
+            kind: Panel
+            spec:
+                display:
+                    name: TTFT (P50)
+                    description: 50th percentile (median) of Time To First Token latency over the selected time range.
+                plugin:
+                    kind: BarChart
+                    spec:
+                        nested:
+                            iwas: stat
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: migration_from_grafana_not_supported
+        "2_0":
+            kind: Panel
+            spec:
+                display:
+                    name: ITL (Time Per Output Token) Over Time
+                    description: Iteration latency, or average time taken to generate a single output token, with percentiles.
+                plugin:
+                    kind: FooChart
+                    spec:
+                        iwas: timeseries
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: migration_from_grafana_not_supported
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: migration_from_grafana_not_supported
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: migration_from_grafana_not_supported
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: migration_from_grafana_not_supported
+        "2_1":
+            kind: Panel
+            spec:
+                display:
+                    name: ITL (P90)
+                    description: 90th percentile of Iteration Latency over the selected time range.
+                plugin:
+                    kind: BarChart
+                    spec:
+                        nested:
+                            iwas: stat
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: migration_from_grafana_not_supported
+        "2_2":
+            kind: Panel
+            spec:
+                display:
+                    name: ITL (P99)
+                    description: |+
+                        99th percentile of Iteration Latency over the selected time range.
+
+                plugin:
+                    kind: BarChart
+                    spec:
+                        nested:
+                            iwas: stat
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: migration_from_grafana_not_supported
+        "2_3":
+            kind: Panel
+            spec:
+                display:
+                    name: ITL (Avg)
+                    description: Average Iteration Latency (time per output token) over the selected time range.
+                plugin:
+                    kind: BarChart
+                    spec:
+                        nested:
+                            iwas: stat
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: migration_from_grafana_not_supported
+        "2_4":
+            kind: Panel
+            spec:
+                display:
+                    name: ITL (P50)
+                    description: 50th percentile (median) of Iteration Latency over the selected time range.
+                plugin:
+                    kind: BarChart
+                    spec:
+                        nested:
+                            iwas: stat
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: migration_from_grafana_not_supported
+        "3_0":
+            kind: Panel
+            spec:
+                display:
+                    name: TPS (Tokens Per Second) Over Time
+                    description: Rate of tokens processed per second, including prompt and generation phases.
+                plugin:
+                    kind: FooChart
+                    spec:
+                        iwas: timeseries
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: migration_from_grafana_not_supported
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: migration_from_grafana_not_supported
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: migration_from_grafana_not_supported
+    layouts:
+        - kind: Grid
+          spec:
+            display:
+                title: 'Graph: E2E latency over time '
+                collapse:
+                    open: true
+            items:
+                - x: 0
+                  "y": 1
+                  width: 12
+                  height: 8
+                  content:
+                    $ref: '#/spec/panels/0_0'
+                - x: 12
+                  "y": 1
+                  width: 6
+                  height: 4
+                  content:
+                    $ref: '#/spec/panels/0_1'
+                - x: 18
+                  "y": 1
+                  width: 6
+                  height: 4
+                  content:
+                    $ref: '#/spec/panels/0_2'
+                - x: 12
+                  "y": 5
+                  width: 6
+                  height: 4
+                  content:
+                    $ref: '#/spec/panels/0_3'
+                - x: 18
+                  "y": 5
+                  width: 6
+                  height: 4
+                  content:
+                    $ref: '#/spec/panels/0_4'
+        - kind: Grid
+          spec:
+            display:
+                title: 'Graph: TTFT(Time To First Token) over time '
+                collapse:
+                    open: true
+            items:
+                - x: 0
+                  "y": 10
+                  width: 12
+                  height: 8
+                  content:
+                    $ref: '#/spec/panels/1_0'
+                - x: 12
+                  "y": 10
+                  width: 6
+                  height: 4
+                  content:
+                    $ref: '#/spec/panels/1_1'
+                - x: 18
+                  "y": 10
+                  width: 6
+                  height: 4
+                  content:
+                    $ref: '#/spec/panels/1_2'
+                - x: 12
+                  "y": 14
+                  width: 6
+                  height: 4
+                  content:
+                    $ref: '#/spec/panels/1_3'
+                - x: 18
+                  "y": 14
+                  width: 6
+                  height: 4
+                  content:
+                    $ref: '#/spec/panels/1_4'
+        - kind: Grid
+          spec:
+            display:
+                title: ITL (Iteration Latency / Time Per Output Token) over time.
+                collapse:
+                    open: true
+            items:
+                - x: 0
+                  "y": 19
+                  width: 12
+                  height: 8
+                  content:
+                    $ref: '#/spec/panels/2_0'
+                - x: 12
+                  "y": 19
+                  width: 6
+                  height: 4
+                  content:
+                    $ref: '#/spec/panels/2_1'
+                - x: 18
+                  "y": 19
+                  width: 6
+                  height: 4
+                  content:
+                    $ref: '#/spec/panels/2_2'
+                - x: 12
+                  "y": 23
+                  width: 6
+                  height: 4
+                  content:
+                    $ref: '#/spec/panels/2_3'
+                - x: 18
+                  "y": 23
+                  width: 6
+                  height: 4
+                  content:
+                    $ref: '#/spec/panels/2_4'
+        - kind: Grid
+          spec:
+            display:
+                title: TPS (Tokens Per Second)
+                collapse:
+                    open: true
+            items:
+                - x: 0
+                  "y": 28
+                  width: 12
+                  height: 8
+                  content:
+                    $ref: '#/spec/panels/3_0'
+    duration: 1h
+
