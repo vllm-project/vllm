@@ -424,6 +424,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "KimiVLForConditionalGeneration": _HfExamplesInfo("moonshotai/Kimi-VL-A3B-Instruct",  # noqa: E501
                                                       extras={"thinking": "moonshotai/Kimi-VL-A3B-Thinking"},  # noqa: E501
                                                       trust_remote_code=True),
+    "KimiAudioForConditionalGeneration": _HfExamplesInfo("moonshotai/Kimi-Audio-7B-Instruct",  # noqa: E501
+                                                         trust_remote_code=True),
     "Llama4ForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-4-Scout-17B-16E-Instruct",   # noqa: E501
                                                       max_model_len=10240,
                                                       extras={"llama-guard-4": "meta-llama/Llama-Guard-4-12B"}, # noqa: E501
