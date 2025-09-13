@@ -6,6 +6,8 @@ import numpy as np
 import pytest
 from PIL import Image, ImageChops
 
+pytestmark = pytest.mark.cpu_test
+
 from vllm.multimodal.image import ImageMediaIO, convert_image_mode
 
 ASSETS_DIR = Path(__file__).parent / "assets"

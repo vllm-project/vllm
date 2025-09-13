@@ -8,6 +8,8 @@ import pytest
 import torch
 from PIL import Image, ImageDraw
 
+pytestmark = pytest.mark.cpu_test
+
 from vllm.multimodal.hasher import MultiModalHasher
 
 ASSETS_DIR = Path(__file__).parent / "assets"

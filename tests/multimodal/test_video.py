@@ -9,6 +9,8 @@ import numpy.typing as npt
 import pytest
 from PIL import Image
 
+pytestmark = pytest.mark.cpu_test
+
 from vllm.assets.base import get_vllm_public_assets
 from vllm.assets.video import video_to_ndarrays, video_to_pil_images_list
 from vllm.multimodal.image import ImageMediaIO

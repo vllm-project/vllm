@@ -9,6 +9,8 @@ import partial_json_parser
 import pytest
 from partial_json_parser.core.options import Allow
 
+pytestmark = pytest.mark.cpu_test
+
 from vllm.entrypoints.openai.protocol import (DeltaMessage, FunctionCall,
                                               ToolCall)
 from vllm.entrypoints.openai.tool_parsers import JambaToolParser

@@ -8,6 +8,8 @@ from typing import Callable, Optional
 import pytest
 import torch
 
+pytestmark = pytest.mark.cpu_test
+
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.distributed.kv_events import AllBlocksCleared, BlockRemoved
 from vllm.multimodal.inputs import (MultiModalFeatureSpec,

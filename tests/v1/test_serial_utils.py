@@ -9,6 +9,8 @@ import numpy as np
 import pytest
 import torch
 
+pytestmark = pytest.mark.cpu_test
+
 from vllm.multimodal.inputs import (MultiModalBatchedField,
                                     MultiModalFieldElem, MultiModalFlatField,
                                     MultiModalKwargsItem,

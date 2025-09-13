@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import msgspec
+import pytest
+
+pytestmark = pytest.mark.cpu_test
 
 from vllm.executor.msgspec_utils import decode_hook, encode_hook
 from vllm.sequence import ExecuteModelRequest

@@ -3,6 +3,8 @@
 
 import pytest
 
+pytestmark = pytest.mark.cpu_test
+
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
 from vllm.utils import Device, chunk_list
 

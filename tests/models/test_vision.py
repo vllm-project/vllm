@@ -6,6 +6,8 @@ import torch
 
 from vllm.model_executor.models.vision import resolve_visual_encoder_outputs
 
+pytestmark = pytest.mark.cpu_test
+
 
 @pytest.mark.parametrize(
     ("feature_sample_layers", "num_layers_loaded", "max_possible_layers",

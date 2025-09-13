@@ -8,6 +8,8 @@ from typing import Optional
 
 import pytest
 
+pytestmark = pytest.mark.cpu_test
+
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ChatCompletionToolsParam,
                                               DeltaMessage, FunctionCall,

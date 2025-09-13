@@ -48,23 +48,31 @@ steps:
   - vllm/
   - tests/mq_llm_engine
   - tests/async_engine
-  - tests/test_inputs.py
-  - tests/test_outputs.py
   - tests/multimodal
   - tests/utils_
   - tests/worker
-  - tests/standalone_tests/lazy_imports.py
   - tests/transformers_utils
   commands:
-  - python3 standalone_tests/lazy_imports.py
   - pytest -v -s mq_llm_engine # MQLLMEngine
   - pytest -v -s async_engine # AsyncLLMEngine
-  - pytest -v -s test_inputs.py
-  - pytest -v -s test_outputs.py
-  - pytest -v -s multimodal
+  - pytest -v -s -m 'not cpu_test' multimodal
   - pytest -v -s utils_ # Utils
   - pytest -v -s worker # Worker
   - pytest -v -s transformers_utils # transformers_utils
+
+- label: Async Engine, Inputs, Utils, Worker Test (CPU)
+  source_file_dependencies:
+  - vllm/
+  - tests/test_inputs.py
+  - tests/test_outputs.py
+  - tests/standalone_tests/lazy_imports.py
+  - tests/multimodal
+  no_gpu: true
+  commands:
+  - python3 standalone_tests/lazy_imports.py
+  - pytest -v -s test_inputs.py
+  - pytest -v -s test_outputs.py
+  - pytest -v -s -m 'cpu_test' multimodal
 
 - label: Python-only Installation Test # 10min
   timeout_in_minutes: 20
@@ -102,7 +110,16 @@ steps:
   - vllm/distributed
   - tests/core
   commands:
-  - pytest -v -s core
+  - pytest -v -s -m 'not cpu_test' core
+
+- label: Core Test (CPU)
+  source_file_dependencies:
+  - vllm/core
+  - vllm/distributed
+  - tests/core
+  no_gpu: true
+  commands:
+  - pytest -v -s -m 'cpu_test' core
 
 - label: Entrypoints Unit Tests # 5min
   timeout_in_minutes: 10
@@ -300,22 +317,34 @@ steps:
     - tests/v1
   commands:
     # split the test to avoid interference
-    - pytest -v -s v1/core
+    - pytest -v -s -m 'not cpu_test' v1/core
     - pytest -v -s v1/executor
     - pytest -v -s v1/sample
     - pytest -v -s v1/logits_processors
     - pytest -v -s v1/worker
-    - pytest -v -s v1/structured_output
+    - pytest -v -s -m 'not cpu_test' v1/structured_output
     - pytest -v -s v1/spec_decode
-    - pytest -v -s v1/kv_connector/unit
+    - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
     - pytest -v -s v1/metrics
-    - pytest -v -s v1/test_serial_utils.py
-    - pytest -v -s v1/test_utils.py
     - pytest -v -s v1/test_oracle.py
-    - pytest -v -s v1/test_metrics_reader.py
     # Integration test for streaming correctness (requires special branch).
     - pip install -U git+https://github.com/robertgshaw2-redhat/lm-evaluation-harness.git@streaming-api
     - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
+
+- label: V1 Test others (CPU)
+  source_file_dependencies:
+    - vllm/
+    - tests/v1
+  no_gpu: true
+  commands:
+    # split the test to avoid interference
+    - pytest -v -s -m 'cpu_test' v1/core
+    - pytest -v -s -m 'cpu_test' v1/structured_output
+    - pytest -v -s v1/test_utils.py
+    - pytest -v -s v1/test_serial_utils.py
+    - pytest -v -s -m 'cpu_test' v1/kv_connector/unit
+    - pytest -v -s v1/test_metrics_reader.py
+
 
 - label: Examples Test # 30min
   timeout_in_minutes: 45
@@ -566,8 +595,17 @@ steps:
     - tests/tool_use
     - tests/mistral_tool_use
   commands:
-    - pytest -v -s tool_use
-    - pytest -v -s mistral_tool_use
+    - pytest -v -s -m 'not cpu_test' tool_use
+    - pytest -v -s -m 'not cpu_test' mistral_tool_use
+
+- label: OpenAI-Compatible Tool Use (CPU)
+  source_file_dependencies:
+    - vllm/
+    - tests/tool_use
+    - tests/mistral_tool_use
+  no_gpu: true
+  commands:
+    - pytest -v -s -m 'cpu_test' tool_use
 
 #####  models test  #####
 
@@ -579,10 +617,21 @@ steps:
   - vllm/
   - tests/models/test_initialization.py
   commands:
-    # Run a subset of model initialization tests
-    - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
+    - pytest -v -s models/test_transformers.py
+    - pytest -v -s models/test_initialization.py
 
-- label: Basic Models Tests (Extra Initialization) %N
+- label: Basic Models Test (CPU)
+  torch_nightly: true
+  source_file_dependencies:
+  - tests/models
+  no_gpu: true
+  commands:
+    - pytest -v -s models/test_registry.py
+    - pytest -v -s models/test_utils.py
+    - pytest -v -s models/test_vision.py
+
+
+- label: Language Models Test (Standard) # 35min
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
   torch_nightly: true

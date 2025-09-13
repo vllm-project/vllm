@@ -6,6 +6,8 @@ import json
 
 import pytest
 
+pytestmark = pytest.mark.cpu_test
+
 from vllm.entrypoints.openai.protocol import FunctionCall, ToolCall
 from vllm.entrypoints.openai.tool_parsers import KimiK2ToolParser
 from vllm.transformers_utils.tokenizer import get_tokenizer

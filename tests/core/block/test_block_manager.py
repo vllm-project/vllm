@@ -3,6 +3,8 @@
 
 import pytest
 
+pytestmark = pytest.mark.cpu_test
+
 from vllm.core.block.utils import (STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE,
                                    STR_NOT_IMPL_ENC_DEC_SWA)
 from vllm.core.block_manager import SelfAttnBlockSpaceManager

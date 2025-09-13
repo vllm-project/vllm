@@ -8,6 +8,8 @@ from unittest.mock import MagicMock
 
 import pytest  # noqa
 import torch
+
+pytestmark = pytest.mark.cpu_test
 from torch import Use  # noqa
 
 from vllm.config import CacheConfig, SchedulerConfig

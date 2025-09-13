@@ -6,6 +6,8 @@ import regex as re
 import requests
 import torch
 
+pytestmark = pytest.mark.cpu_test
+
 from tests.utils import RemoteOpenAIServer
 from vllm.v1.worker.utils import bind_kv_cache
 

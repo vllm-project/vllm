@@ -4,7 +4,10 @@ import tempfile
 from collections import defaultdict
 from typing import Any, Callable, Optional
 
+import pytest
 import torch
+
+pytestmark = pytest.mark.cpu_test
 
 from vllm import SamplingParams
 from vllm.config import (CacheConfig, DeviceConfig, KVTransferConfig,
