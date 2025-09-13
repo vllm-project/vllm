@@ -587,178 +587,102 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "FuyuForCausalLM": _HfExamplesInfo("adept/fuyu-8b"),
     "Gemma3ForConditionalGeneration": _HfExamplesInfo("google/gemma-3-4b-it"),
-    "Gemma3nForConditionalGeneration": _HfExamplesInfo(
-        "google/gemma-3n-E2B-it",
-        min_transformers_version="4.53",
-    ),
-    "GraniteSpeechForConditionalGeneration": _HfExamplesInfo(
-        "ibm-granite/granite-speech-3.3-2b"
-    ),
-    "GLM4VForCausalLM": _HfExamplesInfo(
-        "zai-org/glm-4v-9b",
-        trust_remote_code=True,
-        hf_overrides={"architectures": ["GLM4VForCausalLM"]},
-    ),
-    "Glm4vForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-4.1V-9B-Thinking"),
-    "Glm4vMoeForConditionalGeneration": _HfExamplesInfo(
-        "zai-org/GLM-4.5V", min_transformers_version="4.56"
-    ),
-    "H2OVLChatModel": _HfExamplesInfo(
-        "h2oai/h2ovl-mississippi-800m",
-        trust_remote_code=True,
-        extras={"2b": "h2oai/h2ovl-mississippi-2b"},
-        max_transformers_version="4.48",
-        transformers_version_reason="HF model is not compatible.",
-    ),
-    "HCXVisionForCausalLM": _HfExamplesInfo(
-        "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B",
-        trust_remote_code=True,
-    ),
-    "Idefics3ForConditionalGeneration": _HfExamplesInfo(
-        "HuggingFaceM4/Idefics3-8B-Llama3",
-        {"tiny": "HuggingFaceTB/SmolVLM-256M-Instruct"},
-        min_transformers_version="4.56",
-        transformers_version_reason="HF model broken in 4.55",
-    ),
-    "InternS1ForConditionalGeneration": _HfExamplesInfo(
-        "internlm/Intern-S1", trust_remote_code=True
-    ),
-    "InternVLChatModel": _HfExamplesInfo(
-        "OpenGVLab/InternVL2-1B",
-        extras={
-            "2B": "OpenGVLab/InternVL2-2B",
-            "3.0": "OpenGVLab/InternVL3-1B",
-            "3.5-qwen3": "OpenGVLab/InternVL3_5-1B",
-            "3.5-qwen3moe": "OpenGVLab/InternVL3_5-30B-A3B",
-            "3.5-gptoss": "OpenGVLab/InternVL3_5-GPT-OSS-20B-A4B-Preview",
-        },
-        trust_remote_code=True,
-    ),
-    "InternVLForConditionalGeneration": _HfExamplesInfo("OpenGVLab/InternVL3-1B-hf"),
-    "KeyeForConditionalGeneration": _HfExamplesInfo(
-        "Kwai-Keye/Keye-VL-8B-Preview",
-        trust_remote_code=True,
-    ),
-    "KeyeVL1_5ForConditionalGeneration": _HfExamplesInfo(
-        "Kwai-Keye/Keye-VL-1_5-8B",
-        trust_remote_code=True,
-    ),
-    "KimiVLForConditionalGeneration": _HfExamplesInfo(
-        "moonshotai/Kimi-VL-A3B-Instruct",
-        extras={"thinking": "moonshotai/Kimi-VL-A3B-Thinking"},
-        trust_remote_code=True,
-    ),
-    "Llama4ForConditionalGeneration": _HfExamplesInfo(
-        "meta-llama/Llama-4-Scout-17B-16E-Instruct",
-        max_model_len=10240,
-        extras={"llama-guard-4": "meta-llama/Llama-Guard-4-12B"},
-    ),
-    "LlavaForConditionalGeneration": _HfExamplesInfo(
-        "llava-hf/llava-1.5-7b-hf",
-        extras={
-            "mistral": "mistral-community/pixtral-12b",
-            "mistral-fp8": "nm-testing/pixtral-12b-FP8-dynamic",
-        },
-    ),
-    "LlavaNextForConditionalGeneration": _HfExamplesInfo(
-        "llava-hf/llava-v1.6-mistral-7b-hf"
-    ),
-    "LlavaNextVideoForConditionalGeneration": _HfExamplesInfo(
-        "llava-hf/LLaVA-NeXT-Video-7B-hf"
-    ),
-    "LlavaOnevisionForConditionalGeneration": _HfExamplesInfo(
-        "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
-    ),
-    "MantisForConditionalGeneration": _HfExamplesInfo(
-        "TIGER-Lab/Mantis-8B-siglip-llama3",
-        max_transformers_version="4.48",
-        transformers_version_reason="HF model is not compatible.",
-        hf_overrides={"architectures": ["MantisForConditionalGeneration"]},
-    ),
-    "MiDashengLMModel": _HfExamplesInfo(
-        "mispeech/midashenglm-7b", trust_remote_code=True
-    ),
-    "MiniCPMO": _HfExamplesInfo("openbmb/MiniCPM-o-2_6", trust_remote_code=True),
-    "MiniCPMV": _HfExamplesInfo(
-        "openbmb/MiniCPM-Llama3-V-2_5",
-        extras={
-            "2.6": "openbmb/MiniCPM-V-2_6",
-            "4.0": "openbmb/MiniCPM-V-4",
-            "4.5": "openbmb/MiniCPM-V-4_5",
-        },
-        trust_remote_code=True,
-    ),
-    "MiniMaxVL01ForConditionalGeneration": _HfExamplesInfo(
-        "MiniMaxAI/MiniMax-VL-01",
-        trust_remote_code=True,
-        v0_only=True,
-    ),
-    "Mistral3ForConditionalGeneration": _HfExamplesInfo(
-        "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
-        extras={"fp8": "nm-testing/Mistral-Small-3.1-24B-Instruct-2503-FP8-dynamic"},
-    ),
-    "MolmoForCausalLM": _HfExamplesInfo(
-        "allenai/Molmo-7B-D-0924",
-        max_transformers_version="4.48",
-        transformers_version_reason="Incorrectly-detected `tensorflow` import.",
-        extras={"olmo": "allenai/Molmo-7B-O-0924"},
-        trust_remote_code=True,
-    ),
-    "NVLM_D": _HfExamplesInfo("nvidia/NVLM-D-72B", trust_remote_code=True),
-    "Llama_Nemotron_Nano_VL": _HfExamplesInfo(
-        "nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1",
-        trust_remote_code=True,
-    ),
-    "NemotronH_Nano_VL_V2": _HfExamplesInfo(
-        "nano_vl_dummy", is_available_online=False, trust_remote_code=True
-    ),
-    "Ovis": _HfExamplesInfo(
-        "AIDC-AI/Ovis2-1B",
-        trust_remote_code=True,
-        max_transformers_version="4.53",
-        transformers_version_reason="HF model is not compatible",
-        extras={
-            "1.6-llama": "AIDC-AI/Ovis1.6-Llama3.2-3B",
-            "1.6-gemma": "AIDC-AI/Ovis1.6-Gemma2-9B",
-        },
-    ),
-    "Ovis2_5": _HfExamplesInfo("AIDC-AI/Ovis2.5-2B", trust_remote_code=True),
-    "PaliGemmaForConditionalGeneration": _HfExamplesInfo(
-        "google/paligemma-3b-mix-224",
-        extras={"v2": "google/paligemma2-3b-ft-docci-448"},
-    ),
-    "Phi3VForCausalLM": _HfExamplesInfo(
-        "microsoft/Phi-3-vision-128k-instruct",
-        trust_remote_code=True,
-        max_transformers_version="4.48",
-        transformers_version_reason="Use of deprecated imports which have been removed.",  # noqa: E501
-        extras={"phi3.5": "microsoft/Phi-3.5-vision-instruct"},
-    ),
-    "Phi4MMForCausalLM": _HfExamplesInfo(
-        "microsoft/Phi-4-multimodal-instruct", trust_remote_code=True
-    ),
-    "Phi4MultimodalForCausalLM": _HfExamplesInfo(
-        "microsoft/Phi-4-multimodal-instruct",
-        revision="refs/pr/70",
-    ),
-    "PixtralForConditionalGeneration": _HfExamplesInfo(
-        "mistralai/Pixtral-12B-2409",
-        tokenizer_mode="mistral",
-    ),
-    "QwenVLForConditionalGeneration": _HfExamplesInfo(
-        "Qwen/Qwen-VL",
-        extras={"chat": "Qwen/Qwen-VL-Chat"},
-        trust_remote_code=True,
-        hf_overrides={"architectures": ["QwenVLForConditionalGeneration"]},
-    ),
-    "Qwen2AudioForConditionalGeneration": _HfExamplesInfo(
-        "Qwen/Qwen2-Audio-7B-Instruct"
-    ),
-    "Qwen2VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2-VL-2B-Instruct"),
-    "Qwen2_5_VLForConditionalGeneration": _HfExamplesInfo(
-        "Qwen/Qwen2.5-VL-3B-Instruct",
-        max_model_len=4096,
-    ),
+    "Gemma3nForConditionalGeneration": _HfExamplesInfo("google/gemma-3n-E2B-it",    # noqa: E501
+                                        min_transformers_version="4.53"),
+    "GraniteSpeechForConditionalGeneration": _HfExamplesInfo("ibm-granite/granite-speech-3.3-2b"),  # noqa: E501
+    "GLM4VForCausalLM": _HfExamplesInfo("zai-org/glm-4v-9b",
+                                        trust_remote_code=True,
+                                        hf_overrides={"architectures": ["GLM4VForCausalLM"]}),  # noqa: E501
+    "Glm4vForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-4.1V-9B-Thinking"),  # noqa: E501
+    "Glm4vMoeForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-4.5V",
+                                                        min_transformers_version="4.56"),  # noqa: E501
+    "H2OVLChatModel": _HfExamplesInfo("h2oai/h2ovl-mississippi-800m",
+                                      trust_remote_code=True,
+                                      extras={"2b": "h2oai/h2ovl-mississippi-2b"},  # noqa: E501
+                                      max_transformers_version="4.48",  # noqa: E501
+                                      transformers_version_reason="HF model is not compatible."),  # noqa: E501
+    "HCXVisionForCausalLM": _HfExamplesInfo("naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B",  # noqa: E501
+                                            trust_remote_code=True),
+    "Idefics3ForConditionalGeneration": _HfExamplesInfo("HuggingFaceM4/Idefics3-8B-Llama3",  # noqa: E501
+                                                        {"tiny": "HuggingFaceTB/SmolVLM-256M-Instruct"},    # noqa: E501
+                                                        min_transformers_version="4.55.1",
+                                                        transformers_version_reason="HF model broken in 4.55.0"),  # noqa: E501
+    "InternS1ForConditionalGeneration": _HfExamplesInfo("internlm/Intern-S1",
+                                                        trust_remote_code=True),  # noqa: E501
+    "InternVLChatModel": _HfExamplesInfo("OpenGVLab/InternVL2-1B",
+                                         extras={"2B": "OpenGVLab/InternVL2-2B",
+                                                 "3.0": "OpenGVLab/InternVL3-1B"},  # noqa: E501
+                                         trust_remote_code=True),
+    "KeyeForConditionalGeneration": _HfExamplesInfo("Kwai-Keye/Keye-VL-8B-Preview", # noqa: E501
+                                                    trust_remote_code=True),
+    "KimiVLForConditionalGeneration": _HfExamplesInfo("moonshotai/Kimi-VL-A3B-Instruct",  # noqa: E501
+                                                      extras={"thinking": "moonshotai/Kimi-VL-A3B-Thinking"},  # noqa: E501
+                                                      trust_remote_code=True),
+    "KimiAudioForConditionalGeneration": _HfExamplesInfo("moonshotai/Kimi-Audio-7B-Instruct",  # noqa: E501
+                                                         trust_remote_code=True),
+    "Llama4ForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-4-Scout-17B-16E-Instruct",   # noqa: E501
+                                                      max_model_len=10240,
+                                                      extras={"llama-guard-4": "meta-llama/Llama-Guard-4-12B"}, # noqa: E501
+                                                      ),
+    "LlavaForConditionalGeneration": _HfExamplesInfo("llava-hf/llava-1.5-7b-hf",
+                                                     extras={"mistral": "mistral-community/pixtral-12b", # noqa: E501
+                                                             "mistral-fp8": "nm-testing/pixtral-12b-FP8-dynamic"}),  # noqa: E501
+    "LlavaNextForConditionalGeneration": _HfExamplesInfo("llava-hf/llava-v1.6-mistral-7b-hf"),  # noqa: E501
+    "LlavaNextVideoForConditionalGeneration": _HfExamplesInfo("llava-hf/LLaVA-NeXT-Video-7B-hf"),  # noqa: E501
+    "LlavaOnevisionForConditionalGeneration": _HfExamplesInfo("llava-hf/llava-onevision-qwen2-0.5b-ov-hf"),  # noqa: E501
+    "MantisForConditionalGeneration": _HfExamplesInfo("TIGER-Lab/Mantis-8B-siglip-llama3",  # noqa: E501
+                                                      max_transformers_version="4.48",  # noqa: E501
+                                                      transformers_version_reason="HF model is not compatible.",  # noqa: E501
+                                                      hf_overrides={"architectures": ["MantisForConditionalGeneration"]}),  # noqa: E501
+    "MiniCPMO": _HfExamplesInfo("openbmb/MiniCPM-o-2_6",
+                                trust_remote_code=True),
+    "MiniCPMV": _HfExamplesInfo("openbmb/MiniCPM-Llama3-V-2_5",
+                                extras={"2.6": "openbmb/MiniCPM-V-2_6", "4.0": "openbmb/MiniCPM-V-4"},  # noqa: E501
+                                trust_remote_code=True),
+    "MiniMaxVL01ForConditionalGeneration": _HfExamplesInfo("MiniMaxAI/MiniMax-VL-01", # noqa: E501
+                                              trust_remote_code=True,
+                                              v0_only=True),
+    "Mistral3ForConditionalGeneration": _HfExamplesInfo("mistralai/Mistral-Small-3.1-24B-Instruct-2503",  # noqa: E501
+                                                        extras={"fp8": "nm-testing/Mistral-Small-3.1-24B-Instruct-2503-FP8-dynamic"}),  # noqa: E501
+    "MolmoForCausalLM": _HfExamplesInfo("allenai/Molmo-7B-D-0924",
+                                        max_transformers_version="4.48",
+                                        transformers_version_reason="Incorrectly-detected `tensorflow` import.",  # noqa: E501
+                                        extras={"olmo": "allenai/Molmo-7B-O-0924"},  # noqa: E501
+                                        trust_remote_code=True),
+    "NVLM_D": _HfExamplesInfo("nvidia/NVLM-D-72B",
+                              trust_remote_code=True),
+    "Llama_Nemotron_Nano_VL" : _HfExamplesInfo("nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1", # noqa: E501
+                                                     trust_remote_code=True),
+    "Ovis": _HfExamplesInfo("AIDC-AI/Ovis2-1B", trust_remote_code=True,
+                            max_transformers_version="4.53",
+                            transformers_version_reason="HF model is not compatible",  # noqa: E501
+                            extras={"1.6-llama": "AIDC-AI/Ovis1.6-Llama3.2-3B",
+                                    "1.6-gemma": "AIDC-AI/Ovis1.6-Gemma2-9B"}),  # noqa: E501
+    "Ovis2_5": _HfExamplesInfo("AIDC-AI/Ovis2.5-2B",
+                               trust_remote_code=True,
+                               max_transformers_version="4.53",
+                               transformers_version_reason="HF model is not compatible"),  # noqa: E501
+    "PaliGemmaForConditionalGeneration": _HfExamplesInfo("google/paligemma-3b-mix-224",  # noqa: E501
+                                                         extras={"v2": "google/paligemma2-3b-ft-docci-448"}),  # noqa: E501
+    "Phi3VForCausalLM": _HfExamplesInfo("microsoft/Phi-3-vision-128k-instruct",
+                                        trust_remote_code=True,
+                                        max_transformers_version="4.48",
+                                        transformers_version_reason="Use of deprecated imports which have been removed.",  # noqa: E501
+                                        extras={"phi3.5": "microsoft/Phi-3.5-vision-instruct"}),  # noqa: E501
+    "Phi4MMForCausalLM": _HfExamplesInfo("microsoft/Phi-4-multimodal-instruct",
+                                        trust_remote_code=True),
+    "Phi4MultimodalForCausalLM": _HfExamplesInfo("microsoft/Phi-4-multimodal-instruct",  # noqa: E501
+                                                 revision="refs/pr/70"),
+    "PixtralForConditionalGeneration": _HfExamplesInfo("mistralai/Pixtral-12B-2409",  # noqa: E501
+                                                       tokenizer_mode="mistral"),
+    "QwenVLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen-VL",
+                                                      extras={"chat": "Qwen/Qwen-VL-Chat"},  # noqa: E501
+                                                      trust_remote_code=True,
+                                                      hf_overrides={"architectures": ["QwenVLForConditionalGeneration"]}),  # noqa: E501
+    "Qwen2AudioForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2-Audio-7B-Instruct"),  # noqa: E501
+    "Qwen2VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2-VL-2B-Instruct"),  # noqa: E501
+    "Qwen2_5_VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2.5-VL-3B-Instruct", # noqa: E501
+                                                          max_model_len=4096),
     "Qwen2_5OmniModel": _HfExamplesInfo("Qwen/Qwen2.5-Omni-3B"),
     "Qwen2_5OmniForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2.5-Omni-7B-AWQ"),
     "Qwen3VLForConditionalGeneration": _HfExamplesInfo(
