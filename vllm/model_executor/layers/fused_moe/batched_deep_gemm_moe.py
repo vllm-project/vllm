@@ -240,22 +240,23 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_metadata: Optional[mk.ExpertTokensMetadata],
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         assert a.dim() == 2
-        # Dispatch is restricted to DP leader ranks when TP > 1.
-        # This policy is enforced in PrepareAndFinalize (DeepEP/PPLX) so that
-        # only TP rank 0 participates in all2all. The workspace here therefore
-        # multiplies by `num_dispatchers`, which corresponds to the number of
-        # DP leaders that can contribute tokens to this EP rank.
-        num_dispatchers = self.num_dispatchers
         num_experts = local_num_experts
 
-        # Use the observed M to guard against cases where multiple TP ranks
-        # still participate in all2all (e.g., misconfiguration or backend
-        # behavior), which would otherwise lead to insufficient workspace
-        # capacity at runtime when we reshape caches.
+        # Tokens-per-expert capacity actually used by the backend for this
+        # call. For batched formats (DeepEP-LL / PPLX), aq has shape
+        #   (E, T_backend, K)
+        # Prefer using aq.size(1) to avoid under-allocation during dummy/profile
+        # runs or when multiple dispatchers/ranks contribute tokens.
+        T_backend = aq.size(1) if aq.dim() == 3 else 0
+
+        # Fallback capacity from configuration/observation.
+        num_dispatchers = self.num_dispatchers
         observed_M = a.size(0)
         if self.max_num_tokens is None:
-            max_num_tokens = observed_M
+            T_cfg = observed_M * num_dispatchers
         else:
+            # Guard with observed_M to avoid under-estimation when TP>1 or
+            # during profiling runs.
             max_num_tokens = max(self.max_num_tokens, observed_M)
             if observed_M > self.max_num_tokens:
                 with contextlib.suppress(Exception):
@@ -265,10 +266,14 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                         "(num_dispatchers=%d, E=%d, N=%d, K=%d)",
                         self.max_num_tokens, observed_M, num_dispatchers,
                         num_experts, N, K)
-        workspace13 = (num_experts, max_num_tokens * num_dispatchers,
-                       max(K, N))
-        workspace2 = (num_experts, max_num_tokens * num_dispatchers, (N // 2))
-        output = (num_experts, max_num_tokens * num_dispatchers, K)
+            T_cfg = max_num_tokens * num_dispatchers
+
+        # Final capacity: honor backend's requested T if larger.
+        T_eff = max(T_backend, T_cfg)
+
+        workspace13 = (num_experts, T_eff, max(K, N))
+        workspace2 = (num_experts, T_eff, (N // 2))
+        output = (num_experts, T_eff, K)
         return (workspace13, workspace2, output, a.dtype)
 
     def apply(
