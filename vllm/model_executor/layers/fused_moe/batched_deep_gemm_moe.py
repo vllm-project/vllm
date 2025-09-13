@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 from typing import Optional
 
 import torch
@@ -301,8 +302,15 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                     "[MoE Debug] EP rank received tokens: total=%d, E=%d, "
                     "max_tokens_per_dispatcher=%d, num_dispatchers=%d",
                     total_tokens, E, max_num_tokens, self.num_dispatchers)
-            except Exception:
-                pass
+            except Exception as e:
+                # Log the failure without triggering CUDA graph sync.
+                # Only prints once to avoid log spam.
+                with contextlib.suppress(Exception):
+                    logger.debug_once(
+                        "[MoE Debug] Skipped token-count log due to %r "
+                        "(E=%d, shape=%s, device=%s)", e, E,
+                        tuple(expert_num_tokens.size()),
+                        expert_num_tokens.device)
 
         workspace1 = _resize_cache(workspace13, (E, max_num_tokens, N))
 
