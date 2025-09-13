@@ -35,10 +35,6 @@ def test_deepseek_mla_attn_backend_module():
 @pytest.mark.parametrize("batch_size", list(range(1, 257, 3)))
 @pytest.mark.parametrize("use_prompt_embeds", [True, False])
 def test_prepare_prompt(batch_size, use_prompt_embeds, monkeypatch):
-    if use_prompt_embeds:
-        # Prompt Embeddings is only currently supported on V0
-        monkeypatch.setenv("VLLM_USE_V1", "0")
-
     model_runner = _create_model_runner(
         "facebook/opt-125m",
         max_num_batched_tokens=100000,
@@ -169,10 +165,6 @@ def test_prepare_prompt(batch_size, use_prompt_embeds, monkeypatch):
 @pytest.mark.parametrize("batch_size", list(range(1, 257, 3)))
 @pytest.mark.parametrize("use_prompt_embeds", [True, False])
 def test_prepare_decode_cuda_graph(batch_size, use_prompt_embeds, monkeypatch):
-    if use_prompt_embeds:
-        # Prompt Embeddings is only currently supported on V0
-        monkeypatch.setenv("VLLM_USE_V1", "0")
-
     model_runner = _create_model_runner(
         "facebook/opt-125m",
         seed=0,
@@ -350,10 +342,6 @@ def distributed_init():
 @pytest.mark.parametrize('use_prompt_embeds', [True, False])
 def test_hybrid_batches(batch_size, enforce_eager, use_prompt_embeds,
                         distributed_init, monkeypatch):
-    if use_prompt_embeds:
-        # Prompt Embeddings is only currently supported on V0
-        monkeypatch.setenv("VLLM_USE_V1", "0")
-
     model_runner = _create_model_runner(
         "facebook/opt-125m",
         seed=0,

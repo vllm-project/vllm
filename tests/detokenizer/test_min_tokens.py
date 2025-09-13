@@ -36,6 +36,7 @@ def test_min_tokens_with_stop(min_tokens: int, stop: str, truth: str):
                                 None,
                                 None,
                                 None,
+                                None,
                                 params,
                                 None,
                                 None,

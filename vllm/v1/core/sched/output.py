@@ -11,6 +11,7 @@ from vllm import bc_linter_include
 if TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
+    import torch
 
     from vllm.distributed.kv_transfer.kv_connector.v1.base import (
         KVConnectorMetadata)
@@ -26,7 +27,8 @@ if TYPE_CHECKING:
 class NewRequestData:
 
     req_id: str
-    prompt_token_ids: list[int]
+    prompt_token_ids: Optional[list[int]]
+    prompt_embeds: Optional[torch.Tensor]
     mm_features: list[MultiModalFeatureSpec]
     sampling_params: Optional[SamplingParams]
     pooling_params: Optional[PoolingParams]
@@ -43,6 +45,7 @@ class NewRequestData:
         return cls(
             req_id=request.request_id,
             prompt_token_ids=request.prompt_token_ids,
+            prompt_embeds=request.prompt_embeds,
             mm_features=request.mm_features,
             sampling_params=request.sampling_params,
             pooling_params=request.pooling_params,
@@ -51,10 +54,13 @@ class NewRequestData:
             lora_request=request.lora_request,
         )
 
-    def __repr__(self):
+    def __repr__(self) -> str:
+        prompt_embeds_shape = (self.prompt_embeds.shape
+                               if self.prompt_embeds else None)
         return (f"NewRequestData("
                 f"req_id={self.req_id},"
                 f"prompt_token_ids={self.prompt_token_ids},"
+                f"prompt_embeds_shape={prompt_embeds_shape},"
                 f"mm_features={self.mm_features},"
                 f"sampling_params={self.sampling_params},"
                 f"block_ids={self.block_ids},"
@@ -63,10 +69,16 @@ class NewRequestData:
                 ")")
 
     # Version of __repr__ with the prompt data obfuscated
-    def anon_repr(self):
+    def anon_repr(self) -> str:
+        prompt_token_ids_len = len(
+            self.prompt_token_ids
+        ) if self.prompt_token_ids is not None else None
+        prompt_embeds_shape = (self.prompt_embeds.shape
+                               if self.prompt_embeds else None)
         return (f"NewRequestData("
                 f"req_id={self.req_id},"
-                f"prompt_token_ids_len={len(self.prompt_token_ids)},"
+                f"prompt_token_ids_len={prompt_token_ids_len},"
+                f"prompt_embeds_shape={prompt_embeds_shape},"
                 f"mm_features={self.mm_features},"
                 f"sampling_params={self.sampling_params},"
                 f"block_ids={self.block_ids},"
