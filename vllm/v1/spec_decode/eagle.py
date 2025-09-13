@@ -185,6 +185,7 @@ class EagleProposer:
             device=device,
             dtype=torch.int32,
         ).repeat(max_batch_size, 1)
+        self.use_async_scheduling = self.vllm_config.scheduler_config.async_scheduling
 
     def _get_positions(self, num_tokens: int):
         if self.uses_mrope:
@@ -387,10 +388,18 @@ class EagleProposer:
                 positions += 1
                 exceeds_max_model_len = positions >= self.max_model_len
                 clamped_positions = torch.where(exceeds_max_model_len, 0, positions)
-
+            # when enable use_async_scheduling, we shouldn't use in place
+            # operations in case they are modified in next step `prepare_input`
+            # of main model.
             # Increment the sequence lengths.
             common_attn_metadata.seq_lens += 1
-            common_attn_metadata.seq_lens_cpu += 1
+            if self.use_async_scheduling:
+                # this is out-of-place operation to avoid modifying.
+                common_attn_metadata.seq_lens_cpu = (
+                    common_attn_metadata.seq_lens_cpu + 1
+                )
+            else:
+                common_attn_metadata.seq_lens_cpu += 1
             # For the requests that exceed the max model length, we set the
             # sequence length to 1 to minimize their overheads in attention.
 

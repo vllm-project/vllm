@@ -45,6 +45,11 @@ class CachedRequestState:
 
     lora_request: LoRARequest | None = None
     prompt_embeds: torch.Tensor | None = None
+    # these are used when both async_scheduling and spec_decode are enabled.
+    prev_num_draft_len: int = 0
+    prev_sampled_tokens: torch.Tensor | None = None
+    prev_draft_tokens: torch.Tensor | None = None
+    resumed_from_preemption: bool = False
 
     def __post_init__(self):
         self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
@@ -784,16 +789,9 @@ class InputBatch:
             self._make_prompt_token_ids_tensor() if needs_prompt_token_ids else None
         )
 
-        # Only set output_token_ids if required by the current requests'
-        # sampling parameters.
-        needs_output_token_ids = (
-            not self.no_penalties
-            or bool(self.bad_words_token_ids)
-            or self.logitsprocs_need_output_token_ids
-        )
         output_token_ids = (
             cast(list[list[int]], self.req_output_token_ids)
-            if needs_output_token_ids
+            if self.needs_output_token_ids()
             else []
         )
 
@@ -825,6 +823,16 @@ class InputBatch:
             allowed_token_ids_mask=allowed_token_ids_mask,
             bad_words_token_ids=self.bad_words_token_ids,
             logitsprocs=self.logitsprocs,
+        )
+
+    def needs_output_token_ids(self) -> bool:
+        """Returns whether output_token_ids are needed by any request."""
+        # Only set output_token_ids if required by the current requests'
+        # sampling parameters.
+        return (
+            not self.no_penalties
+            or bool(self.bad_words_token_ids)
+            or self.logitsprocs_need_output_token_ids
         )
 
     def get_pooling_params(self) -> list[PoolingParams]:
