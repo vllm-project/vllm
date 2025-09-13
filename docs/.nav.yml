@@ -47,6 +47,7 @@ nav:
       - contributing/model/transcription.md
     - CI: contributing/ci
     - Design Documents: design
+    - Governance: governance
   - API Reference:
     - api/README.md
     - api/vllm
