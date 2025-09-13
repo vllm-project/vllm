@@ -168,6 +168,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "float epsilon) -> ()");
   ops.impl("fused_add_rms_norm", torch::kCUDA, &fused_add_rms_norm);
 
+  // Polynomial Normalization.
+  ops.def(
+      "poly_norm(Tensor! out, Tensor input, Tensor weight, Tensor bias, float "
+      "epsilon) -> ()");
+  ops.impl("poly_norm", torch::kCUDA, &poly_norm);
+
   // Apply repetition penalties to logits in-place
   ops.def(
       "apply_repetition_penalties_(Tensor! logits, Tensor prompt_mask, "
@@ -516,10 +522,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // SM100 CUTLASS MLA decode
   ops.def(
-      "sm100_cutlass_mla_decode(Tensor! out, Tensor q_nope, Tensor q_pe,"
-      "                         Tensor kv_c_and_k_pe_cache, Tensor seq_lens,"
-      "                         Tensor page_table, Tensor workspace, float "
-      "scale,"
+      "sm100_cutlass_mla_decode(Tensor! out, Tensor! lse, Tensor q_nope,"
+      "                         Tensor q_pe, Tensor kv_c_and_k_pe_cache,"
+      "                         Tensor seq_lens, Tensor page_table,"
+      "                         Tensor workspace, float scale,"
       "                         int num_kv_splits) -> ()");
   // conditionally compiled so impl in source file
 
