@@ -447,7 +447,15 @@ def engine_client(request: Request) -> EngineClient:
 @router.get("/health", response_class=Response)
 async def health(raw_request: Request) -> Response:
     """Health check."""
-    await engine_client(raw_request).check_health()
+    client = engine_client(raw_request)
+    generate_str = raw_request.query_params.get("generate")
+    try:
+        await client.check_health()
+        if generate_str == "true":
+            await client.minimal_generation()
+    except Exception as e:
+        logger.exception(e)
+        return Response(status_code=500)
     return Response(status_code=200)
 
 

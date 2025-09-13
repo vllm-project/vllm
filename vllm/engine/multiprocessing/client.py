@@ -45,7 +45,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
-from vllm.utils import Device
+from vllm.utils import Device, random_uuid
 
 logger = init_logger(__name__)
 
@@ -641,3 +641,16 @@ class MQLLMEngineClient(EngineClient):
         if isinstance(request_output, BaseException):
             raise request_output
         return request_output.lora_loaded
+
+    async def minimal_generation(self) -> str:
+        prompt = "Hi"
+        sampling_params = SamplingParams(temperature=0, max_tokens=2)
+        request_id = random_uuid()
+        result_text = ""
+        async for output in self._process_request(prompt, sampling_params,
+                                                  request_id):
+            for completion in output.outputs:
+                result_text = completion.text
+            if output.finished:
+                break
+        return result_text
