@@ -102,14 +102,14 @@ def rebalance_experts_hierarchical(
     num_groups: int,
     num_nodes: int,
     num_gpus: int,
-):
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Parameters:
         weight: [num_moe_layers, num_logical_experts]
         num_physical_experts: number of physical experts after replication
         num_groups: number of expert groups
-        num_nodes: number of server nodes, where the intra-node network
-        (e.g, NVLink) is faster
+        num_nodes: number of server nodes, where the intra-node network 
+            (e.g, NVLink) is faster
         num_gpus: number of GPUs, must be a multiple of `num_nodes`
 
     Returns:
