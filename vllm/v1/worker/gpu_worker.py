@@ -58,6 +58,10 @@ class Worker(WorkerBase):
                          distributed_init_method=distributed_init_method,
                          is_driver_worker=is_driver_worker)
 
+        from batch_invariant_ops import enable_batch_invariant_mode
+        enable_batch_invariant_mode()
+        os.environ["VLLM_ATTENTION_BACKEND"] = "FLEX_ATTENTION"
+
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
