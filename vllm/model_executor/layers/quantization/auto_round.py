@@ -219,7 +219,7 @@ class AutoRoundConfig(QuantizationConfig):
             use_marlin = False
         if use_marlin:
             from vllm.model_executor.layers.quantization.awq_marlin import (
-                AWQMarlinConfig, AWQMarlinLinearMethod, AWQMoEMethod)
+                AWQMarlinConfig, AWQMarlinLinearMethod, AWQMarlinMoEMethod)
 
             quant_args_marlin = AWQMarlinConfig(
                 weight_bits=weight_bits,
@@ -241,7 +241,7 @@ class AutoRoundConfig(QuantizationConfig):
 
         if isinstance(layer, FusedMoE):
             if use_marlin:
-                return AWQMoEMethod(quant_args_marlin, layer.moe)
+                return AWQMarlinMoEMethod(quant_args_marlin, layer.moe)
             from vllm.model_executor.layers.quantization.moe_wna16 import (
                 MoeWNA16Config)
 
