@@ -9,9 +9,12 @@ import torch
 import vllm._custom_ops as ops
 from tests.kernels.utils import opcheck
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.platforms import current_platform
+
+FP8_DTYPE = current_platform.fp8_dtype()
 
 DTYPES = [torch.bfloat16, torch.float]
-QUANT_DTYPES = [torch.int8, torch.float8_e4m3fn]
+QUANT_DTYPES = [torch.int8, FP8_DTYPE]
 VEC_HIDDEN_SIZES = range(1024, 1030)
 # Avoid combinatorial explosion with full Cartesian product
 NUM_TOKENS_HIDDEN_SIZES = [
@@ -57,13 +60,13 @@ def ref_dynamic_per_token_quant(rms_norm_layer: RMSNorm,
                                 scale_ub: Optional[torch.Tensor]) \
         -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     if scale_ub is not None:
-        assert quant_dtype == torch.float8_e4m3fn
+        assert quant_dtype == FP8_DTYPE
 
     # Norm
     torch_out, residual = ref_rms_norm(rms_norm_layer, x, residual)
 
     # Quant
-    if quant_dtype == torch.float8_e4m3fn:
+    if quant_dtype == FP8_DTYPE:
         torch_out, scales = ops.scaled_fp8_quant(torch_out,
                                                  scale_ub=scale_ub,
                                                  use_per_token_if_dynamic=True)
@@ -90,12 +93,9 @@ def ops_dynamic_per_token_quant(weight: torch.Tensor,
                                 residual: Optional[torch.Tensor],
                                 scale_ub: Optional[torch.Tensor]) \
         -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-    if residual is not None:
-        residual = residual.clone()
-    out, scales = ops.rms_norm_dynamic_per_token_quant(x, weight, EPS,
-                                                       quant_dtype, scale_ub,
-                                                       residual)
-    return out, scales, residual
+    out, scales, residual_out = ops.rms_norm_dynamic_per_token_quant(
+        x, weight, EPS, quant_dtype, scale_ub, residual)
+    return out, scales, residual_out
 
 
 def ops_impl(weight: torch.Tensor,
@@ -131,7 +131,7 @@ def test_rms_norm(
         torch.cuda.manual_seed(seed)
     torch.set_default_device(device)
 
-    if scale_ub is not None and quant_dtype != torch.float8_e4m3fn:
+    if scale_ub is not None and quant_dtype != FP8_DTYPE:
         # skip
         return
 
@@ -144,6 +144,7 @@ def test_rms_norm(
     scale = 1 / (hidden_size)
     x = torch.randn(num_tokens, hidden_size, dtype=dtype) * scale
     residual = torch.randn_like(x) * scale if add_residual else None
+    residual_out = torch.empty_like(residual) if add_residual else None
     if scale_ub is not None:
         rms_x, _ = ref_rms_norm(layer, x, residual)
         scale_ub = torch.mean(rms_x).to(dtype=torch.float32, device='cuda')
@@ -171,4 +172,5 @@ def test_rms_norm(
                          dtype=torch.float32)
 
     opcheck(torch.ops._C.rms_norm_dynamic_per_token_quant,
-            (output, x, layer.weight, scales, 1e-5, scale_ub, residual))
+            (output, x, layer.weight, scales, 1e-5, scale_ub, residual_out,
+             residual))
