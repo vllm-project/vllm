@@ -50,6 +50,25 @@ def has_custom_tools(tool_types: list[str]) -> bool:
     return not set(tool_types).issubset(BUILTIN_TOOLS)
 
 
+def is_reasoning_token(harmony_parser) -> bool:
+    """Determine if the current parser state represents a reasoning token.
+    
+    Reasoning tokens include:
+    1. Analysis and commentary channels
+    2. Tool calls to any recipient (python, browser.*, container.*, MCP tools)
+    
+    Args:
+        harmony_parser: The harmony parser with current_channel and 
+                       current_recipient attributes
+    
+    Returns:
+        bool: True if the current token should be counted as reasoning
+    """
+    is_analysis = harmony_parser.current_channel in {"analysis", "commentary"}
+    is_tool_call = harmony_parser.current_recipient is not None
+    return is_analysis or is_tool_call
+
+
 def get_encoding():
     global _harmony_encoding
     if _harmony_encoding is None:
