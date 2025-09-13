@@ -43,6 +43,10 @@ argcomplete==3.5.1
     # via datamodel-code-generator
 arrow==1.3.0
     # via isoduration
+async-timeout==5.0.1
+    # via
+    #   aiohttp
+    #   redis
 attrs==24.2.0
     # via
     #   aiohttp
@@ -194,6 +198,11 @@ eval-type-backport==0.2.2
     # via mteb
 evaluate==0.4.3
     # via lm-eval
+exceptiongroup==1.3.0
+    # via
+    #   anyio
+    #   hypothesis
+    #   pytest
 fastapi==0.116.1
     # via mlflow-skinny
 fastparquet==2024.11.0
@@ -821,7 +830,7 @@ python-dateutil==2.9.0.post0
     #   typepy
 python-rapidjson==1.20
     # via tritonclient
-pytorch-lightning==2.5.2
+pytorch-lightning==2.5.5
     # via
     #   lightly
     #   lightning
@@ -971,7 +980,6 @@ setuptools==77.0.3
     # via
     #   lightning-utilities
     #   pytablewriter
-    #   torch
     #   triton
 shapely==2.1.1
     # via
@@ -1067,8 +1075,14 @@ tokenizers==0.21.1
     # via
     #   -r requirements/test.in
     #   transformers
+toml==0.10.2
+    # via datamodel-code-generator
 tomli==2.2.1
-    # via schemathesis
+    # via
+    #   alembic
+    #   black
+    #   pytest
+    #   schemathesis
 tomli-w==1.2.0
     # via schemathesis
 torch==2.8.0+cu128
@@ -1105,9 +1119,9 @@ torchaudio==2.8.0+cu128
     #   -r requirements/test.in
     #   encodec
     #   vocos
-torchgeo==0.7.0
+torchgeo==0.6.2
     # via terratorch
-torchmetrics==1.7.4
+torchmetrics==1.8.2
     # via
     #   lightning
     #   pytorch-lightning
@@ -1175,6 +1189,9 @@ typing-extensions==4.12.2
     # via
     #   albumentations
     #   alembic
+    #   anyio
+    #   black
+    #   exceptiongroup
     #   fastapi
     #   graphene
     #   huggingface-hub
@@ -1184,6 +1201,7 @@ typing-extensions==4.12.2
     #   mistral-common
     #   mlflow-skinny
     #   mteb
+    #   multidict
     #   opentelemetry-api
     #   opentelemetry-sdk
     #   opentelemetry-semantic-conventions
@@ -1192,12 +1210,13 @@ typing-extensions==4.12.2
     #   pydantic-core
     #   pydantic-extra-types
     #   pytorch-lightning
+    #   rich
     #   sqlalchemy
     #   torch
-    #   torchgeo
     #   typer
     #   typeshed-client
     #   typing-inspection
+    #   uvicorn
 typing-inspection==0.4.1
     # via pydantic
 tzdata==2024.2
@@ -1215,7 +1234,7 @@ urllib3==2.2.3
     #   tritonclient
 uvicorn==0.35.0
     # via mlflow-skinny
-vector-quantize-pytorch==1.21.2
+vector-quantize-pytorch==1.23.2
     # via -r requirements/test.in
 virtualenv==20.31.2
     # via ray
@@ -1233,7 +1252,7 @@ word2number==1.1
     # via lm-eval
 wrapt==1.17.2
     # via smart-open
-xarray==2025.7.1
+xarray==2025.6.1
     # via rioxarray
 xxhash==3.5.0
     # via
