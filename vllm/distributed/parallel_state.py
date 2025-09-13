@@ -1065,8 +1065,8 @@ def init_distributed_environment(world_size: int = -1,
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
-    decode_context_model_parallel_size: Optional[int] = 1,
     context_model_parallel_size: int = 1,
+    decode_context_model_parallel_size: Optional[int] = 1,
     backend: Optional[str] = None,
 ) -> None:
     """
