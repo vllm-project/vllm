@@ -1213,6 +1213,10 @@ class FusedMoE(CustomOp):
         return self.moe_parallel_config.use_ep
 
     @property
+    def use_naive_standard(self):
+        return self.moe_parallel_config.use_naive_standard
+
+    @property
     def use_pplx_kernels(self):
         return self.moe_parallel_config.use_pplx_kernels
 
