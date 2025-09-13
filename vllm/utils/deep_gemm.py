@@ -194,9 +194,10 @@ def calc_diff(x: torch.Tensor, y: torch.Tensor):
     return 1 - sim
 
 
-def should_use_deepgemm_for_fp8_linear(output_dtype: torch.dtype,
+def should_use_deepgemm_for_fp8_linear(is_deep_gemm_supported: bool,
+                                       output_dtype: torch.dtype,
                                        weight: torch.Tensor):
-    return (is_deep_gemm_supported() and output_dtype == torch.bfloat16
+    return (is_deep_gemm_supported and output_dtype == torch.bfloat16
             and weight.shape[0] % 128 == 0 and weight.shape[1] % 128 == 0)
 
 
