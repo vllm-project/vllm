@@ -163,12 +163,12 @@ class HarmonyContext(ConversationContext):
         2. Calculates tool output tokens for multi-turn conversations
         3. Updates cached token counts
         4. Tracks state for next turn calculations
-        
+
         Tool output tokens are calculated as:
-        current_prompt_tokens - last_turn_prompt_tokens - 
+        current_prompt_tokens - last_turn_prompt_tokens -
         last_turn_output_tokens
         This represents tokens added between turns (typically tool responses).
-        
+
         Args:
             output: The RequestOutput containing prompt token information
         """
@@ -214,18 +214,18 @@ class HarmonyContext(ConversationContext):
 
     def _update_decode_token_usage(self, output: RequestOutput) -> int:
         """Update token usage statistics for the decode phase of generation.
-        
+
         The decode phase processes the generated output tokens. This method:
         1. Counts output tokens from all completion outputs
         2. Updates the total output token count
         3. Tracks tokens generated in the current turn
-        
+
         In streaming mode, this is called for each token generated.
         In non-streaming mode, this is called once with all output tokens.
-        
+
         Args:
             output: The RequestOutput containing generated token information
-            
+
         Returns:
             int: Number of output tokens processed in this call
         """
