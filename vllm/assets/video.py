@@ -87,9 +87,10 @@ def video_get_metadata(path: str) -> dict[str, Any]:
 
     metadata = {
         "total_num_frames": total_frames,
-        "fps": fps,
+        "fps": 1,
         "duration": duration,
-        "video_backend": "opencv"
+        "video_backend": "opencv",
+        "frames_indices": list(range(total_frames)),
     }
     return metadata
 

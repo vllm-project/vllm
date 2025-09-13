@@ -1503,7 +1503,7 @@ def run_qwen3_vl(questions: list[str], modality: str) -> ModelRequestData:
 
     engine_args = EngineArgs(
         model=model_name,
-        max_model_len=4096,
+        max_model_len=12800,
         max_num_seqs=5,
         mm_processor_kwargs={
             "min_pixels": 28 * 28,
@@ -1540,7 +1540,7 @@ def run_qwen3_vl_moe(questions: list[str], modality: str) -> ModelRequestData:
 
     engine_args = EngineArgs(
         model=model_name,
-        max_model_len=4096,
+        max_model_len=12800,
         max_num_seqs=5,
         mm_processor_kwargs={
             "min_pixels": 28 * 28,
@@ -1792,6 +1792,15 @@ model_example_map = {
 }
 
 
+MODELS_NEED_VIDEO_METADATA = [
+    "glm4_1v",
+    "glm4_5v",
+    "glm4_5v_fp8",
+    "qwen3_vl",
+    "qwen3_vl_moe",
+]
+
+
 def get_multi_modal_input(args):
     """
     return {
@@ -1816,12 +1825,16 @@ def get_multi_modal_input(args):
 
     if args.modality == "video":
         # Input video and question
-        video = VideoAsset(name="baby_reading", num_frames=args.num_frames).np_ndarrays
-        metadata = VideoAsset(name="baby_reading", num_frames=args.num_frames).metadata
+        # Qwen3-VL needs to read all frames
+        # TODO(Isotr0py): Allow Qwen3-VL to accept pre-sample video frames from video asset
+        needs_metadata = args.model_type in MODELS_NEED_VIDEO_METADATA
+        num_frames = -1 if needs_metadata else args.num_frames
+        video = VideoAsset(name="baby_reading", num_frames=num_frames).np_ndarrays
+        metadata = VideoAsset(name="baby_reading", num_frames=num_frames).metadata
         vid_questions = ["Why is this video funny?"]
 
         return {
-            "data": [(video, metadata)] if args.model_type == "glm4_1v" else video,
+            "data": ([(video, metadata)] if needs_metadata else video),
             "questions": vid_questions,
         }
 
