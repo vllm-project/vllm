@@ -834,7 +834,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         total_num_scheduled_tokens: int,
         cu_num_tokens: np.ndarray,
     ) -> None:
-        """Prepare the input IDs for the current batch.
+        """Prepare the input IDs for the current batch.  
         
         Carefully handles the `prev_sampled_token_ids` which can be cached
         from the previous engine iteration, in which case those tokens on the
@@ -923,8 +923,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                                pin_memory=self.pin_memory).to(
                                                    self.device,
                                                    non_blocking=True)
+                spec_flattened_index = torch.tensor(
+                    spec_flattened_indices[i],
+                    dtype=torch.int64,
+                    pin_memory=self.pin_memory).to(self.device,
+                                                   non_blocking=True)
                 self.input_ids.gpu.scatter_(dim=0,
-                                            index=spec_flattened_indices[i],
+                                            index=spec_flattened_index,
                                             src=draft_token_gpu)
             return
         # _draft_token_ids is a tensor, the length of draft tokens for different
@@ -938,7 +943,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.input_ids.gpu.scatter_(
             dim=0,
             index=draft_tokens_index_tensor,
-            src=self._draft_token_ids[prev_common_req_indices_tensor, :])
+            src=self._draft_token_ids[
+                prev_common_req_indices_tensor, :].flatten())
 
     def _get_encoder_seq_lens(
         self,
