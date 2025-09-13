@@ -609,11 +609,6 @@ class FusedMoEParallelConfig:
                 and envs.VLLM_ALL2ALL_BACKEND == "pplx")
 
     @property
-    def use_naive_standard(self):
-        return (self.use_all2all_kernels
-                and envs.VLLM_ALL2ALL_BACKEND == "naive_standard")
-
-    @property
     def use_deepep_ht_kernels(self):
         return (self.use_all2all_kernels
                 and envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput")
@@ -786,10 +781,6 @@ class FusedMoEConfig:
     @property
     def use_ep(self):
         return self.moe_parallel_config.use_ep
-
-    @property
-    def use_naive_standard(self):
-        return self.moe_parallel_config.use_naive_standard
 
     @property
     def use_pplx_kernels(self):

@@ -1158,8 +1158,7 @@ class FusedMoE(CustomOp):
         # TODO(bnell): make this into a method on prepare finalize (or all2all?)
         self.must_reduce_shared = (self.use_pplx_kernels
                                    or self.use_deepep_ht_kernels
-                                   or self.use_deepep_ll_kernels
-                                   or self.use_naive_standard)
+                                   or self.use_deepep_ll_kernels)
 
         if self.use_dp_chunking:
             if vllm_config.parallel_config.enable_dbo:
@@ -1211,10 +1210,6 @@ class FusedMoE(CustomOp):
     @property
     def use_ep(self):
         return self.moe_parallel_config.use_ep
-
-    @property
-    def use_naive_standard(self):
-        return self.moe_parallel_config.use_naive_standard
 
     @property
     def use_pplx_kernels(self):
