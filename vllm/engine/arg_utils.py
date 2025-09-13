@@ -69,6 +69,7 @@ from vllm.config.multimodal import MMCacheType, MMEncoderTPMode
 from vllm.config.observability import DetailedTraceModules
 from vllm.config.parallel import DistributedExecutorBackend, ExpertPlacementStrategy
 from vllm.config.scheduler import SchedulerPolicy
+from vllm.config.speculative import EagleModelTypes
 from vllm.config.utils import get_field
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
@@ -1496,13 +1497,25 @@ class EngineArgs:
                     "Async scheduling is not supported with pipeline-parallel-size > 1."
                 )
 
-            # Currently, async scheduling does not support speculative decoding.
-            # TODO(woosuk): Support it.
+            # Currently, async scheduling only support eagle speculative
+            # decoding.
+            # TODO(woosuk): Support other kinds of speculative decoding.
             if self.speculative_config is not None:
-                raise ValueError(
-                    "Currently, speculative decoding is not supported with "
-                    "async scheduling."
-                )
+                if self.speculative_config.get("method") not in get_args(
+                    EagleModelTypes
+                ):
+                    raise ValueError(
+                        "Currently, async scheduling is only supported "
+                        "with EAGLE/MTP kind of speculative decodeing"
+                    )
+                elif self.speculative_config.get("disable_padded_drafter_batch"):
+                    raise ValueError(
+                        "async scheduling for EAGLE/MTP kind of speculative "
+                        "decodeing is enabled, but disable_padded_drafter_batch=True "
+                        "disable_padded_drafter_batch=True is not supported for "
+                        "this situation now. please set "
+                        "disable_padded_drafter_batch=Fasle"
+                    )
 
         # Forward the deprecated CLI args to the EPLB config.
         if self.num_redundant_experts is not None:
