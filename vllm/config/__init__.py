@@ -525,26 +525,26 @@ class ModelConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: list[Any] = []
-        factors.append(self.model)
-        factors.append(self.dtype)
-        factors.append(self.quantization)
-        factors.append(self.revision)
-        factors.append(self.code_revision)
-        factors.append(self.max_model_len)
-        factors.append(self.max_logprobs)
-        factors.append(self.disable_sliding_window)
-        factors.append(self.trust_remote_code)
-        factors.append(self.generation_config)
-        factors.append(self.model_impl)
-        factors.append(self.override_generation_config)
-        factors.append(self.rope_scaling)
-        factors.append(self.rope_theta)
-        # hf_config can control how the model looks!
-        factors.append(self.hf_config.to_json_string())
-        str_factors = str(factors)
-        assert_hashable(str_factors)
-        return hashlib.sha256(str(factors).encode()).hexdigest()
+        ignored_factors = {
+            "tokenizer",
+            "hf_text_config",
+            "encoder_config",
+            "hf_image_processor_config",
+            "pooler_config",
+            "multimodal_config",
+            "hf_overrides",
+            # Internals / metadata
+            "_model_info",
+            "_architecture",
+            "seed",
+            "served_model_name",
+            "hf_token",
+            "hf_config_path",
+        }
+
+        from vllm.config.utils import get_hash_factors, hash_factors
+        factors = get_hash_factors(self, ignored_factors)
+        return hash_factors(factors)
 
     def __post_init__(self) -> None:
         # Set the default seed to 0 in V1.
@@ -3216,6 +3216,17 @@ class VllmConfig:
         from vllm import __version__
         vllm_factors.append(__version__)
         vllm_factors.append(envs.VLLM_USE_V1)
+        # Include environment hash (opt-out) so backend decisions
+        # driven by env vars are reflected in the cache key.
+        try:
+            vllm_factors.append(envs.compute_hash())
+        except Exception as e:
+            logger.warning(
+                "Env hash unavailable (%s) — falling back to "
+                "'env_hash_unavailable'",
+                e,
+            )
+            vllm_factors.append("env_hash_unavailable")
         if self.model_config:
             vllm_factors.append(self.model_config.compute_hash())
         else:
