@@ -10,8 +10,7 @@ import torch
 from typing_extensions import deprecated
 
 from vllm.lora.request import LoRARequest
-from vllm.multimodal.inputs import (MultiModalKwargsItem,
-                                    MultiModalKwargsItems, PlaceholderRange)
+from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItems
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
@@ -31,9 +30,7 @@ class CachedRequestState:
 
     req_id: str
     prompt_token_ids: list[int]
-    mm_kwargs: list[MultiModalKwargsItem]
-    mm_positions: list[PlaceholderRange]
-    mm_hashes: list[str]
+    mm_features: list[MultiModalFeatureSpec]
     sampling_params: Optional[SamplingParams]
     pooling_params: Optional[PoolingParams]
     generator: Optional[torch.Generator]
@@ -60,7 +57,8 @@ class CachedRequestState:
                 "removed in v0.13. Please use `mm_kwargs` instead.")
     def mm_inputs(self) -> list[MultiModalKwargsItems]:
         return [
-            MultiModalKwargsItems.from_seq([item]) for item in self.mm_kwargs
+            MultiModalKwargsItems.from_seq([f.data]) for f in self.mm_features
+            if f.data is not None
         ]
 
     def get_token_id(self, idx: int) -> int:
@@ -83,6 +81,7 @@ class InputBatch:
         logitsprocs: Optional[LogitsProcessors] = None,
         is_spec_decode: bool = False,
         is_pooling_model: bool = False,
+        num_speculative_tokens: int = 0,
     ):
         self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
@@ -127,6 +126,7 @@ class InputBatch:
             pin_memory=pin_memory,
             device=device,
             block_sizes=block_sizes,
+            num_speculative_tokens=num_speculative_tokens,
         )
 
         # Sampling-related.
@@ -202,6 +202,14 @@ class InputBatch:
             self.repetition_penalties_cpu_tensor.numpy()
         self.repetition_penalties_reqs: set[str] = set()
 
+        # Speculative decoding
+        self.num_accepted_tokens_cpu_tensor = torch.ones((max_num_reqs, ),
+                                                         dtype=torch.int64,
+                                                         device="cpu",
+                                                         pin_memory=pin_memory)
+        self.num_accepted_tokens_cpu = \
+            self.num_accepted_tokens_cpu_tensor.numpy()
+
         # lora related
         self.request_lora_mapping = np.zeros((self.max_num_reqs, ),
                                              dtype=np.int32)
@@ -249,6 +257,11 @@ class InputBatch:
         self.sampling_metadata = self._make_sampling_metadata()
 
         self.pooling_params: dict[str, PoolingParams] = {}
+
+        # Cached reference to the GPU tensor of previously sampled tokens
+        self.prev_sampled_token_ids: Optional[torch.Tensor] = None
+        self.prev_sampled_token_ids_invalid_indices: Optional[set[int]] = None
+        self.prev_req_id_to_index: Optional[dict[str, int]] = None
 
     @property
     def req_ids(self) -> list[str]:
@@ -355,8 +368,9 @@ class InputBatch:
                                              if sampling_params.logprobs == -1
                                              else sampling_params.logprobs)
             if sampling_params.prompt_logprobs is not None:
-                self.num_prompt_logprobs[
-                    req_id] = sampling_params.prompt_logprobs
+                self.num_prompt_logprobs[req_id] = (
+                    self.vocab_size if sampling_params.prompt_logprobs == -1
+                    else sampling_params.prompt_logprobs)
 
             if sampling_params.allowed_token_ids:
                 self.has_allowed_token_ids.add(req_id)
@@ -387,6 +401,9 @@ class InputBatch:
                 pooling_params.requires_token_ids)
         else:
             raise NotImplementedError("Unrecognized request type")
+
+        # Speculative decoding: by default 1 token is generated.
+        self.num_accepted_tokens_cpu[req_index] = 1
 
         # Add request lora ID
         if request.lora_request:
@@ -509,6 +526,8 @@ class InputBatch:
             self.presence_penalties_cpu[i2], self.presence_penalties_cpu[i1]
         self.repetition_penalties_cpu[i1], self.repetition_penalties_cpu[i2] = \
             self.repetition_penalties_cpu[i2], self.repetition_penalties_cpu[i1]
+        self.num_accepted_tokens_cpu[i1], self.num_accepted_tokens_cpu[i2] =\
+            self.num_accepted_tokens_cpu[i2], self.num_accepted_tokens_cpu[i1]
 
         swap_dict_values(self.generators, i1, i2)
         swap_dict_values(self.bad_words_token_ids, i1, i2)
@@ -603,6 +622,8 @@ class InputBatch:
                 empty_index] = self.presence_penalties_cpu[last_req_index]
             self.repetition_penalties_cpu[
                 empty_index] = self.repetition_penalties_cpu[last_req_index]
+            self.num_accepted_tokens_cpu[
+                empty_index] = self.num_accepted_tokens_cpu[last_req_index]
             generator = self.generators.pop(last_req_index, None)
             if generator is not None:
                 self.generators[empty_index] = generator
