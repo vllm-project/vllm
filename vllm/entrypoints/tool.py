@@ -15,6 +15,28 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def patch_call_python_script_with_uv():
+
+    def call_python_script_with_uv_patched(script: str) -> str:
+        import os
+        import subprocess
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            script_path = os.path.join(temp_dir, "script.py")
+            with open(script_path, "w") as f:
+                f.write(script)
+            exec_result = subprocess.run(
+                ["uv", "run", "--no-project", "python", script_path],
+                capture_output=True)
+            return (exec_result.stdout.decode("utf-8")
+                    if exec_result.returncode == 0 else
+                    exec_result.stderr.decode("utf-8"))
+
+    from gpt_oss.tools.python_docker import docker_tool
+    docker_tool.call_python_script_with_uv = call_python_script_with_uv_patched
+
+
 def validate_gpt_oss_install():
     """
     Check if the gpt-oss is installed and its version is at least 0.0.3.
@@ -33,9 +55,9 @@ def validate_gpt_oss_install():
         raise ImportError(
             f"Invalid version string for 'gpt_oss': {e}") from None
 
-    if pkg_version < Version("0.0.3"):
+    if pkg_version < Version("0.0.5"):
         raise ImportError(
-            f"gpt_oss >= 0.0.3 is required, but {pkg_version} is installed."
+            f"gpt_oss >= 0.0.5 is required, but {pkg_version} is installed."
         ) from None
 
 
@@ -92,6 +114,9 @@ class HarmonyPythonTool(Tool):
 
         try:
             validate_gpt_oss_install()
+            # TODO: Remove the monkey patch after gpt_oss is updated.
+            #       Ref: https://github.com/openai/gpt-oss/pull/182
+            patch_call_python_script_with_uv()
             from gpt_oss.tools.python_docker.docker_tool import PythonTool
         except ImportError as e:
             self.enabled = False
