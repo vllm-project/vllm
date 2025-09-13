@@ -1,0 +1,154 @@
+# Basic Greedy
+- name: Basic Greedy (max new tokens)
+  request:
+    params:
+        sampling_params:
+            temperature: 0.0
+            seed: 0
+        max_tokens: 20
+        max_completion_tokens: 0
+        logprobs: true
+    requests:
+      - {"role": "user", "content": "Write a long story"}
+  response:
+    choices:
+      finish_reason: length
+      message: "Once upon a time, in a small village nestled in the heart of a lush green forest"
+    usage: 
+      completion_tokens: 20
+      prompt_tokens: 20
+      total_tokens: 40
+
+
+# Basic Greedy
+- name: Basic Greedy, multiple requests (max new tokens)
+  request:
+    params:
+        max_tokens: 20
+        max_completion_tokens: 30
+    requests:
+      - {"role": "user", "content": "Write a long story"}
+      - {"role": "user", "content": "It is a fariy tale"}
+  response:
+    choices:
+      finish_reason: length
+      message: "Once upon a time, in a far-off kingdom, there was a beautiful princess named Isabella. She was kind, intelligent, and had"
+    usage: 
+      completion_tokens: 30
+      prompt_tokens: 36
+      total_tokens: 66
+
+# Basic Greedy
+- name: Basic Greedy (Hit a natural stop point)
+  request:
+    params:
+        max_tokens: 20
+        max_completion_tokens: 30
+    requests:
+      - {"role": "user", "content": "How many is 3 times 3?  Answer with only one digit without any explanation. Do not output more than one character."}
+  response:
+    choices:
+      finish_reason: stop
+      message: "9"
+    usage: 
+      completion_tokens: 2
+      prompt_tokens: 43
+      total_tokens: 45
+
+
+- name: Basic Greedy (stop words)
+  request:
+    params:
+        sampling_params:
+            temperature: 0.0
+            seed: 0
+        max_tokens: 20
+        max_completion_tokens: 0
+        stop: [
+            "of",
+            "green",
+        ]
+    requests:
+      - {"role": "user", "content": "Write a long story"}
+  response:
+    choices:
+      finish_reason: stop
+      message: "Once upon a time, in a small village nestled in the heart "
+    usage: 
+      completion_tokens: 15
+      prompt_tokens: 20
+      total_tokens: 35
+
+- name: Basic Greedy (Logprobs)
+  request:
+    params:
+        sampling_params:
+            temperature: 0.0
+            seed: 0
+        max_tokens: 20
+        max_completion_tokens: 0
+        stop: [
+            "of",
+            "green",
+        ]
+    requests:
+      - {"role": "user", "content": "Write a long story"}
+  response:
+    choices:
+      finish_reason: stop
+      message: "Once upon a time, in a small village nestled in the heart "
+      logprobs: 
+        - -0.7096761465072632 
+        - -0.00975992251187563
+        - -4.172316494077677e-06
+        - -1.3708974620385561e-05
+        - -0.007612859830260277
+        - -0.028101392090320587
+        - -0.07925201952457428
+        - -0.58881014585495
+        - -0.6773282289505005
+        - -0.03511466830968857
+        - -2.884823152271565e-05
+        - -0.912897527217865
+        - -0.009785067290067673
+        - -0.4188191890716553
+        - -0.0023098711390048265
+    usage: 
+      completion_tokens: 15
+      prompt_tokens: 20
+      total_tokens: 35
+    
+# Basic Greedy with tuned prompt prefix
+- name: Greedy with tuned prompt prefix
+  request:
+    params:
+        max_tokens: 20
+        max_completion_tokens: 30
+    requests:
+      - "role": "user" 
+        "content": >
+          You will act as a professional sentiment analysis expert. Based on the text content, tone, and context of the input sentence, complete the sentiment analysis task in strict accordance with the following rules:
+          Analysis Scope: Focus only on the explicit emotional expressions in the input sentence itself. Do not extend to unmentioned background information or add subjective speculations (e.g., unstated underlying emotions of the speaker, unexpressed intentions not implied by the sentence).
+          Sentiment Classification: Categorize sentiment into 3 types, and select results only from these 3 options:
+          Positive: The sentence conveys positive emotions such as joy, satisfaction, appreciation, or expectation (e.g., "I’m so happy to receive a gift today!" "This plan’s effect exceeded expectations").
+          Negative: The sentence conveys negative emotions such as anger, disappointment, dissatisfaction, or sadness (e.g., "I waited 2 hours and the problem still isn’t solved—I’m really angry" "This movie’s plot is boring").
+          Neutral: The sentence only states facts or delivers information, with no obvious emotional tendency (e.g., "The meeting will start at 3 PM tomorrow" "This document contains 5 chapters").
+          Output Format: Only include 1 word of "Positive", "Negative", or "Neutral". Do not add extra content:
+
+      - {"role": "user", "content": "What a wonderful day!:\nSentiment:"}
+  response:
+    choices:
+      finish_reason: stop
+      message: "Positive"
+    usage: 
+      completion_tokens: 3
+      prompt_tokens: 330
+      total_tokens: 333
+
+    
+
+               
+
+
+          
+
