@@ -18,56 +18,6 @@ HEAD_SIZES = [128, 192, 256]
 BLOCK_SIZES = [16]
 DTYPES = [torch.float16, torch.bfloat16]
 
-
-@pytest.mark.parametrize("num_tokens", [1, 39, 16912])
-@pytest.mark.parametrize("num_heads", NUM_HEADS)
-@pytest.mark.parametrize("head_size", HEAD_SIZES)
-@pytest.mark.parametrize("dtype", DTYPES)
-@torch.inference_mode()
-def test_merge_kernel(
-    num_tokens: int,
-    num_heads: tuple[int, int],
-    head_size: int,
-    dtype: torch.dtype,
-):
-    torch.set_default_device("cuda")
-    current_platform.seed_everything(0)
-    num_query_heads = num_heads[0]
-    num_kv_heads = num_heads[1]
-    assert num_query_heads % num_kv_heads == 0
-
-    # Prepare inputs.
-    prefix_output = torch.randn(num_tokens,
-                                num_query_heads,
-                                head_size,
-                                dtype=dtype)
-    suffix_output = torch.randn(num_tokens,
-                                num_query_heads,
-                                head_size,
-                                dtype=dtype)
-    prefix_lse = torch.randn(num_query_heads, num_tokens, dtype=torch.float32)
-    suffix_lse = torch.randn(num_query_heads, num_tokens, dtype=torch.float32)
-
-    # Run the kernel.
-    output = torch.empty(num_tokens, num_query_heads, head_size, dtype=dtype)
-    merge_attn_states(output, prefix_output, prefix_lse, suffix_output,
-                      suffix_lse)
-
-    # Reference implementation.
-    max_lse = torch.maximum(prefix_lse, suffix_lse)
-    p_lse = torch.exp(prefix_lse - max_lse)
-    s_lse = torch.exp(suffix_lse - max_lse)
-    p_scale = p_lse / (p_lse + s_lse)
-    s_scale = s_lse / (p_lse + s_lse)
-    p_scale = p_scale.transpose(0, 1).unsqueeze(2)
-    s_scale = s_scale.transpose(0, 1).unsqueeze(2)
-    ref_output = p_scale * prefix_output + s_scale * suffix_output
-    ref_output = ref_output.to(dtype)
-
-    # Compare the results.
-    torch.testing.assert_close(output, ref_output, atol=1e-2, rtol=1e-2)
-
-
 CASES = [
     # Case 1. A general case.
     ([(129, 871), (18, 280), (37, 988), (1023, 2304), (1, 257)], 256),
@@ -85,7 +35,7 @@ CASES = [
 @pytest.mark.parametrize("num_blocks", [2048])
 @pytest.mark.parametrize("fa_version", [2, 3])
 @torch.inference_mode()
-def test_cascade(
+def test_multi_cascade(
     seq_lens_and_common_prefix: tuple[list[tuple[int, int]], int],
     num_heads: tuple[int, int],
     head_size: int,
@@ -182,7 +132,7 @@ def test_cascade(
         sliding_window=window_size,
         logits_soft_cap=soft_cap if soft_cap is not None else 0,
         block_table=block_tables,
-        common_prefix_lens=[common_prefix_len],
+        common_prefix_len=common_prefix_len,
         fa_version=fa_version,
     )
 
