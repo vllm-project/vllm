@@ -86,8 +86,12 @@ class ToolServer(ABC):
         pass
 
     @abstractmethod
-    def new_session(self, tool_name: str,
-                    session_id: str) -> AbstractAsyncContextManager[Any]:
+    def new_session(
+        self,
+        tool_name: str,
+        session_id: str,
+        headers: Optional[dict[str, str]] = None
+    ) -> AbstractAsyncContextManager[Any]:
         """
         Create a session for the tool.
         """
@@ -144,11 +148,16 @@ class MCPToolServer(ToolServer):
         return self.harmony_tool_descriptions.get(tool_name)
 
     @asynccontextmanager
-    async def new_session(self, tool_name: str, session_id: str):
+    async def new_session(self,
+                          tool_name: str,
+                          session_id: str,
+                          headers: Optional[dict[str, str]] = None):
         from mcp import ClientSession
         from mcp.client.sse import sse_client
         url = self.urls.get(tool_name)
-        headers = {"x-session-id": session_id}
+        if headers is None:
+            headers = {}
+        headers = {"x-session-id": session_id, **headers}
         if not url:
             raise KeyError(f"Tool '{tool_name}' is not supported")
         async with sse_client(url=url,

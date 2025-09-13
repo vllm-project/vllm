@@ -310,14 +310,21 @@ class HarmonyContext(ConversationContext):
                     recipient=Role.ASSISTANT)
         ]
 
-    async def init_tool_sessions(self, tool_server: Optional[ToolServer],
-                                 exit_stack: AsyncExitStack,
-                                 request_id: str) -> None:
+    async def init_tool_sessions(
+            self,
+            tool_server: Optional[ToolServer],
+            exit_stack: AsyncExitStack,
+            request_id: str,
+            mcp_tool_headers: dict[str, dict[str, str]] = None) -> None:
         if tool_server:
             for tool_name in self.available_tools:
                 if tool_name not in self._tool_sessions:
                     tool_session = await exit_stack.enter_async_context(
-                        tool_server.new_session(tool_name, request_id))
+                        tool_server.new_session(
+                            tool_name, request_id,
+                            mcp_tool_headers.get(tool_name)
+                            if tool_name in mcp_tool_headers else {}))
+                    logger.info("Created new session for %s", tool_name)
                     self._tool_sessions[tool_name] = tool_session
                     exit_stack.push_async_exit(self.cleanup_session)
 
