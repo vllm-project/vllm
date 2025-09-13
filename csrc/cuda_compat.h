@@ -77,7 +77,7 @@ struct Utils {
     hipFuncSetAttribute(FUNC, hipFuncAttributeMaxDynamicSharedMemorySize, VAL)
 #endif
 
-#if !defined(USE_ROCM) && defined(CCCL_MAJOR_VERSION) && (CCCL_MAJOR_VERSION >= 13)
+#if !defined(USE_ROCM) && defined(CUDA_VERSION) && (CUDA_VERSION >= 13000)
   #include <cuda_runtime.h>
   #include <cufunctional.h>
   using Sum_CUDA_13_fix = cu::plus<>;
