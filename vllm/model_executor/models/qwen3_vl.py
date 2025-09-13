@@ -40,6 +40,7 @@ from transformers.models.qwen3_vl.configuration_qwen3_vl import (
     Qwen3VLConfig, Qwen3VLVisionConfig)
 from transformers.video_utils import VideoMetadata
 
+from vllm.attention.layer import check_upstream_fa_availability
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
@@ -306,7 +307,12 @@ class Qwen3_VisionTransformer(nn.Module):
             for layer_idx in range(len(self.deepstack_visual_indexes))
         ])
 
-        self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
+        self.attn_backend = get_vit_attn_backend(
+            head_size=head_dim, dtype=torch.get_default_dtype())
+        if self.attn_backend != _Backend.FLASH_ATTN and \
+            check_upstream_fa_availability(
+                torch.get_default_dtype()):
+            self.attn_backend = _Backend.FLASH_ATTN
 
     @property
     def dtype(self) -> torch.dtype:
