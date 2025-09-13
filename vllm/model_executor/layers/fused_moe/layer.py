@@ -80,7 +80,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__()
         self.moe = moe
-        self.fused_experts: Optional[Callable] = None
+        self.fused_experts: Optional[FusedMoEModularKernel] = None
         self.topk_indices_dtype = None
 
     @abstractmethod
@@ -809,6 +809,9 @@ class FusedMoE(CustomOp):
                 dp_size_=dp_size_,
                 vllm_parallel_config=vllm_config.parallel_config))
 
+        logger.debug("FusedMoEParallelConfig = %s",
+                     str(self.moe_parallel_config))
+
         self.global_num_experts = num_experts + num_redundant_experts
 
         # we are padding globally so EP buffer allocation works
@@ -947,9 +950,7 @@ class FusedMoE(CustomOp):
         # Chunked all2all staging tensor
         self.batched_hidden_states: Optional[torch.Tensor] = None
         self.batched_router_logits: Optional[torch.Tensor] = None
-        if (self.moe_parallel_config.use_pplx_kernels
-                or self.moe_parallel_config.use_deepep_ll_kernels
-                or self.moe_config.use_flashinfer_cutlass_kernels):
+        if self.use_chunking:
             self.batched_hidden_states = torch.zeros(
                 (moe.max_num_tokens, self.hidden_size),
                 dtype=moe.in_dtype,
@@ -992,6 +993,12 @@ class FusedMoE(CustomOp):
     @property
     def use_ep(self):
         return self.moe_parallel_config.use_ep
+
+    @property
+    def use_chunking(self):
+        return (self.moe_parallel_config.use_pplx_kernels
+                or self.moe_parallel_config.use_deepep_ll_kernels
+                or self.moe_config.use_flashinfer_cutlass_kernels)
 
     @property
     def use_pplx_kernels(self):
@@ -1594,8 +1601,7 @@ class FusedMoE(CustomOp):
         """
         The pplx combine kernel reduces across GPU ranks by default.
         """
-        if (self.use_pplx_kernels or self.use_deepep_ht_kernels
-                or self.use_deepep_ll_kernels):
+        if self.must_reduce_shared_expert_outputs():
             return final_hidden_states
         else:
             return tensor_model_parallel_all_reduce(final_hidden_states)
@@ -1660,6 +1666,8 @@ class FusedMoE(CustomOp):
         if self.shared_experts is not None:
             full_shared_final_hidden_states = torch.empty_like(
                 full_hidden_states)
+        else:
+            full_shared_final_hidden_states = None
 
         def process_chunk(chunk_start, chunk_end, skip_result_store=False):
             chunk_size = chunk_end - chunk_start
@@ -1670,10 +1678,12 @@ class FusedMoE(CustomOp):
                     >= chunk_size)
             assert (self.batched_router_logits.size(0)  # type: ignore
                     >= chunk_size)
-            staged_hidden_states = self.batched_hidden_states[:
-                                                              chunk_size, :]  # type: ignore
-            staged_router_logits = self.batched_router_logits[:
-                                                              chunk_size, :]  # type: ignore
+            staged_hidden_states = (
+                self.batched_hidden_states[:chunk_size, :]  # type: ignore
+            )
+            staged_router_logits = (
+                self.batched_router_logits[:chunk_size, :]  # type: ignore
+            )
             staged_hidden_states.copy_(hidden_states, non_blocking=True)
             staged_router_logits.copy_(router_logits, non_blocking=True)
 
@@ -1709,6 +1719,7 @@ class FusedMoE(CustomOp):
                         chunk_start:chunk_end, :].copy_(final_hidden_states,
                                                         non_blocking=True)
                 else:
+                    assert full_shared_final_hidden_states is not None
                     full_shared_final_hidden_states[
                         chunk_start:chunk_end, :].copy_(final_hidden_states[0],
                                                         non_blocking=True)
