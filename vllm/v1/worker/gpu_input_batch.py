@@ -44,6 +44,10 @@ class CachedRequestState:
 
     lora_request: Optional[LoRARequest] = None
     prompt_embeds: Optional[torch.Tensor] = None
+    # these are used when enbale both async_scheduling and spec_decode
+    prev_num_draft_len: int = 0
+    prev_sampled_tokens: Optional[torch.Tensor] = None
+    prev_draft_tokens: Optional[torch.Tensor] = None
 
     def __post_init__(self):
         self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
@@ -279,6 +283,7 @@ class InputBatch:
         self.prev_sampled_token_ids: Optional[torch.Tensor] = None
         self.prev_sampled_token_ids_invalid_indices: Optional[set[int]] = None
         self.prev_req_id_to_index: Optional[dict[str, int]] = None
+        self.prev_req_ids: Optional[list[Optional[str]]] = None
 
     @property
     def req_ids(self) -> list[str]:
