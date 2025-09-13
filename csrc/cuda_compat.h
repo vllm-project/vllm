@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cuda_runtime.h>
+
 #ifdef USE_ROCM
   #include <hip/hip_runtime.h>
 #endif
