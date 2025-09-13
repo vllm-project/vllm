@@ -35,7 +35,8 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (MultiModalEmbeddings, SupportsMultiModal, SupportsPP,
+                         SupportsQuant)
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     init_vllm_registered_model, maybe_prefix,
@@ -318,15 +319,19 @@ class Cohere2VisionMultiModalProcessor(
     info=Cohere2VisionProcessingInfo,
     dummy_inputs=Cohere2VisionDummyInputsBuilder)
 class Cohere2VisionForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                            SupportsPP):
+                                            SupportsPP, SupportsQuant):
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.vision_tower.": "vision_tower.",
             "model.multi_modal_projector.": "multi_modal_projector.",
             "model.language_model.": "language_model.model.",
-            "lm_head.": "language_model.lm_head.",
         })
+
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
