@@ -3,7 +3,7 @@
 #include "../vectorization_utils.cuh"
 #include <c10/cuda/CUDAGuard.h>
 #include <ATen/cuda/Exceptions.h>
-#include "../../../cuda_compat.h"
+#include "../../cuda_compat.h"
 
 #ifndef USE_ROCM
   #include <cub/cub.cuh>
