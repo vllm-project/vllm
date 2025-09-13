@@ -444,7 +444,7 @@ def test_propose_tree(spec_token_tree):
     # Mock the model forward calls.
     forward_returns = [(torch.zeros(total_tokens, hidden_size, device=device),
                         torch.zeros(total_tokens, hidden_size, device=device))]
-    for cu_num_drafts in proposer.cu_drafts_per_level:
+    for cu_num_drafts in proposer.cu_drafts_per_level[1:]:
         h_logits = torch.zeros(batch_size * cu_num_drafts,
                                hidden_size,
                                device=device)
@@ -455,7 +455,7 @@ def test_propose_tree(spec_token_tree):
     model_mock.side_effect = forward_returns
 
     # Mock the compute_logits calls.
-    cu_num_drafts_tensor = torch.tensor([0] + proposer.cu_drafts_per_level,
+    cu_num_drafts_tensor = torch.tensor(proposer.cu_drafts_per_level,
                                         dtype=torch.int32,
                                         device=device)
     logits_returns = []
