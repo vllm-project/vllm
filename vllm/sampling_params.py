@@ -192,7 +192,7 @@ class SamplingParams(
 
     # The below fields are not supposed to be used as an input.
     # They are set in post_init.
-    output_text_buffer_length: int = 0
+    _output_text_buffer_length: int = 0
     _all_stop_token_ids: set[int] = msgspec.field(default_factory=set)
 
     # Fields used to construct logits processors
@@ -226,26 +226,27 @@ class SamplingParams(
         repetition_penalty: Optional[float] = 1.0,
         temperature: Optional[float] = 1.0,
         top_p: Optional[float] = 1.0,
-        top_k: int = 0,
-        min_p: float = 0.0,
+        top_k: Optional[int] = 0,
+        min_p: Optional[float] = 0.0,
         seed: Optional[int] = None,
         stop: Optional[Union[str, list[str]]] = None,
         stop_token_ids: Optional[list[int]] = None,
         bad_words: Optional[list[str]] = None,
-        include_stop_str_in_output: bool = False,
-        ignore_eos: bool = False,
+        include_stop_str_in_output: Optional[bool] = False,
+        ignore_eos: Optional[bool] = False,
         max_tokens: Optional[int] = 16,
-        min_tokens: int = 0,
+        min_tokens: Optional[int] = 0,
         logprobs: Optional[int] = None,
         prompt_logprobs: Optional[int] = None,
-        detokenize: bool = True,
-        skip_special_tokens: bool = True,
-        spaces_between_special_tokens: bool = True,
+        detokenize: Optional[bool] = True,
+        skip_special_tokens: Optional[bool] = True,
+        spaces_between_special_tokens: Optional[bool] = True,
         logits_processors: Optional[list[LogitsProcessor]] = None,
         truncate_prompt_tokens: Optional[Annotated[int,
                                                    msgspec.Meta(
                                                        ge=-1)]] = None,
-        output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE,
+        output_kind: Optional[RequestOutputKind] = RequestOutputKind.
+        CUMULATIVE,
         guided_decoding: Optional[GuidedDecodingParams] = None,
         logit_bias: Optional[Union[dict[int, float], dict[str, float]]] = None,
         allowed_token_ids: Optional[list[int]] = None,
@@ -270,24 +271,28 @@ class SamplingParams(
             if repetition_penalty is None else repetition_penalty,
             temperature=1.0 if temperature is None else temperature,
             top_p=1.0 if top_p is None else top_p,
-            top_k=top_k,
-            min_p=min_p,
+            top_k=0 if top_k is None else top_k,
+            min_p=0.0 if min_p is None else min_p,
             seed=seed,
             stop=stop,
             stop_token_ids=stop_token_ids,
             bad_words=bad_words,
-            include_stop_str_in_output=include_stop_str_in_output,
-            ignore_eos=ignore_eos,
+            include_stop_str_in_output=False if include_stop_str_in_output
+            is None else include_stop_str_in_output,
+            ignore_eos=False if ignore_eos is None else ignore_eos,
             max_tokens=max_tokens,
-            min_tokens=min_tokens,
+            min_tokens=0 if min_tokens is None else min_tokens,
             logprobs=logprobs,
             prompt_logprobs=prompt_logprobs,
-            detokenize=detokenize,
-            skip_special_tokens=skip_special_tokens,
-            spaces_between_special_tokens=spaces_between_special_tokens,
+            detokenize=True if detokenize is None else detokenize,
+            skip_special_tokens=True
+            if skip_special_tokens is None else skip_special_tokens,
+            spaces_between_special_tokens=True if spaces_between_special_tokens
+            is None else spaces_between_special_tokens,
             logits_processors=logits_processors,
             truncate_prompt_tokens=truncate_prompt_tokens,
-            output_kind=output_kind,
+            output_kind=RequestOutputKind.CUMULATIVE
+            if output_kind is None else output_kind,
             guided_decoding=guided_decoding,
             logit_bias=logit_bias,
             allowed_token_ids=allowed_token_ids,
@@ -340,7 +345,8 @@ class SamplingParams(
         # Number of characters to hold back for stop string evaluation
         # until sequence is finished.
         if self.stop and not self.include_stop_str_in_output:
-            self.output_text_buffer_length = max(len(s) for s in self.stop) - 1
+            self._output_text_buffer_length = max(len(s)
+                                                  for s in self.stop) - 1
 
         self._verify_args()
 
@@ -519,6 +525,10 @@ class SamplingParams(
     def bad_words_token_ids(self) -> Optional[list[list[int]]]:
         # For internal use only. Backward compatibility not guaranteed
         return self._bad_words_token_ids
+
+    @property
+    def output_text_buffer_length(self) -> int:
+        return self._output_text_buffer_length
 
     def clone(self) -> "SamplingParams":
         """Deep copy, but maybe not the LogitsProcessor objects.
