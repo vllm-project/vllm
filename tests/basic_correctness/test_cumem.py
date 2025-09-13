@@ -181,7 +181,7 @@ def test_end_to_end(monkeypatch: pytest.MonkeyPatch, model: str, use_v1: bool):
 
 @create_new_process_for_each_test()
 def test_deep_sleep():
-    model = "Qwen/Qwen3-0.6B"
+    model = "hmellor/tiny-random-LlamaForCausalLM"
     free, total = torch.cuda.mem_get_info()
     used_bytes_baseline = total - free  # in case other process is running
     llm = LLM(model, enable_sleep_mode=True)
