@@ -23,7 +23,7 @@ from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import receiver_cache_from_config
+from vllm.multimodal.cache import engine_receiver_cache_from_config
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
@@ -131,7 +131,7 @@ class EngineCore:
         self.use_spec_decode = vllm_config.speculative_config is not None
 
         self.mm_registry = mm_registry = MULTIMODAL_REGISTRY
-        self.mm_receiver_cache = receiver_cache_from_config(
+        self.mm_receiver_cache = engine_receiver_cache_from_config(
             vllm_config, mm_registry)
 
         # Setup batch queue for pipeline parallelism.
@@ -158,6 +158,9 @@ class EngineCore:
 
             self.request_block_hasher = get_request_block_hasher(
                 block_size, caching_hash_fn)
+
+        self.step_fn = (self.step if self.batch_queue is None else
+                        self.step_with_batch_queue)
 
     def _initialize_kv_caches(
             self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
@@ -331,7 +334,8 @@ class EngineCore:
         model_executed = False
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule()
-            future = self.model_executor.execute_model(scheduler_output)
+            future = self.model_executor.execute_model(scheduler_output,
+                                                       non_block=True)
             batch_queue.appendleft(
                 (future, scheduler_output))  # type: ignore[arg-type]
 
@@ -533,9 +537,6 @@ class EngineCoreProc(EngineCore):
                         "Input socket thread died during startup")
                 assert addresses.coordinator_input is not None
                 logger.info("Waiting for READY message from DP Coordinator...")
-
-        self.step_fn = (self.step if self.batch_queue is None else
-                        self.step_with_batch_queue)
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.

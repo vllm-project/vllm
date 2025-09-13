@@ -44,6 +44,7 @@ from transformers.models.glm4v.video_processing_glm4v import (
     Glm4vVideoProcessor)
 from transformers.video_utils import VideoMetadata
 
+from vllm.attention.layer import check_upstream_fa_availability
 from vllm.config import VllmConfig
 from vllm.distributed import (get_tensor_model_parallel_world_size,
                               parallel_state)
@@ -260,7 +261,15 @@ class Glm4vVisionAttention(nn.Module):
         )
 
         # Detect attention implementation.
-        self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
+        self.attn_backend = get_vit_attn_backend(
+            head_size=self.hidden_size_per_attention_head,
+            dtype=torch.get_default_dtype())
+        self.use_upstream_fa = False
+        if self.attn_backend != _Backend.FLASH_ATTN and \
+            check_upstream_fa_availability(torch.get_default_dtype()):
+            self.attn_backend = _Backend.FLASH_ATTN
+            self.use_upstream_fa = True
+
         if self.attn_backend not in {
                 _Backend.FLASH_ATTN,
                 _Backend.TORCH_SDPA,
@@ -310,7 +319,10 @@ class Glm4vVisionAttention(nn.Module):
         if self.attn_backend == _Backend.FLASH_ATTN:
             # from vllm_flash_attn.flash_attn_interface import (
             #   flash_attn_varlen_func)
-            from flash_attn import flash_attn_varlen_func
+            if self.use_upstream_fa:
+                from flash_attn import flash_attn_varlen_func
+            else:
+                from vllm.vllm_flash_attn import flash_attn_varlen_func
 
             q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
 
@@ -407,15 +419,16 @@ class Glm4vVisionBlock(nn.Module):
             max_seqlen: Optional[int] = None,  # Only used for Flash Attention
             seqlens: Optional[list[int]] = None,  # Only used for xFormers
     ) -> torch.Tensor:
-        x = x + self.attn(
+        x_attn = self.attn(
             self.norm1(x),
             cu_seqlens=cu_seqlens,
             rotary_pos_emb=rotary_pos_emb,
             max_seqlen=max_seqlen,
             seqlens=seqlens,
         )
+        x_fused_norm, residual = self.norm2(x, residual=x_attn)
+        x = residual + self.mlp(x_fused_norm)
 
-        x = x + self.mlp(self.norm2(x))
         return x
 
 
@@ -715,7 +728,11 @@ class Glm4vVisionTransformer(nn.Module):
         self.post_layernorm = RMSNorm(vision_config.hidden_size,
                                       eps=vision_config.rms_norm_eps)
 
-        self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
+        self.attn_backend = get_vit_attn_backend(
+            head_size=head_dim, dtype=torch.get_default_dtype())
+        if self.attn_backend != _Backend.FLASH_ATTN and \
+            check_upstream_fa_availability(torch.get_default_dtype()):
+            self.attn_backend = _Backend.FLASH_ATTN
 
     @property
     def dtype(self) -> torch.dtype:
@@ -1362,7 +1379,7 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
                 raise ValueError(f"{name} should be 2D or batched 3D tensor. "
                                  f"Got ndim: {mm_input.ndim} "
                                  f"(shape={mm_input.shape})")
-            return torch.concat(list(mm_input))
+            return mm_input.reshape(-1, mm_input.shape[-1])
         else:
             return torch.concat(mm_input)
 
@@ -1583,17 +1600,10 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
                 **NOTE**: If mrope is enabled (default setting for GLM-4V
                 opensource models), the shape will be `(3, seq_len)`,
                 otherwise it will be `(seq_len,).
-            pixel_values: Pixel values to be fed to a model.
-                `None` if no images are passed.
-            image_grid_thw: Tensor `(n_images, 3)` of image 3D grid in LLM.
-                `None` if no images are passed.
-            pixel_values_videos: Pixel values of videos to be fed to a model.
-                `None` if no videos are passed.
-            video_grid_thw: Tensor `(n_videos, 3)` of video 3D grid in LLM.
-                `None` if no videos are passed.
-            second_per_grid_ts: Tensor `(num_videos)` of video time interval (
-                in seconds) for each grid along the temporal dimension in the
-                3D position IDs. `None` if no videos are passed.
+            intermediate_tensors: Optional intermediate tensors for pipeline
+                parallelism.
+            inputs_embeds: Optional pre-computed input embeddings.
+            **kwargs: Additional keyword arguments.
         """
         if intermediate_tensors is not None:
             inputs_embeds = None
