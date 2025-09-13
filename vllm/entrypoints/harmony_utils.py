@@ -318,7 +318,7 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
         elif recipient is not None and (recipient.startswith("python")
                                         or recipient.startswith("browser")
                                         or recipient.startswith("functions.")):
-            # When recipient starts with built-in tools or custom functions, 
+            # When recipient starts with built-in tools or custom functions,
             # treat as reasoning content
             for content in message.content:
                 reasoning_item = ResponseReasoningItem(
@@ -368,10 +368,11 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
         )
         output_items.append(text_item)
     else:
-        # For unknown channels, raise an error as we cannot determine 
+        # For unknown channels, raise an error as we cannot determine
         # the proper handling without knowing the channel type
         raise ValueError(f"Unknown channel: {message.channel}. "
-                        f"Supported channels are: 'analysis', 'commentary', 'final'")
+                         f"Supported channels are: 'analysis', "
+                         f"'commentary', 'final'")
     return output_items
 
 
