@@ -43,7 +43,8 @@ class LinearAttentionMetadataBuilder(
         assert isinstance(kv_cache_spec, MambaSpec)
 
     def build(self,
-              common_prefix_len: int,
+              group_indices: list[int],
+              common_prefix_lens: list[int],
               common_attn_metadata: CommonAttentionMetadata,
               fast_build: bool = False) -> LinearAttentionMetadata:
         query_start_loc = common_attn_metadata.query_start_loc

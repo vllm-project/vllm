@@ -249,7 +249,7 @@ class ipex_ops:
         causal: bool,
         block_table: torch.Tensor,
         alibi_slopes: Optional[torch.Tensor],
-        window_size: Optional[list[int]] = None,
+        window_size: Optional[list[int] | tuple[int, int]] = None,
         softcap: Optional[float] = 0.0,
         cu_seqlens_k: Optional[torch.Tensor] = None,
         # The following parameters are not used in ipex kernel currently,

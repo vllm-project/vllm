@@ -391,6 +391,9 @@ class ModelConfig:
     preventing potential numerical issues. Note that even if this is set to
     False, cascade attention will be only used when the heuristic tells that
     it's beneficial."""
+    disable_multi_cascade_attn: bool = False
+    """Disable multi-cascade attention for V1. Multi-cascade attention is useful
+    when serving requests with multiple common prefixes in the same batch."""
     skip_tokenizer_init: bool = False
     """Skip initialization of tokenizer and detokenizer. Expects valid
     `prompt_token_ids` and `None` for prompt from the input. The generated
@@ -478,6 +481,13 @@ class ModelConfig:
     """Initialize non-default pooling config or override default pooling config
     for the pooling model. e.g. `{"pooling_type": "mean", "normalize": false}`.
     """
+    multi_cascade_config: "KVAlignedConfig" = field(default_factory="KVAlignedConfig")
+    """Multi-cascade config which controls behaviour of request grouping when
+    multi-cascade attention is enabled."""
+    override_multi_cascade_config: Optional[Union[dict, "KVAlignedConfig"]] = None
+    """Initialize non-default multi-cascade config or override default multi-cascade
+    config."""
+
     logits_processor_pattern: Optional[str] = None
     """Optional regex pattern specifying valid logits processor qualified names
     that can be passed with the `logits_processors` extra completion argument.
@@ -622,6 +632,20 @@ class ModelConfig:
                 "https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile "  # noqa: E501
                 "for instructions on how to install it.")
 
+        if self.disable_cascade_attn and not \
+            self.disable_multi_cascade_attn:
+            logger.info("To enable multi-cascade attention, must also"
+                        "enable cascade attention.")
+            self.disable_multi_cascade_attn = True
+
+        if (backend := envs.VLLM_ATTENTION_BACKEND) and backend != "FLASH_ATTN" \
+            and not self.disable_multi_cascade_attn:
+            logger.info("Multi-cascade attention can currently only be used with "
+                        "FlashAttention. Set backend to FLASH_ATTN with "
+                        "export VLLM_ATTENTION_BACKEND=FLASH_ATTN to enable FLASH_ATTN"
+                        "backend.")
+            self.disable_multi_cascade_attn = True
+
         from vllm.platforms import current_platform
 
         if (self.override_attention_dtype is not None
@@ -758,6 +782,8 @@ class ModelConfig:
             is_pooling_model=self.runner_type == "pooling",
             revision=self.revision,
         )
+
+        self.multi_cascade_config = self._init_multi_cascade_config()
 
         # Interleaved attention is not supported by some backends in V0
         if (not self.disable_sliding_window
@@ -925,6 +951,14 @@ class ModelConfig:
             return pooler_config
 
         return None
+
+    def _init_multi_cascade_config(self) -> "KVAlignedConfig":
+        if isinstance(self.override_multi_cascade_config, dict):
+            self.override_multi_cascade_config = KVAlignedConfig(
+                **self.override_multi_cascade_config)
+        multi_cascade_config = (self.override_multi_cascade_config or
+                                KVAlignedConfig())
+        return multi_cascade_config
 
     def _verify_tokenizer_mode(self) -> None:
         tokenizer_mode = cast(TokenizerMode, self.tokenizer_mode.lower())
@@ -2626,6 +2660,37 @@ class PoolerConfig:
         hash_str = hashlib.md5(str(factors).encode(),
                                usedforsecurity=False).hexdigest()
         return hash_str
+
+@config
+class KVAlignedGroupingConfig(str, enum.Enum):
+    """Methods for grouping requests for multi-cascade
+    attention."""
+
+    LEAF_PASS = "leaf_pass"
+    """Only group requests if their latest KVCacheBlock 
+    is the same."""
+
+    FULL_PASS = "full_pass"
+    """Group requests even if they share a partially 
+    common prefix. Takes longer than leaf_pass but results
+    in larger groups."""
+
+@config
+@dataclass
+class KVAlignedConfig:
+    """Contains configurations for deciding how to schedule
+    multi-cascade attention."""
+
+    absorption_threshold: float = 0.8
+    """Threshold parameter that specifies whether to 
+    group more leaves with lower prefix length (low
+    absorption threshold), or fewer leaves with higher 
+    common prefix length (higher absorption threshold)."""
+
+    allocate_method = KVAlignedGroupingConfig.LEAF_PASS
+    """Method used to group requests with common prefixes. 
+    Logic behind grouping is in vllm.v1.core.multi_cascade_manager.
+    Defaults to leaf_pass."""
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {

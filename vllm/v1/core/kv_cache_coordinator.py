@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from typing import Optional
 
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock, KVPrefixTrie
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager, FullAttentionManager, get_manager_for_kv_cache_spec)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
@@ -35,11 +35,14 @@ class KVCacheCoordinator(ABC):
 
         # Needs special handling for find_longest_cache_hit if eagle is enabled
         self.use_eagle = use_eagle
+        enable_first_layer_trie = (
+            kv_cache_config.enable_kv_prefix_trie)
         self.single_type_managers = tuple(
             get_manager_for_kv_cache_spec(
                 kv_cache_spec=kv_cache_group.kv_cache_spec,
                 block_pool=self.block_pool,
                 kv_cache_group_id=i,
+                enable_kv_prefix_trie=enable_first_layer_trie if i==0 else False,
                 dcp_world_size=dcp_world_size,
             ) for i, kv_cache_group in enumerate(
                 self.kv_cache_config.kv_cache_groups))
@@ -137,6 +140,20 @@ class KVCacheCoordinator(ABC):
         """
         for manager in self.single_type_managers:
             manager.free(request_id)
+
+    def unschedule(self, request_id: str) -> None:
+        """
+        Set the request as unscheduled.
+
+        Args:
+            request_id: The request ID
+        """
+        self.single_type_managers[0].unschedule(request_id)
+
+    def get_prefix_trie(self) -> Optional[KVPrefixTrie]:
+        if not self.single_type_managers:
+            return None
+        return self.single_type_managers[0].kv_prefix_trie
 
     def get_num_common_prefix_blocks(self, request_id: str,
                                      num_running_requests: int) -> list[int]:
