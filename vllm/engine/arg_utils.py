@@ -27,8 +27,8 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          DistributedExecutorBackend, EPLBConfig,
                          GuidedDecodingBackend, HfOverrides, KVEventsConfig,
                          KVTransferConfig, LoadConfig, LogprobsMode,
-                         LoRAConfig, MambaDType, MMEncoderTPMode, ModelConfig,
-                         ModelDType, ModelImpl, MultiModalConfig,
+                         LoRAConfig, MambaDType, MMCacheType, MMEncoderTPMode,
+                         ModelConfig, ModelDType, ModelImpl, MultiModalConfig,
                          ObservabilityConfig, ParallelConfig, PoolerConfig,
                          PrefixCachingHashAlgo, RunnerOption, SchedulerConfig,
                          SchedulerPolicy, SpeculativeConfig, TaskOption,
@@ -324,11 +324,10 @@ class EngineArgs:
     data_parallel_hybrid_lb: bool = False
     data_parallel_backend: str = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
-    enable_microbatching: bool = ParallelConfig.enable_microbatching
-    microbatching_decode_token_threshold: int = \
-        ParallelConfig.microbatching_decode_token_threshold
-    microbatching_prefill_token_threshold: int = \
-        ParallelConfig.microbatching_prefill_token_threshold
+    enable_dbo: bool = ParallelConfig.enable_dbo
+    dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
+    dbo_prefill_token_threshold: int = \
+        ParallelConfig.dbo_prefill_token_threshold
     eplb_config: EPLBConfig = get_field(ParallelConfig, "eplb_config")
     enable_eplb: bool = ParallelConfig.enable_eplb
     num_redundant_experts: int = EPLBConfig.num_redundant_experts
@@ -378,6 +377,10 @@ class EngineArgs:
         MultiModalConfig.mm_processor_kwargs
     disable_mm_preprocessor_cache: bool = False  # DEPRECATED
     mm_processor_cache_gb: float = MultiModalConfig.mm_processor_cache_gb
+    mm_processor_cache_type: Optional[MMCacheType] = \
+        MultiModalConfig.mm_processor_cache_type
+    mm_shm_cache_max_object_size_mb: int = \
+        MultiModalConfig.mm_shm_cache_max_object_size_mb
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
     io_processor_plugin: Optional[str] = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
@@ -691,14 +694,14 @@ class EngineArgs:
         parallel_group.add_argument(
             "--enable-expert-parallel",
             **parallel_kwargs["enable_expert_parallel"])
-        parallel_group.add_argument("--enable-microbatching",
-                                    **parallel_kwargs["enable_microbatching"])
+        parallel_group.add_argument("--enable-dbo",
+                                    **parallel_kwargs["enable_dbo"])
         parallel_group.add_argument(
-            "--microbatching-decode-token-threshold",
-            **parallel_kwargs["microbatching_decode_token_threshold"])
+            "--dbo-decode-token-threshold",
+            **parallel_kwargs["dbo_decode_token_threshold"])
         parallel_group.add_argument(
-            "--microbatching-prefill-token-threshold",
-            **parallel_kwargs["microbatching_prefill_token_threshold"])
+            "--dbo-prefill-token-threshold",
+            **parallel_kwargs["dbo_prefill_token_threshold"])
         parallel_group.add_argument("--enable-eplb",
                                     **parallel_kwargs["enable_eplb"])
         parallel_group.add_argument("--eplb-config",
@@ -795,6 +798,12 @@ class EngineArgs:
         multimodal_group.add_argument("--disable-mm-preprocessor-cache",
                                       action="store_true",
                                       deprecated=True)
+        multimodal_group.add_argument(
+            "--mm-processor-cache-type",
+            **multimodal_kwargs["mm_processor_cache_type"])
+        multimodal_group.add_argument(
+            "--mm-shm-cache-max-object-size-mb",
+            **multimodal_kwargs["mm_shm_cache_max_object_size_mb"])
         multimodal_group.add_argument(
             "--mm-encoder-tp-mode", **multimodal_kwargs["mm_encoder_tp_mode"])
         multimodal_group.add_argument(
@@ -1011,6 +1020,9 @@ class EngineArgs:
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,
             mm_processor_cache_gb=self.mm_processor_cache_gb,
+            mm_processor_cache_type=self.mm_processor_cache_type,
+            mm_shm_cache_max_object_size_mb=self.
+            mm_shm_cache_max_object_size_mb,
             mm_encoder_tp_mode=self.mm_encoder_tp_mode,
             override_pooler_config=self.override_pooler_config,
             logits_processor_pattern=self.logits_processor_pattern,
@@ -1334,9 +1346,9 @@ class EngineArgs:
             data_parallel_backend=self.data_parallel_backend,
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
             enable_expert_parallel=self.enable_expert_parallel,
-            enable_microbatching=self.enable_microbatching,
-            microbatching_decode_token_threshold=self.
-            microbatching_decode_token_threshold,
+            enable_dbo=self.enable_dbo,
+            dbo_decode_token_threshold=self.dbo_decode_token_threshold,
+            dbo_prefill_token_threshold=self.dbo_prefill_token_threshold,
             enable_eplb=self.enable_eplb,
             eplb_config=self.eplb_config,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
@@ -1504,12 +1516,6 @@ class EngineArgs:
                 or self.max_long_partial_prefills
                 != SchedulerConfig.max_long_partial_prefills):
             _raise_or_fallback(feature_name="Concurrent Partial Prefill",
-                               recommend_to_remove=False)
-            return False
-
-        # No OTLP observability so far.
-        if (self.otlp_traces_endpoint or self.collect_detailed_traces):
-            _raise_or_fallback(feature_name="--otlp-traces-endpoint",
                                recommend_to_remove=False)
             return False
 

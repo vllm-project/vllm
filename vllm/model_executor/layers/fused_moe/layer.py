@@ -814,9 +814,16 @@ class FusedMoE(CustomOp):
 
         # we are padding globally so EP buffer allocation works
         if quant_config and quant_config.get_name() == "mxfp4":
-            from vllm.model_executor.layers.quantization.mxfp4 import (  # noqa: E501
-                should_use_flashinfer_mxfp4)
-            if current_platform.is_rocm() or should_use_flashinfer_mxfp4():
+            from vllm.model_executor.layers.quantization.mxfp4 import (
+                Mxfp4Backend, get_mxfp4_backend)
+            current_mxfp4_backend = get_mxfp4_backend()
+            if (current_mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
+                    or current_mxfp4_backend
+                    == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS):
+                hidden_size = round_up(hidden_size, 128)
+            elif (current_platform.is_rocm() or current_mxfp4_backend
+                  == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM or
+                  current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16):
                 hidden_size = round_up(hidden_size, 256)
 
         # For smuggling this layer into the fused moe custom op
@@ -944,16 +951,28 @@ class FusedMoE(CustomOp):
         if (self.moe_parallel_config.use_pplx_kernels
                 or self.moe_parallel_config.use_deepep_ll_kernels
                 or self.moe_config.use_flashinfer_cutlass_kernels):
-            self.batched_hidden_states = torch.zeros(
-                (2, moe.max_num_tokens, self.hidden_size),
-                dtype=moe.in_dtype,
-                device=torch.cuda.current_device())
+            if vllm_config.parallel_config.enable_dbo:
+                self.batched_hidden_states = torch.zeros(
+                    (2, moe.max_num_tokens, self.hidden_size),
+                    dtype=moe.in_dtype,
+                    device=torch.cuda.current_device())
 
-            # Note here we use `num_experts` which is logical expert count
-            self.batched_router_logits = torch.zeros(
-                (2, moe.max_num_tokens, num_experts),
-                dtype=moe.in_dtype,
-                device=torch.cuda.current_device())
+                # Note here we use `num_experts` which is logical expert count
+                self.batched_router_logits = torch.zeros(
+                    (2, moe.max_num_tokens, num_experts),
+                    dtype=moe.in_dtype,
+                    device=torch.cuda.current_device())
+            else:
+                self.batched_hidden_states = torch.zeros(
+                    (moe.max_num_tokens, self.hidden_size),
+                    dtype=moe.in_dtype,
+                    device=torch.cuda.current_device())
+
+                # Note here we use `num_experts` which is logical expert count
+                self.batched_router_logits = torch.zeros(
+                    (moe.max_num_tokens, num_experts),
+                    dtype=moe.in_dtype,
+                    device=torch.cuda.current_device())
 
     @property
     def shared_experts(self) -> Optional[torch.nn.Module]:
@@ -1594,7 +1613,7 @@ class FusedMoE(CustomOp):
         else:
             return tensor_model_parallel_all_reduce(final_hidden_states)
 
-    def forward(
+    def forward_native(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
@@ -1628,6 +1647,13 @@ class FusedMoE(CustomOp):
             return (shared_output[..., :og_hidden_states],
                     fused_output[..., :og_hidden_states])
 
+    def forward_cuda(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        return self.forward_native(hidden_states, router_logits)
+
     def forward_impl_chunked(
         self,
         full_hidden_states: torch.Tensor,
@@ -1653,14 +1679,20 @@ class FusedMoE(CustomOp):
             hidden_states = full_hidden_states[chunk_start:chunk_end, :]
             router_logits = full_router_logits[chunk_start:chunk_end, :]
 
-            batch_buffer_idx = dbo_current_ubatch_id()
-
             assert self.batched_hidden_states is not None
             assert self.batched_router_logits is not None
-            batched_hidden_states = self.batched_hidden_states[
-                batch_buffer_idx, :]
-            batched_router_logits = self.batched_router_logits[
-                batch_buffer_idx, :]
+            # This is only true when DBO has been enabled in the config.
+            # Both tensors will have an outer dimension for the ubatch id
+            if self.batched_hidden_states.dim() == 3:
+                assert self.batched_router_logits.dim() == 3
+                batch_buffer_idx = dbo_current_ubatch_id()
+                batched_hidden_states = self.batched_hidden_states[
+                    batch_buffer_idx, :]
+                batched_router_logits = self.batched_router_logits[
+                    batch_buffer_idx, :]
+            else:
+                batched_hidden_states = self.batched_hidden_states
+                batched_router_logits = self.batched_router_logits
 
             assert (batched_hidden_states.size(0)  # type: ignore
                     >= chunk_size)

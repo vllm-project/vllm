@@ -88,7 +88,7 @@ def parse_args():
         help=("Fraction of GPU memory vLLM is allowed to allocate (0.0, 1.0]."),
     )
     parser.add_argument(
-        "--enable-microbatching",
+        "--enable-dbo",
         action="store_true",
         help=("Enable microbatched execution"),
     )
@@ -118,7 +118,7 @@ def main(
     max_model_len,
     compilation_config,
     gpu_memory_utilization,
-    enable_microbatching,
+    enable_dbo,
     quantization,
 ):
     os.environ["VLLM_DP_RANK"] = str(global_dp_rank)
@@ -173,7 +173,7 @@ def main(
         max_num_seqs=max_num_seqs,
         max_model_len=max_model_len,
         gpu_memory_utilization=gpu_memory_utilization,
-        enable_microbatching=enable_microbatching,
+        enable_dbo=enable_dbo,
         quantization=quantization,
         compilation_config=compilation_config,
     )
@@ -234,7 +234,7 @@ if __name__ == "__main__":
                 args.max_model_len,
                 args.compilation_config,
                 args.gpu_memory_utilization,
-                args.enable_microbatching,
+                args.enable_dbo,
                 args.quantization,
             ),
         )

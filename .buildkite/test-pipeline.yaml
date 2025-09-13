@@ -231,7 +231,7 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/metrics
-  - tests/tracing
+  - tests/v1/tracing
   commands:
   - pytest -v -s metrics
   - "pip install \
@@ -789,6 +789,8 @@ steps:
   commands:
   - pytest -v -s distributed/test_comm_ops.py
   - pytest -v -s distributed/test_shm_broadcast.py
+  - pytest -v -s distributed/test_shm_buffer.py
+  - pytest -v -s distributed/test_shm_storage.py
 
 - label: 2 Node Tests (4 GPUs in total) # 16min
   timeout_in_minutes: 30
