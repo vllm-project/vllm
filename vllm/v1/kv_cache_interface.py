@@ -86,6 +86,12 @@ class FullAttentionSpec(AttentionSpec):
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_model_len = vllm_config.model_config.max_model_len
+        dcp_world_size = \
+            vllm_config.parallel_config.decode_context_parallel_size
+        # Note(hc): each dcp rank only need save
+        # (max_model_len//dcp_world_size) tokens locally.
+        if dcp_world_size > 1:
+            max_model_len = cdiv(max_model_len, dcp_world_size)
         cp_size = vllm_config.parallel_config.context_parallel_size
         enable_sp = vllm_config.parallel_config.enable_sequence_parallel
         sp_size = vllm_config.parallel_config.tensor_parallel_size if enable_sp else 1
@@ -165,6 +171,8 @@ class SlidingWindowSpec(AttentionSpec):
         assert not self.use_mla, "MLA is not supported for sliding window"
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        assert vllm_config.parallel_config.decode_context_parallel_size == 1, \
+            "DCP not support sliding window."
         max_model_len = vllm_config.model_config.max_model_len
         max_num_batched_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens)
@@ -189,6 +197,7 @@ class MambaSpec(KVCacheSpec):
     dtypes: tuple[torch.dtype]
     page_size_padded: Optional[int] = None
     mamba_type: str = "mamba2"
+    num_speculative_blocks: int = 0
 
     @property
     def page_size_bytes(self) -> int:

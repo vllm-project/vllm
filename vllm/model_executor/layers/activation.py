@@ -95,13 +95,6 @@ class SiluAndMul(CustomOp):
         self.op(out, x)
         return out
 
-    def forward_neuron(self, x: torch.Tensor) -> torch.Tensor:
-        d = x.shape[-1] // 2
-        x_reshaped = x.view(-1, x.shape[-1])
-        s = x_reshaped[:, :d] * F.sigmoid(x_reshaped[:, :d])
-        result = s * x_reshaped[:, d:]
-        return result.view(*x.shape[:-1], d)
-
 
 @CustomOp.register("mul_and_silu")
 class MulAndSilu(CustomOp):
@@ -362,7 +355,7 @@ class ReLUSquaredActivation(CustomOp):
         return torch.square(F.relu(x))
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
-        #TODO : implement cuda kenrels
+        #TODO : implement cuda kernels
         return self.forward_native(x)
 
 
@@ -461,7 +454,7 @@ class XIELU(CustomOp):
         )
         return result.view(original_shape)
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def forward_native(self, input: torch.Tensor) -> torch.Tensor:
         if self._xielu_cuda_obj is not None and input.is_cuda:
             if not torch._dynamo.is_compiling():
                 return self._xielu_cuda_fn(input)
@@ -470,6 +463,9 @@ class XIELU(CustomOp):
                     "torch._dynamo is compiling, using Python version of xIELU."
                 )
         return self._xielu_python(input)
+
+    def forward_cuda(self, input: torch.Tensor) -> torch.Tensor:
+        return self.forward_native(input)
 
 
 class ScaledActivation(nn.Module):
