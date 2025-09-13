@@ -43,6 +43,7 @@ class CachedRequestState:
     mrope_position_delta: Optional[int] = None
 
     lora_request: Optional[LoRARequest] = None
+    draft_probs: Optional[torch.Tensor] = None
 
     def __post_init__(self):
         self.num_prompt_tokens = len(self.prompt_token_ids)
