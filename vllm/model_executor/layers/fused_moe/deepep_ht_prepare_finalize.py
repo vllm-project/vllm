@@ -11,6 +11,8 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous, TopKWeightAndReduceDelegate)
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
+from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed.parallel_state import get_tp_group
 
 
 class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
@@ -192,6 +194,15 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> Callable:
+
+        # Only DP leader ranks (tp_rank == 0) should dispatch when TP > 1.
+        tp_world_size = get_tensor_model_parallel_world_size()
+        tp_rank_in_group = get_tp_group().rank_in_group if tp_world_size > 1 else 0
+        if tp_world_size > 1 and tp_rank_in_group != 0:
+            # Non-leader TP ranks send zero tokens to avoid duplicate dispatch.
+            a1 = a1[:0]
+            topk_ids = topk_ids[:0]
+            topk_weights = topk_weights[:0]
 
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)

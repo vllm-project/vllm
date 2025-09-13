@@ -154,9 +154,15 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
             all_to_all_args = dict()
             handle = all2all_manager.get_handle(all_to_all_args)
+            # Only DP leader ranks should dispatch when TP > 1.
+            # Use number of DP ranks (leaders) as dispatchers in that case.
+            tp_world_size = all2all_manager.tp_group.world_size
+            num_dispatchers = (all2all_manager.world_size //
+                               tp_world_size) if tp_world_size > 1 else \
+                all2all_manager.world_size
             prepare_finalize = DeepEPHTPrepareAndFinalize(
                 handle,
-                num_dispatchers=all2all_manager.world_size,
+                num_dispatchers=num_dispatchers,
                 dp_size=all2all_manager.dp_world_size,
                 rank_expert_offset=all2all_manager.rank *
                 moe.num_local_experts,
@@ -183,7 +189,12 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             prepare_finalize = DeepEPLLPrepareAndFinalize(
                 handle,
                 max_tokens_per_rank=moe.max_num_tokens,
-                num_dispatchers=all2all_manager.world_size,
+                # Only DP leader ranks should dispatch when TP > 1.
+                # Use number of DP ranks (leaders) as dispatchers in that case.
+                num_dispatchers=(all2all_manager.world_size //
+                                 all2all_manager.tp_group.world_size)
+                if all2all_manager.tp_group.world_size > 1 else
+                all2all_manager.world_size,
                 use_fp8_dispatch=use_fp8_dispatch,
             )
 
