@@ -6,8 +6,15 @@
 
 #ifndef USE_ROCM
   #include <cub/cub.cuh>
+  #if CUB_VERSION >= 300000
+    #include <cuda/std/functional>
+    using MaxOp = cuda::maximum<>;
+  #endif
 #else
   #include <hipcub/hipcub.hpp>
+  #if CUB_VERSION >= 300000
+    using MaxOp = cub::Max;
+  #endif
 #endif
 
 namespace vllm {
@@ -115,8 +122,14 @@ __global__ void dynamic_per_token_scaled_fp8_quant_kernel_strided(
 
   using BlockReduce = cub::BlockReduce<float, 256>;
   __shared__ typename BlockReduce::TempStorage tmp;
-  const float block_max =
+
+  #if CUB_VERSION >= 300000
+    const float block_max =
+        BlockReduce(tmp).Reduce(absmax_val, MaxOp{}, blockDim.x);
+  #else
+    const float block_max =
       BlockReduce(tmp).Reduce(absmax_val, cub::Max{}, blockDim.x);
+  #endif
 
   __shared__ float token_scale;
   if (tid == 0) {

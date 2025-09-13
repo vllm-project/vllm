@@ -6,8 +6,15 @@
 
 #ifndef USE_ROCM
   #include <cub/cub.cuh>
+  #if CUB_VERSION >= 300000
+    #include <cuda/std/functional>
+    using AddOp = cuda::std::plus<>;
+  #endif
 #else
   #include <hipcub/hipcub.hpp>
+  #if CUB_VERSION >= 300000
+    using AddOp = cub::Sum;
+  #endif
 #endif
 
 namespace vllm {
@@ -30,7 +37,12 @@ __global__ void rms_norm_kernel(
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
   __shared__ typename BlockReduce::TempStorage reduceStore;
-  variance = BlockReduce(reduceStore).Reduce(variance, cub::Sum{}, blockDim.x);
+
+  #if CUB_VERSION >= 300000
+    variance = BlockReduce(reduceStore).Reduce(variance, AddOp{}, blockDim.x);
+  #else
+    variance = BlockReduce(reduceStore).Reduce(variance, cub::Sum{}, blockDim.x);
+  #endif
 
   if (threadIdx.x == 0) {
     s_variance = rsqrtf(variance / hidden_size + epsilon);
@@ -85,7 +97,12 @@ fused_add_rms_norm_kernel(
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
   __shared__ typename BlockReduce::TempStorage reduceStore;
-  variance = BlockReduce(reduceStore).Reduce(variance, cub::Sum{}, blockDim.x);
+
+  #if CUB_VERSION >= 300000
+    variance = BlockReduce(reduceStore).Reduce(variance, AddOp{}, blockDim.x);
+  #else
+    variance = BlockReduce(reduceStore).Reduce(variance, cub::Sum{}, blockDim.x);
+  #endif
 
   if (threadIdx.x == 0) {
     s_variance = rsqrtf(variance / hidden_size + epsilon);
@@ -126,7 +143,12 @@ fused_add_rms_norm_kernel(
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
   __shared__ typename BlockReduce::TempStorage reduceStore;
-  variance = BlockReduce(reduceStore).Reduce(variance, cub::Sum{}, blockDim.x);
+
+  #if CUB_VERSION >= 300000
+    variance = BlockReduce(reduceStore).Reduce(variance, AddOp{}, blockDim.x);
+  #else
+    variance = BlockReduce(reduceStore).Reduce(variance, cub::Sum{}, blockDim.x);
+  #endif
 
   if (threadIdx.x == 0) {
     s_variance = rsqrtf(variance / hidden_size + epsilon);

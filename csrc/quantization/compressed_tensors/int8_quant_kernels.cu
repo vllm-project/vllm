@@ -13,9 +13,16 @@
 #ifndef USE_ROCM
   #include <cub/cub.cuh>
   #include <cub/util_type.cuh>
+  #if CUB_VERSION >= 300000
+    #include <cuda/std/functional>
+    using MaxOp = cuda::maximum<>;
+  #endif
 #else
   #include <hipcub/hipcub.hpp>
   #include <hipcub/util_type.hpp>
+  #if CUB_VERSION >= 300000
+    using MaxOp = cub::Max;
+  #endif
 #endif
 
 static inline __device__ int8_t float_to_int8_rn(float x) {
@@ -173,7 +180,12 @@ __global__ void dynamic_scaled_int8_quant_kernel(
       });
   using BlockReduce = cub::BlockReduce<float, 256>;
   __shared__ typename BlockReduce::TempStorage tmp;
-  float block_max = BlockReduce(tmp).Reduce(thread_max, cub::Max{}, blockDim.x);
+
+  #if CUB_VERSION >= 300000
+    float block_max = BlockReduce(tmp).Reduce(thread_max, MaxOp{}, blockDim.x);
+  #else
+    float block_max = BlockReduce(tmp).Reduce(thread_max, cub::Max{}, blockDim.x);
+  #endif
   __shared__ float absmax;
   if (tid == 0) {
     absmax = block_max;
