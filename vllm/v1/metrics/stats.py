@@ -25,6 +25,10 @@ class PrefixCacheStats:
     # The number of hits in these requests.
     hits: int = 0
 
+    # tool call specific stats
+    toolcall_non_1st_turn_hits: int = 0
+    toolcall_non_1st_turn_queries: int = 0
+
 
 @dataclass
 class SchedulerStats:
