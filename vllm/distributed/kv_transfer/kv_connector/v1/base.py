@@ -49,6 +49,8 @@ if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.config import VllmConfig
     from vllm.distributed.kv_events import KVCacheEvent
+    from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+        KVTransferStats)
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
@@ -354,4 +356,10 @@ class KVConnectorBase_V1(ABC):
         if cls is KVConnectorBase_V1:
             raise TypeError("get_required_kvcache_layout should not be called "
                             "on the abstract base class")
+        return None
+
+    def get_kv_transfer_stats(self) -> Optional["KVTransferStats"]:
+        """
+        Get the KV transfer stats for the connector.
+        """
         return None
