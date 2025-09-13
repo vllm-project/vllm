@@ -26,7 +26,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta)
 from vllm.utils import (GiB_bytes, MemorySnapshot, bind_kv_cache,
-                        memory_profiling)
+                        decorate_logs, memory_profiling, set_process_title)
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
@@ -195,6 +195,44 @@ class Worker(LocalOrDistributedWorkerBase):
         init_worker_distributed_environment(self.vllm_config, self.rank,
                                             self.distributed_init_method,
                                             self.local_rank)
+
+        # Set process title and log prefix early for better debugging
+        from vllm.distributed.parallel_state import (get_dp_group,
+                                                     get_ep_group,
+                                                     get_pp_group,
+                                                     get_tp_group)
+
+        try:
+            dp_size = get_dp_group().world_size
+            dp_rank = get_dp_group().rank_in_group
+            pp_size = get_pp_group().world_size
+            pp_rank = get_pp_group().rank_in_group
+            tp_size = get_tp_group().world_size
+            tp_rank = get_tp_group().rank_in_group
+
+            process_name = "Worker"
+            if dp_size > 1:
+                process_name += f"_DP{dp_rank}"
+            if pp_size > 1:
+                process_name += f"_PP{pp_rank}"
+            if tp_size > 1:
+                process_name += f"_TP{tp_rank}"
+
+            # Check if expert parallelism is enabled
+            if self.parallel_config.enable_expert_parallel:
+                ep_size = get_ep_group().world_size
+                if ep_size > 1:
+                    ep_rank = get_ep_group().rank_in_group
+                    process_name += f"_EP{ep_rank}"
+
+            set_process_title(name=process_name)
+            decorate_logs(process_name)
+        except Exception:
+            # If parallel state is not ready for some reason
+            # continue without setting process title
+            # to ensure we don't break initialization.
+            pass
+
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
