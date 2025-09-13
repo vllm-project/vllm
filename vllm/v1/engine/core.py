@@ -211,7 +211,11 @@ class EngineCore:
             for cfg in kv_cache_configs
         ])
         num_gpu_blocks = kv_cache_configs[0].num_blocks
-        num_cpu_blocks = 0
+        if kv_cache_configs[0].kv_bytes_per_block == 0:
+            num_cpu_blocks = 0
+        else:
+            num_cpu_blocks = (int(vllm_config.cache_config.swap_space_bytes) //
+                              kv_cache_configs[0].kv_bytes_per_block)
         scheduler_kv_cache_config = kv_cache_configs[0]
 
         # Initialize kv cache and warmup the execution
