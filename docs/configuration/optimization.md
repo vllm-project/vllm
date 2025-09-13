@@ -230,6 +230,20 @@ Multi-modal IPC caching is automatically enabled when
 there is a one-to-one correspondence between API (`P0`) and engine core (`P1`) processes,
 to avoid repeatedly transferring the same multi-modal inputs between them.
 
+#### Key-Replicated Cache
+
+By default, IPC caching uses a **key-replicated cache**, where cache keys exist
+in both the API (`P0`) and engine core (`P1`) processes, but the actual cache
+data resides only in `P1`.
+
+#### Shared Memory Cache
+
+When multiple worker processes are involved (e.g., when TP > 1), a
+**shared-memory cache** is more efficient. This can be enabled by setting
+`mm_processor_cache_type="shm"`. In this mode, cache keys are stored
+on `P0`, while the cache data itself lives in shared memory accessible by all
+processes.
+
 ### Configuration
 
 You can adjust the size of the cache by setting the value of `mm_processor_cache_gb` (default 4 GiB).
@@ -244,6 +258,12 @@ Examples:
 llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
           mm_processor_cache_gb=8)
 
+# Use a shared-memory based IPC cache
+llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
+          tensor_parallel_size=2,
+          mm_processor_cache_type="shm",
+          mm_processor_cache_gb=8)
+
 # Disable the cache
 llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
           mm_processor_cache_gb=0)
@@ -253,11 +273,12 @@ llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
 
 Based on the configuration, the content of the multi-modal caches on `P0` and `P1` are as follows:
 
-| Processor Caching | IPC Caching | `P0` Cache | `P1` Cache | Max. Memory |
-|-------------------|-------------|------------|------------|-------------|
-| ✅ | ✅ | K | K + V | `mm_processor_cache_gb * data_parallel_size` |
-| ✅ | ❌ | K + V | N/A | `mm_processor_cache_gb * api_server_count` |
-| ❌ | ❌ | N/A | N/A | `0` |
+| mm_processor_cache_type | Cache Type | `P0` Cache | `P1` Engine Cache | `P1` Worker Cache | Max. Memory |
+|-------------------|-------------|------------|------------|-------------|-------------|
+| lru | Processor Caching | K + V | N/A | N/A | `mm_processor_cache_gb * data_parallel_size` |
+| lru | Key-Replicated Caching | K | K + V | N/A | `mm_processor_cache_gb * api_server_count` |
+| shm | Shared Memory Caching | K | N/A | V | `mm_processor_cache_gb * api_server_count` |
+| N/A | Disabled | N/A | N/A | N/A | `0` |
 
 K: Stores the hashes of multi-modal items  
 V: Stores the processed tensor data of multi-modal items

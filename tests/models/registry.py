@@ -301,6 +301,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                             trust_remote_code=True),
     "OlmoForCausalLM": _HfExamplesInfo("allenai/OLMo-1B-hf"),
     "Olmo2ForCausalLM": _HfExamplesInfo("allenai/OLMo-2-0425-1B"),
+    "Olmo3ForCausalLM": _HfExamplesInfo("shanearora/2025-sep-a-base-model"),
     "OlmoeForCausalLM": _HfExamplesInfo("allenai/OLMoE-1B-7B-0924-Instruct"),
     "OPTForCausalLM": _HfExamplesInfo("facebook/opt-125m",
                                       {"1b": "facebook/opt-iml-max-1.3b"}),

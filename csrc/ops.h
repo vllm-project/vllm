@@ -122,12 +122,6 @@ void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
                       std::optional<torch::Tensor> key, int64_t head_size,
                       torch::Tensor& cos_sin_cache, bool is_neox);
 
-void batched_rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
-                              std::optional<torch::Tensor> key,
-                              int64_t head_size, torch::Tensor& cos_sin_cache,
-                              bool is_neox, int64_t rot_dim,
-                              torch::Tensor& cos_sin_cache_offsets);
-
 void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
 
 void silu_and_mul_quant(torch::Tensor& out, torch::Tensor& input,
@@ -139,6 +133,12 @@ void silu_and_mul_nvfp4_quant(torch::Tensor& out,
                               torch::Tensor& input,
                               torch::Tensor& input_global_scale);
 #endif
+void silu_mul_fp8_quant_deep_gemm_cuda(
+    const at::Tensor& input,   // (E, T, 2*H)
+    const at::Tensor& counts,  // (E)
+    at::Tensor& y_q,           // (E, T, H) [OUT]
+    at::Tensor& y_s,           // (E, T, H//group_size) [OUT]
+    int64_t group_size, bool use_ue8m0, int64_t num_parallel_tokens);
 
 void mul_and_silu(torch::Tensor& out, torch::Tensor& input);
 

@@ -708,8 +708,6 @@ class NixlConnectorWorker:
         caches_data = []
         # With hybrid allocator, layers can share a kv cache tensor
         seen_base_addresses = []
-        xfer_buffers = (self.host_xfer_buffers
-                        if self.use_host_buffer else kv_caches)
 
         # Note(tms): I modified this from the original region setup code.
         # K and V are now in different regions. Advantage is that we can

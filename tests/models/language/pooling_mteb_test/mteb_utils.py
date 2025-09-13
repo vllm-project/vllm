@@ -11,6 +11,7 @@ import pytest
 import requests
 import torch
 
+import tests.ci_envs as ci_envs
 from tests.models.utils import (EmbedModelInfo, RerankModelInfo,
                                 check_embeddings_close)
 
@@ -168,7 +169,7 @@ def mteb_test_embed_models(hf_runner,
                            atol=MTEB_EMBED_TOL):
     # A model family has many models with the same architecture,
     # and we don't need to test each one.
-    if not model_info.enable_test:
+    if not ci_envs.VLLM_CI_NO_SKIP and not model_info.enable_test:
         pytest.skip("Skipping test.")
 
     # Test embed_dims, isnan and whether to use normalize
@@ -176,11 +177,18 @@ def mteb_test_embed_models(hf_runner,
 
     # Allow vllm to test using the given dtype, such as float32
     vllm_extra_kwargs = vllm_extra_kwargs or {}
-    vllm_extra_kwargs["dtype"] = model_info.dtype
+    vllm_extra_kwargs["dtype"] = ci_envs.VLLM_CI_DTYPE or model_info.dtype
 
     # Allow vllm to test using hf_overrides
     if model_info.hf_overrides is not None:
         vllm_extra_kwargs["hf_overrides"] = model_info.hf_overrides
+
+    # Allow changing the head dtype used by vllm in tests
+    if ci_envs.VLLM_CI_HEAD_DTYPE is not None:
+        if "hf_overrides" not in vllm_extra_kwargs:
+            vllm_extra_kwargs["hf_overrides"] = {}
+        vllm_extra_kwargs["hf_overrides"][
+            "head_dtype"] = ci_envs.VLLM_CI_HEAD_DTYPE
 
     with vllm_runner(model_info.name,
                      runner="pooling",
@@ -202,6 +210,7 @@ def mteb_test_embed_models(hf_runner,
         vllm_main_score = run_mteb_embed_task(VllmMtebEncoder(vllm_model),
                                               MTEB_EMBED_TASKS)
         vllm_dtype = vllm_model.llm.llm_engine.model_config.dtype
+        head_dtype = model_config.head_dtype
 
         # Test embed_dims, isnan and whether to use normalize
         vllm_outputs = vllm_model.embed(example_prompts,
@@ -211,9 +220,11 @@ def mteb_test_embed_models(hf_runner,
     # Accelerate mteb test by setting
     # SentenceTransformers mteb score to a constant
     if model_info.mteb_score is None:
-        with hf_runner(model_info.name,
-                       is_sentence_transformer=True,
-                       dtype=model_info.hf_dtype) as hf_model:
+        with hf_runner(
+                model_info.name,
+                is_sentence_transformer=True,
+                dtype=ci_envs.VLLM_CI_HF_DTYPE or model_info.hf_dtype,
+        ) as hf_model:
 
             # e.g. setting default parameters for the encode method of hf_runner
             if hf_model_callback is not None:
@@ -236,7 +247,8 @@ def mteb_test_embed_models(hf_runner,
         st_dtype = "Constant"
 
     print("Model:", model_info.name)
-    print("VLLM:", vllm_dtype, vllm_main_score)
+    print("VLLM:", f"dtype:{vllm_dtype}", f"head_dtype:{head_dtype}",
+          vllm_main_score)
     print("SentenceTransformers:", st_dtype, st_main_score)
     print("Difference:", st_main_score - vllm_main_score)
 
@@ -319,16 +331,23 @@ def mteb_test_rerank_models(hf_runner,
                             atol=MTEB_RERANK_TOL):
     # A model family has many models with the same architecture,
     # and we don't need to test each one.
-    if not model_info.enable_test:
+    if not ci_envs.VLLM_CI_NO_SKIP and not model_info.enable_test:
         pytest.skip("Skipping test.")
 
     # Allow vllm to test using the given dtype, such as float32
     vllm_extra_kwargs = vllm_extra_kwargs or {}
-    vllm_extra_kwargs["dtype"] = model_info.dtype
+    vllm_extra_kwargs["dtype"] = ci_envs.VLLM_CI_DTYPE or model_info.dtype
 
     # Allow vllm to test using hf_overrides
     if model_info.hf_overrides is not None:
         vllm_extra_kwargs["hf_overrides"] = model_info.hf_overrides
+
+    # Allow changing the head dtype used by vllm in tests
+    if ci_envs.VLLM_CI_HEAD_DTYPE is not None:
+        if "hf_overrides" not in vllm_extra_kwargs:
+            vllm_extra_kwargs["hf_overrides"] = {}
+        vllm_extra_kwargs["hf_overrides"][
+            "head_dtype"] = ci_envs.VLLM_CI_HEAD_DTYPE
 
     with vllm_runner(model_info.name,
                      runner="pooling",
@@ -355,6 +374,7 @@ def mteb_test_rerank_models(hf_runner,
                                           tasks=MTEB_RERANK_TASKS,
                                           languages=MTEB_RERANK_LANGS)
         vllm_dtype = model_config.dtype
+        head_dtype = model_config.head_dtype
 
     # Accelerate mteb test by setting
     # SentenceTransformers mteb score to a constant
@@ -366,7 +386,8 @@ def mteb_test_rerank_models(hf_runner,
         st_dtype = "Constant"
 
     print("Model:", model_info.name)
-    print("VLLM:", vllm_dtype, vllm_main_score)
+    print("VLLM:", f"dtype:{vllm_dtype}", f"head_dtype:{head_dtype}",
+          vllm_main_score)
     print("SentenceTransformers:", st_dtype, st_main_score)
     print("Difference:", st_main_score - vllm_main_score)
 

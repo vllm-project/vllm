@@ -64,9 +64,7 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
             NewRequestData(
                 req_id=req_id,
                 prompt_token_ids=[1, 2, 3],
-                mm_kwargs=[],
-                mm_hashes=[],
-                mm_positions=[],
+                mm_features=[],
                 sampling_params=SamplingParams(),
                 pooling_params=PoolingParams(),
                 block_ids=([0], ),  # block_ids should be tuple[list[int]]

@@ -209,7 +209,8 @@ class GDNAttentionMetadataBuilder(
 
         # prepare tensors for cudagraph
         if (self.use_full_cuda_graph and num_prefills == 0 and num_decodes == 0
-                and num_spec_decodes <= self.decode_cudagraph_max_bs):
+                and num_spec_decodes <= self.decode_cudagraph_max_bs
+                and m.num_actual_tokens <= self.decode_cudagraph_max_bs):
             num_total_tokens = self.vllm_config.pad_for_cudagraph(
                 m.num_actual_tokens)
             batch_size = num_total_tokens // (self.num_spec + 1)

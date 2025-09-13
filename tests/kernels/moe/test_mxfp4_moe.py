@@ -771,11 +771,11 @@ def test_flashinfer_cutlass_mxfp4_mxfp8_fused_moe(
     w13_ref = dequant_mxfp4_batches(
         w13_q.view(torch.uint8),
         w13_scale.view(torch.uint8).reshape(-1)).to(torch.float32).reshape(
-            num_experts, 2 * intermediate_size, hidden_size)
+            num_experts, 2 * intermediate_size, hidden_size).to(device)
     w2_ref = dequant_mxfp4_batches(
         w2_q.view(torch.uint8),
         w2_scale.view(torch.uint8).reshape(-1)).to(torch.float32).reshape(
-            num_experts, hidden_size, intermediate_size)
+            num_experts, hidden_size, intermediate_size).to(device)
 
     # Quantize activations for SM100 path and dequantize for reference
     hidden_states_q, hidden_states_sf = mxfp8_quantize(hidden_states, True, 32)

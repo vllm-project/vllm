@@ -135,8 +135,8 @@ def triton_mrope(
     """Qwen2VL mrope kernel.
 
     Args:
-        query: [num_tokens, num_heads * head_size]
-        key: [num_tokens, num_kv_heads * head_size]
+        q: [num_tokens, num_heads * head_size]
+        k: [num_tokens, num_kv_heads * head_size]
         cos: [3, num_tokens, head_size //2 ]
             (T/H/W positions with multimodal inputs)
         sin: [3, num_tokens, head_size //2 ]
@@ -299,6 +299,15 @@ class MRotaryEmbedding(RotaryEmbedding):
                                             self.is_neox_style)
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
+
+    def forward_xpu(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: Optional[torch.Tensor] = None,
+        offsets: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        return self.forward_native(positions, query, key, offsets)
 
     def forward_cpu(
         self,

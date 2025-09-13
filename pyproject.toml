@@ -145,6 +145,7 @@ skip_gitignore = true
 
 [tool.pytest.ini_options]
 markers = [
+    "slow_test",
     "skip_global_cleanup",
     "core_model: enable this model test in each PR instead of only nightly",
     "hybrid_model: models that contain mamba layers (including pure SSM and hybrid architectures)",

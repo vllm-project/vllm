@@ -218,8 +218,9 @@ class TensorMemoryPool:
 
         return addr
 
-    def load_tensor(self, addr: int, dtype: torch.dtype,
-                    shape: tuple[int, ...], device) -> torch.Tensor:
+    def load_tensor(self, addr: int, dtype: torch.dtype, shape: tuple[int,
+                                                                      ...],
+                    device: torch.device) -> torch.Tensor:
         """Loads a tensor from pinned host memory to the specified device.
 
         Args:
