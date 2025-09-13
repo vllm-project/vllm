@@ -152,6 +152,7 @@ class HunyuanA13BReasoningParser(ReasoningParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
+        request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
         """Extract content using token ID sequence state machine"""
         # Define sequences
