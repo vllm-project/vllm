@@ -1,7 +1,5 @@
 #pragma once
 
-#include <cuda_runtime.h>
-
 #ifdef USE_ROCM
   #include <hip/hip_runtime.h>
 #endif
@@ -78,8 +76,6 @@ struct Utils {
 #endif
 
 #if !defined(USE_ROCM) && defined(CUDA_VERSION) && (CUDA_VERSION >= 13000)
-  #include <cuda_runtime.h>
-  #include <cufunctional.h>
   using Sum_CUDA_13_fix = cu::plus<>;
   using Max_CUDA_13_fix = cuda::maximum<>;
   using Min_CUDA_13_fix = cuda::minimum<>;
