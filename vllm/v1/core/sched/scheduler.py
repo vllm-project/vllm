@@ -274,6 +274,9 @@ class Scheduler(SchedulerInterface):
                     self.encoder_cache_manager.free(preempted_req)
                     preempted_req.status = RequestStatus.PREEMPTED
                     preempted_req.num_computed_tokens = 0
+                    # both sync and async scheduling don'use spec_token_ids
+                    # in waitting queue, so we can just clear it here.
+                    preempted_req.spec_token_ids.clear()
                     if self.log_stats:
                         preempted_req.record_event(
                             EngineCoreEventType.PREEMPTED, scheduled_timestamp)
@@ -308,7 +311,7 @@ class Scheduler(SchedulerInterface):
                     # Trim spec_token_ids list to num_scheduled_spec_tokens.
                     del request.spec_token_ids[num_scheduled_spec_tokens:]
                     scheduled_spec_decode_tokens[request.request_id] = (
-                        request.spec_token_ids)
+                        request.spec_token_ids[:])
 
             # Encoder-related.
             if encoder_inputs_to_schedule:
@@ -897,19 +900,13 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id))
             if scheduled_spec_token_ids:
-                num_draft_tokens = len(scheduled_spec_token_ids)
-                num_accepted = len(generated_token_ids) - 1
-                num_rejected = num_draft_tokens - num_accepted
-                # num_computed_tokens represents the number of tokens
-                # processed in the current step, considering scheduled
-                # tokens and rejections. If some tokens are rejected,
-                # num_computed_tokens is decreased by the number of rejected
-                # tokens.
-                request.num_computed_tokens -= num_rejected
-                spec_decoding_stats = self.make_spec_decoding_stats(
+
+                spec_decoding_stats = self._update_computed_tokens(
+                    request,
+                    scheduled_spec_token_ids,
+                    generated_token_ids,
                     spec_decoding_stats,
-                    num_draft_tokens=num_draft_tokens,
-                    num_accepted_tokens=num_accepted)
+                )
 
             stopped = False
             new_logprobs = None
@@ -1020,6 +1017,29 @@ class Scheduler(SchedulerInterface):
             eco.scheduler_stats = stats
 
         return engine_core_outputs
+
+    def _update_computed_tokens(
+        self,
+        request: Request,
+        scheduled_spec_token_ids: list[int],
+        generated_token_ids: list[int],
+        spec_decoding_status: Optional[SpecDecodingStats],
+    ):
+        num_draft_tokens = len(scheduled_spec_token_ids)
+        num_accepted = len(generated_token_ids) - 1
+        num_rejected = num_draft_tokens - num_accepted
+        # num_computed_tokens represents the number of tokens
+        # processed in the current step, considering scheduled
+        # tokens and rejections. If some tokens are rejected,
+        # num_computed_tokens is decreased by the number of rejected
+        # tokens.
+        request.num_computed_tokens -= num_rejected
+        spec_decoding_stats = self.make_spec_decoding_stats(
+            spec_decoding_status,
+            num_draft_tokens=num_draft_tokens,
+            num_accepted_tokens=num_accepted,
+        )
+        return spec_decoding_stats
 
     def _update_request_with_output(
         self,
