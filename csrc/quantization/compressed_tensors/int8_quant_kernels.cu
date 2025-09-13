@@ -1,6 +1,8 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/all.h>
 
+#include "../../cuda_compat.h"
+
 #ifndef USE_ROCM
   #include "../per_token_group_quant_8bit.h"
 #endif
@@ -173,7 +175,7 @@ __global__ void dynamic_scaled_int8_quant_kernel(
       });
   using BlockReduce = cub::BlockReduce<float, 256>;
   __shared__ typename BlockReduce::TempStorage tmp;
-  float block_max = BlockReduce(tmp).Reduce(thread_max, cub::Max{}, blockDim.x);
+  float block_max = BlockReduce(tmp).Reduce(thread_max, Max_CUDA_13_fix{}, blockDim.x);
   __shared__ float absmax;
   if (tid == 0) {
     absmax = block_max;

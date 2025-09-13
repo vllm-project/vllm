@@ -74,3 +74,24 @@ struct Utils {
   #define VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize(FUNC, VAL) \
     hipFuncSetAttribute(FUNC, hipFuncAttributeMaxDynamicSharedMemorySize, VAL)
 #endif
+
+#if defined(USE_ROCM)
+  #include <hipcub/hipcub.hpp>
+  using Sum_CUDA_13_fix = hipcub::Sum;
+  using Max_CUDA_13_fix = hipcub::Max;
+  using Min_CUDA_13_fix = hipcub::Min;
+#else // Not ROCm, so CUDA
+  #if defined(CUDA_VERSION) && (CUDA_VERSION >= 13000)
+    #include <cuda/functional>
+    #include <cuda/std/functional>
+    using Sum_CUDA_13_fix = cuda::std::plus<>;
+    using Max_CUDA_13_fix = cuda::maximum<>;
+    using Min_CUDA_13_fix = cuda::minimum<>;
+  #else // CUDA < 13
+    #include <cub/cub.cuh>
+    using Sum_CUDA_13_fix = cub::Sum;
+    using Max_CUDA_13_fix = cub::Max;
+    using Min_CUDA_13_fix = cub::Min;
+  #endif
+#endif
+
