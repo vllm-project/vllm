@@ -740,7 +740,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         """
         Handle special case for models where MLP layers are already
         fused on disk. In this case, we have no shard id. This function
-        determmines the shard id by splitting these layers and then calls
+        determines the shard id by splitting these layers and then calls
         the weight loader using the shard id.
 
         An example of a model with these fused layers:
@@ -914,7 +914,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         """
         Handle special case for models where QKV layers are already 
         fused on disk. In this case, we have no shard id. This function
-        determmines the shard id by splitting these layers and then calls
+        determines the shard id by splitting these layers and then calls
         the weight loader using the shard id.
 
         An example of a model with these fused layers:

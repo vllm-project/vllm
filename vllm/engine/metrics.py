@@ -379,7 +379,7 @@ class LoggingStatLogger(StatLoggerBase):
         if local_interval_elapsed(stats.now, self.last_local_log,
                                   self.local_interval):
             # Compute summary metrics for tracked stats (and log them
-            # to promethus if applicable).
+            # to prometheus if applicable).
             prompt_throughput = get_throughput(self.num_prompt_tokens,
                                                now=stats.now,
                                                last_log=self.last_local_log)
@@ -432,7 +432,7 @@ class LoggingStatLogger(StatLoggerBase):
 
 
 class PrometheusStatLogger(StatLoggerBase):
-    """PrometheusStatLogger is used LLMEngine to log to Promethus."""
+    """PrometheusStatLogger is used LLMEngine to log to Prometheus."""
     _metrics_cls = Metrics
     _gauge_cls = prometheus_client.Gauge
 
