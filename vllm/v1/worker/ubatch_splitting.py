@@ -32,12 +32,12 @@ def should_ubatch_with_num_tokens(
 
 def check_ubatch_thresholds(config: ParallelConfig, num_tokens: int,
                             uniform_decode: bool) -> bool:
-    if not config.enable_microbatching:
+    if not config.enable_dbo:
         return False
     if uniform_decode:
-        return num_tokens >= config.microbatching_decode_token_threshold
+        return num_tokens >= config.dbo_decode_token_threshold
     else:
-        return num_tokens >= config.microbatching_prefill_token_threshold
+        return num_tokens >= config.dbo_prefill_token_threshold
 
 
 def get_dp_padding_ubatch(
