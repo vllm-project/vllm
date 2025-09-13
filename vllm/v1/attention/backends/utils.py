@@ -207,7 +207,6 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
               fast_build: bool = False) -> M:
         """
         Central method that builds attention metadata.
-        Some builders (MLA) require reorder_batch to be called prior to build.
         
         Args:
             common_prefix_len: The length of the common prefix of the batch.
@@ -215,23 +214,6 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
             fast_build: The meta-data will prioritize speed of building over
                 then speed at execution. Can be used for spec-decode where the
                 result of a build call may only be used for few layers/iters.
-        """
-        raise NotImplementedError
-
-    def reorder_batch(self, input_batch: "InputBatch",
-                      scheduler_output: "SchedulerOutput") -> bool:
-        """
-        Update the order of requests in the batch based on the attention
-        backend's needs. For example, some attention backends (namely MLA) may
-        want to separate requests based on if the attention computation will be
-        compute-bound or memory-bound.
-
-        Args:
-            input_batch: input batch
-            scheduler_output: scheduler output.
-
-        Returns:
-            True if the batch was modified, False otherwise.
         """
         raise NotImplementedError
 
@@ -722,10 +704,6 @@ def reorder_batch_to_split_decodes_and_prefills(
 
     for i, req_id in enumerate(input_batch.req_ids):
         num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-        # for now treat 1 scheduled token as "decode" even if it's not,
-        # we should update this to something like < 8 in the future but
-        # currently the TritonMLA._forward_decode only supports
-        # num_tokens = 1
         if num_tokens <= decode_threshold:
             decodes.append(i)
             num_decode_tokens += num_tokens
