@@ -678,7 +678,8 @@ def get_hf_file_to_dict(file_name: str,
 
 
 @cache
-def get_pooling_config(model: str, revision: Optional[str] = 'main') -> dict:
+def get_pooling_config(model: str,
+                       revision: Optional[str] = 'main') -> Optional[dict]:
     """
     This function gets the pooling and normalize
     config from the model - only applies to
@@ -691,7 +692,7 @@ def get_pooling_config(model: str, revision: Optional[str] = 'main') -> dict:
 
     Returns:
         A dictionary containing the pooling type and whether 
-            normalization is used.
+            normalization is used, or None if no pooling configuration is found.
     """
 
     modules_file_name = "modules.json"
