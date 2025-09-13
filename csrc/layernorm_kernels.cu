@@ -3,6 +3,7 @@
 
 #include <torch/cuda.h>
 #include <c10/cuda/CUDAGuard.h>
+#include "cuda_compat.h"
 
 #ifndef USE_ROCM
   #include <cub/cub.cuh>
@@ -30,7 +31,7 @@ __global__ void rms_norm_kernel(
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
   __shared__ typename BlockReduce::TempStorage reduceStore;
-  variance = BlockReduce(reduceStore).Reduce(variance, cub::Sum{}, blockDim.x);
+  variance = BlockReduce(reduceStore).Reduce(variance, Sum_CUDA_13_fix{}, blockDim.x);
 
   if (threadIdx.x == 0) {
     s_variance = rsqrtf(variance / hidden_size + epsilon);
@@ -85,7 +86,7 @@ fused_add_rms_norm_kernel(
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
   __shared__ typename BlockReduce::TempStorage reduceStore;
-  variance = BlockReduce(reduceStore).Reduce(variance, cub::Sum{}, blockDim.x);
+  variance = BlockReduce(reduceStore).Reduce(variance, Sum_CUDA_13_fix{}, blockDim.x);
 
   if (threadIdx.x == 0) {
     s_variance = rsqrtf(variance / hidden_size + epsilon);
@@ -126,7 +127,7 @@ fused_add_rms_norm_kernel(
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
   __shared__ typename BlockReduce::TempStorage reduceStore;
-  variance = BlockReduce(reduceStore).Reduce(variance, cub::Sum{}, blockDim.x);
+  variance = BlockReduce(reduceStore).Reduce(variance, Sum_CUDA_13_fix{}, blockDim.x);
 
   if (threadIdx.x == 0) {
     s_variance = rsqrtf(variance / hidden_size + epsilon);
