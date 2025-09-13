@@ -239,7 +239,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "LlamaForCausalLM": _HfExamplesInfo("meta-llama/Llama-3.2-1B-Instruct",
                                         extras={"guard": "meta-llama/Llama-Guard-3-1B",  # noqa: E501
                                                 "hermes": "NousResearch/Hermes-3-Llama-3.1-8B", # noqa: E501
-                                                "fp8": "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8"}),  # noqa: E501
+                                                "fp8": "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8",  # noqa: E501
+                                                "tiny": "hmellor/tiny-random-LlamaForCausalLM"}),  # noqa: E501
     "LLaMAForCausalLM": _HfExamplesInfo("decapoda-research/llama-7b-hf",
                                         is_available_online=False),
     "Llama4ForCausalLM": _HfExamplesInfo("meta-llama/Llama-4-Scout-17B-16E-Instruct", # noqa: E501
