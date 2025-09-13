@@ -260,10 +260,10 @@ class Processor:
         else:
             # NOTE: engine_level_backend must be "auto" here, because we have
             # checked supported_backends above.
-            # "auto" is an opt-in to opinionated behavior where we try to
-            # choose a backend based on request contents. This is not the
-            # default as it is less predictable and subject to change
-            # between releases as feature support changes.
+            # In this mode, we set opinionated defaults based on what we think
+            # will satisfy the most use cases without having to worry about
+            # this setting. We include fallback behavior here, but not with any
+            # other setting where a specific backend was specified.
             try:
                 validate_xgrammar_grammar(params)
                 params.guided_decoding.backend = "xgrammar"
