@@ -624,43 +624,11 @@ class CudaPlatformBase(Platform):
     def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
                                     model_config: "ModelConfig") -> bool:
         fp8_attention = kv_cache_dtype.startswith("fp8")
-        attention_backend = envs.VLLM_ATTENTION_BACKEND
-
-        supported = False
-        if model_config is not None and model_config.use_mla:
-            # Default to CutlassMLA for blackwell,
-            # FlashMLA otherwise
-            if attention_backend is None:
-                if cls.is_device_capability(100):
-                    attention_backend = "CUTLASS_MLA"
-                else:
-                    attention_backend = "FLASHMLA"
-
-            # Only FlashMLA and CUTLASS_MLA support fp8
-            if attention_backend in ["FLASHMLA", "CUTLASS_MLA"]:
-                supported = True
-            else:
-                supported = (not fp8_attention)
-        else:
-            # Default to FlashAttention
-            if attention_backend is None:
-                attention_backend = "FLASH_ATTN_VLLM_V1"
-
-            # All Blackwell backends support fp8
-            if cls.is_device_capability(100):
-                supported = True
-            elif attention_backend == "FLASH_ATTN_VLLM_V1":
-                if fp8_attention:
-                    from vllm.attention.utils.fa_utils import (
-                        flash_attn_supports_fp8)
-                    supported = flash_attn_supports_fp8()
-                else:
-                    supported = True
-            elif attention_backend == "FLASHINFER":
-                supported = True
-            elif attention_backend == "TRITON_ATTN_VLLM_V1":
-                supported = cls.supports_fp8()
-        return supported
+        if not envs.VLLM_ATTENTION_BACKEND:
+            return not fp8_attention
+        attention_backend = _Backend[envs.VLLM_ATTENTION_BACKEND]
+        backend_class = backend_to_class(attention_backend)
+        return backend_class.supports_kv_cache_dtype(kv_cache_dtype)
 
     @classmethod
     def check_if_supports_dtype(cls, torch_dtype: torch.dtype):
