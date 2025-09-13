@@ -26,7 +26,7 @@ from vllm.tasks import SupportedTask
 from vllm.utils import (close_sockets, get_open_port, get_open_zmq_inproc_path,
                         in_loop, make_zmq_socket)
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
-                            EngineCoreRequestType,
+                            EngineCoreRequestType, EngineErrorPayload,
                             ReconfigureDistributedRequest, ReconfigureRankType,
                             UtilityOutput)
 from vllm.v1.engine.coordinator import DPCoordinator
@@ -811,6 +811,9 @@ class AsyncMPClient(MPClient):
                     frames = await output_socket.recv_multipart(copy=False)
                     resources.validate_alive(frames)
                     outputs: EngineCoreOutputs = decoder.decode(frames)
+                    if outputs.engine_error:
+                        outputs_queue.put_nowait(outputs)
+                        continue
                     if outputs.utility_output:
                         _process_utility_output(outputs.utility_output,
                                                 utility_results)
@@ -1331,3 +1334,14 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         logger.info(
             "[Elastic EP] Scale down completed, new data parallel size: %s",
             new_data_parallel_size)
+
+
+def process_engine_error(engine_error: EngineErrorPayload) -> Exception:
+    """Process an engine error payload and raise an exception."""
+    try:
+        module = sys.modules.get(engine_error.exc_module)
+        exc_class = getattr(module, engine_error.exc_type)
+    except Exception:
+        exc_class = RuntimeError  # fallback
+    exc = exc_class(*engine_error.exc_args)
+    return exc
