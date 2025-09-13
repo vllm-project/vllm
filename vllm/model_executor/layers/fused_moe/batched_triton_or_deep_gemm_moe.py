@@ -88,8 +88,8 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert bte_war is not None
         return bte_war
 
-    def workspace_dtype(self) -> Optional[torch.dtype]:
-        return None
+    def workspace_dtype(self, act_dtype: torch.dtype) -> torch.dtype:
+        return act_dtype
 
     def workspace_shapes(
         self,
