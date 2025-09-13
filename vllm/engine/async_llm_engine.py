@@ -561,6 +561,7 @@ class AsyncLLMEngine(EngineClient):
         start_engine_loop: bool = True,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
+        stat_logger_global: Optional[StatLoggerBase] = None,
     ) -> "AsyncLLMEngine":
         """Creates an async LLM engine from the engine arguments."""
 
@@ -576,6 +577,7 @@ class AsyncLLMEngine(EngineClient):
             start_engine_loop=start_engine_loop,
             usage_context=usage_context,
             stat_loggers=stat_loggers,
+            stat_logger_global=stat_logger_global,
             disable_log_stats=engine_args.disable_log_stats,
             enable_log_requests=engine_args.enable_log_requests,
         )
