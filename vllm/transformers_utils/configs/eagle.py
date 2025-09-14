@@ -43,18 +43,20 @@ class EAGLEConfig(PretrainedConfig):
             self.truncated_vocab_size = self.model.vocab_size if \
                 truncated_vocab_size is None else truncated_vocab_size
 
-        # Eagle model name should follow naming convention of
-        # LlamaForCausalLM -> EagleLlamaForCausalLM
-        # LlamaForCausalLM -> Eagle3LlamaForCausalLM
-        # LlamaForCausalLMEagle3 -> LlamaForCausalLMEagle3
         if method == "eagle":
             assert self.model is not None, \
                 "model should not be None when method is eagle"
-            kwargs["architectures"] = [
-                f"Eagle{arch}" if not arch.startswith("Eagle") \
-                    else arch for arch in self.model.architectures
-            ]
 
+            from vllm.model_executor.models.utils import (
+                normalize_eagle_architecture)
+
+            kwargs["architectures"] = [
+                normalize_eagle_architecture(arch)
+                for arch in self.model.architectures
+            ]
+        # Eagle3 model name should follow naming convention of
+        # LlamaForCausalLM      ->  Eagle3LlamaForCausalLM
+        # LlamaForCausalLMEagle3 -> LlamaForCausalLMEagle3
         elif method == "eagle3":
             assert self.model is not None, \
                 "model should not be None when method is eagle3"

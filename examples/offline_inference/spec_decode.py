@@ -60,7 +60,6 @@ def parse_args():
     parser.add_argument("--prompt-lookup-min", type=int, default=2)
     parser.add_argument("--tp", type=int, default=1)
     parser.add_argument("--enforce-eager", action="store_true")
-    parser.add_argument("--enable-chunked-prefill", action="store_true")
     parser.add_argument("--temp", type=float, default=0)
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--top-k", type=int, default=-1)
@@ -125,12 +124,11 @@ def main():
         model=model_dir,
         trust_remote_code=True,
         tensor_parallel_size=args.tp,
-        enable_chunked_prefill=args.enable_chunked_prefill,
         enforce_eager=args.enforce_eager,
         gpu_memory_utilization=0.8,
         speculative_config=speculative_config,
         disable_log_stats=False,
-        max_model_len=16384,
+        max_model_len=8192,
         limit_mm_per_prompt={"image": 5},
         disable_chunked_mm_input=True,
     )
