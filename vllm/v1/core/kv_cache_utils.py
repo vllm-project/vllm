@@ -1104,27 +1104,32 @@ def get_kv_cache_config(
         The generated KVCacheConfigs
     """
     check_enough_kv_cache_memory(vllm_config, kv_cache_spec, available_memory)
+    kvCacheConfig: KVCacheConfig = None
     if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
         unify_hybrid_kv_cache_specs(kv_cache_spec)
 
     if is_kv_cache_type_attention_free(kv_cache_spec):
         # This returns a kv_cache config with 0 kv_cache groups and 1 block
         # to allow for the KVCache manager to handle attention free models.
-        return _get_kv_cache_config_attention_free()
+        kvCacheConfig = _get_kv_cache_config_attention_free()
     elif is_kv_cache_type_uniform(kv_cache_spec):
         # KV cache of all layers are the same, which is true for
         # most models. Allocate the same amount of memory for
         # each layer.
-        return _get_kv_cache_config_uniform_type(vllm_config, kv_cache_spec,
-                                                 available_memory)
+        kvCacheConfig = _get_kv_cache_config_uniform_type(
+            vllm_config, kv_cache_spec, available_memory)
     elif is_kv_cache_page_size_uniform(kv_cache_spec):
         # Model contains multiple attention types, but KV cache of all layers
         # have the same physical memory per block per layer. Split the layers
         # into groups with the same number of layers, and thus same total page
         # size.
-        return _get_kv_cache_config_uniform_page_size(vllm_config,
-                                                      kv_cache_spec,
-                                                      available_memory)
+        kvCacheConfig = _get_kv_cache_config_uniform_page_size(
+            vllm_config, kv_cache_spec, available_memory)
+    if kvCacheConfig:
+        if vllm_config.cache_config:
+            delay_batch_size = vllm_config.cache_config.delay_batch_size
+            kvCacheConfig.delay_batch_size = delay_batch_size
+        return kvCacheConfig
 
     raise NotImplementedError
 

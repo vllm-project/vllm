@@ -30,8 +30,9 @@ class KVCacheCoordinator(ABC):
         self.max_model_len = max_model_len
         self.enable_caching = enable_caching
 
-        self.block_pool = BlockPool(kv_cache_config.num_blocks, enable_caching,
-                                    enable_kv_cache_events)
+        self.block_pool = BlockPool(kv_cache_config.num_blocks,
+                                    kv_cache_config.delay_batch_size,
+                                    enable_caching, enable_kv_cache_events)
 
         # Needs special handling for find_longest_cache_hit if eagle is enabled
         self.use_eagle = use_eagle
