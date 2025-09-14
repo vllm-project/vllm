@@ -18,15 +18,19 @@ HEAD_SIZES = [128, 192, 256]
 BLOCK_SIZES = [16]
 DTYPES = [torch.float16, torch.bfloat16]
 
-CASES = [
+GROUPING_DATA = [
     # Case 1. A general case.
-    ([(129, 871), (18, 280), (37, 988), (1023, 2304), (1, 257)], 256),
+    ([(129, 871), (18, 280), (37, 988), (1023, 2304), (1, 257)],
+     [0, 2, 5],
+     [272, 256]),
     # Case 2. Flash-decoding case.
-    ([(1, 1023), (1, 879), (1, 778), (1, 1777)] * 100, 512),
+    ([(1, 1023), (1, 879), (1, 778), (1, 1777)] * 100,
+     [0, 100, 200, 300, 400],
+     [768, 384, 256, 16])
 ]
 
 
-@pytest.mark.parametrize("seq_lens_and_common_prefix", CASES)
+@pytest.mark.parametrize("grouping_data", GROUPING_DATA)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
@@ -36,7 +40,7 @@ CASES = [
 @pytest.mark.parametrize("fa_version", [2, 3])
 @torch.inference_mode()
 def test_multi_cascade(
-    seq_lens_and_common_prefix: tuple[list[tuple[int, int]], int],
+    grouping_data: tuple[list[tuple[int, int]], list[int], list[int]],
     num_heads: tuple[int, int],
     head_size: int,
     dtype: torch.dtype,
@@ -64,7 +68,8 @@ def test_multi_cascade(
                             dtype=dtype)
     value_cache = torch.randn_like(key_cache)
 
-    seq_lens, common_prefix_len = seq_lens_and_common_prefix
+    seq_lens, group_indices, common_prefix_lens = grouping_data
+    assert len(group_indices) == len(common_prefix_lens) + 1
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
     kv_lens = [x[1] for x in seq_lens]
@@ -86,12 +91,18 @@ def test_multi_cascade(
                                  (num_seqs, max_num_blocks_per_seq),
                                  dtype=torch.int32)
 
-    assert common_prefix_len > 0
-    assert common_prefix_len % block_size == 0
-    num_common_kv_blocks = common_prefix_len // block_size
-    # Make sure the first `num_common_kv_blocks` blocks are the same.
-    block_tables[:, :num_common_kv_blocks] = \
-        block_tables[0, :num_common_kv_blocks]
+    assert all([common_prefix_len > 0 for
+                common_prefix_len in common_prefix_lens])
+    assert all([common_prefix_len % block_size == 0 for
+                common_prefix_len in common_prefix_lens])
+
+    # Write common prefixes into appropriate groups in block_tables
+    for i in range(len(common_prefix_lens)):
+        group_start = group_indices[i]
+        group_end = group_indices[i + 1]
+        common_prefix_len = common_prefix_lens[i]
+        block_tables[group_start: group_end, :common_prefix_len] = (
+            block_tables[group_start, :common_prefix_len])
 
     # Run the regular attention.
     ref_output = flash_attn_varlen_func(
@@ -110,11 +121,17 @@ def test_multi_cascade(
     )
 
     # Run cascade attention.
-    assert all(common_prefix_len < kv_len for kv_len in kv_lens)
-    cu_prefix_query_lens = torch.tensor([0, total_num_query_tokens],
-                                        dtype=torch.int32)
-    prefix_kv_lens = torch.tensor([common_prefix_len], dtype=torch.int32)
-    suffix_kv_lens = kv_lens_tensor - common_prefix_len
+    assert all([common_prefix_lens[i] < kv_len
+                for i in range(len(common_prefix_lens))
+                for kv_len in kv_lens[group_indices[i]: group_indices[i + 1]]])
+    cu_prefix_query_lens = torch.tensor(
+        [*[cu_query_lens[group_indices[:-1]]], total_num_query_tokens],
+        dtype=torch.int32)
+    prefix_kv_lens = torch.tensor(
+        [common_prefix_lens[i]
+         for i in range(len(common_prefix_lens))
+         for _ in range(group_indices[i + 1] - group_indices[i])], dtype=torch.int32)
+    suffix_kv_lens = kv_lens_tensor - prefix_kv_lens
     output = torch.empty_like(query)
     cascade_attention(
         output=output,
@@ -132,7 +149,7 @@ def test_multi_cascade(
         sliding_window=window_size,
         logits_soft_cap=soft_cap if soft_cap is not None else 0,
         block_table=block_tables,
-        common_prefix_len=common_prefix_len,
+        common_prefix_lens=common_prefix_lens,
         fa_version=fa_version,
     )
 
