@@ -480,7 +480,6 @@ function (define_gpu_extension_target GPU_MOD_NAME)
       ${GPU_LANGUAGE}_ARCHITECTURES "${GPU_ARCHITECTURES}")
   endif()
 
-  set_property(TARGET ${GPU_MOD_NAME} PROPERTY CXX_STANDARD 17)
 
   target_compile_options(${GPU_MOD_NAME} PRIVATE
     $<$<COMPILE_LANGUAGE:${GPU_LANGUAGE}>:${GPU_COMPILE_FLAGS}>)
