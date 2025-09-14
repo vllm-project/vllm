@@ -118,7 +118,7 @@ class BlockTables:
         # no clear upper bound on the number of new blocks.
         new_block_ids_cpu = torch.empty(
             self.num_kv_cache_groups,
-            max(len(b) for b in new_block_ids),
+            max(x[-1] for x in cu_num_new_blocks),
             dtype=torch.int32,
             device="cpu",
             pin_memory=self.pin_memory,
