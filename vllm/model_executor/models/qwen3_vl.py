@@ -596,7 +596,20 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         video_processor = self.get_video_processor()
         merge_size = video_processor.merge_size
         indices = metadata["frames_indices"]
-        video_fps = metadata["fps"]
+        do_sample_frames = metadata["do_sample_frames"]
+        # The fps here refers to the sampled video fps.
+        video_fps = video_processor.fps
+
+        # if frames is sampled in HF processor, we need to re-calculate the
+        # indices from original metadata.
+        if do_sample_frames:
+            total_num_frames = metadata["total_num_frames"]
+            num_frames = int(total_num_frames / metadata["fps"] * video_fps)
+            num_frames = min(
+                min(max(num_frames, video_processor.min_frames),
+                    video_processor.max_frames), total_num_frames)
+            indices = np.linspace(0, total_num_frames - 1,
+                                  num_frames).round().astype(int).tolist()
         timestamps = self._calculate_timestamps(indices, video_fps, merge_size)
         return timestamps
 
@@ -656,6 +669,7 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
                 "total_num_frames": num_frames,
                 "frames_indices": [i for i in range(num_frames)],
                 "video_backend": "opencv",
+                "do_sample_frames": False,
             }
             video_item = (video.copy(), video_metadata)
             video_items.append(video_item)
@@ -692,7 +706,13 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo]
                 # the sampled frames indices of pre-sampled videos, which is
                 # used to calculate the timestamps. Make sure that
                 # do_sample_frames in mm_kwargs is false for presampled videos.
-                metadata = VideoMetadata(**metadata)
+                mm_kwargs["do_sample_frames"] = metadata.get(
+                    "do_sample_frames", True)
+
+                metadata = VideoMetadata(**{
+                    k: metadata[k]
+                    for k in metadata if k != "do_sample_frames"
+                })
 
                 video_mm_data = dict()
                 video_mm_data["videos"] = [[video_array]]
