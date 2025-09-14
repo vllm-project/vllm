@@ -1003,28 +1003,32 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         max_frame_idx = meta_frames - 1
         duration = metadata.get("duration",
                                 round(max_frame_idx / video_fps) + 1)
-        if duration <= video_processor.max_duration:
-            n = int(math.floor(duration * video_processor.fps))
-            frame_indices = [
-                min(
-                    max_frame_idx,
-                    int(math.ceil(i * video_fps / video_processor.fps)),
-                ) for i in range(n)
-            ]
+        do_sample_frames = metadata["do_sample_frames"]
+        if not do_sample_frames:
+            frame_indices = metadata["frames_indices"]
         else:
-            num_samples = int(video_processor.max_duration *
-                              video_processor.fps)
-            if num_samples >= meta_frames:
-                frame_indices = list(range(meta_frames))
-            else:
-                target_seconds = np.linspace(0,
-                                             duration,
-                                             num_samples,
-                                             endpoint=True)
+            if duration <= video_processor.max_duration:
+                n = int(math.floor(duration * video_processor.fps))
                 frame_indices = [
-                    min(max_frame_idx, int(math.ceil(t * video_fps)))
-                    for t in target_seconds
+                    min(
+                        max_frame_idx,
+                        int(math.ceil(i * video_fps / video_processor.fps)),
+                    ) for i in range(n)
                 ]
+            else:
+                num_samples = int(video_processor.max_duration *
+                                  video_processor.fps)
+                if num_samples >= meta_frames:
+                    frame_indices = list(range(meta_frames))
+                else:
+                    target_seconds = np.linspace(0,
+                                                 duration,
+                                                 num_samples,
+                                                 endpoint=True)
+                    frame_indices = [
+                        min(max_frame_idx, int(math.ceil(t * video_fps)))
+                        for t in target_seconds
+                    ]
 
         seen, uniq = set(), []
         for idx in frame_indices:
@@ -1220,6 +1224,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                 prompt = prompt.replace(
                     "<|begin_of_video|><|video|><|end_of_video|>",
                     video_placeholder,
+                    1,
                 )
 
                 video_grid_thw_lst.append(video_outputs["video_grid_thw"])
