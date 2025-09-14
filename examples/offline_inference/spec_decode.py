@@ -151,7 +151,7 @@ def main():
         gpu_memory_utilization=0.8,
         speculative_config=speculative_config,
         disable_log_stats=False,
-        max_model_len=4096,
+        max_model_len=16384,
         max_num_seqs=args.batch_size,
         limit_mm_per_prompt={"image": 5},
         disable_chunked_mm_input=True,
@@ -187,67 +187,76 @@ def main():
         print("Metrics are not supported in the V0 engine.")
         return
 
-    total_num_output_tokens = sum(
-        len(output.outputs[0].token_ids) for output in outputs
-    )
-    total_prefill_time = 0.0
-    total_decode_time = 0.0
-    num_drafts = 0
-    num_draft_tokens = 0
-    num_accepted_tokens = 0
-    total_num_prompt_tokens = 0
-    num_requests = 0
+    output_tokens = sum(len(output.outputs[0].token_ids) for output in outputs)
+    input_time_sec = 0.0
+    output_time_sec = 0.0
+    drafts = 0
+    draft_tokens = 0
+    accepted_tokens = 0
+    input_tokens = 0
+    requests = 0
     acceptance_counts = [0] * args.num_spec_tokens
 
     for metric in metrics:
         if metric.name == "vllm:spec_decode_num_drafts":
             assert isinstance(metric, Counter)
-            num_drafts += metric.value
+            drafts += metric.value
         elif metric.name == "vllm:spec_decode_num_draft_tokens":
             assert isinstance(metric, Counter)
-            num_draft_tokens += metric.value
+            draft_tokens += metric.value
         elif metric.name == "vllm:spec_decode_num_accepted_tokens":
             assert isinstance(metric, Counter)
-            num_accepted_tokens += metric.value
+            accepted_tokens += metric.value
         elif metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
             assert isinstance(metric, Vector)
             for pos in range(len(metric.values)):
                 acceptance_counts[pos] += metric.values[pos]
         elif metric.name == "vllm:prompt_tokens":
             assert isinstance(metric, Counter)
-            total_num_prompt_tokens += metric.value
+            input_tokens += metric.value
         elif metric.name == "vllm:request_prefill_time_seconds":
             assert isinstance(metric, Histogram)
-            total_prefill_time += metric.sum
+            input_time_sec += metric.sum
         elif metric.name == "vllm:request_decode_time_seconds":
             assert isinstance(metric, Histogram)
-            total_decode_time += metric.sum
+            output_time_sec += metric.sum
         elif metric.name == "vllm:request_success":
             assert isinstance(metric, Counter)
-            num_requests += metric.value
+            requests += metric.value
 
     # Calculate metrics
-    prefill_speed = total_num_prompt_tokens / total_prefill_time if total_prefill_time > 0 else 0
-    decode_speed = total_num_output_tokens / total_decode_time if total_decode_time > 0 else 0
-    acceptance_length = 1 + (num_accepted_tokens / num_drafts) if num_drafts > 0 else 1
-    draft_utilization_rate = num_accepted_tokens / num_draft_tokens * 100 if num_draft_tokens > 0 else 0
+    tokens = input_tokens + output_tokens
+    time_sec = input_time_sec + output_time_sec
+
+    input_speed = input_tokens / input_time_sec if input_time_sec > 0 else 0
+    output_speed = output_tokens / output_time_sec if output_time_sec > 0 else 0
+    overall_speed = tokens / time_sec
+
+    acceptance_length = 1 + (accepted_tokens / drafts) if drafts > 0 else 1
+    draft_utilization_rate = accepted_tokens / draft_tokens * 100 if draft_tokens > 0 else 0
 
     # Print formatted benchmark results
     print("=========== Speculative Decoding Stats ============")
-    print(f"Total input tokens:                      {total_num_prompt_tokens:<10}")
-    print(f"Total output tokens:                     {total_num_output_tokens:<10}")
+    print(f"Number of input tokens:                    {input_tokens:<10}")
+    print(f"Number of output tokens:                   {output_tokens:<10}")
     print()
 
-    print(f"Input token throughput (tok/s):          {prefill_speed:<10.2f}")
-    print(f"Output token throughput (tok/s):         {decode_speed:<10.2f}")
+    print(f"Input time (sec):                          {input_time_sec:<10.2f}")
+    print(f"Output time (sec):                         {output_time_sec:<10.2f}")
+    print(f"Total time (sec):                          {time_sec:<10.2f}")
+    print()
+
+    print(f"Input token throughput (tok/sec):          {input_speed:<10.2f}")
+    print(f"Output token throughput (tok/sec):         {output_speed:<10.2f}")
+    print(f"Total throughput (tok/sec):                {overall_speed:<10.2f}")
     print()
 
     # Only print if we use a speculative decoding method
     if args.method != "None":
-        print(f"Number of drafts:                        {num_drafts:<10}")
-        print(f"Draft tokens generated:                  {num_draft_tokens:<10}")
+        print(f"Number of drafts:                        {drafts:<10}")
+        print(f"Draft tokens generated:                  {draft_tokens:<10}")
         print(f"Draft utilization rate:                  {draft_utilization_rate:<10.1f}")
-        print(f"Accepted tokens:                         {num_accepted_tokens:<10}")
+        print(f"Accepted tokens:                         {accepted_tokens:<10}")
         print(f"Mean acceptance length:                  {acceptance_length:<10.2f}")
 
     print("====================================================")
