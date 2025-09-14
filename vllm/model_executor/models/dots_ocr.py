@@ -7,6 +7,7 @@ from typing import Literal, Optional, TypedDict, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from einops import rearrange
 from torch.nn import LayerNorm
 from transformers.modeling_utils import PreTrainedModel
 from transformers.models.qwen2 import Qwen2ForCausalLM
@@ -125,9 +126,6 @@ class DotsOCRProcessingInfo(Qwen2_5_VLProcessingInfo):
         )
         processor = self.ctx.get_hf_processor(
             Qwen2VLProcessor,
-            image_processor=self.get_image_processor(
-                min_pixels=min_pixels, max_pixels=max_pixels, size=size
-            ),
             **kwargs,
         )
         processor.image_token = "<|imgpad|>"
@@ -325,26 +323,26 @@ class VisionSdpaAttention(nn.Module):
             0
         )
 
-        attention_mask = torch.zeros(
-            [1, seq_length, seq_length], device=q.device, dtype=torch.bool
-        )
+        q, k, v = (rearrange(x, "s h d -> 1 s h d") for x in (q, k, v))
+
+        outputs = []
         for i in range(1, len(cu_seqlens)):
-            attention_mask[
-                ...,
-                cu_seqlens[i - 1] : cu_seqlens[i],
-                cu_seqlens[i - 1] : cu_seqlens[i],
-            ] = True
-
-        q = q.transpose(0, 1)
-        k = k.transpose(0, 1)
-        v = v.transpose(0, 1)
-
-        attn_output = F.scaled_dot_product_attention(
-            q, k, v, attention_mask, dropout_p=0.0
-        )
-        attn_output = attn_output.transpose(0, 1)
-        attn_output = attn_output.reshape(seq_length, -1)
-
+            start_idx = cu_seqlens[i - 1]
+            end_idx = cu_seqlens[i]
+            q_i = q[:, start_idx:end_idx]
+            k_i = k[:, start_idx:end_idx]
+            v_i = v[:, start_idx:end_idx]
+            q_i, k_i, v_i = (
+                rearrange(x, "b s h d -> b h s d") for x in [q_i, k_i, v_i]
+            )
+            output_i = F.scaled_dot_product_attention(q_i,
+                                                      k_i,
+                                                      v_i,
+                                                      dropout_p=0.0)
+            output_i = rearrange(output_i, "b h s d -> b s h d")
+            outputs.append(output_i)
+        attn_output = torch.cat(outputs, dim=1)
+        attn_output = rearrange(attn_output, "1 s h d -> s (h d)")
         attn_output = self.proj(attn_output)
         return attn_output
 
@@ -390,10 +388,7 @@ class DotsVisionTransformer(PreTrainedModel):
 
         _num_hidden_layers = config.num_hidden_layers
         self.blocks = nn.ModuleList(
-            [
-                DotsVisionBlock(config)
-                for _ in range(_num_hidden_layers)
-            ]
+            [DotsVisionBlock(config) for _ in range(_num_hidden_layers)]
         )
 
         if self.config.post_norm:
@@ -722,8 +717,10 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if intermediate_tensors is not None:
             inputs_embeds = None
-        elif inputs_embeds is None and (kwargs.get("pixel_values") is not None
-                                        or kwargs.get("image_embeds") is not None):
+        elif inputs_embeds is None and (
+            kwargs.get("pixel_values") is not None
+            or kwargs.get("image_embeds") is not None
+        ):
             image_input = self._parse_and_validate_image_input(**kwargs)
             if image_input is None:
                 inputs_embeds = None
