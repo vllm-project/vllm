@@ -874,6 +874,7 @@ class FusedMoEModularKernel(torch.nn.Module):
             if self.shared_experts is not None:
                 shared_output = self.shared_experts(a1)
 
+            # TODO(lucas): refactor this in the alternative schedules followup
             if isinstance(prepare_ret, tuple):
                 hook, receiver = prepare_ret
             else:
