@@ -151,7 +151,7 @@ def main():
         gpu_memory_utilization=0.8,
         speculative_config=speculative_config,
         disable_log_stats=False,
-        max_model_len=16384,
+        max_model_len=4096,
         max_num_seqs=args.batch_size,
         limit_mm_per_prompt={"image": 5},
         disable_chunked_mm_input=True,
@@ -249,15 +249,15 @@ def main():
     print(f"Input token throughput (tok/sec):          {input_speed:<10.2f}")
     print(f"Output token throughput (tok/sec):         {output_speed:<10.2f}")
     print(f"Total throughput (tok/sec):                {overall_speed:<10.2f}")
-    print()
 
     # Only print if we use a speculative decoding method
     if args.method != "None":
-        print(f"Number of drafts:                        {drafts:<10}")
-        print(f"Draft tokens generated:                  {draft_tokens:<10}")
-        print(f"Draft utilization rate:                  {draft_utilization_rate:<10.1f}")
-        print(f"Accepted tokens:                         {accepted_tokens:<10}")
-        print(f"Mean acceptance length:                  {acceptance_length:<10.2f}")
+        print()
+        print(f"Number of drafts:                            {drafts:<10}")
+        print(f"Draft tokens generated:                      {draft_tokens:<10}")
+        print(f"Draft utilization rate:                      {draft_utilization_rate:<10.1f}")
+        print(f"Accepted tokens:                             {accepted_tokens:<10}")
+        print(f"Mean acceptance length:                      {acceptance_length:<10.2f}")
 
     print("====================================================")
 
