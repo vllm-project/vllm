@@ -13,22 +13,22 @@ The performance benchmarks are used for development to confirm whether new chang
 
 ### Manually Trigger the benchmark
 
-Use [vllm-ci-test-repo images](https://gallery.ecr.aws/q9t5s3a7/vllm-ci-test-repo) with vLLM benchmark suite.  
+Use [vllm-ci-test-repo images](https://gallery.ecr.aws/q9t5s3a7/vllm-ci-test-repo) with vLLM benchmark suite.
 For CPU environment, please use the image with "-cpu" postfix.
 
-Here is an example for docker run command for CPU.  
+Here is an example for docker run command for CPU.
 
 ```bash
 docker run -it --entrypoint /bin/bash -v /data/huggingface:/root/.cache/huggingface  -e HF_TOKEN=''  --shm-size=16g --name vllm-cpu-ci  public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:1da94e673c257373280026f75ceb4effac80e892-cpu
 ```
 
-Then, run below command inside the docker instance.  
+Then, run below command inside the docker instance.
 
 ```bash
 bash .buildkite/nightly-benchmarks/scripts/run-performance-benchmarks.sh
 ```
 
-When run, benchmark script generates results under **benchmark/results** folder, along with the benchmark_results.md and benchmark_results.json.  
+When run, benchmark script generates results under **benchmark/results** folder, along with the benchmark_results.md and benchmark_results.json.
 
 #### Runtime environment variables
 
@@ -55,9 +55,7 @@ The latest nightly benchmark results are shared in major release blog posts such
 
 More information on the nightly benchmarks and their parameters can be found [here](gh-file:.buildkite/nightly-benchmarks/nightly-descriptions.md).
 
-[](){ #benchmark-tools }
-
-## Benchmark Tools
+## Benchmark CLIs
 
 This section guides you through running benchmark tests with the extensive
 datasets supported on vLLM. It's a living document, updated as new features and datasets
@@ -194,7 +192,9 @@ For local `dataset-path`, please set `hf-name` to its Hugging Face ID like
 --dataset-path /datasets/VisionArena-Chat/ --hf-name lmarena-ai/VisionArena-Chat
 ```
 
-### 🚀 Example - Online Benchmark
+### Examples
+
+#### 🚀 Online Benchmark
 
 <details>
 <summary>Show more</summary>
@@ -335,7 +335,7 @@ Run all categories:
 
 vllm bench serve \
     --model meta-llama/Meta-Llama-3-8B-Instruct \
-    --dataset-name spec_bench \ 
+    --dataset-name spec_bench \
     --dataset-path "<YOUR_DOWNLOADED_PATH>/data/spec_bench/question.jsonl" \
     --num-prompts -1
 ```
@@ -347,7 +347,7 @@ Run only a specific category like "summarization":
 ``` bash
 vllm bench serve \
     --model meta-llama/Meta-Llama-3-8B-Instruct \
-    --dataset-name spec_bench \ 
+    --dataset-name spec_bench \
     --dataset-path "<YOUR_DOWNLOADED_PATH>/data/spec_bench/question.jsonl" \
     --num-prompts -1
     --spec-bench-category "summarization"
@@ -458,9 +458,9 @@ The following arguments can be used to control the ramp-up:
 
 </details>
 
-### 📈 Example - Offline Throughput Benchmark
+#### 📈 Offline Throughput Benchmark
 
-<details>
+<details class="admonition abstract">
 <summary>Show more</summary>
 
 <br/>
@@ -583,9 +583,9 @@ vllm bench throughput \
 
 </details>
 
-### 🛠️ Example - Structured Output Benchmark
+#### 🛠️ Structured Output Benchmark
 
-<details>
+<details class="admonition abstract">
 <summary>Show more</summary>
 
 <br/>
@@ -657,9 +657,9 @@ python3 benchmarks/benchmark_serving_structured_output.py \
 
 </details>
 
-### 📚 Example - Long Document QA Benchmark
+#### 📚 Long Document QA Benchmark
 
-<details>
+<details class="admonition abstract">
 <summary>Show more</summary>
 
 <br/>
@@ -711,9 +711,9 @@ python3 benchmarks/benchmark_long_document_qa_throughput.py \
 
 </details>
 
-### 🗂️ Example - Prefix Caching Benchmark
+#### 🗂️ Prefix Caching Benchmark
 
-<details>
+<details class="admonition abstract">
 <summary>Show more</summary>
 
 <br/>
@@ -762,9 +762,9 @@ vllm bench serve \
 
 </details>
 
-### ⚡ Example - Request Prioritization Benchmark
+#### ⚡ Request Prioritization Benchmark
 
-<details>
+<details class="admonition abstract">
 <summary>Show more</summary>
 
 <br/>
@@ -796,9 +796,9 @@ python3 benchmarks/benchmark_prioritization.py \
 
 </details>
 
-### 👁️ Example - Multi-Modal Benchmark
+#### 👁️ Multi-Modal Benchmark
 
-<details>
+<details class="admonition abstract">
 <summary>Show more</summary>
 
 <br/>
