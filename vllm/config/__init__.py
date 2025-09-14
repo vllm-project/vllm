@@ -1998,7 +1998,9 @@ class SpeculativeConfig:
 
     # Draft model vocabulary configuration
     draft_vocab_frequency_path: Optional[str] = None
-    """The path to token frequencies for the draft model vocabulary."""
+    draft_vocab_scores: Optional[str] = None
+    """The path to the scores used to prune the draft model vocabulary.
+    Can be the token frequencies or something else."""
     draft_vocab_frequency_keep_threshold: Optional[float] = None
     """If `None`, do not prune the vocabulary. Otherwise must be in (0, 1)
     and keep the threshold% most frequent tokens."""

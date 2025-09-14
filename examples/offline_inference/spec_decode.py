@@ -157,8 +157,11 @@ def main():
         disable_chunked_mm_input=True,
     )
 
-    max_num_seqs = llm.llm_engine.engine_config.scheduler_config.max_num_seqs
-    print(f"max_num_seqs: {max_num_seqs}")
+    try:
+        max_num_seqs = llm.llm_engine.engine_core.scheduler_config.max_num_seqs
+        print(f"max_num_seqs: {max_num_seqs}")
+    except Exception as e:
+        print(e)
 
 
     sampling_params = SamplingParams(temperature=args.temp, max_tokens=args.output_len)
