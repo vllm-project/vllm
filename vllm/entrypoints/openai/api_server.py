@@ -578,9 +578,10 @@ async def show_version():
     return JSONResponse(content=ver)
 
 
-async def _stream_results(
+async def _convert_stream_to_sse_events(
         generator: AsyncGenerator[BaseModel,
                                   None]) -> AsyncGenerator[str, None]:
+    """Convert the generator to a stream of events in SSE format"""
     async for event in generator:
         event_type = getattr(event, 'type', 'unknown')
         # https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events#event_stream_format
@@ -625,7 +626,7 @@ async def create_responses(request: ResponsesRequest, raw_request: Request):
     elif isinstance(generator, ResponsesResponse):
         return JSONResponse(content=generator.model_dump())
 
-    return StreamingResponse(content=_stream_results(generator),
+    return StreamingResponse(content=_convert_stream_to_sse_events(generator),
                              media_type="text/event-stream")
 
 
@@ -656,7 +657,7 @@ async def retrieve_responses(
                             status_code=response.error.code)
     elif isinstance(response, ResponsesResponse):
         return JSONResponse(content=response.model_dump())
-    return StreamingResponse(content=_stream_results(response),
+    return StreamingResponse(content=_convert_stream_to_sse_events(response),
                              media_type="text/event-stream")
 
 
