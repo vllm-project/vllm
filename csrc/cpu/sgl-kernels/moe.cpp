@@ -215,7 +215,7 @@ int moe_align_block_size(
       offsets[mb + 1] = sorted_id_size(sorted_ids + mb * BLOCK_M);
     }
   });
-  // TODO: do we need to vecterize this ?
+  // TODO: do we need to vectorize this ?
   for (int mb = 0; mb < num_token_blocks; ++mb) {
     offsets[mb + 1] += offsets[mb];
   }

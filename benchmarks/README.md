@@ -96,6 +96,24 @@ become available.
       <td><code>lmms-lab/LLaVA-OneVision-Data</code>, <code>Aeala/ShareGPT_Vicuna_unfiltered</code></td>
     </tr>
     <tr>
+      <td><strong>HuggingFace-MTBench</strong></td>
+      <td style="text-align: center;">✅</td>
+      <td style="text-align: center;">✅</td>
+      <td><code>philschmid/mt-bench</code></td>
+    </tr>
+    <tr>
+      <td><strong>HuggingFace-Blazedit</strong></td>
+      <td style="text-align: center;">✅</td>
+      <td style="text-align: center;">✅</td>
+      <td><code>vdaita/edit_5k_char</code>, <code>vdaita/edit_10k_char</code></td>
+    </tr>
+    <tr>
+      <td><strong>Spec Bench</strong></td>
+      <td style="text-align: center;">✅</td>
+      <td style="text-align: center;">✅</td>
+      <td><code>wget https://raw.githubusercontent.com/hemingkx/Spec-Bench/refs/heads/main/data/spec_bench/question.jsonl</code></td>
+    </tr>
+    <tr>
       <td><strong>Custom</strong></td>
       <td style="text-align: center;">✅</td>
       <td style="text-align: center;">✅</td>
@@ -110,7 +128,12 @@ become available.
 
 🚧: to be supported
 
-**Note**: HuggingFace dataset's `dataset-name` should be set to `hf`
+**Note**: HuggingFace dataset's `dataset-name` should be set to `hf`.
+For local `dataset-path`, please set `hf-name` to its Hugging Face ID like
+
+```bash
+--dataset-path /datasets/VisionArena-Chat/ --hf-name lmarena-ai/VisionArena-Chat
+```
 
 ## 🚀 Example - Online Benchmark
 
@@ -234,6 +257,43 @@ vllm bench serve \
     --num-prompts 2048
 ```
 
+### Spec Bench Benchmark with Speculative Decoding
+
+``` bash
+VLLM_USE_V1=1 vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
+    --speculative-config $'{"method": "ngram",
+    "num_speculative_tokens": 5, "prompt_lookup_max": 5,
+    "prompt_lookup_min": 2}'
+```
+
+[SpecBench dataset](https://github.com/hemingkx/Spec-Bench)
+
+Run all categories:
+
+``` bash
+# Download the dataset using:
+# wget https://raw.githubusercontent.com/hemingkx/Spec-Bench/refs/heads/main/data/spec_bench/question.jsonl
+
+vllm bench serve \
+    --model meta-llama/Meta-Llama-3-8B-Instruct \
+    --dataset-name spec_bench \ 
+    --dataset-path "<YOUR_DOWNLOADED_PATH>/data/spec_bench/question.jsonl" \
+    --num-prompts -1
+```
+
+Available categories include `[writing, roleplay, reasoning, math, coding, extraction, stem, humanities, translation, summarization, qa, math_reasoning, rag]`.
+
+Run only a specific category like "summarization":
+
+``` bash
+vllm bench serve \
+    --model meta-llama/Meta-Llama-3-8B-Instruct \
+    --dataset-name spec_bench \ 
+    --dataset-path "<YOUR_DOWNLOADED_PATH>/data/spec_bench/question.jsonl" \
+    --num-prompts -1
+    --spec-bench-category "summarization"
+```
+
 ### Other HuggingFaceDataset Examples
 
 ```bash
@@ -288,6 +348,18 @@ vllm bench serve \
     --dataset-name hf \
     --dataset-path philschmid/mt-bench \
     --num-prompts 80
+```
+
+`vdaita/edit_5k_char` or `vdaita/edit_10k_char`:
+
+``` bash
+vllm bench serve \
+    --model Qwen/QwQ-32B \
+    --dataset-name hf \
+    --dataset-path vdaita/edit_5k_char \
+    --num-prompts 90 \
+    --blazedit-min-distance 0.01 \
+    --blazedit-max-distance 0.99
 ```
 
 ### Running With Sampling Parameters
@@ -689,7 +761,7 @@ python -m vllm.entrypoints.openai.api_server \
 Send requests with images:
 
 ```bash
-python benchmarks/benchmark_serving.py \
+vllm bench serve \
   --backend openai-chat \
   --model Qwen/Qwen2.5-VL-7B-Instruct \
   --dataset-name sharegpt \
@@ -716,7 +788,7 @@ python -m vllm.entrypoints.openai.api_server \
 Send requests with videos:
 
 ```bash
-python benchmarks/benchmark_serving.py \
+vllm bench serve \
   --backend openai-chat \
   --model Qwen/Qwen2.5-VL-7B-Instruct \
   --dataset-name sharegpt \

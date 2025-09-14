@@ -5,13 +5,14 @@ Define LoRA functionality mixin for model runners.
 """
 
 from contextlib import contextmanager
-from typing import Union
+from typing import Optional, Union
 
 import numpy as np
 import torch
 import torch.nn as nn
 
-from vllm.config import LoRAConfig, ModelConfig, SchedulerConfig
+from vllm.config import ModelConfig, SchedulerConfig
+from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
@@ -62,8 +63,7 @@ class LoRAModelRunnerMixin:
     def _set_active_loras(self, prompt_lora_mapping: tuple[int, ...],
                           token_lora_mapping: tuple[int, ...],
                           lora_requests: set[LoRARequest]) -> None:
-        if not self.lora_manager:
-            raise RuntimeError("LoRA is not enabled.")
+        self._ensure_lora_enabled()
 
         # Set is_prefill to True, so we always use the SGMV kernels on
         # non-cuda platforms.
@@ -73,6 +73,11 @@ class LoRAModelRunnerMixin:
                                    prompt_lora_mapping,
                                    is_prefill=True)
         self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
+
+    def _ensure_lora_enabled(self) -> None:
+        if not hasattr(self, "lora_manager"):
+            raise RuntimeError(
+                "LoRA is not enabled. Use --enable-lora to enable LoRA.")
 
     def set_active_loras(self, input_batch: InputBatch,
                          num_scheduled_tokens: np.ndarray) -> None:
@@ -87,7 +92,9 @@ class LoRAModelRunnerMixin:
                                       lora_requests)
 
     @contextmanager
-    def maybe_setup_dummy_loras(self, lora_config):
+    def maybe_setup_dummy_loras(self,
+                                lora_config: Optional[LoRAConfig],
+                                remove_lora: bool = True):
         if lora_config is None:
             yield
         else:
@@ -114,10 +121,11 @@ class LoRAModelRunnerMixin:
                 yield
 
             # __exit__ code
-            self.lora_manager.remove_all_adapters()
+            if remove_lora:
+                self.lora_manager.remove_all_adapters()
 
     @contextmanager
-    def maybe_select_dummy_loras(self, lora_config: LoRAConfig,
+    def maybe_select_dummy_loras(self, lora_config: Optional[LoRAConfig],
                                  num_scheduled_tokens: np.ndarray):
         if lora_config is None:
             yield
@@ -151,29 +159,34 @@ class LoRAModelRunnerMixin:
             yield
 
     @contextmanager
-    def maybe_dummy_run_with_lora(self, lora_config: LoRAConfig,
-                                  num_scheduled_tokens: np.ndarray):
-        with self.maybe_setup_dummy_loras(
-                lora_config), self.maybe_select_dummy_loras(
-                    lora_config, num_scheduled_tokens):
+    def maybe_dummy_run_with_lora(self,
+                                  lora_config: Optional[LoRAConfig],
+                                  num_scheduled_tokens: np.ndarray,
+                                  remove_lora: bool = True):
+        with (
+                self.maybe_setup_dummy_loras(lora_config, remove_lora),
+                self.maybe_select_dummy_loras(lora_config,
+                                              num_scheduled_tokens),
+        ):
             yield
 
+    def maybe_remove_all_loras(self, lora_config: Optional[LoRAConfig]):
+        if lora_config is None:
+            return
+        self.lora_manager.remove_all_adapters()
+
     def add_lora(self, lora_request: LoRARequest) -> bool:
-        if not self.lora_manager:
-            raise RuntimeError("LoRA is not enabled.")
+        self._ensure_lora_enabled()
         return self.lora_manager.add_adapter(lora_request)
 
     def remove_lora(self, lora_id: int) -> bool:
-        if not self.lora_manager:
-            raise RuntimeError("LoRA is not enabled.")
+        self._ensure_lora_enabled()
         return self.lora_manager.remove_adapter(lora_id)
 
     def pin_lora(self, lora_id: int) -> bool:
-        if not self.lora_manager:
-            raise RuntimeError("LoRA is not enabled.")
+        self._ensure_lora_enabled()
         return self.lora_manager.pin_adapter(lora_id)
 
     def list_loras(self) -> set[int]:
-        if not self.lora_manager:
-            raise RuntimeError("LoRA is not enabled.")
+        self._ensure_lora_enabled()
         return self.lora_manager.list_adapters()

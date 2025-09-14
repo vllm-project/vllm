@@ -173,6 +173,37 @@ def run_deepseek_vl2(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Ernie4.5-VL
+def run_ernie45_vl(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "baidu/ERNIE-4.5-VL-28B-A3B-PT"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=5,
+        limit_mm_per_prompt={modality: 1},
+        trust_remote_code=True,
+    )
+
+    if modality == "image":
+        placeholder = "Picture 1:<|IMAGE_START|><|image@placeholder|><|IMAGE_END|>"
+    elif modality == "video":
+        placeholder = "Video 1:<|VIDEO_START|><|video@placeholder|><|VIDEO_END|>"
+
+    prompts = [
+        (
+            f"<|begin_of_sentence|>User: {question}{placeholder}\n"
+            "Assistant: <think></think>"
+        )
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # Florence2
 def run_florence2(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -624,6 +655,37 @@ def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
 # Keye-VL
 def run_keye_vl(questions: list[str], modality: str) -> ModelRequestData:
     model_name = "Kwai-Keye/Keye-VL-8B-Preview"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        trust_remote_code=True,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    if modality == "image":
+        placeholder = "<|image_pad|>"
+    elif modality == "video":
+        placeholder = "<|video_pad|>"
+
+    prompts = [
+        (
+            f"<|im_start|>user\n<|vision_start|>{placeholder}<|vision_end|>"
+            f"{question}<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        )
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+# Keye-VL-1.5
+def run_keye_vl1_5(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "Kwai-Keye/Keye-VL-1.5-8B"
 
     engine_args = EngineArgs(
         model=model_name,
@@ -1602,6 +1664,7 @@ model_example_map = {
     "chameleon": run_chameleon,
     "command_a_vision": run_command_a_vision,
     "deepseek_vl_v2": run_deepseek_vl2,
+    "ernie45_vl": run_ernie45_vl,
     "florence2": run_florence2,
     "fuyu": run_fuyu,
     "gemma3": run_gemma3,
@@ -1616,6 +1679,7 @@ model_example_map = {
     "interns1": run_interns1,
     "internvl_chat": run_internvl,
     "keye_vl": run_keye_vl,
+    "keye_vl1_5": run_keye_vl1_5,
     "kimi_vl": run_kimi_vl,
     "llama4": run_llama4,
     "llava": run_llava,
@@ -1700,6 +1764,7 @@ def apply_image_repeat(
     probs = [1.0 - image_repeat_prob, image_repeat_prob]
 
     inputs = []
+    inputs_with_empty_media = []
     cur_image = data
     for i in range(num_prompts):
         if image_repeat_prob is not None:
@@ -1710,14 +1775,25 @@ def apply_image_repeat(
                 new_val = (i // 256 // 256, i // 256, i % 256)
                 cur_image.putpixel((0, 0), new_val)
 
+        uuid = "uuid_{}".format(i)
+
         inputs.append(
             {
                 "prompt": prompts[i % len(prompts)],
                 "multi_modal_data": {modality: cur_image},
+                "multi_modal_uuids": {modality: uuid},
             }
         )
 
-    return inputs
+        inputs_with_empty_media.append(
+            {
+                "prompt": prompts[i % len(prompts)],
+                "multi_modal_data": {modality: None},
+                "multi_modal_uuids": {modality: uuid},
+            }
+        )
+
+    return inputs, inputs_with_empty_media
 
 
 @contextmanager
@@ -1796,6 +1872,13 @@ def parse_args():
         help="If True, then use different prompt (with the same multi-modal "
         "data) for each request.",
     )
+
+    parser.add_argument(
+        "--verify-mm-cache-hit-with-uuids",
+        action="store_true",
+        help="If True, will send all requests in a second batch with empty mm "
+        "data to verify cache hits with UUIDs.",
+    )
     return parser.parse_args()
 
 
@@ -1839,26 +1922,48 @@ def main(args):
     assert args.num_prompts > 0
     if args.num_prompts == 1:
         # Single inference
+        uuid = "uuid_0"
         inputs = {
             "prompt": prompts[0],
             "multi_modal_data": {modality: data},
+            "multi_modal_uuids": {modality: uuid},
+        }
+        inputs_with_empty_media = {
+            "prompt": prompts[0],
+            "multi_modal_data": {modality: None},
+            "multi_modal_uuids": {modality: uuid},
         }
     else:
         # Batch inference
         if args.image_repeat_prob is not None:
             # Repeat images with specified probability of "image_repeat_prob"
-            inputs = apply_image_repeat(
-                args.image_repeat_prob, args.num_prompts, data, prompts, modality
+            inputs, inputs_with_empty_media = apply_image_repeat(
+                args.image_repeat_prob,
+                args.num_prompts,
+                data,
+                prompts,
+                modality,
             )
         else:
             # Use the same image for all prompts
-            inputs = [
-                {
-                    "prompt": prompts[i % len(prompts)],
-                    "multi_modal_data": {modality: data},
-                }
-                for i in range(args.num_prompts)
-            ]
+            inputs = []
+            inputs_with_empty_media = []
+            for i in range(args.num_prompts):
+                uuid = "uuid_{}".format(i)
+                inputs.append(
+                    {
+                        "prompt": prompts[i % len(prompts)],
+                        "multi_modal_data": {modality: data},
+                        "multi_modal_uuids": {modality: uuid},
+                    }
+                )
+                inputs_with_empty_media.append(
+                    {
+                        "prompt": prompts[i % len(prompts)],
+                        "multi_modal_data": {modality: None},
+                        "multi_modal_uuids": {modality: uuid},
+                    }
+                )
 
     # Add LoRA request if applicable
     lora_request = (
@@ -1877,6 +1982,26 @@ def main(args):
         generated_text = o.outputs[0].text
         print(generated_text)
         print("-" * 50)
+
+    if args.verify_mm_cache_hit_with_uuids:
+        try:
+            # Verify cache hits with UUIDs
+            print(
+                "Sending a second batch of requests with empty media"
+                " and matching UUIDs."
+            )
+            outputs = llm.generate(
+                inputs_with_empty_media,
+                sampling_params=sampling_params,
+                lora_request=lora_request,
+            )
+            print("-" * 50)
+            for o in outputs:
+                generated_text = o.outputs[0].text
+                print(generated_text)
+                print("-" * 50)
+        except Exception as e:
+            print(f"Failed to verify cache hits with UUIDs. Error: {e}")
 
 
 if __name__ == "__main__":
