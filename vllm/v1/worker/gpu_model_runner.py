@@ -2676,7 +2676,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # if self.get_dp_padding is not executed
         # non-moe model on dp > 1 will be blocked forever
         if skip_run:
-            return torch.tensor(0), torch.tensor(0)
+            return torch.tensor(0, device=self.device), torch.tensor(
+                0, device=self.device)
 
         # If cudagraph_mode.decode_mode() == FULL and
         # cudagraph_mode.separate_routine(). This means that we are using
