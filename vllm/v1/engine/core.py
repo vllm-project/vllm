@@ -29,10 +29,9 @@ from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.utils import (decorate_logs, get_hash_fn_by_name, make_zmq_socket,
                         resolve_obj_by_qualname, set_process_title)
-from vllm.v1.core.kv_cache_utils import (BlockHash, get_kv_cache_config,
+from vllm.v1.core.kv_cache_utils import (BlockHash, get_kv_cache_configs,
                                          get_request_block_hasher,
-                                         init_none_hash,
-                                         unify_kv_cache_configs)
+                                         init_none_hash)
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler as V1Scheduler
@@ -191,18 +190,9 @@ class EngineCore:
             available_gpu_memory = [0] * len(kv_cache_specs)
 
         assert len(kv_cache_specs) == len(available_gpu_memory)
-        # Get the kv cache tensor size
-        kv_cache_configs = [
-            get_kv_cache_config(vllm_config, kv_cache_spec_one_worker,
-                                available_gpu_memory_one_worker)
-            for kv_cache_spec_one_worker, available_gpu_memory_one_worker in
-            zip(kv_cache_specs, available_gpu_memory)
-        ]
 
-        # Since we use a shared centralized controller, we need the
-        # `kv_cache_config` to be consistent across all workers to make sure
-        # all the memory operators can be applied to all workers.
-        unify_kv_cache_configs(kv_cache_configs)
+        kv_cache_configs = get_kv_cache_configs(vllm_config, kv_cache_specs,
+                                                available_gpu_memory)
 
         # All workers have the same kv_cache_config except layer names, so use
         # an arbitrary one to initialize the scheduler.
