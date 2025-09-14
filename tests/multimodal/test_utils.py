@@ -31,11 +31,11 @@ if TYPE_CHECKING:
     from vllm.multimodal.inputs import MultiModalPlaceholderDict
 
 # Test different image extensions (JPG/PNG) and formats (gray/RGB/RGBA)
-TEST_IMAGE_URLS = [
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/f/fa/Grayscale_8bits_palette_sample_image.png",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/9/91/Venn_diagram_rgb.svg/1280px-Venn_diagram_rgb.svg.png",
-    "https://upload.wikimedia.org/wikipedia/commons/0/0b/RGBA_comp.png",
+TEST_IMAGE_ASSETS = [
+    "2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg",  # "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+    "Grayscale_8bits_palette_sample_image.png",  # "https://upload.wikimedia.org/wikipedia/commons/f/fa/Grayscale_8bits_palette_sample_image.png",
+    "1280px-Venn_diagram_rgb.svg.png",  # "https://upload.wikimedia.org/wikipedia/commons/thumb/9/91/Venn_diagram_rgb.svg/1280px-Venn_diagram_rgb.svg.png",
+    "RGBA_comp.png",  # "https://upload.wikimedia.org/wikipedia/commons/0/0b/RGBA_comp.png",
 ]
 
 TEST_VIDEO_URLS = [
@@ -45,12 +45,11 @@ TEST_VIDEO_URLS = [
 
 
 @pytest.fixture(scope="module")
-def url_images() -> dict[str, Image.Image]:
-    connector = MediaConnector()
+def url_images(local_asset_server) -> dict[str, Image.Image]:
 
     return {
-        image_url: connector.fetch_image(image_url)
-        for image_url in TEST_IMAGE_URLS
+        image_url: local_asset_server.get_image_asset(image_url)
+        for image_url in TEST_IMAGE_ASSETS
     }
 
 
@@ -69,7 +68,7 @@ def _image_equals(a: Image.Image, b: Image.Image) -> bool:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
+@pytest.mark.parametrize("image_url", TEST_IMAGE_ASSETS, indirect=True)
 async def test_fetch_image_http(image_url: str):
     connector = MediaConnector()
 
@@ -79,12 +78,12 @@ async def test_fetch_image_http(image_url: str):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
+@pytest.mark.parametrize("raw_image_url", TEST_IMAGE_ASSETS)
 @pytest.mark.parametrize("suffix", get_supported_suffixes())
 async def test_fetch_image_base64(url_images: dict[str, Image.Image],
-                                  image_url: str, suffix: str):
+                                  raw_image_url: str, suffix: str):
     connector = MediaConnector()
-    url_image = url_images[image_url]
+    url_image = url_images[raw_image_url]
 
     try:
         mime_type = Image.MIME[Image.registered_extensions()[suffix]]
@@ -117,7 +116,7 @@ async def test_fetch_image_base64(url_images: dict[str, Image.Image],
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
+@pytest.mark.parametrize("image_url", TEST_IMAGE_ASSETS, indirect=True)
 async def test_fetch_image_local_files(image_url: str):
     connector = MediaConnector()
 
@@ -152,8 +151,8 @@ async def test_fetch_image_local_files(image_url: str):
 
 
 @pytest.mark.asyncio
-async def test_fetch_image_local_files_with_space_in_name():
-    image_url = TEST_IMAGE_URLS[0]
+@pytest.mark.parametrize("image_url", [TEST_IMAGE_ASSETS[0]], indirect=True)
+async def test_fetch_image_local_files_with_space_in_name(image_url: str):
     connector = MediaConnector()
 
     with TemporaryDirectory() as temp_dir:
@@ -203,6 +202,32 @@ async def test_fetch_video_http(video_url: str, num_frames: int):
     video_async, metadata_async = await connector.fetch_video_async(video_url)
     assert np.array_equal(video_sync, video_async)
     assert metadata_sync == metadata_async
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("video_url", TEST_VIDEO_URLS)
+@pytest.mark.parametrize("max_duration", [1, 60, 1800])
+@pytest.mark.parametrize("requested_fps", [2, 24])
+async def test_fetch_video_http_with_dynamic_loader(
+        video_url: str, max_duration: int, requested_fps: int,
+        monkeypatch: pytest.MonkeyPatch):
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv_dynamic")
+        connector = MediaConnector(
+            media_io_kwargs={
+                "video": {
+                    "max_duration": max_duration,
+                    "requested_fps": requested_fps,
+                }
+            })
+
+        video_sync, metadata_sync = connector.fetch_video(video_url)
+        video_async, metadata_async = await connector.fetch_video_async(
+            video_url)
+
+        assert np.array_equal(video_sync, video_async)
+        assert metadata_sync == metadata_async
+        assert metadata_sync["video_backend"] == "opencv_dynamic"
 
 
 # Used for `test_argsort_mm_positions`.
@@ -458,7 +483,7 @@ def run_dp_sharded_vision_model_vs_direct(local_rank: int, world_size: int,
     with torch.inference_mode():
         sharded_output = run_dp_sharded_vision_model(image_input, vision_model)
 
-    # Check that the world size is setup correctly
+    # Check that the world size is set up correctly
     assert get_tensor_model_parallel_world_size() == world_size
 
     # Check that the outputs have the same shape
@@ -636,11 +661,13 @@ def run_dp_sharded_mrope_vision_model_vs_direct(local_rank: int,
 
     # Run the model through the sharded function
     with torch.inference_mode():
-        sharded_output = run_dp_sharded_mrope_vision_model(
-            vision_model, pixel_values, grid_thw_list)
+        sharded_output = run_dp_sharded_mrope_vision_model(vision_model,
+                                                           pixel_values,
+                                                           grid_thw_list,
+                                                           rope_type="rope_3d")
         sharded_output = torch.cat(sharded_output, dim=0)
 
-    # Check that the world size is setup correctly
+    # Check that the world size is set up correctly
     assert get_tensor_model_parallel_world_size() == world_size
 
     # Compare outputs (only on rank 0)
@@ -691,8 +718,10 @@ def run_dp_sharded_mrope_vision_model_empty_input_worker(
 
     # Should handle empty input gracefully
     with torch.inference_mode():
-        output = run_dp_sharded_mrope_vision_model(vision_model, pixel_values,
-                                                   grid_thw_list)
+        output = run_dp_sharded_mrope_vision_model(vision_model,
+                                                   pixel_values,
+                                                   grid_thw_list,
+                                                   rope_type="rope_3d")
 
     assert len(output) == 0
 
@@ -745,8 +774,10 @@ def run_dp_sharded_mrope_vision_model_uneven_load_worker(
 
     # Should handle uneven distribution without errors
     with torch.inference_mode():
-        output_tuple = run_dp_sharded_mrope_vision_model(
-            vision_model, pixel_values, grid_thw_list)
+        output_tuple = run_dp_sharded_mrope_vision_model(vision_model,
+                                                         pixel_values,
+                                                         grid_thw_list,
+                                                         rope_type="rope_3d")
 
     # Verify output shape is reasonable
     merge_factor = vision_model.spatial_merge_size**2
