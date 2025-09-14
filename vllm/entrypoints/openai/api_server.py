@@ -80,7 +80,6 @@ from vllm.entrypoints.openai.serving_classification import (
     ServingClassification)
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
-from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import (BaseModelPath,
                                                     LoRAModulePath,
@@ -102,7 +101,13 @@ from vllm.reasoning import ReasoningParserManager
 from vllm.transformers_utils.tokenizer import MistralTokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (Device, FlexibleArgumentParser, decorate_logs,
+<<<<<<< HEAD
                         is_valid_ipv6_address, set_ulimit)
+=======
+                        get_open_zmq_ipc_path, is_valid_ipv6_address,
+                        set_ulimit)
+from vllm.v1.engine.exceptions import EngineDeadError
+>>>>>>> c268f953a (Improve health check functionality)
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -1528,11 +1533,10 @@ def build_app(args: Namespace) -> FastAPI:
 
     @app.exception_handler(EngineDeadError)
     async def engine_dead_exception_handler(_: Request, exc: EngineDeadError):
-        err = ErrorResponse(
-            error=ErrorInfo(
-                message="Service temporarily unavailable due to engine failure",
-                type=HTTPStatus.SERVICE_UNAVAILABLE.phrase,
-                code=HTTPStatus.SERVICE_UNAVAILABLE))
+        err = ErrorResponse(error=ErrorInfo(
+            message="Service temporarily unavailable due to engine failure",
+            type=HTTPStatus.SERVICE_UNAVAILABLE.phrase,
+            code=HTTPStatus.SERVICE_UNAVAILABLE))
         return JSONResponse(err.model_dump(),
                             status_code=HTTPStatus.SERVICE_UNAVAILABLE)
 
