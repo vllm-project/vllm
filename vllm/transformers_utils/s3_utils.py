@@ -2,9 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import fnmatch
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Optional
 
 from vllm.utils import PlaceholderModule
+
+if TYPE_CHECKING:
+    from botocore.client import BaseClient
 
 try:
     import boto3
@@ -26,7 +29,7 @@ def _filter_ignore(paths: list[str], patterns: list[str]) -> list[str]:
     ]
 
 
-def glob(s3: Optional[Any] = None,
+def glob(s3: Optional["BaseClient"] = None,
          path: str = "",
          allow_pattern: Optional[list[str]] = None) -> list[str]:
     """
@@ -51,7 +54,7 @@ def glob(s3: Optional[Any] = None,
 
 
 def list_files(
-        s3: Any,
+        s3: "BaseClient",
         path: str,
         allow_pattern: Optional[list[str]] = None,
         ignore_pattern: Optional[list[str]] = None
