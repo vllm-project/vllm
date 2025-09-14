@@ -80,6 +80,7 @@ from vllm.entrypoints.openai.serving_classification import (
     ServingClassification)
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
+from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import (BaseModelPath,
                                                     LoRAModulePath,
@@ -1524,6 +1525,16 @@ def build_app(args: Namespace) -> FastAPI:
                                             code=HTTPStatus.BAD_REQUEST))
         return JSONResponse(err.model_dump(),
                             status_code=HTTPStatus.BAD_REQUEST)
+
+    @app.exception_handler(EngineDeadError)
+    async def engine_dead_exception_handler(_: Request, exc: EngineDeadError):
+        err = ErrorResponse(
+            error=ErrorInfo(
+                message="Service temporarily unavailable due to engine failure",
+                type=HTTPStatus.SERVICE_UNAVAILABLE.phrase,
+                code=HTTPStatus.SERVICE_UNAVAILABLE))
+        return JSONResponse(err.model_dump(),
+                            status_code=HTTPStatus.SERVICE_UNAVAILABLE)
 
     # Ensure --api-key option from CLI takes precedence over VLLM_API_KEY
     if tokens := [key for key in (args.api_key or [envs.VLLM_API_KEY]) if key]:
