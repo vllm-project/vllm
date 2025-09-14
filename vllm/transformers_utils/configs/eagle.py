@@ -56,6 +56,7 @@ class EAGLEConfig(PretrainedConfig):
             ]
         # Eagle3 model name should follow naming convention of
         # LlamaForCausalLM      ->  Eagle3LlamaForCausalLM
+        # LlamaForCausalLMEagle3 -> LlamaForCausalLMEagle3
         elif method == "eagle3":
             assert self.model is not None, \
                 "model should not be None when method is eagle3"
