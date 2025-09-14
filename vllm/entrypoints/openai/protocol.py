@@ -433,7 +433,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     presence_penalty: Optional[float] = 0.0
     response_format: Optional[AnyResponseFormat] = None
     seed: Optional[int] = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
-    stop: Optional[Union[str, list[str]]] = []
+    stop: Optional[Union[str, list[str]]] = None
     stream: Optional[bool] = False
     stream_options: Optional[StreamOptions] = None
     temperature: Optional[float] = None
@@ -459,7 +459,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     min_p: Optional[float] = None
     repetition_penalty: Optional[float] = None
     length_penalty: float = 1.0
-    stop_token_ids: Optional[list[int]] = []
+    stop_token_ids: Optional[list[int]] = None
     include_stop_str_in_output: bool = False
     ignore_eos: bool = False
     min_tokens: int = 0
@@ -468,7 +468,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
     prompt_logprobs: Optional[int] = None
     allowed_token_ids: Optional[list[int]] = None
-    bad_words: list[str] = Field(default_factory=list)
+    bad_words: Optional[list[str]] = None
     # --8<-- [end:chat-completion-sampling-params]
 
     # --8<-- [start:chat-completion-extra-params]
@@ -964,7 +964,7 @@ class CompletionRequest(OpenAIBaseModel):
     n: int = 1
     presence_penalty: Optional[float] = 0.0
     seed: Optional[int] = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
-    stop: Optional[Union[str, list[str]]] = []
+    stop: Optional[Union[str, list[str]]] = None
     stream: Optional[bool] = False
     stream_options: Optional[StreamOptions] = None
     suffix: Optional[str] = None
@@ -978,7 +978,7 @@ class CompletionRequest(OpenAIBaseModel):
     min_p: Optional[float] = None
     repetition_penalty: Optional[float] = None
     length_penalty: float = 1.0
-    stop_token_ids: Optional[list[int]] = []
+    stop_token_ids: Optional[list[int]] = None
     include_stop_str_in_output: bool = False
     ignore_eos: bool = False
     min_tokens: int = 0
