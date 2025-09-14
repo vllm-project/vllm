@@ -1333,6 +1333,14 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
     if not hasattr(args, "request_id_prefix"):
         args.request_id_prefix = ""
 
+    # Validate that random dataset is not used with dataset_path
+    if args.dataset_name == "random" and args.dataset_path is not None:
+        raise ValueError(
+            "Cannot use 'random' dataset with --dataset-path. "
+            "Please specify the appropriate --dataset-name (e.g., 'sharegpt', "
+            f"'custom', 'sonnet') for your dataset file: {args.dataset_path}"
+        )
+
     if args.dataset_name == "custom":
         dataset = CustomDataset(dataset_path=args.dataset_path)
         input_requests = dataset.sample(
