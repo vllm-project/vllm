@@ -29,9 +29,8 @@ from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.utils import (decorate_logs, get_hash_fn_by_name, make_zmq_socket,
                         resolve_obj_by_qualname, set_process_title)
-from vllm.v1.core.kv_cache_utils import (BlockHash,
-                                         generate_scheduler_kv_cache_config,
-                                         get_kv_cache_configs,
+from vllm.utils.gc_utils import maybe_attach_gc_debug_callback
+from vllm.v1.core.kv_cache_utils import (BlockHash, get_kv_cache_configs,
                                          get_request_block_hasher,
                                          init_none_hash)
 from vllm.v1.core.sched.interface import SchedulerInterface
@@ -165,6 +164,8 @@ class EngineCore:
 
         self.step_fn = (self.step if self.batch_queue is None else
                         self.step_with_batch_queue)
+
+        maybe_attach_gc_debug_callback()
 
     def _initialize_kv_caches(
             self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
