@@ -196,7 +196,7 @@ For local `dataset-path`, please set `hf-name` to its Hugging Face ID like
 
 #### 🚀 Online Benchmark
 
-<details>
+<details class="admonition abstract">
 <summary>Show more</summary>
 
 <br/>
@@ -247,7 +247,7 @@ P99 ITL (ms):                            8.39
 ==================================================
 ```
 
-#### Custom Dataset
+<h5>Custom Dataset</h5>
 
 If the dataset you want to benchmark is not supported yet in vLLM, even then you can benchmark on it using `CustomDataset`. Your data needs to be in `.jsonl` format and needs to have "prompt" field per entry, e.g., data.jsonl
 
@@ -280,7 +280,7 @@ vllm bench serve --port 9001 --save-result --save-detailed \
 
 You can skip applying chat template if your data already has it by using `--custom-skip-chat-template`.
 
-#### VisionArena Benchmark for Vision Language Models
+<h5>VisionArena Benchmark for Vision Language Models</h5>
 
 ```bash
 # need a model with vision capability here
@@ -299,7 +299,7 @@ vllm bench serve \
   --num-prompts 1000
 ```
 
-#### InstructCoder Benchmark with Speculative Decoding
+<h5>InstructCoder Benchmark with Speculative Decoding</h5>
 
 ``` bash
 VLLM_USE_V1=1 vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
@@ -316,7 +316,7 @@ vllm bench serve \
     --num-prompts 2048
 ```
 
-#### Spec Bench Benchmark with Speculative Decoding
+<h5>Spec Bench Benchmark with Speculative Decoding</h5>
 
 ``` bash
 VLLM_USE_V1=1 vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
@@ -353,7 +353,7 @@ vllm bench serve \
     --spec-bench-category "summarization"
 ```
 
-#### Other HuggingFaceDataset Examples
+<h5>Other HuggingFaceDataset Examples</h5>
 
 ```bash
 vllm serve Qwen/Qwen2-VL-7B-Instruct
@@ -421,7 +421,7 @@ vllm bench serve \
     --blazedit-max-distance 0.99
 ```
 
-#### Running With Sampling Parameters
+<h5>Running With Sampling Parameters</h5>
 
 When using OpenAI-compatible backends such as `vllm`, optional sampling
 parameters can be specified. Example client command:
@@ -439,7 +439,7 @@ vllm bench serve \
   --num-prompts 10
 ```
 
-#### Running With Ramp-Up Request Rate
+<h5>Running With Ramp-Up Request Rate</h5>
 
 The benchmark tool also supports ramping up the request rate over the
 duration of the benchmark run. This can be useful for stress testing the
@@ -481,7 +481,7 @@ Total num prompt tokens:  5014
 Total num output tokens:  1500
 ```
 
-#### VisionArena Benchmark for Vision Language Models
+<h5>VisionArena Benchmark for Vision Language Models</h5>
 
 ```bash
 vllm bench throughput \
@@ -501,7 +501,7 @@ Total num prompt tokens:  14527
 Total num output tokens:  1280
 ```
 
-#### InstructCoder Benchmark with Speculative Decoding
+<h5>InstructCoder Benchmark with Speculative Decoding</h5>
 
 ``` bash
 VLLM_WORKER_MULTIPROC_METHOD=spawn \
@@ -525,7 +525,7 @@ Total num prompt tokens:  261136
 Total num output tokens:  204800
 ```
 
-#### Other HuggingFaceDataset Examples
+<h5>Other HuggingFaceDataset Examples</h5>
 
 `lmms-lab/LLaVA-OneVision-Data`:
 
@@ -592,13 +592,13 @@ vllm bench throughput \
 
 Benchmark the performance of structured output generation (JSON, grammar, regex).
 
-#### Server Setup
+<h5>Server Setup</h5>
 
 ```bash
 vllm serve NousResearch/Hermes-3-Llama-3.1-8B
 ```
 
-#### JSON Schema Benchmark
+<h5>JSON Schema Benchmark</h5>
 
 ```bash
 python3 benchmarks/benchmark_serving_structured_output.py \
@@ -610,7 +610,7 @@ python3 benchmarks/benchmark_serving_structured_output.py \
   --num-prompts 1000
 ```
 
-#### Grammar-based Generation Benchmark
+<h5>Grammar-based Generation Benchmark</h5>
 
 ```bash
 python3 benchmarks/benchmark_serving_structured_output.py \
@@ -622,7 +622,7 @@ python3 benchmarks/benchmark_serving_structured_output.py \
   --num-prompts 1000
 ```
 
-#### Regex-based Generation Benchmark
+<h5>Regex-based Generation Benchmark</h5>
 
 ```bash
 python3 benchmarks/benchmark_serving_structured_output.py \
@@ -633,7 +633,7 @@ python3 benchmarks/benchmark_serving_structured_output.py \
   --num-prompts 1000
 ```
 
-#### Choice-based Generation Benchmark
+<h5>Choice-based Generation Benchmark</h5>
 
 ```bash
 python3 benchmarks/benchmark_serving_structured_output.py \
@@ -644,7 +644,7 @@ python3 benchmarks/benchmark_serving_structured_output.py \
   --num-prompts 1000
 ```
 
-#### XGrammar Benchmark Dataset
+<h5>XGrammar Benchmark Dataset</h5>
 
 ```bash
 python3 benchmarks/benchmark_serving_structured_output.py \
