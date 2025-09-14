@@ -755,7 +755,7 @@ class FusedMoE(CustomOp):
         intermediate_size: Intermediate size of the experts
         params_dtype: Data type for the parameters.
         reduce_results: Whether to all all_reduce on the output of the layer
-        renomalize: Whether to renormalize the logits in the fused_moe kernel
+        renormalize: Whether to renormalize the logits in the fused_moe kernel
         quant_config: Quantization configure.
         enable_eplb: Whether to enable expert parallelism load balancer.
     """
@@ -813,9 +813,16 @@ class FusedMoE(CustomOp):
 
         # we are padding globally so EP buffer allocation works
         if quant_config and quant_config.get_name() == "mxfp4":
-            from vllm.model_executor.layers.quantization.mxfp4 import (  # noqa: E501
-                should_use_flashinfer_mxfp4)
-            if current_platform.is_rocm() or should_use_flashinfer_mxfp4():
+            from vllm.model_executor.layers.quantization.mxfp4 import (
+                Mxfp4Backend, get_mxfp4_backend)
+            current_mxfp4_backend = get_mxfp4_backend()
+            if (current_mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
+                    or current_mxfp4_backend
+                    == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS):
+                hidden_size = round_up(hidden_size, 128)
+            elif (current_platform.is_rocm() or current_mxfp4_backend
+                  == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM or
+                  current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16):
                 hidden_size = round_up(hidden_size, 256)
 
         # For smuggling this layer into the fused moe custom op
@@ -1593,7 +1600,7 @@ class FusedMoE(CustomOp):
         else:
             return tensor_model_parallel_all_reduce(final_hidden_states)
 
-    def forward(
+    def forward_native(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
@@ -1626,6 +1633,13 @@ class FusedMoE(CustomOp):
                     hidden_states, router_logits, self.layer_name)
             return (shared_output[..., :og_hidden_states],
                     fused_output[..., :og_hidden_states])
+
+    def forward_cuda(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        return self.forward_native(hidden_states, router_logits)
 
     def forward_impl_chunked(
         self,

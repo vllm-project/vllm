@@ -454,11 +454,12 @@ class VllmBackend:
         inductor_config = config.inductor_compile_config
         PASS_KEY = "post_grad_custom_post_pass"
         if PASS_KEY in inductor_config:
-            # Config should automatically wrap all inductor passes
             if isinstance(inductor_config[PASS_KEY], PostGradPassManager):
+                # PassManager already added to config, make sure it's correct
                 assert (inductor_config[PASS_KEY].uuid() ==
                         self.post_grad_pass_manager.uuid())
             else:
+                # Config should automatically wrap all inductor passes
                 assert isinstance(inductor_config[PASS_KEY], InductorPass)
                 self.post_grad_pass_manager.add(inductor_config[PASS_KEY])
         inductor_config[PASS_KEY] = self.post_grad_pass_manager
