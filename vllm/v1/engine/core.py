@@ -397,6 +397,9 @@ class EngineCore:
     def execute_dummy_batch(self):
         self.model_executor.execute_dummy_batch()
 
+    def skip_dummy_batch(self):
+        self.model_executor.skip_dummy_batch()
+
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_executor.add_lora(lora_request)
 
@@ -970,6 +973,7 @@ class DPEngineCoreProc(EngineCoreProc):
         self.step_counter = 0
         self.current_wave = 0
         self.last_counts = (0, 0)
+        self.use_ep = vllm_config.parallel_config.enable_expert_parallel
 
         # Initialize the engine.
         dp_rank = vllm_config.parallel_config.data_parallel_rank
@@ -1064,7 +1068,10 @@ class DPEngineCoreProc(EngineCoreProc):
 
                 # We are in a running state and so must execute a dummy pass
                 # if the model didn't execute any ready requests.
-                self.execute_dummy_batch()
+                if self.use_ep:
+                    self.execute_dummy_batch()
+                else:
+                    self.skip_dummy_batch()
 
             # 3) All-reduce operation to determine global unfinished reqs.
             self.engines_running = self._has_global_unfinished_reqs(

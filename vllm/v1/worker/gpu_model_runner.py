@@ -2643,6 +2643,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         is_profile: bool = False,
         create_mixed_batch: bool = False,
         remove_lora: bool = True,
+        skip_run: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Run a dummy forward pass to warm up/profile run or capture the
@@ -2671,6 +2672,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Padding for DP
         num_pad, num_tokens_across_dp = self.get_dp_padding(num_tokens)
         num_tokens += num_pad
+
+        # if self.get_dp_padding is not executed
+        # non-moe model on dp > 1 will be blocked forever
+        if skip_run:
+            return torch.tensor(0), torch.tensor(0)
 
         # If cudagraph_mode.decode_mode() == FULL and
         # cudagraph_mode.separate_routine(). This means that we are using
