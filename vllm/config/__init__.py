@@ -262,6 +262,7 @@ def is_init_field(cls: ConfigType, name: str) -> bool:
 TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 MMEncoderTPMode = Literal["weights", "data"]
+MMCacheType = Literal["shm", "lru"]
 
 
 class LogprobsMode(enum.Enum):
@@ -453,6 +454,13 @@ class ModelConfig:
     `mm_processor_cache_gb * (api_server_count + data_parallel_size)`.
 
     Set to `0` to disable this cache completely (not recommended)."""
+    mm_processor_cache_type: MMCacheType = "lru"
+    """Type of cache to use for the multi-modal preprocessor/mapper. If `shm`,
+    use shared memory FIFO cache. If `lru`, use mirrored LRU cache."""
+    mm_shm_cache_max_object_size_mb: int = 128
+    """Size limit (in MiB) for each object stored in the multi-modal processor
+    shared memory cache. Only effective when `mm_processor_cache_type` is
+    `"shm"`."""
     mm_encoder_tp_mode: MMEncoderTPMode = "weights"
     """Indicates how to optimize multi-modal encoder inference using
     tensor parallelism (TP).
@@ -907,6 +915,9 @@ class ModelConfig:
                 media_io_kwargs=self.media_io_kwargs,
                 mm_processor_kwargs=self.mm_processor_kwargs,
                 mm_processor_cache_gb=self.mm_processor_cache_gb,
+                mm_processor_cache_type=self.mm_processor_cache_type,
+                mm_shm_cache_max_object_size_mb=self.
+                mm_shm_cache_max_object_size_mb,
                 mm_encoder_tp_mode=self.mm_encoder_tp_mode,
                 interleave_mm_strings=self.interleave_mm_strings,
                 skip_mm_profiling=self.skip_mm_profiling,
@@ -1809,15 +1820,20 @@ class ModelConfig:
         such as the lm_head in a generation model,
         or the score or classifier in a classification model.
 
-        The default head_dtype based on runner_type.\n
+        `head_dtype` currently only supports pooling models.\n
         - The pooling model defaults to using fp32 head,
-        you can use --hf-overrides '{"head_dtype": "model"}' to disable it.\n
-        - The generate model defaults to not using fp32 head,
-        you can use --hf-overrides '{"head_dtype": "float32"}' to enable it.
+        you can use --hf-overrides '{"head_dtype": "model"}' to disable it.
         """
+
         head_dtype = _get_head_dtype(config=self.hf_config,
                                      dtype=self.dtype,
                                      runner_type=self.runner_type)
+
+        if self.runner_type != "pooling" and head_dtype != self.dtype:
+            logger.warning_once(
+                "`head_dtype` currently only supports pooling models."
+                "fallback to model dtype [%s].", self.dtype)
+            return self.dtype
 
         if head_dtype not in current_platform.supported_dtypes:
             logger.warning_once(
@@ -2476,6 +2492,15 @@ class MultiModalConfig:
 
     Set to `0` to disable this cache completely (not recommended).
     """
+
+    mm_processor_cache_type: MMCacheType = "lru"
+    """Type of cache to use for the multi-modal preprocessor/mapper. If `shm`,
+    use shared memory FIFO cache. If `lru`, use mirrored LRU cache."""
+
+    mm_shm_cache_max_object_size_mb: int = 128
+    """Size limit (in MiB) for each object stored in the multi-modal processor
+    shared memory cache. Only effective when `mm_processor_cache_type` is
+    `"shm"`."""
 
     mm_encoder_tp_mode: MMEncoderTPMode = "weights"
     """
