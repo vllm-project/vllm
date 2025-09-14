@@ -121,14 +121,6 @@ class OpenCVVideoBackend(VideoLoader):
         original_fps = cap.get(cv2.CAP_PROP_FPS)
         duration = total_frames_num / original_fps if original_fps > 0 else 0
 
-        # Use transformers transformers.video_utils.VideoMetadata format
-        metadata = {
-            "total_num_frames": total_frames_num,
-            "fps": original_fps,
-            "duration": duration,
-            "video_backend": "opencv"
-        }
-
         # resample video to target num_frames
         full_read = num_frames == -1 or total_frames_num < num_frames
         if full_read:
@@ -158,6 +150,20 @@ class OpenCVVideoBackend(VideoLoader):
 
         assert i == num_frames, (f"Expected reading {num_frames} frames, "
                                  f"but only loaded {i} frames from video.")
+
+        # Use transformers transformers.video_utils.VideoMetadata format
+        # NOTE(Isotr0py): For models like Qwen3-VL/GLM4.5V, this metadata
+        # can cause incorrect timestamp calculation without num_frames=-1.
+        metadata = {
+            "total_num_frames": num_frames,
+            "fps": original_fps,
+            "duration": duration,
+            "video_backend": "opencv",
+            "frames_indices": list(range(num_frames)),
+            # extra field used to control hf processor's video
+            # sampling behavior
+            "do_sample_frames": num_frames == total_frames_num,
+        }
 
         return frames, metadata
 
@@ -190,7 +196,8 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
             "total_num_frames": total_frames_num,
             "fps": original_fps,
             "duration": duration,
-            "video_backend": "opencv_dynamic"
+            "video_backend": "opencv_dynamic",
+            "do_sample_frames": False,
         }
 
         # resample video to target num_frames

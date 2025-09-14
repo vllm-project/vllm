@@ -36,7 +36,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
+from packaging.version import Version
 from transformers import BatchFeature
+from transformers import __version__ as TRANSFORMERS_VERSION
 from transformers.models.glm4v.configuration_glm4v import Glm4vVisionConfig
 from transformers.models.glm4v.image_processing_glm4v import (
     Glm4vImageProcessor, smart_resize)
@@ -1172,25 +1174,25 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             for item in mm_data.pop("videos", []):
                 video_array, metadata = item
 
-                if metadata["video_backend"] == "opencv_dynamic":
-                    mm_kwargs["do_sample_frames"] = False
-
-                elif metadata["total_num_frames"] != len(video_array):
-                    logger.warning(
-                        "Total frames in metadata "
-                        "(%s) does not match the length of "
-                        "video array %s. This can "
-                        "be because the video is resampled "
-                        "in advance. This may cause "
-                        "a divergence with HF implementation.",
-                        metadata["total_num_frames"],
-                        len(video_array),
-                    )
-                    metadata["total_num_frames"] = len(video_array)
+                mm_kwargs["do_sample_frames"] = metadata.get(
+                    "do_sample_frames", True)
 
                 video_mm_data = dict()
                 video_mm_data["videos"] = [[video_array]]
-                video_mm_data["video_metadata"] = [[VideoMetadata(**metadata)]]
+
+                # backward compatibility for Transformers 4.55
+                if not hasattr(
+                        VideoMetadata,
+                        "frames_indices") and "frames_indices" in metadata:
+                    metadata.pop("frames_indices")
+
+                video_mm_data["video_metadata"] = [[
+                    VideoMetadata(
+                        **{
+                            k: metadata[k]
+                            for k in metadata if k != "do_sample_frames"
+                        })
+                ]]
 
                 video_outputs = super()._call_hf_processor(
                     prompt="<|begin_of_video|><|video|><|end_of_video|>",
@@ -1198,8 +1200,8 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                     mm_kwargs=mm_kwargs,
                     tok_kwargs=tok_kwargs,
                 )
-                if "do_sample_frames" in mm_kwargs and not mm_kwargs[
-                        "do_sample_frames"]:
+                if not mm_kwargs["do_sample_frames"] and Version(
+                        TRANSFORMERS_VERSION) < Version("4.56.0"):
                     # Transformers v4.55 has incorrect timestamps issue for
                     # skip sampling. We construct the placeholder manually to
                     # get placeholders with correct timestamps.
