@@ -77,6 +77,7 @@ class EngineClient(ABC):
 
         preprocessor = await self.get_input_preprocessor()
         tokenizer = preprocessor.get_tokenizer()
+        eos_token_id = tokenizer.eos_token_id
 
         if is_explicit_encoder_decoder_prompt(prompt):
             raise NotImplementedError
@@ -103,7 +104,7 @@ class EngineClient(ABC):
         tokenized_length = len(prompt_token_ids)
 
         sort_beams_key = create_sort_beams_key_function(
-            tokenizer.eos_token_id, length_penalty)
+            eos_token_id, length_penalty)
 
         beam_search_params = SamplingParams(
             logprobs=2 * beam_width,
@@ -153,7 +154,7 @@ class EngineClient(ABC):
                 if result.outputs[0].logprobs is not None:
                     logprobs = result.outputs[0].logprobs[0]
                     for token_id, logprob_obj in logprobs.items():
-                        if token_id == tokenizer.eos_token_id and \
+                        if token_id == eos_token_id and \
                             not ignore_eos:
                             completed.append(
                                 BeamSearchSequence(
@@ -165,7 +166,7 @@ class EngineClient(ABC):
                                     cum_logprob=current_beam.cum_logprob +
                                     logprob_obj.logprob,
                                     finish_reason="stop",
-                                    stop_reason=tokenizer.eos_token_id))
+                                    stop_reason=eos_token_id))
                         else:
                             new_beams.append(
                                 BeamSearchSequence(
@@ -188,14 +189,14 @@ class EngineClient(ABC):
         best_beams = sorted_completed[:beam_width]
 
         for beam in best_beams:
-            if (beam.tokens[-1] == tokenizer.eos_token_id and not ignore_eos):
+            if (beam.tokens[-1] == eos_token_id and not ignore_eos):
                 # Skip the eos token in the text.
                 tokens = beam.tokens[tokenized_length:-1]
             else:
                 tokens = beam.tokens[tokenized_length:]
             beam.text = tokenizer.decode(tokens)
 
-        beam_search_output = RequestOutput(
+        yield RequestOutput(
             request_id=request_id,
             prompt=prompt_text,
             outputs=[
@@ -212,8 +213,6 @@ class EngineClient(ABC):
             finished=True,
             prompt_token_ids=prompt_token_ids,
             prompt_logprobs=None)
-
-        yield beam_search_output
 
     @abstractmethod
     def encode(

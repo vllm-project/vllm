@@ -10,8 +10,9 @@ from typing import (Any, AsyncGenerator, Callable, Dict, Iterable, List,
 from weakref import ReferenceType
 
 import vllm.envs as envs
-from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, VllmConfig)
+from vllm.config import (DecodingConfig, ModelConfig, ParallelConfig,
+                         SchedulerConfig, VllmConfig)
+from vllm.config.lora import LoRAConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_timeout import asyncio_timeout
