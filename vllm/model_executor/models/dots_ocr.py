@@ -7,7 +7,6 @@ from typing import Literal, Optional, TypedDict, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange
 from torch.nn import LayerNorm
 from transformers.modeling_utils import PreTrainedModel
 from transformers.models.qwen2 import Qwen2ForCausalLM
@@ -40,6 +39,7 @@ from vllm.transformers_utils.configs.dotsocr import (
     DotsOCRConfig,
     DotsVisionConfig,
 )
+from vllm.attention.layer import MultiHeadAttention
 
 
 class DotsOCRImagePixelInputs(TypedDict):
@@ -291,13 +291,23 @@ class DotsViTPreprocessor(nn.Module):
         return tokens
 
 
-# TODO: Use vLLM internal layers
 class VisionSdpaAttention(nn.Module):
     def __init__(
         self, config, dim: int, num_heads: int = 16, bias=True
     ) -> None:
         super().__init__()
         self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.scale = self.head_dim ** -0.5
+        
+        # 使用 vLLM 的 MultiHeadAttention，它会自动选择最优的后端
+        self.attn = MultiHeadAttention(
+            num_heads=num_heads,
+            head_size=self.head_dim,
+            scale=self.scale,
+        )
+        
+        # 保留原有的线性层
         self.qkv = nn.Linear(dim, dim * 3, bias=bias)
         self.proj = nn.Linear(dim, dim, bias=bias)
         self.config = config
@@ -309,40 +319,32 @@ class VisionSdpaAttention(nn.Module):
         rotary_pos_emb: torch.Tensor = None,
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
+        
+        # 计算 QKV
+        qkv = self.qkv(hidden_states)
         q, k, v = (
-            self.qkv(hidden_states)
-            .reshape(seq_length, 3, self.num_heads, -1)
+            qkv.reshape(seq_length, 3, self.num_heads, -1)
             .permute(1, 0, 2, 3)
             .unbind(0)
         )
 
-        q = apply_rotary_pos_emb_vision(q.unsqueeze(0), rotary_pos_emb).squeeze(
-            0
-        )
-        k = apply_rotary_pos_emb_vision(k.unsqueeze(0), rotary_pos_emb).squeeze(
-            0
-        )
+        # 应用旋转位置编码
+        q = apply_rotary_pos_emb_vision(q.unsqueeze(0), rotary_pos_emb).squeeze(0)
+        k = apply_rotary_pos_emb_vision(k.unsqueeze(0), rotary_pos_emb).squeeze(0)
 
-        q, k, v = (rearrange(x, "s h d -> 1 s h d") for x in (q, k, v))
+        # 重新排列维度以匹配 MultiHeadAttention 的期望输入格式
+        # MultiHeadAttention 期望 (batch_size, seq_len, hidden_size)
+        q = q.reshape(1, seq_length, -1)  # (1, seq_len, hidden_size)
+        k = k.reshape(1, seq_length, -1)  # (1, seq_len, hidden_size)  
+        v = v.reshape(1, seq_length, -1)  # (1, seq_len, hidden_size)
 
-        outputs = []
-        for i in range(1, len(cu_seqlens)):
-            start_idx = cu_seqlens[i - 1]
-            end_idx = cu_seqlens[i]
-            q_i = q[:, start_idx:end_idx]
-            k_i = k[:, start_idx:end_idx]
-            v_i = v[:, start_idx:end_idx]
-            q_i, k_i, v_i = (
-                rearrange(x, "b s h d -> b h s d") for x in [q_i, k_i, v_i]
-            )
-            output_i = F.scaled_dot_product_attention(q_i,
-                                                      k_i,
-                                                      v_i,
-                                                      dropout_p=0.0)
-            output_i = rearrange(output_i, "b h s d -> b s h d")
-            outputs.append(output_i)
-        attn_output = torch.cat(outputs, dim=1)
-        attn_output = rearrange(attn_output, "1 s h d -> s (h d)")
+        # 使用 vLLM 的 MultiHeadAttention，它会自动处理内存优化
+        attn_output = self.attn(q, k, v)
+        
+        # 重新排列回原始格式
+        attn_output = attn_output.squeeze(0)  # (seq_len, hidden_size)
+        
+        # 应用输出投影
         attn_output = self.proj(attn_output)
         return attn_output
 
