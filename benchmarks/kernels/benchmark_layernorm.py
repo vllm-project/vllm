@@ -11,7 +11,7 @@ from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, FlexibleArgumentParser
 
 
 @torch.inference_mode()
-def run_benchmark(
+def main(
     num_tokens: int,
     hidden_size: int,
     add_residual: bool,
@@ -59,8 +59,7 @@ def run_benchmark(
     print(f"Kernel running time: {latency * 1000000:.3f} us")
 
 
-def main():
-    """Main function for Buck compatibility."""
+if __name__ == "__main__":
     parser = FlexibleArgumentParser(description="Benchmark the layernorm kernel.")
     parser.add_argument("--num-tokens", type=int, default=4096)
     parser.add_argument("--hidden-size", type=int, default=8192)
@@ -82,7 +81,7 @@ def main():
     args = parser.parse_args()
     print(args)
 
-    run_benchmark(
+    main(
         num_tokens=args.num_tokens,
         hidden_size=args.hidden_size,
         add_residual=args.add_residual,
@@ -92,7 +91,3 @@ def main():
         num_warmup_iters=args.num_warmup_iters,
         num_iters=args.num_iters,
     )
-
-
-if __name__ == "__main__":
-    main()
