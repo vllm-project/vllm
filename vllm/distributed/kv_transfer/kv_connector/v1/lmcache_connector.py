@@ -30,7 +30,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
     # Worker-side methods
     # ==============================
     def start_load_kv(self, forward_context: "ForwardContext",
-                      **kwargs) -> None:
+                      **kwargs: Any) -> None:
         """
         Start loading the KV cache from the connector to vLLM's paged
         KV buffer. This is called from the forward context before the
@@ -61,7 +61,8 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         self._lmcache_engine.wait_for_layer_load(layer_name)
 
     def save_kv_layer(self, layer_name: str, kv_layer: torch.Tensor,
-                      attn_metadata: "AttentionMetadata", **kwargs) -> None:
+                      attn_metadata: "AttentionMetadata",
+                      **kwargs: Any) -> None:
         """
         Start saving the a layer of KV cache from vLLM's paged buffer 
         to the connector. This is called from within attention layer to
@@ -110,7 +111,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         self,
         request: "Request",
         num_computed_tokens: int,
-    ) -> tuple[int, bool]:
+    ) -> tuple[Optional[int], bool]:
         """
         Get number of new tokens that can be loaded from the
         external KV cache beyond the num_computed_tokens.
