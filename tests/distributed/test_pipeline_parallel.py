@@ -215,9 +215,7 @@ TEXT_GENERATION_MODELS = {
 EMBEDDING_MODELS = {  # type: ignore[var-annotated]
     # [Text-only]
     "intfloat/e5-mistral-7b-instruct": PPTestSettings.fast(runner="pooling"),
-    # TODO: re-enable when https://github.com/vllm-project/vllm/issues/23883
-    # is fixed
-    #"BAAI/bge-multilingual-gemma2": PPTestSettings.fast(runner="pooling"),
+    "BAAI/bge-multilingual-gemma2": PPTestSettings.fast(runner="pooling"),
     "Qwen/Qwen2.5-Math-RM-72B": PPTestSettings.fast(
         load_format="dummy", runner="pooling"
     ),
