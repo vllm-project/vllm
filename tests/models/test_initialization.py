@@ -10,7 +10,7 @@ from vllm import LLM
 from vllm.config import ModelImpl
 from vllm.engine.llm_engine import LLMEngine as V0LLMEngine
 from vllm.utils import GiB_bytes
-from vllm.v1.core.kv_cache_utils import get_kv_cache_config
+from vllm.v1.core.kv_cache_utils import get_kv_cache_configs
 from vllm.v1.engine.core import EngineCore as V1EngineCore
 
 from ..utils import create_new_process_for_each_test
@@ -68,11 +68,11 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
 
     def _initialize_kv_caches_v1(self, vllm_config):
         kv_cache_specs = self.model_executor.get_kv_cache_specs()
-        scheduler_kv_cache_config = get_kv_cache_config(
+        scheduler_kv_cache_config = get_kv_cache_configs(
             vllm_config,
-            kv_cache_specs[0],
-            10 * GiB_bytes,
-        )
+            kv_cache_specs,
+            [10 * GiB_bytes],
+        )[0]
 
         # gpu_blocks (> 0), cpu_blocks, scheduler_kv_cache_config
         return 1, 0, scheduler_kv_cache_config
