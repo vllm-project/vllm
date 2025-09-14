@@ -1185,16 +1185,17 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                 video_mm_data["videos"] = [[video_array]]
 
                 # backward compatibility for Transformers 4.55
+                unuse_metadata = ["do_sample_frames"]
                 if not hasattr(
                         VideoMetadata,
                         "frames_indices") and "frames_indices" in metadata:
-                    metadata.pop("frames_indices")
+                    unuse_metadata.append("frames_indices")
 
                 video_mm_data["video_metadata"] = [[
                     VideoMetadata(
                         **{
                             k: metadata[k]
-                            for k in metadata if k != "do_sample_frames"
+                            for k in metadata if k not in unuse_metadata
                         })
                 ]]
 
