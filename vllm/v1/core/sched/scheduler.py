@@ -415,8 +415,9 @@ class Scheduler(SchedulerInterface):
                                            global_cache_hit_threshold)
 
                     # Check if cache hit is above threshold
-                    cache_hit_percent = num_computed_tokens / len(
-                        request.prompt_token_ids)
+                    prompt_len = len(request.prompt_token_ids)
+                    cache_hit_percent = num_computed_tokens / prompt_len \
+                        if prompt_len > 0 else 0.0
                     if cache_hit_percent < cache_hit_threshold:
                         threshold_source = ("request"
                                             if request.cache_hit_threshold
