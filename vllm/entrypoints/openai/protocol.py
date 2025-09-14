@@ -37,6 +37,8 @@ from pydantic import (BaseModel, ConfigDict, Field, TypeAdapter,
                       ValidationInfo, field_validator, model_validator)
 from typing_extensions import TypeAlias
 
+from openai_harmony import Author
+
 from vllm import envs
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          make_tool_call_id)
@@ -52,6 +54,18 @@ from vllm.utils import random_uuid, resolve_obj_by_qualname
 logger = init_logger(__name__)
 
 _LONG_INFO = torch.iinfo(torch.long)
+
+
+class MessageMetadata(BaseModel):
+    author: Author
+    channel: Optional[str] = None
+    recipient: Optional[str] = None
+    content_type: Optional[str] = None
+
+
+class ResponseOutputItemWithMetadata(BaseModel):
+    item: ResponseOutputItem
+    metadata: MessageMetadata
 
 
 class OpenAIBaseModel(BaseModel):
@@ -242,7 +256,7 @@ def get_logits_processors(processors: Optional[LogitsProcessors],
     elif processors:
         raise ValueError(
             "The `logits_processors` argument is not supported by this "
-            "server. See --logits-processor-pattern engine argument "
+            "server. See --logits-processor-pattern engine argugment "
             "for more information.")
     return None
 
@@ -1849,11 +1863,16 @@ class TranscriptionStreamResponse(OpenAIBaseModel):
 
 class InputTokensDetails(OpenAIBaseModel):
     cached_tokens: int
+    input_tokens_per_turn: list[int] = []
+    cached_tokens_per_turn: list[int] = []
 
 
 class OutputTokensDetails(OpenAIBaseModel):
     reasoning_tokens: int = 0
     tool_output_tokens: int = 0
+    output_tokens_per_turn: list[int] = []
+    tool_output_tokens_per_turn: list[int] = []
+    tool_call_latency_ms_per_turn: list[int] = []
 
 
 class ResponseUsage(OpenAIBaseModel):
@@ -1873,7 +1892,7 @@ class ResponsesResponse(OpenAIBaseModel):
     metadata: Optional[Metadata] = None
     model: str
     object: Literal["response"] = "response"
-    output: list[ResponseOutputItem]
+    output: Union[list[ResponseOutputItem], list[ResponseOutputItemWithMetadata]]
     parallel_tool_calls: bool
     temperature: float
     tool_choice: ToolChoice
@@ -1900,7 +1919,7 @@ class ResponsesResponse(OpenAIBaseModel):
         sampling_params: SamplingParams,
         model_name: str,
         created_time: int,
-        output: list[ResponseOutputItem],
+        output: Union[list[ResponseOutputItem], list[ResponseOutputItemWithMetadata]],
         status: ResponseStatus,
         usage: Optional[ResponseUsage] = None,
     ) -> "ResponsesResponse":
@@ -2109,7 +2128,7 @@ class DetokenizeResponse(OpenAIBaseModel):
 
 class TokenizerInfoResponse(OpenAIBaseModel):
     """
-    Response containing tokenizer configuration 
+    Response containing tokenizer configuration
     equivalent to tokenizer_config.json
     """
 

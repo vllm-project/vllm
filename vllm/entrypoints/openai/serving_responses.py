@@ -54,6 +54,7 @@ from vllm.entrypoints.openai.protocol import (DeltaMessage, ErrorResponse,
                                               InputTokensDetails,
                                               OutputTokensDetails,
                                               RequestResponseMetadata,
+                                              ResponseOutputItemWithMetadata,
                                               ResponsesRequest,
                                               ResponsesResponse, ResponseUsage)
 # yapf: enable
@@ -490,10 +491,15 @@ class OpenAIServingResponses(OpenAIServing):
             output_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
             input_tokens_details=InputTokensDetails(
-                cached_tokens=num_cached_tokens),
+                cached_tokens=num_cached_tokens, 
+                input_tokens_per_turn=[turn.input_tokens for turn in context.all_turns],
+                cached_tokens_per_turn=[turn.cached_input_tokens for turn in context.all_turns]),
             output_tokens_details=OutputTokensDetails(
                 reasoning_tokens=num_reasoning_tokens,
-                tool_output_tokens=num_tool_output_tokens),
+                tool_output_tokens=num_tool_output_tokens,
+                output_tokens_per_turn=[turn.output_tokens for turn in context.all_turns],
+                tool_output_tokens_per_turn=[turn.tool_output_tokens for turn in context.all_turns],
+                tool_call_latency_ms_per_turn=[turn.tool_call_latency_ms for turn in context.all_turns])
         )
         response = ResponsesResponse.from_request(
             request,
@@ -657,16 +663,18 @@ class OpenAIServingResponses(OpenAIServing):
     def _make_response_output_items_with_harmony(
         self,
         context: HarmonyContext,
-    ) -> list[ResponseOutputItem]:
-        output_items = []
+    ) -> list[ResponseOutputItemWithMetadata]:
+        output_items_with_metadata = []
         num_init_messages = context.num_init_messages
         for msg in context.messages[num_init_messages:]:
-            output_items.extend(parse_output_message(msg))
+            output_items_with_metadata.extend(parse_output_message(msg,
+                                                                 previous_output_items=output_items_with_metadata))
+
         # Handle the generation stopped in the middle (if any).
         last_items = parse_remaining_state(context.parser)
         if last_items:
-            output_items.extend(last_items)
-        return output_items
+            output_items_with_metadata.extend(last_items)
+        return output_items_with_metadata
 
     def _construct_input_messages(
         self,
@@ -716,7 +724,10 @@ class OpenAIServingResponses(OpenAIServing):
                                 if request.reasoning else None)
             # Temporary: OpenAI types doesn't have container tool
             # so we used MCP to cover that, up for change
-            tool_types = [tool.type for tool in request.tools]
+            tool_types = [
+                "container" if tool.type == "mcp"
+                else tool.type for tool in request.tools
+            ]
             if envs.VLLM_GPT_OSS_USE_CONTAINER_TOOL:
                 tool_types.append("container")
             enable_browser = ("web_search_preview" in tool_types
