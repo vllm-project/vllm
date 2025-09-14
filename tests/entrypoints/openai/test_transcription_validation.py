@@ -67,7 +67,7 @@ async def test_basic_audio(mary_had_lamb, model_name):
 
 @pytest.mark.asyncio
 async def test_basic_audio_with_lora(mary_had_lamb):
-    """Ensure STT requests can pass LoRA requests through to generate."""
+    """Ensure STT (transcribe) requests can pass LoRA through to generate."""
     model_name = "ibm-granite/granite-speech-3.3-2b"
     lora_model_name = "speech"
     server_args = [
@@ -90,11 +90,11 @@ async def test_basic_audio_with_lora(mary_had_lamb):
             language="en",
             response_format="text",
             temperature=0.0)
-        out = json.loads(transcription)
-        out_text = out['text']
-        out_usage = out['usage']
-        assert "mary had a little lamb" in out_text
-        assert out_usage["seconds"] == 16, out_usage["seconds"]
+    out = json.loads(transcription)
+    out_text = out['text']
+    out_usage = out['usage']
+    assert "mary had a little lamb" in out_text
+    assert out_usage["seconds"] == 16, out_usage["seconds"]
 
 
 @pytest.mark.asyncio
