@@ -79,10 +79,8 @@ class DonutLanguageForConditionalGeneration(nn.Module, SupportsV0Only):
     ) -> torch.Tensor:
         r"""
         Args:
-            input_ids
-                torch.Tensor of *decoder* input token ids.
-            positions
-                torch.Tensor of *decoder* position indices.
+            input_ids: torch.Tensor of *decoder* input token ids.
+            positions: torch.Tensor of *decoder* position indices.
         Returns:
             Output torch.Tensor
         """
@@ -351,14 +349,10 @@ class DonutForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> torch.Tensor:
         r"""
         Args:
-            input_ids
-                torch.Tensor of *decoder* input token ids.
-            positions
-                torch.Tensor of *decoder* position indices.
-            encoder_input_ids
-                torch.Tensor of *encoder* input token ids.
-            encoder_positions
-                torch.Tensor of *encoder* position indices
+            input_ids: torch.Tensor of *decoder* input token ids.
+            positions: torch.Tensor of *decoder* position indices.
+            encoder_input_ids: torch.Tensor of *encoder* input token ids.
+            encoder_positions: torch.Tensor of *encoder* position indices
         Returns:
             Output torch.Tensor
         """

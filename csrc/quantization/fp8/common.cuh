@@ -5,7 +5,9 @@
 
 #include <cmath>
 
-#ifdef USE_ROCM
+#ifndef USE_ROCM
+  #include "nvidia/quant_utils.cuh"
+#else
   #include "amd/quant_utils.cuh"
 #endif
 
@@ -48,7 +50,9 @@ __device__ __forceinline__ fp8_type scaled_fp8_conversion(float const val,
   float r =
       fmaxf(-quant_type_max_v<fp8_type>, fminf(x, quant_type_max_v<fp8_type>));
 #ifndef USE_ROCM
-  return static_cast<fp8_type>(r);
+  // Use hardware cvt instruction for fp8 on nvidia
+  // Currently only support fp8_type = c10::Float8_e4m3fn
+  return fp8::vec_conversion<fp8_type, float>(r);
 #else
   // Use hardware cvt instruction for fp8 on rocm
   return fp8::cvt_c10<fp8_type>(r);
