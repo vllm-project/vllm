@@ -115,8 +115,8 @@ def get_hash_factors(config: ConfigT,
     - Skips non-normalizable values.
     """
     factors: dict[str, object] = {}
-    for field in fields(config):
-        factor = field.name
+    for dc_field in fields(config):
+        factor = dc_field.name
         if factor in ignored_factors:
             continue
         value = getattr(config, factor, None)
@@ -128,10 +128,12 @@ def get_hash_factors(config: ConfigT,
                 f"({type(value).__name__})") from e
     return factors
 
+
 def hash_factors(items: dict[str, object]) -> str:
     """Return a SHA-256 hex digest of the canonical items structure."""
     return hashlib.sha256(json.dumps(items,
                                      sort_keys=True).encode()).hexdigest()
+
 
 def get_field(cls: ConfigType, name: str) -> Field:
     """Get the default factory field of a dataclass by name. Used for getting
