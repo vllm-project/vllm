@@ -1447,9 +1447,20 @@ def LLMM1(a: torch.Tensor, b: torch.Tensor,
     return torch.ops._rocm_C.LLMM1(a, b, rows_per_block)
 
 
-def wvSplitK(a: torch.Tensor, b: torch.Tensor, cu_count: int) -> torch.Tensor:
-    return torch.ops._rocm_C.wvSplitK(a, b, cu_count)
+def wvSplitKb(a: torch.Tensor, b: torch.Tensor, bias: torch.Tensor, cu_count: int) -> torch.Tensor:
+    return torch.ops._rocm_C.wvSplitK(a, b, bias, cu_count)
 
+def wvSplitK(a: torch.Tensor, b: torch.Tensor, cu_count: int) -> torch.Tensor:
+    return torch.ops._rocm_C.wvSplitK(a, b, torch.empty(0), cu_count)
+
+def wvSplitKQ(a: torch.Tensor, b: torch.Tensor, bias: torch.Tensor, out_dtype: torch.dtype,
+              scale_a: torch.Tensor, scale_b: torch.Tensor,
+              cu_count: int) -> torch.Tensor:
+    out = torch.empty((b.shape[0], a.shape[0]),
+                      dtype=out_dtype,
+                      device=b.device)
+    torch.ops._rocm_C.wvSplitKQ(a, b, bias, out, scale_a, scale_b, cu_count)
+    return out
 
 def wvSplitKQ(a: torch.Tensor, b: torch.Tensor, out_dtype: torch.dtype,
               scale_a: torch.Tensor, scale_b: torch.Tensor,
@@ -1457,9 +1468,8 @@ def wvSplitKQ(a: torch.Tensor, b: torch.Tensor, out_dtype: torch.dtype,
     out = torch.empty((b.shape[0], a.shape[0]),
                       dtype=out_dtype,
                       device=b.device)
-    torch.ops._rocm_C.wvSplitKQ(a, b, out, scale_a, scale_b, cu_count)
+    torch.ops._rocm_C.wvSplitKQ(a, b, torch.empty(0), out, scale_a, scale_b, cu_count)
     return out
-
 
 # moe
 def moe_sum(input: torch.Tensor, output: torch.Tensor):

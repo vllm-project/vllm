@@ -292,8 +292,8 @@ torch::Tensor LLMM1(at::Tensor& in_a, at::Tensor& in_b,
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N>
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
-    wvSplitK_hf_sml_(const int K, const int M, const scalar_t* B,
-                     const scalar_t* __restrict__ A, scalar_t* C,
+    wvSplitK_hf_sml_(const int K, const int M, const int Bx, const int By, const scalar_t* B,
+                     const scalar_t* __restrict__ A, const scalar_t* __restrict__ BIAS, scalar_t* C,
                      const int _WvPrGrp, const int CuCount) {
   constexpr int max_lds_len = LDS_SIZE / 2;
   #if defined(__HIP__MI3XX__)
@@ -485,7 +485,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         for (int n = 0; n < N; n++) {
           for (int i = 0; i < YTILE; i++) {
             // if (commitColumn[i]) C[m + i + n * M] = __float2half(sum[n][i]);
-            C[m + i + n * M] = __float2s<scalar_t>(sum[n][i]);
+            C[m + i + n * M] = __float2s<scalar_t>(sum[n][i] );// + __half2float(BIAS[(m+i)%Bx]));
           }
         }
       }
@@ -530,7 +530,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         for (int n = 0; n < N; n++) {
           for (int i = 0; i < YTILE; i++) {
             // if (commitColumn[i]) C[n + i + m * N] = __float2half(sum[n][i]);
-            C[m + i + n * M] = __float2bfloat16(sum4[n][i][0]);
+            //C[m + i + n * M] = __float2bfloat16(sum4[n][i][0] + __bfloat162float(BIAS[(m+i)%Bx]));
+            C[m + i + n * M] = __float2bfloat16(sum4[n][i][0]) + BIAS[(m+i)%Bx];
           }
         }
       }
@@ -541,8 +542,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 #else   // !defined(__HIP__GFX9__) TODO: Add NAVI support
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N>
-__global__ void wvSplitK_hf_sml_(const int K, const int M, const scalar_t* B,
-                                 const scalar_t* __restrict__ A, scalar_t* C,
+__global__ void wvSplitK_hf_sml_(const int K, const int M, const int Bx, const int By, const scalar_t* B,
+                                 const scalar_t* __restrict__ A, const scalar_t* __restrict__ BIAS, scalar_t* C,
                                  const int _WvPrGrp, const int CuCount) {
   UNREACHABLE_CODE
 }
@@ -553,8 +554,8 @@ __global__ void wvSplitK_hf_sml_(const int K, const int M, const scalar_t* B,
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N>
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
-    wvSplitK_hf_(const int K, const int M, const scalar_t* B,
-                 const scalar_t* __restrict__ A, scalar_t* C,
+    wvSplitK_hf_(const int K, const int M, const int Bx, const int By, const scalar_t* B,
+                 const scalar_t* __restrict__ A, const scalar_t* __restrict__ BIAS, scalar_t* C,
                  const int _WvPrGrp, const int CuCount) {
   constexpr int max_lds_len = LDS_SIZE / 2;
   #if defined(__HIP__MI3XX__)
@@ -773,7 +774,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         for (int n = 0; n < N; n++) {
           for (int i = 0; i < YTILE; i++) {
             if (commitColumn[i])
-              C[m + i + n * M] = __float2s<scalar_t>(sum[n][i]);
+              C[m + i + n * M] = __float2s<scalar_t>(sum[n][i]) + BIAS[(m+i)%Bx];
           }
         }
       }
@@ -819,7 +820,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         for (int n = 0; n < N; n++) {
           for (int i = 0; i < YTILE; i++) {
             // if (commitColumn[i]) C[n + i + m * N] = __float2half(sum[n][i]);
-            C[m + i + n * M] = __float2bfloat16(sum4[n][i][0]);
+            C[m + i + n * M] = __float2bfloat16(sum4[n][i][0]) + BIAS[(m+i)%Bx];
           }
         }
       }
@@ -842,8 +843,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 #else   // !defined(__HIP__GFX9__) TODO: Add NAVI support
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N>
-__global__ void wvSplitK_hf_(const int K, const int M, const scalar_t* B,
-                             const scalar_t* __restrict__ A, scalar_t* C,
+__global__ void wvSplitK_hf_(const int K, const int M, const int Bx, const int By, const scalar_t* B,
+                             const scalar_t* __restrict__ A, const scalar_t* __restrict__ BIAS, scalar_t* C,
                              const int _WvPrGrp, const int CuCount) {
   UNREACHABLE_CODE
 }
@@ -854,8 +855,8 @@ __global__ void wvSplitK_hf_(const int K, const int M, const scalar_t* B,
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N>
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
-    wvSplitK_hf_big_(const int K, const int M, const scalar_t* B,
-                     const scalar_t* __restrict__ A, scalar_t* C,
+    wvSplitK_hf_big_(const int K, const int M, const int Bx, const int By, const scalar_t* B,
+                     const scalar_t* __restrict__ A, const scalar_t* __restrict__ BIAS, scalar_t* C,
                      const int _WvPrGrp, const int CuCount) {
   constexpr int max_lds_len = LDS_SIZE / 2;
   #if defined(__HIP__MI3XX__)
@@ -1125,7 +1126,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         for (int n = 0; n < N; n++) {
           for (int i = 0; i < YTILE; i++) {
             if (commitColumn[i])
-              C[m + i + n * M] = __float2s<scalar_t>(sum[n][i]);
+              C[m + i + n * M] = __float2s<scalar_t>(sum[n][i]) + BIAS[(m+i)%Bx];
           }
         }
       }
@@ -1167,7 +1168,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         for (int n = 0; n < N; n++) {
           for (int i = 0; i < YTILE; i++) {
             // if (commitColumn[i]) C[n + i + m * N] = __float2half(sum[n][i]);
-            C[m + i + n * M] = __float2bfloat16(sum4[n][i][0]);
+            C[m + i + n * M] = __float2bfloat16(sum4[n][i][0]) + BIAS[(m+i)%Bx];
           }
         }
       }
@@ -1190,8 +1191,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 #else   // !defined(__HIP__GFX9__) TODO: Add NAVI support
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N>
-__global__ void wvSplitK_hf_big_(const int K, const int M, const scalar_t* B,
-                                 const scalar_t* __restrict__ A, scalar_t* C,
+__global__ void wvSplitK_hf_big_(const int K, const int M, const int Bx, const int By, const scalar_t* B,
+                                 const scalar_t* __restrict__ A, const scalar_t* __restrict__ BIAS, scalar_t* C,
                                  const int _WvPrGrp, const int CuCount) {
   UNREACHABLE_CODE
 }
@@ -1226,11 +1227,14 @@ int mindiv(int N, int div1, int div2) {
   return rtn;
 }
 
-torch::Tensor wvSplitK(at::Tensor& in_a, at::Tensor& in_b,
+torch::Tensor wvSplitK(at::Tensor& in_a, at::Tensor& in_b, at::Tensor& in_bias,
                        const int64_t CuCount) {
   auto M_in = in_a.size(0);
   auto K_in = in_a.size(1);
   auto N_in = in_b.size(0);
+  auto Bx_in = in_bias.size(1);
+  printf("\nBx_ini:%d\n", Bx_in);
+  auto By_in = 1;//in_bias.size(0);
 
   TORCH_CHECK(in_a.dtype() == in_b.dtype());
   TORCH_CHECK(K_in % 8 == 0, "k % 8 == 0");
@@ -1254,18 +1258,18 @@ torch::Tensor wvSplitK(at::Tensor& in_a, at::Tensor& in_b,
     if ((K_in * N_in <= max_lds_len) && (M_in % _YTILEs == 0)) {              \
       int __wvPrGrp = mindiv(M_in, CuCount * _YTILEs, _WvPrGrp);              \
       wvSplitK_hf_sml_<fptype, 64, _YTILEs, _WvPrGrp, 8, _UNRLs, _N>          \
-          <<<grid, block, 0, stream>>>(K_in, M_in, af4, bf4, c, __wvPrGrp,    \
-                                       CuCount);                              \
+          <<<grid, block, 0, stream>>>(K_in, M_in, Bx_in, By_in, af4, bf4,    \
+                                       biasf4, c, __wvPrGrp, CuCount);        \
     } else if (K_in * N_in <= max_lds_len * 1.2) {                            \
       int __wvPrGrp = mindiv(M_in, CuCount * _YTILEm, _WvPrGrp);              \
       wvSplitK_hf_<fptype, 64, _YTILEm, _WvPrGrp, 8, _UNRLm, _N>              \
-          <<<grid, block, 0, stream>>>(K_in, M_in, af4, bf4, c, __wvPrGrp,    \
-                                       CuCount);                              \
+          <<<grid, block, 0, stream>>>(K_in, M_in, Bx_in, By_in, af4, bf4,    \
+                                       biasf4, c, __wvPrGrp, CuCount);        \
     } else {                                                                  \
       int __wvPrGrp = mindiv(M_in, CuCount * _YTILEb, _WvPrGrp);              \
       wvSplitK_hf_big_<fptype, 64, _YTILEb, _WvPrGrp, 8, _UNRLb, _N>          \
-          <<<grid, block, 0, stream>>>(K_in, M_in, af4, bf4, c, __wvPrGrp,    \
-                                       CuCount);                              \
+          <<<grid, block, 0, stream>>>(K_in, M_in, Bx_in, By_in, af4, bf4,    \
+                                       biasf4, c, __wvPrGrp, CuCount);        \
     }                                                                         \
   }
 
@@ -1273,6 +1277,7 @@ torch::Tensor wvSplitK(at::Tensor& in_a, at::Tensor& in_b,
     using fptype = typename scalar<scalar_t>::type;
     fptype* af4 = reinterpret_cast<fptype*>(in_a.data_ptr());
     const fptype* bf4 = reinterpret_cast<const fptype*>(in_b.data_ptr());
+    const fptype* biasf4 = reinterpret_cast<const fptype*>(in_bias.data_ptr());
     fptype* c = reinterpret_cast<fptype*>(out_c.data_ptr());
     switch (N_in) {
       case 1:
@@ -1300,8 +1305,10 @@ torch::Tensor wvSplitK(at::Tensor& in_a, at::Tensor& in_b,
 template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
           int A_CHUNK, int UNRL, int N>
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
-    wvSplitKQ_hf_sml_(const int K, const int Kp, const int M, const fp8_t* B,
-                      const fp8_t* __restrict__ A, scalar_t* C,
+    wvSplitKQ_hf_sml_(const int K, const int Kp, const int M, const int Bx, const int By, 
+                      const fp8_t* B,
+                      const fp8_t* __restrict__ A, 
+		      const fp8_t* __restrict__ BIAS, scalar_t* C,
                       const float* __restrict__ s_A,
                       const float* __restrict__ s_B, const int _WvPrGrp,
                       const int CuCount) {
@@ -1453,7 +1460,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     if (threadIdx.x == 0) {
       for (int n = 0; n < N; n++) {
         for (int y = 0; y < YTILE; y++) {
-          C[m + y + n * M] = __float2s<scalar_t>(sum[n][y][0] * sA * sB);
+          //TODO: Determine data type conversion of bias for fp8
+          C[m + y + n * M] = __float2s<scalar_t>(sum[n][y][0] * sA * sB);// + BIAS[(m+y)%Bx]);
         }
       }
     }
@@ -1465,7 +1473,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
           int A_CHUNK, int UNRL, int N>
 __global__ void wvSplitKQ_hf_sml_(const int K, const int Kp, const int M,
+                                  const int Bx, const int By,
                                   const fp8_t* B, const fp8_t* __restrict__ A,
+                                  const fp8_t* __restrict__ BIAS, 
                                   scalar_t* C, const float* __restrict__ s_A,
                                   const float* __restrict__ s_B,
                                   const int _WvPrGrp, const int CuCount) {
@@ -1477,8 +1487,11 @@ __global__ void wvSplitKQ_hf_sml_(const int K, const int Kp, const int M,
 template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
           int A_CHUNK, int UNRL, int N>
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
-    wvSplitKQ_hf_(const int K, const int Kp, const int M, const fp8_t* B,
-                  const fp8_t* __restrict__ A, scalar_t* C,
+    wvSplitKQ_hf_(const int K, const int Kp, const int M, const int Bx, const int By, 
+                  const fp8_t* B,
+                  const fp8_t* __restrict__ A, 
+                  const fp8_t* __restrict__ BIAS, 
+		  scalar_t* C,
                   const float* __restrict__ s_A, const float* __restrict__ s_B,
                   const int _WvPrGrp, const int CuCount) {
   constexpr int max_lds_len = LDS_SIZE;
@@ -1626,7 +1639,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       for (int n = 0; n < N; n++) {
         for (int y = 0; y < YTILE; y++) {
           if (y + m >= M) break;  // To avoid mem access fault.
-          C[m + y + n * M] = __float2s<scalar_t>(sum[n][y][0] * sA * sB);
+          //TODO: Determine data type conversion of bias for fp8
+          C[m + y + n * M] = __float2s<scalar_t>(sum[n][y][0] * sA * sB);// + BIAS[(m+y)%Bx]);
         }
       }
     }
@@ -1637,8 +1651,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 #else   // !defined(__HIP__MI3XX__) TODO: Add NAVI support
 template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
           int A_CHUNK, int UNRL, int N>
-__global__ void wvSplitKQ_hf_(const int K, const int Kp, const int M,
+__global__ void wvSplitKQ_hf_(const int K, const int Kp, const int M, const int Bx, const int By,
                               const fp8_t* B, const fp8_t* __restrict__ A,
+                              const fp8_t* __restrict__ BIAS,
                               scalar_t* C, const float* __restrict__ s_A,
                               const float* __restrict__ s_B, const int _WvPrGrp,
                               const int CuCount) {
@@ -1646,7 +1661,7 @@ __global__ void wvSplitKQ_hf_(const int K, const int Kp, const int M,
 }
 #endif  // defined(__HIP__MI3XX__) TODO: Add NAVI support
 
-void wvSplitKQ(at::Tensor& in_a, at::Tensor& in_b, at::Tensor& out_c,
+void wvSplitKQ(at::Tensor& in_a, at::Tensor& in_b, at::Tensor& in_bias, at::Tensor& out_c,
                at::Tensor& scale_a, at::Tensor& scale_b,
                const int64_t CuCount) {
   static c10::ScalarType kFp8Type = is_fp8_ocp()
@@ -1656,6 +1671,9 @@ void wvSplitKQ(at::Tensor& in_a, at::Tensor& in_b, at::Tensor& out_c,
   auto K_in = in_a.size(1);
   auto N_in = in_b.size(0);
   auto Kp_in = in_a.stride(0);
+  auto Bx_in = in_bias.size(0);
+  auto By_in = 1;//in_bias.size(0);
+
   TORCH_CHECK(K_in % 16 == 0, "k % 16 == 0");
   TORCH_CHECK(in_a.dtype() == in_b.dtype() && in_a.dtype() == kFp8Type);
   TORCH_CHECK(out_c.dtype() == torch::kFloat16 ||
@@ -1673,12 +1691,12 @@ void wvSplitKQ(at::Tensor& in_a, at::Tensor& in_b, at::Tensor& out_c,
     if ((K_in * N_in <= max_lds_len) && (M_in % _YTILEs == 0)) {               \
       int __wvPrGrp = mindiv(M_in, CuCount * _YTILEs, _WvPrGrp);               \
       wvSplitKQ_hf_sml_<fptype, fp8_t, 64, _YTILEs, _WvPrGrp, 16, _UNRLs, _N>  \
-          <<<grid, block, 0, stream>>>(K_in, Kp_in, M_in, a_ptr, b_ptr, c_ptr, \
+          <<<grid, block, 0, stream>>>(K_in, Kp_in, M_in, Bx_in, By_in, a_ptr, b_ptr, bias_ptr, c_ptr, \
                                        s_a, s_b, __wvPrGrp, CuCount);          \
     } else {                                                                   \
       int __wvPrGrp = mindiv(M_in, CuCount * _YTILEm, _WvPrGrp);               \
       wvSplitKQ_hf_<fptype, fp8_t, 64, _YTILEm, _WvPrGrp, 16, _UNRLm, _N>      \
-          <<<grid, block, 0, stream>>>(K_in, Kp_in, M_in, a_ptr, b_ptr, c_ptr, \
+          <<<grid, block, 0, stream>>>(K_in, Kp_in, M_in, Bx_in, By_in, a_ptr, b_ptr, bias_ptr, c_ptr, \
                                        s_a, s_b, __wvPrGrp, CuCount);          \
     }                                                                          \
   }
@@ -1691,6 +1709,7 @@ void wvSplitKQ(at::Tensor& in_a, at::Tensor& in_b, at::Tensor& out_c,
     VLLM_DISPATCH_FP8_TYPES(in_a.scalar_type(), "wvSplitKQ", [&] {
       auto a_ptr = in_a.data_ptr<fp8_t>();
       auto b_ptr = in_b.data_ptr<fp8_t>();
+      auto bias_ptr = in_bias.data_ptr<fp8_t>();
       switch (N_in) {
         case 1:
           WVSPLITKQ(16, 2, 2, 2, 2, 2, 2, 1)

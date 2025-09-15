@@ -5,10 +5,10 @@
 torch::Tensor LLMM1(at::Tensor& in_a, at::Tensor& in_b,
                     const int64_t rows_per_block);
 
-torch::Tensor wvSplitK(at::Tensor& in_a, at::Tensor& in_b,
+torch::Tensor wvSplitK(at::Tensor& in_a, at::Tensor& in_b, at::Tensor& in_bias,
                        const int64_t CuCount);
 
-void wvSplitKQ(at::Tensor& in_a, at::Tensor& in_b, at::Tensor& out_c,
+void wvSplitKQ(at::Tensor& in_a, at::Tensor& in_b, at::Tensor& in_bias, at::Tensor& out_c,
                at::Tensor& scale_a, at::Tensor& scale_b, const int64_t CuCount);
 
 void paged_attention(
