@@ -36,7 +36,6 @@ def _set_vllm_config(vllm_config: VllmConfig, world_size: int, rank: int,
     import tempfile
     temp_file = tempfile.mkstemp()[1]
 
-    set_current_vllm_config(vllm_config)
     with set_current_vllm_config(vllm_config):
         init_distributed_environment(
             world_size=world_size,

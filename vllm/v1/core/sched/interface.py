@@ -9,7 +9,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.engine import EngineCoreOutputs
     from vllm.v1.metrics.stats import SchedulerStats
-    from vllm.v1.outputs import ModelRunnerOutput
+    from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
     from vllm.v1.request import Request, RequestStatus
 
 
@@ -59,6 +59,14 @@ class SchedulerInterface(ABC):
             A dict of client index to EngineCoreOutputs object containing the
             outputs for each request originating from that client.
         """
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_draft_token_ids(
+        self,
+        draft_token_ids: "DraftTokenIds",
+    ) -> None:
+        """Update the draft token ids for the scheduled requests."""
         raise NotImplementedError
 
     @abstractmethod

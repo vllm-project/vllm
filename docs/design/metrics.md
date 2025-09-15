@@ -57,11 +57,11 @@ In v0, the following metrics are exposed via a Prometheus-compatible `/metrics` 
 - `vllm:spec_decode_num_draft_tokens_total` (Counter)
 - `vllm:spec_decode_num_emitted_tokens_total` (Counter)
 
-These are documented under [Inferencing and Serving -> Production Metrics](../../usage/metrics.md).
+These are documented under [Inferencing and Serving -> Production Metrics](../usage/metrics.md).
 
 ### Grafana Dashboard
 
-vLLM also provides [a reference example](../../examples/online_serving/prometheus_grafana.md) for how to collect and store these metrics using Prometheus and visualize them using a Grafana dashboard.
+vLLM also provides [a reference example](../examples/online_serving/prometheus_grafana.md) for how to collect and store these metrics using Prometheus and visualize them using a Grafana dashboard.
 
 The subset of metrics exposed in the Grafana dashboard gives us an indication of which metrics are especially important:
 
@@ -99,11 +99,11 @@ http_request_duration_seconds_count{handler="/v1/completions",method="POST"} 201
 
 ### Multi-process Mode
 
-In v0, metrics are collected in the engine core process and we use multi-process mode to make them available in the API server process. See <gh-pr:7279>.
+In v0, metrics are collected in the engine core process and we use multiprocess mode to make them available in the API server process. See <gh-pr:7279>.
 
 ### Built in Python/Process Metrics
 
-The following metrics are supported by default by `prometheus_client`, but they are not exposed when multi-process mode is used:
+The following metrics are supported by default by `prometheus_client`, but they are not exposed when multiprocess mode is used:
 
 - `python_gc_objects_collected_total`
 - `python_gc_objects_uncollectable_total`
@@ -455,7 +455,7 @@ In general:
    [an escape hatch](https://kubernetes.io/docs/concepts/cluster-administration/system-metrics/#show-hidden-metrics)
    for some time before deleting them.
 
-See the [deprecation policy](../../contributing/deprecation_policy.md) for
+See the [deprecation policy](../contributing/deprecation_policy.md) for
 the project-wide deprecation policy.
 
 ### Unimplemented - `vllm:tokens_total`
@@ -565,7 +565,7 @@ model and then validate those tokens with the larger model.
 - `vllm:spec_decode_num_emitted_tokens_total` (Counter)
 
 There is a PR under review (<gh-pr:12193>) to add "prompt lookup (ngram)"
-seculative decoding to v1. Other techniques will follow. We should
+speculative decoding to v1. Other techniques will follow. We should
 revisit the v0 metrics in this context.
 
 !!! note
@@ -655,7 +655,7 @@ v0 has support for OpenTelemetry tracing:
 - Added by <gh-pr:4687>
 - Configured with `--oltp-traces-endpoint` and `--collect-detailed-traces`
 - [OpenTelemetry blog post](https://opentelemetry.io/blog/2024/llm-observability/)
-- [User-facing docs](../../examples/online_serving/opentelemetry.md)
+- [User-facing docs](../examples/online_serving/opentelemetry.md)
 - [Blog post](https://medium.com/@ronen.schaffer/follow-the-trail-supercharging-vllm-with-opentelemetry-distributed-tracing-aa655229b46f)
 - [IBM product docs](https://www.ibm.com/docs/en/instana-observability/current?topic=mgaa-monitoring-large-language-models-llms-vllm-public-preview)
   

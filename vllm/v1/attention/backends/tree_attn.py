@@ -165,7 +165,8 @@ class TreeAttentionMetadataBuilder(
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        self.kv_cache_spec = kv_cache_spec
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+
         self.block_size = kv_cache_spec.block_size
 
         spec_config = vllm_config.speculative_config
@@ -205,7 +206,7 @@ class TreeAttentionMetadataBuilder(
         q_start_loc = common_attn_metadata.query_start_loc
         max_query_len = common_attn_metadata.max_query_len
         kv_seqlens = common_attn_metadata.seq_lens
-        max_seq_len = int(common_attn_metadata.seq_lens_cpu.max())
+        max_seq_len = common_attn_metadata.max_seq_len
         block_table = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
 
@@ -236,9 +237,9 @@ class TreeAttentionMetadataBuilder(
             # Use prefill for drafting at the root level.
             self.tree_attn_bias = torch.empty(0)
         else:
-            # Slice the tree attention bias for drafting.
-            query_len = common_attn_metadata.max_query_len
-            start, end = draft_index, draft_index + query_len
+            # Slice the tree attention bias for drafting. Exclude
+            # the root level.
+            start, end = 1, 1 + common_attn_metadata.max_query_len
             self.tree_attn_bias = self.tree_attn_bias[start:end,
                                                       start:end].contiguous()
 
@@ -354,6 +355,7 @@ class TreeAttentionImpl(AttentionImpl):
         attn_metadata: TreeAttentionMetadata,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
+        output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with TreeAttention.
 
@@ -361,14 +363,15 @@ class TreeAttentionImpl(AttentionImpl):
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
-            kv_cache = [2, num_blocks, block_size, num_kv_heads, head_size]
+            kv_cache: shape =
+                [2, num_blocks, block_size, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
         assert output is not None, "Output tensor must be provided."
 
-        if output_scale is not None:
+        if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
                 "fused output quantization is not yet supported"
                 " for TreeAttentionImpl")

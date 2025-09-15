@@ -1,6 +1,6 @@
 # --8<-- [start:installation]
 
-vLLM has experimental support for macOS with Apple silicon. For now, users must build from source to natively run on macOS.
+vLLM has experimental support for macOS with Apple Silicon. For now, users must build from source to natively run on macOS.
 
 Currently the CPU implementation for macOS supports FP32 and FP16 datatypes.
 

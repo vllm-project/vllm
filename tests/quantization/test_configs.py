@@ -22,22 +22,12 @@ class ModelPair:
 MODEL_ARG_EXPTYPES = [
     # AUTOGPTQ
     # compat: autogptq <=0.7.1 is_marlin_format: bool
-    # Model Serialized in Marlin Format should always use Marlin kernel.
-    ("neuralmagic/TinyLlama-1.1B-Chat-v1.0-marlin", None, "marlin"),
-    ("neuralmagic/TinyLlama-1.1B-Chat-v1.0-marlin", "marlin", "marlin"),
-    ("neuralmagic/TinyLlama-1.1B-Chat-v1.0-marlin", "gptq", "marlin"),
-    ("neuralmagic/TinyLlama-1.1B-Chat-v1.0-marlin", "awq", "ERROR"),
     # Model Serialized in Exllama Format.
     ("TheBloke/Llama-2-7B-Chat-GPTQ", None, "gptq_marlin"),
     ("TheBloke/Llama-2-7B-Chat-GPTQ", "marlin", "gptq_marlin"),
     ("TheBloke/Llama-2-7B-Chat-GPTQ", "gptq", "gptq"),
     ("TheBloke/Llama-2-7B-Chat-GPTQ", "awq", "ERROR"),
     # compat: autogptq >=0.8.0 use checkpoint_format: str
-    # Model Serialized in Marlin Format should always use Marlin kernel.
-    ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-Marlin-4bit", None, "marlin"),
-    ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-Marlin-4bit", "marlin", "marlin"),
-    ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-Marlin-4bit", "gptq", "marlin"),
-    ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-Marlin-4bit", "awq", "ERROR"),
     # Model Serialized in Exllama Format.
     ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", None, "gptq_marlin"),
     ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", "marlin", "gptq_marlin"),

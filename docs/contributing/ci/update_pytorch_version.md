@@ -90,7 +90,7 @@ address the long build time at its source, the current workaround is to set `VLL
 to a custom branch provided by @khluu (`VLLM_CI_BRANCH=khluu/use_postmerge_q`)
 when manually triggering a build on Buildkite. This branch accomplishes two things:
 
-1. Increase the timeout limit to 10 hours so that the build doesn't timeout.
+1. Increase the timeout limit to 10 hours so that the build doesn't time out.
 2. Allow the compiled artifacts to be written to the vLLM sccache S3 bucket
 to warm it up so that future builds are faster.
 
@@ -129,19 +129,6 @@ Similar to FlashInfer, here is how to build and install xFormers from source:
 export TORCH_CUDA_ARCH_LIST='7.0 7.5 8.0 8.9 9.0 10.0+PTX'
 MAX_JOBS=16 uv pip install --system \
     --no-build-isolation "git+https://github.com/facebookresearch/xformers@v0.0.30"
-```
-
-### Mamba
-
-```bash
-uv pip install --system \
-    --no-build-isolation "git+https://github.com/state-spaces/mamba@v2.2.5"
-```
-
-### causal-conv1d
-
-```bash
-uv pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8'
 ```
 
 ## Update all the different vLLM platforms

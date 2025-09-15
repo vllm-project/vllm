@@ -7,6 +7,7 @@
 # Copyright (c) 2023 OpenGVLab
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Any, Literal, Optional, TypeVar, Union
@@ -28,7 +29,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs, NestedTensors)
+                                    MultiModalKwargsItems, NestedTensors)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -37,6 +38,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.utils import set_default_torch_num_threads
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
@@ -115,13 +117,26 @@ InternVLVideoInputs = Union[InternVLVideoPixelInputs,
 # adapted from https://huggingface.co/OpenGVLab/InternVL2-1B
 def build_transform(input_size: int):
     MEAN, STD = IMAGENET_MEAN, IMAGENET_STD
-    return T.Compose([
+    transform = T.Compose([
         T.Lambda(lambda img: convert_image_mode(img, 'RGB')),
         T.Resize((input_size, input_size),
                  interpolation=T.InterpolationMode.BICUBIC),
         T.ToTensor(),
         T.Normalize(mean=MEAN, std=STD)
     ])
+    # Image transformation operations (which include tensor computations
+    # on the CPU) can occupy a substantial number of CPU cores, introducing
+    # overhead due to CPU contention. This issue becomes particularly
+    # noticeable when deploying multiple vLLM instances on a single machine.
+    # Therefore, it is necessary to limit the number of threads allocated to
+    # image transformation tasks.
+    num_threads = int(os.environ.get("OMP_NUM_THREADS", "1"))
+
+    def apply(img):
+        with set_default_torch_num_threads(num_threads):
+            return transform(img)
+
+    return apply
 
 
 # adapted from https://huggingface.co/OpenGVLab/InternVL2-1B
@@ -797,18 +812,19 @@ class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
-        if "image_num_patches" in out_mm_kwargs:
-            image_num_patches = out_mm_kwargs["image_num_patches"]
+        out_mm_data = out_mm_kwargs.get_data()
+        if "image_num_patches" in out_mm_data:
+            image_num_patches = out_mm_data["image_num_patches"]
             assert isinstance(image_num_patches, torch.Tensor)
             image_num_patches = image_num_patches.tolist()
-        elif "image_embeds" in out_mm_kwargs:
+        elif "image_embeds" in out_mm_data:
             # TODO: Use image size information in dictionary embedding inputs
             # to compute num_patches (similar to Qwen2-VL)
-            image_num_patches = [None] * len(out_mm_kwargs["image_embeds"])
+            image_num_patches = [None] * len(out_mm_data["image_embeds"])
         else:
             image_num_patches = []
 
@@ -854,9 +870,13 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
 
     def get_video_token(self) -> Optional[str]:
         text_model_type = self.get_hf_config().get_text_config().model_type
-        if text_model_type == "qwen2":
-            return "<|video_pad|>"
-        return None
+        video_token_map = {
+            "qwen2": "<|video_pad|>",
+            "qwen3": "<|video_pad|>",
+            "qwen3_moe": "<|video_pad|>",
+            "gpt_oss": "<|reserved_200000|>",
+        }
+        return video_token_map.get(text_model_type)
 
     def get_num_frames_with_most_features(
         self,
@@ -966,15 +986,19 @@ class InternVLMultiModalProcessor(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        prompt_repl: list[PromptUpdate] = super()._get_prompt_updates(
-            mm_items, hf_processor_mm_kwargs, out_mm_kwargs)
+        prompt_repl = super()._get_prompt_updates(
+            mm_items=mm_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            out_mm_kwargs=out_mm_kwargs,
+        )
 
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
-        if "video_num_patches" in out_mm_kwargs:
-            video_num_patches = out_mm_kwargs["video_num_patches"]
+        out_mm_data = out_mm_kwargs.get_data()
+        if "video_num_patches" in out_mm_data:
+            video_num_patches = out_mm_data["video_num_patches"]
             assert isinstance(video_num_patches, torch.Tensor)
             video_num_patches = video_num_patches.tolist()
         else:
@@ -992,12 +1016,15 @@ class InternVLMultiModalProcessor(
                 video_context_token=hf_processor.video_token)
 
         if self.info.supports_video:
-            prompt_repl.append(
+            prompt_repl = [
+                *prompt_repl,
                 PromptReplacement(
                     modality="video",
                     target="<video>",
                     replacement=get_video_replacement_internvl,
-                ))
+                )
+            ]
+
         return prompt_repl
 
 

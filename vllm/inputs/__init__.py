@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from .data import (DecoderOnlyInputs, EmbedsInputs, EncoderDecoderInputs,
-                   ExplicitEncoderDecoderPrompt, ProcessorInputs, PromptType,
-                   SingletonInputs, SingletonPrompt, TextPrompt, TokenInputs,
-                   TokensPrompt, build_explicit_enc_dec_prompt, embeds_inputs,
+from .data import (DataPrompt, DecoderOnlyInputs, EmbedsInputs, EmbedsPrompt,
+                   EncoderDecoderInputs, ExplicitEncoderDecoderPrompt,
+                   ProcessorInputs, PromptType, SingletonInputs,
+                   SingletonPrompt, TextPrompt, TokenInputs, TokensPrompt,
+                   build_explicit_enc_dec_prompt, embeds_inputs,
                    to_enc_dec_tuple_list, token_inputs, zip_enc_dec_prompts)
 from .registry import (DummyData, InputContext, InputProcessingContext,
                        InputRegistry)
@@ -17,6 +18,7 @@ target model.
 """
 
 __all__ = [
+    "DataPrompt",
     "TextPrompt",
     "TokensPrompt",
     "PromptType",
@@ -24,6 +26,7 @@ __all__ = [
     "ExplicitEncoderDecoderPrompt",
     "TokenInputs",
     "EmbedsInputs",
+    "EmbedsPrompt",
     "token_inputs",
     "embeds_inputs",
     "DecoderOnlyInputs",

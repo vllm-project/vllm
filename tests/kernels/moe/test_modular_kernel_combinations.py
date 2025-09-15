@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+import textwrap
+import traceback
 from itertools import product
 from typing import Optional
 
@@ -10,33 +12,43 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config import VllmConfig, current_platform, set_current_vllm_config
-from vllm.model_executor.layers.fused_moe.batched_triton_or_deep_gemm_moe import (  # noqa: E501
-    BatchedTritonOrDeepGemmExperts)
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
-from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp8
-from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-    BatchedTritonExperts)
-from vllm.model_executor.layers.fused_moe.layer import TritonExperts
-from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
-    TritonOrDeepGemmExperts)
 from vllm.utils import has_deep_ep, has_deep_gemm, has_pplx
+from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 
+from ...utils import multi_gpu_test
 from .modular_kernel_tools.common import (Config, RankTensors, WeightTensors,
                                           reference_moe_impl,
                                           run_modular_kernel)
 from .modular_kernel_tools.mk_objects import (
     MK_FUSED_EXPERT_TYPES, MK_MULTI_GPU_PREPARE_FINALIZE_TYPES,
-    MK_QUANT_CONFIGS, MK_SINGLE_GPU_PREPARE_FINALIZE_TYPES)
+    MK_QUANT_CONFIGS, MK_SINGLE_GPU_PREPARE_FINALIZE_TYPES, expert_info)
 from .modular_kernel_tools.parallel_utils import (ProcessGroupInfo,
                                                   parallel_launch_with_config)
 
-# TODO (varun): These requirements are very strict and could be relaxed.
-has_all_packages = (has_deep_ep() and has_deep_gemm() and has_pplx())
+has_any_multi_gpu_package = (has_deep_ep() or has_deep_gemm() or has_pplx()
+                             or has_flashinfer_cutlass_fused_moe())
 
-meets_package_requirements = pytest.mark.skipif(
-    not has_all_packages,
-    reason="Requires deep_ep & deep_gemm & pplx packages",
+meets_multi_gpu_requirements = pytest.mark.skipif(
+    not has_any_multi_gpu_package,
+    reason="Requires deep_ep or deep_gemm or pplx or flashinfer packages",
 )
+
+
+def format_result(verbose, msg, ex=None):
+    if ex is not None:
+        x = str(ex)
+        newx = x.strip(" \n\t")[:16]
+        if len(newx) < len(x):
+            newx = newx + " ..."
+
+        prefix = "E\t"
+        print(f"{textwrap.indent(traceback.format_exc(), prefix)}")
+        print(f"FAILED {msg} - {newx}\n")
+    elif verbose:
+        print(f"PASSED {msg}")
+    else:
+        print(".", end="")
 
 
 def rank_worker(
@@ -45,6 +57,7 @@ def rank_worker(
     cpu_group,
     config: Config,
     weights: WeightTensors,
+    verbose: bool,
 ):
     current_platform.seed_everything(pgi.rank)
 
@@ -61,39 +74,64 @@ def rank_worker(
     TOPKs = config.topks
     assert isinstance(TOPKs, list)
 
+    exceptions = []
+    count = 0
+
     for m, topk in product(Ms, TOPKs):
-        print(f"Running m={m}, topk={topk} ...")
-        # override m and topk
-        cfgx = copy.deepcopy(config)
-        cfgx.Ms = m
-        cfgx.topks = topk
+        try:
+            print(f"Running[{pgi.rank}]: m={m}, topk={topk} ...")
+            count = count + 1
+            # override m and topk
+            cfgx = copy.deepcopy(config)
+            cfgx.Ms = m
+            cfgx.topks = topk
 
-        # inputs for rank
-        rank_tensors = RankTensors.make(cfgx, pgi)
+            # inputs for rank
+            rank_tensors = RankTensors.make(cfgx, pgi)
 
-        # modular kernel out
-        mk_out = run_modular_kernel(pgi, vllm_config, cfgx, weights,
-                                    rank_tensors)
+            # modular kernel out
+            mk_out = run_modular_kernel(pgi, vllm_config, cfgx, weights,
+                                        rank_tensors)
 
-        with set_current_vllm_config(vllm_config):
-            ref_out = reference_moe_impl(cfgx, weights, rank_tensors)
+            with set_current_vllm_config(vllm_config):
+                ref_out = reference_moe_impl(cfgx, weights, rank_tensors)
 
-        torch.testing.assert_close(ref_out, mk_out, atol=3e-2, rtol=3e-2)
+            if config.quant_dtype == "nvfp4":
+                atol = 1e-1
+                rtol = 1e-1
+            else:
+                atol = 3e-2
+                rtol = 3e-2
+
+            torch.testing.assert_close(ref_out, mk_out, atol=atol, rtol=rtol)
+            format_result(verbose, config.describe())
+        except Exception as ex:
+            format_result(verbose, config.describe(), ex)
+            exceptions.append(ex)
+
+    if len(exceptions) > 0:
+        raise RuntimeError(
+            f"{len(exceptions)} of {count} tests failed in child process, "
+            f"rank={pgi.rank}.")
+    else:
+        print(f"{count} of {count} tests passed in child process, "
+              f"rank={pgi.rank}.")
 
 
-def run(config: Config):
+def run(config: Config, verbose: bool):
     assert config.is_valid()
-    print(f"Testing config \n{config.describe()} ...")
 
     weights: WeightTensors = WeightTensors.make(config)
 
     vllm_config, env_dict = config.make_env_data()
     parallel_launch_with_config(config.world_size, rank_worker, vllm_config,
-                                env_dict, config, weights)
+                                env_dict, config, weights, verbose)
 
 
 Ms = [32, 64]
-Ks = [7168]  # hidden sizes
+# hidden sizes, making this too large will cause fp4 tests to fail.
+# Also needs to be a multiple of 1024 for deep_gemm.
+Ks = [2048]
 Ns = [2048]
 TOPKs = [4, 1]
 Es = [32]
@@ -103,19 +141,16 @@ FUSED_MOE_CHUNK_SIZEs = [None, 16]
 
 def is_nyi_config(config: Config) -> bool:
     # We know these configs to be legitimate. but still fail.
+    info = expert_info(config.fused_experts_type)
 
-    if (config.fused_experts_type in [
-            BatchedTritonExperts, BatchedTritonOrDeepGemmExperts,
-            TritonExperts, TritonOrDeepGemmExperts
-    ]):
+    if info.needs_matching_quant:
         # The triton kernels expect both per-act-token-quant and
         # per-out-ch-quant or neither.
         unsupported_quant_config = ((config.is_per_act_token_quant +
                                      config.is_per_out_ch_quant) == 1)
         return unsupported_quant_config
 
-    # cutlass kernels dont support expert_maps yet.
-    return config.fused_experts_type == CutlassExpertsFp8
+    return not info.supports_expert_map
 
 
 @pytest.mark.parametrize("k", Ks)
@@ -128,13 +163,14 @@ def is_nyi_config(config: Config) -> bool:
     product(MK_MULTI_GPU_PREPARE_FINALIZE_TYPES, MK_FUSED_EXPERT_TYPES))
 @pytest.mark.parametrize("fused_moe_chunk_size", FUSED_MOE_CHUNK_SIZEs)
 @pytest.mark.parametrize("world_size", [2])
-@meets_package_requirements
+@multi_gpu_test(num_gpus=2)
+@meets_multi_gpu_requirements
 def test_modular_kernel_combinations_multigpu(
         k: int, n: int, e: int, dtype: torch.dtype,
-        quant_config: FusedMoEQuantConfig,
+        quant_config: Optional[FusedMoEQuantConfig],
         combination: tuple[mk.FusedMoEPrepareAndFinalize,
                            mk.FusedMoEPermuteExpertsUnpermute],
-        fused_moe_chunk_size: Optional[int], world_size: int):
+        fused_moe_chunk_size: Optional[int], world_size: int, pytestconfig):
 
     config = Config(
         Ms=Ms,
@@ -149,14 +185,15 @@ def test_modular_kernel_combinations_multigpu(
         fused_moe_chunk_size=fused_moe_chunk_size,
         world_size=world_size,
     )
+
     if not config.is_valid():
         pytest.skip(f"Tests config {config} is not valid. Skipping ...")
 
     if is_nyi_config(config):
         pytest.skip(f"Tests config {config} is nyi. Skipping ...")
 
-    print(f"{config.describe()}")
-    run(config)
+    verbosity = pytestconfig.getoption('verbose')
+    run(config, verbosity > 0)
 
 
 @pytest.mark.parametrize("k", Ks)
@@ -169,13 +206,12 @@ def test_modular_kernel_combinations_multigpu(
     product(MK_SINGLE_GPU_PREPARE_FINALIZE_TYPES, MK_FUSED_EXPERT_TYPES))
 @pytest.mark.parametrize("fused_moe_chunk_size", FUSED_MOE_CHUNK_SIZEs)
 @pytest.mark.parametrize("world_size", [1])
-@meets_package_requirements
 def test_modular_kernel_combinations_singlegpu(
         k: int, n: int, e: int, dtype: torch.dtype,
-        quant_config: FusedMoEQuantConfig,
+        quant_config: Optional[FusedMoEQuantConfig],
         combination: tuple[mk.FusedMoEPrepareAndFinalize,
                            mk.FusedMoEPermuteExpertsUnpermute],
-        fused_moe_chunk_size: Optional[int], world_size: int):
+        fused_moe_chunk_size: Optional[int], world_size: int, pytestconfig):
     config = Config(
         Ms=Ms,
         K=k,
@@ -196,7 +232,8 @@ def test_modular_kernel_combinations_singlegpu(
     if is_nyi_config(config):
         pytest.skip(f"Tests config {config} is nyi. Skipping ...")
 
-    run(config)
+    verbosity = pytestconfig.getoption('verbose')
+    run(config, verbosity > 0)
 
 
 if __name__ == '__main__':
@@ -211,4 +248,4 @@ if __name__ == '__main__':
     args = parser.parse_args()
     config = make_config(args)
 
-    run(config)
+    run(config, True)

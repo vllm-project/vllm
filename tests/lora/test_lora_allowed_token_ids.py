@@ -3,8 +3,8 @@
 
 import pytest
 
-from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
-                         VllmConfig)
+from vllm.config import CacheConfig, DeviceConfig, ModelConfig, VllmConfig
+from vllm.config.lora import LoRAConfig
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
@@ -18,7 +18,7 @@ def test_allowed_token_ids_with_lora_vocab(llama_2_7b_base_huggingface_id,
     adapters that define additional tokens.
     """
 
-    # Setup a base model compatible with the sql_lora_files adapter and
+    # Set up a base model compatible with the sql_lora_files adapter and
     # a known number of tokens in the base model.
     model_config = ModelConfig(
         model=llama_2_7b_base_huggingface_id,
@@ -84,7 +84,7 @@ def test_allowed_token_ids_with_lora_adapter_no_vocab(
     adapters that do not define additional tokens.
     """
 
-    # Setup a base model compatible with the qwen25vl_lora_files adapter and
+    # Set up a base model compatible with the qwen25vl_lora_files adapter and
     # a known number of tokens in the base model.
     model_config = ModelConfig(
         model=qwen25vl_base_huggingface_id,

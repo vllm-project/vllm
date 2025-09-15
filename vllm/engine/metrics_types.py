@@ -43,7 +43,7 @@ class Stats:
     num_generation_tokens_iter: int
     num_tokens_iter: int
     time_to_first_tokens_iter: List[float]
-    time_per_output_tokens_iter: List[float]
+    inter_token_latencies_iter: List[float]
     num_preemption_iter: int
 
     # Request stats (should have _requests suffix)

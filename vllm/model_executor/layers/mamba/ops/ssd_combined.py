@@ -21,6 +21,10 @@ from .ssd_state_passing import _state_passing_fwd
 TRITON_22 = version.parse(triton.__version__) >= version.parse('2.2.0')
 
 
+def is_int_pow_2(n):
+    return isinstance(n, int) and n > 0 and (n & (n - 1)) == 0
+
+
 def _mamba_chunk_scan_combined_fwd(x,
                                    dt,
                                    A,
@@ -37,7 +41,9 @@ def _mamba_chunk_scan_combined_fwd(x,
                                    cu_seqlens=None,
                                    dt_softplus=False,
                                    dt_limit=(0.0, float("inf")),
+                                   state_dtype=None,
                                    out=None):
+    assert is_int_pow_2(chunk_size), "chunk_size must be integer power of 2"
     batch, seqlen, nheads, headdim = x.shape
     _, _, ngroups, dstate = B.shape
     assert nheads % ngroups == 0
@@ -100,21 +106,24 @@ def _mamba_chunk_scan_combined_fwd(x,
     # 3. Compute the inter-chunk SSM recurrence; produces correct SSM states at chunk boundaries
     # (middle term of factorization of off-diag blocks; A terms)
     # - for handling chunked prefill, this requires i) initial_states
-    #   ii) seq_idx and iii) is_cont_batched to be all specified.
+    #   ii) seq_idx iii) is_cont_batched and (iv) chunk_offsets to be all specified.
     # - When a new seq_idx is detected, we will stop passing the prev_state
     #   and switch accordingly to the init_state corresponding to the new seq_idx.
+    # - We will also make sure that the dA_cumsum is taken only from the start of the
+    #   sequence (hence we need the full dA_cumsum tensor and not just the values at chunk boundaries)
     # - this will ensure that states will be updated with the rightmost flushed seq_idx
     #   of the previous chunk. This implies that the first chunk of states is either 0
     #   or equal to init_states of the first example.
     states, final_states = _state_passing_fwd(
         rearrange(states, "... p n -> ... (p n)"),
-        dA_cumsum[:, :, :, -1],
+        dA_cumsum,
         initial_states=rearrange(initial_states, "... p n -> ... (p n)")
         if initial_states is not None else None,
         seq_idx=seq_idx,
         chunk_size=chunk_size,
-        out_dtype=C.dtype,
-        is_cont_batched=cu_seqlens is not None)
+        out_dtype=state_dtype if state_dtype is not None else C.dtype,
+        is_cont_batched=cu_seqlens is not None,
+        chunk_offsets=chunk_offsets)
     states, final_states = (rearrange(t, "... (p n) -> ... p n", n=dstate)
                             for t in [states, final_states])
 
@@ -184,7 +193,8 @@ def mamba_chunk_scan_combined(x,
                               dt_limit=(0.0, float("inf")),
                               out=None,
                               return_final_states=False,
-                              return_varlen_states=False):
+                              return_varlen_states=False,
+                              state_dtype=None):
     """
     Argument:
         x: (batch, seqlen, nheads, headdim)
@@ -201,6 +211,7 @@ def mamba_chunk_scan_combined(x,
         cu_seqlens: (num_sequences + 1) or None, only used if return_varlen_states is True
         dt_softplus: Whether to apply softplus to dt
         out: Preallocated output tensor
+        state_dtype: The data type of the ssm state
     """
 
     if not return_varlen_states:
@@ -224,7 +235,8 @@ def mamba_chunk_scan_combined(x,
         cu_seqlens=cu_seqlens,
         dt_softplus=dt_softplus,
         dt_limit=dt_limit,
-        out=out)
+        out=out,
+        state_dtype=state_dtype)
     if not return_varlen_states:
         if not return_final_states:
             return

@@ -15,6 +15,8 @@ typedef __hip_bfloat16 nv_bfloat16;
 #include <map>
 #include <unordered_map>
 #include <vector>
+#include <cstdlib>
+#include <cstring>
 
 namespace vllm {
 #define CUDACHECK(cmd)                                              \
@@ -555,22 +557,47 @@ class CustomAllreduce {
     size /= d;
     auto bytes = size * sizeof(typename packed_t<T>::P);
     int blocks = std::min(block_limit, (size + threads - 1) / threads);
+
+    // Check environment variable once
+    const char* env_algo = std::getenv("VLLM_CUSTOM_ALLREDUCE_ALGO");
+    bool force_1stage = false;
+    bool force_2stage = false;
+    if (env_algo != nullptr) {
+      if (std::strcmp(env_algo, "1stage") == 0 ||
+          std::strcmp(env_algo, "oneshot") == 0) {
+        force_1stage = true;
+      } else if (std::strcmp(env_algo, "2stage") == 0 ||
+                 std::strcmp(env_algo, "twoshot") == 0) {
+        force_2stage = true;
+      } else {
+        throw std::runtime_error(
+            "Invalid VLLM_CUSTOM_ALLREDUCE_ALGO: " + std::string(env_algo) +
+            ". Valid values: 1stage, oneshot, 2stage, twoshot");
+      }
+    }
+
 #define KL(ngpus, name)                                                       \
   name<T, ngpus><<<blocks, threads, 0, stream>>>(ptrs, sg_, self_sg_, output, \
                                                  rank_, size);
-#define REDUCE_CASE(ngpus)                            \
-  case ngpus: {                                       \
-    if (world_size_ == 2) {                           \
-      KL(ngpus, cross_device_reduce_1stage);          \
-    } else if (fully_connected_) {                    \
-      if ((world_size_ <= 4 && bytes < 512 * 1024) || \
-          (world_size_ <= 8 && bytes < 256 * 1024)) { \
-        KL(ngpus, cross_device_reduce_1stage);        \
-      } else {                                        \
-        KL(ngpus, cross_device_reduce_2stage);        \
-      }                                               \
-    }                                                 \
-    break;                                            \
+#define REDUCE_CASE(ngpus)                              \
+  case ngpus: {                                         \
+    if (force_1stage) {                                 \
+      KL(ngpus, cross_device_reduce_1stage);            \
+    } else if (force_2stage) {                          \
+      KL(ngpus, cross_device_reduce_2stage);            \
+    } else {                                            \
+      if (world_size_ == 2) {                           \
+        KL(ngpus, cross_device_reduce_1stage);          \
+      } else if (fully_connected_) {                    \
+        if ((world_size_ <= 4 && bytes < 512 * 1024) || \
+            (world_size_ <= 8 && bytes < 256 * 1024)) { \
+          KL(ngpus, cross_device_reduce_1stage);        \
+        } else {                                        \
+          KL(ngpus, cross_device_reduce_2stage);        \
+        }                                               \
+      }                                                 \
+    }                                                   \
+    break;                                              \
   }
 
     switch (world_size_) {

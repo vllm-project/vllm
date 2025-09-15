@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Mapping
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import TYPE_CHECKING, Generic, Optional, Protocol, TypeVar
 
 import torch.nn as nn
@@ -13,8 +12,9 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer,
                                                cached_tokenizer_from_config)
 from vllm.utils import ClassRegistry
 
-from .processing import (BaseMultiModalProcessor, BaseProcessingInfo,
-                         ProcessingCache)
+from .cache import (BaseMultiModalProcessorCache,
+                    processor_only_cache_from_config)
+from .processing import BaseMultiModalProcessor, BaseProcessingInfo
 from .profiling import (BaseDummyInputsBuilder, DummyDecoderData,
                         DummyEncoderData, MultiModalProfiler)
 
@@ -65,7 +65,7 @@ class MultiModalProcessorFactory(Protocol[_I]):
         info: _I,
         dummy_inputs: BaseDummyInputsBuilder[_I],
         *,
-        cache: Optional[ProcessingCache] = None,
+        cache: Optional[BaseMultiModalProcessorCache] = None,
     ) -> BaseMultiModalProcessor[_I]:
         ...
 
@@ -80,18 +80,11 @@ class _ProcessorFactories(Generic[_I]):
         self,
         ctx: InputProcessingContext,
         *,
-        cache: Optional[ProcessingCache] = None,
+        cache: Optional[BaseMultiModalProcessorCache] = None,
     ):
         info = self.info(ctx)
         dummy_inputs_builder = self.dummy_inputs(info)
         return self.processor(info, dummy_inputs_builder, cache=cache)
-
-
-# Make sure a different cache is used for each model config
-# NOTE: ModelConfig is not hashable so it cannot be passed directly
-@lru_cache(maxsize=1)
-def _get_processor_cache(model_id: str, capacity_gb: int):
-    return ProcessingCache(capacity_gb) if capacity_gb > 0 else None
 
 
 class MultiModalRegistry:
@@ -103,21 +96,37 @@ class MultiModalRegistry:
         self._processor_factories = ClassRegistry[nn.Module,
                                                   _ProcessorFactories]()
 
-    def _get_processor_cache(self, model_config: "ModelConfig"):
-        model_id = model_config.model
-        capacity_gb = model_config.mm_processor_cache_gb
-        return _get_processor_cache(model_id, capacity_gb)
+    def supports_multimodal_inputs(self, model_config: "ModelConfig") -> bool:
+        """
+        Checks if the model supports multimodal inputs.
+        Returns True if the model is multimodal with any non-zero supported 
+        modalities, otherwise returns False, effectively running in 
+        text-only mode.
+        """
+        if not model_config.is_multimodal_model:
+            return False
 
-    def reset_processor_cache(self, model_config: "ModelConfig") -> bool:
-        """Reset the multi-modal processing cache."""
-        if processor_cache := self._get_processor_cache(model_config):
-            processor_cache.reset()
+        info = self._create_processing_info(model_config, tokenizer=None)
+        supported_modalities = info.get_supported_mm_limits()
 
-        return True  # Success
+        mm_config = model_config.get_multimodal_config()
+
+        # Check if all supported modalities have limit == 0
+        if all(
+                mm_config.get_limit_per_prompt(modality) == 0
+                for modality in supported_modalities):
+            logger.info_once(
+                "All limits of multimodal modalities supported by the model "
+                "are set to 0, running in text-only mode.")
+            return False
+
+        return True
 
     def get_max_tokens_per_item_by_modality(
         self,
         model_config: "ModelConfig",
+        *,
+        cache: Optional[BaseMultiModalProcessorCache] = None,
     ) -> Mapping[str, int]:
         """
         Get the maximum number of tokens per data item from each modality based
@@ -126,11 +135,11 @@ class MultiModalRegistry:
         if not model_config.is_multimodal_model:
             return {}
 
-        processor = self.create_processor(model_config, disable_cache=False)
+        processor = self.create_processor(model_config, cache=cache)
         profiler = MultiModalProfiler(processor)
 
         seq_len = model_config.max_model_len
-        mm_limits = self.get_mm_limits_per_prompt(model_config)
+        mm_limits = self.get_mm_limits_per_prompt(model_config, cache=cache)
 
         return profiler.get_mm_max_contiguous_tokens(
             seq_len,
@@ -143,6 +152,8 @@ class MultiModalRegistry:
     def get_max_tokens_per_item_by_nonzero_modality(
         self,
         model_config: "ModelConfig",
+        *,
+        cache: Optional[BaseMultiModalProcessorCache] = None,
     ) -> Mapping[str, int]:
         """
         Get the maximum number of tokens per data item from each modality based
@@ -153,15 +164,19 @@ class MultiModalRegistry:
             This is currently directly used only in V1 for profiling the memory
             usage of a model.
         """
-        mm_limits = self.get_mm_limits_per_prompt(model_config)
+        mm_limits = self.get_mm_limits_per_prompt(model_config, cache=cache)
+        max_tokens_per_item = self.get_max_tokens_per_item_by_modality(
+            model_config,
+            cache=cache,
+        )
 
         return {
             key: max_tokens_per_mm_item
-            for key, max_tokens_per_mm_item in
-            self.get_max_tokens_per_item_by_modality(model_config).items()
+            for key, max_tokens_per_mm_item in max_tokens_per_item.items()
             if mm_limits[key] > 0
         }
 
+    # TODO: Remove once V0 is gone
     def get_max_tokens_by_modality(
         self,
         model_config: "ModelConfig",
@@ -170,14 +185,19 @@ class MultiModalRegistry:
         Get the maximum number of tokens from each modality
         for profiling the memory usage of a model.
         """
-        mm_limits = self.get_mm_limits_per_prompt(model_config)
+        cache = processor_only_cache_from_config(model_config, self)
+        mm_limits = self.get_mm_limits_per_prompt(model_config, cache=cache)
+        max_tokens_per_item = self.get_max_tokens_per_item_by_modality(
+            model_config,
+            cache=cache,
+        )
 
         return {
             key: mm_limits[key] * max_tokens_per_mm_item
-            for key, max_tokens_per_mm_item in
-            self.get_max_tokens_per_item_by_modality(model_config).items()
+            for key, max_tokens_per_mm_item in max_tokens_per_item.items()
         }
 
+    # TODO: Remove once V0 is gone
     def get_max_multimodal_tokens(self, model_config: "ModelConfig") -> int:
         """
         Get the maximum number of multi-modal tokens
@@ -188,6 +208,8 @@ class MultiModalRegistry:
     def get_mm_limits_per_prompt(
         self,
         model_config: "ModelConfig",
+        *,
+        cache: Optional[BaseMultiModalProcessorCache] = None,
     ) -> Mapping[str, int]:
         """
         Get the maximum number of multi-modal input instances for each modality
@@ -196,7 +218,7 @@ class MultiModalRegistry:
         if not model_config.is_multimodal_model:
             return {}
 
-        processor = self.create_processor(model_config, disable_cache=False)
+        processor = self.create_processor(model_config, cache=cache)
         profiler = MultiModalProfiler(processor)
         return profiler.get_mm_limits()
 
@@ -239,12 +261,32 @@ class MultiModalRegistry:
         model_cls, _ = get_model_architecture(model_config)
         return model_cls
 
+    def _create_processing_ctx(
+        self,
+        model_config: "ModelConfig",
+        tokenizer: Optional[AnyTokenizer] = None,
+    ) -> InputProcessingContext:
+        if tokenizer is None and not model_config.skip_tokenizer_init:
+            tokenizer = cached_tokenizer_from_config(model_config)
+        return InputProcessingContext(model_config, tokenizer)
+
+    def _create_processing_info(
+        self,
+        model_config: "ModelConfig",
+        *,
+        tokenizer: Optional[AnyTokenizer] = None,
+    ) -> BaseProcessingInfo:
+        model_cls = self._get_model_cls(model_config)
+        factories = self._processor_factories[model_cls]
+        ctx = self._create_processing_ctx(model_config, tokenizer)
+        return factories.info(ctx)
+
     def create_processor(
         self,
         model_config: "ModelConfig",
         *,
         tokenizer: Optional[AnyTokenizer] = None,
-        disable_cache: Optional[bool] = None,
+        cache: Optional[BaseMultiModalProcessorCache] = None,
     ) -> BaseMultiModalProcessor[BaseProcessingInfo]:
         """
         Create a multi-modal processor for a specific model and tokenizer.
@@ -252,17 +294,10 @@ class MultiModalRegistry:
         if not model_config.is_multimodal_model:
             raise ValueError(f"{model_config.model} is not a multimodal model")
 
-        if tokenizer is None and not model_config.skip_tokenizer_init:
-            tokenizer = cached_tokenizer_from_config(model_config)
-        if disable_cache is None:
-            disable_cache = not model_config.enable_mm_processor_cache
-
         model_cls = self._get_model_cls(model_config)
         factories = self._processor_factories[model_cls]
 
-        ctx = InputProcessingContext(model_config, tokenizer)
-        cache = None if disable_cache else self._get_processor_cache(
-            model_config)
+        ctx = self._create_processing_ctx(model_config, tokenizer)
 
         return factories.build_processor(ctx, cache=cache)
 
@@ -271,13 +306,15 @@ class MultiModalRegistry:
         model_config: "ModelConfig",
         seq_len: int,
         mm_counts: Optional[Mapping[str, int]] = None,
+        *,
+        cache: Optional[BaseMultiModalProcessorCache] = None,
     ) -> DummyDecoderData:
         """
         Create dummy data for profiling the memory usage of a model.
 
         The model is identified by ``model_config``.
         """
-        processor = self.create_processor(model_config, disable_cache=False)
+        processor = self.create_processor(model_config, cache=cache)
         profiler = MultiModalProfiler(processor)
         dummy_data = profiler.get_decoder_dummy_data(seq_len, mm_counts)
 
@@ -295,13 +332,15 @@ class MultiModalRegistry:
         model_config: "ModelConfig",
         seq_len: int,
         mm_counts: Optional[Mapping[str, int]] = None,
+        *,
+        cache: Optional[BaseMultiModalProcessorCache] = None,
     ) -> DummyEncoderData:
         """
         Create dummy data for profiling the memory usage of a model.
 
         The model is identified by ``model_config``.
         """
-        processor = self.create_processor(model_config, disable_cache=False)
+        processor = self.create_processor(model_config, cache=cache)
         profiler = MultiModalProfiler(processor)
         dummy_data = profiler.get_encoder_dummy_data(seq_len, mm_counts)
 
@@ -315,3 +354,22 @@ class MultiModalRegistry:
             )
 
         return dummy_data
+
+    def get_encdec_max_encoder_len(self, model_config: "ModelConfig") -> int:
+        """
+        Get the maximum length of the encoder input for encoder-decoder models.
+        """
+        if not model_config.is_encoder_decoder:
+            return 0
+        max_tokens = self.\
+            get_max_tokens_per_item_by_nonzero_modality(model_config)
+        if not max_tokens:
+            # TODO - this function assumes encoder-decoder models are
+            # multimodal. This will need to change when adding support for more
+            # than whisper.
+            return 0
+        assert len(max_tokens) == 1, "Encoder-decoder models are expected \
+            to implement the multimodal interface with at most one modality."
+
+        first_modality = next(iter(max_tokens))
+        return max_tokens[first_modality]

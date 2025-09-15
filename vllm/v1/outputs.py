@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import NamedTuple, Optional
 
@@ -94,9 +95,6 @@ class ModelRunnerOutput:
     # each request due to speculative/jump decoding.
     sampled_token_ids: list[list[int]]
 
-    # num_reqs x num_spec_tokens
-    spec_token_ids: Optional[list[list[int]]]
-
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs]
@@ -117,10 +115,32 @@ class ModelRunnerOutput:
     num_nans_in_logits: Optional[dict[str, int]] = None
 
 
+# ModelRunnerOutput wrapper for async scheduling.
+class AsyncModelRunnerOutput(ABC):
+
+    @abstractmethod
+    def get_output(self) -> ModelRunnerOutput:
+        """Get the ModelRunnerOutput for this async output.
+        
+        This is a blocking call that waits until the results are ready, which
+        might involve copying device tensors to the host.
+        This method should only be called once per AsyncModelRunnerOutput.
+        """
+        pass
+
+
+@dataclass
+class DraftTokenIds:
+
+    # [num_reqs]
+    req_ids: list[str]
+    # num_reqs x num_draft_tokens
+    draft_token_ids: list[list[int]]
+
+
 EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],
                                               req_id_to_index={},
                                               sampled_token_ids=[],
-                                              spec_token_ids=None,
                                               logprobs=None,
                                               prompt_logprobs_dict={},
                                               pooler_output=[],

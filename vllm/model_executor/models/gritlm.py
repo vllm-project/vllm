@@ -15,12 +15,12 @@ from vllm.model_executor.layers.pooler import (DispatchPooler, Pooler,
                                                build_output, get_prompt_lens,
                                                get_prompt_token_ids)
 from vllm.model_executor.models.llama import LlamaForCausalLM
-from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import PoolerOutput
 from vllm.tasks import PoolingTask
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
+from vllm.v1.pool.metadata import PoolingMetadata
 
-from .interfaces import SupportsV0Only
+from .interfaces_base import default_pooling_type
 
 logger = init_logger(__name__)
 
@@ -215,7 +215,8 @@ class GritLMPooler(Pooler):
         return build_output(pooled_data)
 
 
-class GritLM(LlamaForCausalLM, SupportsV0Only):
+@default_pooling_type("MEAN")
+class GritLM(LlamaForCausalLM):
     """This class implements the embedding model for parasail-ai/GritLM-7B-vllm.
 
     The class inherits from LlamaForCausalLM and provides a custom pooling
@@ -241,16 +242,13 @@ class GritLM(LlamaForCausalLM, SupportsV0Only):
         prefix: str = "",
         **kwargs,
     ) -> None:
-        # Use full attention for pooling (this is why V1 is not supported yet)
         if vllm_config.model_config.runner_type == "pooling":
             hf_config = vllm_config.model_config.hf_config
             hf_config.is_causal = False
 
             vllm_config.cache_config.sliding_window = None
 
-            for attr in ("sliding_window", "interleaved_sliding_window"):
-                if hasattr(hf_config, attr):
-                    delattr(hf_config, attr)
+            hf_config.sliding_window = None
 
         super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
 

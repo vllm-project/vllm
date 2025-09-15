@@ -52,7 +52,7 @@ def profile_modular_kernel(
     rank_weights = weights.slice_weights(pgi.rank, config.num_local_experts)
 
     # make modular kernel
-    mk = make_modular_kernel(config, vllm_config)
+    mk = make_modular_kernel(config, vllm_config, weights)
 
     mk_kwargs = {
         "hidden_states": rank_tensors.hidden_states,
@@ -83,7 +83,7 @@ def rank_worker(
     # sanity check
     from vllm import envs
     if config.fused_moe_chunk_size is not None:
-        assert (config.fused_moe_chunk_size == envs.VLLM_FUSED_MOE_CHUNK_SIZE)
+        assert config.fused_moe_chunk_size == envs.VLLM_FUSED_MOE_CHUNK_SIZE
 
     # get weights to this device
     weights.to_current_device()

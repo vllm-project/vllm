@@ -161,12 +161,12 @@ def test_load_without_tensorizer_load_format(vllm_runner, capfd, model_ref):
         model = vllm_runner(
             model_ref,
             model_loader_extra_config=TensorizerConfig(tensorizer_uri="test"))
+        pytest.fail("Expected RuntimeError for extra config keys")
     except RuntimeError:
         out, err = capfd.readouterr()
         combined_output = out + err
-        assert ("ValueError: Model loader extra config "
-                "is not supported for load "
-                "format LoadFormat.AUTO") in combined_output
+        assert ("ValueError: Unexpected extra config keys for load "
+                "format auto") in combined_output
     finally:
         del model
         gc.collect()
@@ -181,12 +181,13 @@ def test_raise_value_error_on_invalid_load_format(vllm_runner, capfd,
             model_ref,
             load_format="safetensors",
             model_loader_extra_config=TensorizerConfig(tensorizer_uri="test"))
+        pytest.fail("Expected RuntimeError for extra config keys")
     except RuntimeError:
         out, err = capfd.readouterr()
 
         combined_output = out + err
-        assert ("ValueError: Model loader extra config is not supported "
-                "for load format LoadFormat.SAFETENSORS") in combined_output
+        assert ("ValueError: Unexpected extra config keys "
+                "for load format safetensors") in combined_output
     finally:
         del model
         gc.collect()

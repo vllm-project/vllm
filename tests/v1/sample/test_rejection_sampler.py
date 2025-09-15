@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from vllm.platforms import current_platform
-from vllm.v1.sample.logits_processor import LogitsProcessorManager
+from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import (PLACEHOLDER_TOKEN_ID,
                                               RejectionSampler)
@@ -69,7 +69,7 @@ def create_sampling_metadata(
         output_token_ids=[],
         allowed_token_ids_mask=None,
         bad_words_token_ids={},
-        logitsprocs=LogitsProcessorManager(),
+        logitsprocs=LogitsProcessors(),
     )
 
 
