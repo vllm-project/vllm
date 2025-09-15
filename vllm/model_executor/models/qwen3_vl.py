@@ -706,7 +706,10 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo]
                 # the sampled frames indices of pre-sampled videos, which is
                 # used to calculate the timestamps. Make sure that
                 # do_sample_frames in mm_kwargs is false for presampled videos.
-                mm_kwargs["do_sample_frames"] = metadata.get(
+
+                # don't update mm_kwargs inplace, otherwise hash is incorrect
+                video_mm_kwargs = dict(**mm_kwargs)
+                video_mm_kwargs["do_sample_frames"] = metadata.get(
                     "do_sample_frames", True)
 
                 metadata = VideoMetadata(**{
@@ -721,7 +724,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo]
                 video_outputs = super()._call_hf_processor(
                     prompt="<|vision_start|><|video_pad|><|vision_end|>",
                     mm_data=video_mm_data,
-                    mm_kwargs=mm_kwargs,
+                    mm_kwargs=video_mm_kwargs,
                     tok_kwargs=tok_kwargs,
                 )
                 input_ids = video_outputs.pop("input_ids")

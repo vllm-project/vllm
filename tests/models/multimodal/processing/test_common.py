@@ -58,6 +58,7 @@ def qwen3_vl_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
             "duration": num_frames / 2.0,
             "video_backend": "opencv",
             "frames_indices": list(range(num_frames)),
+            "do_sample_frames": True,
         }
 
     # Ensure video metadata is included
@@ -361,7 +362,7 @@ def _test_processing_correctness_one(
     "Qwen/Qwen2.5-VL-3B-Instruct",
     "Qwen/Qwen2-Audio-7B-Instruct",
     "Qwen/Qwen2.5-Omni-3B",
-    "Qwen/Qwen3-VL-4B-Instruct",
+    "/home/mozf/LLM/Qwen3-VL-4B-Instruct",
     "Qwen/Qwen3-VL-30B-A3B-Instruct",
     "YannQi/R-4B",
     "Skywork/Skywork-R1V-38B",
