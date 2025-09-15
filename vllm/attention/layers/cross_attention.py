@@ -29,8 +29,7 @@ def _get_max_encoder_len(vllm_config: "VllmConfig") -> int:
         "max_num_encoder_input_tokens",
         0,
     )
-    return (max_len if isinstance(max_len, int) and
-            max_len > 0 else 0)
+    return (max_len if isinstance(max_len, int) and max_len > 0 else 0)
 
 
 def _get_cross_slot_mapping(encoder_seq_lens: np.ndarray,
