@@ -196,6 +196,7 @@ _EMBEDDING_MODELS = {
 
 _CROSS_ENCODER_MODELS = {
     "BertForSequenceClassification": ("bert", "BertForSequenceClassification"),
+    "BertForTokenClassification": ("bert", "BertForTokenClassification"),
     "GteNewForSequenceClassification": ("bert_with_rope",
                                         "GteNewForSequenceClassification"),
     "ModernBertForSequenceClassification": ("modernbert",
