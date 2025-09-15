@@ -84,7 +84,7 @@ class DPMetadata:
         # point that could adversely affect performance of vllm with asynch
         # scheduling. This environment variable exists to quickly disable
         # this optimization if we run into this case.
-        if envs.VLLM_DISABLE_NCCL_DP_PADDING:
+        if envs.VLLM_DISABLE_NCCL_FOR_DP_SYNCHRONIZATION:
             logger.info_once(
                 "Using CPU all reduce to syncronize DP padding between ranks.")
             device = "cpu"
