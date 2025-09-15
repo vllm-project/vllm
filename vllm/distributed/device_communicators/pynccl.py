@@ -155,9 +155,7 @@ class PyNcclCommunicator:
         if (self.world_size == 8
                 and input_tensor.numel() > 8 * 1024 * 1024):  # 8 MB
             return True
-
-        if self.world_size > 8:
-            return True
+        return self.world_size > 8
 
     def all_reduce(self,
                    in_tensor: torch.Tensor,
