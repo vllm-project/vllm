@@ -29,6 +29,14 @@ from vllm.v1.utils import (APIServerProcessManager,
 
 logger = init_logger(__name__)
 
+DESCRIPTION = """Launch a local OpenAI-compatible API server to serve LLM
+completions via HTTP. Defaults to Qwen/Qwen3-0.6B if no model is specified.
+
+Search by using: `--help=<ConfigGroup>` to explore options by section (e.g.,
+--help=modelconfig, --help=frontend)
+  Use `--help=all` to show all available flags at once.
+"""
+
 
 class ServeSubcommand(CLISubcommand):
     """The `serve` subcommand for the vLLM CLI. """
@@ -56,9 +64,8 @@ class ServeSubcommand(CLISubcommand):
             self,
             subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
         serve_parser = subparsers.add_parser(
-            "serve",
-            help="Start the vLLM OpenAI Compatible API server.",
-            description="Start the vLLM OpenAI Compatible API server.",
+            self.name,
+            description=DESCRIPTION,
             usage="vllm serve [model_tag] [options]")
 
         serve_parser = make_arg_parser(serve_parser)
