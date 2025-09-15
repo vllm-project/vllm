@@ -387,7 +387,9 @@ def parse_remaining_state(
             id=f"msg_{random_uuid()}",
             content=[output_text],
             role="assistant",
-            status="completed",
+            # if the parser still has messages (ie if the generator got cut
+            # abruptly), this should be incomplete
+            status="incomplete",
             type="message",
         )
         return [text_item]
