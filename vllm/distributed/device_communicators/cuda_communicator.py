@@ -116,7 +116,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # since currently we perform copy input -> symm_input -> out-of-place AR
         # return symm_output, we don't need to check if input is symmetric
         if self.pynccl_comm is not None and \
-            self.pynccl_comm.should_use_nccl_symm_mem_allreduce(input_):
+            self.pynccl_comm.should_nccl_symm_mem_allreduce(input_):
             out = torch.ops.vllm.all_reduce_symmetric_with_copy(input_)
             if out is not None:
                 return out

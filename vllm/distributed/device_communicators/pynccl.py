@@ -8,8 +8,6 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup, ReduceOp
 
-from vllm.distributed.device_communicators.pynccl_allocator import(
-  is_symmetric_memory_enabled,)
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     NCCLLibrary, buffer_type, cudaStream_t, ncclComm_t, ncclDataTypeEnum,
     ncclRedOpTypeEnum, ncclUniqueId)
@@ -146,10 +144,26 @@ class PyNcclCommunicator:
             stream.synchronize()
             del data
 
-    def should_use_nccl_symm_mem_allreduce(
+    def should_nccl_symm_mem_allreduce(
         self, input_tensor: torch.Tensor
     ) -> bool:
-        if is_symmetric_memory_enabled():
+        from vllm.distributed.device_communicators.pynccl_allocator import (
+            is_symmetric_memory_enabled,
+        )
+        if not is_symmetric_memory_enabled():
+            return False
+        if self.world_size < 4:
+            return False
+        if (
+            self.world_size == 4 and input_tensor.numel() > 2 * 1024 * 1024
+        ):  # 2 MB
+            return True
+        if (
+            self.world_size == 8 and input_tensor.numel() > 8 * 1024 * 1024
+        ):  # 8 MB
+            return True
+
+        if self.world_size > 8:
             return True
 
     def all_reduce(self,
