@@ -229,7 +229,8 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
     def get_max_image_tokens(self) -> int:
         width, height = self.get_max_image_size()
         processor = self.get_hf_processor()
-        mm_processor_kwargs = self.ctx.model_config.mm_processor_kwargs or {}
+        multimodal_config = self.ctx.model_config.multimodal_config
+        mm_processor_kwargs = multimodal_config.mm_processor_kwargs or {}
         mm_tokens = processor._get_num_multimodal_tokens(
             image_sizes=([height, width], ), **mm_processor_kwargs)
         image_tokens = mm_tokens["num_image_tokens"][0]
@@ -380,8 +381,8 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         # Below tested on Llava. Prompts and `mm_token_type_ids` are always bs=1
         mm_positions = torch.where(mm_token_type_ids == 1)[1]
         images = mm_items.get_items("image", ImageProcessorItems)
-        mm_processor_kwargs = (self.info.ctx.model_config.mm_processor_kwargs
-                               or {})
+        multimodal_config = self.info.ctx.model_config.multimodal_config
+        mm_processor_kwargs = multimodal_config.mm_processor_kwargs or {}
         image_sizes = []
         for item_idx in range(len(images)):
             image_size = images.get_image_size(item_idx)

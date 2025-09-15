@@ -31,7 +31,7 @@ def _mk_processor(monkeypatch,
                         raising=True)
     monkeypatch.setattr(ModelConfig,
                         "__post_init__",
-                        lambda self: None,
+                        lambda self, *args: None,
                         raising=True)
     monkeypatch.setattr(UnspecifiedPlatform,
                         "is_async_output_supported",

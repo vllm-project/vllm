@@ -27,12 +27,14 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          DistributedExecutorBackend, EPLBConfig,
                          GuidedDecodingBackend, HfOverrides, KVEventsConfig,
                          KVTransferConfig, LoadConfig, LogprobsMode,
-                         LoRAConfig, MambaDType, MMCacheType, MMEncoderTPMode,
-                         ModelConfig, ModelDType, ModelImpl, MultiModalConfig,
-                         ObservabilityConfig, ParallelConfig, PoolerConfig,
-                         PrefixCachingHashAlgo, RunnerOption, SchedulerConfig,
-                         SchedulerPolicy, SpeculativeConfig, TaskOption,
-                         TokenizerMode, VllmConfig, get_attr_docs, get_field)
+                         LoRAConfig, MambaDType, MMEncoderTPMode, ModelConfig,
+                         ModelDType, ModelImpl, ObservabilityConfig,
+                         ParallelConfig, PoolerConfig, PrefixCachingHashAlgo,
+                         RunnerOption, SchedulerConfig, SchedulerPolicy,
+                         SpeculativeConfig, TaskOption, TokenizerMode,
+                         VllmConfig, get_attr_docs)
+from vllm.config.multimodal import MMCacheType, MultiModalConfig
+from vllm.config.utils import get_field
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
