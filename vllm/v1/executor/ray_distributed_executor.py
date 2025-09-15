@@ -51,8 +51,6 @@ class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
 
         # KV connector setup
         self.has_connector = self.vllm_config.kv_transfer_config is not None
-        self.kv_output_aggregator = KVOutputAggregator(
-            self.parallel_config.world_size)
 
     @property
     def max_concurrent_batches(self) -> int:
