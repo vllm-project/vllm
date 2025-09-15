@@ -1437,9 +1437,17 @@ class ModelConfig:
                    None) is not None:
             return self.hf_text_config.hidden_size_per_head
 
+        # NOTE: Some models (such as MPT) use `d_model` and `n_heads`
+        hidden_size = getattr(self.hf_text_config, "hidden_size",
+                              getattr(self.hf_text_config, "d_model", None))
+        num_heads = getattr(self.hf_text_config, "num_attention_heads",
+                            getattr(self.hf_text_config, "n_heads", None))
+        if hidden_size is None or num_heads is None:
+            raise AttributeError(
+                "Cannot determine head size: missing hidden_size or"
+                "num_attention_heads in the config")
         # FIXME(woosuk): This may not be true for all models.
-        return (self.hf_text_config.hidden_size //
-                self.hf_text_config.num_attention_heads)
+        return hidden_size // num_heads
 
     def get_total_num_kv_heads(self) -> int:
         """Returns the total number of KV heads."""

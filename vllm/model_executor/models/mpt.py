@@ -60,15 +60,15 @@ class MPTAttention(nn.Module):
         self.d_model = config.d_model
         self.total_num_heads = config.n_heads
         self.head_dim = self.d_model // self.total_num_heads
-        self.clip_qkv = config.attn_config.clip_qkv
-        self.qk_ln = config.attn_config.qk_ln
-        self.alibi_bias_max = config.attn_config.alibi_bias_max
+        self.clip_qkv = config.attn_config['clip_qkv']
+        self.qk_ln = config.attn_config['qk_ln']
+        self.alibi_bias_max = config.attn_config['alibi_bias_max']
         if "kv_n_heads" in config.attn_config:
-            self.total_num_kv_heads = config.attn_config.kv_n_heads
+            self.total_num_kv_heads = config.attn_config['kv_n_heads']
         else:
             self.total_num_kv_heads = self.total_num_heads
-        assert not config.attn_config.prefix_lm
-        assert config.attn_config.alibi
+        assert not config.attn_config['prefix_lm']
+        assert config.attn_config['alibi']
 
         # pylint: disable=invalid-name
         self.Wqkv = QKVParallelLinear(
