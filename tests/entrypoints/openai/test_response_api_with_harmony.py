@@ -344,14 +344,15 @@ async def test_streaming_types(client: OpenAI, model_name: str):
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("background", [True, False])
 async def test_streaming(client: OpenAI, model_name: str, background: bool):
-    # TODO: Add back when web search and code interpreter are available in CI
+    # TODO: Add back when code interpreter are available in CI
     prompts = [
         "tell me a story about a cat in 20 words",
         # "What is 13 * 24? Use python to calculate the result.",
         "When did Jensen found NVIDIA? Search it and answer the year only.",
     ]
+    requires_web_search = [False, False, True]
 
-    for prompt in prompts:
+    for prompt, require_web_search in zip(prompts, requires_web_search):
         response = await client.responses.create(
             model=model_name,
             input=prompt,
@@ -375,6 +376,7 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
         current_content_index = -1
 
         events = []
+        web_search_event_count = 0
         current_event_mode = None
         resp_id = None
         async for event in response:
@@ -417,11 +419,14 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
             elif ("response.output_item.added" in event.type
                   and event.item.type == "web_search_call"):
                 print(f"Web search: {event.item.action}", end="", flush=True)
+                web_search_event_count += 1
             events.append(event)
 
         assert len(events) > 0
         response_completed_event = events[-1]
         assert len(response_completed_event.response.output) > 0
+        if require_web_search:
+            assert web_search_event_count > 0
 
         if background:
             starting_after = 5
@@ -447,6 +452,7 @@ async def test_web_search(client: OpenAI, model_name: str):
     )
     assert response is not None
     assert response.status == "completed"
+    assert "web_search_call" in [output.type for output in response.output]
 
 
 @pytest.mark.asyncio
