@@ -437,15 +437,16 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
     def _load_modelinfo_from_cache(self,
                                    module_hash: str) -> _ModelInfo | None:
         try:
-            modelinfo_path = self._get_cache_dir() / self._get_cache_filename()
-            if not modelinfo_path.exists():
+            try:
+                modelinfo_path = self._get_cache_dir(
+                ) / self._get_cache_filename()
+                with open(modelinfo_path, encoding="utf-8") as file:
+                    mi_dict = json.load(file)
+            except FileNotFoundError:
                 logger.debug(("Cached model info file "
                               "for class %s.%s not found"), self.module_name,
                              self.class_name)
                 return None
-
-            with open(modelinfo_path, encoding="utf-8") as file:
-                mi_dict = json.load(file)
 
             if mi_dict["hash"] != module_hash:
                 logger.debug(("Cached model info file "
@@ -464,6 +465,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
     def _save_modelinfo_to_cache(self, mi: _ModelInfo,
                                  module_hash: str) -> None:
         """save dictionary json file to cache"""
+        from vllm.model_executor.model_loader.weight_utils import atomic_writer
         try:
             mi_dict = {}
             for f in fields(mi):
@@ -472,16 +474,16 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
                 "hash": module_hash,
                 "modelinfo": mi_dict,
             }
-            modelinfo_path = self._get_cache_dir() / self._get_cache_filename()
-            with open(modelinfo_path, "w", encoding="utf-8") as f:
+            cache_dir = self._get_cache_dir()
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            modelinfo_path = cache_dir / self._get_cache_filename()
+            with atomic_writer(modelinfo_path, encoding='utf-8') as f:
                 json.dump(modelinfo_dict, f, indent=2)
         except Exception:
             logger.exception("Error saving model info cache.")
 
     @logtime(logger=logger, msg="Registry inspect model class")
     def inspect_model_cls(self) -> _ModelInfo:
-        from vllm.model_executor.model_loader.weight_utils import get_lock
-
         model_path = Path(
             __file__).parent / f"{self.module_name.split('.')[-1]}.py"
 
@@ -490,30 +492,28 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
         with open(model_path, "rb") as f:
             module_hash = hashlib.md5(f.read()).hexdigest()
 
-        with get_lock(self._get_cache_filename(), self._get_cache_dir()):
-            mi = self._load_modelinfo_from_cache(module_hash)
-            if mi is not None:
-                logger.debug(("Loaded model info "
-                              "for class %s.%s from cache"), self.module_name,
-                             self.class_name)
-                return mi
-            else:
-                logger.debug(("Cache model info "
-                              "for class %s.%s miss. "
-                              "Loading model instead."), self.module_name,
-                             self.class_name)
-
-            # Performed in another process to avoid initializing CUDA
-            mi = _run_in_subprocess(
-                lambda: _ModelInfo.from_model_cls(self.load_model_cls()))
-
-            logger.debug("Loaded model info for class %s.%s", self.module_name,
+        mi = self._load_modelinfo_from_cache(module_hash)
+        if mi is not None:
+            logger.debug(("Loaded model info "
+                          "for class %s.%s from cache"), self.module_name,
+                         self.class_name)
+            return mi
+        else:
+            logger.debug(("Cache model info "
+                          "for class %s.%s miss. "
+                          "Loading model instead."), self.module_name,
                          self.class_name)
 
-            # save cache file
-            self._save_modelinfo_to_cache(mi, module_hash)
+        # Performed in another process to avoid initializing CUDA
+        mi = _run_in_subprocess(
+            lambda: _ModelInfo.from_model_cls(self.load_model_cls()))
+        logger.debug("Loaded model info for class %s.%s", self.module_name,
+                     self.class_name)
 
-            return mi
+        # save cache file
+        self._save_modelinfo_to_cache(mi, module_hash)
+
+        return mi
 
     def load_model_cls(self) -> type[nn.Module]:
         mod = importlib.import_module(self.module_name)
