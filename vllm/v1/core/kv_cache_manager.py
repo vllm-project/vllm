@@ -301,72 +301,64 @@ class KVCacheManager:
             new_computed_block_list = tuple(
                 [] for _ in range(len(self.kv_cache_config.kv_cache_groups)))
 
-        total_computed_tokens = sum([
-            request.num_computed_tokens,
-            num_new_computed_tokens,
-            num_extra_tokens_from_connector,
-        ])
-        total_tokens_need_slots = total_computed_tokens + num_new_tokens +\
-            num_lookahead_tokens
+        # Free the blocks that are skipped during the attention computation
+        # (e.g., tokens outside the sliding window).
+        # We can do this even if we cannot schedule this request due to
+        # insufficient free blocks.
+        # Should call this function before allocating new blocks to reduce
+        # the number of evicted blocks.
+        self.coordinator.remove_skipped_blocks(request.request_id,
+                                               request.num_computed_tokens)
 
-        # Free unnecessary blocks (e.g. outside sliding window)
-        # in request.num_computed_tokens
-        self.coordinator.free_blocks_outside_attention_window(
-            request.request_id,
-            request.num_computed_tokens,
+        # The number of computed tokens is the number of computed tokens plus
+        # the new prefix caching hits
+        num_computed_tokens = (request.num_computed_tokens +
+                               num_new_computed_tokens)
+        num_tokens_need_slot = min(
+            num_computed_tokens + num_new_tokens + num_lookahead_tokens,
+            self.max_model_len)
+
+        num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
+            request_id=request.request_id,
+            num_tokens=num_tokens_need_slot,
+            new_computed_blocks=new_computed_block_list,
+            num_encoder_tokens=num_encoder_tokens,
         )
-        # Check if we have sufficient free blocks.
-        if not self._can_allocate(
-                request,
-                total_tokens_need_slots,
-                new_computed_block_list,
-                total_computed_tokens,
-                num_encoder_tokens,
-        ):
+
+        if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
+            # Cannot allocate new blocks
             return None
 
+        # Touch the computed blocks to make sure they won't be evicted.
         if self.enable_caching:
             self.block_pool.touch(new_computed_block_list)
-            self.coordinator.save_new_computed_blocks(
-                request.request_id,
-                new_computed_block_list,
-            )
-            self.coordinator.free_blocks_outside_attention_window(
-                request.request_id,
-                total_computed_tokens,
-            )
-            # need to allocate blocks for connector-cached tokens.
-            extra_blocks_for_connector = KVCacheBlocks(
-                self.coordinator.allocate_new_blocks(
-                    request.request_id,
-                    total_computed_tokens,
-                ))
         else:
             assert not any(new_computed_block_list), (
                 "Computed blocks should be empty when "
                 "prefix caching is disabled")
-            extra_blocks_for_connector = self.create_empty_block_list()
 
-        # For new blocks to be computed, we just allocate them normally.
-        new_blocks_to_be_computed = KVCacheBlocks(
-            self.coordinator.allocate_new_blocks(request.request_id,
-                                                 total_tokens_need_slots,
-                                                 num_encoder_tokens))
+        # Append the new computed blocks to the request blocks until now to
+        # avoid the case where the new blocks cannot be allocated.
+        self.coordinator.save_new_computed_blocks(request.request_id,
+                                                  new_computed_block_list)
 
-        # P/D: don't cache blocks when the blocks are still being
-        # asynchronously received from the connector.
+        new_blocks = self.coordinator.allocate_new_blocks(
+            request.request_id, num_tokens_need_slot, num_encoder_tokens)
+
+        # P/D: delay caching blocks if we have to recv from
+        # remote. Update state for locally cached blocks.
         if not self.enable_caching or delay_cache_blocks:
-            return extra_blocks_for_connector + new_blocks_to_be_computed
+            return KVCacheBlocks(new_blocks)
 
         # NOTE(woosuk): We want to commit (cache) up to num_computed_tokens +
         # num_new_tokens, but must exclude "non-committable" tokens (e.g.,
         # draft tokens that could be rejected). Therefore, we cap the number
         # at `request.num_tokens`, ensuring only "finalized" tokens are cached.
-        num_tokens_to_cache = min(total_computed_tokens + num_new_tokens,
+        num_tokens_to_cache = min(num_computed_tokens + num_new_tokens,
                                   request.num_tokens)
         self.coordinator.cache_blocks(request, num_tokens_to_cache)
 
-        return extra_blocks_for_connector + new_blocks_to_be_computed
+        return KVCacheBlocks(new_blocks)
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
