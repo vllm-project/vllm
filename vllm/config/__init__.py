@@ -11,13 +11,12 @@ import json
 import os
 import textwrap
 import warnings
-from collections.abc import Mapping
 from contextlib import contextmanager
-from dataclasses import MISSING, Field, field, fields, is_dataclass, replace
+from dataclasses import InitVar, field, fields, is_dataclass, replace
 from functools import cached_property, lru_cache
 from importlib.util import find_spec
-from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
-                    Protocol, TypeVar, Union, cast, get_args)
+from typing import (TYPE_CHECKING, Any, Callable, Literal, Optional, Protocol,
+                    TypeVar, Union, cast, get_args)
 
 import regex as re
 import torch
@@ -37,6 +36,8 @@ from vllm.config.kv_events import KVEventsConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.config.load import LoadConfig
 from vllm.config.lora import LoRAConfig
+from vllm.config.multimodal import (MMCacheType, MMEncoderTPMode,
+                                    MultiModalConfig)
 from vllm.config.parallel import (DistributedExecutorBackend, EPLBConfig,
                                   ParallelConfig)
 from vllm.config.scheduler import SchedulerConfig, SchedulerPolicy
@@ -238,31 +239,12 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
     return out
 
 
-def get_field(cls: ConfigType, name: str) -> Field:
-    """Get the default factory field of a dataclass by name. Used for getting
-    default factory fields in `EngineArgs`."""
-    if not is_dataclass(cls):
-        raise TypeError("The given class is not a dataclass.")
-    cls_fields = {f.name: f for f in fields(cls)}
-    if name not in cls_fields:
-        raise ValueError(f"Field '{name}' not found in {cls.__name__}.")
-    named_field: Field = cls_fields[name]
-    if (default_factory := named_field.default_factory) is not MISSING:
-        return field(default_factory=default_factory)
-    if (default := named_field.default) is not MISSING:
-        return field(default=default)
-    raise ValueError(
-        f"{cls.__name__}.{name} must have a default value or default factory.")
-
-
 def is_init_field(cls: ConfigType, name: str) -> bool:
     return next(f for f in fields(cls) if f.name == name).init
 
 
 TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
-MMEncoderTPMode = Literal["weights", "data"]
-MMCacheType = Literal["shm", "lru"]
 
 
 class LogprobsMode(enum.Enum):
@@ -407,20 +389,6 @@ class ModelConfig:
     that this name(s) will also be used in `model_name` tag content of
     prometheus metrics, if multiple names provided, metrics tag will take the
     first one."""
-    limit_mm_per_prompt: dict[str, int] = field(default_factory=dict)
-    """Maximum number of data items per modality per prompt. Only applicable
-    for multimodal models."""
-    interleave_mm_strings: bool = False
-    """Enable fully interleaved support for multimodal prompts, while using
-    --chat-template-content-format=string. Defaults to False."""
-    skip_mm_profiling: bool = False
-    """When enabled, skips multimodal memory profiling and only profiles with
-    language backbone model during engine initialization.
-    """
-    media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
-    """Additional args passed to process media inputs, keyed by modalities.
-    For example, to set num_frames for video, set
-    `--media-io-kwargs '{"video": {"num_frames": 40} }'` """
     use_async_output_proc: bool = True
     """Whether to use async output processor."""
     config_format: Union[str, ConfigFormat] = "auto"
@@ -436,41 +404,6 @@ class ModelConfig:
     hf_overrides: HfOverrides = field(default_factory=dict)
     """If a dictionary, contains arguments to be forwarded to the Hugging Face
     config. If a callable, it is called to update the HuggingFace config."""
-    mm_processor_kwargs: Optional[dict[str, Any]] = None
-    """Arguments to be forwarded to the model's processor for multi-modal data,
-    e.g., image processor. Overrides for the multi-modal processor obtained
-    from `AutoProcessor.from_pretrained`. The available overrides depend on the
-    model that is being run. For example, for Phi-3-Vision: `{"num_crops": 4}`.
-    """
-    mm_processor_cache_gb: float = 4
-    """The size (in GiB) of the multi-modal processor cache, which is used to
-    avoid re-processing past multi-modal inputs.
-
-    This cache is duplicated for each API process and engine core process,
-    resulting in a total memory usage of
-    `mm_processor_cache_gb * (api_server_count + data_parallel_size)`.
-
-    Set to `0` to disable this cache completely (not recommended)."""
-    mm_processor_cache_type: MMCacheType = "lru"
-    """Type of cache to use for the multi-modal preprocessor/mapper. If `shm`,
-    use shared memory FIFO cache. If `lru`, use mirrored LRU cache."""
-    mm_shm_cache_max_object_size_mb: int = 128
-    """Size limit (in MiB) for each object stored in the multi-modal processor
-    shared memory cache. Only effective when `mm_processor_cache_type` is
-    `"shm"`."""
-    mm_encoder_tp_mode: MMEncoderTPMode = "weights"
-    """Indicates how to optimize multi-modal encoder inference using
-    tensor parallelism (TP).
-
-    - `"weights"`: Within the same vLLM engine, split the weights of
-        each layer across TP ranks. (default TP behavior)
-    - `"data"`: Within the same vLLM engine, split the batched input data
-        across TP ranks to process the data in parallel, while hosting
-        the full weights on each TP rank.
-        This batch-level DP is not to be confused with API request-level
-        DP (which is controlled by `--data-parallel-size`).
-        This is only supported on a per-model basis and falls back to
-        `"weights"` if the encoder does not support DP."""
     pooler_config: Optional["PoolerConfig"] = field(init=False)
     """Pooler config which controls the behaviour of output pooling in pooling
     models."""
@@ -513,6 +446,18 @@ class ModelConfig:
     io_processor_plugin: Optional[str] = None
     """IOProcessor plugin name to load at model startup"""
 
+    # Multimodal config and init vars
+    multimodal_config: Optional[MultiModalConfig] = None
+    limit_mm_per_prompt: InitVar[Optional[dict[str, int]]] = None
+    media_io_kwargs: InitVar[Optional[dict[str, dict[str, Any]]]] = None
+    mm_processor_kwargs: InitVar[Optional[dict[str, Any]]] = None
+    mm_processor_cache_gb: InitVar[Optional[float]] = None
+    mm_processor_cache_type: InitVar[Optional[MMCacheType]] = None
+    mm_shm_cache_max_object_size_mb: InitVar[Optional[int]] = None
+    mm_encoder_tp_mode: InitVar[Optional[MMEncoderTPMode]] = None
+    interleave_mm_strings: InitVar[Optional[bool]] = None
+    skip_mm_profiling: InitVar[Optional[bool]] = None
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -546,7 +491,18 @@ class ModelConfig:
         assert_hashable(str_factors)
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
-    def __post_init__(self) -> None:
+    def __post_init__(
+            self,
+            # Multimodal config init vars
+            limit_mm_per_prompt: Optional[dict[str, int]],
+            media_io_kwargs: Optional[dict[str, dict[str, Any]]],
+            mm_processor_kwargs: Optional[dict[str, Any]],
+            mm_processor_cache_gb: Optional[float],
+            mm_processor_cache_type: Optional[MMCacheType],
+            mm_shm_cache_max_object_size_mb: Optional[int],
+            mm_encoder_tp_mode: Optional[MMEncoderTPMode],
+            interleave_mm_strings: Optional[bool],
+            skip_mm_profiling: Optional[bool]) -> None:
         # Set the default seed to 0 in V1.
         # NOTE(woosuk): In V0, we set the default seed to None because the
         # driver worker shares the same process as the user process, and thus
@@ -777,7 +733,33 @@ class ModelConfig:
 
         self.original_max_model_len = self.max_model_len
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
-        self.multimodal_config = self._init_multimodal_config()
+        # Init multimodal config if needed
+        if self._model_info.supports_multimodal:
+            if (mm_encoder_tp_mode == "data" and
+                    not self._model_info.supports_multimodal_encoder_tp_data):
+                logger.warning_once(
+                    "This model does not support `--mm-encoder-tp-mode data`. "
+                    "Falling back to `--mm-encoder-tp-mode weights`.")
+                mm_encoder_tp_mode = "weights"
+
+            mm_config_kwargs = dict(
+                limit_per_prompt=limit_mm_per_prompt,
+                media_io_kwargs=media_io_kwargs,
+                mm_processor_kwargs=mm_processor_kwargs,
+                mm_processor_cache_gb=mm_processor_cache_gb,
+                mm_processor_cache_type=mm_processor_cache_type,
+                mm_shm_cache_max_object_size_mb=mm_shm_cache_max_object_size_mb,
+                mm_encoder_tp_mode=mm_encoder_tp_mode,
+                interleave_mm_strings=interleave_mm_strings,
+                skip_mm_profiling=skip_mm_profiling,
+            )
+
+            mm_config_kwargs = {
+                k: v
+                for k, v in mm_config_kwargs.items() if v is not None
+            }
+
+            self.multimodal_config = MultiModalConfig(**mm_config_kwargs)
 
         if self.disable_sliding_window:
             # Set after get_and_verify_max_len to ensure that max_model_len
@@ -874,30 +856,6 @@ class ModelConfig:
                 model,
                 ignore_pattern=["*.pt", "*.safetensors", "*.bin", "*.tensors"])
             self.tokenizer = object_storage_tokenizer.dir
-
-    def _init_multimodal_config(self) -> Optional["MultiModalConfig"]:
-        if self._model_info.supports_multimodal:
-            if (self.mm_encoder_tp_mode == "data" and
-                    not self._model_info.supports_multimodal_encoder_tp_data):
-                logger.warning_once(
-                    "This model does not support `--mm-encoder-tp-mode data`. "
-                    "Falling back to `--mm-encoder-tp-mode weights`.")
-                self.mm_encoder_tp_mode = "weights"
-
-            return MultiModalConfig(
-                limit_per_prompt=self.limit_mm_per_prompt,
-                media_io_kwargs=self.media_io_kwargs,
-                mm_processor_kwargs=self.mm_processor_kwargs,
-                mm_processor_cache_gb=self.mm_processor_cache_gb,
-                mm_processor_cache_type=self.mm_processor_cache_type,
-                mm_shm_cache_max_object_size_mb=self.
-                mm_shm_cache_max_object_size_mb,
-                mm_encoder_tp_mode=self.mm_encoder_tp_mode,
-                interleave_mm_strings=self.interleave_mm_strings,
-                skip_mm_profiling=self.skip_mm_profiling,
-            )
-
-        return None
 
     def _get_encoder_config(self):
         return get_sentence_transformer_tokenizer_config(
@@ -2415,129 +2373,6 @@ class SpeculativeConfig:
         model = None if method == "ngram" else self.draft_model_config.model
         num_spec_tokens = self.num_speculative_tokens
         return f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=})"
-
-
-@config
-@dataclass
-class MultiModalConfig:
-    """Controls the behavior of multimodal models."""
-
-    limit_per_prompt: dict[str, int] = \
-        cast(dict[str, int], get_field(ModelConfig, "limit_mm_per_prompt"))
-    """
-    The maximum number of input items allowed per prompt for each modality.
-    Defaults to 1 (V0) or 999 (V1) for each modality.
-
-    For example, to allow up to 16 images and 2 videos per prompt:
-    `{"image": 16, "video": 2}`
-    """
-
-    media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
-    """Additional args passed to process media inputs, keyed by modalities.
-    For example, to set num_frames for video, set
-    `--media-io-kwargs '{"video": {"num_frames": 40} }'` """
-
-    mm_processor_kwargs: Optional[dict[str, object]] = None
-    """
-    Overrides for the multi-modal processor obtained from
-    `transformers.AutoProcessor.from_pretrained`.
-
-    The available overrides depend on the model that is being run.
-
-    For example, for Phi-3-Vision:
-    `{"num_crops": 4}`.
-    """
-
-    mm_processor_cache_gb: float = 4
-    """
-    The size (in GiB) of the multi-modal processor cache, which is used to
-
-    This cache is duplicated for each API process and engine core process,
-    resulting in a total memory usage of
-    `mm_processor_cache_gb * (api_server_count + data_parallel_size)`.
-
-    Set to `0` to disable this cache completely (not recommended).
-    """
-
-    mm_processor_cache_type: MMCacheType = "lru"
-    """Type of cache to use for the multi-modal preprocessor/mapper. If `shm`,
-    use shared memory FIFO cache. If `lru`, use mirrored LRU cache."""
-
-    mm_shm_cache_max_object_size_mb: int = 128
-    """Size limit (in MiB) for each object stored in the multi-modal processor
-    shared memory cache. Only effective when `mm_processor_cache_type` is
-    `"shm"`."""
-
-    mm_encoder_tp_mode: MMEncoderTPMode = "weights"
-    """
-    Indicates how to optimize multi-modal encoder inference using
-    tensor parallelism (TP).
-
-    - `"weights"`: Within the same vLLM engine, split the weights of
-        each layer across TP ranks. (default TP behavior)
-    - `"data"`: Within the same vLLM engine, split the batched input data
-        across TP ranks to process the data in parallel, while hosting
-        the full weights on each TP rank.
-        This batch-level DP is not to be confused with API request-level
-        DP (which is controlled by `--data-parallel-size`).
-        This is only supported on a per-model basis and falls back to
-        `"weights"` if the encoder does not support DP.
-    """
-
-    interleave_mm_strings: bool = False
-    """
-    Enable fully interleaved support for multimodal prompts.
-    """
-
-    skip_mm_profiling: bool = False
-    """
-    When enabled, skips multimodal memory profiling and only profiles with
-    language backbone model during engine initialization.
-
-    This reduces engine startup time but shifts the responsibility to users for
-    estimating the peak memory usage of the activation of multimodal encoder and
-    embedding cache.
-    """
-
-    def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
-
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
-        """
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode(),
-                               usedforsecurity=False).hexdigest()
-        return hash_str
-
-    def get_limit_per_prompt(self, modality: str) -> int:
-        """
-        Get the maximum number of input items allowed per prompt
-        for the given modality.
-        """
-        return self.limit_per_prompt.get(
-            modality,
-            999 if envs.VLLM_USE_V1 else 1,
-        )
-
-    def merge_mm_processor_kwargs(
-        self,
-        inference_kwargs: Mapping[str, object],
-    ) -> dict[str, object]:
-        """
-        Get the keyword arguments to pass to the multi-modal processor
-        according to the extra arguments passed during inference.
-        """
-        kwargs = self.mm_processor_kwargs or {}
-        return kwargs | dict(inference_kwargs)
 
 
 @config
