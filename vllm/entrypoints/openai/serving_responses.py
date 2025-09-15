@@ -1353,6 +1353,7 @@ class OpenAIServingResponses(OpenAIServing):
                         and ctx.parser.current_recipient is None):
                     if not sent_output_item_added:
                         sent_output_item_added = True
+                        current_item_id = f"msg_{random_uuid()}"
                         yield _increment_sequence_number_and_return(
                             openai_responses_types.
                             ResponseOutputItemAddedEvent(
@@ -1414,6 +1415,7 @@ class OpenAIServingResponses(OpenAIServing):
                                     status="in_progress",
                                 ),
                             ))
+                        current_content_index += 1
                         yield _increment_sequence_number_and_return(
                             openai_responses_types.
                             ResponseContentPartAddedEvent(
@@ -1446,6 +1448,7 @@ class OpenAIServingResponses(OpenAIServing):
                       ) and ctx.parser.current_recipient == "python":
                     if not sent_output_item_added:
                         sent_output_item_added = True
+                        current_item_id = f"tool_{random_uuid()}"
                         yield _increment_sequence_number_and_return(
                             openai_responses_types.
                             ResponseOutputItemAddedEvent(
