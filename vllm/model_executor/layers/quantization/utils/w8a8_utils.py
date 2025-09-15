@@ -447,7 +447,8 @@ class Fp8LinearOp:
         self.use_aiter_and_is_supported = (current_platform.is_rocm()
                                            and envs.VLLM_ROCM_USE_AITER
                                            and envs.VLLM_ROCM_USE_AITER_LINEAR
-                                           and current_platform.is_fp8_fnuz())
+                                           and current_platform.is_fp8_fnuz()
+                                           and pad_output is not True)
 
         if self.use_aiter_and_is_supported:
             self.preferred_backend = "aiter"
@@ -471,6 +472,8 @@ class Fp8LinearOp:
             config = get_current_vllm_config().compilation_config
             pad_output = config.level < CompilationLevel.PIECEWISE and \
                          self.preferred_backend == "torch"
+        else:
+            pad_output = pad_output and self.preferred_backend == "torch"
 
         self.output_padding = 17 if pad_output else None
         self.act_quant_static = act_quant_static

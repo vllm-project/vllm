@@ -90,6 +90,12 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             else:
                 weight_scale = layer.weight_scale.data
 
+            from vllm._aiter_ops import use_swizzle_gemm
+            use_swizzle_gemm = use_swizzle_gemm(*weight.shape,
+                                                dtype=weight.dtype)
+            self.use_aiter_and_is_supported = \
+                (self.use_aiter_and_is_supported and use_swizzle_gemm)
+
             if self.use_aiter_and_is_supported:
                 from aiter.ops.shuffle import shuffle_weight
 
@@ -102,6 +108,12 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                 layer.weight = Parameter(weight.t(), requires_grad=False)
             # required by torch.compile to be torch.nn.Parameter
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+
+            if current_platform.is_rocm():
+                self.fp8_linear = Fp8LinearOp(
+                    act_quant_static=self.is_static_input_scheme,
+                    act_quant_group_shape=self.act_q_group_shape,
+                    pad_output=not use_swizzle_gemm)
 
         else:
             raise ValueError(f"Unknown quantization strategy {self.strategy}")

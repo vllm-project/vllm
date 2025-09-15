@@ -8,6 +8,16 @@ from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
 
+def use_swizzle_gemm(n: int, k: int, dtype: torch.dtype) -> bool:
+
+    multiple_of: int = 64
+
+    if dtype == current_platform.fp8_dtype():
+        multiple_of = 128
+
+    return n % multiple_of == 0 and k % multiple_of == 0
+
+
 def rocm_aiter_tuned_gemm_impl(
         input: torch.Tensor,
         weight: torch.Tensor,
