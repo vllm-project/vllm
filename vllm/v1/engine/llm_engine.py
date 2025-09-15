@@ -80,8 +80,9 @@ class LLMEngine:
         # important: init dp group before init the engine_core
         # In the decoupled engine case this is handled in EngineCoreProc.
         parallel_config = vllm_config.parallel_config
-        if not multiprocess_mode and parallel_config.data_parallel_size > 1:
-            self.dp_group = parallel_config.stateless_init_dp_group()
+        if not multiprocess_mode and parallel_config.data_parallel_size > 1 \
+            and self.vllm_config.parallel_config.distributed_executor_backend != "external_launcher":
+                self.dp_group = parallel_config.stateless_init_dp_group()
         else:
             self.dp_group = None
         self.should_execute_dummy_batch = False
