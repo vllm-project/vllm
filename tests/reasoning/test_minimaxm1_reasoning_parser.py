@@ -62,7 +62,8 @@ SHORTEST_REASONING = {
     "is_reasoning_end": True,
 }
 REASONING_WITH_THINK = {
-    "output": "<think>\nThis is a reasoning section\n</think>\nThis is the rest",
+    "output":
+    "<think>\nThis is a reasoning section\n</think>\nThis is the rest",
     "reasoning_content": "This is a reasoning section",
     "content": "This is the rest",
     "is_reasoning_end": True,
@@ -232,7 +233,8 @@ def test_reasoning(
 ):
     output = minimax_m1_tokenizer.tokenize(param_dict["output"])
     output_tokens: list[str] = [
-        minimax_m1_tokenizer.convert_tokens_to_string([token]) for token in output
+        minimax_m1_tokenizer.convert_tokens_to_string([token])
+        for token in output
     ]
     parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(
         parser_name)(minimax_m1_tokenizer)
