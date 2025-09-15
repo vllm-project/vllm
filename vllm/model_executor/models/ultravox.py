@@ -662,7 +662,7 @@ def pad_and_concat_to_dim3(
     max_len = max(f.shape[-1] for f in features)
     # Ensure all features have dim=3
     features = [f.view(-1, *f.shape[-2:]) for f in features]
-    # Pad and oncatenate:
+    # Pad and concatenate:
     # [[B1, 80, M1], [B2, 80, M2]] -> [B1+B2, 80, max(M1, M2)]
     features = [F.pad(f, (0, max_len - f.shape[-1])) for f in features]
     return torch.cat(features)
