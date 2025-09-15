@@ -56,12 +56,13 @@ class ObjectStorageModel:
         pull_files(): Pull model from object storage to the temporary directory.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, dir: Optional[str] = None) -> None:
         for sig in (signal.SIGINT, signal.SIGTERM):
             existing_handler = signal.getsignal(sig)
             signal.signal(sig, self._close_by_signal(existing_handler))
 
-        self.dir = tempfile.mkdtemp()
+        self.dir = os.path.join(tempfile.gettempdir(),
+                                dir) if dir else tempfile.mkdtemp()
 
     def __del__(self):
         self._close()
