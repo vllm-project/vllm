@@ -18,7 +18,12 @@ def create_parser():
     sampling_group.add_argument("--top-k", type=int)
     # Add example params
     parser.add_argument("--chat-template-path", type=str)
-
+    
+    # Set a higher default for max_tokens for more meaningful generation.
+    # The default of 16 is too low for a chat example.
+    # Set max_num_batched_tokens to the context length of the default model
+    # to avoid errors, especially on CPU.
+    parser.set_defaults(max_num_batched_tokens=131072, max_tokens=10000)
     return parser
 
 
