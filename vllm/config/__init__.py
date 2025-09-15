@@ -789,7 +789,6 @@ class ModelConfig:
 
         # Avoid running try_verify_and_update_config multiple times
         self.config_updated = False
-
         self._verify_quantization()
         self._verify_cuda_graph()
         self._verify_bnb_config()

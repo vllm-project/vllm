@@ -471,6 +471,8 @@ class EngineArgs:
     kv_sharing_fast_prefill: bool = \
         CacheConfig.kv_sharing_fast_prefill
 
+    max_num_labels: Optional[int] = None
+
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -827,6 +829,9 @@ class EngineArgs:
                                 **lora_kwargs["fully_sharded_loras"])
         lora_group.add_argument("--default-mm-loras",
                                 **lora_kwargs["default_mm_loras"])
+
+        lora_group.add_argument("--max-num-labels",
+                                **lora_kwargs["max_num_labels"])
 
         # Observability arguments
         observability_kwargs = get_kwargs(ObservabilityConfig)

@@ -63,6 +63,9 @@ class LoRAConfig:
     """[DEPRECATED] Enable bias for LoRA adapters. This option will be
     removed in v0.12.0."""
 
+    max_num_labels: Optional[int] = None
+    """Max classification label number.
+    """
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -83,6 +86,7 @@ class LoRAConfig:
         factors.append(self.lora_extra_vocab_size)
         factors.append(self.lora_vocab_padding_size)
         factors.append(self.bias_enabled)
+        factors.append(self.max_num_labels)
         hash_str = hashlib.md5(str(factors).encode(),
                                usedforsecurity=False).hexdigest()
         return hash_str
@@ -130,3 +134,5 @@ class LoRAConfig:
             self.lora_dtype = model_config.dtype
         elif isinstance(self.lora_dtype, str):
             self.lora_dtype = getattr(torch, self.lora_dtype)
+        if self.max_num_labels is None:
+            self.max_num_labels = model_config.hf_config.num_labels

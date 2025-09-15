@@ -22,7 +22,8 @@ from vllm.lora.layers import BaseLayerWithLoRA, LoRAMapping
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.punica_wrapper import get_punica_wrapper
-from vllm.lora.utils import (from_layer, from_layer_logits_processor,
+from vllm.lora.utils import (from_layer, from_layer_classifier,
+                             from_layer_logits_processor,
                              get_supported_lora_modules,
                              is_regex_target_modules,
                              parse_fine_tuned_lora_name, replace_submodule)
@@ -482,10 +483,17 @@ class LoRAModelManager(AdapterModelManager):
                 continue
             parts = module_name.split(".")[-1]
             packed_moduled_lst = self.packed_modules_mapping.get(parts, [])
-            new_module = replace_submodule(
-                self.model, module_name,
-                from_layer(module, self.lora_slots, self.lora_config,
-                           packed_moduled_lst, self.model.config))
+            if "score" in module_name and self.is_pooling_model:
+                new_module = replace_submodule(
+                    self.model, module_name,
+                    from_layer_classifier(module, self.lora_slots,
+                                          self.lora_config, self.model.config))
+            else:
+
+                new_module = replace_submodule(
+                    self.model, module_name,
+                    from_layer(module, self.lora_slots, self.lora_config,
+                               packed_moduled_lst, self.model.config))
 
             # (yard1): TODO make this more robust
             if "lm_head" in module_name:
