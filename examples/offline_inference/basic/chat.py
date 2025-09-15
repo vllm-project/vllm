@@ -18,7 +18,9 @@ def create_parser():
     sampling_group.add_argument("--top-k", type=int)
     # Add example params
     parser.add_argument("--chat-template-path", type=str)
-
+    
+    parser.set_defaults(max_num_batched_tokens=131072)
+    parser.set_defaults(max_tokens=10000)
     return parser
 
 
