@@ -597,10 +597,11 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         with the `input_ids`.
 
         Args:
-            audio_features: A batch of audio input chunks [B, N, 80, M].
-            audio_lens: Length of audio frames for each audio chunk [B].
-            audio_token_len: Length of audio tokens for each audio chunk [B'].
-                Note: batch dim is different from batch dim in audio chunks.
+            input_ids: Flattened (concatenated) input_ids corresponding to a
+                batch.
+            positions: Position indices for the input tokens.
+            intermediate_tensors: Intermediate tensors from prior forward pass.
+            inputs_embeds: Optional tensor of input embeddings.
 
         """
 
@@ -661,7 +662,7 @@ def pad_and_concat_to_dim3(
     max_len = max(f.shape[-1] for f in features)
     # Ensure all features have dim=3
     features = [f.view(-1, *f.shape[-2:]) for f in features]
-    # Pad and oncatenate:
+    # Pad and concatenate:
     # [[B1, 80, M1], [B2, 80, M2]] -> [B1+B2, 80, max(M1, M2)]
     features = [F.pad(f, (0, max_len - f.shape[-1])) for f in features]
     return torch.cat(features)
