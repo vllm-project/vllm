@@ -8,7 +8,7 @@ This benchmark aims to:
 
 Latest results: [results link](https://blog.vllm.ai/2024/09/05/perf-update.html), scroll to the end.
 
-Latest reproduction guilde: [github issue link](https://github.com/vllm-project/vllm/issues/8176)
+Latest reproduction guide: [github issue link](https://github.com/vllm-project/vllm/issues/8176)
 
 ## Setup
 
