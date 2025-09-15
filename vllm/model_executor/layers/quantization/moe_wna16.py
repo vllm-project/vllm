@@ -190,7 +190,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
         group_size = self.quant_config.group_size
         group_size_div_factor = 1
 
-        # make intermediate_size and hidden_size diviable by group_size
+        # make intermediate_size and hidden_size divisible by group_size
         # we reduce the group size to ensure that
         # and we would repeat the loaded_weight later
         while intermediate_size_per_partition % group_size or \
