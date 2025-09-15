@@ -44,10 +44,10 @@ We also found that when a batch cannot hit a full CUDA Graph, the host-side eage
 
 Defaults: If you’re on v1 with piecewise compilation, we default to `PIECEWISE` for safety reasons (for mamba mixer models, it's `FULL_AND_PIECEWISE`). Otherwise, we default to `NONE`.
 
-!!! note
-    We also fuse the subset modes `NONE`, `PIECEWISE`, and `FULL` as the concrete runtime modes for CUDA Graphs dispatching, so they are treated as one of the "decode_mode" or "mixed_mode" at runtime.
-
 While `NONE` , `PIECEWISE`, and `FULL` are single-mode configurations and simply equivalent to past implementations of eager execution, piecewise CUDA Graphs, and full CUDA Graphs respectively, `FULL_DECODE_ONLY` and `FULL_AND_PIECEWISE` are newly appended dual-mode configurations, which require dispatching to switch between concrete runtime modes according to runtime batches dynamically.
+
+!!! note
+    We also fuse the subset `NONE`, `PIECEWISE`, and `FULL` modes as the concrete runtime modes for CUDA Graphs dispatching, which means they are treated as one of the modes for prefill/mixed or uniform-decode phase at runtime.
 
 !!! note
     Not all CUDA Graphs modes are compatible with every attention backend. For convenience, we alias `FULL` mode to `FULL_AND_PIECEWISE` (`-O 3`) or `FULL_DECODE_ONLY` (`-O 0`) for attention backends that support CUDA Graphs for only pure decode or uniform decode.
@@ -60,7 +60,11 @@ The new CUDA Graphs logic is built on top of piecewise compilation and supports 
 
 See the following figures for a quick comparison between the previous and current design patterns of CUDA Graphs with inductor compilation. We can see that previously the CUDA Graphs logic and compilation logic were tightly coupled into the vllm `PiecewiseBackend`, and CUDA Graphs was implicitly dispatched by `batch_size` idly. Now the CUDA Graphs logic is separated into the `CUDAGraphWrapper` class, responsible for both full and piecewise CUDA Graphs abilities, and dispatching is **explicitly** done via **runtime mode** plus the `BatchDescriptor` as the **dispatch key** via `CudagraphDispatcher`.
 
+#### Before:
+
 ![previous_design](../assets/design/cuda_graphs/previous_design.png)
+
+#### After:
 
 ![new_design](../assets/design/cuda_graphs/current_design.png)
 
