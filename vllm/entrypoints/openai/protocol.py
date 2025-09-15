@@ -242,7 +242,7 @@ def get_logits_processors(processors: Optional[LogitsProcessors],
     elif processors:
         raise ValueError(
             "The `logits_processors` argument is not supported by this "
-            "server. See --logits-processor-pattern engine argugment "
+            "server. See --logits-processor-pattern engine argument "
             "for more information.")
     return None
 
@@ -1270,9 +1270,20 @@ class CompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def validate_prompt_and_prompt_embeds(cls, data):
-        if data.get("prompt") is None and data.get("prompt_embeds") is None:
+        prompt = data.get("prompt")
+        prompt_embeds = data.get("prompt_embeds")
+
+        prompt_is_empty = (prompt is None
+                           or (isinstance(prompt, str) and prompt == ""))
+        embeds_is_empty = (prompt_embeds is None
+                           or (isinstance(prompt_embeds, list)
+                               and len(prompt_embeds) == 0))
+
+        if prompt_is_empty and embeds_is_empty:
             raise ValueError(
-                "At least one of `prompt` or `prompt_embeds` must be set.")
+                "Either prompt or prompt_embeds must be provided and non-empty."
+            )
+
         return data
 
     @model_validator(mode="before")
@@ -1342,6 +1353,14 @@ class EmbeddingChatRequest(OpenAIBaseModel):
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
 
     # --8<-- [start:chat-embedding-extra-params]
+    add_generation_prompt: bool = Field(
+        default=False,
+        description=
+        ("If true, the generation prompt will be added to the chat template. "
+         "This is a parameter used by chat template in tokenizer config of the "
+         "model."),
+    )
+
     add_special_tokens: bool = Field(
         default=False,
         description=(
@@ -1833,7 +1852,8 @@ class InputTokensDetails(OpenAIBaseModel):
 
 
 class OutputTokensDetails(OpenAIBaseModel):
-    reasoning_tokens: int
+    reasoning_tokens: int = 0
+    tool_output_tokens: int = 0
 
 
 class ResponseUsage(OpenAIBaseModel):

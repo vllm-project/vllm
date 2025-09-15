@@ -169,15 +169,11 @@ class PrometheusStatLogger(StatLoggerBase):
         model_name = vllm_config.model_config.served_model_name
         max_model_len = vllm_config.model_config.max_model_len
 
-        if (len(self.engine_indexes) > 1
-                and vllm_config.speculative_config is not None):
-            raise NotImplementedError("Prometheus metrics with Spec Decoding "
-                                      "with >1 EngineCore per AsyncLLM is not "
-                                      "supported yet.")
-        spec_decode_labelvalues = [
-            vllm_config.model_config.served_model_name,
-            str(self.engine_indexes[0])
-        ]
+        spec_decode_labelvalues: dict[int, list[str]] = {
+            idx: [model_name, str(idx)]
+            for idx in engine_indexes
+        }
+
         self.spec_decoding_prom = self._spec_decoding_cls(
             vllm_config.speculative_config, labelnames,
             spec_decode_labelvalues)
@@ -530,7 +526,7 @@ class PrometheusStatLogger(StatLoggerBase):
 
             if scheduler_stats.spec_decoding_stats is not None:
                 self.spec_decoding_prom.observe(
-                    scheduler_stats.spec_decoding_stats)
+                    scheduler_stats.spec_decoding_stats, engine_idx)
 
         if iteration_stats is None:
             return
@@ -651,15 +647,21 @@ class StatLoggerManager:
         vllm_config: VllmConfig,
         engine_idxs: Optional[list[int]] = None,
         custom_stat_loggers: Optional[list[StatLoggerFactory]] = None,
+        enable_default_loggers: bool = True,
+        client_count: int = 1,
     ):
         self.engine_idxs = engine_idxs if engine_idxs else [0]
 
-        factories: list[StatLoggerFactory]
+        factories: list[StatLoggerFactory] = []
         if custom_stat_loggers is not None:
-            factories = custom_stat_loggers
-        else:
-            factories = []
-            if logger.isEnabledFor(logging.INFO):
+            factories.extend(custom_stat_loggers)
+
+        if enable_default_loggers and logger.isEnabledFor(logging.INFO):
+            if client_count > 1:
+                logger.warning(
+                    "AsyncLLM created with api_server_count more than 1; "
+                    "disabling stats logging to avoid incomplete stats.")
+            else:
                 factories.append(LoggingStatLogger)
 
         # engine_idx: StatLogger
