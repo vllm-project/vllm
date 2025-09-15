@@ -1386,8 +1386,3 @@ def image_urls(request, local_asset_server) -> list[str]:
     """Indirect fixture: takes a list of names, returns list of full URLs."""
     names: list[str] = request.param
     return [local_asset_server.url_for(name) for name in names]
-
-
-@pytest.fixture
-def with_init_none_hash():
-    init_none_hash(hash)

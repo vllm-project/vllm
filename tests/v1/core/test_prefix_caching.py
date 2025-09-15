@@ -25,6 +25,16 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, SlidingWindowSpec)
 
 
+@pytest.fixture(autouse=True)
+def _auto_init_hash_fn(request):
+    hash_fn: Callable
+    if "hash_fn" in request.fixturenames:
+        hash_fn = init_none_hash(request.getfixturevalue("hash_fn"))
+    else:
+        hash_fn = hash
+    init_none_hash(hash_fn)
+
+
 def make_request(
     request_id: str,
     prompt_token_ids: list[int],
@@ -105,7 +115,6 @@ def make_kv_cache_config_hybrid_model(block_size: int,
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_prefill(hash_fn):
-    init_none_hash(hash_fn)
 
     block_size = 16
     manager = KVCacheManager(
@@ -361,7 +370,7 @@ def test_prefill_hybrid_model():
     ], 0)
 
 
-def test_prefill_plp(with_init_none_hash):
+def test_prefill_plp():
     '''Test prefill with APC and some prompt logprobs (plp) requests.
 
     1. Schedule plp request and validate APC block allocation
@@ -482,7 +491,7 @@ def test_prefill_plp(with_init_none_hash):
     manager.free(req2)
 
 
-def test_decode(with_init_none_hash):
+def test_decode():
     block_size = 16
     manager = KVCacheManager(
         make_kv_cache_config(block_size, 11),
@@ -533,7 +542,7 @@ def test_decode(with_init_none_hash):
         req0.request_id][-1].block_hash is None
 
 
-def test_evict(with_init_none_hash):
+def test_evict():
     block_size = 16
     manager = KVCacheManager(
         make_kv_cache_config(block_size, 11),
@@ -587,7 +596,7 @@ def test_evict(with_init_none_hash):
     assert manager.block_pool.free_block_queue.num_free_blocks == 7
 
 
-def test_hash_block_correct_reuse(with_init_none_hash):
+def test_hash_block_correct_reuse():
     """
     This tests when a previously cached block is reused as a new block,
     its hash metadata should be correctly reset.
@@ -628,7 +637,7 @@ def test_hash_block_correct_reuse(with_init_none_hash):
                                      [0].block_id].block_hash is None
 
 
-def test_computed_blocks_not_evicted(with_init_none_hash):
+def test_computed_blocks_not_evicted():
     """
     Test that the computed blocks are not evicted when getting new blocks
     for a request if there are any other free blocks.
@@ -683,7 +692,7 @@ def test_computed_blocks_not_evicted(with_init_none_hash):
     assert blocks.blocks[0][0].block_id == 2
 
 
-def test_basic_prefix_caching_disabled(with_init_none_hash):
+def test_basic_prefix_caching_disabled():
     """
     This tests that the prefix caching is disabled.
     """
@@ -736,7 +745,6 @@ def test_cache_blocks(hash_fn):
     This is a unit test that tests the correctness of the _cache_full_blocks
     function of KVCacheManager.
     """
-    init_none_hash(hash_fn)
 
     block_size = 4
     block_pool = BlockPool(
@@ -779,7 +787,7 @@ def test_cache_blocks(hash_fn):
     assert blocks[0].block_hash is not None
 
 
-def test_cache_blocks_multi_group(with_init_none_hash):
+def test_cache_blocks_multi_group():
     """
     This tests that blocks are cached correctly for different kv cache groups.
     """
@@ -845,11 +853,11 @@ def test_cache_blocks_multi_group(with_init_none_hash):
                                        kv_cache_group_ids=[0, 1]) is None
 
 
-def test_mm_prefix_caching(with_init_none_hash):
+@pytest.mark.parametrize("hash_fn", [sha256])
+def test_mm_prefix_caching(hash_fn):
     """
     This tests that the multi-modal prefix caching is correct.
     """
-    kv_cache_utils.init_none_hash(sha256)
 
     block_size = 16
     manager = KVCacheManager(
@@ -937,13 +945,12 @@ def test_mm_prefix_caching(with_init_none_hash):
     assert num_computed_tokens == 3 * 16
 
 
-def test_cache_key_salting(with_init_none_hash):
+@pytest.mark.parametrize("hash_fn", [sha256])
+def test_cache_key_salting(hash_fn):
     """
     This tests that cache salts are applied during hashing and the cache
     is separated cache as expected.
     """
-    kv_cache_utils.init_none_hash(sha256)
-
     block_size = 16
     manager = KVCacheManager(
         make_kv_cache_config(block_size, 11),
@@ -1013,8 +1020,7 @@ def test_cache_key_salting(with_init_none_hash):
          None))
 
 
-def test_prefill_not_enough_free_blocks_with_computed_blocks(
-        with_init_none_hash):
+def test_prefill_not_enough_free_blocks_with_computed_blocks():
     """
     This is a unit test that tests the correctness of the allocate_slots
     when there is not enough free blocks. Specifically, when a request
@@ -1084,7 +1090,7 @@ def test_prefill_not_enough_free_blocks_with_computed_blocks(
     assert {block.ref_cnt for block in block_part1[3:]} == {0}
 
 
-def test_reset_prefix_cache(with_init_none_hash):
+def test_reset_prefix_cache():
     block_size = 16
     manager = KVCacheManager(
         make_kv_cache_config(block_size, 11),
@@ -1123,7 +1129,7 @@ def test_reset_prefix_cache(with_init_none_hash):
     assert all([blk.block_hash is None for blk in manager.block_pool.blocks])
 
 
-def test_prefix_cache_stats_disabled(with_init_none_hash):
+def test_prefix_cache_stats_disabled():
     """Test that prefix_cache_stats is None when log_stats is False."""
     block_size = 16
     manager = KVCacheManager(
@@ -1148,7 +1154,7 @@ def test_prefix_cache_stats_disabled(with_init_none_hash):
     assert manager.prefix_cache_stats is None
 
 
-def test_maybe_evict_cached_block(with_init_none_hash):
+def test_maybe_evict_cached_block():
     pool = BlockPool(num_gpu_blocks=4, enable_caching=True)
     block_hash0 = make_block_hash_with_group_id(BlockHash(b"10"), 1000)
     block_hash1 = make_block_hash_with_group_id(BlockHash(b"20"), 2000)
@@ -1210,7 +1216,7 @@ def test_maybe_evict_cached_block(with_init_none_hash):
 
 
 @pytest.mark.parametrize("blocks_to_cache", [2, 3, 10])
-def test_kv_cache_events(blocks_to_cache: int, with_init_none_hash):
+def test_kv_cache_events(blocks_to_cache: int):
     block_size = 16
     num_blocks = blocks_to_cache + 1
 
@@ -1263,7 +1269,7 @@ def test_kv_cache_events(blocks_to_cache: int, with_init_none_hash):
     assert len(manager.block_pool.cached_block_hash_to_block) == 0
 
 
-def test_eagle_enabled_removes_last_block(with_init_none_hash):
+def test_eagle_enabled_removes_last_block():
     """Verify Eagle does NOT remove blocks when request 
     length is divisible by block size."""
     block_size = 16
@@ -1296,7 +1302,7 @@ def test_eagle_enabled_removes_last_block(with_init_none_hash):
     assert num_tokens == 1 * block_size  # 16 tokens
 
 
-def test_eagle_with_partial_blocks(with_init_none_hash):
+def test_eagle_with_partial_blocks():
     """Test Eagle behavior with requests containing partial blocks."""
     block_size = 16
     manager = KVCacheManager(
@@ -1324,7 +1330,7 @@ def test_eagle_with_partial_blocks(with_init_none_hash):
     assert num_tokens == 1 * block_size
 
 
-def test_eagle_with_sliding_window(with_init_none_hash):
+def test_eagle_with_sliding_window():
     """Test Eagle behavior with sliding window."""
     block_size = 16
     sliding_window_spec = SlidingWindowSpec(

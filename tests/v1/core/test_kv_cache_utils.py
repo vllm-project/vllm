@@ -30,6 +30,16 @@ from vllm.v1.request import Request
 # yapf: enable
 
 
+@pytest.fixture(autouse=True)
+def _auto_init_hash_fn(request):
+    hash_fn: Callable
+    if "hash_fn" in request.fixturenames:
+        hash_fn = init_none_hash(request.getfixturevalue("hash_fn"))
+    else:
+        hash_fn = hash
+    init_none_hash(hash_fn)
+
+
 def make_request(
     request_id: str,
     prompt_token_ids: list[int],
@@ -338,7 +348,7 @@ def test_free_kv_cache_block_queue_get_all_free_blocks():
         blocks[1:2] + blocks[3:] + [block_to_remove]
 
 
-def test_generate_block_hash_extra_keys(with_init_none_hash):
+def test_generate_block_hash_extra_keys():
     request = make_request(
         request_id="0",
         prompt_token_ids=[_ for _ in range(20)],
@@ -370,7 +380,7 @@ def test_generate_block_hash_extra_keys(with_init_none_hash):
     assert next_mm_idx == 2
 
 
-def test_generate_block_hash_extra_keys_no_mm_inputs(with_init_none_hash):
+def test_generate_block_hash_extra_keys_no_mm_inputs():
     request = make_request(
         request_id="0",
         prompt_token_ids=[_ for _ in range(6)],
@@ -383,7 +393,7 @@ def test_generate_block_hash_extra_keys_no_mm_inputs(with_init_none_hash):
     assert next_mm_idx == 0
 
 
-def test_generate_block_hash_extra_keys_cache_salt(with_init_none_hash):
+def test_generate_block_hash_extra_keys_cache_salt():
     request = make_request(
         request_id="0",
         prompt_token_ids=[_ for _ in range(6)],
@@ -424,7 +434,6 @@ def test_generate_block_hash_extra_keys_cache_salt(with_init_none_hash):
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_hash_block_tokens(hash_fn):
-    init_none_hash(hash_fn)
     parent_block_hash = BlockHash(b"123")
     curr_block_token_ids = (1, 2, 3)
     extra_keys = ("key1", "key2")
@@ -437,8 +446,6 @@ def test_hash_block_tokens(hash_fn):
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_request_block_hasher(hash_fn):
-    kv_cache_utils.init_none_hash(hash_fn)
-
     request = make_request(
         request_id="0",
         prompt_token_ids=[_ for _ in range(6)],
@@ -461,8 +468,6 @@ def test_request_block_hasher(hash_fn):
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_hash_tokens_different_mm_input(hash_fn):
-    init_none_hash(hash_fn)
-
     request1 = make_request(
         request_id="0",
         prompt_token_ids=[_ for _ in range(6)],
@@ -491,8 +496,6 @@ def test_hash_tokens_different_mm_input(hash_fn):
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_hash_request_tokens_no_mm_inputs(hash_fn):
-    kv_cache_utils.init_none_hash(hash_fn)
-
     request = make_request(
         request_id="0",
         prompt_token_ids=[_ for _ in range(6)],
