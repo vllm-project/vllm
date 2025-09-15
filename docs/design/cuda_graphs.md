@@ -221,6 +221,6 @@ Currently, the default behavior of cudagraph_mode != `NONE` would always keep th
 
 See the following links for examples:
 
-comment1: <https://github.com/vllm-project/vllm/pull/20059#issuecomment-3160858458>
-comment2: <https://github.com/vllm-project/vllm/pull/20059#issuecomment-3188735226>
-comment3: <https://github.com/vllm-project/vllm/pull/20059#issuecomment-3219888738>
+- [20059#issuecomment-3160858458](https://github.com/vllm-project/vllm/pull/20059#issuecomment-3160858458)
+- [20059#issuecomment-3188735226](https://github.com/vllm-project/vllm/pull/20059#issuecomment-3188735226)
+- [20059#issuecomment-3219888738](https://github.com/vllm-project/vllm/pull/20059#issuecomment-3219888738)
