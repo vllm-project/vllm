@@ -10,7 +10,9 @@ from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import ModelConfig, SchedulerConfig
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
+from vllm.multimodal.cache import processor_only_cache_from_config
 from vllm.multimodal.registry import MultiModalRegistry
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
 from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
@@ -33,14 +35,18 @@ class MultiModalBudget:
         self.model_config = model_config
         self.scheduler_config = scheduler_config
         self.mm_registry = mm_registry
+        self.cache = cache = processor_only_cache_from_config(
+            model_config, mm_registry)
 
         self.max_model_len = model_config.max_model_len
         self.max_num_reqs = scheduler_config.max_num_seqs
 
-        self.mm_limits = mm_registry.get_mm_limits_per_prompt(model_config)
+        self.mm_limits = mm_registry.get_mm_limits_per_prompt(model_config,
+                                                              cache=cache)
 
         max_tokens_by_modality = mm_registry \
-            .get_max_tokens_per_item_by_nonzero_modality(model_config)
+            .get_max_tokens_per_item_by_nonzero_modality(model_config,
+                                                         cache=cache)
 
         encoder_compute_budget, encoder_cache_size = compute_mm_encoder_budget(
             scheduler_config,
@@ -167,10 +173,10 @@ def scatter_mm_placeholders(
 
     Args:
         embeds: The multimodal embeddings.
-          Shape: `(num_embeds, embed_dim)`
+            Shape: `(num_embeds, embed_dim)`
         is_embed: A boolean mask indicating which positions in the placeholder
-          tokens need to be filled with multimodal embeddings.
-          Shape: `(num_placeholders, num_embeds)`
+            tokens need to be filled with multimodal embeddings.
+            Shape: `(num_placeholders, num_embeds)`
     """
     if is_embed is None:
         return embeds
@@ -198,12 +204,9 @@ def gather_mm_placeholders(
     return placeholders[is_embed]
 
 
-def initialize_kv_cache_for_kv_sharing(
+def add_kv_sharing_layers_to_kv_cache_groups(
     shared_kv_cache_layers: dict[str, str],
     kv_cache_groups: list[KVCacheGroupSpec],
-    kv_caches: dict[str, torch.Tensor],
-    # Optional for now to avoid breaking TPU
-    attn_groups: Optional[list[list[AttentionGroup]]] = None,
     runner_only_attn_layers: Optional[set[str]] = None,
 ) -> None:
     """
@@ -218,38 +221,15 @@ def initialize_kv_cache_for_kv_sharing(
             means this layer will perform attention using the keys and values
             from the KV cache of `shared_kv_cache_layers[layer_name]`.
         kv_cache_groups: The KV cache groups of the model.
-        kv_caches: The allocated kv_caches with layer names as keys.
-            Note that layers in shared_kv_cache_layers.keys() are not
-            originally included as it only contains layers which have its own
-            KV cache allocation.
-        attn_groups: Optional list of attention groups. Layers in the same KV
-            cache group may be placed in different attention groups if they
-            have different attention backends.  Currently only provided by 
-            GPU model runner.
     """
-    # mapping from layer name to tuple of (kv_cache_group_idx, attn_group_idx)
-    layer_to_attn_group_idx: dict[str, tuple[int, int]] = {}
-    if attn_groups:
-        for kv_cache_group_idx, kv_attn_groups in enumerate(attn_groups):
-            for attn_group_idx, attn_group in enumerate(kv_attn_groups):
-                for layer_name in attn_group.layer_names:
-                    layer_to_attn_group_idx[layer_name] = (kv_cache_group_idx,
-                                                           attn_group_idx)
-    else:
-        for kv_cache_group_idx, kv_cache_group in enumerate(kv_cache_groups):
-            for layer_name in kv_cache_group.layer_names:
-                # attn group idx default to 0 if not provided
-                layer_to_attn_group_idx[layer_name] = (kv_cache_group_idx, 0)
+    layer_to_kv_cache_group: dict[str, KVCacheGroupSpec] = {}
+    for kv_cache_group in kv_cache_groups:
+        for layer_name in kv_cache_group.layer_names:
+            layer_to_kv_cache_group[layer_name] = kv_cache_group
 
     for layer_name, target_layer_name in shared_kv_cache_layers.items():
-        kv_caches[layer_name] = kv_caches[target_layer_name]
-        kv_cache_group_idx = layer_to_attn_group_idx[target_layer_name][0]
-        kv_cache_groups[kv_cache_group_idx].layer_names.append(layer_name)
-
-        if attn_groups:
-            attn_group_idx = layer_to_attn_group_idx[target_layer_name][1]
-            attn_groups[kv_cache_group_idx][attn_group_idx].layer_names.append(
-                layer_name)
+        tgt_kv_cache_group = layer_to_kv_cache_group[target_layer_name]
+        tgt_kv_cache_group.layer_names.append(layer_name)
 
         if runner_only_attn_layers is not None:
             runner_only_attn_layers.add(layer_name)
@@ -273,7 +253,7 @@ def bind_kv_cache(
     Args:
         kv_caches: The allocated kv_caches with layer names as keys.
         forward_context: The global forward context containing all Attention
-        layers with layer names as keys.
+            layers with layer names as keys.
         runner_kv_caches: The kv_cache declared by ModelRunner.
     """
     # Bind kv_caches to ModelRunner
@@ -290,7 +270,17 @@ def bind_kv_cache(
             # One typical case is encoder-decoder model, e.g., bart.
             # The cross attention and self attention in the same decoder layer
             # has different layer_name but the same layer_index.
-            raise NotImplementedError
+
+            # TODO - analyze where runner_kv_caches is used and the right
+            # way to ensure it properly reflects multiple attention layers
+            # in the same decoder block.
+            if current_platform.is_cuda():
+                # We know that the GPU runner is not impacted by this
+                # case. Some test code depends on runner_kv_caches, but
+                # not in a way that's impacted by ignoring this.
+                pass
+            else:
+                raise NotImplementedError
         layer_name = layer_names[0]
         runner_kv_caches.append(kv_caches[layer_name])
 

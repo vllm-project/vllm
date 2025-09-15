@@ -32,15 +32,16 @@ MODEL_CONFIGS = [
         "tensor_parallel_size": 1,
         "tokenizer_mode": "mistral",
     },
-    {
-        "model": "sentence-transformers/all-MiniLM-L12-v2",
-        "enforce_eager": True,
-        "gpu_memory_utilization": 0.20,
-        "max_model_len": 64,
-        "max_num_batched_tokens": 64,
-        "max_num_seqs": 64,
-        "tensor_parallel_size": 1,
-    },
+    # TODO: re-enable once these tests are run with V1
+    # {
+    #     "model": "sentence-transformers/all-MiniLM-L12-v2",
+    #     "enforce_eager": True,
+    #     "gpu_memory_utilization": 0.20,
+    #     "max_model_len": 64,
+    #     "max_num_batched_tokens": 64,
+    #     "max_num_seqs": 64,
+    #     "tensor_parallel_size": 1,
+    # },
 ]
 
 
@@ -78,7 +79,7 @@ def test_offline_mode(monkeypatch: pytest.MonkeyPatch):
             )
 
             # Need to re-import huggingface_hub
-            # and friends to setup offline mode
+            # and friends to set up offline mode
             _re_import_modules()
             # Cached model files should be used in offline mode
             for model_config in MODEL_CONFIGS:
@@ -135,7 +136,7 @@ def test_model_from_huggingface_offline(monkeypatch: pytest.MonkeyPatch):
                 disable_connect,
             )
             # Need to re-import huggingface_hub
-            # and friends to setup offline mode
+            # and friends to set up offline mode
             _re_import_modules()
             engine_args = EngineArgs(model="facebook/opt-125m")
             LLM(**dataclasses.asdict(engine_args))
