@@ -1831,7 +1831,7 @@ class FusedMoE(CustomOp):
     def maybe_all_reduce_tensor_model_parallel(
             self, final_hidden_states: torch.Tensor):
         """
-        Some combine kernel reduces across GPU ranks by default.
+        Some combine kernels reduce across GPU ranks by default.
         """
         if self.must_reduce_shared:
             return final_hidden_states
