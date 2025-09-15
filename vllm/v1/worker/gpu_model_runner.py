@@ -3365,7 +3365,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 kernel_block_sizes.append(
                     kv_cache_group.kv_cache_spec.block_size)
 
-        if block_sizes != [self.cache_config.block_size]:
+        if block_sizes != [self.cache_config.block_size
+                           ] or block_sizes != kernel_block_sizes:
             assert self.cache_config.cpu_offload_gb == 0, (
                 "Cannot re-initialize the input batch when CPU weight "
                 "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
