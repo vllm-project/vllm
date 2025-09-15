@@ -36,7 +36,8 @@ from vllm.config.kv_events import KVEventsConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.config.load import LoadConfig
 from vllm.config.lora import LoRAConfig
-from vllm.config.multimodal import MMEncoderTPMode, MultiModalConfig
+from vllm.config.multimodal import (MMCacheType, MMEncoderTPMode,
+                                    MultiModalConfig)
 from vllm.config.parallel import (DistributedExecutorBackend, EPLBConfig,
                                   ParallelConfig)
 from vllm.config.scheduler import SchedulerConfig, SchedulerPolicy
@@ -451,6 +452,8 @@ class ModelConfig:
     media_io_kwargs: InitVar[Optional[dict[str, dict[str, Any]]]] = None
     mm_processor_kwargs: InitVar[Optional[dict[str, Any]]] = None
     mm_processor_cache_gb: InitVar[Optional[float]] = None
+    mm_processor_cache_type: InitVar[Optional[MMCacheType]] = None
+    mm_shm_cache_max_object_size_mb: InitVar[Optional[int]] = None
     mm_encoder_tp_mode: InitVar[Optional[MMEncoderTPMode]] = None
     interleave_mm_strings: InitVar[Optional[bool]] = None
     skip_mm_profiling: InitVar[Optional[bool]] = None
@@ -488,13 +491,18 @@ class ModelConfig:
         assert_hashable(str_factors)
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
-    def __post_init__(self, limit_mm_per_prompt: Optional[dict[str, int]],
-                      media_io_kwargs: Optional[dict[str, dict[str, Any]]],
-                      mm_processor_kwargs: Optional[dict[str, Any]],
-                      mm_processor_cache_gb: Optional[float],
-                      mm_encoder_tp_mode: Optional[MMEncoderTPMode],
-                      interleave_mm_strings: Optional[bool],
-                      skip_mm_profiling: Optional[bool]) -> None:
+    def __post_init__(
+            self,
+            # Multimodal config init vars
+            limit_mm_per_prompt: Optional[dict[str, int]],
+            media_io_kwargs: Optional[dict[str, dict[str, Any]]],
+            mm_processor_kwargs: Optional[dict[str, Any]],
+            mm_processor_cache_gb: Optional[float],
+            mm_processor_cache_type: Optional[MMCacheType],
+            mm_shm_cache_max_object_size_mb: Optional[int],
+            mm_encoder_tp_mode: Optional[MMEncoderTPMode],
+            interleave_mm_strings: Optional[bool],
+            skip_mm_profiling: Optional[bool]) -> None:
         # Set the default seed to 0 in V1.
         # NOTE(woosuk): In V0, we set the default seed to None because the
         # driver worker shares the same process as the user process, and thus
@@ -739,6 +747,8 @@ class ModelConfig:
                 media_io_kwargs=media_io_kwargs,
                 mm_processor_kwargs=mm_processor_kwargs,
                 mm_processor_cache_gb=mm_processor_cache_gb,
+                mm_processor_cache_type=mm_processor_cache_type,
+                mm_shm_cache_max_object_size_mb=mm_shm_cache_max_object_size_mb,
                 mm_encoder_tp_mode=mm_encoder_tp_mode,
                 interleave_mm_strings=interleave_mm_strings,
                 skip_mm_profiling=skip_mm_profiling,
@@ -1734,15 +1744,20 @@ class ModelConfig:
         such as the lm_head in a generation model,
         or the score or classifier in a classification model.
 
-        The default head_dtype based on runner_type.\n
+        `head_dtype` currently only supports pooling models.\n
         - The pooling model defaults to using fp32 head,
-        you can use --hf-overrides '{"head_dtype": "model"}' to disable it.\n
-        - The generate model defaults to not using fp32 head,
-        you can use --hf-overrides '{"head_dtype": "float32"}' to enable it.
+        you can use --hf-overrides '{"head_dtype": "model"}' to disable it.
         """
+
         head_dtype = _get_head_dtype(config=self.hf_config,
                                      dtype=self.dtype,
                                      runner_type=self.runner_type)
+
+        if self.runner_type != "pooling" and head_dtype != self.dtype:
+            logger.warning_once(
+                "`head_dtype` currently only supports pooling models."
+                "fallback to model dtype [%s].", self.dtype)
+            return self.dtype
 
         if head_dtype not in current_platform.supported_dtypes:
             logger.warning_once(

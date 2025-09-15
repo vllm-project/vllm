@@ -12,6 +12,7 @@ import vllm.envs as envs
 from vllm.config.utils import config
 
 MMEncoderTPMode = Literal["weights", "data"]
+MMCacheType = Literal["shm", "lru"]
 
 
 @config
@@ -47,6 +48,13 @@ class MultiModalConfig:
     `mm_processor_cache_gb * (api_server_count + data_parallel_size)`.
 
     Set to `0` to disable this cache completely (not recommended)."""
+    mm_processor_cache_type: MMCacheType = "lru"
+    """Type of cache to use for the multi-modal preprocessor/mapper. If `shm`,
+    use shared memory FIFO cache. If `lru`, use mirrored LRU cache."""
+    mm_shm_cache_max_object_size_mb: int = 128
+    """Size limit (in MiB) for each object stored in the multi-modal processor
+    shared memory cache. Only effective when `mm_processor_cache_type` is
+    `"shm"`."""
     mm_encoder_tp_mode: MMEncoderTPMode = "weights"
     """Indicates how to optimize multi-modal encoder inference using tensor
     parallelism (TP).
