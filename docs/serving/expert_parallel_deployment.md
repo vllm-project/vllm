@@ -10,7 +10,16 @@ Before using EP, you need to install the necessary dependencies. We are actively
 
 1. **Install DeepEP and pplx-kernels**: Set up host environment following vLLM's guide for EP kernels [here](gh-file:tools/ep_kernels).
 2. **Install DeepGEMM library**: Follow the [official instructions](https://github.com/deepseek-ai/DeepGEMM#installation).
-3. **For disaggregated serving**: Install UCX and NIXL following the [script](gh-file:tools/install_nixl.sh).
+3. **For disaggregated serving**:
+
+    ```sh
+    # Installs gdrcopy dependency
+    RUN curl https://developer.download.nvidia.com/compute/redist/gdrcopy/CUDA%2012.8/ubuntu24_04/x64/libgdrapi_2.5.1-1_amd64.Ubuntu24_04.deb --output libgdrapi_2.5.1-1_amd64.Ubuntu24_04.deb \
+        && apt install ./libgdrapi_2.5.1-1_amd64.Ubuntu24_04.deb \
+        && rm libgdrapi_2.5.1-1_amd64.Ubuntu24_04.deb
+    # Installs nixl/ucx
+    uv pip install -r requirements/kv_connectors.txt
+    ```
 
 ### Backend Selection Guide
 
@@ -191,7 +200,16 @@ For production deployments requiring strict SLA guarantees for time-to-first-tok
 
 ### Setup Steps
 
-1. **Install KV Connector**: Install NIXL using the [installation script](gh-file:tools/install_nixl.sh)
+1. **Install gdrcopy/ucx/nixl**:
+
+    ```sh
+    # Installs gdrcopy dependency
+    RUN curl https://developer.download.nvidia.com/compute/redist/gdrcopy/CUDA%2012.8/ubuntu24_04/x64/libgdrapi_2.5.1-1_amd64.Ubuntu24_04.deb --output libgdrapi_2.5.1-1_amd64.Ubuntu24_04.deb \
+        && apt install ./libgdrapi_2.5.1-1_amd64.Ubuntu24_04.deb \
+        && rm libgdrapi_2.5.1-1_amd64.Ubuntu24_04.deb
+    # Installs nixl/ucx
+    uv pip install -r requirements/kv_connectors.txt
+    ```
 
 2. **Configure Both Instances**: Add this flag to both prefill and decode instances `--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}`
 
