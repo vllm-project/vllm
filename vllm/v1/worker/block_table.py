@@ -26,7 +26,6 @@ class BlockTable:
         kernel_block_size: int,
     ):
         self.max_num_reqs = max_num_reqs
-        self.max_num_blocks_per_req = max_num_blocks_per_req
         self.max_num_batched_tokens = max_num_batched_tokens
         self.pin_memory = pin_memory
         self.device = device
@@ -53,6 +52,8 @@ class BlockTable:
             else:
                 self.use_hybrid_blocks = False
 
+        self.max_num_blocks_per_req = max_num_blocks_per_req * \
+                                        self.blocks_per_phys_block
         if self.use_hybrid_blocks:
             logical_table_size = (max_num_blocks_per_req *
                                   self.blocks_per_phys_block)
@@ -157,8 +158,7 @@ class BlockTable:
             # (always needed with unified tensor)
             # Each physical block is split into multiple logical blocks
             # The logical table has been expanded to accommodate this
-            block_table_indices = (req_indices * self.max_num_blocks_per_req *
-                                   self.blocks_per_phys_block +
+            block_table_indices = (req_indices * self.max_num_blocks_per_req +
                                    logical_block_idx)
 
             block_numbers = self.block_table_np.ravel()[block_table_indices]
@@ -182,8 +182,7 @@ class BlockTable:
             # (always needed with unified tensor)
             # Each physical block is split into multiple logical blocks
             # The logical table has been expanded to accommodate this
-            block_table_indices = (req_indices * self.max_num_blocks_per_req *
-                                   self.blocks_per_phys_block +
+            block_table_indices = (req_indices * self.max_num_blocks_per_req +
                                    logical_block_idx)
 
             block_numbers = self.block_table_np.ravel()[block_table_indices]
