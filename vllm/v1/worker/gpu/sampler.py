@@ -10,8 +10,8 @@ import triton.language as tl
 
 from vllm.config import LogprobsMode
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
-from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
+from vllm.v1.worker.gpu.states import SamplingMetadata
 
 _SAMPLING_EPS = 1e-5
 
