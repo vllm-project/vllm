@@ -570,7 +570,6 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         is_a_8bit = self.input_dtype is not None and \
             self.input_dtype.itemsize == 1
-        quant_type = self.quant_type
 
         if is_a_8bit:
             assert self.quant_type == scalar_types.uint4b8, \
@@ -655,7 +654,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             is_a_8bit=is_a_8bit)
         if self.input_dtype == torch.int8 and layer.num_groups_w13 > 1:
             marlin_w13_scales, w13_input_global_scale = \
-                marlin_act_int8_process_scales(marlin_w13_scales, quant_type)
+                marlin_act_int8_process_scales(marlin_w13_scales)
             layer.register_parameter(
                 "w13_input_global_scale",
                 torch.nn.Parameter(w13_input_global_scale,
@@ -672,7 +671,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             is_a_8bit=is_a_8bit)
         if self.input_dtype == torch.int8 and layer.num_groups_w2 > 1:
             marlin_w2_scales, w2_input_global_scale = \
-                marlin_act_int8_process_scales(marlin_w2_scales, quant_type)
+                marlin_act_int8_process_scales(marlin_w2_scales)
             layer.register_parameter(
                 "w2_input_global_scale",
                 torch.nn.Parameter(w2_input_global_scale, requires_grad=False))
@@ -716,7 +715,6 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
 
         assert activation == "silu", "Only SiLU activation is supported."
 
-        router_logits = torch.randn_like(router_logits)
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,

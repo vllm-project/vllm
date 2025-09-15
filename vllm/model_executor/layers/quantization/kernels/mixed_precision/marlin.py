@@ -108,7 +108,7 @@ class MarlinLinearKernel(MPLinearKernel):
 
             if c.act_type == torch.int8 and num_groups > 1:
                 x.data, input_global_scale = \
-                    marlin_act_int8_process_scales(x.data, c.weight_type)
+                    marlin_act_int8_process_scales(x.data)
                 layer.register_parameter(
                     "input_global_scale",
                     torch.nn.Parameter(input_global_scale,

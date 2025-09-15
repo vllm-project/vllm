@@ -309,7 +309,7 @@ class AWQMarlinLinearMethod(LinearMethodBase):
             is_a_8bit=is_a_8bit)
         if self.input_dtype == torch.int8 and layer.num_groups > 1:
             marlin_scales, input_global_scale = marlin_act_int8_process_scales(
-                marlin_scales, self.quant_type)
+                marlin_scales)
             layer.register_parameter(
                 "input_global_scale",
                 Parameter(input_global_scale, requires_grad=False))
@@ -451,17 +451,18 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
         device = layer.w13_qweight.device
         is_a_8bit = self.input_dtype is not None and \
             self.input_dtype.itemsize == 1
-        quant_type = self.quant_type
 
         if self.input_dtype == torch.float8_e4m3fn:
-            ops.marlin_int4_fp8_preprocess(layer.w13_qweight,
-                                           layer.w13_qzeros,
-                                           inplace=True)
-            ops.marlin_int4_fp8_preprocess(layer.w2_qweight,
-                                           layer.w2_qzeros,
-                                           inplace=True)
-            layer.marlin_w13_scales.data = layer.marlin_w13_scales.data * 512
-            layer.marlin_w2_scales.data = layer.marlin_w2_scales.data * 512
+            ops.marlin_int4_fp8_preprocess(
+                layer.w13_qweight.view(-1, layer.w13_qweight.size(2)),
+                layer.w13_qzeros.view(-1, layer.w13_qzeros.size(2)),
+                inplace=True)
+            ops.marlin_int4_fp8_preprocess(
+                layer.w2_qweight.view(-1, layer.w2_qweight.size(2)),
+                layer.w2_qzeros.view(-1, layer.w2_qzeros.size(2)),
+                inplace=True)
+            layer.w13_scales.data = layer.w13_scales.data * 512
+            layer.w2_scales.data = layer.w2_scales.data * 512
 
         layer.w13_g_idx_sort_indices = torch.nn.Parameter(
             torch.empty((num_experts, 0), dtype=torch.int32, device=device),
@@ -499,12 +500,10 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
             is_a_8bit=is_a_8bit)
         if self.input_dtype == torch.int8 and layer.num_groups_w13 > 1:
             marlin_w13_scales, w13_input_global_scale = \
-                marlin_act_int8_process_scales(marlin_w13_scales, quant_type)
+                marlin_act_int8_process_scales(marlin_w13_scales)
             layer.register_parameter(
                 "w13_input_global_scale",
                 Parameter(w13_input_global_scale, requires_grad=False))
-        elif self.input_dtype == torch.float8_e4m3fn:
-            marlin_w13_scales = marlin_w13_scales * 512
 
         replace_parameter(layer, "w13_scales", marlin_w13_scales)
 
@@ -516,12 +515,10 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
             is_a_8bit=is_a_8bit)
         if self.input_dtype == torch.int8 and layer.num_groups_w2 > 1:
             marlin_w2_scales, w2_input_global_scale = \
-                marlin_act_int8_process_scales(marlin_w2_scales, quant_type)
+                marlin_act_int8_process_scales(marlin_w2_scales)
             layer.register_parameter(
                 "w2_input_global_scale",
                 Parameter(w2_input_global_scale, requires_grad=False))
-        elif self.input_dtype == torch.float8_e4m3fn:
-            marlin_w2_scales = marlin_w2_scales * 512
 
         replace_parameter(layer, "w2_scales", marlin_w2_scales)
 

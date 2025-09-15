@@ -1079,7 +1079,6 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
 
         from vllm.model_executor.layers.fused_moe import fused_experts
 
-        router_logits = torch.randn_like(router_logits)
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,

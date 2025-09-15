@@ -284,7 +284,7 @@ def marlin_permute_bias(s: torch.Tensor) -> torch.Tensor:
     return s.reshape(*origin_shape).contiguous()
 
 
-def marlin_act_int8_process_scales(s: torch.Tensor, b_type: ScalarType):
+def marlin_act_int8_process_scales(s: torch.Tensor):
     a_scales_scale_factor = 1 / 4096 * s.max().float()
     s = s / s.max() * 4096
     s = s.round().to(torch.int16).view(s.dtype)
