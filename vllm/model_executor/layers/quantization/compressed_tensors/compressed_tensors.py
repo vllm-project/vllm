@@ -129,7 +129,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             # choose transform method
             if any((input_tfms, output_tfms)):
                 return CompressedTensorsLinearTransformMethod.from_schemes(
-                    quant_method, input_tfms, output_tfms)
+                    quant_method, quant_scheme, input_tfms, output_tfms)
 
             else:
                 return quant_method
