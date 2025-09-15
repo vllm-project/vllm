@@ -27,7 +27,7 @@ from openai.types.responses import (ResponseCreatedEvent,
                                     ResponseReasoningItem,
                                     ResponseReasoningTextDeltaEvent,
                                     ResponseReasoningTextDoneEvent,
-                                    response_text_delta_event)
+                                    ResponseStatus, response_text_delta_event)
 from openai.types.responses.response_output_text import (Logprob,
                                                          LogprobTopLogprob)
 # yapf: enable
@@ -461,10 +461,22 @@ class OpenAIServingResponses(OpenAIServing):
                 # TODO: Use a vllm-specific Validation Error
                 return self.create_error_response(str(e))
 
+        # NOTE: Implementation of stauts is still WIP, but for now
+        # we guarantee that if the status is not "completed", it is accurate.
+        # "completed" is implemented as the "catch-all" for now.
+        status: ResponseStatus = "completed"
+
         if self.use_harmony:
             assert isinstance(context, HarmonyContext)
             output = self._make_response_output_items_with_harmony(context)
             num_tool_output_tokens = context.num_tool_output_tokens
+            if len(output) > 0:
+                if context.finish_reason == "length":
+                    status = "incomplete"
+                elif context.finish_reason == "abort":
+                    status = "cancelled"
+            else:
+                status = "incomplete"
         else:
             assert isinstance(context, SimpleContext)
             final_res = context.last_output
@@ -501,7 +513,7 @@ class OpenAIServingResponses(OpenAIServing):
             model_name=model_name,
             created_time=created_time,
             output=output,
-            status="completed",
+            status=status,
             usage=usage,
         )
 
@@ -658,7 +670,7 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         context: HarmonyContext,
     ) -> list[ResponseOutputItem]:
-        output_items = []
+        output_items: list[ResponseOutputItem] = []
         num_init_messages = context.num_init_messages
         for msg in context.messages[num_init_messages:]:
             output_items.extend(parse_output_message(msg))
