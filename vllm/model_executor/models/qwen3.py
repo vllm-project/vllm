@@ -164,6 +164,7 @@ class Qwen3DecoderLayer(nn.Module):
     def __init__(
         self,
         config: Qwen3Config,
+        layer_idx: int,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -186,9 +187,23 @@ class Qwen3DecoderLayer(nn.Module):
         else:
             attn_type = AttentionType.ENCODER_ONLY
 
+        self.layer_idx = layer_idx
+        layer_head_num = getattr(config, 'layer_head_num', None)
+        layer_inter_size = getattr(config, 'layer_inter_size', None)
+
+        if layer_head_num:
+            self.layer_heads = config.layer_head_num[layer_idx]
+        else:
+            self.layer_heads = config.num_attention_heads
+
+        if layer_inter_size:
+            self.layer_inter_size = config.layer_inter_size[layer_idx]
+        else:
+            self.layer_inter_size = config.intermediate_size
+
         self.self_attn = Qwen3Attention(
             hidden_size=self.hidden_size,
-            num_heads=config.num_attention_heads,
+            num_heads=self.layer_heads,
             max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
             rope_theta=rope_theta,
@@ -204,7 +219,7 @@ class Qwen3DecoderLayer(nn.Module):
         )
         self.mlp = Qwen3MLP(
             hidden_size=self.hidden_size,
-            intermediate_size=config.intermediate_size,
+            intermediate_size=self.layer_inter_size,
             hidden_act=config.hidden_act,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
