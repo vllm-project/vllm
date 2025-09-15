@@ -866,11 +866,13 @@ class Qwen3OmniMoeConditionalGenerationMixin(
         if not isinstance(mm_input, (torch.Tensor, list)):
             raise ValueError(f"Incorrect type of {name}. "
                              f"Got type: {type(mm_input)}")
+        if name == "feature_attention_mask":
+            dim = -1
         if isinstance(mm_input, torch.Tensor):
             return torch.concat(list(mm_input), dim=dim)
         else:
-            if isinstance(mm_input, list):
-                return torch.concat([torch.concat(mm_input[i]) for i in range(len(mm_input))], dim=dim)
+            if isinstance(mm_input[0], list):
+                return torch.concat([torch.concat(mm_input[i], dim=dim) for i in range(len(mm_input))], dim=dim)
             else:
                 return torch.concat(mm_input, dim=dim)
     
