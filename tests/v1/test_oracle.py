@@ -9,9 +9,7 @@ from vllm import LLM
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 
-UNSUPPORTED_MODELS_V1 = [
-    "facebook/bart-large-cnn",  # encoder decoder
-]
+UNSUPPORTED_MODELS_V1: list[str] = []
 
 MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 
