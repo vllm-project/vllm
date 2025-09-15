@@ -451,17 +451,6 @@ class Eagle2_5_VLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
-    def _patch_quant_config(self, config: PretrainedConfig,
-                            quant_config: QuantizationConfig):
-        # the awq models from OpenGVLab missing `modules_to_not_convert`
-        # patch the quant_config to add `modules_to_not_convert` back
-        if isinstance(quant_config, AWQConfig):
-            text_config = config.text_config
-            llm_quant_config = getattr(text_config, "quantization_config",
-                                       None)
-            if (not quant_config.modules_to_not_convert) and \
-                (llm_quant_config is not None):
-                quant_config.modules_to_not_convert.append("vision_model")
 
     def _init_mlp1(
             self,
