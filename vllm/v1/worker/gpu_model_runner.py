@@ -18,7 +18,7 @@ from tqdm import tqdm
 
 import vllm.envs as envs
 from vllm.attention import Attention, AttentionType
-from vllm.attention.backends.abstract import AttentionBackend
+from vllm.attention.backends.abstract import AttentionBackend, MultipleOf
 from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
@@ -3342,13 +3342,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         Returns:
             The selected kernel block size
         """
-        supported_sizes = backend_cls.get_supported_block_size()
+        supported_constraints = backend_cls.get_supported_block_size()
         selected_kernel_size = physical_block_size
-        if supported_sizes:
-            for kernel_size in supported_sizes:
-                if (kernel_size > 0
-                        and physical_block_size % kernel_size == 0):
-                    selected_kernel_size = kernel_size
+        if supported_constraints:
+            for constraint in supported_constraints:
+                if (isinstance(constraint, int)
+                        and physical_block_size % constraint == 0):
+                    selected_kernel_size = constraint
+                    break
+                elif (isinstance(constraint, MultipleOf)
+                      and physical_block_size % constraint.base == 0):
+                    selected_kernel_size = constraint.base
                     break
         return selected_kernel_size
 

@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
 from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional,
-                    Protocol, Set, Tuple, Type, TypeVar)
+                    Protocol, Set, Tuple, Type, TypeVar, Union)
 
 import torch
 
@@ -31,6 +31,13 @@ class AttentionType:
     ENCODER_ONLY = "encoder_only"
     # Attention between dec. Q and enc. K/V for encoder-decoder
     ENCODER_DECODER = "encoder_decoder"
+
+
+class MultipleOf:
+    base: int
+
+    def __init__(self, base: int):
+        self.base = base
 
 
 class AttentionBackend(ABC):
@@ -61,7 +68,7 @@ class AttentionBackend(ABC):
         raise NotImplementedError
 
     @classmethod
-    def get_supported_block_size(cls) -> list[int]:
+    def get_supported_block_size(cls) -> list[Union[int, MultipleOf]]:
         return cls.get_impl_cls().get_supported_block_size()
 
     @classmethod
@@ -304,10 +311,10 @@ class AttentionImpl(ABC, Generic[T]):
         raise NotImplementedError
 
     @staticmethod
-    def get_supported_block_size() -> list[int]:
+    def get_supported_block_size() -> list[Union[int, MultipleOf]]:
         # [16] is a placeholder: the actual block size will be determined
         # by config.block_size at runtime.
-        return [16]
+        return [MultipleOf(16)]
 
     @abstractmethod
     def forward(

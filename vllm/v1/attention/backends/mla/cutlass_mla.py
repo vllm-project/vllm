@@ -2,12 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import ClassVar, Optional
+from typing import ClassVar, Optional, Union
 
 import torch
 
 import vllm._custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionLayer, AttentionType,
+                                              MultipleOf,
                                               is_quantized_kv_cache)
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
@@ -40,7 +41,7 @@ class CutlassMLABackend(MLACommonBackend):
         return CutlassMLAMetadataBuilder
 
     @staticmethod
-    def get_supported_block_size() -> list[int]:
+    def get_supported_block_size() -> list[Union[int, MultipleOf]]:
         return [128]
 
 
