@@ -104,7 +104,13 @@ class ParallelConfig:
     eplb_config: EPLBConfig = field(default_factory=EPLBConfig)
     """Expert parallelism configuration."""
     expert_placement_strategy: ExpertPlacementStrategy = "linear"
-    """The expert placement strategy for MoE layers."""
+    """The expert placement strategy for MoE layers:\n
+    - "linear": Experts are placed in a contiguous manner. For example, with 4
+      experts and 2 ranks, rank 0 will have experts [0, 1] and rank 1 will have
+      experts [2, 3].\n
+    - "round_robin": Experts are placed in a round-robin manner. For example,
+      with 4 experts and 2 ranks, rank 0 will have experts [0, 2] and rank 1
+      will have experts [1, 3]."""
     num_redundant_experts: Optional[int] = None
     """`num_redundant_experts` is deprecated and has been replaced with
     `eplb_config.num_redundant_experts`. This will be removed in v0.12.0.
