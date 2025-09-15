@@ -25,6 +25,7 @@
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 import math
+from typing import Any
 
 import torch
 import torchvision.transforms as T
@@ -178,17 +179,15 @@ class DeepseekVLV2Processor(ProcessorMixin):
         prompt: str,
         images: list[Image.Image],
         inference_mode: bool = True,
-        **kwargs,
+        **kwargs: Any,
     ):
         """
 
         Args:
             prompt (str): the formatted prompt;
-            conversations (list[dict]): conversations with a list of messages;
             images (list[ImageType]): the list of images;
             inference_mode (bool): if True, then remove the last eos token;
-            system_prompt (str): the system prompt;
-            **kwargs:
+            **kwargs: Additional keyword arguments.
 
         Returns:
             outputs (BaseProcessorOutput): the output of the processor,
@@ -256,15 +255,15 @@ class DeepseekVLV2Processor(ProcessorMixin):
     def __call__(
         self,
         *,
-        prompt: str,
+        text: str,
         images: list[Image.Image],
         inference_mode: bool = True,
-        **kwargs,
+        **kwargs: Any,
     ):
         """
 
         Args:
-            prompt (str): the formatted prompt;
+            text (str): the formatted prompt;
             images (list[ImageType]): the list of images;
             inference_mode (bool): if True, then remove the last eos token;
             **kwargs:
@@ -278,7 +277,7 @@ class DeepseekVLV2Processor(ProcessorMixin):
         """
 
         prepare = self.process_one(
-            prompt=prompt,
+            prompt=text,
             images=images,
             inference_mode=inference_mode,
         )

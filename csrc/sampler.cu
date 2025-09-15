@@ -59,6 +59,8 @@ void apply_repetition_penalties_(
   int vocab_size = logits.size(-1);
   int num_seqs = logits.size(0);
 
+  if (num_seqs == 0) return;
+
   // Get number of SMs on the current device
   int sms = 0;
   cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount,

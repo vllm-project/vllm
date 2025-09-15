@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copyreg
 import os
 import subprocess
 import sys
@@ -10,6 +11,30 @@ from pathlib import Path
 
 import pytest
 import requests
+import urllib3.exceptions
+
+
+def _pickle_new_connection_error(obj):
+    """Custom pickler for NewConnectionError to fix tblib compatibility."""
+    # Extract the original message by removing the "conn: " prefix
+    full_message = obj.args[0] if obj.args else ""
+    if ': ' in full_message:
+        # Split off the connection part and keep the actual message
+        _, actual_message = full_message.split(': ', 1)
+    else:
+        actual_message = full_message
+    return _unpickle_new_connection_error, (actual_message, )
+
+
+def _unpickle_new_connection_error(message):
+    """Custom unpickler for NewConnectionError."""
+    # Create with None as conn and the actual message
+    return urllib3.exceptions.NewConnectionError(None, message)
+
+
+# Register the custom pickle/unpickle functions for tblib compatibility
+copyreg.pickle(urllib3.exceptions.NewConnectionError,
+               _pickle_new_connection_error)
 
 
 def _query_server(prompt: str, max_tokens: int = 5) -> dict:
@@ -29,7 +54,7 @@ def _query_server_long(prompt: str) -> dict:
 
 
 @pytest.fixture
-def api_server(tokenizer_pool_size: int, distributed_executor_backend: str):
+def api_server(distributed_executor_backend: str):
     script_path = Path(__file__).parent.joinpath(
         "api_server_async_engine.py").absolute()
     commands = [
@@ -40,8 +65,6 @@ def api_server(tokenizer_pool_size: int, distributed_executor_backend: str):
         "facebook/opt-125m",
         "--host",
         "127.0.0.1",
-        "--tokenizer-pool-size",
-        str(tokenizer_pool_size),
         "--distributed-executor-backend",
         distributed_executor_backend,
     ]
@@ -54,10 +77,9 @@ def api_server(tokenizer_pool_size: int, distributed_executor_backend: str):
     uvicorn_process.terminate()
 
 
-@pytest.mark.parametrize("tokenizer_pool_size", [0, 2])
+@pytest.mark.timeout(300)
 @pytest.mark.parametrize("distributed_executor_backend", ["mp", "ray"])
-def test_api_server(api_server, tokenizer_pool_size: int,
-                    distributed_executor_backend: str):
+def test_api_server(api_server, distributed_executor_backend: str):
     """
     Run the API server and test it.
 
@@ -102,7 +124,7 @@ def test_api_server(api_server, tokenizer_pool_size: int,
         pool.join()
 
         # check cancellation stats
-        # give it some times to update the stats
+        # give it some time to update the stats
         time.sleep(1)
 
         num_aborted_requests = requests.get(

@@ -4,7 +4,7 @@ vLLM exposes a number of metrics that can be used to monitor the health of the
 system. These metrics are exposed via the `/metrics` endpoint on the vLLM
 OpenAI compatible API server.
 
-You can start the server using Python, or using [Docker][deployment-docker]:
+You can start the server using Python, or using [Docker](../deployment/docker.md):
 
 ```bash
 vllm serve unsloth/Llama-3.2-1B-Instruct
@@ -12,7 +12,7 @@ vllm serve unsloth/Llama-3.2-1B-Instruct
 
 Then query the endpoint to get the latest metrics from the server:
 
-??? Output
+??? console "Output"
 
     ```console
     $ curl http://0.0.0.0:8000/metrics
@@ -33,7 +33,7 @@ Then query the endpoint to get the latest metrics from the server:
 
 The following metrics are exposed:
 
-??? Code
+??? code
 
     ```python
     --8<-- "vllm/engine/metrics.py:metrics-definitions"

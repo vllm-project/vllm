@@ -18,12 +18,14 @@ RTOL = 0.08
 
 def launch_lm_eval(eval_config, tp_size):
     trust_remote_code = eval_config.get("trust_remote_code", False)
+    max_model_len = eval_config.get("max_model_len", 4096)
     model_args = (
         f"pretrained={eval_config['model_name']},"
         f"tensor_parallel_size={tp_size},"
         f"enforce_eager=true,"
         f"add_bos_token=true,"
-        f"trust_remote_code={trust_remote_code}"
+        f"trust_remote_code={trust_remote_code},"
+        f"max_model_len={max_model_len}"
     )
     results = lm_eval.simple_evaluate(
         model="vllm",

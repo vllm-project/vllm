@@ -9,6 +9,7 @@ from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional,
 
 import torch
 
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.multimodal import MultiModalPlaceholderMap
 
 if TYPE_CHECKING:
@@ -99,10 +100,9 @@ class AttentionBackend(ABC):
     ) -> None:
         raise NotImplementedError
 
-    def advance_step(self, model_input: "ModelRunnerInputBase",
-                     sampled_token_ids: Optional[torch.Tensor],
-                     block_size: int, num_seqs: int, num_queries: int) -> None:
-        raise NotImplementedError
+    @classmethod
+    def full_cls_name(cls) -> tuple[str, str]:
+        return (cls.__module__, cls.__qualname__)
 
 
 @dataclass
@@ -240,6 +240,7 @@ class AttentionLayer(Protocol):
     _q_scale: torch.Tensor
     _k_scale: torch.Tensor
     _v_scale: torch.Tensor
+    _q_scale_float: float
     _k_scale_float: float
     _v_scale_float: float
     _prob_scale: torch.Tensor
@@ -257,6 +258,32 @@ class AttentionLayer(Protocol):
 
 class AttentionImpl(ABC, Generic[T]):
 
+    # Whether the attention impl can return the softmax lse for decode.
+    # Some features like decode context parallelism require the softmax lse.
+    can_return_lse_for_decode: bool = False
+
+    # some attention backends might not always want to return lse
+    # even if they can return lse (for efficiency reasons)
+    need_to_return_lse_for_decode: bool = False
+
+    dcp_world_size: int
+    dcp_rank: int
+
+    def __new__(cls, *args, **kwargs):
+        # use __new__ so that all subclasses will call this
+        self = super().__new__(cls)
+        try:
+            from vllm.distributed.parallel_state import get_dcp_group
+            self.dcp_world_size = get_dcp_group().world_size
+            self.dcp_rank = get_dcp_group().rank_in_group
+        except AssertionError:
+            # DCP might not be initialized in testing
+            self.dcp_world_size = 1
+            self.dcp_rank = 0
+        self.need_to_return_lse_for_decode = self.dcp_world_size > 1 \
+            and self.can_return_lse_for_decode
+        return self
+
     @abstractmethod
     def __init__(
         self,
@@ -267,7 +294,6 @@ class AttentionImpl(ABC, Generic[T]):
         alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
         kv_cache_dtype: str = "auto",
-        blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
@@ -285,20 +311,17 @@ class AttentionImpl(ABC, Generic[T]):
         attn_metadata: T,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
+        output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         raise NotImplementedError
 
-    def fused_output_quant_supported(self, dtype: torch.dtype, static: bool,
-                                     group_shape: tuple[int, int]):
+    def fused_output_quant_supported(self, quant_key: QuantKey):
         """
         Does this attention implementation support fused output quantization.
         This is used by the AttnFusionPass to only fuse output quantization
         onto implementations that support it.
 
-        TODO(luka) merge parameters into QuantDescriptor
-        :param dtype: quantized dtype
-        :param static: static or dynamic quantization
-        :param group_shape: quant group shape. (-1, -1) for per-tensor.
+        :param quant_key: QuantKey object that describes the quantization op
         :return: is fusion supported for this type of quantization
         """
         return False
@@ -317,6 +340,7 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
         attn_metadata: T,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
+        output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         raise NotImplementedError
 

@@ -11,7 +11,7 @@ from vllm.adapter_commons.utils import (add_adapter_worker,
                                         list_adapters_worker,
                                         set_active_adapters_worker)
 from vllm.adapter_commons.worker_manager import AbstractWorkerManager
-from vllm.config import LoRAConfig
+from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.models import (LoRAModel, LoRAModelManager,
                               LRUCacheLoRAModelManager, create_lora_manager)
@@ -154,7 +154,7 @@ class WorkerLoRAManager(AbstractWorkerManager):
                 lora_request.lora_int_id)
         else:
             dummy_lora = self._adapter_manager.create_dummy_lora(
-                lora_request.lora_int_id, rank, 1, self.embedding_modules)
+                lora_request.lora_int_id, rank, self.embedding_modules)
             if self._cached_dummy_lora is None:
                 self._cached_dummy_lora = dummy_lora
         return self._adapter_manager.add_adapter(dummy_lora)

@@ -18,14 +18,14 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 
 from vllm.benchmarks.datasets import (AIMODataset, BurstGPTDataset,
                                       ConversationDataset,
-                                      InstructCoderDataset, RandomDataset,
-                                      SampleRequest, ShareGPTDataset,
-                                      SonnetDataset, VisionArenaDataset)
-from vllm.benchmarks.utils import (convert_to_pytorch_benchmark_format,
-                                   write_to_json)
+                                      InstructCoderDataset,
+                                      PrefixRepetitionRandomDataset,
+                                      RandomDataset, SampleRequest,
+                                      ShareGPTDataset, SonnetDataset,
+                                      VisionArenaDataset)
+from vllm.benchmarks.lib.utils import (convert_to_pytorch_benchmark_format,
+                                       write_to_json)
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
-from vllm.entrypoints.openai.api_server import (
-    build_async_engine_client_from_engine_args)
 from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
@@ -37,6 +37,7 @@ def run_vllm(
     requests: list[SampleRequest],
     n: int,
     engine_args: EngineArgs,
+    do_profile: bool,
     disable_detokenize: bool = False,
 ) -> tuple[float, Optional[list[RequestOutput]]]:
     from vllm import LLM, SamplingParams
@@ -75,10 +76,14 @@ def run_vllm(
     outputs = None
     if not use_beam_search:
         start = time.perf_counter()
+        if do_profile:
+            llm.start_profile()
         outputs = llm.generate(prompts,
                                sampling_params,
                                lora_request=lora_requests,
                                use_tqdm=True)
+        if do_profile:
+            llm.stop_profile()
         end = time.perf_counter()
     else:
         assert lora_requests is None, "BeamSearch API does not support LoRA"
@@ -88,6 +93,8 @@ def run_vllm(
         for request in requests:
             assert request.expected_output_len == output_len
         start = time.perf_counter()
+        if do_profile:
+            llm.start_profile()
         llm.beam_search(
             prompts,
             BeamSearchParams(
@@ -95,6 +102,8 @@ def run_vllm(
                 max_tokens=output_len,
                 ignore_eos=True,
             ))
+        if do_profile:
+            llm.stop_profile()
         end = time.perf_counter()
     return end - start, outputs
 
@@ -103,6 +112,7 @@ def run_vllm_chat(
         requests: list[SampleRequest],
         n: int,
         engine_args: EngineArgs,
+        do_profile: bool,
         disable_detokenize: bool = False) -> tuple[float, list[RequestOutput]]:
     """
     Run vLLM chat benchmark. This function is recommended ONLY for benchmarking
@@ -133,7 +143,11 @@ def run_vllm_chat(
                 detokenize=not disable_detokenize,
             ))
     start = time.perf_counter()
+    if do_profile:
+        llm.start_profile()
     outputs = llm.chat(prompts, sampling_params, use_tqdm=True)
+    if do_profile:
+        llm.stop_profile()
     end = time.perf_counter()
     return end - start, outputs
 
@@ -142,13 +156,18 @@ async def run_vllm_async(
     requests: list[SampleRequest],
     n: int,
     engine_args: AsyncEngineArgs,
+    do_profile: bool,
     disable_frontend_multiprocessing: bool = False,
     disable_detokenize: bool = False,
 ) -> float:
     from vllm import SamplingParams
+    from vllm.entrypoints.openai.api_server import (
+        build_async_engine_client_from_engine_args)
 
     async with build_async_engine_client_from_engine_args(
-            engine_args, disable_frontend_multiprocessing) as llm:
+        engine_args,
+        disable_frontend_multiprocessing=disable_frontend_multiprocessing,
+    ) as llm:
         model_config = await llm.get_model_config()
         assert all(
             model_config.max_model_len >= (request.prompt_len +
@@ -181,6 +200,8 @@ async def run_vllm_async(
 
         generators = []
         start = time.perf_counter()
+        if do_profile:
+            await llm.start_profile()
         for i, (prompt, sp,
                 lr) in enumerate(zip(prompts, sampling_params, lora_requests)):
             generator = llm.generate(prompt,
@@ -191,6 +212,8 @@ async def run_vllm_async(
         all_gens = merge_async_iterators(*generators)
         async for i, res in all_gens:
             pass
+        if do_profile:
+            await llm.stop_profile()
         end = time.perf_counter()
         return end - start
 
@@ -325,6 +348,12 @@ def get_requests(args, tokenizer):
             dataset_cls = AIMODataset
             common_kwargs['dataset_subset'] = None
             common_kwargs['dataset_split'] = "train"
+    elif args.dataset_name == "prefix_repetition":
+        dataset_cls = PrefixRepetitionRandomDataset
+        sample_kwargs["prefix_len"] = args.prefix_repetition_prefix_len
+        sample_kwargs["suffix_len"] = args.prefix_repetition_suffix_len
+        sample_kwargs["num_prefixes"] = args.prefix_repetition_num_prefixes
+        sample_kwargs["output_len"] = args.prefix_repetition_output_len
     else:
         raise ValueError(f"Unknown dataset name: {args.dataset_name}")
     # Remove None values
@@ -354,7 +383,11 @@ def validate_args(args):
         raise ValueError(f"Unsupported backend: {args.backend}")
 
     # === Dataset Configuration ===
-    if not args.dataset and not args.dataset_path:
+    if (
+        not args.dataset
+        and not args.dataset_path
+        and args.dataset_name not in {"prefix_repetition"}
+    ):
         print(
             "When dataset path is not set, it will default to random dataset")
         args.dataset_name = 'random'
@@ -420,6 +453,14 @@ def validate_args(args):
     if args.backend == "mii" and args.tokenizer != args.model:
         raise ValueError(
             "Tokenizer must be the same as the model for MII backend.")
+    
+    # --data-parallel is not supported currently.
+    # https://github.com/vllm-project/vllm/issues/16222
+    if args.data_parallel_size > 1:
+        raise ValueError(
+            "Data parallel is not supported in offline benchmark, "
+            "please use benchmark serving instead"
+        )
 
 
 def add_cli_args(parser: argparse.ArgumentParser):
@@ -430,7 +471,10 @@ def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--dataset-name",
         type=str,
-        choices=["sharegpt", "random", "sonnet", "burstgpt", "hf"],
+        choices=[
+            "sharegpt", "random", "sonnet", "burstgpt", "hf",
+            "prefix_repetition"
+        ],
         help="Name of the dataset to benchmark on.",
         default="sharegpt")
     parser.add_argument(
@@ -518,6 +562,44 @@ def add_cli_args(parser: argparse.ArgumentParser):
                         type=str,
                         default=None,
                         help="Split of the HF dataset.")
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        default=False,
+        help="Use Torch Profiler. The env variable "
+        "VLLM_TORCH_PROFILER_DIR must be set to enable profiler.")
+
+    # prefix repetition dataset
+    prefix_repetition_group = parser.add_argument_group(
+        "prefix repetition dataset options")
+    prefix_repetition_group.add_argument(
+        "--prefix-repetition-prefix-len",
+        type=int,
+        default=None,
+        help="Number of prefix tokens per request, used only for prefix "
+        "repetition dataset.",
+    )
+    prefix_repetition_group.add_argument(
+        "--prefix-repetition-suffix-len",
+        type=int,
+        default=None,
+        help="Number of suffix tokens per request, used only for prefix "
+        "repetition dataset. Total input length is prefix_len + suffix_len.",
+    )
+    prefix_repetition_group.add_argument(
+        "--prefix-repetition-num-prefixes",
+        type=int,
+        default=None,
+        help="Number of prefixes to generate, used only for prefix repetition "
+        "dataset. Prompts per prefix is num_requests // num_prefixes.",
+    )
+    prefix_repetition_group.add_argument(
+        "--prefix-repetition-output-len",
+        type=int,
+        default=None,
+        help="Number of output tokens per request, used only for prefix "
+        "repetition dataset.",
+    )
 
     parser = AsyncEngineArgs.add_cli_args(parser)
 
@@ -543,22 +625,27 @@ def main(args: argparse.Namespace):
                     requests,
                     args.n,
                     AsyncEngineArgs.from_cli_args(args),
-                    args.disable_frontend_multiprocessing,
-                    args.disable_detokenize,
+                    disable_frontend_multiprocessing=args.disable_frontend_multiprocessing,
+                    disable_detokenize=args.disable_detokenize,
+                    do_profile=args.profile,
                 ))
         else:
             elapsed_time, request_outputs = run_vllm(
                 requests, args.n, EngineArgs.from_cli_args(args),
-                args.disable_detokenize)
+                disable_detokenize=args.disable_detokenize,
+                do_profile=args.profile)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
+        if args.profile:
+            raise NotImplementedError(
+                "Profiling not implemented yet for backend='hf'.")
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
                               args.hf_max_batch_size, args.trust_remote_code,
                               args.disable_detokenize)
     elif args.backend == "vllm-chat":
         elapsed_time, request_outputs = run_vllm_chat(
             requests, args.n, EngineArgs.from_cli_args(args),
-            args.disable_detokenize)
+            disable_detokenize=args.disable_detokenize, do_profile=args.profile)
     else:
         raise ValueError(f"Unknown backend: {args.backend}")
 

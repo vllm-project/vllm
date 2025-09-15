@@ -1,14 +1,11 @@
----
-title: Using Kubernetes
----
-[](){ #deployment-k8s }
+# Using Kubernetes
 
 Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine learning models. This guide walks you through deploying vLLM using native Kubernetes.
 
 - [Deployment with CPUs](#deployment-with-cpus)
 - [Deployment with GPUs](#deployment-with-gpus)
 - [Troubleshooting](#troubleshooting)
-  - [Startup Probe or Readiness Probe Failure, container log contains "KeyboardInterrupt: terminated"](#startup-probe-or-readiness-probe-failure-container-log-contains-keyboardinterrupt-terminated)
+    - [Startup Probe or Readiness Probe Failure, container log contains "KeyboardInterrupt: terminated"](#startup-probe-or-readiness-probe-failure-container-log-contains-keyboardinterrupt-terminated)
 - [Conclusion](#conclusion)
 
 Alternatively, you can deploy vLLM to Kubernetes using any of the following:
@@ -16,6 +13,7 @@ Alternatively, you can deploy vLLM to Kubernetes using any of the following:
 - [Helm](frameworks/helm.md)
 - [InftyAI/llmaz](integrations/llmaz.md)
 - [KServe](integrations/kserve.md)
+- [KubeRay](integrations/kuberay.md)
 - [kubernetes-sigs/lws](frameworks/lws.md)
 - [meta-llama/llama-stack](integrations/llamastack.md)
 - [substratusai/kubeai](integrations/kubeai.md)
@@ -29,7 +27,7 @@ Alternatively, you can deploy vLLM to Kubernetes using any of the following:
 
 First, create a Kubernetes PVC and Secret for downloading and storing Hugging Face model:
 
-??? Config
+??? console "Config"
 
     ```bash
     cat <<EOF |kubectl apply -f -
@@ -57,7 +55,7 @@ First, create a Kubernetes PVC and Secret for downloading and storing Hugging Fa
 
 Next, start the vLLM server as a Kubernetes Deployment and Service:
 
-??? Config
+??? console "Config"
 
     ```bash
     cat <<EOF |kubectl apply -f -
@@ -382,7 +380,7 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 
 ### Startup Probe or Readiness Probe Failure, container log contains "KeyboardInterrupt: terminated"
 
-If the startup or readiness probe failureThreshold is too low for the time needed to startup the server, Kubernetes scheduler will kill the container. A couple of indications that this has happened:
+If the startup or readiness probe failureThreshold is too low for the time needed to start up the server, Kubernetes scheduler will kill the container. A couple of indications that this has happened:
 
 1. container log contains "KeyboardInterrupt: terminated"
 2. `kubectl get events` shows message `Container $NAME failed startup probe, will be restarted`

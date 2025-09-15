@@ -1,3 +1,5 @@
+#include "core/registration.h"
+
 #include <torch/all.h>
 #include <cutlass/arch/arch.h>
 
@@ -199,11 +201,10 @@ void run_blockwise_scaled_group_mm(
       reinterpret_cast<typename ScheduleConfig::LayoutSFB*>(
           layout_sfb.data_ptr())};
 
-  cutlass::KernelHardwareInfo hw_info;
-  hw_info.device_id = a_ptrs.get_device();
-  hw_info.sm_count =
-      cutlass::KernelHardwareInfo::query_device_multiprocessor_count(
-          hw_info.device_id);
+  int device_id = a_ptrs.device().index();
+  static const cutlass::KernelHardwareInfo hw_info{
+      device_id, cutlass::KernelHardwareInfo::query_device_multiprocessor_count(
+                     device_id)};
 
   // Epilogue Arguments
   typename GemmKernel::EpilogueArguments epilogue_args{
@@ -364,4 +365,9 @@ void cutlass_blockwise_scaled_grouped_mm(
     TORCH_CHECK(false, "Unsupported output tensor type");
   }
 #endif
+}
+
+TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
+  m.impl("cutlass_blockwise_scaled_grouped_mm",
+         &cutlass_blockwise_scaled_grouped_mm);
 }

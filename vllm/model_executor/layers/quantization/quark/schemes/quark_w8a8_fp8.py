@@ -7,6 +7,8 @@ import torch
 from torch.nn import Parameter
 
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp, normalize_e4m3fn_to_e4m3fnuz, requantize_with_max_scale)
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
@@ -28,10 +30,14 @@ class QuarkW8A8Fp8(QuarkScheme):
             self.is_static_input_scheme = not cast(
                 bool, input_config.get("is_dynamic"))
             self.input_qscheme = cast(str, input_config.get("qscheme"))
-        self.use_per_token_if_dynamic = (not self.is_static_input_scheme \
-            and self.input_qscheme == "per_channel")
+
+        per_token = (not self.is_static_input_scheme
+                     and self.input_qscheme == "per_channel")
+        self.act_quant_group_shape = GroupShape.PER_TOKEN \
+            if per_token else GroupShape.PER_TENSOR
         self.fp8_linear = Fp8LinearOp(
-            use_per_token_if_dynamic=self.use_per_token_if_dynamic)
+            act_quant_static=self.is_static_input_scheme,
+            act_quant_group_shape=self.act_quant_group_shape)
         self.out_dtype = torch.get_default_dtype()
 
     @classmethod
@@ -44,7 +50,7 @@ class QuarkW8A8Fp8(QuarkScheme):
         # tensor scales (thus N scales being passed to the kernel),
         # requantize so we can always run per tensor
         if self.weight_qscheme == "per_tensor":
-            if current_platform.is_rocm():
+            if current_platform.is_fp8_fnuz():
                 input_scale = getattr(layer, 'input_scale', None)
                 weight, max_w_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
                     weight=layer.weight,
@@ -82,7 +88,7 @@ class QuarkW8A8Fp8(QuarkScheme):
                                                   requires_grad=False)
             else:
                 weight_scale = layer.weight_scale.data
-            if self.use_per_token_if_dynamic:
+            if self.act_quant_group_shape == GroupShape.PER_TOKEN:
                 weight_scale = weight_scale.view(-1, 1)
             layer.weight = Parameter(weight.t(), requires_grad=False)
             # required by torch.compile to be torch.nn.Parameter
