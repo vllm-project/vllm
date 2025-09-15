@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 from copy import deepcopy
 from typing import Any
 
@@ -14,12 +15,14 @@ from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.sampler import SamplerOutput
-from vllm.v1.worker.gpu.attn_utils import get_kv_cache_spec, init_attn_backend
+from vllm.v1.worker.gpu.attn_utils import get_kv_cache_spec, init_attn_backend, init_kv_cache
+from vllm.v1.worker.utils import bind_kv_cache
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.init_utils import load_model
 from vllm.v1.worker.gpu.input_batch import (InputBatch, InputBuffers,
                                             prepare_inputs)
 from vllm.v1.worker.gpu.sampler import Sampler
+from vllm.model_executor.model_loader import get_model_loader
+from vllm.utils import DeviceMemoryProfiler, GiB_bytes
 from vllm.v1.worker.gpu.states import RequestState
 
 logger = init_logger(__name__)
@@ -52,6 +55,7 @@ class GPUModelRunner:
             # Quantized KV cache.
             self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
                 self.cache_config.cache_dtype]
+        self.is_pooling_model = False
 
         self.vocab_size = self.model_config.get_vocab_size()
         self.max_model_len = self.model_config.max_model_len
@@ -74,8 +78,27 @@ class GPUModelRunner:
         )
         self.sampler = Sampler()
 
-    def load_model(self) -> None:
-        self.model = load_model(self.vllm_config)
+    def load_model(self, eep_scale_up: bool = False) -> None:
+        time_before_load = time.perf_counter()
+        with DeviceMemoryProfiler() as m:
+            model_loader = get_model_loader(self.vllm_config.load_config)
+            logger.info("Loading model from scratch...")
+            self.model = model_loader.load_model(
+                vllm_config=self.vllm_config,
+                model_config=self.vllm_config.model_config,
+            )
+        time_after_load = time.perf_counter()
+
+        self.model_memory_usage = m.consumed_memory
+        logger.info("Model loading took %.4f GiB and %.6f seconds",
+                    m.consumed_memory / GiB_bytes,
+                    time_after_load - time_before_load)
+
+    def profile_run(self):
+        pass
+
+    def maybe_remove_all_loras(self, lora_config):
+        pass
 
     def get_kv_cache_spec(self):
         return get_kv_cache_spec(self.vllm_config, self.kv_cache_dtype)
@@ -93,7 +116,20 @@ class GPUModelRunner:
             device=self.device,
             pin_memory=self.pin_memory,
         )
-        self.attn_metadata_builders = init_attn_backend(self.vllm_config)
+
+        self.attn_backends, self.attn_metadata_builders = init_attn_backend(
+            self.kv_cache_config,
+            self.vllm_config,
+            self.device,
+        )
+
+        kv_caches = init_kv_cache(self.kv_cache_config, self.attn_backends, self.device)
+        self.kv_caches: list[torch.Tensor] = []
+        bind_kv_cache(
+            kv_caches,
+            self.compilation_config.static_forward_context,
+            self.kv_caches,
+        )
 
     def update_states(self, scheduler_output: SchedulerOutput) -> None:
         for req_id in scheduler_output.preempted_req_ids:
@@ -291,9 +327,11 @@ class GPUModelRunner:
             return None
 
         num_prompt_tokens_scheduled = ...
-        if not np.any(num_prompt_tokens_scheduled > 0 & needs_prompt_logprobs):
+        if not np.any((num_prompt_tokens_scheduled > 0) & needs_prompt_logprobs):
             # The request already computed prompt logprobs.
             return None
+
+        # TODO
         return
 
     def postprocess(

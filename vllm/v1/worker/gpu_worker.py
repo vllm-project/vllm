@@ -31,7 +31,8 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
                              DraftTokenIds, ModelRunnerOutput)
 from vllm.v1.utils import report_usage_stats
-from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+# from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import WorkerBase
 
@@ -682,8 +683,8 @@ class Worker(WorkerBase):
         self.model_runner.save_tensorized_model(
             tensorizer_config=tensorizer_config, )
 
-    def shutdown(self) -> None:
-        self.model_runner.ensure_kv_transfer_shutdown()
+    # def shutdown(self) -> None:
+    #     self.model_runner.ensure_kv_transfer_shutdown()
 
 
 def init_worker_distributed_environment(

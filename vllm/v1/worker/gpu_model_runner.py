@@ -1559,12 +1559,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             for layer_name in layer_names:
                 attn_backend = layers[layer_name].get_attn_backend()
 
-                if layer_name in self.kv_sharing_fast_prefill_eligible_layers:
-                    attn_backend = create_fast_prefill_custom_backend(
-                        "FastPrefill",
-                        attn_backend,
-                    )
-
                 key = attn_backend.full_cls_name()
                 attn_backends[key] = attn_backend
                 attn_backend_layers[key].append(layer_name)
@@ -1726,7 +1720,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             corresponding memory buffer for KV cache.
         """
         kv_caches: dict[str, torch.Tensor] = {}
-        has_attn, has_mamba = False, False
         for kv_cache_spec, group in self._kv_cache_spec_attn_group_iterator():
             attn_backend = group.backend
             for layer_name in group.layer_names:
@@ -1736,35 +1729,34 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
                 num_blocks = (raw_tensor.numel() //
                               kv_cache_spec.page_size_bytes)
-                if isinstance(kv_cache_spec, AttentionSpec):
-                    has_attn = True
-                    kv_cache_shape = attn_backend.get_kv_cache_shape(
-                        num_blocks, kv_cache_spec.block_size,
-                        kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
-                    dtype = kv_cache_spec.dtype
-                    try:
-                        kv_cache_stride_order = \
-                            attn_backend.get_kv_cache_stride_order()
-                        assert len(kv_cache_stride_order) == len(
-                            kv_cache_shape)
-                    except (AttributeError, NotImplementedError):
-                        kv_cache_stride_order = tuple(
-                            range(len(kv_cache_shape)))
-                    # The allocation respects the backend-defined stride order
-                    # to ensure the semantic remains consistent for each
-                    # backend. We first obtain the generic kv cache shape and
-                    # then permute it according to the stride order which could
-                    # result in a non-contiguous tensor.
-                    kv_cache_shape = tuple(kv_cache_shape[i]
-                                           for i in kv_cache_stride_order)
-                    # Maintain original KV shape view.
-                    inv_order = [
-                        kv_cache_stride_order.index(i)
-                        for i in range(len(kv_cache_stride_order))
-                    ]
-                    kv_caches[layer_name] = kv_cache_raw_tensors[
-                        layer_name].view(dtype).view(kv_cache_shape).permute(
-                            *inv_order)
+
+                kv_cache_shape = attn_backend.get_kv_cache_shape(
+                    num_blocks, kv_cache_spec.block_size,
+                    kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
+                dtype = kv_cache_spec.dtype
+                try:
+                    kv_cache_stride_order = \
+                        attn_backend.get_kv_cache_stride_order()
+                    assert len(kv_cache_stride_order) == len(
+                        kv_cache_shape)
+                except (AttributeError, NotImplementedError):
+                    kv_cache_stride_order = tuple(
+                        range(len(kv_cache_shape)))
+                # The allocation respects the backend-defined stride order
+                # to ensure the semantic remains consistent for each
+                # backend. We first obtain the generic kv cache shape and
+                # then permute it according to the stride order which could
+                # result in a non-contiguous tensor.
+                kv_cache_shape = tuple(kv_cache_shape[i]
+                                        for i in kv_cache_stride_order)
+                # Maintain original KV shape view.
+                inv_order = [
+                    kv_cache_stride_order.index(i)
+                    for i in range(len(kv_cache_stride_order))
+                ]
+                kv_caches[layer_name] = kv_cache_raw_tensors[
+                    layer_name].view(dtype).view(kv_cache_shape).permute(
+                        *inv_order)
 
         return kv_caches
 

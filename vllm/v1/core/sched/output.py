@@ -30,6 +30,7 @@ class NewRequestData:
     mm_features: list[MultiModalFeatureSpec]
     sampling_params: Optional[SamplingParams]
     pooling_params: Optional[PoolingParams]
+    block_ids: tuple[list[int], ...]
     num_computed_tokens: int
     lora_request: Optional[LoRARequest]
 
@@ -45,6 +46,7 @@ class NewRequestData:
             mm_features=request.mm_features,
             sampling_params=request.sampling_params,
             pooling_params=request.pooling_params,
+            block_ids=block_ids,
             num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
         )
@@ -55,6 +57,7 @@ class NewRequestData:
                 f"prompt_token_ids={self.prompt_token_ids},"
                 f"mm_features={self.mm_features},"
                 f"sampling_params={self.sampling_params},"
+                f"block_ids={self.block_ids},"
                 f"num_computed_tokens={self.num_computed_tokens},"
                 f"lora_request={self.lora_request}"
                 ")")
@@ -66,6 +69,7 @@ class NewRequestData:
                 f"prompt_token_ids_len={len(self.prompt_token_ids)},"
                 f"mm_features={self.mm_features},"
                 f"sampling_params={self.sampling_params},"
+                f"block_ids={self.block_ids},"
                 f"num_computed_tokens={self.num_computed_tokens},"
                 f"lora_request={self.lora_request}"
                 ")")
@@ -73,17 +77,52 @@ class NewRequestData:
 
 @bc_linter_include
 @dataclass
-class SchedulerOutput:
+class CachedRequestData:
 
     req_ids: list[str]
-    cu_new_block_ids: tuple[np.ndarray, ...]
+    # If resumed_from_preemption is False, new_block_ids will be appended to
+    # the request's block IDs. If True, new_block_ids will be used as the
+    # request's block IDs instead of appending to the existing block IDs.
+    resumed_from_preemption: list[bool]
+    # NOTE(woosuk): new_token_ids is only used for pipeline parallelism.
+    # When PP is not used, new_token_ids will be empty.
+    new_token_ids: list[list[int]]
+    new_block_ids: list[Optional[tuple[list[int], ...]]]
+    num_computed_tokens: list[int]
+
+    @property
+    def num_reqs(self) -> int:
+        return len(self.req_ids)
+
+    @classmethod
+    def make_empty(cls) -> CachedRequestData:
+        return cls(
+            req_ids=[],
+            resumed_from_preemption=[],
+            new_token_ids=[],
+            new_block_ids=[],
+            num_computed_tokens=[],
+        )
+
+
+@bc_linter_include
+@dataclass
+class SchedulerOutput:
 
     # list of the requests that are scheduled for the first time.
     # We cache the request's data in each worker process, so that we don't
     # need to re-send it every scheduling step.
     scheduled_new_reqs: list[NewRequestData]
+    # list of the requests that have been scheduled before.
+    # Since the request's data is already cached in the worker processes,
+    # we only send the diff to minimize the communication cost.
+    scheduled_cached_reqs: CachedRequestData
 
+    # req_id -> num_scheduled_tokens
+    # Number of tokens scheduled for each request.
     num_scheduled_tokens: dict[str, int]
+    # Total number of tokens scheduled for all requests.
+    # Equal to sum(num_scheduled_tokens.values())
     total_num_scheduled_tokens: int
     # req_id -> spec_token_ids
     # If a request does not have any spec decode tokens, it will not be
@@ -97,11 +136,13 @@ class SchedulerOutput:
     # This can be used for cascade attention.
     num_common_prefix_blocks: list[int]
 
-    preempted_req_ids: set[str]
     # Request IDs that are finished in between the previous and the current
     # steps. This is used to notify the workers about the finished requests
     # so that they can free the cached states for those requests.
     finished_req_ids: set[str]
+    # list of mm_hash strings associated with the encoder outputs to be
+    # freed from the encoder cache.
+    free_encoder_mm_hashes: list[str]
 
     # Dict of request ids to their index within the batch
     # for filling the next token bitmask

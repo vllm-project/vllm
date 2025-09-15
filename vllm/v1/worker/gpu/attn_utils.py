@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm.attention.backends.abstract import AttentionType
+from vllm.attention.backends.abstract import AttentionBackend, AttentionType
 from vllm.attention.layer import Attention
+from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheSpec,
                                         SlidingWindowSpec)
@@ -40,8 +42,30 @@ def get_kv_cache_spec(
     return kv_cache_spec
 
 
-def init_attn_backend(vllm_config: VllmConfig):
+def init_attn_backend(
+    kv_cache_config: KVCacheConfig,
+    vllm_config: VllmConfig,
+    device: torch.device,
+):
+    attn_backends: dict[str, AttentionBackend] = {}
+    attn_metadata_builders: dict[str, AttentionMetadataBuilder] = {}
+
     attn_layers = get_layers_from_vllm_config(vllm_config, Attention)
+    for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
+        layer_names = kv_cache_group_spec.layer_names
+        any_layer_name = next(iter(layer_names))
+
+        attn_backend = attn_layers[any_layer_name].get_attn_backend()
+        attn_metadata_builder = attn_backend.get_builder_cls()(
+            kv_cache_group_spec.kv_cache_spec,
+            layer_names,
+            vllm_config,
+            device,
+        )
+        for layer_name in layer_names:
+            attn_backends[layer_name] = attn_backend
+            attn_metadata_builders[layer_name] = attn_metadata_builder
+    return attn_backends, attn_metadata_builders
 
 
 def _allocate_kv_cache(
@@ -68,13 +92,42 @@ def _allocate_kv_cache(
 def _reshape_kv_cache(
     kv_cache_config: KVCacheConfig,
     kv_cache_raw_tensors: dict[str, torch.Tensor],
-):
-    pass
+    attn_backends: dict[str, AttentionBackend],
+) -> dict[str, torch.Tensor]:
+    kv_caches: dict[str, torch.Tensor] = {}
+    for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
+        kv_cache_spec = kv_cache_group_spec.kv_cache_spec
+        for layer_name in kv_cache_group_spec.layer_names:
+            raw_tensor = kv_cache_raw_tensors[layer_name]    
+            assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
+            num_blocks = (raw_tensor.numel() // kv_cache_spec.page_size_bytes)
+
+            attn_backend = attn_backends[layer_name]
+            kv_cache_shape = attn_backend.get_kv_cache_shape(
+                num_blocks, kv_cache_spec.block_size,
+                kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
+
+            dtype = kv_cache_spec.dtype
+            kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
+            kv_cache_shape = tuple(kv_cache_shape[i]
+                                    for i in kv_cache_stride_order)
+
+            inv_order = [
+                kv_cache_stride_order.index(i)
+                for i in range(len(kv_cache_stride_order))
+            ]
+
+            raw_tensor = raw_tensor.view(dtype)
+            raw_tensor = raw_tensor.view(kv_cache_shape)
+            kv_caches[layer_name] = raw_tensor.permute(*inv_order)
+    return kv_caches
 
 
 def init_kv_cache(
     kv_cache_config: KVCacheConfig,
+    attn_backends: dict[str, AttentionBackend],
     device: torch.device,
 ):
     kv_cache_raw_tensors = _allocate_kv_cache(kv_cache_config, device)
-    kv_caches = _reshape_kv_cache(kv_cache_config, kv_cache_raw_tensors)
+    kv_caches = _reshape_kv_cache(kv_cache_config, kv_cache_raw_tensors, attn_backends)
+    return kv_caches
