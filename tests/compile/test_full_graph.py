@@ -11,8 +11,10 @@ import torch
 
 from tests.quantization.utils import is_quant_method_supported
 from vllm import LLM, SamplingParams
-from vllm.config import CompilationConfig, CompilationLevel, PassConfig
+from vllm.config import (CompilationConfig, CompilationLevel, CUDAGraphMode,
+                         PassConfig)
 from vllm.platforms import current_platform
+from vllm.utils import is_torch_equal_or_newer
 
 from ..utils import create_new_process_for_each_test
 
@@ -107,6 +109,19 @@ def test_full_graph(
         (CompilationConfig(level=CompilationLevel.PIECEWISE,
                            debug_dump_path=tempfile.gettempdir()),
          ("facebook/opt-125m", {})),
+    ] + [
+        # graph inductor partition
+        (
+            CompilationConfig(
+                level=CompilationLevel.PIECEWISE,
+                # inductor graph partition uses
+                # torch._C.Tag.cudagraph_unsafe to specify splitting ops
+                splitting_ops=[],
+                use_inductor_graph_partition=True,
+                cudagraph_mode=CUDAGraphMode.PIECEWISE,
+                compile_sizes=[1, 2]),
+            model) for model in models_list(all=False)
+        if is_torch_equal_or_newer("2.9.0.dev")
     ])
 # only test some of the models
 @create_new_process_for_each_test()
