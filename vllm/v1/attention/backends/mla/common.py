@@ -463,7 +463,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             self.dcp_world_size = 1
             self.dcp_rank = 0
 
-        # Dont try to access the runner on AMD
+        # Don't try to access the runner on AMD
         if self.aot_schedule:
             self.page_size = self.kv_cache_spec.block_size
 
@@ -584,7 +584,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             window_left=self._global_hyperparameters.window_left,
             logits_soft_cap=self._global_hyperparameters.logits_soft_cap,
             q_data_type=self.model_config.dtype,
-            kv_data_type=self.kv_cache_spec.dtype,
         )
 
         # Prepare context prefills
@@ -605,7 +604,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     logits_soft_cap=self._global_hyperparameters.
                     logits_soft_cap,
                     q_data_type=self.model_config.dtype,
-                    kv_data_type=self.kv_cache_spec.dtype,
                 )
 
         prefill.prefill_main = self._fi_prefill_main
@@ -1322,7 +1320,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         k_scale: torch.Tensor,
         dcp_world_size: int,
     ):
-        assert k_scale is None, "DCP not support sacled kvcache now."
+        assert k_scale is None, "DCP not support scaled kvcache now."
         assert attn_metadata.prefill is not None
         prefill_metadata = attn_metadata.prefill
         assert prefill_metadata.chunked_context is not None

@@ -551,6 +551,8 @@ class Qwen2_5OmniConditionalGenerationMixin:
             raise ValueError(f"Incorrect type of {name}. "
                              f"Got type: {type(mm_input)}")
         if isinstance(mm_input, torch.Tensor):
+            if dim == 0:
+                return mm_input.reshape(-1, *mm_input.shape[2:])
             return torch.concat(list(mm_input), dim=dim)
         else:
             return torch.concat(mm_input, dim=dim)
@@ -846,7 +848,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             return []
 
         # The result multimodal_embeddings is tuple of tensors, with each
-        # tensor correspoending to a multimodal data item (image or video).
+        # tensor corresponding to a multimodal data item (image or video).
         multimodal_embeddings: tuple[torch.Tensor, ...] = ()
 
         # NOTE: It is important to iterate over the keys in this dictionary
@@ -873,7 +875,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         if multimodal_embeddings is not None \
             and len(multimodal_embeddings) != 0:
 
-            # TODO (ywang96): support overlapping modalitiy embeddings so that
+            # TODO (ywang96): support overlapping modality embeddings so that
             # `use_audio_in_video` will work on V1.
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings, [
