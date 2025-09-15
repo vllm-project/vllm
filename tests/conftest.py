@@ -158,6 +158,52 @@ def cleanup_VLLM_USE_V1(monkeypatch):
         monkeypatch.delenv("VLLM_USE_V1")
 
 
+# Make logger.debug_once robust to unhashable args in tests without touching prod code
+@pytest.fixture(scope="session", autouse=True)
+def _patch_vllm_logger_debug_once():
+    import logging
+
+    def _to_hashable(obj):
+        try:
+            hash(obj)
+            return obj
+        except Exception:
+            if isinstance(obj, dict):
+                return tuple(sorted((
+                    _to_hashable(k), _to_hashable(v)) for k, v in obj.items()))
+            if isinstance(obj, (list, tuple)):
+                return tuple(_to_hashable(x) for x in obj)
+            if isinstance(obj, set):
+                return tuple(sorted(_to_hashable(x) for x in obj))
+            return repr(obj)
+
+    def _safe_debug_once(self, msg: str, *args, **kwargs) -> None:
+        key = (msg,) + tuple(_to_hashable(a) for a in args)
+        seen_attr = "_vllm_debug_once_seen_keys"
+        seen = getattr(self, seen_attr, None)
+        if seen is None:
+            seen = set()
+            setattr(self, seen_attr, seen)
+        if key in seen:
+            return
+        seen.add(key)
+        self.debug(msg, *args, **kwargs)
+
+    # Patch class for future loggers
+    setattr(logging.Logger, "debug_once", _safe_debug_once)
+
+    # Patch existing vllm loggers
+    for name in list(logging.root.manager.loggerDict.keys()):
+        if isinstance(name, str) and name.startswith("vllm"):
+            logger_obj = logging.getLogger(name)
+            try:
+                setattr(logger_obj, "debug_once",
+                        _safe_debug_once.__get__(logger_obj, logging.Logger))
+            except Exception:
+                continue
+    yield
+
+
 @pytest.fixture(params=[True, False])
 def run_with_both_engines(request, monkeypatch):
     # Automatically runs tests twice, once with V1 and once without
