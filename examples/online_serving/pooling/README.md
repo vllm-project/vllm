@@ -23,6 +23,7 @@ python examples/online_serving/pooling/openai_chat_embedding_client_for_multimod
 ```bash
 python examples/online_serving/pooling/openai_classification_client.py
 ```
+
 ## Openai embedding usage
 
 ```bash
