@@ -7,8 +7,8 @@ Benchmark script for device communicators:
 CustomAllreduce (oneshot, twoshot), PyNcclCommunicator,
 and SymmMemCommunicator (multimem, two-shot).
 
-for NCCL symmetric memory you need to set the environment variables 
-NCCL_NVLS_ENABLE=1 NCCL_CUMEM_ENABLE=1 VLLM_USE_NCCL_SYMM_MEM=1, otherwise NCCL does 
+for NCCL symmetric memory you need to set the environment variables
+NCCL_NVLS_ENABLE=1 NCCL_CUMEM_ENABLE=1 VLLM_USE_NCCL_SYMM_MEM=1, otherwise NCCL does
 not use fast NVLS implementation for all reduce.
 
 Usage:
