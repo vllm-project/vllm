@@ -25,6 +25,16 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, SlidingWindowSpec)
 
 
+@pytest.fixture(autouse=True)
+def _auto_init_hash_fn(request):
+    hash_fn: Callable
+    if "hash_fn" in request.fixturenames:
+        hash_fn = init_none_hash(request.getfixturevalue("hash_fn"))
+    else:
+        hash_fn = sha256
+    init_none_hash(hash_fn)
+
+
 def make_request(
     request_id: str,
     prompt_token_ids: list[int],
@@ -105,7 +115,6 @@ def make_kv_cache_config_hybrid_model(block_size: int,
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_prefill(hash_fn):
-    init_none_hash(hash_fn)
 
     block_size = 16
     manager = KVCacheManager(
@@ -736,7 +745,6 @@ def test_cache_blocks(hash_fn):
     This is a unit test that tests the correctness of the _cache_full_blocks
     function of KVCacheManager.
     """
-    init_none_hash(hash_fn)
 
     block_size = 4
     block_pool = BlockPool(
@@ -849,7 +857,6 @@ def test_mm_prefix_caching():
     """
     This tests that the multi-modal prefix caching is correct.
     """
-    kv_cache_utils.init_none_hash(sha256)
 
     block_size = 16
     manager = KVCacheManager(
@@ -942,8 +949,6 @@ def test_cache_key_salting():
     This tests that cache salts are applied during hashing and the cache
     is separated cache as expected.
     """
-    kv_cache_utils.init_none_hash(sha256)
-
     block_size = 16
     manager = KVCacheManager(
         make_kv_cache_config(block_size, 11),
