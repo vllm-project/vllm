@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 from torch import nn
 
 from vllm.config import ModelConfig, VllmConfig
@@ -11,12 +13,12 @@ logger = init_logger(__name__)
 
 class TTModelLoader(BaseModelLoader):
 
-    def load_model(self, *, vllm_config: VllmConfig) -> nn.Module:
+    def load_model(self, vllm_config: VllmConfig,
+                   model_config: ModelConfig) -> nn.Module:
         """Load a model with the given configurations."""
 
         # For TT models, prepend "TT" to the architecture name,
         # e.g. "TTLlamaForCausalLM"
-        model_config = vllm_config.model_config
         device_config = vllm_config.device_config
         scheduler_config = vllm_config.scheduler_config
 

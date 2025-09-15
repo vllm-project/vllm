@@ -160,7 +160,7 @@ class Platform:
 
     def is_neuron(self) -> bool:
         return self._enum == PlatformEnum.NEURON
-    
+
     def is_tt(self) -> bool:
         return self._enum == PlatformEnum.TT
 
