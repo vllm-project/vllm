@@ -136,27 +136,26 @@ def sdpa_attention(
         q_cu_seqlens: Optional cumulative sequence lengths of q.
         k_cu_seqlens: Optional cumulative sequence lengths of k.
     """
-    seq_length = q.shape[0]
-    attention_mask = torch.zeros([1, seq_length, seq_length],
-                                 device=q.device,
-                                 dtype=torch.bool)
-    for i in range(1, len(q_cu_seqlens)):
-        attention_mask[
-            ...,
-            q_cu_seqlens[i - 1]:q_cu_seqlens[i],
-            q_cu_seqlens[i - 1]:q_cu_seqlens[i],
-        ] = True
-    q = q.transpose(0, 1)
-    k = k.transpose(0, 1)
-    v = v.transpose(0, 1)
-    attn_output = F.scaled_dot_product_attention(q,
-                                                 k,
-                                                 v,
-                                                 attention_mask,
-                                                 dropout_p=0.0)
-    attn_output = attn_output.transpose(0, 1)
-    attn_output = attn_output.reshape(seq_length, -1)
-    return attn_output
+    batch_size = q_cu_seqlens.numel() - 1
+    outputs = []
+
+    for i in range(batch_size):
+        # unpack
+        q_i = q[q_cu_seqlens[i]:q_cu_seqlens[i + 1]]
+        k_i = k[k_cu_seqlens[i]:k_cu_seqlens[i + 1]]
+        v_i = v[k_cu_seqlens[i]:k_cu_seqlens[i + 1]]
+
+        q_i = q_i.transpose(0, 1)
+        k_i = k_i.transpose(0, 1)
+        v_i = v_i.transpose(0, 1)
+
+        out_i = F.scaled_dot_product_attention(q_i, k_i, v_i, dropout_p=0.0)
+        outputs.append(out_i.transpose(0, 1))
+
+    outputs = torch.cat(outputs, dim=0)
+    outputs = outputs.flatten(start_dim=-2)
+
+    return outputs
 
 
 VL_VISION_ATTENTION_FUNCTIONS = {
