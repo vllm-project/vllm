@@ -513,7 +513,6 @@ ENV UV_HTTP_TIMEOUT=500
 
 COPY requirements/kv_connectors.txt requirements/kv_connectors.txt
 
-
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
