@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E501
 """Example Python client for multimodal embedding API using vLLM API server
 NOTE:
     start a supported multimodal embeddings model server with `vllm serve`, e.g.
