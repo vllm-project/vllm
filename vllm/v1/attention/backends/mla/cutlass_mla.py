@@ -228,11 +228,6 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
         self._workspace.ensure_size(attn_metadata, self._num_kv_splits)
 
         # Run MLA
-        # Clone q_nope and q_pe to make sure strides computation is correct.
-        # TODO: Check if we really need it
-        q_nope = q_nope.clone()
-        q_pe = q_pe.clone()
-
         o, lse = self._sm100_cutlass_mla_decode(
             q_nope,
             q_pe,
