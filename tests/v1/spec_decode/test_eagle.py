@@ -13,9 +13,9 @@ from tests.v1.attention.utils import (BatchSpec, _Backend,
                                       create_standard_kv_cache_spec,
                                       get_attention_backend)
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
-                         VllmConfig)
+                         ParallelConfig, SchedulerConfig, VllmConfig)
 from vllm.config.load import LoadConfig
+from vllm.config.speculative import SpeculativeConfig
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.v1.spec_decode.eagle import EagleProposer

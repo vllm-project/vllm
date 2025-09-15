@@ -5,7 +5,8 @@ from typing import Optional, Union
 import torch
 
 from vllm.config import (CacheConfig, KVTransferConfig, ModelConfig,
-                         SchedulerConfig, SpeculativeConfig, VllmConfig)
+                         SchedulerConfig, VllmConfig)
+from vllm.config.speculative import SpeculativeConfig
 from vllm.multimodal.inputs import (MultiModalFeatureSpec,
                                     MultiModalKwargsItem, PlaceholderRange)
 from vllm.sampling_params import SamplingParams

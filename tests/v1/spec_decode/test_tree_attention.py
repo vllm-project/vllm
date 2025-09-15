@@ -9,7 +9,8 @@ import torch
 from tests.v1.attention.utils import (_Backend, create_standard_kv_cache_spec,
                                       create_vllm_config,
                                       get_attention_backend)
-from vllm.config import ParallelConfig, SpeculativeConfig
+from vllm.config import ParallelConfig
+from vllm.config.speculative import SpeculativeConfig
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
 

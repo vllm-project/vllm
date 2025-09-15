@@ -14,8 +14,9 @@ from transformers.activations import ACT2FN
 from vllm import envs
 from vllm.attention import Attention, AttentionBackend, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import (CacheConfig, ModelConfig, SpeculativeConfig,
-                         VllmConfig, get_current_vllm_config)
+from vllm.config import (CacheConfig, ModelConfig, VllmConfig,
+                         get_current_vllm_config)
+from vllm.config.speculative import SpeculativeConfig
 from vllm.distributed import (divide, get_ep_group, get_pp_group,
                               get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
