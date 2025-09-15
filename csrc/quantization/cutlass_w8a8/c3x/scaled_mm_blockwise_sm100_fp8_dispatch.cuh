@@ -172,24 +172,22 @@ void cutlass_gemm_caller_blockwise(torch::Tensor& out, torch::Tensor const& a,
   auto b_scales_ptr = static_cast<ElementBlockScale const*>(b_scales.data_ptr());
 
   typename GemmKernel::MainloopArguments mainloop_args{};
+  mainloop_args.layout_SFA = layout_SFA;
+  mainloop_args.layout_SFB = layout_SFB;
   if (swap_ab) {
     mainloop_args.ptr_A = b_ptr;
     mainloop_args.dA = b_stride;
     mainloop_args.ptr_B = a_ptr;
     mainloop_args.dB = a_stride;
     mainloop_args.ptr_SFA = b_scales_ptr;
-    mainloop_args.layout_SFA = layout_SFA;
     mainloop_args.ptr_SFB = a_scales_ptr;
-    mainloop_args.layout_SFB = layout_SFB;
   } else {
     mainloop_args.ptr_A = a_ptr;
     mainloop_args.dA = a_stride;
     mainloop_args.ptr_B = b_ptr;
     mainloop_args.dB = b_stride;
     mainloop_args.ptr_SFA = a_scales_ptr;
-    mainloop_args.layout_SFA = layout_SFA;
     mainloop_args.ptr_SFB = b_scales_ptr;
-    mainloop_args.layout_SFB = layout_SFB;
   }
   auto prob_shape = swap_ab ? cute::make_shape(n, m, k, 1) : cute::make_shape(m, n, k, 1);
 
