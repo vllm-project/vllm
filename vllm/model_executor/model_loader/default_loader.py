@@ -261,7 +261,6 @@ class DefaultModelLoader(BaseModelLoader):
 
     def load_weights(self, model: nn.Module,
                      model_config: ModelConfig) -> None:
-
         weights_to_load = {name for name, _ in model.named_parameters()}
         loaded_weights = model.load_weights(
             self.get_all_weights(model_config, model))
