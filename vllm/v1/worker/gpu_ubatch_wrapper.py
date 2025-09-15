@@ -7,7 +7,6 @@ from typing import Any, Callable, Optional
 
 import torch
 
-import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import (create_forward_context, get_forward_context,
@@ -55,7 +54,6 @@ class UBatchWrapper:
             self.cudagraph_wrapper = CUDAGraphWrapper(
                 runnable, vllm_config, runtime_mode=runtime_mode)
             self.graph_pool = current_platform.get_global_graph_pool()
-        self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
 
     def __getattr__(self, key: str):
         # allow accessing the attributes of the runnable.

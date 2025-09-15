@@ -86,14 +86,6 @@ class UBatchContext:
     def _wait_comm_done(self):
         self.compute_stream.wait_event(self.gpu_comm_done_event)
 
-    def stream_string(self):
-        if current_stream() == self.compute_stream:
-            assert self.current_stream == self.compute_stream
-            return "COMPUTE"
-        elif current_stream() == self.comm_stream:
-            assert self.current_stream == self.comm_stream
-            return "COMM"
-
     def _cpu_yield(self):
         # It is critical for correctness that only one thread is running
         # at a time. These asserts just make sure that this is the only
