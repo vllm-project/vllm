@@ -308,9 +308,16 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # Only build Marlin kernels if we are building for at least some compatible archs.
   # Keep building Marlin for 9.0 as there are some group sizes and shapes that
   # are not supported by Machete yet.
-  # 9.0 for latest bf16 atomicAdd PTX
-  cuda_archs_loose_intersection(MARLIN_ARCHS "8.0;8.7;9.0+PTX" "${CUDA_ARCHS}")
-  cuda_archs_loose_intersection(MARLIN_FP8_ARCHS "8.9;9.0+PTX" "${CUDA_ARCHS}")
+
+  # marlin arches with fp16 output
+  cuda_archs_loose_intersection(MARLIN_ARCHS "8.0+PTX" "${CUDA_ARCHS}")
+  # marlin arches with bf16 output (we need 9.0 for bf16 atomicAdd PTX)
+  cuda_archs_loose_intersection(MARLIN_BF16_ARCHS "8.0;8.7;9.0+PTX" "${CUDA_ARCHS}")
+  # marlin arches with fp16 output and fp8 input
+  cuda_archs_loose_intersection(MARLIN_FP8_ARCHS "8.9+PTX" "${CUDA_ARCHS}")
+  # marlin arches with bf16 output and fp8 input (we need 9.0 for bf16 atomicAdd PTX)
+  cuda_archs_loose_intersection(MARLIN_FP8_BF16_ARCHS "8.9;9.0+PTX" "${CUDA_ARCHS}")
+
   if (MARLIN_ARCHS)
 
     #
@@ -362,6 +369,16 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     endif()
     list(APPEND VLLM_EXT_SRC ${MARLIN_TEMPLATE_KERNEL_SRC})
 
+    file(GLOB MARLIN_TEMPLATE_BF16_KERNEL_SRC "csrc/quantization/gptq_marlin/sm80_kernel_*.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${MARLIN_TEMPLATE_BF16_KERNEL_SRC}"
+      CUDA_ARCHS "${MARLIN_BF16_ARCHS}")
+    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
+      set_source_files_properties(${MARLIN_TEMPLATE_BF16_KERNEL_SRC}
+        PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
+    endif()
+    list(APPEND VLLM_EXT_SRC ${MARLIN_TEMPLATE_BF16_KERNEL_SRC})
+
     if (MARLIN_FP8_ARCHS) 
       file(GLOB MARLIN_TEMPLATE_FP8_KERNEL_SRC "csrc/quantization/gptq_marlin/sm89_kernel_*.cu")
       set_gencode_flags_for_srcs(
@@ -372,6 +389,16 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
           PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
       endif()
       list(APPEND VLLM_EXT_SRC ${MARLIN_TEMPLATE_FP8_KERNEL_SRC})
+
+      file(GLOB MARLIN_TEMPLATE_FP8_BF16_KERNEL_SRC "csrc/quantization/gptq_marlin/sm89_kernel_*.cu")
+      set_gencode_flags_for_srcs(
+        SRCS "${MARLIN_TEMPLATE_FP8_BF16_KERNEL_SRC}"
+        CUDA_ARCHS "${MARLIN_FP8_BF16_ARCHS}")
+      if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
+        set_source_files_properties(${MARLIN_TEMPLATE_FP8_BF16_KERNEL_SRC}
+          PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
+      endif()
+      list(APPEND VLLM_EXT_SRC ${MARLIN_TEMPLATE_FP8_BF16_KERNEL_SRC})
     endif()
 
     set(MARLIN_SRCS
@@ -864,8 +891,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     CUDA_ARCHS "${CUDA_ARCHS}")
 
   list(APPEND VLLM_MOE_EXT_SRC "${VLLM_MOE_WNA16_SRC}")
-  # 9.0 for latest bf16 atomicAdd PTX
+  # moe marlin arches
+  # note that we always set `use_atomic_add=False` for moe marlin now,
+  # so we don't need 9.0 for bf16 atomicAdd PTX
   cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0+PTX" "${CUDA_ARCHS}")
+  # moe marlin arches for fp8 input
   cuda_archs_loose_intersection(MARLIN_MOE_FP8_ARCHS "8.9+PTX" "${CUDA_ARCHS}")
   if (MARLIN_MOE_ARCHS)
 
