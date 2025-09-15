@@ -77,7 +77,7 @@ def invoke_main() -> None:
         "--num-iteration",
         type=int,
         default=100,
-        help="Number of iterations to run to stablize final data readings",
+        help="Number of iterations to run to stabilize final data readings",
     )
     parser.add_argument(
         "--num-req", type=int, default=128, help="Number of requests in the batch"

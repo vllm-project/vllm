@@ -22,7 +22,8 @@ if TYPE_CHECKING:
     from PIL.Image import Image
     from transformers.feature_extraction_utils import BatchFeature
 
-    from .hasher import MultiModalHashDict
+    from .processing import MultiModalHashes
+
 else:
     torch = LazyLoader("torch", globals(), "torch")
 
@@ -84,9 +85,10 @@ which are treated as audio embeddings;
 these are directly passed to the model without HF processing.
 """
 
-ModalityData: TypeAlias = Union[_T, list[_T]]
+ModalityData: TypeAlias = Union[_T, list[Optional[_T]], None]
 """
-Either a single data item, or a list of data items.
+Either a single data item, or a list of data items. Can only be None if UUID
+is provided.
 
 The number of data items allowed per modality is restricted by
 `--limit-mm-per-prompt`.
@@ -113,6 +115,16 @@ A dictionary containing an entry for each modality type to input.
 
 The built-in modalities are defined by
 [`MultiModalDataBuiltins`][vllm.multimodal.inputs.MultiModalDataBuiltins].
+"""
+
+MultiModalUUIDDict: TypeAlias = Mapping[str, Union[list[Optional[str]], str]]
+"""
+A dictionary containing user-provided UUIDs for items in each modality.
+If a UUID for an item is not provided, its entry will be `None` and
+MultiModalHasher will compute a hash for the item.
+
+The UUID will be used to identify the item for all caching purposes
+(input processing caching, embedding caching, prefix caching, etc).
 """
 
 
@@ -939,7 +951,7 @@ class MultiModalInputs(TypedDict):
     mm_kwargs: MultiModalKwargsOptionalItems
     """Keyword arguments to be directly passed to the model after batching."""
 
-    mm_hashes: "MultiModalHashDict"
+    mm_hashes: "MultiModalHashes"
     """The hashes of the multi-modal data."""
 
     mm_placeholders: "MultiModalPlaceholderDict"

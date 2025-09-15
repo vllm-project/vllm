@@ -252,7 +252,10 @@ class DeviceCommunicatorBase:
 
         moe_modules = [
             module for module in model.modules()
-            if module.__class__.__name__ == "FusedMoE"
+            # TODO(bnell): Should use isinstance but can't.  Maybe search for
+            # presence of quant_method.init_prepare_finalize?
+            if (module.__class__.__name__ == "FusedMoE"
+                or module.__class__.__name__ == "SharedFusedMoE")
         ]
         for module in moe_modules:
             module.quant_method.init_prepare_finalize(module)

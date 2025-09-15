@@ -79,7 +79,7 @@ def test_offline_mode(monkeypatch: pytest.MonkeyPatch):
             )
 
             # Need to re-import huggingface_hub
-            # and friends to setup offline mode
+            # and friends to set up offline mode
             _re_import_modules()
             # Cached model files should be used in offline mode
             for model_config in MODEL_CONFIGS:
@@ -136,7 +136,7 @@ def test_model_from_huggingface_offline(monkeypatch: pytest.MonkeyPatch):
                 disable_connect,
             )
             # Need to re-import huggingface_hub
-            # and friends to setup offline mode
+            # and friends to set up offline mode
             _re_import_modules()
             engine_args = EngineArgs(model="facebook/opt-125m")
             LLM(**dataclasses.asdict(engine_args))
