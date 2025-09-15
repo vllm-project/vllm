@@ -1180,7 +1180,9 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             for item in mm_data.pop("videos", []):
                 video_array, metadata = item
 
-                mm_kwargs["do_sample_frames"] = metadata.get(
+                # don't update mm_kwargs inplace
+                video_mm_kwargs = dict(**mm_kwargs)
+                video_mm_kwargs["do_sample_frames"] = metadata.get(
                     "do_sample_frames", True)
 
                 video_mm_data = dict()
@@ -1204,10 +1206,10 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                 video_outputs = super()._call_hf_processor(
                     prompt="<|begin_of_video|><|video|><|end_of_video|>",
                     mm_data=video_mm_data,
-                    mm_kwargs=mm_kwargs,
+                    mm_kwargs=video_mm_kwargs,
                     tok_kwargs=tok_kwargs,
                 )
-                if not mm_kwargs["do_sample_frames"] and Version(
+                if not video_mm_kwargs["do_sample_frames"] and Version(
                         TRANSFORMERS_VERSION) < Version("4.56.0"):
                     # Transformers v4.55 has incorrect timestamps issue for
                     # skip sampling. We construct the placeholder manually to
