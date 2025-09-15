@@ -5,8 +5,8 @@ import enum
 import functools
 from abc import abstractmethod
 from dataclasses import dataclass, fields, make_dataclass
-from typing import (TYPE_CHECKING, Any, ClassVar, Generic, Optional, Protocol,
-                    TypeVar)
+from typing import (TYPE_CHECKING, Any, ClassVar, Generic, Literal, Optional,
+                    Protocol, TypeVar, Union, get_args)
 
 import numpy as np
 import torch
@@ -30,7 +30,12 @@ from vllm.logger import init_logger
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
-_KV_CACHE_LAYOUT_OVERRIDE = None
+KVCacheLayoutType = Literal["NHD", "HND"]
+_KV_CACHE_LAYOUT_OVERRIDE: Union[KVCacheLayoutType, None] = None
+
+
+def is_valid_kv_cache_layout(value: str) -> bool:
+    return value in get_args(KVCacheLayoutType)
 
 
 @dataclass
@@ -71,6 +76,9 @@ class CommonAttentionMetadata:
     # Needed by FastPrefillAttentionBuilder
     logits_indices_padded: Optional[torch.Tensor] = None
     num_logits_indices: Optional[int] = None
+
+    # Needed by CrossAttentionBuilder
+    encoder_seq_lens: Optional[np.ndarray] = None
 
 
 @dataclass
@@ -193,6 +201,9 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
         self.kv_cache_spec = kv_cache_spec
+        self.layer_names = layer_names
+        self.vllm_config = vllm_config
+        self.device = device
 
     @abstractmethod
     def build(self,
@@ -290,12 +301,13 @@ def get_kv_cache_layout():
     if cache_layout is None:
         cache_layout = get_kv_connector_cache_layout()
     else:
+        assert is_valid_kv_cache_layout(cache_layout)
         logger.info_once("`VLLM_KV_CACHE_LAYOUT` environment variable " \
         "detected. Setting KV cache layout to %s.", cache_layout)
     return cache_layout
 
 
-def set_kv_cache_layout(cache_layout: str):
+def set_kv_cache_layout(cache_layout: KVCacheLayoutType):
     global _KV_CACHE_LAYOUT_OVERRIDE
     _KV_CACHE_LAYOUT_OVERRIDE = cache_layout
 

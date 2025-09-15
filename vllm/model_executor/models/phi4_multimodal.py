@@ -374,8 +374,8 @@ class Phi4MMAudioMeanVarianceNormLayer(nn.Module):
     Typically used as a very first layer in a model.
 
     Args:
-        input_size: int
-            layer input size.
+        config: [Phi4MultimodalAudioConfig](https://huggingface.co/docs/transformers/model_doc/phi4_multimodal#transformers.Phi4MultimodalAudioConfig) 
+            object containing model parameters.
     """
 
     def __init__(self, config: Phi4MultimodalAudioConfig):
@@ -1350,7 +1350,7 @@ class Phi4MultimodalForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
             return None
 
         # The result multimodal_embeddings is tuple of tensors, with each
-        # tensor correspoending to a multimodal data item (image or video).
+        # tensor corresponding to a multimodal data item (image or video).
         multimodal_embeddings: tuple[torch.Tensor, ...] = ()
 
         # NOTE: It is important to iterate over the keys in this dictionary
