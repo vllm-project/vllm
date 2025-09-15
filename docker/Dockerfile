@@ -8,6 +8,10 @@
 ARG CUDA_VERSION=12.8.1
 ARG PYTHON_VERSION=3.12
 
+ARG GDRCOPY_CUDA_VERSION=12.8
+# Keep in line with FINAL_BASE_IMAGE
+ARG GDRCOPY_OS_VERSION=Ubuntu22.04
+
 # By parameterizing the base images, we allow third-party to use their own
 # base images. One use case is hermetic builds with base images stored in
 # private registries that use a different repository naming conventions.
@@ -439,10 +443,17 @@ COPY tools/install_deepgemm.sh /tmp/install_deepgemm.sh
 RUN --mount=type=cache,target=/root/.cache/uv \
     VLLM_DOCKER_BUILD_CONTEXT=1 /tmp/install_deepgemm.sh --cuda-version "${CUDA_VERSION}" ${DEEPGEMM_GIT_REF:+--ref "$DEEPGEMM_GIT_REF"} 
 
-# Install libgdrapi dependency for nixl/ucx
-RUN curl https://developer.download.nvidia.com/compute/redist/gdrcopy/CUDA%2012.8/ubuntu22_04/x64/libgdrapi_2.5.1-1_amd64.Ubuntu22_04.deb --output libgdrapi_2.5.1-1_amd64.Ubuntu22_04.deb \
-    && apt install ./libgdrapi_2.5.1-1_amd64.Ubuntu22_04.deb \
-    && rm libgdrapi_2.5.1-1_amd64.Ubuntu22_04.deb
+RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
+        OS_VERSION_LOWER="(echo "GDRCOPY_OS_VERSION" | tr '[:upper:]' '[:lower:]')"; \
+            && curl https://developer.download.nvidia.com/compute/redist/gdrcopy/CUDA%20${GDRCOPY_CUDA_VERSION}/{OS_VERSION_LOWER}/x64/libgdrapi_2.5.1-1_aarch64.${GDRCOPY_OS_VERSION}.deb --output libgdrapi_2.5.1-1_aarch64.${GDRCOPY_OS_VERSION}.deb \
+            && apt install ./libgdrapi_2.5.1-1_aarch64.${GDRCOPY_OS_VERSION}.deb \
+            && rm libgdrapi_2.5.1-1_aarch64.${GDRCOPY_OS_VERSION}.deb ; \
+    else \
+        OS_VERSION_LOWER="(echo "GDRCOPY_OS_VERSION" | tr '[:upper:]' '[:lower:]')"; \
+        && curl https://developer.download.nvidia.com/compute/redist/gdrcopy/CUDA%20${GDRCOPY_CUDA_VERSION}/{OS_VERSION_LOWER}/x64/libgdrapi_2.5.1-1_amd64.${GDRCOPY_OS_VERSION}.deb --output libgdrapi_2.5.1-1_amd64.${GDRCOPY_OS_VERSION}.deb \
+            && apt install ./libgdrapi_2.5.1-1_amd64.${GDRCOPY_OS_VERSION}.deb \
+            && rm libgdrapi_2.5.1-1_amd64.${GDRCOPY_OS_VERSION}.deb ; \
+    fi
 
 # Install EP kernels(pplx-kernels and DeepEP)
 COPY tools/ep_kernels/install_python_libraries.sh install_python_libraries.sh
@@ -522,7 +533,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     else \
         BITSANDBYTES_VERSION="0.46.1"; \
     fi; \
-    uv pip install --system accelerate hf_transfer modelscope "bitsandbytes>=${BITSANDBYTES_VERSION}" 'timm>=1.0.17' boto3 runai-model-streamer runai-model-streamer[s3]
+    uv pip install --system accelerate hf_transfer modelscope "bitsandbytes>=$" 'timm>=1.0.17' boto3 runai-model-streamer runai-model-streamer[s3]
 
 ENV VLLM_USAGE_SOURCE production-docker-image
 
