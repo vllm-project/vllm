@@ -14,6 +14,6 @@ This directory used to contain vLLM's benchmark scripts and utilities for perfor
 For detailed usage instructions, examples, and dataset information, see the [Benchmark CLI documentation](../docs/contributing/benchmarks.md#benchmark-cli).
 
 For full CLI reference see:
-- https://docs.vllm.ai/en/latest/cli/bench/latency.html
-- https://docs.vllm.ai/en/latest/cli/bench/serve.html
-- https://docs.vllm.ai/en/latest/cli/bench/throughput.html
+- <https://docs.vllm.ai/en/latest/cli/bench/latency.html>
+- <https://docs.vllm.ai/en/latest/cli/bench/serve.html>
+- <https://docs.vllm.ai/en/latest/cli/bench/throughput.html>
