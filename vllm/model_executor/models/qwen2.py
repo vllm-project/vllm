@@ -215,7 +215,7 @@ class Qwen2DecoderLayer(nn.Module):
         if getattr(config, "is_causal", True):
             attn_type = AttentionType.DECODER
         else:
-            attn_type = AttentionType
+            attn_type = AttentionType.ENCODER_ONLY
 
         layer_idx = int(prefix.split(".")[-1])
         layer_head_num = getattr(config, 'layer_head_num', None)
