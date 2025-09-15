@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any, Optional, Union
 
@@ -18,7 +19,7 @@ from vllm.v1.request import Request
 logger = init_logger(__name__)
 
 
-class BlockLookupCache:
+class BlockHashToBlockMap:
     """
     Cache of blocks that are used for prefix caching.
     """
@@ -42,8 +43,10 @@ class BlockLookupCache:
         # block tables are append-only.
         # NOTE #2: The union type is introduced in order to reduce GC costs
         # from the inner dict.
-        self._cache: dict[BlockHashWithGroupId,
-                          Union[KVCacheBlock, dict[int, KVCacheBlock]]] = {}
+        self._cache: defaultdict[BlockHashWithGroupId,
+                                 Union[KVCacheBlock,
+                                       dict[int,
+                                            KVCacheBlock]]] = defaultdict(dict)
 
     def get_one_block(self,
                       key: BlockHashWithGroupId) -> Optional[KVCacheBlock]:
@@ -78,29 +81,34 @@ class BlockLookupCache:
         else:
             self._unexpected_blocks_type(blocks)
 
-    def check_block_hash_and_pop_block(self, key: BlockHashWithGroupId,
-                                       block_id: int) -> bool:
+    def pop(self, key: BlockHashWithGroupId,
+            block_id: int) -> Optional[KVCacheBlock]:
         """
         Checks if block_hash exists and pop block_id from the cache
         """
         blocks = self._cache.get(key)
         if blocks is None:
             # block_hash not found in the cache
-            return False
+            return None
         elif isinstance(blocks, KVCacheBlock):
             # If the single block ID matched the given one, directly
             # remove the whole cached block hash entry
             if blocks.block_id == block_id:
                 self._cache.pop(key)
+                return blocks
         elif isinstance(blocks, dict):
             # Try to pop block_id from the block dict, and if dict became
             # empty, remove the whole cached block hash entry
-            blocks.pop(block_id, None)
+            block = blocks.pop(block_id, None)
             if len(blocks) == 0:
                 self._cache.pop(key)
+            return block
         else:
             self._unexpected_blocks_type(blocks)
-        return True
+        return None
+
+    def __len__(self) -> int:
+        return len(self._cache)
 
     def _unexpected_blocks_type(self, blocks: Any) -> None:
         raise AssertionError(f"Invalid KV cache block type {type(blocks)}")
@@ -139,7 +147,8 @@ class BlockPool:
         self.free_block_queue = FreeKVCacheBlockQueue(self.blocks)
 
         # Cache for block lookup
-        self.cached_block_hash_to_block: BlockLookupCache = BlockLookupCache()
+        self.cached_block_hash_to_block: BlockHashToBlockMap = \
+            BlockHashToBlockMap()
 
         # To represent a placeholder block with block_id=0.
         # The ref_cnt of null_block is not maintained, needs special care to
@@ -289,9 +298,9 @@ class BlockPool:
             # The block doesn't have hash, eviction is not needed
             return False
 
-        if not self.cached_block_hash_to_block.check_block_hash_and_pop_block(
-                block_hash, block.block_id):
-            # block_hash not found in cached_block_hash_to_block,
+        if self.cached_block_hash_to_block.pop(block_hash,
+                                               block.block_id) is None:
+            # block not found in cached_block_hash_to_block,
             # eviction is not needed
             return False
 
@@ -359,7 +368,7 @@ class BlockPool:
             return False
 
         # Remove all hashes so that no new blocks will hit.
-        self.cached_block_hash_to_block = BlockLookupCache()
+        self.cached_block_hash_to_block = BlockHashToBlockMap()
 
         # Remove all hashes from all blocks.
         for block in self.blocks:
