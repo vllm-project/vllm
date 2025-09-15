@@ -1476,6 +1476,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_GC_DEBUG": lambda: bool(int(os.getenv("VLLM_GC_DEBUG", "0"))),
     # Logs top K GC collected objects for debugging purposes.
     # Default to -1 (i.e. disable).
+    # NOTE: Debug only, due to the high overhead for top collected objects
+    # computations
     "VLLM_GC_DEBUG_TOP_COLLECTED_OBJECTS":
     lambda: int(os.getenv("VLLM_GC_DEBUG_TOP_COLLECTED_OBJECTS", "-1")),
 }

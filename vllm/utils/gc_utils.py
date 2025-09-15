@@ -3,6 +3,7 @@
 import gc
 import time
 from collections import Counter
+from contextlib import suppress
 from typing import Any
 
 from vllm.envs import VLLM_GC_DEBUG, VLLM_GC_DEBUG_TOP_COLLECTED_OBJECTS
@@ -29,11 +30,11 @@ class GCDebugger:
         # compute top collected objects by object types
         self.gc_top_collected_objects: str = ""
 
-    def gc_callback(self, phase: str, info: dict[str, int]) -> None:
+    def handle(self, phase: str, info: dict[str, int]) -> None:
         """
-        Callback entry point which could be attached to gc.callbacks
+        Handles a GC event (e.g. GC start or GC finish)
         """
-        generation = info.get('generation')
+        generation = info.get("generation")
         if generation is None:
             return
         if phase == "start":
@@ -49,10 +50,13 @@ class GCDebugger:
             elpased_ms = (time.monotonic_ns() - self.start_time_ns) / 1e6
             logger.info(
                 "GC took %.3fms to complete. "
-                "Collected %s objects in GC generation %d.%s", elpased_ms,
-                str(info.get('collected', '?')), generation,
-                f" Top collected objects: \n{self.gc_top_collected_objects}"
-                if self.gc_top_collected_objects else "")
+                "Collected %s objects in GC generation %d.%s",
+                elpased_ms,
+                str(info.get("collected", "?")),
+                generation,
+                (f" Top collected objects: \n{self.gc_top_collected_objects}"
+                 if self.gc_top_collected_objects else ""),
+            )
 
 
 def maybe_attach_gc_debug_callback() -> None:
@@ -60,10 +64,12 @@ def maybe_attach_gc_debug_callback() -> None:
     Attached a callback for GC debug when VLLM_GC_DEBUG is enabled.
     """
     if VLLM_GC_DEBUG:
-        gc.callbacks.append(_DEBUGGER.gc_callback)
+        debugger: GCDebugger = GCDebugger()
 
+        def gc_callback(phase: str, info: dict[str, int]) -> None:
+            debugger.handle(phase, info)
 
-_DEBUGGER: GCDebugger = GCDebugger()
+        gc.callbacks.append(gc_callback)
 
 
 def _compute_detailed_type(o: Any) -> str:
@@ -75,7 +81,9 @@ def _compute_detailed_type(o: Any) -> str:
     which kills the engine.
     """
     size_str: str = ""
-    if hasattr(o, "__len__"):
+    # Object doesn't support len() - this can happen with type objects
+    # or other objects that don't implement __len__ properly
+    with suppress(Exception):
         size_str = f"(size:{len(o)})"
     return f"{str(type(o))}{size_str}"
 
