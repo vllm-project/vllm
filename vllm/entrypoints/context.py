@@ -338,7 +338,6 @@ class HarmonyContext(ConversationContext):
                     tool_session = await exit_stack.enter_async_context(
                         tool_server.new_session(tool_name, request_id,
                                                 headers))
-                    logger.info("Created new session for %s", tool_name)
                     self._tool_sessions[tool_name] = tool_session
                     exit_stack.push_async_exit(self.cleanup_session)
 
