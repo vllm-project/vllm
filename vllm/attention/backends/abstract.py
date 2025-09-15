@@ -152,10 +152,26 @@ class AttentionBackend(ABC):
         raise NotImplementedError
 
     @classmethod
+    def get_min_compute_capability(cls) -> Optional[int]:
+        raise NotImplementedError
+
+    @classmethod
+    def get_max_compute_capability(cls) -> Optional[int]:
+        return None
+
+    @classmethod
+    def supports_compute_capability(cls, capability: int) -> bool:
+        min_capability = cls.get_min_compute_capability()
+        max_capability = cls.get_max_compute_capability()
+        return (((min_capability is None) or (capability >= min_capability))
+                and ((max_capability is None) or
+                     (capability <= max_capability)))
+
+    @classmethod
     def validate_configuration(cls, head_size: int, dtype: torch.dtype,
                                kv_cache_dtype: Optional[str], block_size: int,
-                               use_v1: bool, use_mla: bool,
-                               has_sink: bool) -> bool:
+                               use_v1: bool, use_mla: bool, has_sink: bool,
+                               device_capability: int) -> bool:
         if not cls.supports_head_size(head_size):
             return False
         if not cls.supports_dtype(dtype):
@@ -166,7 +182,11 @@ class AttentionBackend(ABC):
             return False
         if (use_v1 != cls.is_v1()):
             return False
-        return (use_mla != cls.is_mla())
+        if (use_mla != cls.is_mla()):
+            return False
+        if (has_sink and not cls.supports_sink()):
+            return False
+        return cls.supports_compute_capability(device_capability)
 
 
 @dataclass

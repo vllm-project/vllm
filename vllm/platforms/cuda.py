@@ -258,11 +258,12 @@ class CudaPlatformBase(Platform):
             has_sink) -> tuple[list[_Backend], dict[_Backend, str]]:
         valid_backends = []
         invalid_reasons = {}
+        device_capability = cls.get_device_capability().to_int()
         for backend in _Backend:
             backend_class = backend_to_class(backend)
             maybe_invalid_reason = backend_class.validate_configuration(
                 head_size, dtype, kv_cache_dtype, block_size, use_v1, use_mla,
-                has_sink)
+                has_sink, device_capability)
             if maybe_invalid_reason is None:
                 valid_backends.append(backend)
             else:
@@ -327,6 +328,13 @@ class CudaPlatformBase(Platform):
         engine_version = 'V1' if use_v1 else 'V0'
         logger.info("Using %s backend on %s engine.",
                     valid_backends[selected_index].name, engine_version)
+
+        # Post-selection modifications
+        if valid_backends[selected_index] == _Backend.FLASHINFER_MLA:
+            from vllm.v1.attention.backends.utils import set_kv_cache_layout
+            set_kv_cache_layout("HND")
+            logger.info("Using HND KV cache layout for FlashInferMLA.")
+
         return valid_backends_classes_str[selected_index]
 
     @classmethod

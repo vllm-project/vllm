@@ -55,6 +55,14 @@ class CutlassMLABackend(MLACommonBackend):
     def is_v1(cls) -> bool:
         return True
 
+    @classmethod
+    def get_min_compute_capability(cls) -> Optional[int]:
+        return 100
+
+    @classmethod
+    def get_max_compute_capability(cls) -> Optional[int]:
+        return 100
+
 
 class SM100Workspace:
 
