@@ -8,10 +8,10 @@ This write-up introduces the new CUDA Graphs modes in vLLM v1 beyond previous [t
 
 In this document we will discuss the:
 
-- [Motivation](#motivation)
-- [CUDA Graphs modes](#cudagraphmodes)
-- [Detailed design](#detailed-design)
-- [Example usage of the different CUDA Graphs modes](#usage-guide)
+* [Motivation](#motivation)
+* [CUDA Graphs modes](#cudagraphmodes)
+* [Detailed design](#detailed-design)
+* [Example usage of the different CUDA Graphs modes](#usage-guide)
 
 !!! note
     In this document, we refer to pure decode (`max_query_len=1`) or speculative decode (`max_query_len =1+num_spec_tokens`) as **uniform decode** batches, and the opposite would be **non-uniform** batches (i.e., prefill or mixed prefill-decode batches).
