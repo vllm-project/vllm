@@ -99,8 +99,6 @@ class InputBatch:
         self.device = device
         self.pin_memory = pin_memory
         self.vocab_size = vocab_size
-        self.hidden_size = hidden_size
-        self.dtype = dtype
 
         self._req_ids: list[Optional[str]] = []
         self.req_id_to_index: dict[str, int] = {}
