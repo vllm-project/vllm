@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import argparse
 import asyncio
 import dataclasses
 import functools
 import os
 import subprocess
 import sys
+from argparse import ArgumentParser, Namespace
 from typing import Any, Optional, Union
 
 from fastapi import Request
@@ -211,7 +211,7 @@ def _output_with_pager(text: str):
     print(text)
 
 
-def show_filtered_argument_or_group_from_help(parser: argparse.ArgumentParser,
+def show_filtered_argument_or_group_from_help(parser: ArgumentParser,
                                               subcommand_name: list[str]):
 
     # Only handle --help=<keyword> for the current subcommand.
@@ -298,11 +298,11 @@ def get_max_tokens(max_model_len: int, request: Union[ChatCompletionRequest,
                if val is not None)
 
 
-def log_non_default_args(args: Union[argparse.Namespace, EngineArgs]):
+def log_non_default_args(args: Union[Namespace, EngineArgs]):
     non_default_args = {}
 
-    # Handle argparse.Namespace
-    if isinstance(args, argparse.Namespace):
+    # Handle Namespace
+    if isinstance(args, Namespace):
         parser = make_arg_parser(FlexibleArgumentParser())
         for arg, default in vars(parser.parse_args([])).items():
             if default != getattr(args, arg):
@@ -320,6 +320,6 @@ def log_non_default_args(args: Union[argparse.Namespace, EngineArgs]):
             non_default_args["model"] = default_args.model
     else:
         raise TypeError("Unsupported argument type. " \
-        "Must be argparse.Namespace or EngineArgs instance.")
+        "Must be Namespace or EngineArgs instance.")
 
     logger.info("non-default args: %s", non_default_args)
