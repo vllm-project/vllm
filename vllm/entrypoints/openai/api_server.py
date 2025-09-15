@@ -101,16 +101,8 @@ from vllm.reasoning import ReasoningParserManager
 from vllm.transformers_utils.tokenizer import MistralTokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (Device, FlexibleArgumentParser, decorate_logs,
-<<<<<<< HEAD
                         is_valid_ipv6_address, set_ulimit)
-=======
-                        get_open_zmq_ipc_path, is_valid_ipv6_address,
-                        set_ulimit)
-<<<<<<< HEAD
 from vllm.v1.engine.exceptions import EngineDeadError
->>>>>>> c268f953a (Improve health check functionality)
-=======
->>>>>>> 188107ac2 (return 503 for /health when Exception occurs)
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -362,7 +354,7 @@ async def health(raw_request: Request) -> Response:
     try:
         await engine_client(raw_request).check_health()
         return Response(status_code=200)
-    except Exception:
+    except EngineDeadError:
         return Response(status_code=503)
 
 
