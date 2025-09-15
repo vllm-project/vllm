@@ -6,7 +6,7 @@ import functools
 from abc import abstractmethod
 from dataclasses import dataclass, fields, make_dataclass
 from typing import (TYPE_CHECKING, Any, ClassVar, Generic, Literal, Optional,
-                    Protocol, TypeVar, get_args)
+                    Protocol, TypeVar, Union, get_args)
 
 import numpy as np
 import torch
@@ -31,7 +31,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
 KVCacheLayoutType = Literal["NHD", "HND"]
-_KV_CACHE_LAYOUT_OVERRIDE: KVCacheLayoutType | None = None
+_KV_CACHE_LAYOUT_OVERRIDE: Union[KVCacheLayoutType, None] = None
 
 
 def is_valid_kv_cache_layout(value: str) -> bool:
