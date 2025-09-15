@@ -165,16 +165,20 @@ def supports_trtllm_attention() -> bool:
 
 
 @functools.cache
+def _force_use_trtllm_attention(env_value: Optional[bool]) -> Optional[bool]:
+    """Cache the env value for VLLM_USE_TRTLLM_ATTENTION"""
+    if env_value is not None:
+        logger.info_once("VLLM_USE_TRTLLM_ATTENTION is set to %s", env_value)
+    return env_value
+
+
 def force_use_trtllm_attention() -> Optional[bool]:
     """
     Return ``None`` if VLLM_USE_TRTLLM_ATTENTION is not set,
     return ``True`` if TRTLLM attention is forced to be used,
     return ``False`` if TRTLLM attention is forced to be not used.
     """
-    env_value = envs.VLLM_USE_TRTLLM_ATTENTION
-    if env_value is not None:
-        logger.info_once("VLLM_USE_TRTLLM_ATTENTION is set to %s", env_value)
-    return None if env_value is None else env_value == "1"
+    return _force_use_trtllm_attention(envs.VLLM_USE_TRTLLM_ATTENTION)
 
 
 def use_trtllm_attention(
