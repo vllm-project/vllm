@@ -37,7 +37,6 @@ class BlockTable:
             self.blocks_per_phys_block = 1
             self.use_hybrid_blocks = False
         else:
-            # Validate that kernel_block_size divides physical_block_size evenly
             if self.physical_block_size % kernel_block_size != 0:
                 raise ValueError(
                     f"kernel_block_size {kernel_block_size} must divide "
@@ -54,19 +53,14 @@ class BlockTable:
 
         self.max_num_blocks_per_req = max_num_blocks_per_req * \
                                         self.blocks_per_phys_block
-        if self.use_hybrid_blocks:
-            logical_table_size = (max_num_blocks_per_req *
-                                  self.blocks_per_phys_block)
-        else:
-            logical_table_size = max_num_blocks_per_req
 
         self.block_table = torch.zeros(
-            (max_num_reqs, logical_table_size),
+            (max_num_reqs, self.max_num_blocks_per_req),
             device=self.device,
             dtype=torch.int32,
         )
         self.block_table_cpu = torch.zeros(
-            (max_num_reqs, logical_table_size),
+            (max_num_reqs, self.max_num_blocks_per_req),
             device="cpu",
             dtype=torch.int32,
             pin_memory=pin_memory,
