@@ -293,7 +293,7 @@ Extended from single quantization scheme (e.g. MXFP4, FP8) models, aka PTQ model
 
 Although one can maximize serving throughput using the lowest precision supported on a given device (e.g. MXFP4 for AMD Instinct MI355, FP8 for AMD Instinct MI300), these aggressive schemes can be detrimental to accuracy recovering from quantization on target tasks. Mixed precision allows to strike a balance between maximizing accuracy and throughput.
 
-Simply speaking, there are two steps to use the mixed precision feature mention above.
+There are two steps to generate and deploy a mixed precision model quantized with AMD Quark, as shown below.
 
 ### 1. generate a mixed precision quantized model in AMD Quark.
 
