@@ -27,6 +27,9 @@ from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 logger = init_logger(__name__)
 
@@ -105,6 +108,13 @@ class EagleProposer:
             (self.max_num_tokens, self.hidden_size),
             dtype=self.dtype,
             device=device)
+
+        self.backup_next_token_ids = CpuGpuBuffer(
+            max_batch_size,
+            dtype=torch.int32,
+            pin_memory=is_pin_memory_available(),
+            device=device,
+            with_numpy=True)
 
         # Determine allowed attention backends once during initialization.
         self.allowed_attn_types: tuple[type[EagleAttentionMetadata], ...]
@@ -360,14 +370,104 @@ class EagleProposer:
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
         return draft_token_ids
 
-    def prepare_inputs_deferred(self,
-                                common_attn_metadata: CommonAttentionMetadata):
+    def prepare_next_token_ids(self,
+                               common_attn_metadata: CommonAttentionMetadata,
+                               spec_decode_metadata: SpecDecodeMetadata,
+                               sampled_token_ids: torch.Tensor,
+                               requests: dict[str, CachedRequestState],
+                               gpu_input_batch: InputBatch,
+                               discard_request_indices: torch.Tensor,
+                               num_discarded_requests: int) -> \
+                                tuple[torch.Tensor, torch.Tensor]:
         """
-        This function is used to prepare the inputs for the spec decode.
+        This function is used to prepare the inputs for speculative decoding.
+        It calculates the next token ids and the number of valid sampled tokens
+        for each request, considering the "discarded" requests whose next token
+        is not sampled and comes from `request.get_token_id()` instead.
+        No blocking CPU operations should be introduced in this function.
+        """
+        # TODO(Ben): Combine this into a custom fused kernel
+
+        # Precompute get_token_id for when there is no valid next token
+        num_reqs = gpu_input_batch.num_reqs
+        self.backup_next_token_ids.np[:num_reqs] = np.array([
+            requests[gpu_input_batch.req_ids[i]].get_token_id(
+                common_attn_metadata.seq_lens_cpu[i].item())
+            for i in range(num_reqs)
+        ])
+        self.backup_next_token_ids.copy_to_gpu(num_reqs)
+
+        # Mask out the sampled tokens indices that should not be sampled.
+        discard_sampled_tokens_req_indices = \
+            discard_request_indices[:num_discarded_requests]
+
+        valid_sampled_token_ids_gpu = sampled_token_ids.clone()
+        valid_sampled_token_ids_gpu.index_fill_(
+            0, discard_sampled_tokens_req_indices, -1)
+
+        # Generate a mask for all valid tokens within those requests
+        max_gen_len = sampled_token_ids.shape[-1]
+        if max_gen_len == 1:
+            valid_mask = torch.ones_like(valid_sampled_token_ids_gpu,
+                                         dtype=torch.bool)
+        else:
+            valid_mask = (
+                (valid_sampled_token_ids_gpu != -1) &
+                (valid_sampled_token_ids_gpu < gpu_input_batch.vocab_size))
+
+        # Count the number of valid tokens in each request
+        valid_sampled_tokens_count = valid_mask.sum(dim=1)
+
+        # Get the rightmost valid index per row
+        last_valid_indices = valid_sampled_tokens_count - 1
+        last_valid_indices_safe = torch.clamp(last_valid_indices, min=0)
+
+        # Get last valid token from each row
+        # (assume undefined state where there is no valid token)
+        selected_tokens = torch.gather(
+            valid_sampled_token_ids_gpu, 1,
+            last_valid_indices_safe.unsqueeze(1)).squeeze(1)
+
+        # Use last token if valid, pre-computed backup if not
+        batch_size = valid_sampled_token_ids_gpu.shape[0]
+        next_token_ids = torch.where(
+            last_valid_indices != -1, selected_tokens,
+            self.backup_next_token_ids.gpu[:batch_size])
+
+        return next_token_ids, valid_sampled_tokens_count
+
+    def prepare_num_rejected_tokens(self,
+                                    spec_decode_metadata: SpecDecodeMetadata,
+                                    valid_sampled_tokens_count: torch.Tensor) \
+                                    -> torch.Tensor:
+        """
+        Calculate the number of rejected tokens for each request based on the
+        number of valid sampled tokens and the number of draft tokens in each.
+        """
+        num_draft_tokens_gpu = torch.cat([
+            spec_decode_metadata.cu_num_draft_tokens[0:1],
+            spec_decode_metadata.cu_num_draft_tokens[1:] -
+            spec_decode_metadata.cu_num_draft_tokens[:-1]
+        ])
+
+        num_rejected_tokens_gpu = torch.where(
+            num_draft_tokens_gpu > 0,
+            num_draft_tokens_gpu + 1 - valid_sampled_tokens_count,
+            torch.zeros_like(num_draft_tokens_gpu))
+
+        return num_rejected_tokens_gpu
+
+    def prepare_inputs_deferred(self,
+                                common_attn_metadata: CommonAttentionMetadata,
+                                num_rejected_tokens: torch.Tensor) -> \
+                    tuple[CommonAttentionMetadata, torch.Tensor, torch.Tensor]:
+        """
+        This function is used to prepare the inputs for speculative decoding
         It updates the common_attn_metadata for speculative decoding,
         but does not consider the rejected tokens. Instead, all tokens
         are included as inputs to the speculator, with the rejected tokens
-        used as padding and filtered out later by `last_token_indices`.
+        used as padding and filtered out later by `token_indices_to_sample`.
+        No blocking CPU operations should be introduced in this function.
         """
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
 
@@ -393,7 +493,10 @@ class EagleProposer:
             causal=True,
         )
 
-        return spec_common_attn_metadata, token_indices
+        token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1 \
+            - num_rejected_tokens
+
+        return spec_common_attn_metadata, token_indices, token_indices_to_sample
 
     def propose_tree(
         self,
@@ -571,7 +674,7 @@ class EagleProposer:
         num_rejected_tokens: torch.Tensor
     ) -> tuple[CommonAttentionMetadata, torch.Tensor]:
         """
-        This function is used to prepare the inputs for the spec decode.
+        This function is used to prepare the inputs for speculative decoding.
         It updates to the common_attn_metadata to account for the rejected
         tokens (and newly sampled tokens). It also returns the token indices
         of the tokens that should be fed to the speculator.

@@ -310,8 +310,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                                self.hidden_size,
                                                dtype=self.dtype,
                                                numpy=False)
-        self.backup_next_token_ids = self._make_buffer(self.max_num_reqs,
-                                                       dtype=torch.int32)
         self.discard_request_indices = self._make_buffer(self.max_num_reqs,
                                                          dtype=torch.int64)
         self.num_discarded_requests = 0
@@ -891,13 +889,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             discard_request_indices)
 
         self.discard_request_indices.copy_to_gpu(self.num_discarded_requests)
-
-        # Precompute get_token_id for when there is no valid next token
-        self.backup_next_token_ids.np[:num_reqs] = np.array([
-            self.requests[self.input_batch.req_ids[i]].get_token_id(
-                self.seq_lens.np[i]) for i in range(num_reqs)
-        ])
-        self.backup_next_token_ids.copy_to_gpu(num_reqs)
 
         # Copy the tensors to the GPU.
         self._prepare_input_ids(total_num_scheduled_tokens, cu_num_tokens)
@@ -2096,51 +2087,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             assert isinstance(sampled_token_ids, torch.Tensor)
             assert isinstance(self.drafter, EagleProposer)
 
-            # TODO(Ben): Combine this bookkeeping into a custom fused kernel
-
-            # Mask out the sampled tokens indices that should not be sampled.
-            discard_sampled_tokens_req_indices =  \
-                self.discard_request_indices\
-                    .gpu[:self.num_discarded_requests]
-
-            valid_sampled_token_ids_gpu = sampled_token_ids.clone()
-            valid_sampled_token_ids_gpu.index_fill_(
-                0, discard_sampled_tokens_req_indices, -1)
-
-            # Generate a mask for all valid tokens within those requests
-            max_gen_len = sampled_token_ids.shape[-1]
-            if max_gen_len == 1:
-                valid_mask = torch.ones_like(valid_sampled_token_ids_gpu,
-                                             dtype=torch.bool)
-            else:
-                valid_mask = ((valid_sampled_token_ids_gpu != -1) &
-                              (valid_sampled_token_ids_gpu
-                               < self.input_batch.vocab_size))
-
-            # Count the number of valid tokens in each request
-            valid_sampled_tokens_count = valid_mask.sum(dim=1)
-
-            # Get the rightmost valid index per row
-            last_valid_indices = valid_sampled_tokens_count - 1
-
-            last_valid_indices_safe = torch.max(
-                last_valid_indices, torch.zeros_like(last_valid_indices))
-
-            # Get last valid token from each row
-            # (assume undefined state where there is no valid token)
-            selected_tokens = torch.gather(
-                valid_sampled_token_ids_gpu, 1,
-                last_valid_indices_safe.unsqueeze(1)).squeeze(1)
-
-            # Use last token if valid, pre-computed backup if not
-            batch_size = valid_sampled_token_ids_gpu.shape[0]
-            next_token_ids = torch.where(
-                last_valid_indices != -1, selected_tokens,
-                self.backup_next_token_ids.gpu[:batch_size])
-
-            token_indices_to_sample = None
+            next_token_ids, valid_sampled_tokens_count = \
+                self.drafter.prepare_next_token_ids(
+                    common_attn_metadata,
+                    spec_decode_metadata,
+                    sampled_token_ids,
+                    self.requests,
+                    self.input_batch,
+                    self.discard_request_indices.gpu,
+                    self.num_discarded_requests
+                )
 
             if spec_decode_metadata is None:
+                token_indices_to_sample = None
                 # input_ids can be None for multimodal models.
                 target_token_ids = self.input_ids.gpu[:num_scheduled_tokens]
                 # TODO(woosuk): Support M-RoPE.
@@ -2152,22 +2111,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 else:
                     target_hidden_states = hidden_states[:num_scheduled_tokens]
             else:
-                num_draft_tokens_gpu = torch.cat([
-                    spec_decode_metadata.cu_num_draft_tokens[0:1],
-                    spec_decode_metadata.cu_num_draft_tokens[1:] -
-                    spec_decode_metadata.cu_num_draft_tokens[:-1]
-                ])
+                num_rejected_tokens = self.drafter.prepare_num_rejected_tokens(
+                    spec_decode_metadata, valid_sampled_tokens_count)
 
-                num_rejected_tokens_gpu = torch.where(
-                    num_draft_tokens_gpu > 0,
-                    num_draft_tokens_gpu + 1 - valid_sampled_tokens_count,
-                    torch.zeros_like(num_draft_tokens_gpu))
-
-                common_attn_metadata, token_indices =\
-                    self.drafter.prepare_inputs_deferred(common_attn_metadata)
-                token_indices_to_sample = \
-                    common_attn_metadata.query_start_loc[1:] - 1 \
-                        - num_rejected_tokens_gpu
+                if self.speculative_config.disable_padded_batch:
+                    token_indices_to_sample = None
+                    common_attn_metadata, token_indices =\
+                        self.drafter.prepare_inputs(
+                            common_attn_metadata,
+                            num_rejected_tokens.to('cpu').int())
+                else:
+                    common_attn_metadata, token_indices, \
+                        token_indices_to_sample =\
+                        self.drafter.prepare_inputs_deferred(
+                            common_attn_metadata, num_rejected_tokens)
 
                 target_token_ids = self.input_ids.gpu[token_indices]
                 # TODO(woosuk): Support M-RoPE.
