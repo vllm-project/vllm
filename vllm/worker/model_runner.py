@@ -26,9 +26,9 @@ from vllm.compilation.counter import compilation_counter
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.distributed import broadcast_tensor_dict, get_pp_group
-from vllm.distributed.kv_transfer import get_kv_transfer_group
 from vllm.distributed.device_communicators.pynccl_allocator import (
-  set_graph_pool_id,)
+    set_graph_pool_id)
+from vllm.distributed.kv_transfer import get_kv_transfer_group
 from vllm.distributed.parallel_state import (get_tensor_model_parallel_rank,
                                              graph_capture)
 from vllm.forward_context import get_forward_context, set_forward_context
