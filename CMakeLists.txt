@@ -359,7 +359,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       message(STATUS "Marlin generation script has not changed, skipping generation.")
     endif()
 
-    file(GLOB MARLIN_TEMPLATE_KERNEL_SRC "csrc/quantization/gptq_marlin/sm80_kernel_*.cu")
+    file(GLOB MARLIN_TEMPLATE_KERNEL_SRC "csrc/quantization/gptq_marlin/sm80_kernel_*_float16.cu")
     set_gencode_flags_for_srcs(
       SRCS "${MARLIN_TEMPLATE_KERNEL_SRC}"
       CUDA_ARCHS "${MARLIN_ARCHS}")
@@ -369,7 +369,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     endif()
     list(APPEND VLLM_EXT_SRC ${MARLIN_TEMPLATE_KERNEL_SRC})
 
-    file(GLOB MARLIN_TEMPLATE_BF16_KERNEL_SRC "csrc/quantization/gptq_marlin/sm80_kernel_*.cu")
+    file(GLOB MARLIN_TEMPLATE_BF16_KERNEL_SRC "csrc/quantization/gptq_marlin/sm80_kernel_*_bfloat16.cu")
     set_gencode_flags_for_srcs(
       SRCS "${MARLIN_TEMPLATE_BF16_KERNEL_SRC}"
       CUDA_ARCHS "${MARLIN_BF16_ARCHS}")
@@ -380,7 +380,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_EXT_SRC ${MARLIN_TEMPLATE_BF16_KERNEL_SRC})
 
     if (MARLIN_FP8_ARCHS) 
-      file(GLOB MARLIN_TEMPLATE_FP8_KERNEL_SRC "csrc/quantization/gptq_marlin/sm89_kernel_*.cu")
+      file(GLOB MARLIN_TEMPLATE_FP8_KERNEL_SRC "csrc/quantization/gptq_marlin/sm89_kernel_*_float16.cu")
       set_gencode_flags_for_srcs(
         SRCS "${MARLIN_TEMPLATE_FP8_KERNEL_SRC}"
         CUDA_ARCHS "${MARLIN_FP8_ARCHS}")
@@ -390,7 +390,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       endif()
       list(APPEND VLLM_EXT_SRC ${MARLIN_TEMPLATE_FP8_KERNEL_SRC})
 
-      file(GLOB MARLIN_TEMPLATE_FP8_BF16_KERNEL_SRC "csrc/quantization/gptq_marlin/sm89_kernel_*.cu")
+      file(GLOB MARLIN_TEMPLATE_FP8_BF16_KERNEL_SRC "csrc/quantization/gptq_marlin/sm89_kernel_*_bfloat16.cu")
       set_gencode_flags_for_srcs(
         SRCS "${MARLIN_TEMPLATE_FP8_BF16_KERNEL_SRC}"
         CUDA_ARCHS "${MARLIN_FP8_BF16_ARCHS}")
