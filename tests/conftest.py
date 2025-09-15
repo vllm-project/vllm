@@ -169,8 +169,9 @@ def _patch_vllm_logger_debug_once():
             return obj
         except Exception:
             if isinstance(obj, dict):
-                return tuple(sorted((
-                    _to_hashable(k), _to_hashable(v)) for k, v in obj.items()))
+                return tuple(
+                    sorted((_to_hashable(k), _to_hashable(v))
+                           for k, v in obj.items()))
             if isinstance(obj, (list, tuple)):
                 return tuple(_to_hashable(x) for x in obj)
             if isinstance(obj, set):
@@ -178,7 +179,7 @@ def _patch_vllm_logger_debug_once():
             return repr(obj)
 
     def _safe_debug_once(self, msg: str, *args, **kwargs) -> None:
-        key = (msg,) + tuple(_to_hashable(a) for a in args)
+        key = (msg, ) + tuple(_to_hashable(a) for a in args)
         seen_attr = "_vllm_debug_once_seen_keys"
         seen = getattr(self, seen_attr, None)
         if seen is None:
