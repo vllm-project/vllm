@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import multiprocessing as mp
+import queue
 from contextlib import suppress
 from multiprocessing import Queue
 from typing import Any, Callable, Optional
@@ -84,6 +85,8 @@ class EPLBProcess:
                     # Execute target function
                     result = self.target_func(*args)
                     output_queue.put(result)
+                except queue.Empty:
+                    continue
                 except Exception as e:
                     output_queue.put(None)
                     if hasattr(e, "add_note"):
