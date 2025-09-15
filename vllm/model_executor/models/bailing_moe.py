@@ -117,7 +117,8 @@ class BailingAttention(nn.Module):
             prefix=f"{prefix}.dense",
         )
 
-        self.partial_rotary_factor = getattr(config, "partial_rotary_factor", 1.0)
+        self.partial_rotary_factor = getattr(config, "partial_rotary_factor",
+                                             1.0)
 
         self.rotary_dim = getattr(config, "rotary_dim", self.head_dim)
 
