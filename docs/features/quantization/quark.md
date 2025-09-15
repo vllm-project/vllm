@@ -289,7 +289,6 @@ vLLM also supports loading layerwise mixed precision model quantized using AMD Q
 
 - Unquantized Linear and/or MoE layer(s) as an option for each layer, i.e., mixed of {MXFP4, FP8, BF16/FP16}
 - MXFP6 quantization extension, i.e., {MXFP4, MXFP6, FP8, BF16/FP16}
-- etc.
 
 Although one can maximize serving throughput using the lowest precision supported on a given device (e.g. MXFP4 for AMD Instinct MI355, FP8 for AMD Instinct MI300), these aggressive schemes can be detrimental to accuracy recovering from quantization on target tasks. Mixed precision allows to strike a balance between maximizing accuracy and throughput.
 
