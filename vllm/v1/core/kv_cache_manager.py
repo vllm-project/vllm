@@ -83,15 +83,18 @@ class KVCacheBlocks:
 
 class KVCacheManager:
 
-    def __init__(self,
-                 kv_cache_config: KVCacheConfig,
-                 max_model_len: int,
-                 enable_caching: bool = True,
-                 use_eagle: bool = False,
-                 log_stats: bool = False,
-                 enable_kv_cache_events: bool = False,
-                 enable_wa_policy: bool = False,
-                 wa_offline_param_path: Optional[str] = "") -> None:
+    def __init__(
+        self,
+        kv_cache_config: KVCacheConfig,
+        max_model_len: int,
+        enable_caching: bool = True,
+        use_eagle: bool = False,
+        log_stats: bool = False,
+        enable_kv_cache_events: bool = False,
+        dcp_world_size: int = 1,
+        enable_wa_policy: bool = False,
+        wa_offline_param_path: Optional[str] = "",
+    ) -> None:
         self.max_model_len = max_model_len
 
         self.enable_caching = enable_caching
@@ -109,12 +112,20 @@ class KVCacheManager:
             self.block_size = kv_cache_config.kv_cache_groups[
                 0].kv_cache_spec.block_size
 
+            if dcp_world_size > 1:
+                assert len(kv_cache_config.kv_cache_groups) == 1
+                # Note(hc): need revisit. When both DCP and any future
+                # PCP are enabled, the block_size may need to be scaled
+                # by a factor of dcp_size × pcp_size?
+                self.block_size *= dcp_world_size
+
         self.coordinator = get_kv_cache_coordinator(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
             use_eagle=self.use_eagle,
             enable_caching=self.enable_caching,
             enable_kv_cache_events=enable_kv_cache_events,
+            dcp_world_size=dcp_world_size,
             enable_wa_policy=enable_wa_policy,
             wa_offline_param_path=wa_offline_param_path)
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)

@@ -43,6 +43,10 @@ argcomplete==3.5.1
     # via datamodel-code-generator
 arrow==1.3.0
     # via isoduration
+async-timeout==5.0.1
+    # via
+    #   aiohttp
+    #   redis
 attrs==24.2.0
     # via
     #   aiohttp
@@ -137,7 +141,7 @@ contourpy==1.3.0
     # via matplotlib
 cramjam==2.9.0
     # via fastparquet
-cupy-cuda12x==13.3.0
+cupy-cuda12x==13.6.0
     # via ray
 cycler==0.12.1
     # via matplotlib
@@ -194,6 +198,11 @@ eval-type-backport==0.2.2
     # via mteb
 evaluate==0.4.3
     # via lm-eval
+exceptiongroup==1.3.0
+    # via
+    #   anyio
+    #   hypothesis
+    #   pytest
 fastapi==0.116.1
     # via mlflow-skinny
 fastparquet==2024.11.0
@@ -971,7 +980,6 @@ setuptools==77.0.3
     # via
     #   lightning-utilities
     #   pytablewriter
-    #   torch
     #   triton
 shapely==2.1.1
     # via
@@ -1032,6 +1040,8 @@ tabledata==1.3.3
     # via pytablewriter
 tabulate==0.9.0
     # via sacrebleu
+tblib==3.1.0
+    # via -r requirements/test.in
 tcolorpy==0.1.6
     # via pytablewriter
 tenacity==9.0.0
@@ -1042,7 +1052,7 @@ tensorboardx==2.6.4
     # via lightning
 tensorizer==2.10.1
     # via -r requirements/test.in
-terratorch==1.1rc2
+terratorch @ git+https://github.com/IBM/terratorch.git@07184fcf91a1324f831ff521dd238d97fe350e3e
     # via -r requirements/test.in
 threadpoolctl==3.5.0
     # via scikit-learn
@@ -1065,8 +1075,14 @@ tokenizers==0.21.1
     # via
     #   -r requirements/test.in
     #   transformers
+toml==0.10.2
+    # via datamodel-code-generator
 tomli==2.2.1
-    # via schemathesis
+    # via
+    #   alembic
+    #   black
+    #   pytest
+    #   schemathesis
 tomli-w==1.2.0
     # via schemathesis
 torch==2.8.0+cu128
@@ -1103,7 +1119,7 @@ torchaudio==2.8.0+cu128
     #   -r requirements/test.in
     #   encodec
     #   vocos
-torchgeo==0.7.0
+torchgeo==0.6.2
     # via terratorch
 torchmetrics==1.7.4
     # via
@@ -1173,6 +1189,9 @@ typing-extensions==4.12.2
     # via
     #   albumentations
     #   alembic
+    #   anyio
+    #   black
+    #   exceptiongroup
     #   fastapi
     #   graphene
     #   huggingface-hub
@@ -1182,6 +1201,7 @@ typing-extensions==4.12.2
     #   mistral-common
     #   mlflow-skinny
     #   mteb
+    #   multidict
     #   opentelemetry-api
     #   opentelemetry-sdk
     #   opentelemetry-semantic-conventions
@@ -1190,12 +1210,13 @@ typing-extensions==4.12.2
     #   pydantic-core
     #   pydantic-extra-types
     #   pytorch-lightning
+    #   rich
     #   sqlalchemy
     #   torch
-    #   torchgeo
     #   typer
     #   typeshed-client
     #   typing-inspection
+    #   uvicorn
 typing-inspection==0.4.1
     # via pydantic
 tzdata==2024.2
@@ -1231,7 +1252,7 @@ word2number==1.1
     # via lm-eval
 wrapt==1.17.2
     # via smart-open
-xarray==2025.7.1
+xarray==2025.6.1
     # via rioxarray
 xxhash==3.5.0
     # via
