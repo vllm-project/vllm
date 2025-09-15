@@ -164,7 +164,6 @@ class Qwen3DecoderLayer(nn.Module):
     def __init__(
         self,
         config: Qwen3Config,
-        layer_idx: int,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -187,7 +186,7 @@ class Qwen3DecoderLayer(nn.Module):
         else:
             attn_type = AttentionType.ENCODER_ONLY
 
-        self.layer_idx = layer_idx
+        layer_idx =int(prefix.split(".")[-1])
         layer_head_num = getattr(config, 'layer_head_num', None)
         layer_inter_size = getattr(config, 'layer_inter_size', None)
 
