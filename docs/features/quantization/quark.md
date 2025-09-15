@@ -295,7 +295,7 @@ Although one can maximize serving throughput using the lowest precision supporte
 
 There are two steps to generate and deploy a mixed precision model quantized with AMD Quark, as shown below.
 
-### 1. generate a mixed precision quantized model in AMD Quark.
+### 1. Quantize a model using mixed precision in AMD Quark
 
 Firstly, the layerwise mixed-precision configuration for a given LLM model is searched and then quantized using AMD Quark. We will provide a detailed tutorial with Quark APIs later.
 
