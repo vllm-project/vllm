@@ -5,6 +5,7 @@ import dataclasses
 import math
 import os
 import time
+from contextlib import suppress
 from typing import List, Optional, Tuple, cast
 
 import torch
@@ -413,12 +414,14 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
     def __del__(self):
         # Delete model runner first in case there are model arifacts
-        del self.model_runner
+        with suppress(AttributeError):
+            # attributes may be already torn down when destructor is called
+            del self.model_runner
 
-        if self.mesh_device:
-            close_mesh_device(self.mesh_device,
-                              self.model_config.override_tt_config)
-            del self.mesh_device
+            if self.mesh_device:
+                close_mesh_device(self.mesh_device,
+                                  self.model_config.override_tt_config)
+                del self.mesh_device
 
         if hasattr(super(), '__del__'):
             super().__del__()  # type: ignore

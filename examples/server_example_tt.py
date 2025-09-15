@@ -24,6 +24,9 @@ def main():
         default=32,
         help="Maximum number of sequences to be processed in a single iteration",
     )
+    parser.add_argument(
+        "--num_scheduler_steps", type=int, default=10, help="Number of scheduler steps"
+    )
     args, _ = parser.parse_known_args()
 
     check_tt_model_supported(args.model)
@@ -37,7 +40,7 @@ def main():
             "--max_num_seqs",
             str(args.max_num_seqs),
             "--num_scheduler_steps",
-            "10",
+            str(args.num_scheduler_steps),
         ]
     )
     runpy.run_module("vllm.entrypoints.openai.api_server", run_name="__main__")
