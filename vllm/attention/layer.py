@@ -337,7 +337,7 @@ class Attention(nn.Module, AttentionLayerBase):
         return self.attn_backend
 
 
-class MultiHeadAttention(nn.Module):
+class MultiHeadAttention(nn.Module, AttentionLayerBase):
     """Multi-headed attention without any cache, used for ViT."""
 
     def __init__(
@@ -357,13 +357,17 @@ class MultiHeadAttention(nn.Module):
             f"num_heads ({self.num_heads}) is not " \
             f"divisible by num_kv_heads ({self.num_kv_heads})"
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
+        self.attn_backend = self._get_attn_backend()
+
+    def _get_attn_backend(self) -> type[AttentionBackend]:
+        """Get the attention backend class for this layer."""
+        attn_backend = None
 
         # During model initialization, the default dtype is set as the model
         # weight and activation dtype.
         dtype = torch.get_default_dtype()
-
         # Determine the attention backend
-        backend = get_vit_attn_backend(head_size=head_size, dtype=dtype)
+        backend = get_vit_attn_backend(head_size=self.head_size, dtype=dtype)
 
         # Some auto-selected backends can be upgraded
         # to upstream flash attention if available.
@@ -376,10 +380,9 @@ class MultiHeadAttention(nn.Module):
 
         if current_platform.is_rocm():
             # currently, only torch_sdpa is supported on rocm
-            self.attn_backend = _Backend.TORCH_SDPA
+            attn_backend = _Backend.TORCH_SDPA
         else:
-
-            self.attn_backend = backend if backend in {
+            attn_backend = (backend if backend in {
                 _Backend.TORCH_SDPA,
                 _Backend.TORCH_SDPA_VLLM_V1,
                 _Backend.XFORMERS,
@@ -387,15 +390,13 @@ class MultiHeadAttention(nn.Module):
                 _Backend.ROCM_AITER_FA,
                 _Backend.FLASH_ATTN,
                 _Backend.FLASH_ATTN_VLLM_V1,
-            } else _Backend.TORCH_SDPA
+            } else _Backend.TORCH_SDPA)
 
-        if (self.attn_backend == _Backend.XFORMERS
+        if (attn_backend == _Backend.XFORMERS
                 and not check_xformers_availability()):
-            self.attn_backend = _Backend.TORCH_SDPA
+            attn_backend = _Backend.TORCH_SDPA
 
-        if self.attn_backend in {
-                _Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1
-        }:
+        if attn_backend in {_Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1}:
             if use_upstream_fa:
                 from flash_attn import flash_attn_varlen_func
                 self._flash_attn_varlen_func = flash_attn_varlen_func
@@ -403,9 +404,12 @@ class MultiHeadAttention(nn.Module):
                 from vllm.vllm_flash_attn import flash_attn_varlen_func
                 self._flash_attn_varlen_func = flash_attn_varlen_func
 
-        logger.info_once(
-            f"MultiHeadAttention attn_backend: {self.attn_backend}, "
-            f"use_upstream_fa: {use_upstream_fa}")
+        logger.info_once(f"MultiHeadAttention attn_backend: {attn_backend}, "
+                         f"use_upstream_fa: {use_upstream_fa}")
+        return attn_backend
+
+    def get_attn_backend(self) -> type[AttentionBackend]:
+        return self.attn_backend
 
     def forward(
         self,
