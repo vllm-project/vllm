@@ -258,7 +258,7 @@ python quantize_quark.py --model_dir Qwen/Qwen1.5-MoE-A2.7B-Chat \
 
 ## Using Quark Quantized Auto Mixed Precision (AMP) Models
 
-Extended from single quantization scheme (e.g. MXFP4, FP8) models, aka PTQ models, vLLM also supports loading layerwise mixed precision model quantized by AMD Quark. Currently, mixed scheme of {MXFP4, FP8} is supported, where FP8 here denotes for FP8 per-tensor scheme. More mixed precision schemes are planned to be supported in a near future, including
+vLLM also supports loading layerwise mixed precision model quantized using AMD Quark. Currently, mixed scheme of {MXFP4, FP8} is supported, where FP8 here denotes for FP8 per-tensor scheme. More mixed precision schemes are planned to be supported in a near future, including
 
 - Unquantized Linear and/or MoE layer(s) as an option for each layer, i.e., mixed of {MXFP4, FP8, BF16/FP16}
 - MXFP6 quantization extension, i.e., {MXFP4, MXFP6, FP8, BF16/FP16}
