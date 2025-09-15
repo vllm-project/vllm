@@ -940,6 +940,48 @@ define_gpu_extension_target(
   USE_SABI 3
   WITH_SOABI)
 
+#
+# _suffix_cache_C extension
+#
+set(VLLM_SUFFIX_CACHE_EXT_SRC
+  "csrc/suffix_cache/pybind.cc"
+  "csrc/suffix_cache/suffix_tree.cc")
+
+message(STATUS "Enabling suffix_cache extension.")
+add_library(
+  _suffix_cache_C MODULE
+  ${VLLM_SUFFIX_CACHE_EXT_SRC}
+)
+
+# Set properties for the suffix_cache extension
+set_target_properties(_suffix_cache_C PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON
+)
+
+# Include directories
+target_include_directories(_suffix_cache_C PRIVATE
+  csrc
+)
+
+# Link against torch and python
+target_link_libraries(_suffix_cache_C PRIVATE
+  torch
+  ${TORCH_PYTHON_LIBRARY}
+)
+
+# Set output name without lib prefix
+set_target_properties(_suffix_cache_C PROPERTIES
+  PREFIX ""
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/vllm"
+)
+
+# Install the extension
+install(TARGETS _suffix_cache_C
+  LIBRARY DESTINATION vllm
+  COMPONENT _suffix_cache_C
+)
+
 if(VLLM_GPU_LANG STREQUAL "HIP")
   #
   # _rocm_C extension
