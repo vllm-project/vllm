@@ -280,11 +280,11 @@ As examples, we provide some ready-to-use quantized mixed precision model to sho
 
 ### 2. inference the quantized mixed precision model in vLLM.
 
-User can load the mixed precision model for inference in the vLLM in a virutally free way, compared with common PTQ models. For example, one can evaluate a mixed-precision model using lm_eval CLI as same as evaluating a PTQ model, such as:
+
+Models quantized with AMD Quark using mixed precision can natively be reload in vLLM, and e.g. evaluated using lm-evaluation-harness as follow:
 
 ```bash
 lm_eval --model vllm \
     --model_args pretrained=amd/Llama-2-70b-chat-hf-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8,tensor_parallel_size=4,dtype=auto,gpu_memory_utilization=0.8,trust_remote_code=False \
     --tasks mmlu \
     --batch_size auto
-```
