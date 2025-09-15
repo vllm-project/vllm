@@ -291,7 +291,7 @@ Extended from single quantization scheme (e.g. MXFP4, FP8) models, aka PTQ model
 - MXFP6 quantization extension, i.e., {MXFP4, MXFP6, FP8, BF16/FP16}
 - etc.
 
-With the mixed-precision quantized model, one could expect an optimal balance between accuracy and hardware metrics.
+Although one can maximize serving throughput using the lowest precision supported on a given device (e.g. MXFP4 for AMD Instinct MI355, FP8 for AMD Instinct MI300), these aggressive schemes can be detrimental to accuracy recovering from quantization on target tasks. Mixed precision allows to strike a balance between maximizing accuracy and throughput.
 
 Simply speaking, there are two steps to use the mixed precision feature mention above.
 
