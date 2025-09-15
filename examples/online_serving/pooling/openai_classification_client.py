@@ -5,6 +5,7 @@ NOTE:
     start a supported classification model server with `vllm serve`, e.g.
     vllm serve jason9693/Qwen2.5-1.5B-apeach
 """
+
 import argparse
 import pprint
 
