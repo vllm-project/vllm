@@ -125,6 +125,7 @@ void cutlass_gemm_caller_blockwise(torch::Tensor& out, torch::Tensor const& a,
 
   using ElementAB = typename Gemm::ElementAB;
   using ElementD = typename Gemm::ElementD;
+  using ElementBlockScale = typename Gemm::ElementBlockScale;
 
   int32_t m = a.size(0), n = b.size(1), k = a.size(1);
 
