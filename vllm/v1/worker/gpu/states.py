@@ -51,6 +51,7 @@ class RequestState:
         )
         self.num_tokens = np.zeros(self.max_num_reqs, dtype=np.int32)
         self.num_computed_tokens = np.zeros(self.max_num_reqs, dtype=np.int32)
+        self.num_prompt_tokens = np.zeros(self.max_num_reqs, dtype=np.int32)
 
         # Last sampled token ids.
         self.last_token = torch.zeros(
@@ -66,6 +67,8 @@ class RequestState:
         self.num_logprobs = np.empty(self.max_num_reqs, dtype=np.int32)
         # -1 means no logprobs are requested.
         self.num_logprobs.fill(-1)
+
+        self.needs_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=bool)
 
     @property
     def num_reqs(self) -> int:
@@ -85,6 +88,7 @@ class RequestState:
 
         prompt_len = len(prompt_token_ids)
         self.num_tokens[req_idx] = prompt_len
+        self.num_prompt_tokens[req_idx] = prompt_len
         self.token_ids[req_idx, :prompt_len] = prompt_token_ids
         self.num_computed_tokens[req_idx] = num_computed_tokens
 
@@ -101,6 +105,10 @@ class RequestState:
         else:
             num_logprobs = -1
         self.num_logprobs[req_idx] = num_logprobs
+
+        # For now, only support prompt logprobs for the prompt tokens.
+        needs_prompt_logprobs = sampling_params.prompt_logprobs is not None
+        self.needs_prompt_logprobs[req_idx] = needs_prompt_logprobs
 
     def append_token_ids(
         self,
