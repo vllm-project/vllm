@@ -22,13 +22,14 @@ from vllm.v1.kv_cache_interface import CrossAttentionSpec
 logger = init_logger(__name__)
 
 def _get_max_encoder_len(vllm_config: "VllmConfig") -> int:
-    """Gets the max number of encoder tokens from the config."""
-    max_len = getattr(
-        getattr(vllm_config, "scheduler_config", None),
-        "max_num_encoder_input_tokens",
-        0,
-    )
-    return (max_len if isinstance(max_len, int) and max_len > 0 else 0)
+    """Gets the max number of encoder input tokens from the config.
+    """
+    max_len = vllm_config.scheduler_config.max_num_encoder_input_tokens
+
+    if isinstance(max_len, int) and max_len > 0:
+        return max_len
+
+    return 0
 
 
 def _get_cross_slot_mapping(encoder_seq_lens: np.ndarray,
