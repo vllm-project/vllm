@@ -6,6 +6,8 @@ from typing import Optional, Union
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
@@ -268,3 +270,25 @@ def _validate_scale_shape(
         assert block_shape is not None
         expected = (a.shape[0], cdiv(a.shape[1], block_shape[1]))
         assert a_scale.shape == expected, f"{a_scale.shape} == {expected}"
+
+
+def restrict_dispatch_to_tp_leader(
+        *tensors: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    """Restrict dispatch to the TP leader rank.
+
+    If tensor model parallelism is enabled (TP > 1), only ranks with
+    ``tp_rank_in_group == 0`` should perform dispatch. Non-leader ranks
+    return empty tensors to avoid duplicate dispatch work.
+
+    Returns the input tensors unchanged on the TP leader or when TP == 1;
+    otherwise returns zero-length views of the inputs along the first dim.
+    """
+    tp_world_size = get_tensor_model_parallel_world_size()
+    if tp_world_size <= 1:
+        return tensors
+
+    tp_rank_in_group = get_tp_group().rank_in_group
+    if tp_rank_in_group != 0:
+        return tuple(t[:0] for t in tensors)
+
+    return tensors
