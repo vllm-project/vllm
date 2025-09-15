@@ -64,7 +64,7 @@ class MiniMaxM1ReasoningParser(ReasoningParser):
     ) -> Union[DeltaMessage, None]:
         """
         Extract reasoning content using string patterns.
-        Assume that nothing before the <think> tag is reasoning content.
+        Assume that whenever a <think> tag exists, the text before it is empty.
         """
 
         content = ""
