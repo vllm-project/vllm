@@ -189,25 +189,6 @@ class KVCacheManager:
 
         return KVCacheBlocks(computed_blocks), num_new_computed_tokens
 
-    def _can_allocate(
-        self,
-        request: Request,
-        total_tokens_need_slots: int,
-        new_computed_blocks: tuple[list[KVCacheBlock], ...],
-        total_computed_tokens: int,
-        num_encoder_tokens: int = 0,
-    ) -> bool:
-
-        num_blocks = self.coordinator.get_num_blocks_to_allocate(
-            request.request_id,
-            total_tokens_need_slots,
-            new_computed_blocks,
-            total_computed_tokens,
-            num_encoder_tokens,
-        )
-
-        return num_blocks < self.block_pool.get_num_free_blocks()
-
     def allocate_slots(
         self,
         request: Request,
@@ -323,6 +304,8 @@ class KVCacheManager:
             num_tokens=num_tokens_need_slot,
             new_computed_blocks=new_computed_block_list,
             num_encoder_tokens=num_encoder_tokens,
+            total_computed_tokens=num_computed_tokens +
+            num_extra_tokens_from_connector,
         )
 
         if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
@@ -337,10 +320,17 @@ class KVCacheManager:
                 "Computed blocks should be empty when "
                 "prefix caching is disabled")
 
-        # Append the new computed blocks to the request blocks until now to
-        # avoid the case where the new blocks cannot be allocated.
-        self.coordinator.save_new_computed_blocks(request.request_id,
-                                                  new_computed_block_list)
+        if self.enable_caching:
+            # Append the new computed blocks to the request blocks until now to
+            # avoid the case where the new blocks cannot be allocated.
+            self.coordinator.save_new_computed_blocks(request.request_id,
+                                                      new_computed_block_list)
+
+        if num_extra_tokens_from_connector > 0:
+            new_blocks_for_connector = self.coordinator.allocate_new_blocks_for_connector(
+                request.request_id,
+                num_computed_tokens + num_extra_tokens_from_connector)
+            # TODO: merge new_blocks_for_connector with new_blocks
 
         new_blocks = self.coordinator.allocate_new_blocks(
             request.request_id, num_tokens_need_slot, num_encoder_tokens)
