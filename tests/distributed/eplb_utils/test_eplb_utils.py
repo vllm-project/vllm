@@ -71,11 +71,11 @@ def test_global_idx_to_rank_edge():
     assert global_idx_to_rank(global_idx=199, local_cnt=100) == 1  #1*100 ≤199 <2*100
 
 
-# -------------------------- Test get_ep_ranks_with_expert --------------------------
+# ----------------------- Test get_ep_ranks_with_expert ----------------------
 def test_get_ep_ranks_with_expert_basic():
     """Test basic scenario: get send/recv ranks for a target expert."""
-    # Params: idx=2 (target expert), num_local_experts=3 (each rank has 3 experts)
-    old_indices = [1, 2, 2, 3]  # Global indices (rank = global_idx//3)
+    # Params: idx=2, num_local_experts=3 
+    old_indices = [1, 2, 2, 3]  
     new_indices = [2, 4, 2, 5]
     ranks_to_send, ranks_to_recv = get_ep_ranks_with_expert(
         idx=2,
@@ -105,7 +105,7 @@ def test_get_ep_ranks_with_expert_no_overlap():
 
 
 def test_get_ep_ranks_with_expert_duplicate_ranks():
-    """Test scenario: old/new indices have duplicate ranks (should be deduplicated)."""
+    """Test scenario: old/new indices have duplicate ranks."""
     old_indices = [8, 11, 8]  # num_local_experts=3 → rank 0 (2//3=0)
     new_indices = [5, 8, 8]  # 5//3=1, 8//3=2 → ranks [1,2]
 
@@ -120,11 +120,15 @@ def test_get_ep_ranks_with_expert_duplicate_ranks():
     assert ranks_to_recv == []  
 
 
-# -------------------------- Test generate_log2phy_map --------------------------
+# ------------------------- Test generate_log2phy_map -------------------------
 def test_generate_log2phy_map_single_holding_rank():
-    """Test case: Each expert is held by exactly 1 rank (fill others with its value)."""
+    """
+    Test case: Each expert is held by exactly 1 rank 
+    (fill others with its value).
+    """
     # Expert map: shape (3 ranks, 2 global experts)
-    # - Rank 0 holds expert 0 (value 0), rank 1 holds expert 1 (value 1), others = -1
+    # Rank 0 holds expert 0 (value 0), rank 1 holds expert 1 (value 1)
+    # other ranks = -1
     expert_map = torch.tensor([[0, -1], [-1, 1], [-1, -1]], dtype=torch.int32)
     log2phy_map = generate_log2phy_map(expert_map)
 
@@ -136,7 +140,7 @@ def test_generate_log2phy_map_single_holding_rank():
     assert torch.equal(log2phy_map, expected)
 
 
-def test_generate_log2phy_map_multiple_holding_ranks(monkeypatch):
+def test_generate_log2phy_map_multiple_holding_ranks(monkeypatch): #noqa: E501
     """Test case: Expert held by multiple ranks (fill -1 with random choices)."""
     # Fix random seed to avoid non-determinism
     def mock_choice(arr):
@@ -155,12 +159,12 @@ def test_generate_log2phy_map_multiple_holding_ranks(monkeypatch):
     assert torch.equal(log2phy_map, expected)
 
 
-# -------------------------- Test determine_default_log2phy_map --------------------------
+# ------------------- Test determine_default_log2phy_map ---------------------
 def test_determine_default_log2phy_map_equal_distribution():
     """Test case: Global experts are evenly distributed across ranks."""
-    global_expert_num = 6  # 6 experts total
-    world_size = 3         # 3 ranks → 2 experts per rank
-    rank_id = 1            # Test rank 1
+    # global_expert_num = 6  # 6 experts total
+    # world_size = 3         # 3 ranks → 2 experts per rank
+    # rank_id = 1            # Test rank 1
 
     log2phy_map_rank1 = determine_default_log2phy_map(
         global_expert_num=6,
@@ -178,15 +182,15 @@ def test_determine_default_log2phy_map_equal_distribution():
     assert torch.equal(log2phy_map_rank1, expected)
 
 
-def test_determine_default_log2phy_map_unequal_distribution(monkeypatch):
+def test_determine_default_log2phy_map_unequal_distribution(monkeypatch): #noqa: E501
     """Test case: Global experts are unevenly distributed (last rank has more)."""
     def mock_choice(arr):
         return arr[0]
     monkeypatch.setattr(random, "choice", mock_choice)
 
-    global_expert_num = 7  # 7 experts total
-    world_size = 3         # 3 ranks → 2,2,3 experts (last rank has 3)
-    rank_id = 2            # Test last rank
+    # global_expert_num = 7  # 7 experts total
+    # world_size = 3         # 3 ranks → 2,2,3 experts (last rank has 3)
+    # rank_id = 2            # Test last rank
 
     log2phy_map_rank2 = determine_default_log2phy_map(
         global_expert_num=7,

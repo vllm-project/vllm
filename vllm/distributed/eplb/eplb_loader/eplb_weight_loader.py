@@ -12,14 +12,19 @@ from torch.distributed import P2POp, batch_isend_irecv, get_global_rank
 
 from vllm.distributed.eplb.eplb_adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm.distributed.eplb.eplb_loader.abstract_loader import BaseLoader
-from vllm.distributed.eplb.eplb_utils.eplb_utils import idx_local_to_global, get_ep_ranks_with_expert
+from vllm.distributed.eplb.eplb_utils.eplb_utils import (
+    idx_local_to_global, 
+    get_ep_ranks_with_expert,
+)
 
 
 class EplbWeightLoader(BaseLoader):
     """
-    A concrete implementation of BaseLoader for Expert Parallel Load Balancing (EPLB).
-    This class is responsible for managing the transfer and update of expert weights
-    across different ranks during expert rearrangement.
+    A concrete implementation of BaseLoader for Expert Parallel Load 
+    Balancing (EPLB).
+
+    This class is responsible for managing the transfer and update of 
+    expert weights across different ranks during expert rearrangement.
     """
     def __init__(self, eplb_adaptor: VllmEplbAdaptor):
         """
@@ -48,8 +53,8 @@ class EplbWeightLoader(BaseLoader):
                       ) -> None:
         """
         Performs expert weights rearrangement for a single MoE layer.
-        This method orchestrates the entire shuffling process including local copies
-        and inter-rank P2P communications.
+        This method orchestrates the entire shuffling process including 
+        local copies and inter-rank P2P communications.
 
         Args:
             num_local_experts: The number of experts managed by the current EP rank.
@@ -62,9 +67,11 @@ class EplbWeightLoader(BaseLoader):
                             expert weights (e.g., [w1, w2, ...]). Each w_i is
                             (num_local_experts, expert_dim).
             expert_weights_buffer: An iterable of torch.Tensor, representing buffers
-                                   for receiving expert weights. Same structure as expert_weights.
+                                   for receiving expert weights. 
+                                   Same structure as expert_weights.
             ep_group: The PyTorch distributed process group for expert parallelism.
         """
+
         local2global = partial(
             idx_local_to_global,
             local_cnt=num_local_experts,
@@ -121,8 +128,8 @@ class EplbWeightLoader(BaseLoader):
         Args:
             expert_weights: The actual expert weight tensors to be updated.
             expert_weights_buffer: Buffers containing received or locally copied weights.
-            experts_recv_loc: A dictionary mapping global expert ID to the local buffer index
-                              where it was received.
+            experts_recv_loc: A dictionary mapping global expert ID to the local buffer 
+                              index where it was received.
             is_received_locally: Boolean list indicating if an expert was copied locally.
             is_unchanged: Boolean list indicating if an expert remained in its original slot.
             local2global: Partial function to convert local index to global expert ID.
@@ -175,8 +182,8 @@ class EplbWeightLoader(BaseLoader):
 
         Returns:
             A tuple containing:
-            - experts_recv_loc: A dictionary mapping global expert ID to the local buffer index
-                                where it will be received.
+            - experts_recv_loc: A dictionary mapping global expert ID to the 
+                                local buffer index where it will be received.
             - p2p_ops: The updated list of P2POp objects.
         """
         experts_recv_loc: dict[int, int] = {}
@@ -227,7 +234,8 @@ class EplbWeightLoader(BaseLoader):
             ep_group: The PyTorch distributed process group.
             ep_rank: Current rank in the EP group.
             expert_weights: The actual expert weight tensors to be sent.
-            local2global: Partial function for local to global index conversion.
+            local2global: Partial function for local 
+                          to global index conversion.
             new_indices: The new global expert indices mapping.
             num_local_experts: Number of local experts.
             old_indices: The old global expert indices mapping.
@@ -284,7 +292,8 @@ class EplbWeightLoader(BaseLoader):
         This method is intended to be called when setting up communication for a specific layer.
 
         Args:
-            expert_send_info: A list of tuples, where each tuple is (destination_rank, global_expert_id_to_send).
+            expert_send_info: A list of tuples, where each tuple is 
+                              (destination_rank, global_expert_id_to_send).
             layer_id: The ID of the MoE layer for which experts are being sent.
         """
         for dst_rank, global_expert_id_to_send in expert_send_info:
@@ -308,10 +317,10 @@ class EplbWeightLoader(BaseLoader):
         """
         buffer_tensor_id = 0
         for recv_rank, global_expert_id_to_recv in expert_recv_info:
-            for buffer_tensor in self.eplb_adaptor.buffer_tensor_list[buffer_tensor_id]:
+            for buffer_tensor in self.eplb_adaptor.buffer_tensor_list[buffer_tensor_id]: # noqa: E501
                 self.comm_op_list.append(
                     dist.P2POp(dist.irecv, buffer_tensor, recv_rank))
-            local_expert_to_replace = updated_expert_map[global_expert_id_to_recv].item()
+            local_expert_to_replace = updated_expert_map[global_expert_id_to_recv].item() # noqa: E501
             self.recv_expert_list.append(
                 (local_expert_to_replace, buffer_tensor_id))
             buffer_tensor_id += 1

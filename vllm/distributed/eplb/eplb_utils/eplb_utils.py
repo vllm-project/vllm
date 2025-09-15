@@ -90,10 +90,12 @@ def get_ep_ranks_with_expert(
 
 def generate_log2phy_map(expert_map):
     """
-    Generates a logical-to-physical expert mapping for all ranks based on an initial
-    expert distribution map. This map indicates which physical expert slot (on which rank)
-    corresponds to a given logical expert. It handles cases where an expert might
-    not be present on all ranks and fills in missing entries by replicating existing ones.
+    Generates a logical-to-physical expert mapping for all ranks 
+    based on an initial expert distribution map. 
+    This map indicates which physical expert slot (on which rank)
+    corresponds to a given logical expert. 
+    It handles cases where an expert might not be present on all 
+    ranks and fills in missing entries by replicating existing ones.
 
     Args:
         expert_map: A 2D tensor of shape [num_ranks, num_global_experts].
@@ -106,7 +108,8 @@ def generate_log2phy_map(expert_map):
         that rank `r` should use for logical expert `g`.
         A global physical ID is `rank_id * num_local_experts + local_physical_expert_id`.
     """
-    num_local_experts = expert_map.max() + 1
+
+    num_local_experts = expert_map.max() + 1 # noqa: E501
     log2phy_map = expert_map.clone()
     num_ranks, num_global_expert = log2phy_map.shape
 
@@ -150,8 +153,8 @@ def determine_default_log2phy_map(global_expert_num, world_size, rank_id):
     Returns:
         A 1D tensor representing the logical-to-physical mapping for the specified `rank_id`.
         Shape: [num_global_experts].
-        Each element `log2phy_map[g]` is the global physical ID of the expert
-        that `rank_id` should use for logical expert `g`.
+        Each element `log2phy_map[g]` is the global physical ID of 
+        the expert that `rank_id` should use for logical expert `g`.
     """
     local_num_experts = global_expert_num // world_size
 
