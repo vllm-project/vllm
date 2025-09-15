@@ -424,7 +424,6 @@ Some models are supported only via the [Transformers backend](#transformers). Th
 !!! note
     Currently, the ROCm version of vLLM supports Mistral and Mixtral only for context lengths up to 4096.
 
-
 ### Pooling Models
 
 See [this page](./pooling_models.md) for more information on how to use pooling models.
