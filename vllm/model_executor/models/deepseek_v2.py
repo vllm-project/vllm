@@ -306,14 +306,8 @@ class DeepseekV2MoE(nn.Module):
             final_hidden_states = tensor_model_parallel_all_gather(
                 final_hidden_states, 0)
             final_hidden_states = final_hidden_states[:num_tokens]
-        elif False and self.tp_size > 1:
-            final_hidden_states = (
-                self.experts.maybe_all_reduce_tensor_model_parallel(
-                    final_hidden_states))
 
-        #assert final_hidden_states.shape == (num_tokens, hidden_dim), f"{final_hidden_states.shape}"
-        #print(f"FINAL {final_hidden_states.shape}, {(num_tokens, hidden_dim)}")
-
+        # TODO(bnell): why is this view needed?
         return final_hidden_states.view(num_tokens, hidden_dim)
 
 
