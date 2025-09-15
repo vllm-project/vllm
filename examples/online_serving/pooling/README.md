@@ -1,4 +1,4 @@
-# Online serving examples for pooling models
+# Pooling models
 
 ## Cohere rerank usage
 
