@@ -6,7 +6,7 @@ KV cache helper for store.
 from collections import defaultdict
 from collections.abc import Sequence
 from concurrent.futures import CancelledError, Future
-from typing import cast, Literal, Optional, Union
+from typing import Literal, Optional, Union, cast
 
 import torch
 
