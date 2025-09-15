@@ -95,6 +95,7 @@ class HadamardTransform(torch.nn.Module):
 
                 return value
 
+            # sylvester transforms are symmetric, inv => transpose => original
             return ops.hadacore_transform(value)
 
         # fall back to dense

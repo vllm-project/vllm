@@ -2012,14 +2012,25 @@ def onednn_scaled_mm(
     return output
 
 
-def hadacore_transform(value: torch.Tensor) -> torch.Tensor:
+def hadacore_transform(x: torch.Tensor, inplace: bool = True) -> torch.Tensor:
     """
     Perform Hadamard transforms using [Hadacore](https://arxiv.org/abs/2412.08832)
     kernels. Note that these kernels exploit the recursive properties of
     Sylvester Hadamards, and therefore do not require transform weight data
+
+    Note that sylvester hadamard transforms are also symmetric, which means that
+    this function is also applies the (transpose <=> inverse) transform.
     
-    :param value: value to be transformed inplace
+    :param x: value to be transformed inplace
+    :param inplace: modify value in place
     :return: value after transformation
     """
-    torch.ops._C.hadacore_transform(value)
-    return value
+    return torch.ops._C.hadacore_transform(x, inplace)
+
+
+if hasattr(torch.ops._C, "hadacore_transform"):
+
+    @register_fake("_C::hadacore_transform")
+    def _hadacore_transform_fake(x: torch.Tensor,
+                                 inplace: bool) -> torch.Tensor:
+        return torch.empty_like(x) if not inplace else x
