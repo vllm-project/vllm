@@ -338,7 +338,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       execute_process(
         COMMAND ${CMAKE_COMMAND} -E env
         PYTHONPATH=$PYTHONPATH
-          ${Python_EXECUTABLE} ${MARLIN_GEN_SCRIPT} ${CUDA_ARCHS}
+          ${Python_EXECUTABLE} ${MARLIN_GEN_SCRIPT} ${CUDA_ARCHS_STR}
         RESULT_VARIABLE marlin_generation_result
         OUTPUT_VARIABLE marlin_generation_result
         OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/marlin_generation.log
@@ -917,7 +917,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       execute_process(
         COMMAND ${CMAKE_COMMAND} -E env
         PYTHONPATH=$PYTHONPATH
-          ${Python_EXECUTABLE} ${MOE_MARLIN_GEN_SCRIPT} ${CUDA_ARCHS}
+          ${Python_EXECUTABLE} ${MOE_MARLIN_GEN_SCRIPT} ${CUDA_ARCHS_STR}
         RESULT_VARIABLE moe_marlin_generation_result
         OUTPUT_VARIABLE moe_marlin_generation_output
         OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/moe_marlin_generation.log

@@ -10,7 +10,7 @@ import jinja2
 
 ARCHS = []
 SUPPORT_FP8 = False
-for arch in sys.argv[1].split(";"):
+for arch in sys.argv[1].split(","):
     arch = arch[:arch.index(".") + 2].replace(".", "")
     arch = int(arch)
     if arch >= 89:
