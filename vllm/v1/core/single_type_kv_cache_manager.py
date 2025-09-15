@@ -143,7 +143,6 @@ class SingleTypeKVCacheManager(ABC):
         """
         num_skipped_token = self.get_num_skipped_token(total_computed_tokens)
         req_to_blocks = self.req_to_blocks[request_id]
-        assert len(req_to_blocks) == 0
         if num_skipped_token > 0:
             for i in range(num_skipped_token // self.block_size - 1, -1, -1):
                 if req_to_blocks[i] == self._null_block:
