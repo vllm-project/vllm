@@ -33,9 +33,8 @@ class BenchmarkSubcommand(CLISubcommand):
             subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
         bench_parser = subparsers.add_parser(
             self.name,
-            help=self.help,
             description=self.help,
-            usage="vllm bench <bench_type> [options]")
+            usage=f"vllm {self.name} <bench_type> [options]")
         bench_subparsers = bench_parser.add_subparsers(required=True,
                                                        dest="bench_type")
 
@@ -44,13 +43,14 @@ class BenchmarkSubcommand(CLISubcommand):
                 cmd_cls.name,
                 help=cmd_cls.help,
                 description=cmd_cls.help,
-                usage=f"vllm bench {cmd_cls.name} [options]",
+                usage=f"vllm {self.name} {cmd_cls.name} [options]",
             )
             cmd_subparser.set_defaults(dispatch_function=cmd_cls.cmd)
             cmd_cls.add_cli_args(cmd_subparser)
             show_filtered_argument_or_group_from_help(cmd_subparser,
                                                       ["bench", cmd_cls.name])
-            cmd_subparser.epilog = VLLM_SUBCMD_PARSER_EPILOG
+            cmd_subparser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(
+                subcmd=f"{self.name} {cmd_cls.name}")
         return bench_parser
 
 

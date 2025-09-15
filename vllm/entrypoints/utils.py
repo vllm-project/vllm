@@ -25,13 +25,10 @@ from vllm.utils import FlexibleArgumentParser
 logger = init_logger(__name__)
 
 VLLM_SUBCMD_PARSER_EPILOG = (
-    "Tip: Use `vllm [serve|run-batch|bench <bench_type>] "
-    "--help=<keyword>` to explore arguments from help.\n"
-    "   - To view a argument group:     --help=ModelConfig\n"
-    "   - To view a single argument:    --help=max-num-seqs\n"
-    "   - To search by keyword:         --help=max\n"
-    "   - To list all groups:           --help=listgroup\n"
-    "   - To view help with pager:      --help=page")
+    "For full list:            vllm {subcmd} --help=all\n"
+    "For a section:            vllm {subcmd} --help=modelconfig\n"
+    "For a flag:               vllm {subcmd} --help=max-model-len\n"
+    "Documentation:            https://docs.vllm.ai\n")
 
 
 async def listen_for_disconnect(request: Request) -> None:

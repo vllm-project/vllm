@@ -62,8 +62,9 @@ class ServeSubcommand(CLISubcommand):
             usage="vllm serve [model_tag] [options]")
 
         serve_parser = make_arg_parser(serve_parser)
-        show_filtered_argument_or_group_from_help(serve_parser, ["serve"])
-        serve_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG
+        show_filtered_argument_or_group_from_help(serve_parser, [self.name])
+        serve_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(
+            subcmd=self.name)
         return serve_parser
 
 

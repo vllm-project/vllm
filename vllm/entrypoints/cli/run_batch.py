@@ -50,7 +50,7 @@ class RunBatchSubcommand(CLISubcommand):
         from vllm.entrypoints.openai.run_batch import make_arg_parser
 
         run_batch_parser = subparsers.add_parser(
-            "run-batch",
+            self.name,
             help="Run batch prompts and write results to file.",
             description=(
                 "Run batch prompts using vLLM's OpenAI-compatible API.\n"
@@ -60,8 +60,9 @@ class RunBatchSubcommand(CLISubcommand):
         )
         run_batch_parser = make_arg_parser(run_batch_parser)
         show_filtered_argument_or_group_from_help(run_batch_parser,
-                                                  ["run-batch"])
-        run_batch_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG
+                                                  [self.name])
+        run_batch_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(
+            subcmd=self.name)
         return run_batch_parser
 
 
