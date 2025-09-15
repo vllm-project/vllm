@@ -48,6 +48,7 @@ class GPUModelRunner:
         if self.cache_config.cache_dtype == "auto":
             self.kv_cache_dtype = self.dtype
         else:
+            # Quantized KV cache.
             self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
                 self.cache_config.cache_dtype]
 
@@ -217,6 +218,8 @@ class GPUModelRunner:
                 self.kv_cache_config.kv_cache_groups):
             block_table = block_tables[i]
             slot_mapping = slot_mappings[i]
+            num_common_prefix_blocks = 0
+
 
         return InputBatch(
             req_ids=req_ids,
