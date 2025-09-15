@@ -20,7 +20,7 @@ from vllm.distributed.device_communicators.pynccl_wrapper import (
     NCCLLibrary, buffer_type, cudaStream_t, ncclComm_t, ncclDataTypeEnum)
 from vllm.distributed.kv_transfer.kv_connector.v1.p2p.tensor_memory_pool import (  # noqa: E501
     TensorMemoryPool)
-from vllm.utils import current_stream, get_ip
+from vllm.utils import current_stream, get_ip, is_valid_ipv6_address, join_host_port, split_host_port
 
 logger = logging.getLogger(__name__)
 
@@ -86,13 +86,18 @@ class P2pNcclEngine:
         self._hostname = hostname
         self._port = port
 
+        # For HTTP address, use 127.0.0.1 to match where the HTTP server binds
+        # when --host 0.0.0.0 is used, as it doesn't actually bind to IPv6
+        http_hostname = "127.0.0.1" if hostname == get_ip() else hostname
+
         # Each card corresponds to a ZMQ address.
-        self.zmq_address = f"{self._hostname}:{self._port}"
+        # Use IPv6-aware address formatting for ZMQ (for actual P2P communication)
+        self.zmq_address = join_host_port(self._hostname, self._port)
 
         # The `http_port` must be consistent with the port of OpenAI.
-        self.http_address = (
-            f"{self._hostname}:"
-            f"{self.config.kv_connector_extra_config['http_port']}")
+        # Use IPv4 address for HTTP to match where the server actually binds
+        http_port = self.config.kv_connector_extra_config['http_port']
+        self.http_address = join_host_port(http_hostname, http_port)
 
         # If `proxy_ip` or `proxy_port` is `""`,
         # then the ping thread will not be enabled.
@@ -105,6 +110,11 @@ class P2pNcclEngine:
 
         self.context = zmq.Context()
         self.router_socket = self.context.socket(zmq.ROUTER)
+
+        # Configure socket for IPv6 support if needed
+        if is_valid_ipv6_address(self._hostname):
+            self.router_socket.setsockopt(zmq.IPV6, 1)
+
         self.router_socket.bind(f"tcp://{self.zmq_address}")
 
         self.poller = zmq.Poller()
@@ -173,6 +183,16 @@ class P2pNcclEngine:
         if remote_address not in self.socks:
             sock = self.context.socket(zmq.DEALER)
             sock.setsockopt_string(zmq.IDENTITY, self.zmq_address)
+
+            # Configure IPv6 support if connecting to IPv6 address
+            try:
+                remote_host, _ = split_host_port(remote_address)
+                if is_valid_ipv6_address(remote_host):
+                    sock.setsockopt(zmq.IPV6, 1)
+            except (ValueError, IndexError):
+                # If address parsing fails, assume IPv4 for compatibility
+                pass
+
             sock.connect(f"tcp://{remote_address}")
             self.socks[remote_address] = sock
             if remote_address in self.comms:
