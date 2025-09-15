@@ -3315,6 +3315,28 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 else:
                     self.reorder_batch_threshold = reorder_batch_threshold_i
 
+    def _select_kernel_block_size(self, physical_block_size: int,
+                                  backend_cls: type[AttentionBackend]) -> int:
+        """
+        Select the optimal kernel block size for a given physical block size.
+
+        Args:
+            physical_block_size: The physical block size of the KV cache
+            backend_cls: The attention backend class
+
+        Returns:
+            The selected kernel block size
+        """
+        supported_sizes = backend_cls.get_supported_block_size()
+        selected_kernel_size = physical_block_size
+        if supported_sizes:
+            for kernel_size in supported_sizes:
+                if (kernel_size > 0
+                        and physical_block_size % kernel_size == 0):
+                    selected_kernel_size = kernel_size
+                    break
+        return selected_kernel_size
+
     def may_reinitialize_input_batch(self,
                                      kv_cache_config: KVCacheConfig) -> None:
         """
@@ -3346,16 +3368,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 if attn_groups:
                     # Use the backend's supported block size list
                     backend_cls = attn_groups[0].backend
-                    supported_sizes = backend_cls.get_supported_block_size()
-                    # Select the first supported size that divides physical
-                    # block size evenly
-                    selected_kernel_size = physical_block_size
-                    if supported_sizes:
-                        for kernel_size in supported_sizes:
-                            if (kernel_size > 0 and
-                                    physical_block_size % kernel_size == 0):
-                                selected_kernel_size = kernel_size
-                                break
+                    selected_kernel_size = self._select_kernel_block_size(
+                        physical_block_size, backend_cls)
                     kernel_block_sizes.append(selected_kernel_size)
                 else:
                     kernel_block_sizes.append(physical_block_size)
@@ -3459,9 +3473,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                               kv_cache_spec.page_size_bytes)
                 if isinstance(kv_cache_spec, AttentionSpec):
                     has_attn = True
-                    # FIXME here
+                    physical_block_size = kv_cache_spec.block_size
+                    logical_kernel_size = self._select_kernel_block_size(
+                        physical_block_size, attn_backend)
+                    num_blocks_per_phys_block = (physical_block_size //
+                                                 logical_kernel_size)
+                    logical_num_blocks = num_blocks * num_blocks_per_phys_block
+
                     kv_cache_shape = attn_backend.get_kv_cache_shape(
-                        num_blocks, kv_cache_spec.block_size,
+                        logical_num_blocks, logical_kernel_size,
                         kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
                     dtype = kv_cache_spec.dtype
                     try:
