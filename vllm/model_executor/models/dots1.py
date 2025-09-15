@@ -505,7 +505,8 @@ class Dots1ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
             self.lm_head = ParallelLMHead(config.vocab_size,
                                           config.hidden_size,
                                           quant_config=quant_config,
-                                          prefix=maybe_prefix(prefix, "lm_head"))
+                                          prefix=maybe_prefix(
+                                              prefix, "lm_head"))
         else:
             self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(config.vocab_size)

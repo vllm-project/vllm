@@ -558,7 +558,8 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
             self.lm_head = ParallelLMHead(config.vocab_size,
                                           config.hidden_size,
                                           quant_config=quant_config,
-                                          prefix=maybe_prefix(prefix, "lm_head"))
+                                          prefix=maybe_prefix(
+                                              prefix, "lm_head"))
         else:
             self.lm_head = PPMissingLayer()
 
