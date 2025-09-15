@@ -43,7 +43,6 @@ from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
-                                               ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
@@ -118,15 +117,9 @@ class BailingAttention(nn.Module):
             prefix=f"{prefix}.dense",
         )
 
-        if hasattr(config, "partial_rotary_factor"):
-            self.partial_rotary_factor = config.partial_rotary_factor
-        else:
-            self.partial_rotary_factor = 1.0
+        self.partial_rotary_factor = getattr(config, "partial_rotary_factor", 1.0)
 
-        if hasattr(config, "rotary_dim"):
-            self.rotary_dim = config.rotary_dim
-        else:
-            self.rotary_dim = self.head_dim
+        self.rotary_dim = getattr(config, "rotary_dim", self.head_dim)
 
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -246,12 +239,11 @@ class BailingMoE(nn.Module):
         else:
             self.router_dtype = torch.bfloat16
 
-        self.gate = ReplicatedLinear(
+        self.gate = nn.Linear(
             self.hidden_size,
             self.num_experts,
             bias=False,
-            quant_config=None,
-            params_dtype=self.router_dtype,
+            dtype=self.router_dtype,
         )
 
         if getattr(config, "moe_router_enable_expert_bias", False):
@@ -312,7 +304,7 @@ class BailingMoE(nn.Module):
         if self.shared_experts:
             shared_output = self.shared_experts(hidden_states)
         # router_logits: (num_tokens, n_experts)
-        router_logits, _ = self.gate(hidden_states.to(self.router_dtype))
+        router_logits = self.gate(hidden_states.to(self.router_dtype))
         router_logits = router_logits.to(hidden_states.dtype)
 
         final_hidden_states = self.experts(hidden_states=hidden_states,
