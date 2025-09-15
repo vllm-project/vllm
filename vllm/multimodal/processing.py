@@ -1075,7 +1075,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         [`_get_hf_mm_data`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].
         """
         mm_items = self.data_parser.parse_mm_data(mm_data)
-
         for modality, items in mm_items.items():
             self.validate_num_items(modality, len(items))
 
@@ -1436,10 +1435,18 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             ]
             for modality, items_is_cached in mm_is_cached.items()
         }
-        mm_missing_data = {
-            modality: [mm_data_items[modality][idx] for idx in idxs]
-            for modality, idxs in mm_missing_idxs.items()
-        }
+        mm_missing_data = {}
+        for modality, idxs in mm_missing_idxs.items():
+            missing_modality_data = []
+            for idx in idxs:
+                data = mm_data_items[modality][idx]
+                if data is None:
+                    raise ValueError(
+                        f"Cache miss for {modality} at index {idx} "
+                        f"but data is not provided.")
+                else:
+                    missing_modality_data.append(data)
+            mm_missing_data[modality] = missing_modality_data
 
         return self._to_mm_items(mm_missing_data)
 
