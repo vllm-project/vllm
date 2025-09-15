@@ -721,7 +721,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         second_per_grid_ts = []
         audio_feature_lengths = []
         use_audio_in_video = False
-        for mm_feature in req_state.mm_features:
+        for mm_feature in (req_state.mm_features or []):
             mm_item = mm_feature.data
             if mm_item is None:
                 continue
@@ -769,7 +769,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         mm_kwargs = list[MultiModalKwargsItem]()
         for req in scheduler_output.scheduled_new_reqs:
-            for feature in req.mm_features:
+            for feature in (req.mm_features or []):
                 if feature.data is not None:
                     mm_kwargs.append(feature.data)
 
@@ -1561,7 +1561,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_state = self.requests[req_id]
             num_computed_tokens = \
                 req_state.num_computed_tokens + shift_computed_tokens
-            for mm_feature in req_state.mm_features:
+            for mm_feature in (req_state.mm_features or []):
                 pos_info = mm_feature.mm_position
                 start_pos = pos_info.offset
                 num_encoder_tokens = pos_info.length

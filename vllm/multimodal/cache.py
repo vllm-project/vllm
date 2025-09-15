@@ -547,9 +547,11 @@ class BaseMultiModalReceiverCache(
 
     def get_and_update_features(
         self,
-        mm_features: list["MultiModalFeatureSpec"],
-    ) -> list["MultiModalFeatureSpec"]:
+        mm_features: Optional[list["MultiModalFeatureSpec"]],
+    ) -> Optional[list["MultiModalFeatureSpec"]]:
         """Update multimodal features with cached encoder outputs."""
+        if mm_features is None:
+            return None
         for feature in mm_features:
             feature.data = self.get_and_update_item(feature.data,
                                                     feature.identifier)

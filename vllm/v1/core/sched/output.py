@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 class NewRequestData:
 
     req_id: str
-    prompt_token_ids: Optional[list[int]]
+    prompt_token_ids: list[int]
     mm_features: list[MultiModalFeatureSpec]
     sampling_params: Optional[SamplingParams]
     pooling_params: Optional[PoolingParams]
