@@ -18,7 +18,6 @@ class BlockTables:
         self,
         block_sizes: list[int],
         max_num_reqs: int,
-        max_num_cached_reqs: int,
         max_num_batched_tokens: int,
         max_model_len: int,
         device: torch.device,
@@ -26,21 +25,17 @@ class BlockTables:
     ):
         self.block_sizes = block_sizes
         self.max_num_reqs = max_num_reqs
-        self.max_num_cached_reqs = max_num_cached_reqs
         self.max_num_batched_tokens = max_num_batched_tokens
         self.max_model_len = max_model_len
         self.device = device
         self.pin_memory = pin_memory
 
         self.num_kv_cache_groups = len(self.block_sizes)
-        # [num_kv_cache_groups, max_num_reqs, max_num_blocks]
+        # num_kv_cache_groups x [max_num_reqs, max_num_blocks]
         self.block_tables: list[torch.Tensor] = []
-        # [num_kv_cache_groups, max_num_cached_reqs, max_num_blocks]
-        self.block_table_buffers: list[torch.Tensor] = []
         for i in range(self.num_kv_cache_groups):
             block_size = self.block_sizes[i]
             max_num_blocks = cdiv(self.max_model_len, block_size)
-
             block_table = torch.zeros(
                 self.max_num_reqs,
                 max_num_blocks,
@@ -48,17 +43,16 @@ class BlockTables:
                 device=self.device,
             )
             self.block_tables.append(block_table)
-
-            block_table_buffer = torch.zeros(
-                self.max_num_cached_reqs,
-                max_num_blocks,
-                dtype=torch.int32,
-                device=self.device,
-            )
-            self.block_table_buffers.append(block_table_buffer)
-
         self.block_table_ptrs = self._make_ptr_tensor(self.block_tables)
-        self.buffer_ptrs = self._make_ptr_tensor(self.block_table_buffers)
+
+        # Block tables used for model's forward pass.
+        # num_kv_cache_groups x [max_num_reqs, max_num_blocks]
+        self.input_block_tables: list[torch.Tensor] = [
+            torch.zeros_like(block_table) for block_table in self.block_tables
+        ]
+        self.input_block_table_ptrs = self._make_ptr_tensor(
+            self.input_block_tables)
+
         self.block_table_strides = torch.tensor(
             [b.stride(0) for b in self.block_tables],
             dtype=torch.int64,
@@ -67,7 +61,7 @@ class BlockTables:
                                                dtype=torch.int32,
                                                device=self.device)
         self.num_blocks = torch.zeros(self.num_kv_cache_groups,
-                                      self.max_num_cached_reqs,
+                                      self.max_num_reqs,
                                       dtype=torch.int32,
                                       device=self.device)
         self.slot_mappings = torch.zeros(self.num_kv_cache_groups,
@@ -107,7 +101,6 @@ class BlockTables:
         # [num_reqs]
         overwrite: list[bool],
     ) -> None:
-        # TODO(woosuk): Optimize & simplify this.
         num_reqs = len(req_indices)
         self.req_indices.np[:num_reqs] = req_indices
         self.overwrite.np[:num_reqs] = overwrite
@@ -115,19 +108,21 @@ class BlockTables:
             self.cu_num_new_blocks.np[i, :num_reqs + 1] = cu_num_new_blocks[i]
 
         # NOTE(woosuk): Here, we cannot use a fixed-size buffer because there's
-        # no clear upper bound on the number of new blocks.
-        new_block_ids_cpu = torch.empty(
+        # no clear upper bound to the number of new blocks in a single step.
+        # NOTE(woosuk): The buffer has to be cached, because otherwise we cannot
+        # guarantee that the buffer is not freed before the copy is completed.
+        self.new_block_ids_cpu = torch.empty(
             self.num_kv_cache_groups,
             max(len(x) for x in new_block_ids),
             dtype=torch.int32,
             device="cpu",
             pin_memory=self.pin_memory,
         )
-        new_block_ids_np = new_block_ids_cpu.numpy()
+        new_block_ids_np = self.new_block_ids_cpu.numpy()
         for i in range(self.num_kv_cache_groups):
             new_block_ids_np[i, :len(new_block_ids[i])] = new_block_ids[i]
-        new_block_ids_gpu = new_block_ids_cpu.to(self.device,
-                                                 non_blocking=True)
+        new_block_ids_gpu = self.new_block_ids_cpu.to(self.device,
+                                                      non_blocking=True)
 
         _append_block_ids_kernel[(self.num_kv_cache_groups, num_reqs)](
             self.req_indices.copy_to_gpu(num_reqs),
@@ -137,33 +132,34 @@ class BlockTables:
             new_block_ids_gpu.stride(0),
             self.overwrite.copy_to_gpu(num_reqs),
             self.block_table_strides,
-            self.buffer_ptrs,
+            self.block_table_ptrs,
             self.num_blocks,
             self.num_blocks.stride(0),
             BLOCK_SIZE=1024,
         )
 
-    def compute_block_tables(
+    def gather_block_tables(
         self,
         idx_mapping: torch.Tensor,
     ) -> tuple[torch.Tensor, ...]:
-        batch_size = idx_mapping.shape[0]
-        _compute_block_tables_kernel[(self.num_kv_cache_groups, batch_size)](
+        num_reqs = idx_mapping.shape[0]
+        _gather_block_tables_kernel[(self.num_kv_cache_groups, num_reqs)](
             idx_mapping,
-            self.buffer_ptrs,
             self.block_table_ptrs,
+            self.input_block_table_ptrs,
             self.block_table_strides,
             self.num_blocks,
             self.num_blocks.stride(0),
             BLOCK_SIZE=1024,
         )
-        return tuple(b[:batch_size] for b in self.block_tables)
+        return tuple(block_table[:num_reqs]
+                     for block_table in self.input_block_tables)
 
     def compute_slot_mappings(
         self,
         query_start_loc: torch.Tensor,
         positions: torch.Tensor,
-    ) -> tuple[torch.Tensor, ...]:
+    ) -> torch.Tensor:
         num_reqs = query_start_loc.shape[0] - 1
         num_tokens = positions.shape[0]
         num_groups = self.num_kv_cache_groups
@@ -172,7 +168,7 @@ class BlockTables:
             self.max_num_batched_tokens,
             query_start_loc,
             positions,
-            self.block_table_ptrs,
+            self.input_block_table_ptrs,
             self.block_table_strides,
             self.block_sizes_tensor,
             self.slot_mappings,
@@ -180,7 +176,7 @@ class BlockTables:
             PAD_ID=PAD_SLOT_ID,
             BLOCK_SIZE=1024,
         )
-        return tuple(x[:num_tokens] for x in self.slot_mappings)
+        return self.slot_mappings[:, :num_tokens]
 
 
 @triton.jit
@@ -194,8 +190,8 @@ def _append_block_ids_kernel(
     overwrite,  # [num_reqs]
     block_table_strides,  # [num_kv_cache_groups]
     # Outputs
-    block_table_buffer_ptrs,  # [num_kv_cache_groups]
-    num_blocks_ptr,  # [num_kv_cache_groups, max_num_cached_reqs]
+    block_table_ptrs,  # [num_kv_cache_groups]
+    num_blocks_ptr,  # [num_kv_cache_groups, max_num_reqs]
     num_blocks_stride,
     # Constants
     BLOCK_SIZE: tl.constexpr,
@@ -220,10 +216,9 @@ def _append_block_ids_kernel(
     tl.store(group_num_blocks_ptr + req_idx, dst_end_idx)
 
     # Destination
-    block_table_buffer_ptr = _load_ptr(block_table_buffer_ptrs + group_id,
-                                       tl.int32)
+    block_table_ptr = _load_ptr(block_table_ptrs + group_id, tl.int32)
     block_table_stride = tl.load(block_table_strides + group_id)
-    buffer_row_ptr = block_table_buffer_ptr + req_idx * block_table_stride
+    row_ptr = block_table_ptr + req_idx * block_table_stride
 
     group_new_block_ids_ptr = (new_block_ids_ptr +
                                group_id * new_block_ids_stride)
@@ -231,18 +226,18 @@ def _append_block_ids_kernel(
         offset = i + tl.arange(0, BLOCK_SIZE)
         block_ids = tl.load(group_new_block_ids_ptr + start_idx + offset,
                             mask=offset < num_new_blocks)
-        tl.store(buffer_row_ptr + dst_start_idx + offset,
+        tl.store(row_ptr + dst_start_idx + offset,
                  block_ids,
                  mask=offset < num_new_blocks)
 
 
 @triton.jit
-def _compute_block_tables_kernel(
+def _gather_block_tables_kernel(
     batch_idx_to_req_idx,  # [batch_size]
     src_block_table_ptrs,  # [num_kv_cache_groups]
     dst_block_table_ptrs,  # [num_kv_cache_groups]
     block_table_strides,  # [num_kv_cache_groups]
-    num_blocks_ptr,  # [num_kv_cache_groups, max_num_cached_reqs]
+    num_blocks_ptr,  # [num_kv_cache_groups, max_num_reqs]
     num_blocks_stride,
     BLOCK_SIZE: tl.constexpr,
 ):

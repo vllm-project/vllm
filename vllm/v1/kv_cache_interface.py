@@ -3,6 +3,7 @@
 
 import copy
 from dataclasses import dataclass, fields
+from functools import cached_property
 from math import prod
 from typing import Optional
 
@@ -273,3 +274,10 @@ class KVCacheConfig:
     see `_get_kv_cache_config_uniform_page_size` for more details.
     """
     kv_cache_groups: list[KVCacheGroupSpec]
+
+    @cached_property
+    def block_sizes(self) -> list[int]:
+        return [
+            kv_cache_group.kv_cache_spec.block_size
+            for kv_cache_group in self.kv_cache_groups
+        ]

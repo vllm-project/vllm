@@ -1,14 +1,42 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 import numba
 import numpy as np
 import torch
 from numba import types
 
-from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.utils import CpuGpuBuffer
+
+
+class InputBuffers:
+
+    def __init__(
+        self,
+        max_num_reqs: int,
+        max_num_tokens: int,
+        device: torch.device,
+        pin_memory: bool,
+    ):
+        self.max_num_reqs = max_num_reqs
+        self.max_num_tokens = max_num_tokens
+        self.device = device
+        self.pin_memory = pin_memory
+
+        self.idx_mapping = self._make_buffer(max_num_reqs, dtype=torch.int32)
+        self.input_ids = self._make_buffer(max_num_tokens, dtype=torch.int32)
+        self.positions = self._make_buffer(max_num_tokens, dtype=torch.int64)
+        self.query_start_loc = self._make_buffer(max_num_reqs + 1,
+                                                 dtype=torch.int32)
+        self.seq_lens = self._make_buffer(max_num_reqs, dtype=torch.int32)
+
+    def _make_buffer(self, *args, dtype: torch.dtype) -> CpuGpuBuffer:
+        return CpuGpuBuffer(*args,
+                            dtype=dtype,
+                            pin_memory=self.pin_memory,
+                            device=self.device)
 
 
 @dataclass
@@ -16,9 +44,7 @@ class InputBatch:
 
     # batch_idx -> req_id
     req_ids: list[str]
-
-    # req_id -> batch_idx
-    req_id_to_batch_idx: dict[str, int]
+    num_reqs: int
 
     # batch_idx -> req_state_idx
     idx_mapping: torch.Tensor
@@ -26,14 +52,18 @@ class InputBatch:
 
     # batch_idx -> num_scheduled_tokens
     num_scheduled_tokens: np.ndarray
-    total_num_tokens: int
-    max_query_len: int
-    num_reqs: int
+    # sum(num_scheduled_tokens)
+    num_tokens: int
 
+    # [max_num_batched_tokens]
+    input_ids: torch.Tensor
+    # [max_num_batched_tokens]
+    positions: torch.Tensor
+
+    # layer_name -> Metadata
     attn_metadata: dict[str, Any]
-    spec_decode_common_attn_metadata: Optional[Any]
-    spec_decode_metadata: Optional[SpecDecodeMetadata]
 
+    # [num_reqs]
     logits_indices: torch.Tensor
 
 
@@ -47,9 +77,9 @@ class InputBatch:
             types.int32[:],  # num_computed_tokens
             types.int32[:],  # num_scheduled_tokens
             types.int32[:],  # input_ids
+            types.int64[:],  # positions
             types.int32[:],  # query_start_loc
             types.int32[:],  # seq_lens
-            types.int64[:],  # positions
         )
     ],
     nopython=True,
@@ -61,9 +91,9 @@ def prepare_inputs(
         num_computed_tokens: np.ndarray,  # [N]
         num_scheduled_tokens: np.ndarray,  # [B]
         input_ids: np.ndarray,  # [num_input_tokens]
+        positions: np.ndarray,  # [num_input_tokens]
         query_start_loc: np.ndarray,  # [B + 1]
         seq_lens: np.ndarray,  # [B]
-        positions: np.ndarray,  # [num_input_tokens]
 ) -> None:
     num_reqs = num_scheduled_tokens.shape[0]
     query_start_loc[0] = 0
