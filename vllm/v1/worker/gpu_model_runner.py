@@ -2267,14 +2267,25 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             assert isinstance(self.drafter, EagleProposer)
 
             if self.speculative_config.disable_padded_batch:
-                assert isinstance(sampled_token_ids, list)
-                next_token_ids = self.drafter.prepare_next_token_ids_host(
+                # When padded-batch is disabled, the sampled_token_ids should be
+                # the cpu-side list[list[int]] of valid sampled tokens for each
+                # request, with invalid requests having empty lists.
+                assert isinstance(sampled_token_ids, list), \
+                    "sampled_token_ids should be a python list when" \
+                    "padded-batch is disabled."
+                next_token_ids = self.drafter.prepare_next_token_ids_cpu(
                     sampled_token_ids, self.requests, self.input_batch,
                     scheduler_output.num_scheduled_tokens)
             else:
-                assert isinstance(sampled_token_ids, torch.Tensor)
+                # When using padded-batch, the sampled_token_ids should be
+                # the gpu tensor of sampled tokens for each request, of shape
+                # (num_reqs, num_spec_tokens + 1) with rejected tokens having
+                # value -1.
+                assert isinstance(sampled_token_ids, torch.Tensor), \
+                    "sampled_token_ids should be a torch.Tensor when" \
+                    "padded-batch is enabled."
                 next_token_ids, valid_sampled_tokens_count = \
-                    self.drafter.prepare_next_token_ids_device(
+                    self.drafter.prepare_next_token_ids_gpu(
                         common_attn_metadata,
                         sampled_token_ids,
                         self.requests,

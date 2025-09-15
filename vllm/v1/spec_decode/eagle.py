@@ -371,7 +371,7 @@ class EagleProposer:
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
         return draft_token_ids
 
-    def prepare_next_token_ids_host(
+    def prepare_next_token_ids_cpu(
             self, sampled_token_ids: list[list[int]],
             requests: dict[str,
                            CachedRequestState], gpu_input_batch: InputBatch,
@@ -403,7 +403,7 @@ class EagleProposer:
                                       device=self.input_ids.device)
         return next_token_ids
 
-    def prepare_next_token_ids_device(self,
+    def prepare_next_token_ids_gpu(self,
                                common_attn_metadata: CommonAttentionMetadata,
                                sampled_token_ids: torch.Tensor,
                                requests: dict[str, CachedRequestState],
