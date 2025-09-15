@@ -99,40 +99,23 @@ class NoOpEliminationPass(VllmInductorPass):
                     count += 1
 
             elif is_func(node, torch.ops.aten.slice.Tensor):
-                # Eliminate only truly no-op slices. The previous logic
-                # reused dims_equivalent (treating -1 as an inferred dim),
-                # but for slices Python semantics interpret negative indices
-                # relative to the end of the dimension. This caused us to
-                # incorrectly eliminate slices like x[0:-1]. We now rely on
-                # the meta output shape to guarantee no-op behavior.
+                # python slicing semantics are different from reshape
+                # Don't treat -1 as inferred dimension
                 input, dim_index, start, end = node.args[:4]
                 input_shape = input.meta["val"].shape
                 output_shape = node.meta["val"].shape
-                dim_len = input_shape[dim_index]
 
-                # Normalize end according to Python slicing semantics.
-                # aten.slice takes (start, end) where end can be None or int.
-                # If end is a torch.fx.Node (SymInt), only consider it no-op
-                # if its concrete value equals dim_len.
-                is_noop = (self.slice_dims_equivalent(dim_len, start, end)
-                           and output_shape == input_shape)
-
-                if is_noop:
-                    # Truly a no-op slice
+                if output_shape == input_shape:
                     node.replace_all_uses_with(input)
                     graph.erase_node(node)
                     count += 1
 
             elif is_func(node, torch.ops.aten.slice_scatter.default):
-                # Similar logic: treat slice_scatter as no-op only if the
-                # slice fully covers the target along the specified dim.
                 base, view, dim_index, start, end = node.args[:5]
                 base_shape = base.meta["val"].shape
                 view_shape = view.meta["val"].shape
-                dim_len = view_shape[dim_index]
 
-                if base_shape == view_shape and self.slice_dims_equivalent(
-                        dim_len, start, end):
+                if base_shape == view_shape:
                     node.replace_all_uses_with(view)
                     graph.erase_node(node)
                     count += 1
@@ -176,43 +159,3 @@ class NoOpEliminationPass(VllmInductorPass):
         return all(
             self.reshape_dims_equivalent(s, i_s)
             for s, i_s in zip(dims, i_dims))
-
-    # ---------------------- Slice helpers ----------------------
-    def slice_dims_equivalent(
-        self,
-        dim_len: int,
-        start: Union[int, torch.fx.Node],
-        end: Union[int, torch.fx.Node, None],
-    ) -> bool:
-        """Return True if slice(start, end) over a dimension length dim_len
-        covers the full dimension (i.e. is a no-op along that dim).
-
-        Conditions:
-        - start must be 0 (or a symbolic 0)
-        - end must represent dim_len (None, dim_len, symbolic dim_len)
-        Negative integer ends are normalized using Python slicing semantics.
-        """
-        # Start check
-        if isinstance(start, int):
-            if start != 0:
-                return False
-        elif isinstance(start, torch.fx.Node):
-            try:
-                if start.meta["val"] != 0:
-                    return False
-            except Exception:
-                return False
-        else:
-            return False
-
-        if end is None:
-            return True
-        if isinstance(end, int):
-            eff_end = dim_len + end if end < 0 else end
-            return eff_end == dim_len
-        if isinstance(end, torch.fx.Node):
-            try:
-                return end.meta["val"] == dim_len
-            except Exception:
-                return False
-        return False

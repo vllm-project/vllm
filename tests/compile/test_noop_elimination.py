@@ -84,7 +84,10 @@ def test_non_noop_slice_preserved():
     class SliceModel(torch.nn.Module):
 
         def forward(self, x):
-            return x[0:-1, :]
+            base = x.clone()
+            src = torch.ones(15, 16)
+            y = torch.slice_scatter(base, src, dim=0, start=0, end=-1)
+            return x[0:-1, :], y
 
     vllm_config = VllmConfig(compilation_config=CompilationConfig(
         level=CompilationLevel.PIECEWISE,
@@ -100,3 +103,4 @@ def test_non_noop_slice_preserved():
         torch.testing.assert_close(ref, out)
         # The slice should remain (not a no-op).
         assert backend.op_count(torch.ops.aten.slice.Tensor) == 1
+        assert backend.op_count(torch.ops.aten.slice_scatter.default) == 1
