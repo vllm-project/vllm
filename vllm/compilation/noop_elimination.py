@@ -93,34 +93,46 @@ class NoOpEliminationPass(VllmInductorPass):
                     # Invalid reshape args, skip
                     continue
 
-                if self.all_dims_equivalent(shape, input_shape):
+                if self.reshape_all_dims_equivalent(shape, input_shape):
                     node.replace_all_uses_with(input)
                     graph.erase_node(node)
                     count += 1
 
             elif is_func(node, torch.ops.aten.slice.Tensor):
+                # Eliminate only truly no-op slices. The previous logic
+                # reused dims_equivalent (treating -1 as an inferred dim),
+                # but for slices Python semantics interpret negative indices
+                # relative to the end of the dimension. This caused us to
+                # incorrectly eliminate slices like x[0:-1]. We now rely on
+                # the meta output shape to guarantee no-op behavior.
                 input, dim_index, start, end = node.args[:4]
                 input_shape = input.meta["val"].shape
-                i_dim = input_shape[dim_index]
+                output_shape = node.meta["val"].shape
+                dim_len = input_shape[dim_index]
 
-                if start == 0 and self.dims_equivalent(end, i_dim):
+                # Normalize end according to Python slicing semantics.
+                # aten.slice takes (start, end) where end can be None or int.
+                # If end is a torch.fx.Node (SymInt), only consider it no-op
+                # if its concrete value equals dim_len.
+                is_noop = (self.slice_dims_equivalent(dim_len, start, end)
+                           and output_shape == input_shape)
+
+                if is_noop:
+                    # Truly a no-op slice
                     node.replace_all_uses_with(input)
                     graph.erase_node(node)
                     count += 1
 
             elif is_func(node, torch.ops.aten.slice_scatter.default):
+                # Similar logic: treat slice_scatter as no-op only if the
+                # slice fully covers the target along the specified dim.
                 base, view, dim_index, start, end = node.args[:5]
                 base_shape = base.meta["val"].shape
                 view_shape = view.meta["val"].shape
+                dim_len = view_shape[dim_index]
 
-                view_dim = view_shape[dim_index]
-
-                # Check that view fully covers base and the full view is used
-                # (if the view fully covered the base after slicing but was not
-                # fully used, we could replace slice_scatter with a simple slice
-                # but that's a niche case).
-                if (base_shape == view_shape and start == 0
-                        and self.dims_equivalent(end, view_dim)):
+                if base_shape == view_shape and self.slice_dims_equivalent(
+                        dim_len, start, end):
                     node.replace_all_uses_with(view)
                     graph.erase_node(node)
                     count += 1
@@ -129,13 +141,9 @@ class NoOpEliminationPass(VllmInductorPass):
         self.dump_graph(graph, "after_noop_elimination")
         self.end_and_log()
 
-    def all_dims_equivalent(self, dims: Iterable[Union[int, torch.fx.Node]],
-                            i_dims: Iterable[Union[int, SymInt]]):
-        return all(
-            self.dims_equivalent(s, i_s) for s, i_s in zip(dims, i_dims))
-
-    def dims_equivalent(self, dim: Union[int, torch.fx.Node],
-                        i_dim: Union[int, SymInt]) -> bool:
+    # ---------------------- Reshape helpers ----------------------
+    def reshape_dims_equivalent(self, dim: Union[int, torch.fx.Node],
+                                i_dim: Union[int, SymInt]) -> bool:
         """
         This function checks if two dimensions are equivalent.
         :param dim: The dimension arg to reshape/slice
@@ -153,10 +161,58 @@ class NoOpEliminationPass(VllmInductorPass):
         In case 3, the reshape dimension is a torch.fx.Node,
         and its value is a SymInt. That value is equal to the
         input dimension.
-
         """
         # Case 1 and 2
         if dim == i_dim or dim == -1:
             return True
         # Case 3
         return isinstance(dim, torch.fx.Node) and dim.meta["val"] == i_dim
+
+    def reshape_all_dims_equivalent(
+        self,
+        dims: Iterable[Union[int, torch.fx.Node]],
+        i_dims: Iterable[Union[int, SymInt]],
+    ) -> bool:
+        return all(
+            self.reshape_dims_equivalent(s, i_s)
+            for s, i_s in zip(dims, i_dims))
+
+    # ---------------------- Slice helpers ----------------------
+    def slice_dims_equivalent(
+        self,
+        dim_len: int,
+        start: Union[int, torch.fx.Node],
+        end: Union[int, torch.fx.Node, None],
+    ) -> bool:
+        """Return True if slice(start, end) over a dimension length dim_len
+        covers the full dimension (i.e. is a no-op along that dim).
+
+        Conditions:
+        - start must be 0 (or a symbolic 0)
+        - end must represent dim_len (None, dim_len, symbolic dim_len)
+        Negative integer ends are normalized using Python slicing semantics.
+        """
+        # Start check
+        if isinstance(start, int):
+            if start != 0:
+                return False
+        elif isinstance(start, torch.fx.Node):
+            try:
+                if start.meta["val"] != 0:
+                    return False
+            except Exception:
+                return False
+        else:
+            return False
+
+        if end is None:
+            return True
+        if isinstance(end, int):
+            eff_end = dim_len + end if end < 0 else end
+            return eff_end == dim_len
+        if isinstance(end, torch.fx.Node):
+            try:
+                return end.meta["val"] == dim_len
+            except Exception:
+                return False
+        return False
