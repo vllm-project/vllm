@@ -445,9 +445,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
         OS_VERSION_LOWER="$(echo $GDRCOPY_OS_VERSION | tr '[:upper:]' '[:lower:]')"; \
-            && curl https://developer.download.nvidia.com/compute/redist/gdrcopy/CUDA%20${GDRCOPY_CUDA_VERSION}/{OS_VERSION_LOWER}/x64/libgdrapi_2.5.1-1_aarch64.${GDRCOPY_OS_VERSION}.deb --output libgdrapi_2.5.1-1_aarch64.${GDRCOPY_OS_VERSION}.deb \
-            && apt install ./libgdrapi_2.5.1-1_aarch64.${GDRCOPY_OS_VERSION}.deb \
-            && rm libgdrapi_2.5.1-1_aarch64.${GDRCOPY_OS_VERSION}.deb ; \
+            && curl https://developer.download.nvidia.com/compute/redist/gdrcopy/CUDA%20${GDRCOPY_CUDA_VERSION}/{OS_VERSION_LOWER}/aarch64/libgdrapi_2.5.1-1_arm64.${GDRCOPY_OS_VERSION}.deb --output libgdrapi_2.5.1-1_arm64.${GDRCOPY_OS_VERSION}.deb \
+            && apt install ./libgdrapi_2.5.1-1_arm64.${GDRCOPY_OS_VERSION}.deb \
+            && rm libgdrapi_2.5.1-1_arm64.${GDRCOPY_OS_VERSION}.deb ; \
     else \
         OS_VERSION_LOWER="$(echo $GDRCOPY_OS_VERSION | tr '[:upper:]' '[:lower:]')"; \
         && curl https://developer.download.nvidia.com/compute/redist/gdrcopy/CUDA%20${GDRCOPY_CUDA_VERSION}/{OS_VERSION_LOWER}/x64/libgdrapi_2.5.1-1_amd64.${GDRCOPY_OS_VERSION}.deb --output libgdrapi_2.5.1-1_amd64.${GDRCOPY_OS_VERSION}.deb \
