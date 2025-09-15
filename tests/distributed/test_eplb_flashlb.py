@@ -6,9 +6,6 @@ import torch
 import pytest
 import numba
 from collections import defaultdict
-
-numba.config.DISABLE_JIT = True
-
 from vllm.distributed.eplb.eplb_policy.flashlb_policy import FlashLB
 
 
