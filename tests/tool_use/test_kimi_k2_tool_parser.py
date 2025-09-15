@@ -107,13 +107,18 @@ functions.get_weather:1 <|tool_call_argument_begin|> {"city": "Shanghai"} <|tool
                 ToolCall(id='functions.get_weather:0',
                          function=FunctionCall(
                              name="get_weather",
-                             arguments='{"latitude": 34.0522, "longitude": -118.2437}',
+                             arguments=json.dumps({
+                                 "latitude": 34.0522,
+                                 "longitude": -118.2437
+                             }),
                          ),
                          type='function'),
                 ToolCall(id='functions.get_news:1',
                          function=FunctionCall(
                              name="get_news",
-                             arguments='{"content": "Los Angeles today"}',
+                             arguments=json.dumps({
+                                 "content": "Los Angeles today"
+                             }),
                          ),
                          type='function')
             ],
@@ -125,19 +130,26 @@ functions.get_weather:1 <|tool_call_argument_begin|> {"city": "Shanghai"} <|tool
                 ToolCall(id='functions.get_weather:0',
                          function=FunctionCall(
                              name="get_weather",
-                             arguments='{"city": "New York"}',
+                             arguments=json.dumps({
+                                 "city": "New York"
+                             }),
                          ),
                          type='function'),
                 ToolCall(id='functions.get_news:1',
                          function=FunctionCall(
                              name="get_news",
-                             arguments='{"topic": "technology"}',
+                             arguments=json.dumps({
+                                 "topic": "technology"
+                             }),
                          ),
                          type='function'),
                 ToolCall(id='functions.send_email:2',
                          function=FunctionCall(
                              name="send_email",
-                             arguments='{"to": "user@example.com", "subject": "Daily Update"}',
+                             arguments=json.dumps({
+                                 "to": "user@example.com",
+                                 "subject": "Daily Update"
+                             }),
                          ),
                          type='function')
             ],
@@ -149,13 +161,13 @@ functions.get_weather:1 <|tool_call_argument_begin|> {"city": "Shanghai"} <|tool
                 ToolCall(id='functions.test:0',
                          function=FunctionCall(
                              name="test",
-                             arguments="{}",
+                             arguments=json.dumps({}),
                          ),
                          type='function'),
                 ToolCall(id='functions.test2:1',
                          function=FunctionCall(
                              name="test2",
-                             arguments="{}",
+                             arguments=json.dumps({}),
                          ),
                          type='function')
             ],
@@ -167,7 +179,10 @@ functions.get_weather:1 <|tool_call_argument_begin|> {"city": "Shanghai"} <|tool
                 ToolCall(id='functions.process_html:0',
                          function=FunctionCall(
                              name="process_html",
-                             arguments='{"html": "<div>content</div>", "text": "normal text"}',
+                             arguments=json.dumps({
+                                 "html": "<div>content</div>",
+                                 "text": "normal text"
+                             }),
                          ),
                          type='function')
             ],
@@ -185,7 +200,13 @@ functions.get_weather:1 <|tool_call_argument_begin|> {"city": "Shanghai"} <|tool
                 ToolCall(id='functions.process_data:0',
                          function=FunctionCall(
                              name="process_data",
-                             arguments='{\n  "name": "test",\n  "value": 123,\n  "nested": {\n    "key": "value"\n  }\n}',
+                             arguments=json.dumps({
+                                 "name": "test",
+                                 "value": 123,
+                                 "nested": {
+                                     "key": "value"
+                                 }
+                             }, indent=2),
                          ),
                          type='function')
             ],
