@@ -95,7 +95,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         # for to hold non-uniform sharded tensor as well as swizzling
         if current_platform.is_rocm():
             intermediate_size_per_partition_after_pad = round_up(
-                intermediate_size_per_partition, 128)
+                intermediate_size_per_partition, 256)
         else:
             intermediate_size_per_partition_after_pad = round_up(
                 intermediate_size_per_partition, 64)
