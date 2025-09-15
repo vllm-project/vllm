@@ -17,12 +17,12 @@ from vllm.utils import current_stream
 
 logger = init_logger(__name__)
 
-
 _NCCL_SYMM_OPS_REGISTERED = False
+
 
 def register_nccl_symmetric_ops(pynccl_comm):
     from vllm.distributed.device_communicators.pynccl_allocator import (
-        nccl_symm_mem_context,)
+        nccl_symm_mem_context)
     from vllm.utils import direct_register_custom_op
 
     global _NCCL_SYMM_OPS_REGISTERED
@@ -31,8 +31,7 @@ def register_nccl_symmetric_ops(pynccl_comm):
     _NCCL_SYMM_OPS_REGISTERED = True
 
     def all_reduce_symmetric_with_copy_impl(
-        input_tensor: torch.Tensor
-    ) -> torch.Tensor:
+            input_tensor: torch.Tensor) -> torch.Tensor:
         with nccl_symm_mem_context(pynccl_comm):
             symm_input = torch.empty_like(input_tensor)
             symm_output = torch.empty_like(input_tensor)
@@ -40,10 +39,8 @@ def register_nccl_symmetric_ops(pynccl_comm):
         symm_output = pynccl_comm.all_reduce(symm_input, symm_output)
         return symm_output
 
-
     def all_reduce_symmetric_with_copy_fake(
-        input_tensor: torch.Tensor
-    ) -> torch.Tensor:
+            input_tensor: torch.Tensor) -> torch.Tensor:
         return torch.empty_like(input_tensor)
 
     direct_register_custom_op(
@@ -144,23 +141,19 @@ class PyNcclCommunicator:
             stream.synchronize()
             del data
 
-    def should_nccl_symm_mem_allreduce(
-        self, input_tensor: torch.Tensor
-    ) -> bool:
+    def should_nccl_symm_mem_allreduce(self,
+                                       input_tensor: torch.Tensor) -> bool:
         from vllm.distributed.device_communicators.pynccl_allocator import (
-            is_symmetric_memory_enabled,
-        )
+            is_symmetric_memory_enabled)
         if not is_symmetric_memory_enabled():
             return False
         if self.world_size < 4:
             return False
-        if (
-            self.world_size == 4 and input_tensor.numel() > 2 * 1024 * 1024
-        ):  # 2 MB
+        if (self.world_size == 4
+                and input_tensor.numel() > 2 * 1024 * 1024):  # 2 MB
             return True
-        if (
-            self.world_size == 8 and input_tensor.numel() > 8 * 1024 * 1024
-        ):  # 8 MB
+        if (self.world_size == 8
+                and input_tensor.numel() > 8 * 1024 * 1024):  # 8 MB
             return True
 
         if self.world_size > 8:
@@ -359,9 +352,8 @@ class PyNcclCommunicator:
         )
 
     def register_comm_window_raw(self, ptr: int, size: int):
-        return self.nccl.ncclCommWindowRegister(
-            self.comm, buffer_type(ptr), size, 1
-        )
+        return self.nccl.ncclCommWindowRegister(self.comm, buffer_type(ptr),
+                                                size, 1)
 
     def deregister_comm_window(self, window):
         return self.nccl.ncclCommWindowDeregister(self.comm, window)

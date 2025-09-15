@@ -13,7 +13,7 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.device_communicators.pynccl_allocator import (
-  set_graph_pool_id,)
+    set_graph_pool_id)
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import init_logger
 from vllm.platforms import current_platform

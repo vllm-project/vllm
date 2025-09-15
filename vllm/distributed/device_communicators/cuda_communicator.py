@@ -7,10 +7,10 @@ import torch
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
-from vllm.distributed.device_communicators.pynccl_allocator import (
-    is_symmetric_memory_enabled,)
 from vllm.distributed.device_communicators.pynccl import (
-  register_nccl_symmetric_ops,)
+    register_nccl_symmetric_ops)
+from vllm.distributed.device_communicators.pynccl_allocator import (
+    is_symmetric_memory_enabled)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 

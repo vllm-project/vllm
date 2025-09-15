@@ -194,6 +194,7 @@ if TYPE_CHECKING:
     VLLM_USE_NCCL_SYMM_MEM: bool = False
     VLLM_NCCL_INCLUDE_PATH: Optional[str] = None
 
+
 def get_default_cache_root():
     return os.getenv(
         "XDG_CACHE_HOME",

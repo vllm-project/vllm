@@ -1,7 +1,9 @@
-from packaging import version
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import tempfile
 
 import torch
+from packaging import version
 from torch.cuda.memory import CUDAPluggableAllocator
 from torch.utils.cpp_extension import load_inline
 
@@ -9,7 +11,6 @@ from vllm import envs
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-
 
 logger = init_logger(__name__)
 
@@ -38,6 +39,7 @@ _graph_pool_id = None
 _nccl_allocator_failed_to_compile = False
 _cached_pool_snapshot = None
 
+
 def is_symmetric_memory_enabled():
     global _nccl_allocator_failed_to_compile
     return envs.VLLM_USE_NCCL_SYMM_MEM and not _nccl_allocator_failed_to_compile
@@ -63,7 +65,7 @@ def compile_nccl_allocator():
     if not current_platform.is_cuda():
         _nccl_allocator_failed_to_compile = True
         return
-    try: 
+    try:
         out_dir = tempfile.gettempdir()
         nccl_allocator_libname = "nccl_allocator"
         load_inline(
@@ -88,8 +90,7 @@ def compile_nccl_allocator():
             "Symmetric memory will be disabled. "
             "This is expected if NCCL headers are not available. "
             "optionally set VLLM_NCCL_INCLUDE_PATH to point to NCCL header."
-            "Error: %s", str(e)
-        )
+            "Error: %s", str(e))
 
 
 def get_nccl_mem_pool():
@@ -102,19 +103,17 @@ def get_nccl_mem_pool():
 
 
 class nccl_symm_mem_context:
+
     def __init__(
         self,
         pynccl_comm: PyNcclCommunicator,
         disabled: bool = False,
     ):
-        self.disabled = (
-            disabled
-            or not is_symmetric_memory_enabled()
-            or pynccl_comm.world_size == 1
-            or not current_platform.is_cuda()
-            or get_nccl_mem_pool() is None
-            or version.parse(torch.__version__) < version.parse("2.8.0.a0")
-        )
+        self.disabled = (disabled or not is_symmetric_memory_enabled()
+                         or pynccl_comm.world_size == 1
+                         or not current_platform.is_cuda()
+                         or get_nccl_mem_pool() is None or version.parse(
+                             torch.__version__) < version.parse("2.8.0.a0"))
         if self.disabled:
             self.pynccl_comm = None
             self._mem_pool_ctx = None
@@ -130,15 +129,15 @@ class nccl_symm_mem_context:
         if self.disabled:
             return self
         assert (
-            self.pynccl_comm is not None
-        ), "Symmetric memory requires pynccl to be initalized"
+            self.pynccl_comm
+            is not None), "Symmetric memory requires pynccl to be initalized"
         assert (
             self.pynccl_comm.nccl_version >= 22703
         ), "NCCL version 2.27.3 or higher is required for NCCL symmetric memory"
         if self.is_graph_capture:
             assert (
-                _graph_pool_id is not None
-            ), "graph_pool_id is not set under graph capture"
+                _graph_pool_id
+                is not None), "graph_pool_id is not set under graph capture"
             # Pause graph memory pool to use symmetric memory with cuda graph
             torch._C._cuda_endAllocateToPool(self.device, _graph_pool_id)
         self._mem_pool_ctx.__enter__()
@@ -154,10 +153,8 @@ class nccl_symm_mem_context:
         for segment in _cached_pool_snapshot:
             if segment["address"] not in _registered_base_addrs:
                 self.pynccl_comm.register_comm_window_raw(
-                    segment["address"], segment["total_size"]
-                )
+                    segment["address"], segment["total_size"])
                 _registered_base_addrs.add(segment["address"])
         if self.is_graph_capture:
             torch._C._cuda_beginAllocateCurrentThreadToPool(
-                self.device, _graph_pool_id
-            )
+                self.device, _graph_pool_id)
