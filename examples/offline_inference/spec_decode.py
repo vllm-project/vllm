@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ast
+import json
+import time
 
 from transformers import AutoTokenizer
 
@@ -74,6 +76,7 @@ def parse_args():
     parser.add_argument("--custom-mm-prompts", action="store_true")
     parser.add_argument("--draft-vocab-frequency-path", type=str, default=None)
     parser.add_argument("--draft-vocab-frequency-keep-threshold", type=str, default=None)
+    parser.add_argument("--compilation-config", type=str, default="")
     return parser.parse_args()
 
 
@@ -151,17 +154,14 @@ def main():
         gpu_memory_utilization=0.8,
         speculative_config=speculative_config,
         disable_log_stats=False,
-        max_model_len=4096,
+        max_model_len=16384,
         max_num_seqs=args.batch_size,
         limit_mm_per_prompt={"image": 5},
         disable_chunked_mm_input=True,
+        compilation_config=(
+            json.loads(args.compilation_config) if args.compilation_config else None
+        ),
     )
-
-    try:
-        max_num_seqs = llm.llm_engine.engine_core.scheduler_config.max_num_seqs
-        print(f"max_num_seqs: {max_num_seqs}")
-    except Exception as e:
-        print(e)
 
 
     sampling_params = SamplingParams(temperature=args.temp, max_tokens=args.output_len)

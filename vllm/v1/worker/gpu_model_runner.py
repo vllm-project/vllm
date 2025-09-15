@@ -131,7 +131,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
 
     def get_output(self) -> ModelRunnerOutput:
         """Copy the device tensors to the host and return a ModelRunnerOutput.
-        
+
         This function blocks until the copy is finished.
         """
         self._async_copy_ready_event.synchronize()
@@ -723,7 +723,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _prepare_input_ids(self, total_num_scheduled_tokens: int,
                            cu_num_tokens: np.ndarray) -> None:
         """Prepare the input IDs for the current batch.
-        
+
         Carefully handles the `prev_sampled_token_ids` which can be cached
         from the previous engine iteration, in which case those tokens on the
         GPU need to be copied into the corresponding slots into input_ids."""
@@ -1973,6 +1973,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.speculative_config:
             assert spec_decode_common_attn_metadata is not None
             with record_function_or_nullcontext("Draft"):
+                st = time.perf_counter()
                 self._draft_token_ids = self.propose_draft_token_ids(
                     scheduler_output,
                     valid_sampled_token_ids,
@@ -1983,6 +1984,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     spec_decode_metadata,
                     spec_decode_common_attn_metadata,
                 )
+                et = time.perf_counter()
+                ic(f"drafter forward: {et-st:.2f}")
 
         with record_function_or_nullcontext("EPLB"):
             self.eplb_step()
@@ -2218,7 +2221,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                                   self.device)
             if hasattr(self, "drafter"):
                 logger.info("Loading drafter model...")
+                st = time.perf_counter()
                 self.drafter.load_model(self.model)
+                et = time.perf_counter()
+                ic(f"time to load drafter: {et-st:.2f}")
             if self.use_aux_hidden_state_outputs:
                 if supports_eagle3(self.model):
                     self.model.set_aux_hidden_state_layers(

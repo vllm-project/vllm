@@ -3,6 +3,7 @@
 import ast
 import copy
 import os
+import time
 from dataclasses import replace
 from importlib.util import find_spec
 from typing import Optional, Protocol
@@ -219,12 +220,15 @@ class EagleProposer:
         with set_forward_context(per_layer_attn_metadata,
                                  self.vllm_config,
                                  num_tokens=num_input_tokens):
+            st = time.perf_counter()
             ret_hidden_states = self.model(
                 input_ids=input_ids,
                 positions=self.positions[:num_input_tokens],
                 hidden_states=self.hidden_states[:num_input_tokens],
                 inputs_embeds=inputs_embeds,
             )
+            et = time.perf_counter()
+            ic(f'target model forward: {et - st:.2f}')
             if self.method in ("deepseek_mtp", "ernie_mtp"):
                 last_hidden_states = ret_hidden_states
                 hidden_states = last_hidden_states
@@ -702,7 +706,7 @@ class EagleProposer:
                     self.model.lm_head = copy.deepcopy(self.model.lm_head)
 
                 self.model.lm_head.weight.data = self.model.lm_head.weight.data[self.pruned_vocab]
-                
+
                 # # ensure we pruned correctly
                 # model_vocab_size = self.model.lm_head.weight.shape[0]
                 # target_vocab_size = target_language_model.lm_head.weight.shape[0]
