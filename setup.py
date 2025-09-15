@@ -56,8 +56,6 @@ elif (sys.platform.startswith("linux") and torch.version.cuda is None
     # fallback to cpu
     VLLM_TARGET_DEVICE = "cpu"
 
-envs.MAIN_CUDA_VERSION = "12.8"
-
 
 def is_sccache_available() -> bool:
     return which("sccache") is not None and \
