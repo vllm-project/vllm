@@ -303,12 +303,6 @@ class SamplingParams(
         if self.stop is not None and isinstance(self.stop, str):
             self.stop = [self.stop]
 
-        if self.stop_token_ids is None:
-            self.stop_token_ids = []
-
-        if self.bad_words is None:
-            self.bad_words = []
-
         if self.logprobs is True:
             self.logprobs = 1
 
