@@ -14,9 +14,9 @@ Before using EP, you need to install the necessary dependencies. We are actively
 
     ```sh
     # Installs gdrcopy dependency
-    RUN curl https://developer.download.nvidia.com/compute/redist/gdrcopy/CUDA%2012.8/ubuntu24_04/x64/libgdrapi_2.5.1-1_amd64.Ubuntu24_04.deb --output libgdrapi_2.5.1-1_amd64.Ubuntu24_04.deb \
-        && apt install ./libgdrapi_2.5.1-1_amd64.Ubuntu24_04.deb \
-        && rm libgdrapi_2.5.1-1_amd64.Ubuntu24_04.deb
+    RUN curl https://developer.download.nvidia.com/compute/redist/gdrcopy/CUDA%2012.8/{os}/x64/libgdrapi_2.5.1-1_{uuarch}.{os}.deb --output libgdrapi_2.5.1-1_{uuarch}.{os}.deb \
+        && apt install ./libgdrapi_2.5.1-1_{uuarch}.{os}.deb \
+        && rm libgdrapi_2.5.1-1_amd64.Ubuntu22_04.deb
     # Installs nixl/ucx
     uv pip install -r requirements/kv_connectors.txt
     ```
@@ -204,9 +204,9 @@ For production deployments requiring strict SLA guarantees for time-to-first-tok
 
     ```sh
     # Installs gdrcopy dependency
-    RUN curl https://developer.download.nvidia.com/compute/redist/gdrcopy/CUDA%2012.8/ubuntu24_04/x64/libgdrapi_2.5.1-1_amd64.Ubuntu24_04.deb --output libgdrapi_2.5.1-1_amd64.Ubuntu24_04.deb \
-        && apt install ./libgdrapi_2.5.1-1_amd64.Ubuntu24_04.deb \
-        && rm libgdrapi_2.5.1-1_amd64.Ubuntu24_04.deb
+    RUN curl https://developer.download.nvidia.com/compute/redist/gdrcopy/CUDA%2012.8/ubuntu22_04/x64/libgdrapi_2.5.1-1_amd64.Ubuntu22_04.deb --output libgdrapi_2.5.1-1_amd64.Ubuntu22_04.deb \
+        && apt install ./libgdrapi_2.5.1-1_amd64.Ubuntu22_04.deb \
+        && rm libgdrapi_2.5.1-1_amd64.Ubuntu22_04.deb
     # Installs nixl/ucx
     uv pip install -r requirements/kv_connectors.txt
     ```
