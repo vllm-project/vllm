@@ -641,10 +641,6 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         attn_metadata: TorchSDPAMetadata,
         attn_type: str = AttentionType.DECODER,
     ) -> None:
-        if self.num_kv_heads != self.num_heads:
-            key = key.repeat_interleave(self.num_queries_per_kv, dim=1)
-            value = value.repeat_interleave(self.num_queries_per_kv, dim=1)
-
         attn_masks = attn_metadata.get_attn_bias(attn_type)
         if attn_masks is None:
             if self.alibi_slopes is not None:
@@ -664,6 +660,10 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         query = query.movedim(0, query.dim() - 2)
         key = key.movedim(0, key.dim() - 2)
         value = value.movedim(0, value.dim() - 2)
+
+        if self.num_kv_heads != self.num_heads:
+            key = key.repeat_interleave(self.num_queries_per_kv, dim=-3)
+            value = value.repeat_interleave(self.num_queries_per_kv, dim=-3)
 
         causal_attn = (attn_type == AttentionType.DECODER)
 

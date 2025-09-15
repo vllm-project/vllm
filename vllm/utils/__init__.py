@@ -163,6 +163,12 @@ STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
 STR_DUAL_CHUNK_FLASH_ATTN_VAL: str = "DUAL_CHUNK_FLASH_ATTN"
 STR_INVALID_VAL: str = "INVALID"
 
+MB_bytes = 1_000_000
+"""The number of bytes in one megabyte (MB)."""
+
+MiB_bytes = 1 << 20
+"""The number of bytes in one mebibyte (MiB)."""
+
 GB_bytes = 1_000_000_000
 """The number of bytes in one gigabyte (GB)."""
 
@@ -2076,6 +2082,7 @@ async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
         return await task(*args, **kwargs)
 
 
+@lru_cache
 def supports_kw(
     callable: Callable[..., object],
     kw_name: str,
