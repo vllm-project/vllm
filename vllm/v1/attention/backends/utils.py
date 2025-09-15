@@ -344,6 +344,7 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         use_sliding_window: bool,
         use_local_attention: bool,
         num_sms: int,
+        dcp_world_size: int,
     ) -> bool:
         return False
 
