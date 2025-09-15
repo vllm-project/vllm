@@ -3716,16 +3716,10 @@ class VllmConfig:
                 # we maintain a separate list of uniform-decode capture sizes,
                 # since for spec-decode, we may need capture sizes being
                 # divisible by uniform_decode_len(>1).
-
-                # Derive uniform-decode capture sizes via projection: for each
-                # non-uniform capture size i, take the max multiple of
-                # uniform_decode_len that is not greater than i.
-                projected_sizes: set[int] = set()
-                for size in batch_size_capture_list:
-                    proj = (size // uniform_decode_len) * uniform_decode_len
-                    if proj >= uniform_decode_len:
-                        projected_sizes.add(proj)
-                uniform_batch_size_capture_list = sorted(projected_sizes)
+                uniform_batch_size_capture_list = sorted(
+                    set(size * uniform_decode_len
+                        for size in batch_size_capture_list
+                        if size >= uniform_decode_len))
                 if self.parallel_config.tensor_parallel_size > 1 and \
                     self.compilation_config.pass_config.enable_sequence_parallelism:
                     batch_size_capture_list, uniform_batch_size_capture_list = \

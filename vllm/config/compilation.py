@@ -518,8 +518,8 @@ class CompilationConfig:
                 # recompute uniform_cudagraph_capture_sizes based on the
                 # dedup_sizes(computed from config) and uniform_decode_len
                 uniform_cudagraph_capture_sizes = sorted(
-                    set((size // uniform_decode_len) * uniform_decode_len
-                        for size in dedup_sizes if size >= uniform_decode_len))
+                    set(size * uniform_decode_len for size in dedup_sizes
+                        if size >= uniform_decode_len))
 
         computed_compile_sizes = []
         if self.compile_sizes is not None:
