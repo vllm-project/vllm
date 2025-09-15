@@ -24,23 +24,24 @@ class BlockLookupCache:
     """
 
     def __init__(self):
-        # {block_hash: KVCacheBlocks}.
+        # Caches blocks from hash directly to a block or multiple blocks
+        # (i.e. {block_hash: KVCacheBlocks})
         # - Mostly block_hash maps to a single KVCacheBlock, and KVCacheBlocks
         #   would simply be a KVCacheBlock.
         # - Otherwise, KVCacheBlocks is a dict from {block_id: KVCacheBlock}
-        #
-        # NOTE: The union type is introduced in order to reduce GC costs from
-        # the inner dict.
         #
         # A cached block is a full block with a block hash that can be used
         # for prefix caching.
         # The cached block may be used by running requests or in the
         # free_block_queue that could potentially be evicted.
-        # NOTE: We currently don't de-duplicate the blocks in the cache,
+        #
+        # NOTE #1: We currently don't de-duplicate the blocks in the cache,
         # meaning that if a block becomes full and is cached, we don't check
         # if there is already an identical block in the cache. This is because
         # we want to make sure the allocated block IDs won't change so that
         # block tables are append-only.
+        # NOTE #2: The union type is introduced in order to reduce GC costs
+        # from the inner dict.
         self._cache: dict[BlockHashWithGroupId,
                           Union[KVCacheBlock, dict[int, KVCacheBlock]]] = {}
 
@@ -52,9 +53,9 @@ class BlockLookupCache:
         blocks = self._cache.get(key)
         if blocks is None:
             return None
-        if type(blocks) is KVCacheBlock:
+        if isinstance(blocks, KVCacheBlock):
             return blocks
-        if type(blocks) is dict:
+        if isinstance(blocks, dict):
             return next(iter(blocks.values()))
         self._unexpected_blocks_type(blocks)
         return None
@@ -67,11 +68,11 @@ class BlockLookupCache:
         if blocks is None:
             # When key is not found, attach a single block to the key
             self._cache[key] = block
-        elif type(blocks) is KVCacheBlock:
+        elif isinstance(blocks, KVCacheBlock):
             # If there's a block with the same key, merge the original block
             # and the new block into a dict
             self._cache[key] = {blocks.block_id: blocks, block.block_id: block}
-        elif type(blocks) is dict:
+        elif isinstance(blocks, dict):
             # If it's already a dict, simply insert the block
             blocks[block.block_id] = block
         else:
@@ -86,14 +87,14 @@ class BlockLookupCache:
         if blocks is None:
             # block_hash not found in the cache
             return False
-        elif type(blocks) is KVCacheBlock:
+        elif isinstance(blocks, KVCacheBlock):
             # If the single block ID matched the given one, directly
             # remove the whole cached block hash entry
             if blocks.block_id == block_id:
                 self._cache.pop(key)
-        elif type(blocks) is dict:
-            # Try to pop block_id from the block dict, and if dict became empty,
-            # remove the whole cached block hash entry
+        elif isinstance(blocks, dict):
+            # Try to pop block_id from the block dict, and if dict became
+            # empty, remove the whole cached block hash entry
             blocks.pop(block_id, None)
             if len(blocks) == 0:
                 self._cache.pop(key)
@@ -102,9 +103,7 @@ class BlockLookupCache:
         return True
 
     def _unexpected_blocks_type(self, blocks: Any) -> None:
-        raise AssertionError(
-            "This should never happened, kv cache blocks should either be "
-            f"None, KVCacheBlock or dict. But it's {type(blocks)}")
+        raise AssertionError(f"Invalid KV cache block type {type(blocks)}")
 
 
 class BlockPool:
@@ -220,6 +219,8 @@ class BlockPool:
             blk.block_hash = block_hash_with_group_id
             self.cached_block_hash_to_block.insert(block_hash_with_group_id,
                                                    blk)
+            if new_hashes is not None:
+                new_hashes.append(maybe_convert_block_hash(block_hash))
 
         if self.enable_kv_cache_events:
             if num_cached_blocks == 0:
