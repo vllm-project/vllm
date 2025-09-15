@@ -65,7 +65,12 @@ class QuantFP8(CustomOp):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.is_group_quant:
             assert scale is None, "Group quantization is always dynamic"
-            return self._quantize_group_cuda(x)
+            from vllm.model_executor.layers.quantization.utils import fp8_utils
+            return fp8_utils.per_token_group_quant_fp8(
+                x,
+                group_size=self.group_size,
+                column_major_scales=self.column_major_scales,
+                dtype=_FP8_DTYPE)
 
         assert (scale is not None) == self.static
         assert scale_ub is None or (not self.static and self.group_shape
@@ -93,26 +98,21 @@ class QuantFP8(CustomOp):
                                     == GroupShape.PER_TOKEN
                                     and scale_ub.numel() == 1)
 
-        if self.use_per_token_if_dynamic and scale is None:
-            # Per-token quantization logic
-            x_max, _ = x.abs().max(dim=-1)
-            x_max = x_max.unsqueeze(-1).to(torch.float32)
-            if scale_ub is not None:
-                x_max = x_max.clamp(max=scale_ub)
+        if scale is None:
+            if self.group_shape == GroupShape.PER_TOKEN:
+                x_max, _ = x.abs().max(dim=-1)
+                x_max = x_max.unsqueeze(-1).to(torch.float32)
+                if scale_ub is not None:
+                    x_max = x_max.clamp(max=scale_ub)
+            else:
+                x_max = x.abs().max().unsqueeze(-1).to(torch.float32)
+
             scale = (x_max / _FP8_MAX).clamp(min=_FP8_MIN_SCALING_FACTOR)
 
-            out = x.to(torch.float32) * scale.reciprocal()
-            out = out.clamp(_FP8_MIN, _FP8_MAX).to(_FP8_DTYPE)
-        else:
-            # Per-tensor quantization logic
-            if scale is None:
-                x_max = x.abs().max().unsqueeze(-1).to(torch.float32)
-                scale = (x_max / _FP8_MAX).clamp(min=_FP8_MIN_SCALING_FACTOR)
-
-            # Even for dynamic per-token scales,
-            # reciprocal performs slightly better than division
-            out = x.to(torch.float32) * scale.reciprocal()
-            out = out.clamp(_FP8_MIN, _FP8_MAX).to(_FP8_DTYPE)
+        # Even for dynamic per-token scales,
+        # reciprocal performs slightly better than division
+        out = x.to(torch.float32) * scale.reciprocal()
+        out = out.clamp(_FP8_MIN, _FP8_MAX).to(_FP8_DTYPE)
 
         # This currently generates an extra Triton kernel in compilation.
         # Fortunately, we don't use padding if compiling.
@@ -123,16 +123,6 @@ class QuantFP8(CustomOp):
             out = F.pad(out, (0, 0, 0, padding), "constant", 0.0)
 
         return out, scale
-
-    def _quantize_group_cuda(
-            self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-            per_token_group_quant_fp8)
-        return per_token_group_quant_fp8(
-            x,
-            group_size=self.group_size,
-            column_major_scales=self.column_major_scales,
-            dtype=_FP8_DTYPE)
 
     def _quantize_group_native(
             self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
