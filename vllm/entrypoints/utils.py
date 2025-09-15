@@ -214,10 +214,11 @@ def show_filtered_argument_or_group_from_help(parser: ArgumentParser,
     formatter = parser._get_formatter()
     search_keyword = help.split('=', 1)[1].lower()
     parser.formatter_class.skip_arguments = False
+    json_tip = FlexibleArgumentParser._json_tip
 
     # Show full help
     if search_keyword == 'all':
-        parser.epilog = FlexibleArgumentParser._json_tip
+        parser.epilog = json_tip
         print(super(type(parser), parser).format_help())
         sys.exit(0)
 
@@ -228,7 +229,9 @@ def show_filtered_argument_or_group_from_help(parser: ArgumentParser,
             formatter.add_text(group.description)
             formatter.add_arguments(group._group_actions)
             formatter.end_section()
-            break
+            formatter.add_text(json_tip)
+            print(formatter.format_help())
+            sys.exit(0)
 
     # Add to formatter for single args
     matched_actions = []
@@ -241,10 +244,8 @@ def show_filtered_argument_or_group_from_help(parser: ArgumentParser,
     if matched_actions:
         formatter.start_section(f"Parameters matching '{search_keyword}'")
         formatter.add_arguments(matched_actions)
-
-    # Add JSON tip and format help
-    if formatter._current_section.items:
-        formatter.add_text(FlexibleArgumentParser._json_tip)
+        formatter.end_section()
+        formatter.add_text(json_tip)
         print(formatter.format_help())
         sys.exit(0)
 
