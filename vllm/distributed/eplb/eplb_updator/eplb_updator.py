@@ -19,7 +19,8 @@ import torch.distrubuted as dist
 
 from overrides import override
 
-
+# To DO: The mock eplb_process class will be deleted after the related PR merges.
+# To DO: The mock eplb_weight_loader class will be deleted after the related PR merges.
 class EplbUpdator(BaseUpdator):
     """
     Manages the Expert Parallel Load Balancing (EPLB) update process,
