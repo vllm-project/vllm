@@ -3,7 +3,7 @@
 import atexit
 import contextlib
 import tempfile
-from typing import Any, ContextManager, Optional
+from typing import Any, Optional
 
 import torch
 from packaging import version
@@ -135,7 +135,8 @@ class nccl_symm_mem_context:
                              torch.__version__) < version.parse("2.8.0.a0"))
         if self.disabled:
             self.pynccl_comm: Optional[PyNcclCommunicator] = None
-            self._mem_pool_ctx: ContextManager[Any] = contextlib.nullcontext()
+            self._mem_pool_ctx: contextlib.AbstractContextManager[
+                Any] = contextlib.nullcontext()
             self.is_graph_capture = None
             self.device = None
         else:
