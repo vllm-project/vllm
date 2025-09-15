@@ -70,6 +70,7 @@ if TYPE_CHECKING:
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
     VLLM_MM_INPUT_CACHE_GIB: int = 4
     VLLM_TARGET_DEVICE: str = "cuda"
+    VLLM_MAIN_CUDA_VERSION: str = "12.8"
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
     VLLM_USE_PRECOMPILED: bool = False
@@ -245,6 +246,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # rocm, cpu]
     "VLLM_TARGET_DEVICE":
     lambda: os.getenv("VLLM_TARGET_DEVICE", "cuda").lower(),
+
+    # Main CUDA version of vLLM, supporting [12.6, 12.8, 12.9],
+    # 12.8 is the default. This follows PyTorch but can be overridden.
+    "VLLM_MAIN_CUDA_VERSION":
+    lambda: os.getenv("VLLM_MAIN_CUDA_VERSION", "").lower() or "12.8",
 
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs
