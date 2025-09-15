@@ -1955,6 +1955,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, AsyncModelRunnerOutput, IntermediateTensors]:
         with record_function_or_nullcontext("Preprocess"):
+            if self.parallel_config.eplb_config.enable_async:
+                self.eplb_state.forward_before()
             self._update_states(scheduler_output)
             if not scheduler_output.total_num_scheduled_tokens:
                 if not has_kv_transfer_group():
@@ -2097,7 +2099,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     spec_decode_common_attn_metadata,
                 )
 
-        with record_function_or_nullcontext("EPLB"):
+        if self.parallel_config.eplb_config.enable_async:
+            self.eplb_state.forward_end()
+        else:
             self.eplb_step()
 
         output = ModelRunnerOutput(

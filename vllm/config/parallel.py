@@ -56,6 +56,11 @@ class EPLBConfig:
     This is turned off by default since it will cause communication overhead.
     """
 
+    enable_async: bool = False
+    """
+    If True, enables asynchronous operations for expert load balancing,
+    potentially improving performance by overlapping computation and communication.
+    """
 
 @config
 @dataclass
