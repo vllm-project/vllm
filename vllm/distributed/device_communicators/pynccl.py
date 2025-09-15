@@ -149,7 +149,8 @@ class PyNcclCommunicator:
     def should_use_nccl_symm_mem_allreduce(
         self, input_tensor: torch.Tensor
     ) -> bool:
-        return is_symmetric_memory_enabled()
+        if is_symmetric_memory_enabled():
+            return True
 
     def all_reduce(self,
                    in_tensor: torch.Tensor,
