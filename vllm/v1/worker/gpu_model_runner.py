@@ -1740,7 +1740,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # TODO(tms) : There are many cases where padding is enabled for
         # prefills, causing unnecessary and excessive padding of activations.
 
-        if dp_size == 1:
+        if dp_size == 1 or self.vllm_config.model_config.enforce_eager:
             # Early exit.
             return 0, None
 
