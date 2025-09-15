@@ -39,7 +39,7 @@ def glm4_1v_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
             "duration": 1,
             "frames_indices": [i for i in range(num_frames)],
             "video_backend": "opencv",
-            "do_sample_frames": False,
+            "do_sample_frames": True,
         })
     return mm_data
 
