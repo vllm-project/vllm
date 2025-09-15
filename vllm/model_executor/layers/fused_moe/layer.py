@@ -2068,20 +2068,44 @@ class FusedMoE(CustomOp):
             return states
 
         if shared_output is not None:
+            #
+            # shared experts were called by FusedMoE layer forward
+            #
             assert not isinstance(final_hidden_states, tuple)
             assert self.shared_experts is not None
             assert self.shared_fused_combine is not None
+
+            shared_output = combine_and_reduce_output(shared_output, do_combine=False)
+            final_hidden_states = combine_and_reduce_output(final_hidden_states)
+
             final_hidden_states = self.shared_fused_combine(
                 shared_output, final_hidden_states)
+
+            if self.tp_size > 1:
+                return self.maybe_all_reduce_tensor_model_parallel(final_hidden_states)
+            else:
+                return final_hidden_states
+
         elif self.shared_fused_combine is not None:
+            #
+            # shared experts were called by modular kernel
+            #
+            final_hidden_states = (combine_and_reduce_output(final_hidden_states[0], False),
+                                   combine_and_reduce_output(final_hidden_states[1]))
+
             final_hidden_states = self.shared_fused_combine(
                 final_hidden_states[0], final_hidden_states[1])
         elif self.zero_expert_num is not None and self.zero_expert_num > 0:
             assert isinstance(final_hidden_states, torch.Tensor)
             return combine_and_reduce_output(final_hidden_states) + zero_expert_result
 
-        assert not isinstance(final_hidden_states, tuple)
-        return combine_and_reduce_output(final_hidden_states)
+            if self.tp_size > 1:
+                return self.maybe_all_reduce_tensor_model_parallel(final_hidden_states)
+            else:
+                return final_hidden_states
+        else:
+            assert not isinstance(final_hidden_states, tuple)
+            return combine_and_reduce_output(final_hidden_states)
 
     @classmethod
     def make_expert_params_mapping(

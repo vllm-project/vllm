@@ -64,10 +64,10 @@ class SharedFusedMoE(FusedMoE):
 
             # Reduce outputs if necessary, since the MLP should
             # have been created with reduce_results=False.
-            if (self.reduce_results and self.tp_size > 1
-                    and self.must_reduce_shared_expert_outputs()):
-                # TODO: can this be async?
-                shared_out = tensor_model_parallel_all_reduce(shared_out)
+            #if (self.reduce_results and self.tp_size > 1
+            #        and self.must_reduce_shared_expert_outputs()):
+            #    # TODO: can this be async?
+            #    shared_out = tensor_model_parallel_all_reduce(shared_out)
 
             fused_out = super().forward(
                 hidden_states=hidden_states,
@@ -75,13 +75,13 @@ class SharedFusedMoE(FusedMoE):
             )
 
             output = self._shared_fused_combine(shared_out, fused_out)
+
+            if self.tp_size > 1:
+                output = self.maybe_all_reduce_tensor_model_parallel(output)
         else:
             output = super().forward(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
             )
-
-        if self.tp_size > 1 and not self.must_reduce_shared_expert_outputs():
-            output = tensor_model_parallel_all_reduce(output)
 
         return output

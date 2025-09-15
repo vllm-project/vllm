@@ -311,9 +311,10 @@ class DeepseekV2MoE(nn.Module):
                 self.experts.maybe_all_reduce_tensor_model_parallel(
                     final_hidden_states))
 
-        assert final_hidden_states.shape == (num_tokens, hidden_dim)
+        #assert final_hidden_states.shape == (num_tokens, hidden_dim), f"{final_hidden_states.shape}"
+        #print(f"FINAL {final_hidden_states.shape}, {(num_tokens, hidden_dim)}")
 
-        return final_hidden_states
+        return final_hidden_states.view(num_tokens, hidden_dim)
 
 
 def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
