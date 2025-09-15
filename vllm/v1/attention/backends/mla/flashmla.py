@@ -42,6 +42,10 @@ class FlashMLABackend(MLACommonBackend):
     def get_impl_cls() -> type["FlashMLAImpl"]:
         return FlashMLAImpl
 
+    @staticmethod
+    def get_supported_block_size() -> list[int]:
+        return [64]
+
 
 @dataclass
 class FlashMLADecodeMetadata(MLACommonDecodeMetadata):

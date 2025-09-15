@@ -291,6 +291,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.is_pooling_model,
                 self.vllm_config.model_config.logits_processors),
             is_pooling_model=self.is_pooling_model,
+            kernel_block_sizes=None,
         )
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
@@ -3328,6 +3329,37 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             kv_cache_group.kv_cache_spec.block_size
             for kv_cache_group in kv_cache_config.kv_cache_groups
         ]
+
+        # Generate kernel_block_sizes that matches each block_size
+        # For attention backends that support virtual block splitting,
+        # use the supported block sizes from the backend
+        # For other backends (like Mamba), use [0] (no splitting)
+        kernel_block_sizes = []
+        for kv_cache_group_id, kv_cache_group in enumerate(
+                kv_cache_config.kv_cache_groups):
+            if isinstance(kv_cache_group.kv_cache_spec, AttentionSpec):
+                # This is an attention backend that supports virtual
+                # block splitting. Get the supported block sizes from
+                # the backend.
+                attn_groups = self.attn_groups[kv_cache_group_id]
+                if attn_groups:
+                    # Use the backend's supported block size list
+                    backend_cls = attn_groups[0].backend
+                    supported_sizes = backend_cls.get_supported_block_size()
+                    # If no specific sizes supported, use cache config
+                    # block_size
+                    kernel_block_size_list = (supported_sizes
+                                              if supported_sizes else
+                                              [self.cache_config.block_size])
+                else:
+                    # Fallback to cache config block_size if no backend found
+                    kernel_block_size_list = [self.cache_config.block_size]
+                kernel_block_sizes.append(kernel_block_size_list)
+            else:
+                # This is likely Mamba or other non-attention cache,
+                # no splitting.
+                kernel_block_sizes.append([0])
+
         if block_sizes != [self.cache_config.block_size]:
             assert self.cache_config.cpu_offload_gb == 0, (
                 "Cannot re-initialize the input batch when CPU weight "
@@ -3347,6 +3379,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_speculative_tokens=(
                     self.vllm_config.speculative_config.num_speculative_tokens
                     if self.vllm_config.speculative_config else 0),
+                kernel_block_sizes=kernel_block_sizes,
             )
 
     def _allocate_kv_cache_tensors(
@@ -3420,6 +3453,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                               kv_cache_spec.page_size_bytes)
                 if isinstance(kv_cache_spec, AttentionSpec):
                     has_attn = True
+                    # FIXME here
                     kv_cache_shape = attn_backend.get_kv_cache_shape(
                         num_blocks, kv_cache_spec.block_size,
                         kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
@@ -3570,10 +3604,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         """
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
-        self.may_reinitialize_input_batch(kv_cache_config)
         self.may_add_encoder_only_layers_to_kv_cache_config()
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         self.initialize_attn_backend(kv_cache_config)
+        # Reinitialize need to after initialize_attn_backend
+        self.may_reinitialize_input_batch(kv_cache_config)
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
 
         if self.speculative_config and self.speculative_config.use_eagle():

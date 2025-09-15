@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Optional, Union
+
 import numpy as np
 import torch
 
@@ -21,21 +23,53 @@ class BlockTable:
         max_num_batched_tokens: int,
         pin_memory: bool,
         device: torch.device,
+        kernel_block_size: int,
     ):
-        self.block_size = block_size
         self.max_num_reqs = max_num_reqs
         self.max_num_blocks_per_req = max_num_blocks_per_req
         self.max_num_batched_tokens = max_num_batched_tokens
         self.pin_memory = pin_memory
         self.device = device
+        self.physical_block_size = block_size
+        # Validate kernel_block_size and set up logical block configuration
+        if kernel_block_size <= 0:
+            raise ValueError(f"kernel_block_size must be positive, got {kernel_block_size}")
+
+        if kernel_block_size == block_size:
+            # No splitting - use physical block size directly
+            self.block_size = block_size
+            self.logical_block_size = block_size
+            self.blocks_per_phys_block = 1
+            self.use_hybrid_blocks = False
+        else:
+            # Validate that kernel_block_size divides physical_block_size evenly
+            if self.physical_block_size % kernel_block_size != 0:
+                raise ValueError(
+                    f"kernel_block_size {kernel_block_size} must divide "
+                    f"physical block size {self.physical_block_size} evenly")
+
+            self.block_size = kernel_block_size
+            self.logical_block_size = kernel_block_size
+            self.blocks_per_phys_block = (self.physical_block_size //
+                                          self.logical_block_size)
+            if self.blocks_per_phys_block > 1:
+                self.use_hybrid_blocks = True
+            else:
+                self.use_hybrid_blocks = False
+
+        if self.use_hybrid_blocks:
+            logical_table_size = (max_num_blocks_per_req *
+                                  self.blocks_per_phys_block)
+        else:
+            logical_table_size = max_num_blocks_per_req
 
         self.block_table = torch.zeros(
-            (max_num_reqs, max_num_blocks_per_req),
+            (max_num_reqs, logical_table_size),
             device=self.device,
             dtype=torch.int32,
         )
         self.block_table_cpu = torch.zeros(
-            (max_num_reqs, max_num_blocks_per_req),
+            (max_num_reqs, logical_table_size),
             device="cpu",
             dtype=torch.int32,
             pin_memory=pin_memory,
@@ -51,6 +85,14 @@ class BlockTable:
         self.slot_mapping = torch.zeros(self.max_num_batched_tokens,
                                         dtype=torch.int64,
                                         device=self.device)
+
+        # Pre-compute bias array for physical to logical block conversion
+        if self.use_hybrid_blocks:
+            self._bias_array = np.arange(0,
+                                         self.blocks_per_phys_block).reshape(
+                                             1, -1)
+        else:
+            self._bias_array = None
         try:
             self.dcp_world_size = get_dcp_group().world_size
             self.dcp_rank = get_dcp_group().rank_in_group
@@ -66,6 +108,11 @@ class BlockTable:
     ) -> None:
         if not block_ids:
             return
+
+        if self.use_hybrid_blocks:
+            block_ids = self._convert_physical_to_logical_blocks(
+                np.array(block_ids))
+
         num_blocks = len(block_ids)
         start = self.num_blocks_per_row[row_idx]
         self.num_blocks_per_row[row_idx] += num_blocks
@@ -105,8 +152,19 @@ class BlockTable:
             # Use a "virtual block" which equals to world_size * block_size
             # for block_table_indices calculation.
             virtual_block_size = self.block_size * self.dcp_world_size
-            block_table_indices = (req_indices * self.max_num_blocks_per_req +
-                                   positions // virtual_block_size)
+
+            # IMPORTANT: In hybrid mode, positions are in logical block space,
+            # but we need to map them to the correct logical block table indices
+            logical_block_idx = positions // virtual_block_size
+
+            # Account for the expanded logical table
+            # (always needed with unified tensor)
+            # Each physical block is split into multiple logical blocks
+            # The logical table has been expanded to accommodate this
+            block_table_indices = (req_indices * self.max_num_blocks_per_req *
+                                   self.blocks_per_phys_block +
+                                   logical_block_idx)
+
             block_numbers = self.block_table_np.ravel()[block_table_indices]
             # Use virtual_block_size for mask calculation, which marks local
             # tokens.
@@ -120,8 +178,18 @@ class BlockTable:
             self.slot_mapping_np[:req_indices.shape[0]] = np.where(
                 mask, slot_mapping, -1)
         else:
-            block_table_indices = (req_indices * self.max_num_blocks_per_req +
-                                   positions // self.block_size)
+            # IMPORTANT: In hybrid mode, positions are in logical block space,
+            # but we need to map them to the correct logical block table indices
+            logical_block_idx = positions // self.block_size
+
+            # Account for the expanded logical table
+            # (always needed with unified tensor)
+            # Each physical block is split into multiple logical blocks
+            # The logical table has been expanded to accommodate this
+            block_table_indices = (req_indices * self.max_num_blocks_per_req *
+                                   self.blocks_per_phys_block +
+                                   logical_block_idx)
+
             block_numbers = self.block_table_np.ravel()[block_table_indices]
             block_offsets = positions % self.block_size
             np.add(block_numbers * self.block_size,
@@ -139,6 +207,17 @@ class BlockTable:
     def clear(self) -> None:
         self.block_table.fill_(0)
         self.block_table_cpu.fill_(0)
+
+    def _convert_physical_to_logical_blocks(
+            self, physical_blocks: np.ndarray) -> np.ndarray:
+        """Convert physical block IDs to logical block IDs."""
+        if not self.use_hybrid_blocks:
+            return physical_blocks
+
+        logical_blocks = physical_blocks.reshape(
+            -1, 1) * self.blocks_per_phys_block + self._bias_array
+
+        return logical_blocks.reshape(-1)
 
     def get_device_tensor(self) -> torch.Tensor:
         """Returns the device tensor of the block table."""
@@ -163,7 +242,8 @@ class MultiGroupBlockTable:
                  pin_memory: bool,
                  device: torch.device,
                  block_sizes: list[int],
-                 num_speculative_tokens: int = 0) -> None:
+                 num_speculative_tokens: int = 0,
+                 kernel_sizes: Optional[list[list[int]]] = None) -> None:
         # Note(hc): each dcp rank only store
         # (max_model_len//dcp_world_size) tokens in kvcache,
         # so the block_size which used for calc max_num_blocks_per_req
@@ -174,12 +254,24 @@ class MultiGroupBlockTable:
             # DCP might not be initialized in testing
             dcp_world_size = 1
 
+        if kernel_sizes is None:
+            kernel_sizes = [[0]] * len(block_sizes)
+        # Ensure kernel_sizes matches block_sizes length
+        elif len(kernel_sizes) == 1 and len(block_sizes) > 1:
+            kernel_sizes = kernel_sizes * len(block_sizes)
+        elif len(kernel_sizes) != len(block_sizes):
+            raise ValueError(
+                f"kernel_sizes length ({len(kernel_sizes)}) must match "
+                f"block_sizes length ({len(block_sizes)})")
+
+        # Use zip to pair block_sizes with kernel_sizes one-to-one
         self.block_tables = [
             BlockTable(
                 block_size, max_num_reqs,
                 max(cdiv(max_model_len, block_size * dcp_world_size),
                     1 + num_speculative_tokens), max_num_batched_tokens,
-                pin_memory, device) for block_size in block_sizes
+                pin_memory, device, kernel_size_list)
+            for block_size, kernel_size_list in zip(block_sizes, kernel_sizes)
         ]
 
     def append_row(self, block_ids: tuple[list[int], ...],
