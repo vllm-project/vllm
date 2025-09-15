@@ -415,6 +415,9 @@ def causal_conv1d_fn(
         activation = "silu"
 
     args = None
+    # Store original dtype to cast back at the end
+    original_x_dtype = x.dtype
+    x = x.to(conv_states.dtype)
     out = torch.empty_like(x)
     if metadata is not None:
         cu_seqlen = metadata.cu_seqlen
@@ -611,7 +614,7 @@ def causal_conv1d_fn(
         BLOCK_N=256,
         num_stages=2,
     )
-    return out
+    return out.to(original_x_dtype)
 
 
 @triton.jit()
