@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Example Python client for embedding API using vLLM API server
+NOTE:
+    start a supported embeddings model server with `vllm serve`, e.g.
+    vllm serve intfloat/e5-small
+"""
 
 from openai import OpenAI
 
