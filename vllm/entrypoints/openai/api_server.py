@@ -721,6 +721,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
+
 @router.post("/v1/completions",
              dependencies=[Depends(validate_json_request)],
              responses={
