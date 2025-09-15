@@ -1872,8 +1872,8 @@ class MRotaryEmbedding(RotaryEmbedding):
     ) -> list[int]:
         
         shift = 0
-        audio_token_id = thinker_config.audio_token_index
-        video_token_id = thinker_config.video_token_index
+        audio_token_id = thinker_config.audio_token_id
+        video_token_id = thinker_config.video_token_id
         audio_start_token_id = thinker_config.audio_start_token_id
         audio_end_token_id = thinker_config.audio_end_token_id
         spatial_merge_size = thinker_config.vision_config.spatial_merge_size

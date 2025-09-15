@@ -266,7 +266,7 @@ class Qwen3_VisionTransformer(nn.Module):
         super().__init__()
         self.hidden_size = vision_config.hidden_size
         self.num_heads = vision_config.num_heads
-        self.img_size = vision_config.img_size
+        self.image_size = vision_config.image_size
         self.patch_size = vision_config.patch_size
         self.spatial_merge_size = vision_config.spatial_merge_size
         self.spatial_merge_unit = self.spatial_merge_size**2
@@ -283,9 +283,9 @@ class Qwen3_VisionTransformer(nn.Module):
 
         # vit pos embeding, TODO: spatial_patch_size vs patch_size
         if self.apply_vit_abs_pos_embed:
-            self.pos_embed = nn.Embedding((self.img_size // self.patch_size) ** 2, self.hidden_size)
+            self.pos_embed = nn.Embedding((self.image_size // self.patch_size) ** 2, self.hidden_size)
         else:
-            self.pos_embed = nn.Parameter(torch.empty([1, (self.img_size // self.patch_size) ** 2, self.hidden_size]))
+            self.pos_embed = nn.Parameter(torch.empty([1, (self.image_size // self.patch_size) ** 2, self.hidden_size]))
 
         norm_layer = partial(nn.LayerNorm, eps=norm_eps)
         head_dim = self.hidden_size // self.num_heads
@@ -363,7 +363,7 @@ class Qwen3_VisionTransformer(nn.Module):
         return rotary_pos_emb
 
     def fast_pos_embed_interpolate(self, grid_thw):
-        num_grid_per_side = self.img_size // self.patch_size
+        num_grid_per_side = self.image_size // self.patch_size
 
         idx_list = [[] for _ in range(4)]
         weight_list = [[] for _ in range(4)]
@@ -1089,9 +1089,9 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                 inputs_embeds,
                 multimodal_embeddings,
                 [
-                    self.config.image_token_index,
-                    self.config.video_token_index,
-                    self.config.audio_token_index,
+                    self.config.image_token_id,
+                    self.config.video_token_id,
+                    self.config.audio_token_id,
                 ],
             )
         
@@ -1142,11 +1142,11 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
 
         for embeddings, modality in multimodal_embeddings:
             if modality == "audio":
-                placeholder_token_id = self.config.audio_token_index
+                placeholder_token_id = self.config.audio_token_id
             if modality == "image":
-                placeholder_token_id = self.config.image_token_index
+                placeholder_token_id = self.config.image_token_id
             if modality == "video":
-                placeholder_token_id = self.config.video_token_index
+                placeholder_token_id = self.config.video_token_id
             if use_deepstack and modality in ["image", "video"]:
                 embeddings = torch.cat(embeddings)
                 embeddings, embeddings_multiscale = embeddings.split([visual_dim, visual_dim * multiscale_len], dim=-1)
