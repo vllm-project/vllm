@@ -40,6 +40,7 @@ docker push vllm/vllm-openai:v${RELEASE_VERSION}-aarch64
 
 docker manifest create vllm/vllm-openai:latest vllm/vllm-openai:latest-x86_64 vllm/vllm-openai:latest-aarch64 --amend
 docker manifest create vllm/vllm-openai:v${RELEASE_VERSION} vllm/vllm-openai:v${RELEASE_VERSION}-x86_64 vllm/vllm-openai:v${RELEASE_VERSION}-aarch64 --amend
+docker manifest push vllm/vllm-openai:latest
 docker manifest push vllm/vllm-openai:v${RELEASE_VERSION}
 \`\`\`
 EOF 
