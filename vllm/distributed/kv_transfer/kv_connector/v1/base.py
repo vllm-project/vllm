@@ -355,3 +355,14 @@ class KVConnectorBase_V1(ABC):
             raise TypeError("get_required_kvcache_layout should not be called "
                             "on the abstract base class")
         return None
+
+    def get_finished_count(self) -> Optional[int]:
+        """
+        Get the count of requests expected to complete send/receive operations
+        via this connector.
+
+        Returns:
+            int: expected sending or receiving completion count.
+        """
+
+        return None
