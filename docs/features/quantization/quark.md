@@ -297,7 +297,7 @@ Simply speaking, there are two steps to use the mixed precision feature mention 
 
 ### 1. generate a mixed precision quantized model in AMD Quark.
 
-Firstly, the layerwise mixed-precision configuration for a given LLM model is searched and then quantized by amd-quark. We will provide a detailed tutorial with Quark APIs later.
+Firstly, the layerwise mixed-precision configuration for a given LLM model is searched and then quantized using AMD Quark. We will provide a detailed tutorial with Quark APIs later.
 
 As examples, we provide some ready-to-use quantized mixed precision model to show the usage in vLLM and the accuracy benifits. They are:
 
