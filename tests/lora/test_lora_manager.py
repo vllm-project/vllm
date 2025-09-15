@@ -8,7 +8,7 @@ import torch
 from safetensors.torch import load_file
 from torch import nn
 
-from vllm.config import LoRAConfig
+from vllm.config.lora import LoRAConfig
 from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
                               RowParallelLinearWithLoRA)

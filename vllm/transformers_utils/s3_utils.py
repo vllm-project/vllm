@@ -2,14 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import fnmatch
-import os
-import shutil
-import signal
-import tempfile
-from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from vllm.utils import PlaceholderModule
+
+if TYPE_CHECKING:
+    from botocore.client import BaseClient
 
 try:
     import boto3
@@ -31,7 +29,7 @@ def _filter_ignore(paths: list[str], patterns: list[str]) -> list[str]:
     ]
 
 
-def glob(s3=None,
+def glob(s3: Optional["BaseClient"] = None,
          path: str = "",
          allow_pattern: Optional[list[str]] = None) -> list[str]:
     """
@@ -56,7 +54,7 @@ def glob(s3=None,
 
 
 def list_files(
-        s3,
+        s3: "BaseClient",
         path: str,
         allow_pattern: Optional[list[str]] = None,
         ignore_pattern: Optional[list[str]] = None
@@ -93,70 +91,3 @@ def list_files(
         paths = _filter_ignore(paths, ignore_pattern)
 
     return bucket_name, prefix, paths
-
-
-class S3Model:
-    """
-    A class representing a S3 model mirrored into a temporary directory.
-
-    Attributes:
-        s3: S3 client.
-        dir: The temporary created directory.
-
-    Methods:
-        pull_files(): Pull model from S3 to the temporary directory.
-    """
-
-    def __init__(self) -> None:
-        self.s3 = boto3.client('s3')
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            existing_handler = signal.getsignal(sig)
-            signal.signal(sig, self._close_by_signal(existing_handler))
-
-        self.dir = tempfile.mkdtemp()
-
-    def __del__(self):
-        self._close()
-
-    def _close(self) -> None:
-        if os.path.exists(self.dir):
-            shutil.rmtree(self.dir)
-
-    def _close_by_signal(self, existing_handler=None):
-
-        def new_handler(signum, frame):
-            self._close()
-            if existing_handler:
-                existing_handler(signum, frame)
-
-        return new_handler
-
-    def pull_files(self,
-                   s3_model_path: str = "",
-                   allow_pattern: Optional[list[str]] = None,
-                   ignore_pattern: Optional[list[str]] = None) -> None:
-        """
-        Pull files from S3 storage into the temporary directory.
-
-        Args:
-            s3_model_path: The S3 path of the model.
-            allow_pattern: A list of patterns of which files to pull.
-            ignore_pattern: A list of patterns of which files not to pull.
-
-        """
-        if not s3_model_path.endswith("/"):
-            s3_model_path = s3_model_path + "/"
-
-        bucket_name, base_dir, files = list_files(self.s3, s3_model_path,
-                                                  allow_pattern,
-                                                  ignore_pattern)
-        if len(files) == 0:
-            return
-
-        for file in files:
-            destination_file = os.path.join(
-                self.dir,
-                file.removeprefix(base_dir).lstrip("/"))
-            local_dir = Path(destination_file).parent
-            os.makedirs(local_dir, exist_ok=True)
-            self.s3.download_file(bucket_name, file, destination_file)

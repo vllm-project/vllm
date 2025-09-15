@@ -53,7 +53,7 @@ class Llama4VisionRotaryEmbedding(RotaryEmbedding):
             torch.stack([torch.cos(freqs), torch.sin(freqs)], dim=-1))
         return cache
 
-    def forward(
+    def forward_native(  # type: ignore[override]
         self,
         query: torch.Tensor,
         key: Optional[torch.Tensor] = None,
@@ -72,3 +72,10 @@ class Llama4VisionRotaryEmbedding(RotaryEmbedding):
         query_out = torch.view_as_real(query_ * freqs_ci).flatten(3)
         key_out = torch.view_as_real(key_ * freqs_ci).flatten(3)
         return query_out.type_as(query), key_out.type_as(key)
+
+    def forward_cuda(  # type: ignore[override]
+        self,
+        query: torch.Tensor,
+        key: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        return self.forward_native(query, key)

@@ -15,6 +15,8 @@ from vllm.triton_utils import tl, triton
 
 from .prefix_prefill import context_attention_fwd
 
+float8_info = torch.finfo(current_platform.fp8_dtype())
+
 
 @triton.jit
 def cdiv_fn(x, y):
@@ -34,6 +36,7 @@ def kernel_paged_attention_2d(
         scale,  # float32
         k_scale,  # float32
         v_scale,  # float32
+        out_scale_inv,
         num_query_heads: tl.constexpr,  # int
         num_queries_per_kv: tl.constexpr,  # int
         num_queries_per_kv_padded: tl.constexpr,  # int
@@ -60,7 +63,9 @@ def kernel_paged_attention_2d(
         filter_by_query_len: tl.constexpr,  # bool
         query_start_len_ptr,  # [num_seqs+1]
         USE_SINKS: tl.constexpr,  # bool
-):
+        USE_FP8: tl.constexpr,
+        FP8_MIN: tl.constexpr = float8_info.min,
+        FP8_MAX: tl.constexpr = float8_info.max):
     seq_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
 
@@ -204,6 +209,9 @@ def kernel_paged_attention_2d(
 
     # epilogue
     acc = acc / L[:, None]
+    if USE_FP8:
+        acc = acc * tl.load(out_scale_inv)
+        acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
 
     output_offset = (cur_batch_in_all_start_index * output_stride_0 +
                      query_head_idx * output_stride_1)
@@ -234,6 +242,7 @@ def chunked_prefill_paged_decode(
     alibi_slopes=None,
     sliding_window=None,
     sm_scale=None,
+    output_scale=None,
     # Optional tensor for sinks
     sinks=None,
 ):
@@ -266,6 +275,7 @@ def chunked_prefill_paged_decode(
             sliding_window=sliding_window,
             sm_scale=sm_scale,
             skip_decode=True,
+            fp8_out_scale=output_scale,
             sinks=sinks,
         )
 
@@ -316,7 +326,7 @@ def chunked_prefill_paged_decode(
         tmp_output = torch.empty(
             size=(total_num_seq, num_query_heads, max_num_partitions,
                   head_size),
-            dtype=output.dtype,
+            dtype=query.dtype,
             device=output.device,
         )
         exp_sums = torch.empty(
@@ -345,6 +355,7 @@ def chunked_prefill_paged_decode(
             kv_cache_dtype=kv_cache_dtype,
             k_scale=k_scale,
             v_scale=v_scale,
+            fp8_out_scale=output_scale,
         )
     else:
         kernel_paged_attention_2d[(
@@ -362,6 +373,8 @@ def chunked_prefill_paged_decode(
             scale=sm_scale,
             k_scale=k_scale,
             v_scale=v_scale,
+            out_scale_inv=1.0 /
+            output_scale if output_scale is not None else 1.0,
             num_query_heads=num_query_heads,
             num_queries_per_kv=num_queries_per_kv,
             num_queries_per_kv_padded=num_queries_per_kv_padded,
@@ -388,4 +401,5 @@ def chunked_prefill_paged_decode(
             filter_by_query_len=True,
             query_start_len_ptr=query_start_loc,
             USE_SINKS=sinks is not None,
+            USE_FP8=output_scale is not None,
         )

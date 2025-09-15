@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     VLLM_CONFIGURE_LOGGING: int = 1
     VLLM_LOGGING_LEVEL: str = "INFO"
     VLLM_LOGGING_PREFIX: str = ""
+    VLLM_LOGGING_STREAM: str = "ext://sys.stdout"
     VLLM_LOGGING_CONFIG_PATH: Optional[str] = None
     VLLM_LOGITS_PROCESSOR_THREADS: Optional[int] = None
     VLLM_LOG_STATS_INTERVAL: float = 10.
@@ -162,13 +163,20 @@ if TYPE_CHECKING:
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = False
     VLLM_ENABLE_RESPONSES_API_STORE: bool = False
     VLLM_USE_TRTLLM_ATTENTION: Optional[str] = None
+    VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION: bool = False
     VLLM_HAS_FLASHINFER_CUBIN: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
+    VLLM_ROCM_FP8_MFMA_PAGE_ATTN: bool = False
+    VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS: bool = False
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = False
     VLLM_TUNED_CONFIG_FOLDER: Optional[str] = None
     VLLM_DISABLE_PAD_FOR_CUDAGRAPH: bool = False
+    VLLM_GPT_OSS_USE_CONTAINER_TOOL: bool = False
+    VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS: bool = False
     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
+    VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
+    VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME: str = "VLLM_OBJECT_STORAGE_SHM_BUFFER"
 
 
 def get_default_cache_root():
@@ -432,6 +440,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LOGGING_LEVEL":
     lambda: os.getenv("VLLM_LOGGING_LEVEL", "INFO").upper(),
 
+    # this is used for configuring the default logging stream
+    "VLLM_LOGGING_STREAM":
+    lambda: os.getenv("VLLM_LOGGING_STREAM", "ext://sys.stdout"),
+
     # if set, VLLM_LOGGING_PREFIX will be prepended to all log messages
     "VLLM_LOGGING_PREFIX":
     lambda: os.getenv("VLLM_LOGGING_PREFIX", ""),
@@ -465,6 +477,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "FLASHINFER": use flashinfer
     # - "FLASHMLA": use FlashMLA
     # - "FLASH_ATTN_MLA": use FlashAttention for MLA
+    # - "FLASHINFER_MLA": use FlashInfer for MLA
+    # - "CUTLASS_MLA": use CUTLASS for MLA
     "VLLM_ATTENTION_BACKEND":
     lambda: os.getenv("VLLM_ATTENTION_BACKEND", None),
 
@@ -996,6 +1010,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8":
     lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8", "0"))),
 
+    # If set to 1, use the FlashInfer CUTLASS backend for
+    # MXFP8 (activation) x MXFP4 (weight) MoE.
+    # This is separate from the TRTLLMGEN path controlled by
+    # VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8.
+    "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS":
+    lambda: bool(int(
+        os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS", "0")
+        )),
+
     # If set to 1, use the FlashInfer
     # BF16 (activation) x MXFP4 (weight) MoE backend.
     "VLLM_USE_FLASHINFER_MOE_MXFP4_BF16":
@@ -1137,6 +1160,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_TRTLLM_ATTENTION":
     lambda: os.getenv("VLLM_USE_TRTLLM_ATTENTION", None),
 
+    # If set to 1, when we use fp8 kv, we do not quantize Q to fp8
+    "VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION":
+    lambda: bool(int(os.getenv("VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION", "0"))),
+
     # If set, it means we pre-downloaded cubin files and flashinfer will
     # read the cubin files directly.
     "VLLM_HAS_FLASHINFER_CUBIN":
@@ -1193,6 +1220,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ENABLE_RESPONSES_API_STORE":
     lambda: bool(int(os.getenv("VLLM_ENABLE_RESPONSES_API_STORE", "0"))),
 
+    # If set, use the fp8 mfma in rocm paged attention.
+    "VLLM_ROCM_FP8_MFMA_PAGE_ATTN":
+    lambda: bool(int(os.getenv("VLLM_ROCM_FP8_MFMA_PAGE_ATTN", "0"))),
+
     # Whether to use pytorch symmetric memory for allreduce
     "VLLM_ALLREDUCE_USE_SYMM_MEM":
     lambda: bool(int(os.getenv("VLLM_ALLREDUCE_USE_SYMM_MEM", "0"))),
@@ -1201,9 +1232,29 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TUNED_CONFIG_FOLDER":
     lambda: os.getenv("VLLM_TUNED_CONFIG_FOLDER", None),
 
+    # Allows vllm use container tool
+    "VLLM_GPT_OSS_USE_CONTAINER_TOOL":
+    lambda: bool(int(os.getenv("VLLM_GPT_OSS_USE_CONTAINER_TOOL", "0"))),
+
+    # Allows harmony instructions to be injected on system messages
+    "VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS":
+    lambda: bool(
+        int(os.getenv("VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS", "0"))),
+
     # Add optional custom scopes for profiling, disable to avoid overheads
     "VLLM_CUSTOM_SCOPES_FOR_PROFILING":
     lambda: bool(int(os.getenv("VLLM_CUSTOM_SCOPES_FOR_PROFILING", "0"))),
+
+    # Represent block hashes in KV cache events as 64-bit integers instead of
+    # raw bytes. Defaults to True for backward compatibility.
+    "VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES":
+    lambda: bool(int(os.getenv("VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES", "1"))),
+
+    # Name of the shared memory buffer used for object storage.
+    # Only effective when mm_config.mm_processor_cache_type == "shm".
+    "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME":
+    lambda: os.getenv("VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
+                      "VLLM_OBJECT_STORAGE_SHM_BUFFER"),
 }
 
 # --8<-- [end:env-vars-definition]
@@ -1274,9 +1325,11 @@ def compute_hash() -> str:
         "VLLM_USE_FLASHINFER_MOE_FP8",
         "VLLM_USE_FLASHINFER_MOE_FP4",
         "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8",
+        "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS",
         "VLLM_USE_FLASHINFER_MOE_MXFP4_BF16",
         "VLLM_USE_CUDNN_PREFILL",
         "VLLM_USE_TRTLLM_ATTENTION",
+        "VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION",
         "VLLM_ROCM_USE_AITER",
         "VLLM_ROCM_USE_AITER_PAGED_ATTN",
         "VLLM_ROCM_USE_AITER_LINEAR",
@@ -1292,6 +1345,7 @@ def compute_hash() -> str:
         "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION",
         "VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16",
         "VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB",
+        "VLLM_ROCM_FP8_MFMA_PAGE_ATTN",
     ]
     for key in environment_variables_to_hash:
         # if this goes out of sync with environment_variables,

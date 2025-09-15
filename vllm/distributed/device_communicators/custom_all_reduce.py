@@ -54,7 +54,8 @@ class CustomAllreduce:
     def __init__(self,
                  group: ProcessGroup,
                  device: Union[int, str, torch.device],
-                 max_size=8192 * 1024) -> None:
+                 max_size=8192 * 1024,
+                 symm_mem_enabled=False) -> None:
         """
         Args:
             group: the process group to work on. If None, it will use the
@@ -111,7 +112,7 @@ class CustomAllreduce:
         self.device = device
         device_capability = current_platform.get_device_capability(
         ).as_version_str()
-        if (current_platform.is_cuda() and envs.VLLM_ALLREDUCE_USE_SYMM_MEM
+        if (current_platform.is_cuda() and symm_mem_enabled
                 and device_capability in CUSTOM_ALL_REDUCE_MAX_SIZES):
             max_size = min(
                 CUSTOM_ALL_REDUCE_MAX_SIZES[device_capability][world_size],

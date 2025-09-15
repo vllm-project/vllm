@@ -901,7 +901,7 @@ def _get_query_key_seq_metadata(
                 attn_metadata.encoder_seq_start_loc,
                 attn_metadata.max_encoder_seq_len)
     elif attn_type == AttentionType.ENCODER:
-        # For encoder attention both the query and the key are same i.e the
+        # For encoder attention both the query and the key are same i.e. the
         # encoder sequence.
         return (attn_metadata.encoder_seq_start_loc,
                 attn_metadata.max_encoder_seq_len,

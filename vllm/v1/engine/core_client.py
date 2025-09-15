@@ -245,8 +245,8 @@ class InprocClient(EngineCoreClient):
         self.engine_core = EngineCore(*args, **kwargs)
 
     def get_output(self) -> EngineCoreOutputs:
-        outputs, _ = self.engine_core.step()
-        return outputs.get(0) or EngineCoreOutputs()
+        outputs, _ = self.engine_core.step_fn()
+        return outputs and outputs.get(0) or EngineCoreOutputs()
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.engine_core.get_supported_tasks()
@@ -347,8 +347,9 @@ class BackgroundResources:
 
         if isinstance(self.output_socket, zmq.asyncio.Socket):
             # Async case.
-            loop = self.output_socket._get_loop()
-            asyncio.get_running_loop()
+            loop = self.output_queue_task._loop \
+                if self.output_queue_task else None
+
             sockets = (self.output_socket, self.input_socket,
                        self.first_req_send_socket, self.first_req_rcv_socket,
                        self.stats_update_socket)
@@ -359,11 +360,12 @@ class BackgroundResources:
                 close_sockets(sockets)
                 for task in tasks:
                     if task is not None and not task.done():
-                        task.cancel()
+                        with contextlib.suppress(Exception):
+                            task.cancel()
 
             if in_loop(loop):
                 close_sockets_and_tasks()
-            elif not loop.is_closed():
+            elif loop and not loop.is_closed():
                 loop.call_soon_threadsafe(close_sockets_and_tasks)
             else:
                 # Loop has been closed, try to clean up directly.

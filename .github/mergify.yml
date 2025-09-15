@@ -124,9 +124,16 @@ pull_request_rules:
     - or:
       - files~=^examples/.*gpt[-_]?oss.*\.py
       - files~=^tests/.*gpt[-_]?oss.*\.py
+      - files~=^tests/entrypoints/openai/test_response_api_with_harmony.py
+      - files~=^tests/entrypoints/test_context.py
       - files~=^vllm/model_executor/models/.*gpt[-_]?oss.*\.py
       - files~=^vllm/model_executor/layers/.*gpt[-_]?oss.*\.py
+      - files~=^vllm/entrypoints/harmony_utils.py
+      - files~=^vllm/entrypoints/tool_server.py
+      - files~=^vllm/entrypoints/tool.py
+      - files~=^vllm/entrypoints/context.py
       - title~=(?i)gpt[-_]?oss
+      - title~=(?i)harmony
   actions:
     label:
       add:
@@ -272,6 +279,20 @@ pull_request_rules:
     assign:
       users:
         - "sangstar"
+
+- name: assign reviewer for modelopt changes
+  conditions:
+    - or:
+        - files~=^vllm/model_executor/layers/quantization/modelopt\.py$
+        - files~=^vllm/model_executor/layers/quantization/__init__\.py$
+        - files~=^tests/models/quantization/test_modelopt\.py$
+        - files~=^tests/quantization/test_modelopt\.py$
+        - files~=^tests/models/quantization/test_nvfp4\.py$
+        - files~=^docs/features/quantization/modelopt\.md$
+  actions:
+    assign:
+      users:
+        - "Edwardf0t1"
 
 - name: remove 'needs-rebase' label when conflict is resolved
   conditions:

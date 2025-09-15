@@ -24,7 +24,7 @@ logger = init_logger(__name__)
 BlockSize = Literal[1, 8, 16, 32, 64, 128]
 CacheDType = Literal["auto", "fp8", "fp8_e4m3", "fp8_e5m2", "fp8_inc"]
 MambaDType = Literal["auto", "float32"]
-PrefixCachingHashAlgo = Literal["builtin", "sha256", "sha256_cbor_64bit"]
+PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor"]
 
 
 @config
@@ -63,17 +63,12 @@ class CacheConfig:
     """Sliding window size for the KV cache. This is primarily set in
     `ModelConfig` and that value should be manually duplicated here."""
     enable_prefix_caching: Optional[bool] = None
-    """Whether to enable prefix caching. Disabled by default for V0. Enabled by
-    default for V1."""
-    prefix_caching_hash_algo: PrefixCachingHashAlgo = "builtin"
+    """Whether to enable prefix caching. Enabled by default for V1."""
+    prefix_caching_hash_algo: PrefixCachingHashAlgo = "sha256"
     """Set the hash algorithm for prefix caching:\n
-    - "builtin" is Python's built-in hash.\n
-    - "sha256" is collision resistant but with certain overheads.
-    This option uses Pickle for object serialization before hashing.\n
-    - "sha256_cbor_64bit" provides a reproducible, cross-language compatible
-    hash. It serializes objects using canonical CBOR and hashes them with
-    SHA-256. The resulting hash consists of the lower 64 bits of the SHA-256
-    digest."""
+    - "sha256" uses Pickle for object serialization before hashing.\n
+    - "sha256_cbor" provides a reproducible, cross-language compatible hash. It
+    serializes objects using canonical CBOR and hashes them with SHA-256."""
     cpu_offload_gb: float = 0
     """The space in GiB to offload to CPU, per GPU. Default is 0, which means
     no offloading. Intuitively, this argument can be seen as a virtual way to
@@ -117,6 +112,15 @@ class CacheConfig:
     attention metadata for eligible layers to be overridden with metadata
     necessary for implementing this optimization in some models (e.g. Gemma3n)
     """
+
+    kv_cache_memory_bytes: Optional[int] = None
+    """Size of KV Cache per GPU in bytes. By default, this is set to None
+    and vllm can automatically infer the kv cache size based on
+    gpu_memory_utilization. However, users may want to manually specify
+    the kv cache memory size. kv_cache_memory_bytes allows more fine-grain
+    control of how much memory gets used when compared with using
+    gpu_memory_memory_utilization. Note that kv_cache_memory_bytes
+    (when not-None) ignores gpu_memory_utilization"""
 
     def compute_hash(self) -> str:
         """

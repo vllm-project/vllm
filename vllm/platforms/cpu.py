@@ -75,12 +75,12 @@ class CpuPlatform(Platform):
     def supported_dtypes(self) -> list[torch.dtype]:
         if self.get_cpu_architecture() == CpuArchEnum.POWERPC:
             return [torch.bfloat16, torch.float32]
-        elif sys.platform.startswith(
-                "darwin") and self.get_cpu_architecture() == CpuArchEnum.ARM:
-            # TODO: change this condition to check if the platform support bf16
-            # instead of checking the OS. For instance M2 shall supports bf16
-            # already. But we need to modify `cpu_extension.cmake` to activate
-            # the feature in the build.
+        elif (self.get_cpu_architecture() == CpuArchEnum.ARM
+              and sys.platform.startswith("darwin")):
+            if (subprocess.check_output(
+                ["sysctl -n hw.optional.arm.FEAT_BF16"],
+                    shell=True).strip() == b"1"):
+                return [torch.bfloat16, torch.float16, torch.float32]
             return [torch.float16, torch.float32]
         # x86/aarch64 CPU has supported both bf16 and fp16 natively.
         return [torch.bfloat16, torch.float16, torch.float32]
@@ -346,4 +346,8 @@ class CpuPlatform(Platform):
 
     @classmethod
     def opaque_attention_op(cls) -> bool:
+        return True
+
+    @classmethod
+    def support_hybrid_kv_cache(cls) -> bool:
         return True
