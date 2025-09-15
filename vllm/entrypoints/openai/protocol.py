@@ -242,7 +242,7 @@ def get_logits_processors(processors: Optional[LogitsProcessors],
     elif processors:
         raise ValueError(
             "The `logits_processors` argument is not supported by this "
-            "server. See --logits-processor-pattern engine argugment "
+            "server. See --logits-processor-pattern engine argument "
             "for more information.")
     return None
 
