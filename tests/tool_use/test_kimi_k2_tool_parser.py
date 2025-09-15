@@ -58,6 +58,7 @@ def test_extract_tool_calls_no_tools(kimi_k2_tool_parser):
         "three_concatenated_tool_calls",
         "mixed_spacing_tool_calls",
         "angle_brackets_in_json",
+        "newlines_in_json",
     ],
     argnames=["model_output", "expected_tool_calls", "expected_content"],
     argvalues=[
@@ -171,6 +172,24 @@ functions.get_weather:1 <|tool_call_argument_begin|> {"city": "Shanghai"} <|tool
                          type='function')
             ],
             "I need to process HTML content. ",
+        ),
+        (
+            """I need to process formatted JSON. <|tool_calls_section_begin|><|tool_call_begin|>functions.process_data:0<|tool_call_argument_begin|>{
+  "name": "test",
+  "value": 123,
+  "nested": {
+    "key": "value"
+  }
+}<|tool_call_end|><|tool_calls_section_end|>""",
+            [
+                ToolCall(id='functions.process_data:0',
+                         function=FunctionCall(
+                             name="process_data",
+                             arguments='{\n  "name": "test",\n  "value": 123,\n  "nested": {\n    "key": "value"\n  }\n}',
+                         ),
+                         type='function')
+            ],
+            "I need to process formatted JSON. ",
         ),
     ],
 )
