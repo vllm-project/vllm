@@ -191,7 +191,6 @@ For production deployments requiring strict SLA guarantees for time-to-first-tok
 
 ### Setup Steps
 
-
 1. **Install gdrcopy/ucx/nixl**: Install the following [script](gh-file:tools/install_gdrcopy.sh) (`gdrcopy_install.sh "${GDRCOPY_OS_VERSION}" "12.8" "<x64/aarch64>"`), find os versions [here](https://developer.download.nvidia.com/compute/redist/gdrcopy/CUDA%2012.8/) and run `[script](gh-file:tools/install_gdrcopy.sh)`
 
 2. **Configure Both Instances**: Add this flag to both prefill and decode instances `--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}`
