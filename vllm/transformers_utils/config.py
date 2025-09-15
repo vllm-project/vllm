@@ -65,6 +65,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     chatglm="ChatGLMConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
     kimi_vl="KimiVLConfig",
+    lite_whisper="LiteWhisperConfig",
     Llama_Nemotron_Nano_VL="Nemotron_Nano_VL_Config",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
     RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
