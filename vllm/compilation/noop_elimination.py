@@ -62,9 +62,6 @@ class NoOpEliminationPass(VllmInductorPass):
     scaled_mm: "f16[s0, 4096]" = ...
     at = auto_functionalized(fused_add_rms_norm, input = scaled_mm, ...)
     out: "f16[s0, 4096]" = at[1]
-
-    TODO(luka): This is currently tested in test_fusion,
-     but separate tests could be good.
     """
 
     def __call__(self, graph: torch.fx.Graph):
