@@ -12,8 +12,7 @@ from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import (BlockHash, BlockHashWithGroupId,
                                          ExternalBlockHash,
                                          FreeKVCacheBlockQueue, KVCacheBlock,
-                                         WorkloadAwareFreeKVCacheBlockQueue,
-                                         get_block_hash,
+                                         WAFreeQueue, get_block_hash,
                                          make_block_hash_with_group_id,
                                          maybe_convert_block_hash)
 from vllm.v1.request import Request
@@ -44,8 +43,7 @@ class BlockPool:
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
         self.enable_caching = enable_caching
-        self.free_block_queue: Union[FreeKVCacheBlockQueue,
-                                     WorkloadAwareFreeKVCacheBlockQueue]
+        self.free_block_queue: Union[FreeKVCacheBlockQueue, WAFreeQueue]
         # All kv-cache blocks.
         self.blocks: list[KVCacheBlock] = [
             KVCacheBlock(idx) for idx in range(num_gpu_blocks)
@@ -55,8 +53,8 @@ class BlockPool:
         # enabled).
         if enable_wa_policy:
             print("[pool] Enabling WA block queue")
-            self.free_block_queue = WorkloadAwareFreeKVCacheBlockQueue(
-                self.blocks, wa_offline_param_path)
+            self.free_block_queue = WAFreeQueue(self.blocks,
+                                                wa_offline_param_path)
         else:
             self.free_block_queue = FreeKVCacheBlockQueue(self.blocks)
 

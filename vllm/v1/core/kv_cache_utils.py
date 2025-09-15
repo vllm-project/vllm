@@ -427,7 +427,7 @@ class FreeKVCacheBlockQueue:
         return ret
 
 
-class WorkloadAwareFreeKVCacheBlockQueue(FreeKVCacheBlockQueue):
+class WAFreeQueue(FreeKVCacheBlockQueue):
     """
     
     This class (WAQ) is an enhanced version of FreeKVCacheBlockQueue (FeQ).

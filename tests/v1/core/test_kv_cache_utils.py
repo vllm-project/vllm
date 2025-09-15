@@ -17,11 +17,10 @@ from vllm.v1.core.kv_cache_manager import KVCacheManager
 # yapf: disable
 from vllm.v1.core.kv_cache_utils import (
     BlockHash, FreeKVCacheBlockQueue, KVCacheBlock, PrefixCachingMetrics,
-    WorkloadAwareFreeKVCacheBlockQueue, estimate_max_model_len,
-    generate_block_hash_extra_keys, get_kv_cache_configs,
-    get_max_concurrency_for_kv_cache_config, get_request_block_hasher,
-    hash_block_tokens, init_none_hash, is_kv_cache_type_uniform,
-    make_block_hash_with_group_id)
+    WAFreeQueue, estimate_max_model_len, generate_block_hash_extra_keys,
+    get_kv_cache_configs, get_max_concurrency_for_kv_cache_config,
+    get_request_block_hasher, hash_block_tokens, init_none_hash,
+    is_kv_cache_type_uniform, make_block_hash_with_group_id)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheSpec,
                                         KVCacheTensor, SlidingWindowSpec)
@@ -147,7 +146,7 @@ def test_free_kv_cache_block_queue_initialization():
 
 def test_wa_free_kv_cache_block_queue_initialization():
     block = KVCacheBlock(block_id=0)
-    queue = WorkloadAwareFreeKVCacheBlockQueue([block], "TEST")
+    queue = WAFreeQueue([block], "TEST")
     assert queue.num_free_blocks == 1
     assert queue.block_to_workload[0] == "default"
     assert queue.workload_to_head_tail["default"][0] == block
@@ -208,7 +207,7 @@ def test_wa_free_kv_cache_block_queue_operations():
     blocks = [KVCacheBlock(block_id=i) for i in range(5)]
 
     # Create a FreeKVCacheBlockQueue with these blocks
-    queue = WorkloadAwareFreeKVCacheBlockQueue(blocks, "TEST")
+    queue = WAFreeQueue(blocks, "TEST")
 
     # Check initial state
     assert queue.num_free_blocks == 5
