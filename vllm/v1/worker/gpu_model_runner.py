@@ -1895,7 +1895,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
                 batch_descriptor=batch_descriptor,
         ), record_function_or_nullcontext("Forward"),
-              self.maybe_get_kv_connector_output(scheduler_output) as
+              self.maybe_get_kv_connector_output(scheduler_output,
+                                                 intermediate_tensors) as
               kv_connector_output):
             model_output = self.model(
                 input_ids=input_ids,
@@ -1919,8 +1920,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             broadcast_pp_output = \
                 self.parallel_config.distributed_executor_backend \
                 == "external_launcher" and len(get_pp_group().ranks) > 0
-            kv_connector_output = self.merge_kv_connector_output(
-                kv_connector_output, intermediate_tensors)
             if not get_pp_group().is_last_rank:
                 # For mid-pipeline stages, return the hidden states.
                 assert isinstance(hidden_states, IntermediateTensors)

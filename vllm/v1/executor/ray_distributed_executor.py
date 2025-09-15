@@ -106,4 +106,3 @@ class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
         if reconfig_request.new_data_parallel_rank == \
         ReconfigureRankType.SHUTDOWN_CURRENT_RANK:
             self.shutdown()
-        return

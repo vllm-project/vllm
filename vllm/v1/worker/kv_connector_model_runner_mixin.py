@@ -65,24 +65,6 @@ class KVConnectorModelRunnerMixin:
         return None, None
 
     @staticmethod
-    def merge_kv_connector_output(
-        kv_connector_output: Optional[KVConnectorOutput],
-        intermediate_tensors: Optional[IntermediateTensors]
-    ) -> KVConnectorOutput:
-        output = KVConnectorOutput()
-        if kv_connector_output is not None:
-            output.add_finished(kv_connector_output.cu_finished_sending,
-                                kv_connector_output.cu_finished_recving)
-        if (intermediate_tensors is not None
-                and hasattr(intermediate_tensors, "kv_connector_output")
-                and intermediate_tensors.kv_connector_output is not None):
-            output.add_finished(
-                intermediate_tensors.kv_connector_output.cu_finished_sending,
-                intermediate_tensors.kv_connector_output.cu_finished_recving)
-
-        return output
-
-    @staticmethod
     def kv_connector_no_forward(
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors],
@@ -92,12 +74,9 @@ class KVConnectorModelRunnerMixin:
         with set_forward_context(
                 None, vllm_config
         ), KVConnectorModelRunnerMixin._get_kv_connector_output(
-                scheduler_output, wait_for_save=False) as kv_connector_output:
+                scheduler_output, intermediate_tensors, wait_for_save=False) \
+                    as kv_connector_output:
             pass
-
-        kv_connector_output = \
-            KVConnectorModelRunnerMixin.merge_kv_connector_output(
-            kv_connector_output, intermediate_tensors)
 
         if get_pp_group().is_last_rank:
             if (not kv_connector_output.cu_finished_sending
@@ -119,10 +98,12 @@ class KVConnectorModelRunnerMixin:
 
     @staticmethod
     def maybe_get_kv_connector_output(
-        scheduler_output: "SchedulerOutput"
+        scheduler_output: "SchedulerOutput",
+        intermediate_tensors: Optional[IntermediateTensors] = None
     ) -> AbstractContextManager[Optional[KVConnectorOutput]]:
         return KVConnectorModelRunnerMixin._get_kv_connector_output(
-            scheduler_output) if has_kv_transfer_group() else nullcontext()
+            scheduler_output, intermediate_tensors) \
+                if has_kv_transfer_group() else nullcontext()
 
     # This context manager must be used within an active forward context.
     # It encapsulates the entire KV connector lifecycle within execute_model
@@ -130,6 +111,7 @@ class KVConnectorModelRunnerMixin:
     @contextmanager
     def _get_kv_connector_output(
         scheduler_output: "SchedulerOutput",
+        intermediate_tensors: Optional[IntermediateTensors] = None,
         wait_for_save: bool = True
     ) -> Generator[KVConnectorOutput, None, None]:
         output = KVConnectorOutput()
@@ -146,6 +128,13 @@ class KVConnectorModelRunnerMixin:
         # Do this here to save a collective_rpc.
         kv_connector.start_load_kv(get_forward_context())
         try:
+            if (intermediate_tensors is not None
+                    and hasattr(intermediate_tensors, "kv_connector_output")
+                    and intermediate_tensors.kv_connector_output is not None):
+                output.add_finished(
+                    intermediate_tensors.kv_connector_output.
+                    cu_finished_sending, intermediate_tensors.
+                    kv_connector_output.cu_finished_recving)
             yield output
         finally:
             if wait_for_save:
