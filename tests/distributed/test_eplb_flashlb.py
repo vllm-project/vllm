@@ -225,7 +225,8 @@ def test_device_compatibility(device):
     assert logcnt.shape == (1, 4)
 
 
-def generate_expert_map(global_expert_num, world_size, num_moe_layers, num_of_redundant_expert=0):
+def generate_expert_map(global_expert_num, world_size, num_moe_layers,
+                        num_of_redundant_expert=0):
     base_experts = global_expert_num // world_size
     redundant_experts = num_of_redundant_expert // world_size
     remainder = global_expert_num % world_size
@@ -236,7 +237,8 @@ def generate_expert_map(global_expert_num, world_size, num_moe_layers, num_of_re
         dtype=torch.int32
     )
     for device_id in range(world_size):
-        local_ids = torch.arange(base_experts + redundant_experts, dtype=torch.int32)
+        local_ids = torch.arange(base_experts + redundant_experts,
+                                 dtype=torch.int32)
         expand_ids = torch.arange(
             base_experts + redundant_experts,
             local_num_experts,
@@ -246,8 +248,9 @@ def generate_expert_map(global_expert_num, world_size, num_moe_layers, num_of_re
         if device_id < world_size - 1:
             start = device_id * base_experts
             end = start + base_experts + redundant_experts
-            expert_map_tensor[:, device_id, start:end] \
-                = local_ids.unsqueeze(0).expand(num_moe_layers, -1)
+            expert_map_tensor[:, device_id, start:end] = (
+                local_ids.unsqueeze(0).expand(num_moe_layers, -1)
+            )
         else:
             if remainder > 0:
                 slice_end = -remainder
@@ -255,20 +258,24 @@ def generate_expert_map(global_expert_num, world_size, num_moe_layers, num_of_re
             else:
                 slice_start = -(base_experts + redundant_experts)
                 slice_end = None
-            expert_map_tensor[:, device_id, slice_start:slice_end] \
-                = local_ids.unsqueeze(0).expand(num_moe_layers, -1)
+            expert_map_tensor[:, device_id, slice_start:slice_end] = (
+                local_ids.unsqueeze(0).expand(num_moe_layers, -1)
+            )
 
         if remainder > 0:
-            expert_map_tensor[:, device_id, -remainder:] \
-                = expand_ids.unsqueeze(0).expand(num_moe_layers, -1)
+            expert_map_tensor[:, device_id, -remainder:] = (
+                expand_ids.unsqueeze(0).expand(num_moe_layers, -1)
+            )
     expert_map = []
     for layer_id in range(num_moe_layers):
         layer_expert = []
         for device_id in range(world_size):
-            valid_global_experts = torch.where(expert_map_tensor[layer_id, device_id] != -1)[0]
+            valid_global_experts = torch.where(
+                expert_map_tensor[layer_id, device_id] != -1
+            )[0]
             layer_expert.append(valid_global_experts.tolist())
         expert_map.append(layer_expert)
-    return torch.tensor(expert_map,dtype=int)
+    return torch.tensor(expert_map, dtype=int)
     
 def test_experts_exchange():
     """Test experts exchange"""
@@ -281,43 +288,44 @@ def test_experts_exchange():
     num_gpus = 32
     num_expert = 256
     num_replicas = 288
-    replicas_per_gpu = num_replicas//num_gpus
-    
-    weight = torch.randint(1, 1000, (num_layers,num_expert))
+    replicas_per_gpu = num_replicas // num_gpus
+
+    weight = torch.randint(1, 1000, (num_layers, num_expert))
     expert_map = generate_expert_map(
-        global_expert_num = num_expert,    
-        world_size = num_gpus,            
-        num_moe_layers = num_layers,        
-        num_of_redundant_expert = num_replicas-num_expert
-        )
+        global_expert_num=num_expert,
+        world_size=num_gpus,
+        num_moe_layers=num_layers,
+        num_of_redundant_expert=num_replicas - num_expert
+    )
     policy = FlashLB()
-    phy2log, log2phy, logcnt = policy.rebalance_experts(weight, num_replicas,
-                                                        num_groups, num_nodes,
-                                                        num_gpus, expert_map)
-    new_placement = phy2log.reshape((num_layers,num_gpus,replicas_per_gpu))
+    phy2log, log2phy, logcnt = policy.rebalance_experts(
+        weight, num_replicas, num_groups, num_nodes, num_gpus, expert_map
+    )
+    new_placement = phy2log.reshape((num_layers, num_gpus, replicas_per_gpu))
     for layer_id in range(num_layers):
         num_old_expert = torch.unique(expert_map[layer_id]).numel()
         num_new_expert = torch.unique(new_placement[layer_id]).numel()
-        assert num_new_expert == num_old_expert,\
-              f"There exists expert not placed on any rank in layer {layer_id}"
-        
+        assert num_new_expert == num_old_expert, (
+            f"There exists expert not placed on any rank in layer {layer_id}"
+        )
+
         for gpu_id in range(num_gpus):
             new_placement_check = new_placement[layer_id][gpu_id]
             old_placement_check = expert_map[layer_id][gpu_id]
 
-            # check if same logical experts are placed on the same NPU
+            # Check if same logical experts are placed on the same NPU
             new_unique = torch.unique(new_placement_check)
-            assert new_placement_check.numel() == new_unique.numel(),(
+            assert new_placement_check.numel() == new_unique.numel(), (
                 f"Replicated experts are placed on the same NPU, "
                 f"expert placement on layer {layer_id}, rank {gpu_id} is invalid"
             )
-                
 
-            # check if there is any experts movement inside one NPU
-            expert_not_move = torch.isin(new_placement_check, old_placement_check)
+            # Check if there is any experts movement inside one NPU
+            expert_not_move = torch.isin(new_placement_check,
+                                         old_placement_check)
             new_retained = new_placement_check[expert_not_move]
             old_retained = old_placement_check[expert_not_move]
-            assert torch.equal(new_retained, old_retained),(
+            assert torch.equal(new_retained, old_retained), (
                 f"There exists expert movement inside NPU, "
                 f"expert placement on layer {layer_id}, rank {gpu_id} is invalid"
-            )    
+            )
