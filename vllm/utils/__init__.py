@@ -1715,6 +1715,8 @@ class SortedHelpFormatter(ArgumentDefaultsHelpFormatter,
                           RawDescriptionHelpFormatter):
     """SortedHelpFormatter that sorts arguments by their option strings."""
 
+    skip_arguments: bool = True
+
     def _split_lines(self, text, width):
         """
         1. Sentences split across lines have their single newlines removed.
@@ -1729,6 +1731,8 @@ class SortedHelpFormatter(ArgumentDefaultsHelpFormatter,
         return sum([textwrap.wrap(line, width) for line in lines], [])
 
     def add_arguments(self, actions):
+        if self.skip_arguments:
+            return
         actions = sorted(actions, key=lambda x: x.option_strings)
         super().add_arguments(actions)
 
