@@ -106,8 +106,11 @@ from vllm.utils import (Device, FlexibleArgumentParser, decorate_logs,
 =======
                         get_open_zmq_ipc_path, is_valid_ipv6_address,
                         set_ulimit)
+<<<<<<< HEAD
 from vllm.v1.engine.exceptions import EngineDeadError
 >>>>>>> c268f953a (Improve health check functionality)
+=======
+>>>>>>> 188107ac2 (return 503 for /health when Exception occurs)
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -356,8 +359,11 @@ def engine_client(request: Request) -> EngineClient:
 @router.get("/health", response_class=Response)
 async def health(raw_request: Request) -> Response:
     """Health check."""
-    await engine_client(raw_request).check_health()
-    return Response(status_code=200)
+    try:
+        await engine_client(raw_request).check_health()
+        return Response(status_code=200)
+    except Exception:
+        return Response(status_code=503)
 
 
 @router.get("/load")
@@ -1530,15 +1536,6 @@ def build_app(args: Namespace) -> FastAPI:
                                             code=HTTPStatus.BAD_REQUEST))
         return JSONResponse(err.model_dump(),
                             status_code=HTTPStatus.BAD_REQUEST)
-
-    @app.exception_handler(EngineDeadError)
-    async def engine_dead_exception_handler(_: Request, exc: EngineDeadError):
-        err = ErrorResponse(error=ErrorInfo(
-            message="Service temporarily unavailable due to engine failure",
-            type=HTTPStatus.SERVICE_UNAVAILABLE.phrase,
-            code=HTTPStatus.SERVICE_UNAVAILABLE))
-        return JSONResponse(err.model_dump(),
-                            status_code=HTTPStatus.SERVICE_UNAVAILABLE)
 
     # Ensure --api-key option from CLI takes precedence over VLLM_API_KEY
     if tokens := [key for key in (args.api_key or [envs.VLLM_API_KEY]) if key]:
