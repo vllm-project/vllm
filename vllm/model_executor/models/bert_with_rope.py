@@ -637,14 +637,14 @@ class GteNewForSequenceClassification(nn.Module, SupportsCrossEncoding):
         self.new = GteNewModel(vllm_config=vllm_config,
                                prefix=prefix,
                                add_pooling_layer=True)
-        self.classifier = RowParallelLinear(config.hidden_size,
-                                            config.num_labels,
-                                            input_is_parallel=False,
-                                            bias=True,
-                                            quant_config=quant_config,
-                                            prefix=maybe_prefix(
-                                                prefix, "classifier"),
-                                            return_bias=False)
+        self.classifier = ReplicatedLinear(
+            config.hidden_size,
+            config.num_labels,
+            bias=True,
+            quant_config=quant_config,
+            params_dtype=vllm_config.model_config.head_dtype,
+            prefix=maybe_prefix(prefix, "classifier"),
+            return_bias=False)
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None

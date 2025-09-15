@@ -32,11 +32,14 @@ def glm4_1v_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
     # Ensure video metadata is included
     if "video" in mm_data:
         video = mm_data["video"]
+        num_frames = len(video)
         mm_data["video"] = (video, {
-            "total_num_frames": len(video),
-            "fps": len(video),
+            "total_num_frames": num_frames,
+            "fps": num_frames,
             "duration": 1,
-            "video_backend": "opencv"
+            "frames_indices": [i for i in range(num_frames)],
+            "video_backend": "opencv",
+            "do_sample_frames": True,
         })
     return mm_data
 
@@ -66,7 +69,9 @@ def _test_processing_correctness(
         hf_overrides=model_info.hf_overrides,
         # Ensure that the cache can fit all of the data
         mm_processor_cache_gb=2048,
-    )
+        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        enforce_eager=model_info.enforce_eager,
+        dtype=model_info.dtype)
 
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
     factories = MULTIMODAL_REGISTRY._processor_factories[model_cls]
@@ -293,6 +298,7 @@ def _test_processing_correctness_one(
     "OpenGVLab/InternVL3_5-GPT-OSS-20B-A4B-Preview",
     "OpenGVLab/InternVL3_5-30B-A3B",
     "Kwai-Keye/Keye-VL-8B-Preview",
+    "Kwai-Keye/Keye-VL-1_5-8B",
     "moonshotai/Kimi-VL-A3B-Instruct",
     "meta-llama/Llama-4-Scout-17B-16E-Instruct",
     "llava-hf/llava-1.5-7b-hf",
@@ -301,6 +307,7 @@ def _test_processing_correctness_one(
     "llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
     "meta-llama/Llama-3.2-11B-Vision-Instruct",
     "TIGER-Lab/Mantis-8B-siglip-llama3",
+    "mispeech/midashenglm-7b",
     "openbmb/MiniCPM-Llama3-V-2_5",
     "openbmb/MiniCPM-o-2_6",
     "openbmb/MiniCPM-V-2_6",
