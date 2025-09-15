@@ -84,8 +84,7 @@ class OpenAIServingCompletion(OpenAIServing):
         self,
         request: CompletionRequest,
         raw_request: Optional[Request] = None,
-    ) -> Union[AsyncGenerator[str, None], tuple[
-            CompletionResponse, Optional[InbandEngineStats]], ErrorResponse]:
+    ) -> Union[AsyncGenerator[str, None], CompletionResponse, ErrorResponse]:
         """Completion API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/completions/create
@@ -500,7 +499,7 @@ class OpenAIServingCompletion(OpenAIServing):
         model_name: str,
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
-    ) -> tuple[CompletionResponse, Optional[InbandEngineStats]]:
+    ) -> CompletionResponse:
         choices: list[CompletionResponseChoice] = []
         num_prompt_tokens = 0
         num_generated_tokens = 0

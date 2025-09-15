@@ -47,6 +47,7 @@ from vllm.logprobs import Logprob
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
                                   RequestOutputKind, SamplingParams)
+from vllm.sequence import InbandEngineStats
 from vllm.utils import random_uuid, resolve_obj_by_qualname
 
 logger = init_logger(__name__)
@@ -1592,6 +1593,8 @@ class CompletionResponse(OpenAIBaseModel):
     # vLLM-specific fields that are not in OpenAI spec
     kv_transfer_params: Optional[dict[str, Any]] = Field(
         default=None, description="KVTransfer parameters.")
+    stats: Optional[InbandEngineStats] = Field(
+        default=None, description="vLLM-specific engine stats.")
 
 
 class CompletionResponseStreamChoice(OpenAIBaseModel):
@@ -1800,10 +1803,10 @@ class ChatCompletionResponse(OpenAIBaseModel):
     # vLLM-specific fields that are not in OpenAI spec
     prompt_logprobs: Optional[list[Optional[dict[int, Logprob]]]] = None
     prompt_token_ids: Optional[list[int]] = None
-    stats: Optional[dict[str, Any]] = Field(
-        default=None, description="vLLM-specific engine stats.")
     kv_transfer_params: Optional[dict[str, Any]] = Field(
         default=None, description="KVTransfer parameters.")
+    stats: Optional[InbandEngineStats] = Field(
+        default=None, description="vLLM-specific engine stats.")
 
 
 class DeltaMessage(OpenAIBaseModel):

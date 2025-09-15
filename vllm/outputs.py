@@ -94,6 +94,7 @@ class RequestOutput:
         outputs: The output sequences of the request.
         finished: Whether the whole request is finished.
         metrics: Metrics associated with the request.
+        inband_engine_stats: Engine stats collected inband with the request.
         lora_request: The LoRA request that was used to generate the output.
         encoder_prompt: The encoder prompt string of the request.
                         None if decoder-only.
