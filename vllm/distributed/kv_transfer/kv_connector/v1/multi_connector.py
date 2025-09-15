@@ -10,7 +10,6 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.kv_transfer import KVTransferConfig
-from vllm.distributed.kv_events import KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -23,6 +22,7 @@ from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
+    from vllm.distributed.kv_events import KVCacheEvent
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
@@ -266,7 +266,7 @@ class MultiConnector(KVConnectorBase_V1):
 
         return async_saves > 0, kv_txfer_params
 
-    def take_events(self) -> Iterable[KVCacheEvent]:
+    def take_events(self) -> Iterable["KVCacheEvent"]:
         for c in self._connectors:
             yield from c.take_events()
 

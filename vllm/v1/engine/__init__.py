@@ -115,7 +115,6 @@ class EngineCoreOutput(
     kv_transfer_params: Optional[dict[str, Any]] = None
 
     trace_headers: Optional[Mapping[str, str]] = None
-
     # The number of tokens with prefix cache hits.
     num_cached_tokens: int = 0
 
