@@ -543,11 +543,7 @@ class FlexAttentionMetadata:
         self.doc_ids = _offsets_to_doc_ids_tensor(self.query_start_loc)
         self.num_blocks = self.total_cache_tokens // self.block_size
 
-        if self.causal:
-            self.mask_mod = self.get_causal_mask_mod()
-        else:
-            self.mask_mod = self.get_bidirectional_mask_mod()
-
+        self.mask_mod = self.get_mask_mod()
         self.transformed_score_mod = self.get_transformed_score_mod()
 
         if self.direct_build and self.causal:
