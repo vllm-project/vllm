@@ -1721,7 +1721,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                        num_tokens: int) -> tuple[int, Optional[torch.Tensor]]:
         """
         Determines the total number of tokens that each rank will run.
-        All ranks will be padded out so that the run with the same number
+        All ranks will be padded out so that they run with the same number
         of tokens
 
         Returns: tuple[
