@@ -14,6 +14,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from .utils import maybe_prefix
 
 
 class ResidualBlock(nn.Module):
@@ -71,6 +72,7 @@ class Medusa(nn.Module):
                 config.hidden_size,
                 org_num_embeddings=self.truncated_vocab_size,
                 padding_size=DEFAULT_VOCAB_PADDING_SIZE,
+                prefix=maybe_prefix(prefix, "lm_head"),
             )
             self.lm_heads = [
                 self.lm_head for _ in range(self.config.num_heads)
