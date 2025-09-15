@@ -63,8 +63,13 @@ class TestBackend:
     @with_pattern_match_debug
     def post_pass(self, graph: fx.Graph):
         self.graph_pre_pass = deepcopy(graph)
+
+        VllmInductorPass.dump_prefix = 0
         for pass_ in self.custom_passes:
             pass_(graph)
+            VllmInductorPass.dump_prefix += 1
+
+        VllmInductorPass.dump_prefix = None
 
         self.graph_post_pass = deepcopy(graph)
         # assign by reference, will reflect the final state of the graph
