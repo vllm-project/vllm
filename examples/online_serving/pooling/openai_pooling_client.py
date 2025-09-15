@@ -4,7 +4,9 @@
 Example online usage of Pooling API.
 
 Run `vllm serve <model> --runner pooling`
-to start up the server in vLLM.
+to start up the server in vLLM. e.g.
+
+vllm serve internlm/internlm2-1_8b-reward --trust-remote-code
 """
 
 import argparse
@@ -23,7 +25,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--model", type=str, default="jason9693/Qwen2.5-1.5B-apeach")
+    parser.add_argument("--model", type=str, default="internlm/internlm2-1_8b-reward")
 
     return parser.parse_args()
 
