@@ -292,7 +292,7 @@ class LLM:
         else:
             supported_tasks = self.llm_engine.model_config.supported_tasks
 
-        logger.info("Supported_tasks: %s", supported_tasks)
+        logger.debug_once("Supported_tasks: %s", supported_tasks)
 
         self.supported_tasks = supported_tasks
 

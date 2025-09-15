@@ -27,9 +27,9 @@ class RunBatchSubcommand(CLISubcommand):
     def cmd(args: argparse.Namespace) -> None:
         from vllm.entrypoints.openai.run_batch import main as run_batch_main
 
-        logger.info("vLLM batch processing API version %s",
-                    importlib.metadata.version("vllm"))
-        logger.info("args: %s", args)
+        logger.debug_once("vLLM batch processing API version %s",
+                          importlib.metadata.version("vllm"))
+        logger.debug("args: %s", args)
 
         # Start the Prometheus metrics server.
         # LLMEngine uses the Prometheus client
@@ -37,10 +37,10 @@ class RunBatchSubcommand(CLISubcommand):
         if args.enable_metrics:
             from prometheus_client import start_http_server
 
-            logger.info("Prometheus metrics enabled")
+            logger.debug("Prometheus metrics enabled")
             start_http_server(port=args.port, addr=args.url)
         else:
-            logger.info("Prometheus metrics disabled")
+            logger.debug("Prometheus metrics disabled")
 
         asyncio.run(run_batch_main(args))
 
