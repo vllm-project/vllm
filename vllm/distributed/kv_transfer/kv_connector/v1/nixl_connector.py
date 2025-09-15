@@ -24,8 +24,9 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp, KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.parallel_state import (
-    get_pipeline_model_parallel_rank, get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size, get_tp_group)
+    get_pipeline_model_parallel_rank, get_pipeline_model_parallel_world_size,
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
+    get_tp_group)
 from vllm.distributed.utils import divide
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
@@ -458,8 +459,10 @@ class NixlConnectorWorker:
         # Metadata.
         self.engine_id: EngineId = engine_id
         self.tp_rank = get_tensor_model_parallel_rank()
-        self.pp_rank = get_pipeline_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
+        self.pp_rank = get_pipeline_model_parallel_rank()
+        self.pp_size = get_pipeline_model_parallel_world_size()
+
         self.port_offset = self.pp_rank * self.tp_size + self.tp_rank
         self.tp_group = get_tp_group()
         self.num_blocks = 0
@@ -557,6 +560,7 @@ class NixlConnectorWorker:
         logger.debug("Detected kv cache layout %s", self.kv_cache_layout)
 
         self._tp_size: dict[EngineId, int] = {self.engine_id: self.tp_size}
+        self._pp_size: dict[EngineId, int] = {self.engine_id: self.pp_size}
         self.device_id = self._get_current_device_id()
         # With heterogeneous TP, P must wait for all assigned D TP workers to
         # finish reading before safely freeing the blocks.
@@ -632,7 +636,12 @@ class NixlConnectorWorker:
         # pull from. With homogeneous TP it happens to be the same rank_i.
         tp_ratio = self._tp_size[self.engine_id] // remote_tp_size
         p_remote_tp_rank = self.tp_rank // tp_ratio
-        p_remote_pp_rank = self.pp_rank  # only support homogeneous PP
+        if self._pp_size[self.engine_id] != remote_pp_size:
+            raise RuntimeError(
+                f"Heterogeneous PP is not supported yet. Remote PP size"
+                f" {remote_pp_size} does not match local PP size"
+                f" {self._pp_size[self.engine_id]}")
+        p_remote_pp_rank = self.pp_rank
         path = make_zmq_path(
             "tcp", host,
             port + remote_tp_size * p_remote_pp_rank + p_remote_tp_rank)
@@ -660,7 +669,8 @@ class NixlConnectorWorker:
             remote_agent_name = self.add_remote_agent(metadata,
                                                       p_remote_tp_rank,
                                                       remote_tp_size,
-                                                      p_remote_pp_rank)
+                                                      p_remote_pp_rank,
+                                                      remote_pp_size)
             setup_agent_time = time.perf_counter()
             logger.debug("NIXL handshake: add agent took: %s",
                          setup_agent_time - got_metadata_time)
@@ -889,7 +899,8 @@ class NixlConnectorWorker:
                          nixl_agent_meta: NixlAgentMetadata,
                          remote_tp_rank: int = 0,
                          remote_tp_size: int = 1,
-                         remote_pp_rank: int = 0) -> str:
+                         remote_pp_rank: int = 0,
+                         remote_pp_size: int = 1) -> str:
         """
         Add the remote NIXL agent and prepare the descriptors for reading cache
         blocks from remote.
@@ -938,6 +949,15 @@ class NixlConnectorWorker:
             self._tp_size[engine_id] = remote_tp_size
         else:
             assert self._tp_size[engine_id] == remote_tp_size
+        if engine_id not in self._pp_size:
+            self._pp_size[engine_id] = remote_pp_size
+        else:
+            assert self._pp_size[engine_id] == remote_pp_size
+        if remote_pp_size != self.pp_size:
+            raise RuntimeError(
+                "Heterogeneous PP is not supported yet. Remote PP size"
+                f" {remote_pp_size} does not match local PP size"
+                f" {self.pp_size}")
         # TODO We may eventually want to skip enforcing the same attn backend.
         assert nixl_agent_meta.attn_backend_name == self.backend_name
 
@@ -1216,7 +1236,12 @@ class NixlConnectorWorker:
         num_local_blocks = len(local_block_ids)
         if num_local_blocks == 0:
             remote_rank = self.tp_rank // tp_ratio
-            remote_pp_rank = self.pp_rank  # only support homogeneous PP now
+            if self._pp_size[dst_engine_id] != self.pp_size:
+                raise RuntimeError(
+                    "Heterogeneous PP is not supported yet. "
+                    f"Remote PP size {self._pp_size[dst_engine_id]} does not "
+                    f"match local PP size {self.pp_size}")
+            remote_pp_rank = self.pp_rank
             agent_name = self._remote_agents[dst_engine_id][remote_pp_rank][
                 remote_rank]
             self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_id)
