@@ -418,7 +418,8 @@ def test_full_cuda_graph(
 @pytest.mark.parametrize("model", FP32_STATE_MODELS)
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
-@pytest.mark.parametrize("cache_dtype_param", ["mamba_ssm_cache_dtype", "mamba_cache_dtype"])
+@pytest.mark.parametrize("cache_dtype_param",
+                         ["mamba_ssm_cache_dtype", "mamba_cache_dtype"])
 def test_fp32_cache_state(
     hf_runner,
     vllm_runner,

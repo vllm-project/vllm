@@ -859,6 +859,9 @@ def causal_conv1d_update(
         activation = "silu" if activation is True else None
     elif activation is not None:
         assert activation in ["silu", "swish"]
+
+    original_x_dtype = x.dtype
+    x = x.to(conv_state.dtype)
     unsqueeze = x.dim() == 2
     if unsqueeze:
         # make it (batch, dim, seqlen) with seqlen == 1
@@ -945,4 +948,4 @@ def causal_conv1d_update(
     )
     if unsqueeze:
         out = out.squeeze(-1)
-    return out
+    return out.to(original_x_dtype)
