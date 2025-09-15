@@ -293,12 +293,6 @@ class GDNAttentionMetadataBuilder(
         """
         m = common_attn_metadata
 
-        assert (m.num_reqs * (self.num_spec + 1) <= m.num_actual_tokens
-                and ((m.num_reqs + 1) * (self.num_spec + 1)
-                     >= m.num_actual_tokens)), \
-            "GDN only supports decode-only full CUDAGraph capture. " \
-            "Make sure all cudagraph capture sizes <= max_num_seq."
-
         num_accepted_tokens = torch.full((m.num_reqs, ),
                                          m.max_query_len,
                                          dtype=torch.int32,
