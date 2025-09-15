@@ -1668,10 +1668,6 @@ class ModelConfig:
     @property
     def is_encoder_decoder(self) -> bool:
         """Extract the HF encoder/decoder model flag."""
-        """
-        For Mllama, VLLM overrides HF's is_encoder_decoder flag and sets it to
-        True to enable cross-attention
-        """
         return is_encoder_decoder(self.hf_config)
 
     @property
