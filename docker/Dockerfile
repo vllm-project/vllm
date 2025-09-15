@@ -8,10 +8,6 @@
 ARG CUDA_VERSION=12.8.1
 ARG PYTHON_VERSION=3.12
 
-ARG GDRCOPY_CUDA_VERSION=12.8
-# Keep in line with FINAL_BASE_IMAGE
-ARG GDRCOPY_OS_VERSION=Ubuntu22.04
-
 # By parameterizing the base images, we allow third-party to use their own
 # base images. One use case is hermetic builds with base images stored in
 # private registries that use a different repository naming conventions.
@@ -284,6 +280,10 @@ ARG INSTALL_KV_CONNECTORS=false
 WORKDIR /vllm-workspace
 ENV DEBIAN_FRONTEND=noninteractive
 ARG TARGETPLATFORM
+
+ARG GDRCOPY_CUDA_VERSION=12.8
+# Keep in line with FINAL_BASE_IMAGE
+ARG GDRCOPY_OS_VERSION=Ubuntu22.04
 
 SHELL ["/bin/bash", "-c"]
 
