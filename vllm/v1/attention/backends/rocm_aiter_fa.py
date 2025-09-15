@@ -200,7 +200,9 @@ if current_platform.is_rocm():
         block_table: torch.Tensor,
         k_scale: torch.Tensor,
         v_scale: torch.Tensor,
-        total_tokens: int = 0,
+        total_tokens: int,
+        k_values: Optional[torch.Tensor] = None,
+        v_values: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         return torch.empty(q.shape[0],
                            q.shape[1],
@@ -262,6 +264,7 @@ class AiterFlashAttentionMetadataBuilder(
         self.num_heads_kv = self.model_config.get_num_kv_heads(
             self.parallel_config)
         self.headdim = self.model_config.get_head_size()
+        self.workspace_buffer = None
 
     def build(self,
               common_prefix_len: int,
@@ -286,7 +289,6 @@ class AiterFlashAttentionMetadataBuilder(
         empty_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
         k_buffer = None
         v_buffer = None
-        workspace_buffer = None
         cu_seq_lens = None
         if max_query_len > 1:
             required_memory = num_actual_kv_tokens * \
@@ -316,7 +318,9 @@ class AiterFlashAttentionMetadataBuilder(
                              dtype=cu_seq_lens.dtype,
                              out=cu_seq_lens[1:])
 
-        workspace_buffer = torch.empty(
+        # FIXME(zejun): Here is fixing a hip illegal memory access bug issue
+        # by assigning the workspace_buffer to self.workspace_buffer.
+        self.workspace_buffer = torch.empty(
             (num_seqs * self.num_heads_q * max_num_partitions * self.headdim) *
             nbytes_per_qo_elem + 2 *
             (num_seqs * self.num_heads_q * max_num_partitions) * 4,
@@ -337,7 +341,7 @@ class AiterFlashAttentionMetadataBuilder(
             common_prefix_len=common_prefix_len,
             k_buffer=k_buffer,
             v_buffer=v_buffer,
-            workspace_buffer=workspace_buffer,
+            workspace_buffer=self.workspace_buffer,
             cu_seq_lens=cu_seq_lens,
         )
         return attn_metadata
