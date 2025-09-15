@@ -202,18 +202,18 @@ For production deployments requiring strict SLA guarantees for time-to-first-tok
 
 1. **Install gdrcopy/ucx/nixl**:
 
-```sh
-# Installs gdrcopy dependency
-RUN curl https://developer.download.nvidia.com/compute/redist/gdrcopy/CUDA%2012.8/ubuntu24_04/x64/libgdrapi_2.5.1-1_amd64.Ubuntu24_04.deb --output libgdrapi_2.5.1-1_amd64.Ubuntu24_04.deb \
-    && apt install ./libgdrapi_2.5.1-1_amd64.Ubuntu24_04.deb \
-    && rm libgdrapi_2.5.1-1_amd64.Ubuntu24_04.deb
-# Installs nixl/ucx
-uv pip install -r requirements/kv_connectors.txt
-```
+    ```sh
+    # Installs gdrcopy dependency
+    RUN curl https://developer.download.nvidia.com/compute/redist/gdrcopy/CUDA%2012.8/ubuntu24_04/x64/libgdrapi_2.5.1-1_amd64.Ubuntu24_04.deb --output libgdrapi_2.5.1-1_amd64.Ubuntu24_04.deb \
+        && apt install ./libgdrapi_2.5.1-1_amd64.Ubuntu24_04.deb \
+        && rm libgdrapi_2.5.1-1_amd64.Ubuntu24_04.deb
+    # Installs nixl/ucx
+    uv pip install -r requirements/kv_connectors.txt
+    ```
 
-2. **Configure Both Instances**: Add this flag to both prefill and decode instances `--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}`
+3. **Configure Both Instances**: Add this flag to both prefill and decode instances `--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}`
 
-3. **Client Orchestration**: Use the client-side script below to coordinate prefill/decode operations. We are actively working on routing solutions.
+4. **Client Orchestration**: Use the client-side script below to coordinate prefill/decode operations. We are actively working on routing solutions.
 
 ### Client Orchestration Example
 
