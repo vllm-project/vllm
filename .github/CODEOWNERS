@@ -102,3 +102,6 @@ mkdocs.yaml @hmellor
 /vllm/platforms/tpu.py @NickLucche
 /vllm/v1/sample/tpu @NickLucche
 /vllm/tests/v1/tpu @NickLucche
+
+# KVConnector installation files
+/requirements/kv_connectors.txt @NickLucche
