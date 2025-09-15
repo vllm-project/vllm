@@ -701,14 +701,14 @@ class MambaMixer2(MambaBase, CustomOp):
                 def copy_to_conv_state(conv_state_block_idx, x, x_offset, x_end,
                                          query_start_loc):
                     conv_state[conv_state_block_idx, :, 0] = torch.transpose(
-                        x[:, query_start_loc + x_offset - 3:query_start_loc +
-                          x_end:mamba_block_size], 1, 0)
+                        x[:, query_start_loc + x_offset - 3:
+                            x_end:mamba_block_size], 1, 0)
                     conv_state[conv_state_block_idx, :, 1] = torch.transpose(
-                        x[:, query_start_loc + x_offset - 2:query_start_loc +
-                          x_end:mamba_block_size], 1, 0)
+                        x[:, query_start_loc + x_offset - 2:
+                            x_end:mamba_block_size], 1, 0)
                     conv_state[conv_state_block_idx, :, 2] = torch.transpose(
-                        x[:, query_start_loc + x_offset - 1:query_start_loc +
-                          x_end:mamba_block_size], 1, 0)
+                        x[:, query_start_loc + x_offset - 1:
+                            x_end:mamba_block_size], 1, 0)
 
                 # initial state:
                 #   state_indices_tensor_p[<REQ>, last_computed_idx_p[<REQ>]]
