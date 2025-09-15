@@ -514,8 +514,7 @@ class OpenAIServingChat(OpenAIServing):
 
         # Only one of these will be used, thus previous_texts and
         # all_previous_token_ids will not be used twice in the same iteration.
-        if tool_choice_auto or self.reasoning_parser or \
-                request.tool_choice == "required":
+        if tool_choice_auto or self.reasoning_parser:
             # These are only required in "auto" tool choice case
             all_previous_token_ids = [[]] * num_choices
             # For reasoning parser and tool call all enabled
@@ -680,8 +679,7 @@ class OpenAIServingChat(OpenAIServing):
                     delta_message: Optional[DeltaMessage]
 
                     # just update previous_texts and previous_token_ids
-                    if (tool_choice_auto or self.reasoning_parser
-                            or request.tool_choice == "required"):
+                    if (tool_choice_auto or self.reasoning_parser):
                         assert previous_texts is not None
                         assert all_previous_token_ids is not None
                         previous_text = previous_texts[i]
@@ -964,8 +962,7 @@ class OpenAIServingChat(OpenAIServing):
                         delta_message = DeltaMessage(content=delta_text)
 
                     # update the previous values for the next iteration
-                    if ((tool_choice_auto or self.reasoning_parser
-                         or request.tool_choice == "required")
+                    if ((tool_choice_auto or self.reasoning_parser)
                             and not self.use_harmony):
                         assert previous_texts is not None
                         assert all_previous_token_ids is not None
