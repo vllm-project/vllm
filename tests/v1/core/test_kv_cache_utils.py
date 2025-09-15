@@ -243,6 +243,18 @@ def test_free_kv_cache_block_queue_append_n():
     assert blocks[3].next_free_block is queue.fake_free_list_tail
     assert queue.fake_free_list_tail.prev_free_block is blocks[3]
 
+    # Create an empty FreeKVCacheBlockQueue
+    invalid_queue = FreeKVCacheBlockQueue([])
+    # set prev_free_block to None and this will cause assertation in append_n
+    invalid_queue.fake_free_list_tail.prev_free_block = None
+    with pytest.raises(AssertionError):
+        # Append 1 block
+        # fake_head->fake_tail
+        invalid_queue.append_n(blocks[0:1])
+    assert invalid_queue.num_free_blocks == 0
+    assert (invalid_queue.fake_free_list_head.next_free_block ==
+            invalid_queue.fake_free_list_tail)
+
 
 def test_free_kv_cache_block_queue_popleft_n():
     blocks = [KVCacheBlock(block_id=i) for i in range(6)]
@@ -268,9 +280,11 @@ def test_free_kv_cache_block_queue_popleft_n():
     # Pop 0 block
     # fake_head->b1->b3->b5->b4->b0->b2->fake_tail
     assert len(queue.popleft_n(0)) == 0
+    assert queue.num_free_blocks == 6
     # Pop 1 block
     # fake_head->b3->b5->b4->b0->b2->fake_tail
     result_blocks = queue.popleft_n(1)
+    assert queue.num_free_blocks == 5
     assert len(result_blocks) == 1
     assert result_blocks[0] is blocks[1]
     for block in result_blocks:
@@ -280,6 +294,7 @@ def test_free_kv_cache_block_queue_popleft_n():
     # fake_head->b4->b0->b2->fake_tail
     result_blocks = queue.popleft_n(2)
     assert len(result_blocks) == 2
+    assert queue.num_free_blocks == 3
     assert result_blocks[0] is blocks[3]
     assert result_blocks[1] is blocks[5]
     for block in result_blocks:
@@ -289,6 +304,7 @@ def test_free_kv_cache_block_queue_popleft_n():
     # fake_head->fake_tail
     result_blocks = queue.popleft_n(3)
     assert len(result_blocks) == 3
+    assert queue.num_free_blocks == 0
     assert result_blocks[0] is blocks[4]
     assert result_blocks[1] is blocks[0]
     assert result_blocks[2] is blocks[2]
