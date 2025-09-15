@@ -6,7 +6,6 @@ import hashlib
 import json
 import pathlib
 from collections.abc import Mapping, Sequence, Set
-from dataclasses import fields
 from dataclasses import MISSING, Field, field, fields, is_dataclass
 from typing import TYPE_CHECKING, TypeVar
 
