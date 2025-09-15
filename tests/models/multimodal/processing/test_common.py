@@ -32,11 +32,14 @@ def glm4_1v_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
     # Ensure video metadata is included
     if "video" in mm_data:
         video = mm_data["video"]
+        num_frames = len(video)
         mm_data["video"] = (video, {
-            "total_num_frames": len(video),
-            "fps": len(video),
+            "total_num_frames": num_frames,
+            "fps": num_frames,
             "duration": 1,
-            "video_backend": "opencv"
+            "frames_indices": [i for i in range(num_frames)],
+            "video_backend": "opencv",
+            "do_sample_frames": True,
         })
     return mm_data
 
