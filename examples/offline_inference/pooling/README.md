@@ -1,4 +1,4 @@
-# Offline inference examples for pooling models
+# Pooling models
 
 ## Convert llm model to seq cls
 
