@@ -2141,7 +2141,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         with record_function_or_nullcontext("Sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
-        if self.speculative_config and self.speculative_config.use_eagle():
+        use_padded_batch_for_eagle = self.speculative_config and \
+            self.speculative_config.use_eagle() and \
+            not self.speculative_config.disable_padded_batch
+        if use_padded_batch_for_eagle:
             # EAGLE speculative decoding can use the GPU sampled tokens
             # as inputs, and does not need to wait for bookkeeping to finish.
             assert spec_decode_common_attn_metadata is not None
@@ -2170,7 +2173,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                        logits, hidden_states,
                                        num_scheduled_tokens)
 
-        if self.speculative_config and not self.speculative_config.use_eagle():
+        if self.speculative_config and not use_padded_batch_for_eagle:
             # ngram and other speculative decoding methods use the sampled
             # tokens on the CPU, so they are run after bookkeeping.
             assert spec_decode_common_attn_metadata is not None
@@ -2261,19 +2264,24 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 sampling_metadata=sampling_metadata,
             )
         elif self.speculative_config.use_eagle():
-            assert isinstance(sampled_token_ids, torch.Tensor)
             assert isinstance(self.drafter, EagleProposer)
 
-            next_token_ids, valid_sampled_tokens_count = \
-                self.drafter.prepare_next_token_ids(
-                    common_attn_metadata,
-                    spec_decode_metadata,
-                    sampled_token_ids,
-                    self.requests,
-                    self.input_batch,
-                    self.discard_request_indices.gpu,
-                    self.num_discarded_requests
-                )
+            if self.speculative_config.disable_padded_batch:
+                assert isinstance(sampled_token_ids, list)
+                next_token_ids = self.drafter.prepare_next_token_ids_host(
+                    sampled_token_ids, self.requests, self.input_batch,
+                    scheduler_output.num_scheduled_tokens)
+            else:
+                assert isinstance(sampled_token_ids, torch.Tensor)
+                next_token_ids, valid_sampled_tokens_count = \
+                    self.drafter.prepare_next_token_ids_device(
+                        common_attn_metadata,
+                        sampled_token_ids,
+                        self.requests,
+                        self.input_batch,
+                        self.discard_request_indices.gpu,
+                        self.num_discarded_requests
+                    )
 
             if spec_decode_metadata is None:
                 token_indices_to_sample = None
@@ -2288,20 +2296,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 else:
                     target_hidden_states = hidden_states[:num_scheduled_tokens]
             else:
-                num_rejected_tokens = self.drafter.prepare_num_rejected_tokens(
-                    spec_decode_metadata, valid_sampled_tokens_count)
-
                 if self.speculative_config.disable_padded_batch:
                     token_indices_to_sample = None
                     common_attn_metadata, token_indices =\
                         self.drafter.prepare_inputs(
                             common_attn_metadata,
-                            num_rejected_tokens.to('cpu').int())
+                            sampled_token_ids,
+                            spec_decode_metadata.num_draft_tokens)
                 else:
                     common_attn_metadata, token_indices, \
                         token_indices_to_sample =\
                         self.drafter.prepare_inputs_deferred(
-                            common_attn_metadata, num_rejected_tokens)
+                            common_attn_metadata,
+                            spec_decode_metadata,
+                            valid_sampled_tokens_count)
 
                 target_token_ids = self.input_ids.gpu[token_indices]
                 # TODO(woosuk): Support M-RoPE.

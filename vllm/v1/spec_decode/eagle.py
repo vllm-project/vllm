@@ -371,9 +371,40 @@ class EagleProposer:
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
         return draft_token_ids
 
-    def prepare_next_token_ids(self,
+    def prepare_next_token_ids_host(
+            self, sampled_token_ids: list[list[int]],
+            requests: dict[str,
+                           CachedRequestState], gpu_input_batch: InputBatch,
+            num_scheduled_tokens: dict[str, int]) -> torch.Tensor:
+        """
+        This function is used to prepare the inputs for speculative decoding.
+        It calculates the next token ids for each request based on the sampled
+        token ids from the CPU. If a request has no sampled token ids (e.g.,
+        during the initial decoding steps), it falls back to using the request
+        state to get the next token id.
+        """
+        req_ids = gpu_input_batch.req_ids
+        next_token_ids: list[int] = []
+        for i, token_ids in enumerate(sampled_token_ids):
+            if token_ids:
+                # Common case.
+                next_token_id = token_ids[-1]
+            else:
+                # Partial prefill (rare case).
+                # Get the next token id from the request state.
+                req_id = req_ids[i]
+                req_state = requests[req_id]
+                seq_len = (req_state.num_computed_tokens +
+                           num_scheduled_tokens[req_id])
+                next_token_id = req_state.get_token_id(seq_len)
+            next_token_ids.append(next_token_id)
+        next_token_ids = torch.tensor(next_token_ids,
+                                      dtype=torch.int32,
+                                      device=self.input_ids.device)
+        return next_token_ids
+
+    def prepare_next_token_ids_device(self,
                                common_attn_metadata: CommonAttentionMetadata,
-                               spec_decode_metadata: SpecDecodeMetadata,
                                sampled_token_ids: torch.Tensor,
                                requests: dict[str, CachedRequestState],
                                gpu_input_batch: InputBatch,
@@ -385,7 +416,8 @@ class EagleProposer:
         It calculates the next token ids and the number of valid sampled tokens
         for each request, considering the "discarded" requests whose next token
         is not sampled and comes from `request.get_token_id()` instead.
-        No blocking CPU operations should be introduced in this function.
+        This function must use device functions to operate on the inputs, and
+        should not introduce any blocking CPU-GPU synchronization.
         """
         # TODO(Ben): Combine this into a custom fused kernel
 
@@ -437,13 +469,18 @@ class EagleProposer:
 
         return next_token_ids, valid_sampled_tokens_count
 
-    def prepare_num_rejected_tokens(self,
-                                    spec_decode_metadata: SpecDecodeMetadata,
-                                    valid_sampled_tokens_count: torch.Tensor) \
-                                    -> torch.Tensor:
+    def prepare_inputs_deferred(self,
+                                common_attn_metadata: CommonAttentionMetadata,
+                                spec_decode_metadata: SpecDecodeMetadata,
+                                valid_sampled_tokens_count: torch.Tensor) -> \
+                    tuple[CommonAttentionMetadata, torch.Tensor, torch.Tensor]:
         """
-        Calculate the number of rejected tokens for each request based on the
-        number of valid sampled tokens and the number of draft tokens in each.
+        This function is used to prepare the inputs for speculative decoding
+        It updates the common_attn_metadata for speculative decoding,
+        but does not consider the rejected tokens. Instead, all tokens
+        are included as inputs to the speculator, with the rejected tokens
+        used as padding and filtered out later by `token_indices_to_sample`.
+        No blocking CPU operations should be introduced in this function.
         """
         num_draft_tokens_gpu = torch.cat([
             spec_decode_metadata.cu_num_draft_tokens[0:1],
@@ -456,20 +493,6 @@ class EagleProposer:
             num_draft_tokens_gpu + 1 - valid_sampled_tokens_count,
             torch.zeros_like(num_draft_tokens_gpu))
 
-        return num_rejected_tokens_gpu
-
-    def prepare_inputs_deferred(self,
-                                common_attn_metadata: CommonAttentionMetadata,
-                                num_rejected_tokens: torch.Tensor) -> \
-                    tuple[CommonAttentionMetadata, torch.Tensor, torch.Tensor]:
-        """
-        This function is used to prepare the inputs for speculative decoding
-        It updates the common_attn_metadata for speculative decoding,
-        but does not consider the rejected tokens. Instead, all tokens
-        are included as inputs to the speculator, with the rejected tokens
-        used as padding and filtered out later by `token_indices_to_sample`.
-        No blocking CPU operations should be introduced in this function.
-        """
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
 
         new_query_len_per_req = (query_start_loc_cpu[1:] -
@@ -495,7 +518,7 @@ class EagleProposer:
         )
 
         token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1 \
-            - num_rejected_tokens
+            - num_rejected_tokens_gpu
 
         return spec_common_attn_metadata, token_indices, token_indices_to_sample
 
@@ -671,8 +694,8 @@ class EagleProposer:
     def prepare_inputs(
         self,
         common_attn_metadata: CommonAttentionMetadata,
-        # [batch_size]
-        num_rejected_tokens: torch.Tensor
+        sampled_token_ids: list[list[int]],
+        num_draft_tokens: list[int],
     ) -> tuple[CommonAttentionMetadata, torch.Tensor]:
         """
         This function is used to prepare the inputs for speculative decoding.
@@ -695,6 +718,13 @@ class EagleProposer:
         #  token_indices: [0, 1, ..., q1 - n1 - 1,
         #                 q1, q1 + 1, ..., q1 + q2 - n2 - 1,
         #                 q1 + q2, q1 + q2 + 1, ..., q1 + q2 + q3 - n3 - 1]
+
+        num_rejected_tokens = [
+            n + 1 - len(sampled_token_ids[i]) if n > 0 else 0
+            for i, n in enumerate(num_draft_tokens)
+        ]
+        num_rejected_tokens = torch.tensor(num_rejected_tokens,
+                                           dtype=torch.int32)
 
         device = common_attn_metadata.query_start_loc.device
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
