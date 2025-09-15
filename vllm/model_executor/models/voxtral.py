@@ -585,11 +585,11 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
              r"language_model.model.layers.\1.mlp.down_proj"),
             (r"layers\.(\d+)\.feed_forward\.w3",
              r"language_model.model.layers.\1.mlp.up_proj"),
-            (r"mm_whisper_embeddings\.whisper_encoder\.transformer\.layers\.(\d+)\.attention.wo",
-             r"whisper_encoder.whisper_encoder.layers.\1.layers.self_attn.out_proj"
-             ),
             (r"mm_whisper_embeddings\.whisper_encoder\.transformer\.layers\.(\d+)\.attention.w(.*)",
              r"whisper_encoder.whisper_encoder.layers.\1.layers.self_attn.\2_proj"
+             ),
+            (r"mm_whisper_embeddings\.whisper_encoder\.transformer\.layers\.(\d+)\.attention.wo",
+             r"whisper_encoder.whisper_encoder.layers.\1.layers.self_attn.out_proj"
              ),
             (r"mm_whisper_embeddings\.whisper_encoder\.transformer\.layers\.(\d+)\.feed_forward.w(\d+)",
              r"whisper_encoder.whisper_encoder.layers.\1.layers.mlp.fc\2"),
