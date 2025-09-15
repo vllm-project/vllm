@@ -5,185 +5,42 @@ import httpx
 import pytest
 import pytest_asyncio
 from openai import OpenAI
-from openai_harmony import Message, Role, TextContent
+from openai_harmony import Message, Role
 
 from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "openai/gpt-oss-20b"
 
 
-def print_conversation(messages: list, title: str = "Conversation", show_all_fields: bool = False):
+def harmony_message_to_dict(message: Message) -> dict:
     """
-    Pretty print a conversation with colors and formatting.
+    Convert a harmony Message to a dictionary format suitable for vLLM API.
+    
+    This adds the required "type": "harmony" field that vLLM's field validator
+    expects for proper deserialization.
     
     Args:
-        messages: List of harmony message dicts
-        title: Title to display above the conversation
-        show_all_fields: Whether to show channel, recipient, content_type fields
+        message: OpenAI Harmony Message object
+        
+    Returns:
+        Dictionary representation with proper type field for vLLM validation
     """
-    # ANSI color codes
-    COLORS = {
-        'user': '\033[94m',      # Blue
-        'assistant': '\033[92m', # Green  
-        'system': '\033[93m',    # Yellow
-        'developer': '\033[95m', # Magenta
-        'tool': '\033[96m',      # Cyan
-        'reset': '\033[0m',      # Reset
-        'bold': '\033[1m',       # Bold
-        'dim': '\033[2m',        # Dim
-        'header': '\033[97m\033[44m',  # White on blue background
-    }
-    
-    def get_role_color(role: str) -> str:
-        return COLORS.get(role.lower(), '\033[97m')  # Default to white
-    
-    def truncate_text(text: str, max_length: int = 100) -> str:
-        if len(text) <= max_length:
-            return text
-        return text[:max_length-3] + "..."
-    
-    # Print header
-    print(f"\n{COLORS['header']} {title} {COLORS['reset']}")
-    print("=" * (len(title) + 2))
-    
-    if not messages:
-        print(f"{COLORS['dim']}  No messages to display{COLORS['reset']}")
-        return
-    
-    for i, msg in enumerate(messages):
-        role = msg.get('role', 'unknown')
-        role_color = get_role_color(role)
-        
-        # Message header with role
-        print(f"\n{COLORS['bold']}{i+1:2d}.{COLORS['reset']} {role_color}{role.upper()}{COLORS['reset']}", end="")
-        
-        # Show additional fields if requested
-        if show_all_fields:
-            extras = []
-            if msg.get('channel'):
-                extras.append(f"channel={msg['channel']}")
-            if msg.get('recipient'):
-                extras.append(f"recipient={msg['recipient']}")
-            if msg.get('content_type'):
-                extras.append(f"type={msg['content_type']}")
-            if msg.get('name'):
-                extras.append(f"name={msg['name']}")
-                
-            if extras:
-                print(f" {COLORS['dim']}({', '.join(extras)}){COLORS['reset']}", end="")
-        
-        print()  # New line after header
-        
-        # Process content
-        content = msg.get('content', [])
-        if isinstance(content, str):
-            # Handle simple string content
-            print(f"    💬 {content}")
-        elif isinstance(content, list):
-            for j, content_item in enumerate(content):
-                if isinstance(content_item, dict):
-                    content_type = content_item.get('type', 'unknown')
-                    
-                    if content_type == 'text':
-                        text = content_item.get('text', '')
-                        print(f"    💬 {text}")
-                        
-                    elif content_type == 'tool_call':
-                        tool_call = content_item.get('tool_call', {})
-                        tool_type = tool_call.get('type', 'unknown')
-                        tool_id = tool_call.get('id', 'no-id')[:8]  # Show first 8 chars of ID
-                        print(f"    🔧 {COLORS['dim']}TOOL_CALL{COLORS['reset']} {tool_type} (id: {tool_id})")
-                        
-                        # Show tool-specific details
-                        if tool_type == 'code_interpreter':
-                            code_input = tool_call.get('code_interpreter', {}).get('input', '')
-                            if code_input:
-                                preview = truncate_text(code_input.replace('\n', ' '), 80)
-                                print(f"        💻 {COLORS['dim']}{preview}{COLORS['reset']}")
-                        elif tool_type == 'function':
-                            func_name = tool_call.get('function', {}).get('name', 'unknown')
-                            print(f"        ⚡ Function: {func_name}")
-                            
-                    elif content_type == 'tool_result':
-                        tool_result = content_item.get('tool_result', {})
-                        tool_id = tool_result.get('tool_call_id', 'no-id')[:8]
-                        print(f"    📊 {COLORS['dim']}TOOL_RESULT{COLORS['reset']} (id: {tool_id})")
-                        
-                        # Show result content if available
-                        if 'content' in tool_result:
-                            result_content = str(tool_result['content'])
-                            preview = truncate_text(result_content.replace('\n', ' '), 80)
-                            print(f"        📈 {COLORS['dim']}{preview}{COLORS['reset']}")
-                            
-                    elif content_type == 'system_content':
-                        print(f"    🔧 SYSTEM_CONTENT")
-                        
-                    elif content_type == 'developer_content':
-                        instructions = content_item.get('instructions', '')
-                        if instructions:
-                            preview = truncate_text(instructions, 80)
-                            print(f"    👨‍💻 DEVELOPER: {preview}")
-                        else:
-                            print(f"    👨‍💻 DEVELOPER_CONTENT")
-                            
-                    else:
-                        # Unknown content type, show what we can
-                        print(f"    ❓ {content_type.upper()}: {truncate_text(str(content_item), 80)}")
-                else:
-                    print(f"    ❓ {truncate_text(str(content_item), 80)}")
-        else:
-            print(f"    ❓ {COLORS['dim']}Unknown content format{COLORS['reset']}")
-    
-    print()  # Extra line at end
+    message_dict = message.to_dict()
+    message_dict["type"] = "harmony"
+    return message_dict
 
 
-def print_response_summary(response, title: str = "Response Summary"):
-    """Print a summary of the response with key metrics."""
-    COLORS = {
-        'header': '\033[97m\033[44m',  # White on blue background
-        'reset': '\033[0m',
-        'green': '\033[92m',
-        'blue': '\033[94m',
-        'yellow': '\033[93m',
-        'dim': '\033[2m',
-    }
+def harmony_messages_to_dicts(messages: list[Message]) -> list[dict]:
+    """
+    Convert a list of harmony Messages to dictionaries suitable for vLLM API.
     
-    print(f"\n{COLORS['header']} {title} {COLORS['reset']}")
-    print("-" * (len(title) + 2))
-    
-    print(f"📊 Status: {COLORS['green']}{response.status}{COLORS['reset']}")
-    print(f"📥 Input messages: {COLORS['blue']}{len(response.input_messages)}{COLORS['reset']}")
-    print(f"📤 Output messages: {COLORS['blue']}{len(response.output_messages)}{COLORS['reset']}")
-    
-    # Count channels in output messages
-    channels = {}
-    tool_calls = 0
-    tool_results = 0
-    
-    for msg in response.output_messages:
-        channel = msg.get('channel')
-        if channel:
-            channels[channel] = channels.get(channel, 0) + 1
-            
-        # Count tool calls and results
-        if 'content' in msg and isinstance(msg['content'], list):
-            for content_item in msg['content']:
-                if isinstance(content_item, dict):
-                    if content_item.get('type') == 'tool_call':
-                        tool_calls += 1
-                    elif content_item.get('type') == 'tool_result':
-                        tool_results += 1
-    
-    if channels:
-        print(f"📡 Channels: {COLORS['yellow']}{', '.join(f'{ch}({ct})' for ch, ct in channels.items())}{COLORS['reset']}")
-    
-    if tool_calls > 0:
-        print(f"🔧 Tool calls: {COLORS['yellow']}{tool_calls}{COLORS['reset']}")
-    
-    if tool_results > 0:
-        print(f"📊 Tool results: {COLORS['yellow']}{tool_results}{COLORS['reset']}")
-    
-    print()
+    Args:
+        messages: List of OpenAI Harmony Message objects
+        
+    Returns:
+        List of dictionary representations with proper type fields
+    """
+    return [harmony_message_to_dict(msg) for msg in messages]
 
 
 @pytest.fixture(scope="module")
@@ -237,13 +94,6 @@ async def test_harmony_message_deserialization(client: OpenAI, model_name: str,
                                                server):
     """Test that harmony messages can be properly deserialized from JSON."""
     
-    print("\n" + "="*80)
-    print("🧪 TEST: Harmony Message Deserialization")
-    print("="*80)
-    print("📋 Purpose: Test that harmony messages can be properly deserialized from JSON")
-    print("📥 Input: Previous conversation about France + follow-up question")
-    print("📤 Expected: Messages properly deserialized with correct structure")
-
     # Create some harmony messages manually (as they would come from a client)
     previous_harmony_messages = [{
         "role":
@@ -273,15 +123,11 @@ async def test_harmony_message_deserialization(client: OpenAI, model_name: str,
         None
     }]
 
-    print(f"📨 Sending request with {len(previous_harmony_messages)} previous messages")
-    print(f"💬 New input: 'Tell me more about that city.'")
-
     # Use direct HTTP request since OpenAI client doesn't support custom params
     response_json = await send_responses_request(
         server, {
             "model": model_name,
             "input": "Tell me more about that city.",
-            "instructions": "Use the previous conversation context.",
             "previous_response_messages": previous_harmony_messages,
             "enable_response_messages": True
         })
@@ -290,16 +136,10 @@ async def test_harmony_message_deserialization(client: OpenAI, model_name: str,
 
     assert response is not None
     assert response.status == "completed"
-    
-    print(f"✅ Response status: {response.status}")
 
     # Verify the response includes both the previous and new messages
     all_messages = (response.input_messages +
                     response.output_messages)
-
-    print(f"📊 Total messages in response: {len(all_messages)}")
-    print(f"   - Input messages: {len(response.input_messages)}")
-    print(f"   - Output messages: {len(response.output_messages)}")
 
     # Verify that all messages have proper serialization
     all_messages = (response.input_messages +
@@ -313,9 +153,6 @@ async def test_harmony_message_deserialization(client: OpenAI, model_name: str,
         for content_item in msg["content"]:
             assert isinstance(content_item, dict)
             assert len(content_item) > 0  # Should not be empty {}
-    
-    print("✅ All messages have proper structure (role, content, non-empty objects)")
-    print("🎉 Test PASSED: Messages deserialized correctly!")
 
 
 @pytest.mark.asyncio
@@ -351,6 +188,7 @@ async def test_harmony_message_round_trip(client: OpenAI, model_name: str,
             "input": "Now what is 3 + 3?",
             "instructions": "Continue the math conversation.",
             "previous_response_messages": all_first_messages,
+            "previous_response_output": response1_json.get("output", []),
             "enable_response_messages": True
         })
 
@@ -414,6 +252,7 @@ async def test_harmony_message_context_continuation(client: OpenAI,
             "input": "What about food recommendations for that city?",
             "instructions": "Continue helping with travel planning.",
             "previous_response_messages": all_messages,
+            "previous_response_output": response1_json.get("output", []),
             "enable_response_messages": True
         })
 
@@ -485,17 +324,7 @@ async def test_tools_presence_across_requests(client: OpenAI, model_name: str,
                                               server):
     """Test that tools are properly handled when present in first request but not second."""
     
-    print("\n" + "="*80)
-    print("🧪 TEST: Tools Presence Across Requests")
-    print("="*80)
-    print("📋 Purpose: Test tools in first request, no tools in second request")
-    print("📥 Input: First request WITH tools → Second request WITHOUT tools")
-    print("📤 Expected: Second request input_messages have no tool definitions")
-    
     # First request with tools defined
-    print("📨 STEP 1: Sending request WITH code_interpreter tool")
-    print("💬 Input: 'Calculate 25 + 17 using Python.'")
-    
     response1_json = await send_responses_request(
         server, {
             "model": model_name,
@@ -514,16 +343,10 @@ async def test_tools_presence_across_requests(client: OpenAI, model_name: str,
     assert len(response1.input_messages) > 0
     assert len(response1.output_messages) > 0
 
-    print(f"✅ First response status: {response1.status}")
-    print(f"📊 First response messages: {len(response1.input_messages)} input, {len(response1.output_messages)} output")
-
     # Get all messages from first response
     all_messages_1 = response1.input_messages + response1.output_messages
 
     # Second request with NO tools defined, but using messages from first request
-    print("📨 STEP 2: Sending request WITHOUT tools (using previous messages)")
-    print("💬 Input: 'What was that calculation result again?'")
-    
     response2_json = await send_responses_request(
         server, {
             "model": model_name,
@@ -538,9 +361,6 @@ async def test_tools_presence_across_requests(client: OpenAI, model_name: str,
     assert response2.status == "completed"
     assert len(response2.input_messages) > 0
     assert len(response2.output_messages) > 0
-
-    print(f"✅ Second response status: {response2.status}")
-    print(f"📊 Second response messages: {len(response2.input_messages)} input, {len(response2.output_messages)} output")
 
     # Validate that input_messages from second response do not contain tool definitions
     tool_definitions_found = 0
@@ -561,14 +381,10 @@ async def test_tools_presence_across_requests(client: OpenAI, model_name: str,
                 # But tool_call and tool_result types may still be present from previous conversation
                 # We're specifically checking that new tool definitions aren't added
 
-    print(f"🔍 Validation: Found {tool_definitions_found} tool definitions in second request input")
     assert tool_definitions_found == 0, "No tool definitions should be in second request input"
 
     # Verify the second response has more messages (accumulated context)
     assert len(response2.input_messages) > len(response1.input_messages)
-    
-    print("✅ Context accumulated properly (more messages in second response)")
-    print("🎉 Test PASSED: Tools correctly removed from second request!")
 
 
 @pytest.mark.asyncio
@@ -577,17 +393,7 @@ async def test_tools_introduction_in_second_request(client: OpenAI,
                                                    model_name: str, server):
     """Test introducing tools in second request when first had none."""
     
-    print("\n" + "="*80)
-    print("🧪 TEST: Tools Introduction in Second Request")
-    print("="*80)
-    print("📋 Purpose: Test NO tools in first request, tools in second request")
-    print("📥 Input: First request WITHOUT tools → Second request WITH tools")
-    print("📤 Expected: Tool calls appear in second response output")
-    
     # First request with NO tools
-    print("📨 STEP 1: Sending request WITHOUT tools")
-    print("💬 Input: 'I need to do a calculation later: 42 + 58.'")
-    
     response1_json = await send_responses_request(
         server, {
             "model": model_name,
@@ -602,16 +408,10 @@ async def test_tools_introduction_in_second_request(client: OpenAI,
     assert len(response1.input_messages) > 0
     assert len(response1.output_messages) > 0
 
-    print(f"✅ First response status: {response1.status}")
-    print(f"📊 First response messages: {len(response1.input_messages)} input, {len(response1.output_messages)} output")
-
     # Get all messages from first response
     all_messages_1 = response1.input_messages + response1.output_messages
 
     # Second request WITH tools defined, using messages from first request
-    print("📨 STEP 2: Sending request WITH code_interpreter tool (using previous messages)")
-    print("💬 Input: 'Now please calculate that addition I mentioned using Python.'")
-    
     response2_json = await send_responses_request(
         server, {
             "model": model_name,
@@ -631,13 +431,6 @@ async def test_tools_introduction_in_second_request(client: OpenAI,
     assert response2.status == "completed"
     assert len(response2.input_messages) > 0
     assert len(response2.output_messages) > 0
-
-    print_response_summary(response2, "Tool Introduction Response")
-    
-    # Display conversations visually
-    print_conversation(all_messages_1, "📨 First Request (No Tools)")
-    print_conversation(response2.input_messages, "📥 Second Request Input (With Tool Context)")
-    print_conversation(response2.output_messages, "📤 Second Request Output (With Tools)", show_all_fields=True)
 
     # Check for tool calls or tool results in the output messages
     has_tool_call = False
@@ -662,8 +455,6 @@ async def test_tools_introduction_in_second_request(client: OpenAI,
         if has_tool_call:
             break
 
-    print(f"🔍 Tool evidence found: {tool_evidence}")
-
     # Verify that tool functionality was engaged
     assert has_tool_call, "Expected tool call or calculation evidence in output messages"
 
@@ -682,11 +473,7 @@ async def test_tools_introduction_in_second_request(client: OpenAI,
     # Should contain references to the calculation mentioned in first request
     calculation_refs = [kw for kw in ["42", "58", "calculation", "addition"] if kw in conversation_text]
     
-    print(f"🔍 Calculation references found: {calculation_refs}")
     assert len(calculation_refs) > 0, f"Expected calculation references, found: {calculation_refs}"
-    
-    print("✅ Tool functionality engaged and conversation continuity maintained")
-    print("🎉 Test PASSED: Tools successfully introduced in second request!")
 
 
 @pytest.mark.asyncio
@@ -694,17 +481,7 @@ async def test_tools_introduction_in_second_request(client: OpenAI,
 async def test_code_interpreter_tool_structure(client: OpenAI, model_name: str, server):
     """Test code_interpreter tool has correct structure and appears in output_messages with analysis channel."""
     
-    print("\n" + "="*80)
-    print("🧪 TEST: Code Interpreter Tool Structure")
-    print("="*80)
-    print("📋 Purpose: Test code_interpreter tool structure and channel='analysis'")
-    print("📥 Input: Factorial calculation request with code_interpreter tool")
-    print("📤 Expected: Tool calls in output_messages (not response.output), analysis channel")
-    
     # Request that should trigger code_interpreter tool usage
-    print("📨 Sending request with code_interpreter tool")
-    print("💬 Input: 'Calculate the factorial of 5 using Python code.'")
-    
     response_json = await send_responses_request(
         server, {
             "model": model_name,
@@ -722,9 +499,6 @@ async def test_code_interpreter_tool_structure(client: OpenAI, model_name: str, 
     assert response.status == "completed"
     assert len(response.output_messages) > 0
 
-    print(f"✅ Response status: {response.status}")
-    print(f"📊 Output messages: {len(response.output_messages)}")
-
     # Check that response.output doesn't contain tool calls (they should be in output_messages)
     response_output = response_json.get("output", [])
     has_tool_call_in_output = False
@@ -732,8 +506,6 @@ async def test_code_interpreter_tool_structure(client: OpenAI, model_name: str, 
         if isinstance(item, dict) and item.get("type") == "tool_call":
             has_tool_call_in_output = True
             break
-    
-    print(f"🔍 Tool calls in response.output: {has_tool_call_in_output}")
     
     # Tool calls should NOT appear in response.output
     assert not has_tool_call_in_output, "Tool calls should not appear in response.output"
@@ -756,27 +528,20 @@ async def test_code_interpreter_tool_structure(client: OpenAI, model_name: str, 
                     if tool_call.get("type") == "code_interpreter":
                         code_interpreter_calls.append(content_item)
 
-    print(f"🔍 Code interpreter tool calls found: {len(code_interpreter_calls)}")
-    print(f"🔍 Analysis channel messages found: {len(analysis_channel_messages)}")
-
     # For now, just verify we have analysis channel messages (tool calls may vary by implementation)
     assert len(analysis_channel_messages) > 0, "Expected messages with channel='analysis'"
 
     # Validate structure of code_interpreter tool calls if they exist
     for i, tool_call_item in enumerate(code_interpreter_calls):
-        print(f"📋 Validating tool call #{i+1}")
-        
         assert tool_call_item["type"] == "tool_call"
         tool_call = tool_call_item["tool_call"]
         
         # Verify it's a code_interpreter type
         assert tool_call["type"] == "code_interpreter"
-        print(f"   ✅ Type: {tool_call['type']}")
         
         # Should have required fields for code_interpreter
         assert "id" in tool_call
         assert "code_interpreter" in tool_call
-        print(f"   ✅ Has required fields: id, code_interpreter")
         
         code_interpreter = tool_call["code_interpreter"]
         assert "input" in code_interpreter  # Should have code input
@@ -785,30 +550,15 @@ async def test_code_interpreter_tool_structure(client: OpenAI, model_name: str, 
         code_input = code_interpreter["input"].lower()
         factorial_keywords = [kw for kw in ["factorial", "5", "*", "math"] if kw in code_input]
         
-        print(f"   💻 Code input: {code_interpreter['input'][:50]}...")
-        print(f"   🔍 Factorial keywords found: {factorial_keywords}")
-        
         assert len(factorial_keywords) > 0, \
             f"Code should be related to factorial calculation, got: {code_input}"
 
     # Verify analysis channel messages have proper structure
     for i, msg in enumerate(analysis_channel_messages):
-        print(f"📋 Validating analysis message #{i+1}")
-        
         assert msg["channel"] == "analysis"
         assert "role" in msg
         assert "content" in msg
         assert isinstance(msg["content"], list)
-        
-        print(f"   ✅ Channel: {msg['channel']}, Role: {msg['role']}")
-        print(f"   ✅ Content items: {len(msg['content'])}")
-
-    print("✅ All validations passed!")
-    print("   - Tool calls NOT in response.output ✓")
-    print("   - Tool calls in output_messages ✓") 
-    print("   - Analysis channel messages present ✓")
-    print("   - Proper code_interpreter structure ✓")
-    print("🎉 Test PASSED: Code interpreter tool structure validated!")
 
 
 @pytest.mark.asyncio
@@ -974,14 +724,7 @@ async def test_harmony_message_with_python_tool(client: OpenAI,
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_harmony_library_input_messages(client: OpenAI, model_name: str, server):
-    """Test using harmony library to create messages and send via input_messages instead of input."""
-    
-    print("\n" + "="*80)
-    print("🧪 TEST: Harmony Library Input Messages")
-    print("="*80)
-    print("📋 Purpose: Use harmony library to create messages, send via input_messages")
-    print("📥 Input: Empty 'input' field, populated 'input_messages' with harmony messages")
-    print("📤 Expected: Server processes harmony messages correctly without 'input'")
+    """Test using harmony library to create messages and send via previous_response_messages for single-turn conversations."""
     
     # Create harmony messages using the library
     user_message = Message.from_role_and_content(
@@ -989,37 +732,21 @@ async def test_harmony_library_input_messages(client: OpenAI, model_name: str, s
         "Hello! Can you help me understand how Python functions work?"
     )
     
-    print("📨 Creating harmony messages using library:")
-    print(f"   - Message role: {user_message.author.role}")
-    print(f"   - Message content type: {type(user_message.content[0])}")
-    print(f"   - Message text: '{user_message.content[0].text[:50]}...'")
-    
-    # Convert to dict format for API
-    harmony_messages = [user_message.to_dict()]
-    
-    print(f"📨 Sending request with harmony input_messages (empty input)")
-    print(f"   - input: '' (empty)")
-    print(f"   - input_messages: {len(harmony_messages)} harmony messages")
-    
-    # Send request with harmony messages in input_messages and empty input
+    # Convert to dict format for API using helper function
+    harmony_messages = [harmony_message_to_dict(user_message)]
+      
+    # Send request with harmony messages in previous_response_messages and current input
     response_json = await send_responses_request(
         server, {
             "model": model_name,
-            "input": "",  # Empty input field
-            "input_messages": harmony_messages,  # Using input_messages instead
+            "input": "Can you explain more about Python functions?",  # Non-empty input field
+            "previous_response_messages": harmony_messages,  # Using previous_response_messages to provide context
             "instructions": "Provide a helpful explanation about Python functions.",
             "enable_response_messages": True
         })
 
     response = ResponsesApiResponse(response_json)
     assert response.status == "completed"
-    
-    print_response_summary(response, "Single Harmony Message Response")
-    
-    # Display the conversation visually
-    print_conversation(harmony_messages, "📨 Original Harmony Input")
-    print_conversation(response.input_messages, "📥 Server Input Messages")
-    print_conversation(response.output_messages, "📤 Server Output Messages", show_all_fields=True)
 
     # Verify the harmony message was processed correctly
     assert len(response.input_messages) > 0
@@ -1039,7 +766,6 @@ async def test_harmony_library_input_messages(client: OpenAI, model_name: str, s
         if found_original_message:
             break
     
-    print(f"🔍 Original harmony message found in input_messages: {found_original_message}")
     assert found_original_message, "Original harmony message should be preserved in input_messages"
     
     # Verify response contains relevant content about Python functions
@@ -1053,28 +779,13 @@ async def test_harmony_library_input_messages(client: OpenAI, model_name: str, s
     python_keywords_found = [kw for kw in ["function", "python", "def", "return"] 
                             if kw in response_text]
     
-    print(f"🔍 Python-related keywords in response: {python_keywords_found}")
     assert len(python_keywords_found) > 0, "Response should contain Python function information"
-    
-    print("✅ All validations passed!")
-    print("   - Empty input field processed correctly ✓")
-    print("   - Harmony input_messages processed ✓")
-    print("   - Original message preserved ✓")
-    print("   - Relevant response generated ✓")
-    print("🎉 Test PASSED: Harmony library messages work via input_messages!")
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_harmony_library_multi_message_input(client: OpenAI, model_name: str, server):
     """Test using harmony library to create multiple messages via input_messages."""
-    
-    print("\n" + "="*80)
-    print("🧪 TEST: Harmony Library Multi-Message Input")
-    print("="*80)
-    print("📋 Purpose: Send multiple harmony messages via input_messages (conversation)")
-    print("📥 Input: Empty 'input', multiple harmony messages in input_messages")
-    print("📤 Expected: Multi-turn conversation processed correctly")
     
     # Create a conversation using harmony library
     user_msg1 = Message.from_role_and_content(
@@ -1092,39 +803,25 @@ async def test_harmony_library_multi_message_input(client: OpenAI, model_name: s
         "What's the population of that city?"
     )
     
-    print("📨 Creating multi-message conversation using harmony library:")
-    print(f"   - User message 1: '{user_msg1.content[0].text}'")
-    print(f"   - Assistant message 1: '{assistant_msg1.content[0].text}'")
-    print(f"   - User message 2: '{user_msg2.content[0].text}'")
-    
-    # Convert to dict format for API
-    harmony_messages = [
-        user_msg1.to_dict(),
-        assistant_msg1.to_dict(),
-        user_msg2.to_dict()
-    ]
-    
-    print(f"📨 Sending request with {len(harmony_messages)} harmony input_messages")
+    # Convert to dict format for API using helper function
+    harmony_messages = harmony_messages_to_dicts([
+        user_msg1,
+        assistant_msg1,
+        user_msg2
+    ])
     
     # Send request with multiple harmony messages
     response_json = await send_responses_request(
         server, {
             "model": model_name,
             "input": "",  # Empty input field
-            "input_messages": harmony_messages,
+            "previous_response_messages": harmony_messages,
             "instructions": "Continue the conversation about Tokyo.",
             "enable_response_messages": True
         })
 
     response = ResponsesApiResponse(response_json)
     assert response.status == "completed"
-    
-    print_response_summary(response, "Multi-Message Harmony Response")
-    
-    # Display the conversations visually
-    print_conversation(harmony_messages, "📨 Original Multi-Message Harmony Input")
-    print_conversation(response.input_messages, "📥 Server Input Messages")  
-    print_conversation(response.output_messages, "📤 Server Output Messages", show_all_fields=True)
 
     # Verify all original messages are preserved
     assert len(response.input_messages) >= len(harmony_messages)
@@ -1141,7 +838,6 @@ async def test_harmony_library_multi_message_input(client: OpenAI, model_name: s
     context_keywords = [kw for kw in ["tokyo", "population", "million", "people", "city"] 
                        if kw in response_text]
     
-    print(f"🔍 Context keywords found in response: {context_keywords}")
     assert len(context_keywords) > 0, "Response should maintain conversation context"
     
     # Verify message structure integrity
@@ -1152,9 +848,3 @@ async def test_harmony_library_multi_message_input(client: OpenAI, model_name: s
         for content_item in msg["content"]:
             assert isinstance(content_item, dict)
             assert len(content_item) > 0
-    
-    print("✅ All validations passed!")
-    print("   - Multiple harmony messages processed ✓")
-    print("   - Conversation context maintained ✓")
-    print("   - Message structure preserved ✓")
-    print("🎉 Test PASSED: Multi-message harmony input works correctly!")
