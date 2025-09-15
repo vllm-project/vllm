@@ -198,7 +198,6 @@ class Glm4MoE(nn.Module):
                 enable_eplb=self.enable_eplb,
                 num_redundant_experts=self.n_redundant_experts)
 
-
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
@@ -212,7 +211,9 @@ class Glm4MoE(nn.Module):
         if self.shared_experts is not None:
             shared_output, final_hidden_states = fused_moe_out
             assert shared_output is not None
-            final_hidden_states = final_hidden_states * self.routed_scaling_factor + shared_output
+            final_hidden_states = \
+                final_hidden_states * self.routed_scaling_factor\
+                    + shared_output
         else:
             final_hidden_states = fused_moe_out * self.routed_scaling_factor
 
