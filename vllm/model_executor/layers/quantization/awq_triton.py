@@ -120,8 +120,6 @@ def awq_gemm_kernel(a_ptr, b_ptr, c_ptr, zeros_ptr, scales_ptr, M, N, K,
     pid_m = pid // num_pid_n
     pid_n = pid % num_pid_n
 
-    accumulator_dtype = c_ptr.type.element_ty
-
     # NOTE: This doesn't work in TRITON_INTERPRET=1 mode.  Use below instead.
     # accumulator = tl.arange(0, BLOCK_SIZE_N)
     # accumulator = tl.broadcast_to(accumulator[None, :],
@@ -129,7 +127,7 @@ def awq_gemm_kernel(a_ptr, b_ptr, c_ptr, zeros_ptr, scales_ptr, M, N, K,
     # accumulator = accumulator & 0x0
     # accumulator = accumulator.to(accumulator_dtype)
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N),
-                           dtype=accumulator_dtype)
+                           dtype=tl.float32)
 
     # Create reverse AWQ order as tensor: [0, 4, 1, 5, 2, 6, 3, 7]
     # that will map given indices to the correct order.
@@ -199,11 +197,10 @@ def awq_gemm_kernel(a_ptr, b_ptr, c_ptr, zeros_ptr, scales_ptr, M, N, K,
 
         b = (b >> shifts) & 0xF
         zeros = (zeros >> shifts) & 0xF
-        b = (b - zeros) * scales
-        b = b.to(c_ptr.type.element_ty)
+        b = (b - zeros).to(a_ptr.type.element_ty) * scales
 
         # Accumulate results.
-        accumulator = tl.dot(a, b, accumulator, out_dtype=accumulator_dtype)
+        accumulator = tl.dot(a, b, accumulator)
 
         offsets_k += BLOCK_SIZE_K * SPLIT_K
         a_ptrs += BLOCK_SIZE_K * SPLIT_K
