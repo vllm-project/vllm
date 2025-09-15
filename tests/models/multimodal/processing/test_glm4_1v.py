@@ -12,8 +12,19 @@ from ...utils import build_model_context
 
 @pytest.mark.parametrize("model_id", ["zai-org/GLM-4.1V-9B-Thinking"])
 @pytest.mark.parametrize("expected_toks_per_frame", [299])
-@pytest.mark.parametrize("num_frames", [32, 128])
-@pytest.mark.parametrize("fps, expected_grid_t", [(1, 5), (2, 10)])
+@pytest.mark.parametrize(
+    "num_frames, fps, expected_grid_t",
+    [
+        # pre-sampled fixed frames (unexpected behavior,
+        # but we still expect it to work without errors)
+        (32, 1, 16),
+        (32, 2, 16),
+        (128, 1, 64),
+        (128, 2, 64),
+        # post-sampled frames (expected behavior)
+        (-1, 1, 5),
+        (-1, 2, 10),
+    ])
 def test_processor_override(
     model_id: str,
     expected_toks_per_frame: int,
@@ -80,7 +91,7 @@ def test_video_loader_consistency(
 
     static_video, static_metadata = OpenCVVideoBackend.load_bytes(video_bytes)
     dynamic_video, dynamic_metadata = OpenCVDynamicVideoBackend.load_bytes(
-        video_bytes, requested_fps=fps)
+        video_bytes, fps=fps)
 
     # pre-sampled loader shouldn't read all frames
     assert len(dynamic_video) < len(static_video)
