@@ -61,6 +61,7 @@ except ImportError:
 _NIXL_SUPPORTED_XPUS = {
     "cuda": ("cuda", ),
     "tpu": ("cpu", ),
+    "xpu": ("cpu", ),
 }
 
 
@@ -161,7 +162,7 @@ class NixlConnector(KVConnectorBase_V1):
 
     def get_num_new_matched_tokens(
             self, request: "Request",
-            num_computed_tokens: int) -> tuple[int, bool]:
+            num_computed_tokens: int) -> tuple[Optional[int], bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(
             request, num_computed_tokens)
@@ -707,8 +708,6 @@ class NixlConnectorWorker:
         caches_data = []
         # With hybrid allocator, layers can share a kv cache tensor
         seen_base_addresses = []
-        xfer_buffers = (self.host_xfer_buffers
-                        if self.use_host_buffer else kv_caches)
 
         # Note(tms): I modified this from the original region setup code.
         # K and V are now in different regions. Advantage is that we can
@@ -769,7 +768,7 @@ class NixlConnectorWorker:
             # with joint KV for each block. This minimizes the overhead in
             # registerMem allowing faster descs queries. In order to be able to
             # split on kv_heads dim as required by heterogeneous TP, one must
-            # be able to index K/V separately. Hence the we double the number
+            # be able to index K/V separately. Hence we double the number
             # of 'virtual' regions here and halve `block_len` below.
             self.num_regions *= 2
 

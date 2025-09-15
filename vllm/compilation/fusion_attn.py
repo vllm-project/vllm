@@ -39,6 +39,7 @@ class AttentionQuantPattern(ABC):
         self,
         layer: Attention,
         quant_key: QuantKey,
+        dtype: torch.dtype,
     ):
         self.layer = layer
         self.layer_name = layer.layer_name
@@ -46,10 +47,15 @@ class AttentionQuantPattern(ABC):
         self.head_size = layer.head_size
         self.quant_key = quant_key
         self.quant_dtype = quant_key.dtype
+        self.dtype = dtype
 
         assert self.quant_key in QUANT_OPS, \
             f"unsupported quantization scheme {self.quant_key}"
         self.QUANT_OP = QUANT_OPS[self.quant_key]
+
+    def empty(self, *args, **kwargs):
+        kwargs = {'dtype': self.dtype, 'device': "cuda", **kwargs}
+        return torch.empty(*args, **kwargs)
 
     def empty_quant(self, *args, **kwargs):
         kwargs = {'dtype': self.quant_dtype, 'device': "cuda", **kwargs}
@@ -91,12 +97,13 @@ class AttentionFp8StaticQuantPattern(AttentionQuantPattern):
     def __init__(
         self,
         layer: Attention,
+        dtype: torch.dtype,
         symmetric: bool = True,
     ):
         quant_key = QuantKey(dtype=FP8_DTYPE,
                              scale=kStaticTensorScale,
                              symmetric=symmetric)
-        super().__init__(layer, quant_key)
+        super().__init__(layer, quant_key, dtype)
 
     def _register(self, pm_pass: PatternMatcherPass):
 
@@ -139,10 +146,14 @@ class AttentionFp8StaticQuantPattern(AttentionQuantPattern):
             return RESHAPE_OP(at1[1], [-1, self.num_heads * self.head_size])
 
         inputs = [
-            empty_bf16(5, self.num_heads, self.head_size),  # q
-            empty_bf16(5, self.num_heads, self.head_size),  # k
-            empty_bf16(5, self.num_heads, self.head_size),  # v
-            empty_bf16(5, self.num_heads, self.head_size),  # attn_output
+            self.empty(5, self.num_heads, self.head_size,
+                       dtype=self.dtype),  # q
+            self.empty(5, self.num_heads, self.head_size,
+                       dtype=self.dtype),  # k
+            self.empty(5, self.num_heads, self.head_size,
+                       dtype=self.dtype),  # v
+            self.empty(5, self.num_heads, self.head_size,
+                       dtype=self.dtype),  # attn_output
             self.empty_quant(5,
                              self.num_heads * self.head_size),  # quant_output
             empty_fp32(1, 1)  # scale
@@ -165,8 +176,8 @@ class AttentionNvfp4QuantPattern(AttentionQuantPattern):
     will be passed into Attention op as the `output_scale` argument.
     """
 
-    def __init__(self, layer: Attention):
-        super().__init__(layer, kNvfp4Quant)
+    def __init__(self, layer: Attention, dtype: torch.dtype):
+        super().__init__(layer, kNvfp4Quant, dtype)
 
     def _register(self, pm_pass: PatternMatcherPass):
 
@@ -255,11 +266,15 @@ class AttnFusionPass(VllmInductorPass):
 
         attn_layers = get_layers_from_vllm_config(config, Attention)
         for layer_name, layer in attn_layers.items():
-            pattern_fp8 = AttentionFp8StaticQuantPattern(layer)
+            pattern_fp8 = AttentionFp8StaticQuantPattern(
+                layer, config.model_config.dtype)
             pattern_fp8.register_if_supported(self.patterns)
 
-            pattern_nvfp4 = AttentionNvfp4QuantPattern(layer)
-            pattern_nvfp4.register_if_supported(self.patterns)
+            if current_platform.is_cuda() and hasattr(torch.ops._C,
+                                                      "scaled_fp4_quant"):
+                pattern_nvfp4 = AttentionNvfp4QuantPattern(
+                    layer, config.model_config.dtype)
+                pattern_nvfp4.register_if_supported(self.patterns)
 
         if len(attn_layers) == 0:
             logger.warning(

@@ -339,7 +339,10 @@ class GPT2ForSequenceClassification(nn.Module):
         config = vllm_config.model_config.hf_config
         self.transformer = GPT2Model(vllm_config=vllm_config,
                                      prefix=maybe_prefix(prefix, "gpt2"))
-        self.score = nn.Linear(config.n_embd, config.num_labels, bias=False)
+        self.score = nn.Linear(config.n_embd,
+                               config.num_labels,
+                               bias=False,
+                               dtype=vllm_config.model_config.head_dtype)
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
@@ -348,7 +351,7 @@ class GPT2ForSequenceClassification(nn.Module):
             "encode":
             Pooler.for_encode(pooler_config),
             "classify":
-            Pooler.for_classify(pooler_config, classifier=None),
+            Pooler.for_classify(pooler_config, classifier=self.score),
         })
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
@@ -367,8 +370,7 @@ class GPT2ForSequenceClassification(nn.Module):
             position_ids=positions,
             inputs_embeds=inputs_embeds,
             intermediate_tensors=intermediate_tensors)
-        logits = self.score(hidden_states)
-        return logits
+        return hidden_states
 
 
 def _add_transformer_prefix(
