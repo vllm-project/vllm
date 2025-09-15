@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import atexit
+import contextlib
 import tempfile
+from typing import Any, ContextManager, Optional
 
 import torch
 from packaging import version
@@ -33,6 +36,7 @@ void nccl_free_plug(void* ptr, size_t size, int device, void* stream) {
 """
 
 _allocator = None
+_allocator_wrapper = None
 _mem_pool = None
 _registered_base_addrs = set()
 _graph_pool_id = None
@@ -61,7 +65,7 @@ def set_graph_pool_id(graph_pool_id):
 
 
 def compile_nccl_allocator():
-    global _allocator, _nccl_allocator_failed_to_compile
+    global _allocator, _allocator_wrapper, _nccl_allocator_failed_to_compile
     if not current_platform.is_cuda():
         _nccl_allocator_failed_to_compile = True
         return
@@ -78,11 +82,12 @@ def compile_nccl_allocator():
             build_directory=out_dir,
             extra_include_paths=envs.VLLM_NCCL_INCLUDE_PATH,
         )
-        _allocator = CUDAPluggableAllocator(
+        _allocator_wrapper = CUDAPluggableAllocator(
             f"{out_dir}/{nccl_allocator_libname}.so",
             "nccl_alloc_plug",
             "nccl_free_plug",
-        ).allocator()
+        )
+        _allocator = _allocator_wrapper.allocator()
     except Exception as e:
         _nccl_allocator_failed_to_compile = True
         logger.warning(
@@ -102,6 +107,20 @@ def get_nccl_mem_pool():
     return _mem_pool
 
 
+def _cleanup_nccl_mem_pool():
+    global _mem_pool
+    _mem_pool = None
+
+
+def _cleanup_nccl_allocator_wrapper():
+    global _allocator_wrapper
+    _allocator_wrapper = None
+
+
+atexit.register(_cleanup_nccl_mem_pool)
+atexit.register(_cleanup_nccl_allocator_wrapper)
+
+
 class nccl_symm_mem_context:
 
     def __init__(
@@ -115,8 +134,8 @@ class nccl_symm_mem_context:
                          or get_nccl_mem_pool() is None or version.parse(
                              torch.__version__) < version.parse("2.8.0.a0"))
         if self.disabled:
-            self.pynccl_comm = None
-            self._mem_pool_ctx = None
+            self.pynccl_comm: Optional[PyNcclCommunicator] = None
+            self._mem_pool_ctx: ContextManager[Any] = contextlib.nullcontext()
             self.is_graph_capture = None
             self.device = None
         else:
@@ -149,7 +168,10 @@ class nccl_symm_mem_context:
         global _cached_pool_snapshot
         global _registered_base_addrs
         self._mem_pool_ctx.__exit__(exc_type, exc_val, exc_tb)
-        _cached_pool_snapshot = get_nccl_mem_pool().snapshot()
+        _pool = get_nccl_mem_pool()
+        assert _pool is not None
+        _cached_pool_snapshot = _pool.snapshot()
+        assert self.pynccl_comm is not None
         for segment in _cached_pool_snapshot:
             if segment["address"] not in _registered_base_addrs:
                 self.pynccl_comm.register_comm_window_raw(
