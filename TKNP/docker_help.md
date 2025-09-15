@@ -36,6 +36,7 @@ dzdo docker run --gpus all -it --rm \
   --ipc=host --shm-size=20g --ulimit memlock=-1 \
   -p 8001:8001 \
   -v "$HOME/Documents/MLSystems/vllm-distributed:/workspace" \
+  -v "$HOME:$HOME" \
   -w /workspace \
   --entrypoint bash \
   susavlsh10/vllm-tknp:v1

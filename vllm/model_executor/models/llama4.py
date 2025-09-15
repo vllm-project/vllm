@@ -37,7 +37,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
-from .llama import LlamaForCausalLM, LlamaMLP, LlamaModel
+from .llama_og import LlamaForCausalLM, LlamaMLP, LlamaModel
 from .utils import (AutoWeightsLoader, extract_layer_index, fast_topk,
                     is_pp_missing_parameter)
 

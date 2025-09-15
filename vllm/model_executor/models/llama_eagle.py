@@ -15,7 +15,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.llama import (LlamaDecoderLayer,
+from vllm.model_executor.models.llama_og import (LlamaDecoderLayer,
                                               LlamaForCausalLM)
 
 from .utils import AutoWeightsLoader, maybe_prefix

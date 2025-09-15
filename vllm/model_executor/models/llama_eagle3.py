@@ -19,7 +19,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.llama import (LlamaDecoderLayer,
+from vllm.model_executor.models.llama_og import (LlamaDecoderLayer,
                                               LlamaForCausalLM)
 from vllm.v1.sample.metadata import SamplingMetadata
 

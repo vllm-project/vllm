@@ -314,3 +314,38 @@ def create_token_parallel_row_linear(
         reduce_results=reduce_results,
         **kwargs
     ) 
+    
+# A decorator for MLP, normalization, standard layers to be used in token parallelism.
+def init_tknp_layer(cls_to_wrap: type) -> type:
+    """
+    A class decorator that replaces a module with an identity function
+    on non-root ranks when token parallelism is enabled.
+    """
+
+    class RankZeroWrapper(nn.Module):
+        def __init__(self, *args, **kwargs):
+            super().__init__()
+
+            # 1. Check for token parallel init and ranks
+            self.is_tknp_enabled = is_tknp_initialized()
+            self.tknp_rank = get_tknp_rank() if self.is_tknp_enabled else 0
+            self.tknp_world_size = get_tknp_world_size() if self.is_tknp_enabled else 1
+            self.is_root_rank = (self.tknp_rank == 0)
+
+            # 2. If self.is_root_rank is True, setup the regular class.
+            if self.is_root_rank:
+                # Instantiate the actual module we are wrapping (e.g., LlamaMLP)
+                # and pass all arguments to it.
+                self.module = cls_to_wrap(*args, **kwargs)
+            # 3. If we are not the root rank, setup an identity function.
+            else:
+                # On non-root ranks, we just need a placeholder that
+                # passes tensors through without any computation.
+                self.module = nn.Identity()
+
+        def forward(self, *args, **kwargs):
+            # Delegate the forward call to the instantiated module.
+            # This will be either the real module's forward or nn.Identity's forward.
+            return self.module(*args, **kwargs)
+
+    return RankZeroWrapper

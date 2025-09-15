@@ -1,4 +1,4 @@
-# HTTP: Accelerating High Throughput Distributed Inference with Memory Efficient Hybird Tensor and Token Parallelism for Transformers
+# Token Parallel: Accelerating High Throughput Distributed Inference with Memory Efficient Hybird Tensor and Token Parallelism for Transformers
 
 * Docker continer : nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
 
