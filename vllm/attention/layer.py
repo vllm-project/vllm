@@ -83,6 +83,7 @@ class Attention(nn.Module, AttentionLayerBase):
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
         attn_backend: Optional[type[AttentionBackend]] = None,
+        per_layer_kv_cache_dtype: Optional[str] = None,
         **extra_impl_args,
     ) -> None:
         """
@@ -100,10 +101,20 @@ class Attention(nn.Module, AttentionLayerBase):
             sliding_window = None
 
         if cache_config is not None:
-            kv_cache_dtype = cache_config.cache_dtype
+            # Use per-layer dtype if provided
+            if per_layer_kv_cache_dtype is not None:
+                kv_cache_dtype = per_layer_kv_cache_dtype
+                # For mixed-dtype: only calculate scales for FP8 layers
+                calculate_kv_scales = per_layer_kv_cache_dtype.startswith(
+                    'fp8') and cache_config.calculate_kv_scales
+            else:
+                # This is a skip layer in mixed-dtype scenario
+                # Use "auto" to resolve to model dtype
+                kv_cache_dtype = "auto"
+                calculate_kv_scales = False
+
             block_size = cache_config.block_size
             is_attention_free = cache_config.is_attention_free
-            calculate_kv_scales = cache_config.calculate_kv_scales
         else:
             kv_cache_dtype = "auto"
             block_size = 16

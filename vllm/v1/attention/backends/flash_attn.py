@@ -529,6 +529,16 @@ class FlashAttentionImpl(AttentionImpl):
 
             descale_shape = (cu_seqlens_q.shape[0] - 1, self.num_kv_heads)
 
+            # Only pass scale parameters for FP8 layers
+            if self.kv_cache_dtype.startswith("fp8"):
+                q_descale = layer._q_scale.expand(descale_shape)
+                k_descale = layer._k_scale.expand(descale_shape)
+                v_descale = layer._v_scale.expand(descale_shape)
+            else:
+                q_descale = None
+                k_descale = None
+                v_descale = None
+
             flash_attn_varlen_func(
                 q=query[:num_actual_tokens],
                 k=key_cache,
@@ -546,15 +556,25 @@ class FlashAttentionImpl(AttentionImpl):
                 softcap=self.logits_soft_cap,
                 scheduler_metadata=scheduler_metadata,
                 fa_version=self.vllm_flash_attn_version,
-                q_descale=layer._q_scale.expand(descale_shape),
-                k_descale=layer._k_scale.expand(descale_shape),
-                v_descale=layer._v_scale.expand(descale_shape),
+                q_descale=q_descale,
+                k_descale=k_descale,
+                v_descale=v_descale,
                 num_splits=attn_metadata.max_num_splits,
                 s_aux=self.sinks,
             )
             return output
 
         # Cascade attention (rare case).
+        # Only pass scale parameters for FP8 layers
+        if self.kv_cache_dtype.startswith("fp8"):
+            q_descale = layer._q_scale
+            k_descale = layer._k_scale
+            v_descale = layer._v_scale
+        else:
+            q_descale = None
+            k_descale = None
+            v_descale = None
+
         cascade_attention(
             output[:num_actual_tokens],
             query[:num_actual_tokens],
@@ -575,9 +595,9 @@ class FlashAttentionImpl(AttentionImpl):
             fa_version=self.vllm_flash_attn_version,
             prefix_scheduler_metadata=attn_metadata.prefix_scheduler_metadata,
             suffix_scheduler_metadata=attn_metadata.scheduler_metadata,
-            q_descale=layer._q_scale,
-            k_descale=layer._k_scale,
-            v_descale=layer._v_scale,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
         )
         return output
 
@@ -615,6 +635,16 @@ class FlashAttentionImpl(AttentionImpl):
             cu_seqlens_q.shape[0] - 1,  # type: ignore[union-attr]
             self.num_kv_heads)
 
+        # Only pass scale parameters for FP8 layers
+        if self.kv_cache_dtype.startswith("fp8"):
+            q_descale = layer._q_scale.expand(descale_shape)
+            k_descale = layer._k_scale.expand(descale_shape)
+            v_descale = layer._v_scale.expand(descale_shape)
+        else:
+            q_descale = None
+            k_descale = None
+            v_descale = None
+
         # Call flash attention directly on Q, K, V tensors
         flash_attn_varlen_func(
             q=query,
@@ -631,9 +661,9 @@ class FlashAttentionImpl(AttentionImpl):
             window_size=self.sliding_window,
             softcap=self.logits_soft_cap,
             fa_version=self.vllm_flash_attn_version,
-            q_descale=layer._q_scale.expand(descale_shape),
-            k_descale=layer._k_scale.expand(descale_shape),
-            v_descale=layer._v_scale.expand(descale_shape),
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
         )
 
         return output

@@ -3452,7 +3452,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         use_mla = self.vllm_config.model_config.use_mla
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
-        for layer_name, attn_module in attn_layers.items():
+        for layer_idx, (layer_name,
+                        attn_module) in enumerate(attn_layers.items()):
             if (kv_tgt_layer :=
                     attn_module.kv_sharing_target_layer_name) is not None:
                 # The layer doesn't need its own KV cache and will use that of
@@ -3474,7 +3475,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         block_size=block_size,
                         num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
-                        dtype=self.kv_cache_dtype,
+                        dtype=(self.dtype
+                               if self.cache_config.skip_kv_quantization_layers
+                               and layer_idx
+                               in self.cache_config.skip_kv_quantization_layers
+                               else self.kv_cache_dtype),
                         sliding_window=attn_module.sliding_window,
                         use_mla=use_mla)
                 elif self.attention_chunk_size is not None \
@@ -3483,7 +3488,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         block_size=block_size,
                         num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
-                        dtype=self.kv_cache_dtype,
+                        dtype=(self.dtype
+                               if self.cache_config.skip_kv_quantization_layers
+                               and layer_idx
+                               in self.cache_config.skip_kv_quantization_layers
+                               else self.kv_cache_dtype),
                         attention_chunk_size=self.attention_chunk_size,
                         use_mla=use_mla)
                 else:
@@ -3491,7 +3500,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         block_size=block_size,
                         num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
-                        dtype=self.kv_cache_dtype,
+                        dtype=(self.dtype
+                               if self.cache_config.skip_kv_quantization_layers
+                               and layer_idx
+                               in self.cache_config.skip_kv_quantization_layers
+                               else self.kv_cache_dtype),
                         use_mla=use_mla)
             elif attn_module.attn_type in (AttentionType.ENCODER,
                                            AttentionType.ENCODER_ONLY):

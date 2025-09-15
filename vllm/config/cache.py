@@ -96,6 +96,10 @@ class CacheConfig:
     """The data type to use for the Mamba cache (ssm state only, conv state will
     still be controlled by mamba_cache_dtype). If set to 'auto', the data type
     for the ssm state will be determined by mamba_cache_dtype."""
+    skip_kv_quantization_layers: Optional[list[int | str]] = None
+    """List of layer IDs to skip KV cache quantization for, or 'sliding_window' 
+    to skip all sliding window layers. These layers will use the model's  
+    default dtype instead of the quantized cache_dtype (e.g., fp8)."""
 
     # Will be set after profiling.
     num_gpu_blocks: Optional[int] = field(default=None, init=False)

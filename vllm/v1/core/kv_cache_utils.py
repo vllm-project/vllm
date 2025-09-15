@@ -8,6 +8,8 @@ from collections.abc import Iterable, Sequence
 from dataclasses import astuple, dataclass
 from typing import Any, Callable, NewType, Optional, Union
 
+import torch
+
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -744,6 +746,89 @@ def create_kv_cache_group_specs(
     return kv_cache_groups
 
 
+def is_kv_cache_dtype_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
+    """
+    Check if all layers use the same dtype for KV cache.
+    
+    Args:
+        kv_cache_spec: The kv cache spec of each attention layer in the model
+        
+    Returns:
+        True if all layers use the same dtype, False otherwise
+    """
+    dtypes = set()
+    for spec in kv_cache_spec.values():
+        dtype = getattr(spec, 'dtype', None)
+        dtypes.add(dtype)
+
+    return len(dtypes) <= 1
+
+
+def _get_kv_cache_config_mixed_dtype(vllm_config: VllmConfig,
+                                     kv_cache_spec: dict[str, KVCacheSpec],
+                                     available_memory: int) -> KVCacheConfig:
+    """
+    Handle mixed-dtype KV cache for GPT-OSS with sliding window skipping.
+    
+    Sliding window layers: BF16 (skipped quantization)
+    Full attention layers: FP8 (quantized)
+    
+    Adjusts block_size to achieve uniform page sizes, then uses standard
+    hybrid attention framework.
+    """
+    # Calculate max kv_hidden_size (BF16 will be larger than FP8)
+    max_kv_hidden_size = 0
+    for spec in kv_cache_spec.values():
+        if isinstance(spec, (FullAttentionSpec, SlidingWindowSpec)):
+            dtype_size = 2 if spec.dtype == torch.bfloat16 else 1
+            kv_hidden_size = 2 * spec.num_kv_heads * spec.head_size * dtype_size
+            max_kv_hidden_size = max(max_kv_hidden_size, kv_hidden_size)
+
+    # Adjust block_size for FP8 layers to match BF16 page size
+    adjusted_kv_cache_spec: dict[str, KVCacheSpec] = {}
+    for layer_name, spec in kv_cache_spec.items():
+        if isinstance(spec, (FullAttentionSpec, SlidingWindowSpec)):
+            dtype_size = 2 if spec.dtype == torch.bfloat16 else 1
+            current_kv_hidden_size = (2 * spec.num_kv_heads * spec.head_size *
+                                      dtype_size)
+
+            # Calculate multiplier (will be 1 for BF16, >1 for FP8)
+            block_size_multiplier = max_kv_hidden_size // current_kv_hidden_size
+            adjusted_block_size = spec.block_size * block_size_multiplier
+
+            # Create adjusted spec with new block_size
+            adjusted_spec: KVCacheSpec
+            if isinstance(spec, FullAttentionSpec):
+                adjusted_spec = FullAttentionSpec(
+                    block_size=adjusted_block_size,
+                    num_kv_heads=spec.num_kv_heads,
+                    head_size=spec.head_size,
+                    dtype=spec.dtype,
+                    use_mla=spec.use_mla,
+                    sliding_window=spec.sliding_window,
+                )
+            else:  # SlidingWindowSpec
+                adjusted_spec = SlidingWindowSpec(
+                    block_size=adjusted_block_size,
+                    num_kv_heads=spec.num_kv_heads,
+                    head_size=spec.head_size,
+                    dtype=spec.dtype,
+                    use_mla=spec.use_mla,
+                    sliding_window=spec.sliding_window,
+                )
+
+            adjusted_kv_cache_spec[layer_name] = adjusted_spec
+        else:
+            raise NotImplementedError(
+                f"Mixed-dtype KV cache does not support spec type: {type(spec)}"
+            )
+
+    # Use standard hybrid attention with adjusted specs
+    return _get_kv_cache_config_uniform_page_size(vllm_config,
+                                                  adjusted_kv_cache_spec,
+                                                  available_memory)
+
+
 def is_kv_cache_type_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
     """
     Whether all layers in the given KVCacheSpec have the same KV cache spec.
@@ -1116,11 +1201,15 @@ def get_kv_cache_config(
         # to allow for the KVCache manager to handle attention free models.
         return _get_kv_cache_config_attention_free()
     elif is_kv_cache_type_uniform(kv_cache_spec):
-        # KV cache of all layers are the same, which is true for
-        # most models. Allocate the same amount of memory for
-        # each layer.
-        return _get_kv_cache_config_uniform_type(vllm_config, kv_cache_spec,
-                                                 available_memory)
+        # Check if it's uniform due to mixed-dtype support
+        if not is_kv_cache_dtype_uniform(kv_cache_spec):
+            # Mixed-dtype scenario - use specialized handler
+            return _get_kv_cache_config_mixed_dtype(vllm_config, kv_cache_spec,
+                                                    available_memory)
+        else:
+            return _get_kv_cache_config_uniform_type(vllm_config,
+                                                     kv_cache_spec,
+                                                     available_memory)
     elif is_kv_cache_page_size_uniform(kv_cache_spec):
         # Model contains multiple attention types, but KV cache of all layers
         # have the same physical memory per block per layer. Split the layers
@@ -1129,8 +1218,30 @@ def get_kv_cache_config(
         return _get_kv_cache_config_uniform_page_size(vllm_config,
                                                       kv_cache_spec,
                                                       available_memory)
+    elif not is_kv_cache_dtype_uniform(kv_cache_spec):
+        # Mixed-dtype scenario with different attention types
+        # Fall back to mixed-dtype handler
+        return _get_kv_cache_config_mixed_dtype(vllm_config, kv_cache_spec,
+                                                available_memory)
 
     raise NotImplementedError
+
+
+def _get_sortable_spec_key(kv_cache_spec):
+    """
+    Create a sortable key from a KVCacheSpec, handling torch dtypes properly.
+    """
+    spec_tuple = astuple(kv_cache_spec)
+    sortable_tuple = []
+
+    for item in spec_tuple:
+        if isinstance(item, torch.dtype):
+            # Convert torch dtype to string for sorting
+            sortable_tuple.append(str(item))
+        else:
+            sortable_tuple.append(item)
+
+    return tuple(sortable_tuple)
 
 
 def unify_kv_cache_configs(kv_cache_configs: list[KVCacheConfig]):
@@ -1144,12 +1255,15 @@ def unify_kv_cache_configs(kv_cache_configs: list[KVCacheConfig]):
         kv_cache_configs: The KV cache configurations for each worker. Will be
             in-place modified to make them consistent.
     """
+    if len(kv_cache_configs) == 0:
+        return
 
     # Sort the kv cache groups by their KV cache spec.
     # This can avoid the inconsistency caused by the order of groups.
     for kv_cache_config in kv_cache_configs:
-        kv_cache_config.kv_cache_groups.sort(key=lambda x: (type(
-            x.kv_cache_spec).__name__, astuple(x.kv_cache_spec)))
+        kv_cache_config.kv_cache_groups.sort(
+            key=lambda x: (type(x.kv_cache_spec).__name__,
+                           _get_sortable_spec_key(x.kv_cache_spec)))
 
     # Verify that the groups of each rank are the same.
     for kv_cache_config in kv_cache_configs[1:]:

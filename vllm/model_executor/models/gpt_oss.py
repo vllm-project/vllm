@@ -43,6 +43,7 @@ class OAIAttention(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         cache_config: Optional[CacheConfig] = None,
         prefix: str = "",
+        per_layer_kv_cache_dtype: Optional[str] = None,
     ):
         super().__init__()
         self.layer_idx = extract_layer_index(prefix)
@@ -117,6 +118,7 @@ class OAIAttention(nn.Module):
             attn_type=AttentionType.DECODER,
             prefix=f"{prefix}.attn",
             sinks=self.sinks,
+            per_layer_kv_cache_dtype=per_layer_kv_cache_dtype,
         )
 
     def forward(self, hidden_states: torch.Tensor,
@@ -177,9 +179,23 @@ class TransformerBlock(torch.nn.Module):
     ):
         super().__init__()
         self.layer_idx = extract_layer_index(prefix)
-        self.attn = OAIAttention(config,
-                                 prefix=f"{prefix}.attn",
-                                 cache_config=cache_config)
+
+        # Determine per-layer KV cache dtype for mixed-dtype support
+        per_layer_kv_cache_dtype = None
+        if cache_config is not None and self.layer_idx is not None:
+            skip_layers = cache_config.skip_kv_quantization_layers
+
+            # Simple check - sliding_window is already resolved to layer indices
+            if skip_layers and self.layer_idx in skip_layers:
+                per_layer_kv_cache_dtype = None
+            else:
+                per_layer_kv_cache_dtype = cache_config.cache_dtype
+
+        self.attn = OAIAttention(
+            config,
+            prefix=f"{prefix}.attn",
+            cache_config=cache_config,
+            per_layer_kv_cache_dtype=per_layer_kv_cache_dtype)
         self.mlp = MLPBlock(config,
                             self.layer_idx,
                             quant_config=quant_config,
@@ -227,6 +243,18 @@ class GptOssModel(nn.Module):
             self.config.vocab_size,
             self.config.hidden_size,
         )
+
+        # Resolve "sliding_window" keyword for GPT-OSS
+        if (self.cache_config.skip_kv_quantization_layers
+                and len(self.cache_config.skip_kv_quantization_layers) == 1
+                and self.cache_config.skip_kv_quantization_layers[0]
+                == "sliding_window"):
+            # Replace with actual sliding window layer indices (even layers)
+            sliding_window_layers = [
+                i for i in range(self.config.num_hidden_layers) if i % 2 == 0
+            ]
+            self.cache_config.skip_kv_quantization_layers = (
+                sliding_window_layers)
         self.start_layer, self.end_layer, self.layers = make_layers(
             self.config.num_hidden_layers,
             lambda prefix: TransformerBlock(

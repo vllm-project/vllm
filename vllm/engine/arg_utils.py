@@ -293,6 +293,7 @@ class EngineArgs:
     config_format: str = ModelConfig.config_format
     dtype: ModelDType = ModelConfig.dtype
     kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
+    skip_kv_quantization_layers: Optional[str] = None
     seed: Optional[int] = ModelConfig.seed
     max_model_len: Optional[int] = ModelConfig.max_model_len
     cuda_graph_sizes: list[int] = get_field(SchedulerConfig,
@@ -751,6 +752,14 @@ class EngineArgs:
                                  **cache_kwargs["mamba_cache_dtype"])
         cache_group.add_argument("--mamba-ssm-cache-dtype",
                                  **cache_kwargs["mamba_ssm_cache_dtype"])
+        cache_group.add_argument(
+            "--skip-kv-quantization-layers",
+            type=str,
+            default=None,
+            help=("Comma-separated or dash-separated list of layer indices to "
+                  "skip KV quantization, or 'sliding_window' to skip all "
+                  "sliding window layers. Example: '0,31', '1-6-32', or "
+                  "'sliding_window'"))
 
         # Multimodal related configs
         multimodal_kwargs = get_kwargs(MultiModalConfig)
@@ -1081,6 +1090,45 @@ class EngineArgs:
         })
         return SpeculativeConfig(**self.speculative_config)
 
+    def _parse_skip_kv_quantization_layers(
+            self, layers_str: Optional[str]) -> Optional[list[int]]:
+        """Parse skip_kv_quantization_layers string to list of integers.
+        
+        Supports formats:
+        - "0,31" (comma-separated)
+        - "0-31" (dash-separated) 
+        - "0-1-30-31" (multiple dash-separated)
+        - "sliding_window" (skip all sliding window layers)
+        """
+        if layers_str is None:
+            return None
+
+        layers_str = layers_str.strip()
+        if not layers_str:
+            return None
+
+        # Handle special keyword
+        if layers_str.lower() == "sliding_window":
+            # Return special marker - will be resolved later with model info
+            return ["sliding_window"]
+        else:
+            raise NotImplementedError("Currently we only support skipping "
+                                      "sliding window layers.")
+
+        # Try comma-separated first, then dash-separated
+        if ',' in layers_str:
+            parts = layers_str.split(',')
+        else:
+            parts = layers_str.split('-')
+
+        try:
+            return [int(part.strip()) for part in parts if part.strip()]
+        except ValueError as e:
+            raise ValueError(
+                f"Invalid skip_kv_quantization_layers format: '{layers_str}'. "
+                f"Expected comma-separated (0,31), dash-separated (0-31) "
+                f"integers, or 'sliding_window'. Error: {e}") from e
+
     def create_engine_config(
         self,
         usage_context: Optional[UsageContext] = None,
@@ -1167,6 +1215,10 @@ class EngineArgs:
             f"dcp_size={self.decode_context_parallel_size}."
         )
 
+        # Parse skip_kv_quantization_layers string to list of integers
+        parsed_skip_layers = self._parse_skip_kv_quantization_layers(
+            self.skip_kv_quantization_layers)
+
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
@@ -1180,6 +1232,7 @@ class EngineArgs:
             cpu_offload_gb=self.cpu_offload_gb,
             calculate_kv_scales=self.calculate_kv_scales,
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
+            skip_kv_quantization_layers=parsed_skip_layers,
             mamba_cache_dtype=self.mamba_cache_dtype,
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
         )
