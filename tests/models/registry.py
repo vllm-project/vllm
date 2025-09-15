@@ -488,9 +488,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "KimiVLForConditionalGeneration": _HfExamplesInfo("moonshotai/Kimi-VL-A3B-Instruct",  # noqa: E501
                                                       extras={"thinking": "moonshotai/Kimi-VL-A3B-Thinking"},  # noqa: E501
                                                       trust_remote_code=True),
-                                                      max_model_len=10240,
-                                                      extras={"llama-guard-4": "meta-llama/Llama-Guard-4-12B"}, # noqa: E501
-                                                      ),
+    "Llama4ForConditionalGeneration": _HfExamplesInfo(
+        "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+        max_model_len=10240,
+        extras={"llama-guard-4": "meta-llama/Llama-Guard-4-12B"},
+    ),
     "LlavaForConditionalGeneration": _HfExamplesInfo("llava-hf/llava-1.5-7b-hf",
                                                      extras={"mistral": "mistral-community/pixtral-12b", # noqa: E501
                                                              "mistral-fp8": "nm-testing/pixtral-12b-FP8-dynamic"}),  # noqa: E501
@@ -556,6 +558,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Qwen2_5OmniModel": _HfExamplesInfo("Qwen/Qwen2.5-Omni-3B"),
     "Qwen2_5OmniForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2.5-Omni-7B-AWQ"),  # noqa: E501
     "RForConditionalGeneration": _HfExamplesInfo("YannQi/R-4B",
+                                                  trust_remote_code=True),
+    "SkyworkR1VChatModel": _HfExamplesInfo("Skywork/Skywork-R1V-38B",
+                                           trust_remote_code=True),
     "SmolVLMForConditionalGeneration": _HfExamplesInfo("HuggingFaceTB/SmolVLM2-2.2B-Instruct",  # noqa: E501
                                                        min_transformers_version="4.56",
                                                        transformers_version_reason="HF model broken in 4.55"),  # noqa: E501
