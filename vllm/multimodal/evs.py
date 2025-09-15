@@ -13,6 +13,27 @@ import typing
 import torch
 
 
+def compute_retained_tokens_count(video_size_thw: torch.LongTensor,
+                                  spatial_merge_size: int, q: float) -> int:
+    """
+    Compute the number of retained tokens for a given video.
+    Method ensures that we retain all the tokens from the first frame
+    regardless of the pruning rate.
+
+    Args:
+        video_size_thw: The size of the video in the format of (T, H, W).
+        spatial_merge_size: The size of the spatial merge.
+        q: The pruning rate.
+
+    Returns:
+        The number of retained tokens.
+    """
+    T, H, W = video_size_thw
+    min_num_tokens = (H // spatial_merge_size) * (W // spatial_merge_size)
+    evs_num_tokens = int(T * min_num_tokens * (1 - q))
+    return min(min_num_tokens, evs_num_tokens)
+
+
 def compute_retention_mask(
     video_embeds: torch.Tensor,
     video_size_thw: torch.LongTensor,
@@ -56,12 +77,13 @@ def compute_retention_mask(
         dim=0)
 
     dissimilarity_flat = dissimilarity.view(-1)
-    topk_indices = torch.topk(
-        dissimilarity_flat,
-        k=int(dissimilarity_flat.numel() * (1 - q)),
-        largest=True,
-        sorted=False,
-    ).indices
+    order = torch.argsort(dissimilarity_flat,
+                          dim=-1,
+                          descending=True,
+                          stable=True)
+    retain_num_tokens = compute_retained_tokens_count(video_size_thw,
+                                                      spatial_merge_size, q)
+    topk_indices = order[:retain_num_tokens]
 
     retention_mask = torch.zeros_like(dissimilarity_flat, dtype=torch.bool)
     retention_mask[topk_indices] = True

@@ -60,6 +60,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.evs import (compute_mrope_for_media,
+                                 compute_retained_tokens_count,
                                  compute_retention_mask,
                                  recompute_mrope_positions)
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
@@ -944,7 +945,11 @@ class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             ).video_pruning_rate
             if (modality == "video" and video_pruning_rate is not None
                     and video_pruning_rate > 0.0):
-                num_tokens = int(num_tokens * (1 - video_pruning_rate))
+                num_tokens = compute_retained_tokens_count(
+                    grid_thw,
+                    image_processor.merge_size,
+                    video_pruning_rate,
+                )
             # End of EVS-specific code
 
             return [placeholder[modality]] * num_tokens
