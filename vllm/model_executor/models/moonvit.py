@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: E501
 # Adapted from https://huggingface.co/moonshotai/Kimi-VL-A3B-Instruct/blob/main/modeling_kimi_vl.py
 # This file is meant to be used in kimi_vl.py only
@@ -42,9 +43,10 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 import math
+from collections.abc import Sequence
 from copy import deepcopy
 from functools import cached_property
-from typing import List, Optional, Sequence, Tuple, Union
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -222,7 +224,7 @@ class MoonVisionPatchEmbed(nn.Module):
         self,
         out_dim: int,
         in_dim: int = 3,
-        patch_size: Union[int, Tuple[int, int]] = (14, 14),
+        patch_size: Union[int, tuple[int, int]] = (14, 14),
         pos_emb_height: int = 14,
         pos_emb_width: int = 14,
     ):
@@ -526,7 +528,7 @@ def patch_merger(
         x: torch.Tensor,
         grid_hw: torch.Tensor,
         merge_kernel_size: list[int, int] = (2, 2),
-) -> List[torch.Tensor]:
+) -> list[torch.Tensor]:
     d_model = x.size(-1)
 
     outputs = []

@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable, Mapping, Sequence
-from functools import cached_property
-from typing import Literal, Optional, Set, Tuple, TypedDict, Union
+from typing import Literal, Optional, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -12,7 +12,6 @@ from transformers import (BatchFeature, Blip2Config, Blip2QFormerConfig,
 from vllm.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
@@ -62,6 +61,7 @@ class Blip2QFormerMultiHeadAttention(nn.Module):
         quant_config: Optional[QuantizationConfig],
         cache_config: Optional[CacheConfig],
         is_cross_attention: bool = False,
+        prefix: str = "",
     ) -> None:
         super().__init__()
 
@@ -141,7 +141,7 @@ class Blip2QFormerMultiHeadAttention(nn.Module):
 
 class Blip2QFormerSelfOutput(nn.Module):
 
-    def __init__(self, config: Blip2QFormerConfig) -> None:
+    def __init__(self, config: Blip2QFormerConfig, prefix: str = "") -> None:
         super().__init__()
 
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
@@ -169,6 +169,7 @@ class Blip2QFormerAttention(nn.Module):
         quant_config: Optional[QuantizationConfig],
         cache_config: Optional[CacheConfig],
         is_cross_attention: bool = False,
+        prefix: str = "",
     ) -> None:
         super().__init__()
 
@@ -177,15 +178,16 @@ class Blip2QFormerAttention(nn.Module):
             quant_config=quant_config,
             cache_config=cache_config,
             is_cross_attention=is_cross_attention,
+            prefix=f"{prefix}.attention",
         )
 
-        self.output = Blip2QFormerSelfOutput(config)
+        self.output = Blip2QFormerSelfOutput(config, prefix=f"{prefix}.output")
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         encoder_hidden_states: Optional[torch.FloatTensor] = None,
-    ) -> Tuple[torch.Tensor]:
+    ) -> tuple[torch.Tensor]:
         self_output = self.attention(
             hidden_states,
             encoder_hidden_states=encoder_hidden_states,
@@ -197,7 +199,7 @@ class Blip2QFormerAttention(nn.Module):
 
 class Blip2QFormerIntermediate(nn.Module):
 
-    def __init__(self, config: Blip2QFormerConfig) -> None:
+    def __init__(self, config: Blip2QFormerConfig, prefix: str = "") -> None:
         super().__init__()
 
         self.dense = nn.Linear(config.hidden_size, config.intermediate_size)
@@ -211,7 +213,7 @@ class Blip2QFormerIntermediate(nn.Module):
 
 class Blip2QFormerOutput(nn.Module):
 
-    def __init__(self, config: Blip2QFormerConfig) -> None:
+    def __init__(self, config: Blip2QFormerConfig, prefix: str = "") -> None:
         super().__init__()
 
         self.dense = nn.Linear(config.intermediate_size, config.hidden_size)
@@ -239,6 +241,7 @@ class Blip2QFormerLayer(nn.Module):
         quant_config: Optional[QuantizationConfig],
         cache_config: Optional[CacheConfig],
         layer_idx: int,
+        prefix: str = "",
     ) -> None:
         super().__init__()
 
@@ -246,7 +249,8 @@ class Blip2QFormerLayer(nn.Module):
         self.seq_len_dim = 1
         self.attention = Blip2QFormerAttention(config,
                                                quant_config=quant_config,
-                                               cache_config=cache_config)
+                                               cache_config=cache_config,
+                                               prefix=f"{prefix}.attention")
 
         self.layer_idx = layer_idx
 
@@ -255,13 +259,16 @@ class Blip2QFormerLayer(nn.Module):
                 config,
                 quant_config=quant_config,
                 cache_config=cache_config,
-                is_cross_attention=True)
+                is_cross_attention=True,
+                prefix=f"{prefix}.crossattention")
             self.has_cross_attention = True
         else:
             self.has_cross_attention = False
 
-        self.intermediate_query = Blip2QFormerIntermediate(config)
-        self.output_query = Blip2QFormerOutput(config)
+        self.intermediate_query = Blip2QFormerIntermediate(
+            config, prefix=f"{prefix}.intermediate_query")
+        self.output_query = Blip2QFormerOutput(config,
+                                               prefix=f"{prefix}.output_query")
 
     def forward(
         self,
@@ -327,6 +334,7 @@ class Blip2QFormerEncoder(nn.Module):
         *,
         quant_config: Optional[QuantizationConfig],
         cache_config: Optional[CacheConfig],
+        prefix: str = "",
     ) -> None:
         super().__init__()
 
@@ -336,7 +344,8 @@ class Blip2QFormerEncoder(nn.Module):
             Blip2QFormerLayer(config,
                               quant_config=quant_config,
                               cache_config=cache_config,
-                              layer_idx=layer_idx)
+                              layer_idx=layer_idx,
+                              prefix=f"{prefix}.layer.{layer_idx}")
             for layer_idx in range(config.num_hidden_layers)
         ])
 
@@ -367,6 +376,7 @@ class Blip2QFormerModel(nn.Module):
         *,
         quant_config: Optional[QuantizationConfig],
         cache_config: Optional[CacheConfig],
+        prefix: str = "",
     ) -> None:
         super().__init__()
 
@@ -378,7 +388,8 @@ class Blip2QFormerModel(nn.Module):
 
         self.encoder = Blip2QFormerEncoder(config,
                                            quant_config=quant_config,
-                                           cache_config=cache_config)
+                                           cache_config=cache_config,
+                                           prefix=f"{prefix}.encoder")
 
     def forward(
         self,
@@ -443,6 +454,7 @@ class Blip2MultiModalProcessor(BaseMultiModalProcessor[Blip2ProcessingInfo]):
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if not mm_data:
             # HF processor always adds placeholders even when there's no image
@@ -454,6 +466,7 @@ class Blip2MultiModalProcessor(BaseMultiModalProcessor[Blip2ProcessingInfo]):
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
         )
 
     def _get_mm_fields_config(
@@ -494,6 +507,13 @@ class Blip2MultiModalProcessor(BaseMultiModalProcessor[Blip2ProcessingInfo]):
 class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
                                     SupportsQuant):
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return None
+
+        raise ValueError("Only image modality is supported")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
 
         super().__init__()
@@ -513,7 +533,8 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
 
         self.qformer = Blip2QFormerModel(config.qformer_config,
                                          cache_config=cache_config,
-                                         quant_config=quant_config)
+                                         quant_config=quant_config,
+                                         prefix=f"{prefix}.qformer")
 
         self.language_projection = nn.Linear(
             config.qformer_config.hidden_size,
@@ -529,13 +550,6 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
-
-    @cached_property
-    def sampler(self):
-        if hasattr(self.language_model, "sampler"):
-            return self.language_model.sampler
-
-        return get_sampler()
 
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
         h = w = self.config.vision_config.image_size
@@ -622,11 +636,11 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
-            return None
+            return []
         vision_embeddings = self._process_image_input(image_input)
         return vision_embeddings
 
@@ -636,7 +650,8 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings is not None \
+            and len(multimodal_embeddings) != 0:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings,
                 _IMAGE_TOKEN_ID)
@@ -649,7 +664,7 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
-    ) -> Union[SamplerOutput, IntermediateTensors]:
+    ) -> IntermediateTensors:
         """Run forward pass for BLIP-2.
 
         One key thing to understand is the `input_ids` already accounts for the
@@ -677,8 +692,8 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
                 batch.
             pixel_values: The pixels in each input image.
         
-        See also:
-            :class:`Blip2ImageInputs`
+        Info:
+            [Blip2ImageInputs][]
         """
 
         if intermediate_tensors is not None:
@@ -707,14 +722,7 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        return self.language_model.sample(logits, sampling_metadata)
-
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

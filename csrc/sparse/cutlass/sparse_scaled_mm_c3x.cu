@@ -277,7 +277,7 @@ CompressorResult cutlass_sparse_compress_sm90(torch::Tensor const& a) {
   uint32_t const m = 1;  // Set M to 1 for compression
   uint32_t const n = a.size(1);
 
-  // Note: For correctess, the compressed format must be invariant in:
+  // Note: For correctness, the compressed format must be invariant in:
   //  - M, the flattened number of tokens
   //  - Whether output dtype is fp16 or bf16
   //  - CUTLASS epilogues

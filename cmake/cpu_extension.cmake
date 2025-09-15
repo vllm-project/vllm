@@ -12,9 +12,8 @@ endif()
 #
 # Define environment variables for special configurations
 #
-if(DEFINED ENV{VLLM_CPU_AVX512BF16})
-    set(ENABLE_AVX512BF16 ON)
-endif()
+set(ENABLE_AVX512BF16 $ENV{VLLM_CPU_AVX512BF16})
+set(ENABLE_AVX512VNNI $ENV{VLLM_CPU_AVX512VNNI})
 
 include_directories("${CMAKE_SOURCE_DIR}/csrc")
 
@@ -75,6 +74,7 @@ if (MACOSX_FOUND AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
 else()
     find_isa(${CPUINFO} "avx2" AVX2_FOUND)
     find_isa(${CPUINFO} "avx512f" AVX512_FOUND)
+    find_isa(${CPUINFO} "Power11" POWER11_FOUND)
     find_isa(${CPUINFO} "POWER10" POWER10_FOUND)
     find_isa(${CPUINFO} "POWER9" POWER9_FOUND)
     find_isa(${CPUINFO} "asimd" ASIMD_FOUND) # Check for ARM NEON support
@@ -95,24 +95,48 @@ if (AVX512_FOUND AND NOT AVX512_DISABLED)
         if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
             CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.3)
             list(APPEND CXX_COMPILE_FLAGS "-mavx512bf16")
+            set(ENABLE_AVX512BF16 ON)
         else()
+            set(ENABLE_AVX512BF16 OFF)
             message(WARNING "Disable AVX512-BF16 ISA support, requires gcc/g++ >= 12.3")
         endif()
     else()
+        set(ENABLE_AVX512BF16 OFF)
         message(WARNING "Disable AVX512-BF16 ISA support, no avx512_bf16 found in local CPU flags." " If cross-compilation is required, please set env VLLM_CPU_AVX512BF16=1.")
+    endif()
+
+    find_isa(${CPUINFO} "avx512_vnni" AVX512VNNI_FOUND)
+    if (AVX512VNNI_FOUND OR ENABLE_AVX512VNNI)
+        if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+            CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.3)
+            list(APPEND CXX_COMPILE_FLAGS "-mavx512vnni")
+            set(ENABLE_AVX512VNNI ON)
+        else()
+            set(ENABLE_AVX512VNNI OFF)
+            message(WARNING "Disable AVX512-VNNI ISA support, requires gcc/g++ >= 12.3")
+        endif()
+    else()
+        set(ENABLE_AVX512VNNI OFF)
+        message(WARNING "Disable AVX512-VNNI ISA support, no avx512_vnni found in local CPU flags." " If cross-compilation is required, please set env VLLM_CPU_AVX512VNNI=1.")
     endif()
     
 elseif (AVX2_FOUND)
     list(APPEND CXX_COMPILE_FLAGS "-mavx2")
     message(WARNING "vLLM CPU backend using AVX2 ISA")
     
-elseif (POWER9_FOUND OR POWER10_FOUND)
+elseif (POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
     message(STATUS "PowerPC detected")
-    # Check for PowerPC VSX support
-    list(APPEND CXX_COMPILE_FLAGS
-        "-mvsx"
-        "-mcpu=native"
-        "-mtune=native")
+    if (POWER9_FOUND)
+        list(APPEND CXX_COMPILE_FLAGS
+            "-mvsx"
+            "-mcpu=power9"
+            "-mtune=power9")
+    elseif (POWER10_FOUND OR POWER11_FOUND)
+        list(APPEND CXX_COMPILE_FLAGS
+            "-mvsx"
+            "-mcpu=power10"
+            "-mtune=power10")
+    endif()
 
 elseif (ASIMD_FOUND)
     message(STATUS "ARMv8 or later architecture detected")
@@ -141,13 +165,53 @@ else()
 endif()
 
 #
-# Build oneDNN for W8A8 GEMM kernels (only for x86-AVX512 platforms)
-#
-if (AVX512_FOUND AND NOT AVX512_DISABLED)
+# Build oneDNN for W8A8 GEMM kernels (only for x86-AVX512 /ARM platforms)
+# Flag to enable ACL kernels for AARCH64 platforms
+if ( VLLM_BUILD_ACL STREQUAL "ON")
+    set(USE_ACL ON)
+else()
+    set(USE_ACL OFF)
+endif()
+
+if ((AVX512_FOUND AND NOT AVX512_DISABLED) OR ASIMD_FOUND)
     FetchContent_Declare(
         oneDNN
         GIT_REPOSITORY https://github.com/oneapi-src/oneDNN.git
-        GIT_TAG  v3.7.1
+        GIT_TAG  v3.8.1
+        GIT_PROGRESS TRUE
+        GIT_SHALLOW TRUE
+    )
+
+    if(USE_ACL)
+        find_library(ARM_COMPUTE_LIBRARY NAMES arm_compute PATHS $ENV{ACL_ROOT_DIR}/build/)
+        if(NOT ARM_COMPUTE_LIBRARY)
+            message(FATAL_ERROR "Could not find ARM Compute Library: please set ACL_ROOT_DIR")
+        endif()
+        set(ONEDNN_AARCH64_USE_ACL "ON")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,-rpath,$ENV{ACL_ROOT_DIR}/build/")
+        endif()
+
+    set(ONEDNN_LIBRARY_TYPE "STATIC")
+    set(ONEDNN_BUILD_DOC "OFF")
+    set(ONEDNN_BUILD_EXAMPLES "OFF")
+    set(ONEDNN_BUILD_TESTS "OFF")
+    set(ONEDNN_ENABLE_WORKLOAD "INFERENCE")
+    set(ONEDNN_ENABLE_PRIMITIVE "MATMUL;REORDER")
+    set(ONEDNN_BUILD_GRAPH "OFF")
+    set(ONEDNN_ENABLE_JIT_PROFILING "OFF")
+    set(ONEDNN_ENABLE_ITT_TASKS "OFF")
+    set(ONEDNN_ENABLE_MAX_CPU_ISA "OFF")
+    set(ONEDNN_ENABLE_CPU_ISA_HINTS "OFF")
+    set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
+
+    FetchContent_MakeAvailable(oneDNN)
+    
+    list(APPEND LIBS dnnl)
+elseif(POWER10_FOUND)
+    FetchContent_Declare(
+        oneDNN
+        GIT_REPOSITORY https://github.com/oneapi-src/oneDNN.git
+        GIT_TAG v3.7.2
         GIT_PROGRESS TRUE
         GIT_SHALLOW TRUE
     )
@@ -165,8 +229,10 @@ if (AVX512_FOUND AND NOT AVX512_DISABLED)
     set(ONEDNN_ENABLE_CPU_ISA_HINTS "OFF")
     set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
 
+    set(DNNL_CPU_RUNTIME "OMP")
+
     FetchContent_MakeAvailable(oneDNN)
-    
+
     list(APPEND LIBS dnnl)
 endif()
 
@@ -197,7 +263,29 @@ if (AVX512_FOUND AND NOT AVX512_DISABLED)
         "csrc/cpu/quant.cpp"
         "csrc/cpu/shm.cpp"
         ${VLLM_EXT_SRC})
+    if (ENABLE_AVX512BF16 AND ENABLE_AVX512VNNI)
+        set(VLLM_EXT_SRC
+            "csrc/cpu/sgl-kernels/gemm.cpp"
+            "csrc/cpu/sgl-kernels/gemm_int8.cpp"
+            "csrc/cpu/sgl-kernels/gemm_fp8.cpp"
+            "csrc/cpu/sgl-kernels/moe.cpp"
+            "csrc/cpu/sgl-kernels/moe_int8.cpp"
+            "csrc/cpu/sgl-kernels/moe_fp8.cpp"
+            ${VLLM_EXT_SRC})
+        add_compile_definitions(-DCPU_CAPABILITY_AVX512)
+    endif()
+elseif(POWER10_FOUND)
+    set(VLLM_EXT_SRC
+        "csrc/cpu/quant.cpp"
+        ${VLLM_EXT_SRC})
 endif()
+if (ASIMD_FOUND)
+    set(VLLM_EXT_SRC
+        "csrc/cpu/quant.cpp"
+        ${VLLM_EXT_SRC})
+endif()
+
+message(STATUS "CPU extension source files: ${VLLM_EXT_SRC}")
 
 #
 # Define extension targets

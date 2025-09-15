@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import abstractmethod
-from functools import cached_property
-from typing import (Final, Iterable, List, Literal, Mapping, Optional,
-                    Protocol, Set, Tuple, TypedDict, TypeVar, Union)
+from collections.abc import Iterable, Mapping
+from typing import (Final, Literal, Optional, Protocol, TypedDict, TypeVar,
+                    Union)
 
 import torch
 import torch.nn as nn
@@ -13,7 +14,6 @@ from transformers.models.llava_next.modeling_llava_next import (
 from typing_extensions import NotRequired
 
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig
@@ -26,8 +26,8 @@ from .llava import (BaseLlavaMultiModalProcessor, BaseLlavaProcessingInfo,
                     LlavaDummyInputsBuilder, LlavaLikeConfig,
                     LlavaMultiModalProjector, init_vision_tower_for_llava)
 from .siglip import SiglipVisionModel
-from .utils import (AutoWeightsLoader, embed_multimodal, flatten_bn,
-                    init_vllm_registered_model, maybe_prefix)
+from .utils import (AutoWeightsLoader, WeightsMapper, embed_multimodal,
+                    flatten_bn, init_vllm_registered_model, maybe_prefix)
 
 
 class LlavaNextImagePixelInputs(TypedDict):
@@ -136,11 +136,13 @@ class LlavaNextProcessingInfo(BaseLlavaProcessingInfo):
         current_aspect_ratio = current_width / current_height
 
         if aspect_ratio > current_aspect_ratio:
-            new_height = (original_height * current_width) // original_width
+            new_height = int(
+                round(original_height * (current_width / original_width), 7))
             padding = (current_height - new_height) // 2
             current_height = current_height - (2 * padding)
         else:
-            new_width = (original_width * current_height) // original_height
+            new_width = int(
+                round(original_width * (current_height / original_height), 7))
             padding = (current_width - new_width) // 2
             current_width = current_width - (2 * padding)
 
@@ -203,6 +205,23 @@ class LlavaNextMultiModalProcessor(
 class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
                                         SupportsPP):
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            # mapping for new names in checkpoint saved after transformers v4.52
+            "model.language_model.": "language_model.model.",
+            "model.vision_tower.": "vision_tower.",
+            "model.multi_modal_projector.": "multi_modal_projector.",
+            "model.image_newline": "image_newline",
+            "lm_head.": "language_model.lm_head.",
+        })
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<image>"
+
+        raise ValueError("Only image modality is supported")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -250,13 +269,6 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
-    @cached_property
-    def sampler(self):
-        if hasattr(self.language_model, "sampler"):
-            return self.language_model.sampler
-
-        return get_sampler()
-
     def _validate_image_sizes(self, data: torch.Tensor) -> torch.Tensor:
         expected_dims = (2, )
 
@@ -275,8 +287,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
         return data
 
     def _validate_pixel_values(
-        self, data: Union[torch.Tensor, List[torch.Tensor]]
-    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+        self, data: Union[torch.Tensor, list[torch.Tensor]]
+    ) -> Union[torch.Tensor, list[torch.Tensor]]:
 
         h = w = self.config.vision_config.image_size
         expected_dims = (3, h, w)
@@ -459,7 +471,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
     def _process_image_input(
         self,
         image_input: LlavaNextImageInputs,
-    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+    ) -> Union[torch.Tensor, list[torch.Tensor]]:
         if image_input["type"] == "image_embeds":
             return [image_input["data"]]
 
@@ -483,11 +495,11 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
-            return None
+            return []
         vision_embeddings = self._process_image_input(image_input)
         return vision_embeddings
 
@@ -497,7 +509,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
 
-        if multimodal_embeddings is None:
+        if multimodal_embeddings is None \
+            or len(multimodal_embeddings) == 0:
             return self.language_model.get_input_embeddings(input_ids)
 
         inputs_embeds = embed_multimodal(
@@ -546,7 +559,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
         Unlike in LLaVA-1.5, the number of image tokens inputted to the language
         model depends on the original size of the input image. Including the
         original image token in the input, the required number of image tokens
-        is given by :func:`get_llava_next_image_feature_size`.
+        is given by [get_llava_next_image_feature_size][].
 
         This way, the `positions` and `attn_metadata` are consistent
         with the `input_ids`.
@@ -557,8 +570,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
             pixel_values: The pixels in each grid patch for each input image.
             image_sizes: The original `(height, width)` for each input image.
 
-        See also:
-            :class:`LlavaNextImageInputs`
+        Info:
+            [LlavaNextImageInputs][]
         """
         if intermediate_tensors is not None:
             inputs_embeds = None
@@ -585,14 +598,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        return self.language_model.sample(logits, sampling_metadata)
-
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

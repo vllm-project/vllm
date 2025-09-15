@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 
 import pytest
@@ -11,8 +12,7 @@ from vllm.engine.async_llm_engine import AsyncLLMEngine
 UNSUPPORTED_MODELS_V1 = [
     "openai/whisper-large-v3",  # transcription
     "facebook/bart-large-cnn",  # encoder decoder
-    "mistralai/Mamba-Codestral-7B-v0.1",  # mamba
-    "ibm-ai-platform/Bamba-9B",  # hybrid
+    "state-spaces/mamba-130m-hf",  # mamba1
     "BAAI/bge-m3",  # embedding
 ]
 
@@ -43,12 +43,6 @@ def test_unsupported_configs(monkeypatch):
         with pytest.raises(NotImplementedError):
             AsyncEngineArgs(
                 model=MODEL,
-                kv_cache_dtype="fp8",
-            ).create_engine_config()
-
-        with pytest.raises(NotImplementedError):
-            AsyncEngineArgs(
-                model=MODEL,
                 speculative_config={
                     "model": MODEL,
                 },
@@ -57,7 +51,8 @@ def test_unsupported_configs(monkeypatch):
         with pytest.raises(NotImplementedError):
             AsyncEngineArgs(
                 model=MODEL,
-                guided_decoding_backend="lm-format-enforcer:no-fallback",
+                guided_decoding_backend="lm-format-enforcer",
+                guided_decoding_disable_fallback=True,
             ).create_engine_config()
 
         with pytest.raises(NotImplementedError):
@@ -70,12 +65,6 @@ def test_unsupported_configs(monkeypatch):
             AsyncEngineArgs(
                 model=MODEL,
                 disable_async_output_proc=True,
-            ).create_engine_config()
-
-        with pytest.raises(NotImplementedError):
-            AsyncEngineArgs(
-                model=MODEL,
-                scheduling_policy="priority",
             ).create_engine_config()
 
         with pytest.raises(NotImplementedError):
@@ -117,9 +106,9 @@ def test_v1_llm_by_default(monkeypatch):
             m.delenv("VLLM_USE_V1")
 
         # Should default to V1 for supported config.
-        model = LLM(MODEL, enforce_eager=True, enable_lora=True)
-        print(model.generate("Hello my name is"))
-        assert hasattr(model.llm_engine, "engine_core")
+        llm = LLM(MODEL, enforce_eager=True, enable_lora=True)
+        print(llm.generate("Hello my name is"))
+        assert hasattr(llm.llm_engine, "engine_core")
         m.delenv("VLLM_USE_V1")
 
 

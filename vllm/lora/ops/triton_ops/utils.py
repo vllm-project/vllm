@@ -1,14 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-
-from typing import Dict, List, Tuple
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
 
-_LORA_A_PTR_DICT: Dict[Tuple[int, ...], Tuple[torch.tensor, ...]] = {}
-_LORA_B_PTR_DICT: Dict[Tuple[int, ...], Tuple[torch.tensor, ...]] = {}
+_LORA_A_PTR_DICT: dict[tuple[int, ...], tuple[torch.tensor, ...]] = {}
+_LORA_B_PTR_DICT: dict[tuple[int, ...], tuple[torch.tensor, ...]] = {}
 
 
-def _get_lora_a_ptr(lora_a_weights: List[torch.Tensor], device: torch.device):
+def _get_lora_a_ptr(lora_a_weights: list[torch.Tensor], device: torch.device):
     """
     `_LORA_A_PTR_DICT` collects the required information during `profile_run`, 
     After this, it remains constant and subsequent usage is through LUT.
@@ -36,7 +35,9 @@ def _get_lora_a_ptr(lora_a_weights: List[torch.Tensor], device: torch.device):
         lora_strides_d1.append(lora_a_weight.stride(1))
         lora_strides_d2.append(lora_a_weight.stride(2))
     if len(lora_a_weights) > 1:
-        lora_ptr_tensor = torch.tensor(tensor_ptrs, device=device)
+        lora_ptr_tensor = torch.tensor(tensor_ptrs,
+                                       device=device,
+                                       dtype=torch.uint64)
     else:
         lora_ptr_tensor = lora_a_weights[0]
 
@@ -53,7 +54,7 @@ def _get_lora_a_ptr(lora_a_weights: List[torch.Tensor], device: torch.device):
     return _LORA_A_PTR_DICT.get(key)
 
 
-def _get_lora_b_ptr(lora_weights: List[torch.Tensor], offset_start: int,
+def _get_lora_b_ptr(lora_weights: list[torch.Tensor], offset_start: int,
                     device: torch.device):
     """ 
      `_LORA_B_PTR_DICT` collects the required information during `profile_run`, 
@@ -90,8 +91,12 @@ def _get_lora_b_ptr(lora_weights: List[torch.Tensor], offset_start: int,
 
     if len(lora_weights) > 1:
         # note these are device tensors
-        lora_ptr_tensor = torch.tensor(tensor_ptrs, device=device)
-        slice_start_tensor = torch.tensor(slice_offset_lst, device=device)
+        lora_ptr_tensor = torch.tensor(tensor_ptrs,
+                                       device=device,
+                                       dtype=torch.uint64)
+        slice_start_tensor = torch.tensor(slice_offset_lst,
+                                          device=device,
+                                          dtype=torch.uint64)
     else:
         slice_start_tensor = slice_offset_lst[0]
         lora_ptr_tensor = lora_b_weight[0]

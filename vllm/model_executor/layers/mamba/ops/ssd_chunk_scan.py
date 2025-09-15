@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Copyright (c) 2024, Tri Dao, Albert Gu.
 # Adapted from https://github.com/state-spaces/mamba/blob/v2.2.4/mamba_ssm/ops/triton/ssd_chunk_scan.py
@@ -6,9 +7,9 @@
 # ruff: noqa: E501,SIM102
 
 import torch
-import triton
-import triton.language as tl
 from packaging import version
+
+from vllm.triton_utils import tl, triton
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse('2.2.0')
 

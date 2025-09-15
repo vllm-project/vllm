@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import Tuple
 
 import torch
 
@@ -25,8 +25,8 @@ class MambaCacheParams:
 class MambaCacheManager(ConstantSizeCache):
 
     def __init__(self, vllm_config: VllmConfig, dtype: torch.dtype,
-                 num_mamba_layers: int, conv_state_shape: Tuple[int, int],
-                 temporal_state_shape: Tuple[int, int]):
+                 num_mamba_layers: int, conv_state_shape: tuple[int, int],
+                 temporal_state_shape: tuple[int, int]):
 
         # Determine max batch size to set size of MambaCache
         max_batch_size = vllm_config.scheduler_config.max_num_seqs
@@ -36,10 +36,12 @@ class MambaCacheManager(ConstantSizeCache):
         # Initialize parent class
         super().__init__(max_batch_size)
 
+        # assume conv_state = (dim, state_len)
+        assert conv_state_shape[0] > conv_state_shape[1]
         conv_state = torch.empty(size=(num_mamba_layers, max_batch_size) +
-                                 conv_state_shape,
+                                 (conv_state_shape[1], conv_state_shape[0]),
                                  dtype=dtype,
-                                 device="cuda")
+                                 device="cuda").transpose(-1, -2)
         temporal_state = torch.empty(size=(num_mamba_layers, max_batch_size) +
                                      temporal_state_shape,
                                      dtype=dtype,

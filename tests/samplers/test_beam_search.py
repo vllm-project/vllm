@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Compare the outputs of HF and vLLM when using beam search.
 
 Run `pytest tests/samplers/test_beam_search.py`.

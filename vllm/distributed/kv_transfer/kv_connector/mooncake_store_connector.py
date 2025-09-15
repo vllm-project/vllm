@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 MooncakeStore Connector for Distributed Machine Learning Inference
 The MooncakeStoreConnector transfers KV caches between prefill vLLM workers
@@ -6,7 +7,7 @@ The MooncakeStoreConnector transfers KV caches between prefill vLLM workers
 database-style KVStore.
 """
 import hashlib
-from typing import TYPE_CHECKING, List, Tuple, Union
+from typing import TYPE_CHECKING, Union
 
 import torch
 
@@ -31,12 +32,12 @@ class MooncakeStoreConnector(KVConnectorBase):
         local_rank: int,
         config: VllmConfig,
     ):
-        self.config = config.kv_transfer_config
+        self.kv_transfer_config = config.kv_transfer_config
         self.kv_helper = kv_helper(config)
         self.local_tp_rank = local_rank
 
         # Init kv_store
-        if self.config.kv_connector == "MooncakeStoreConnector":
+        if self.kv_transfer_config.kv_connector == "MooncakeStoreConnector":
             # Check if MOONCAKE_CONFIG_PATH is set
             import os
             use_mooncake_store = os.getenv('MOONCAKE_CONFIG_PATH') is not None
@@ -50,10 +51,11 @@ class MooncakeStoreConnector(KVConnectorBase):
                     MooncakeStore)
                 logger.info(
                     "Initializing KVStoreConnector under kv_transfer_config %s",
-                    self.config)
+                    self.kv_transfer_config)
                 self.kv_store = MooncakeStore(config)
         else:
-            logger.error("Can not find %s", self.config.kv_connector)
+            logger.error("Can not find %s",
+                         self.kv_transfer_config.kv_connector)
 
         assert self.kv_store is not None
 
@@ -70,7 +72,7 @@ class MooncakeStoreConnector(KVConnectorBase):
         self,
         model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         hidden_or_intermediate_states: Union[torch.Tensor,
                                              IntermediateTensors],
     ) -> None:
@@ -113,8 +115,8 @@ class MooncakeStoreConnector(KVConnectorBase):
     def recv_kv_caches_and_hidden_states(
         self, model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
-        kv_caches: List[torch.Tensor]
-    ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
+        kv_caches: list[torch.Tensor]
+    ) -> tuple[Union[torch.Tensor, IntermediateTensors], bool,
                "ModelInputForGPUWithSamplingMetadata"]:
         bypass_model_exec = True
         input_tokens_tensor = model_input.input_tokens

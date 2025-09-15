@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Benchmark offline inference throughput."""
 import argparse
 import dataclasses
@@ -83,7 +84,7 @@ def run_vllm(
         assert lora_requests is None, "BeamSearch API does not support LoRA"
         prompts = [request.prompt for request in requests]
         # output_len should be the same for all requests.
-        output_len = requests[0][2]
+        output_len = requests[0].expected_output_len
         for request in requests:
             assert request.expected_output_len == output_len
         start = time.perf_counter()
@@ -148,9 +149,10 @@ async def run_vllm_async(
 
     async with build_async_engine_client_from_engine_args(
             engine_args, disable_frontend_multiprocessing) as llm:
+        model_config = await llm.get_model_config()
         assert all(
-            llm.model_config.max_model_len >= (request.prompt_len +
-                                               request.expected_output_len)
+            model_config.max_model_len >= (request.prompt_len +
+                                           request.expected_output_len)
             for request in requests), (
                 "Please ensure that max_model_len is greater than the sum of"
                 " prompt_len and expected_output_len for all requests.")
@@ -526,7 +528,6 @@ def main(args: argparse.Namespace):
     validate_args(args)
     if args.seed is None:
         args.seed = 0
-    print(args)
     random.seed(args.seed)
     # Sample the requests.
     tokenizer = AutoTokenizer.from_pretrained(

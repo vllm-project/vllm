@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import Callable, List, Optional, Tuple
 
@@ -81,7 +82,7 @@ class StopChecker:
             return
 
         # Check if the sequence has reached max_model_len.
-        if seq.get_len() > self._get_max_model_len(lora_req):
+        if seq.get_len() >= self._get_max_model_len(lora_req):
             seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
             return
 

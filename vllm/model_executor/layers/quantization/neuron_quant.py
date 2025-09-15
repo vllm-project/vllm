@@ -1,15 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
 from importlib.util import find_spec
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 from torch.nn import Module
 
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 
 SUPPORTED_QUANT_DTYPE_LIST = ['s8', 'f8e4m3fn']
+
+
+class AlwaysSupportedDtypes(list):
+
+    def __contains__(self, item):
+        return True
 
 
 class NeuronQuantConfig(QuantizationConfig):
@@ -30,11 +38,12 @@ class NeuronQuantConfig(QuantizationConfig):
         self.dequant_dtype = dequant_dtype
         self.quantize_method = quantize_method
 
-    def get_name(self) -> str:
+    def get_name(self) -> QuantizationMethods:
         return "neuron_quant"
 
-    def get_supported_act_dtypes(self) -> List[str]:
-        return SUPPORTED_QUANT_DTYPE_LIST
+    def get_supported_act_dtypes(self) -> list[str]:
+        # Neuron implements custom handling logic for quantization support
+        return AlwaysSupportedDtypes()
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -42,11 +51,11 @@ class NeuronQuantConfig(QuantizationConfig):
             "This function should not be called with Neuron Backend")
 
     @staticmethod
-    def get_config_filenames() -> List[str]:
+    def get_config_filenames() -> list[str]:
         return []
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "NeuronQuantConfig":
+    def from_config(cls, config: dict[str, Any]) -> "NeuronQuantConfig":
         quantize_method = cls.get_from_keys(config, ["quantize_method"])
         dequant_dtype = cls.get_from_keys(config, ["dequant_dtype"])
         return cls(dequant_dtype=dequant_dtype,

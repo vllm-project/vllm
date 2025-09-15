@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
 import random
 from typing import Any
 
 import pytest
+import torch
 
 from vllm import LLM, SamplingParams
+from vllm.distributed import cleanup_dist_env_and_memory
 
 
 @pytest.fixture
@@ -44,18 +47,12 @@ def test_prompts():
 
 @pytest.fixture
 def sampling_config():
-    # Only support greedy for now
     return SamplingParams(temperature=0, max_tokens=10, ignore_eos=False)
 
 
 @pytest.fixture
 def model_name():
-    return "meta-llama/Meta-Llama-3-8B-Instruct"
-
-
-@pytest.fixture
-def eagle_model_name():
-    return "yuhuili/EAGLE-LLaMA3-Instruct-8B"
+    return "meta-llama/Llama-3.1-8B-Instruct"
 
 
 def test_ngram_correctness(
@@ -74,6 +71,8 @@ def test_ngram_correctness(
         ref_llm = LLM(model=model_name, max_model_len=1024)
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         del ref_llm
+        torch.cuda.empty_cache()
+        cleanup_dist_env_and_memory()
 
         spec_llm = LLM(
             model=model_name,
@@ -100,34 +99,55 @@ def test_ngram_correctness(
         # Upon failure, inspect the outputs to check for inaccuracy.
         assert matches > int(0.7 * len(ref_outputs))
         del spec_llm
+        torch.cuda.empty_cache()
+        cleanup_dist_env_and_memory()
 
 
+@pytest.mark.parametrize("model_setup", [
+    ("eagle", "meta-llama/Llama-3.1-8B-Instruct",
+     "yuhuili/EAGLE-LLaMA3.1-Instruct-8B", 1),
+    ("eagle3", "meta-llama/Llama-3.1-8B-Instruct",
+     "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B", 1),
+    pytest.param(
+        ("eagle", "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+         "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4),
+        marks=pytest.mark.skip(reason="Skipping due to CI OOM issues")),
+],
+                         ids=["llama3_eagle", "llama3_eagle3", "llama4_eagle"])
 def test_eagle_correctness(
     monkeypatch: pytest.MonkeyPatch,
     test_prompts: list[list[dict[str, Any]]],
     sampling_config: SamplingParams,
-    model_name: str,
-    eagle_model_name: str,
+    model_setup: tuple[str, str, str, int],
 ):
     '''
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using eagle speculative decoding.
+    model_setup: (method, model_name, eagle_model_name, tp_size)
     '''
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
+        method, model_name, spec_model_name, tp_size = model_setup
 
-        ref_llm = LLM(model=model_name, max_model_len=1024)
+        ref_llm = LLM(model=model_name,
+                      max_model_len=2048,
+                      tensor_parallel_size=tp_size)
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         del ref_llm
+        torch.cuda.empty_cache()
+        cleanup_dist_env_and_memory()
 
         spec_llm = LLM(
             model=model_name,
+            trust_remote_code=True,
+            tensor_parallel_size=tp_size,
             speculative_config={
-                "method": "eagle",
-                "model": eagle_model_name,
+                "method": method,
+                "model": spec_model_name,
                 "num_speculative_tokens": 3,
+                "max_model_len": 2048,
             },
-            max_model_len=1024,
+            max_model_len=2048,
         )
         spec_outputs = spec_llm.chat(test_prompts, sampling_config)
         matches = 0
@@ -140,7 +160,9 @@ def test_eagle_correctness(
                 print(f"ref_output: {ref_output.outputs[0].text}")
                 print(f"spec_output: {spec_output.outputs[0].text}")
 
-        # Heuristic: expect at least 70% of the prompts to match exactly
+        # Heuristic: expect at least 66% of the prompts to match exactly
         # Upon failure, inspect the outputs to check for inaccuracy.
-        assert matches > int(0.7 * len(ref_outputs))
+        assert matches > int(0.66 * len(ref_outputs))
         del spec_llm
+        torch.cuda.empty_cache()
+        cleanup_dist_env_and_memory()

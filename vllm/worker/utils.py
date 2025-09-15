@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 '''
 Worker-related helper functions.
 '''
@@ -14,7 +15,7 @@ def assert_enc_dec_mr_supported_scenario(
     a supported scenario.
     '''
 
-    # Reminder: Please update docs/source/features/compatibility_matrix.md
+    # Reminder: Please update docs/features/compatibility_matrix.md
     # If the feature combo become valid
 
     if enc_dec_mr.cache_config.enable_prefix_caching:

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ctypes
 import importlib.util
@@ -54,7 +55,7 @@ elif (sys.platform.startswith("linux") and torch.version.cuda is None
     # fallback to cpu
     VLLM_TARGET_DEVICE = "cpu"
 
-MAIN_CUDA_VERSION = "12.4"
+MAIN_CUDA_VERSION = "12.8"
 
 
 def is_sccache_available() -> bool:
@@ -251,11 +252,8 @@ class cmake_build_ext(build_ext):
 
             # CMake appends the extension prefix to the install path,
             # and outdir already contains that prefix, so we need to remove it.
-            # We assume only the final component of extension prefix is added by
-            # CMake, this is currently true for current extensions but may not
-            # always be the case.
             prefix = outdir
-            if '.' in ext.name:
+            for _ in range(ext.name.count('.')):
                 prefix = prefix.parent
 
             # prefix here should actually be the same for all components
@@ -269,15 +267,17 @@ class cmake_build_ext(build_ext):
         # First, run the standard build_ext command to compile the extensions
         super().run()
 
-        # copy vllm/vllm_flash_attn/*.py from self.build_lib to current
+        # copy vllm/vllm_flash_attn/**/*.py from self.build_lib to current
         # directory so that they can be included in the editable build
         import glob
-        files = glob.glob(
-            os.path.join(self.build_lib, "vllm", "vllm_flash_attn", "*.py"))
+        files = glob.glob(os.path.join(self.build_lib, "vllm",
+                                       "vllm_flash_attn", "**", "*.py"),
+                          recursive=True)
         for file in files:
             dst_file = os.path.join("vllm/vllm_flash_attn",
-                                    os.path.basename(file))
+                                    file.split("vllm/vllm_flash_attn/")[-1])
             print(f"Copying {file} to {dst_file}")
+            os.makedirs(os.path.dirname(dst_file), exist_ok=True)
             self.copy_file(file, dst_file)
 
 
@@ -377,13 +377,21 @@ class repackage_wheel(build_ext):
                 "vllm/_flashmla_C.abi3.so",
                 "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
                 "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
-                "vllm/vllm_flash_attn/flash_attn_interface.py",
-                "vllm/vllm_flash_attn/__init__.py",
                 "vllm/cumem_allocator.abi3.so",
                 # "vllm/_version.py", # not available in nightly wheels yet
             ]
-            file_members = filter(lambda x: x.filename in files_to_copy,
-                                  wheel.filelist)
+
+            file_members = list(
+                filter(lambda x: x.filename in files_to_copy, wheel.filelist))
+
+            # vllm_flash_attn python code:
+            # Regex from
+            #  `glob.translate('vllm/vllm_flash_attn/**/*.py', recursive=True)`
+            compiled_regex = re.compile(
+                r"vllm/vllm_flash_attn/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py")
+            file_members += list(
+                filter(lambda x: compiled_regex.match(x.filename),
+                       wheel.filelist))
 
             for file in file_members:
                 print(f"Extracting and including {file.filename} "
@@ -402,29 +410,6 @@ class repackage_wheel(build_ext):
                 package_data[package_name].append(file_name)
 
 
-def _is_hpu() -> bool:
-    # if VLLM_TARGET_DEVICE env var was set explicitly, skip HPU autodetection
-    if os.getenv("VLLM_TARGET_DEVICE", None) == VLLM_TARGET_DEVICE:
-        return VLLM_TARGET_DEVICE == "hpu"
-
-    # if VLLM_TARGET_DEVICE was not set explicitly, check if hl-smi succeeds,
-    # and if it doesn't, check if habanalabs driver is loaded
-    is_hpu_available = False
-    try:
-        out = subprocess.run(["hl-smi"], capture_output=True, check=True)
-        is_hpu_available = out.returncode == 0
-    except (FileNotFoundError, PermissionError, subprocess.CalledProcessError):
-        if sys.platform.startswith("linux"):
-            try:
-                output = subprocess.check_output(
-                    'lsmod | grep habanalabs | wc -l', shell=True)
-                is_hpu_available = int(output) > 0
-            except (ValueError, FileNotFoundError, PermissionError,
-                    subprocess.CalledProcessError):
-                pass
-    return is_hpu_available
-
-
 def _no_device() -> bool:
     return VLLM_TARGET_DEVICE == "empty"
 
@@ -436,7 +421,7 @@ def _is_tt() -> bool:
 def _is_cuda() -> bool:
     has_cuda = torch.version.cuda is not None
     return (VLLM_TARGET_DEVICE == "cuda" and has_cuda
-            and not (_is_neuron() or _is_tpu() or _is_hpu()))
+            and not (_is_neuron() or _is_tpu()))
 
 
 def _is_hip() -> bool:
@@ -571,12 +556,6 @@ def get_vllm_version() -> str:
         if neuron_version != MAIN_CUDA_VERSION:
             neuron_version_str = neuron_version.replace(".", "")[:3]
             version += f"{sep}neuron{neuron_version_str}"
-    elif _is_hpu():
-        # Get the Intel Gaudi Software Suite version
-        gaudi_sw_version = str(get_gaudi_sw_version())
-        if gaudi_sw_version != MAIN_CUDA_VERSION:
-            gaudi_sw_version = gaudi_sw_version.replace(".", "")[:3]
-            version += f"{sep}gaudi{gaudi_sw_version}"
     elif _is_tpu():
         version += f"{sep}tpu"
     elif _is_cpu():
@@ -623,8 +602,6 @@ def get_requirements() -> list[str]:
         requirements = _read_requirements("rocm.txt")
     elif _is_neuron():
         requirements = _read_requirements("neuron.txt")
-    elif _is_hpu():
-        requirements = _read_requirements("hpu.txt")
     elif _is_tpu():
         requirements = _read_requirements("tpu.txt")
     elif _is_cpu():
@@ -635,8 +612,7 @@ def get_requirements() -> list[str]:
         requirements = _read_requirements("tt.txt")
     else:
         raise ValueError(
-            "Unsupported platform, please use CUDA, ROCm, Neuron, HPU, "
-            "or CPU.")
+            "Unsupported platform, please use CUDA, ROCm, Neuron, or CPU.")
     return requirements
 
 
@@ -691,10 +667,13 @@ setup(
     ext_modules=ext_modules,
     install_requires=get_requirements(),
     extras_require={
-        "tensorizer": ["tensorizer>=2.9.0"],
+        "bench": ["pandas", "datasets"],
+        "tensorizer": ["tensorizer==2.10.1"],
         "fastsafetensors": ["fastsafetensors >= 0.1.10"],
-        "runai": ["runai-model-streamer", "runai-model-streamer-s3", "boto3"],
-        "audio": ["librosa", "soundfile"],  # Required for audio processing
+        "runai":
+        ["runai-model-streamer >= 0.13.3", "runai-model-streamer-s3", "boto3"],
+        "audio": ["librosa", "soundfile",
+                  "mistral_common[audio]"],  # Required for audio processing
         "video": []  # Kept for backwards compatibility
     },
     cmdclass=cmdclass,

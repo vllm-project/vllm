@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 from torch import nn
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.loader import BaseModelLoader
+from vllm.model_executor.model_loader import BaseModelLoader
 from vllm.model_executor.model_loader.utils import get_model_architecture
 
 logger = init_logger(__name__)
@@ -11,18 +13,18 @@ logger = init_logger(__name__)
 
 class TTModelLoader(BaseModelLoader):
 
-    def load_model(self, *, vllm_config: VllmConfig) -> nn.Module:
+    def load_model(self, vllm_config: VllmConfig,
+                   model_config: ModelConfig) -> nn.Module:
         """Load a model with the given configurations."""
 
         # For TT models, prepend "TT" to the architecture name,
         # e.g. "TTLlamaForCausalLM"
-        model_config = vllm_config.model_config
         device_config = vllm_config.device_config
         scheduler_config = vllm_config.scheduler_config
 
         arch_names = model_config.hf_config.architectures
-        assert len(model_config.hf_config.architectures) == 1
-        arch_names[0] = "TT" + arch_names[0]
+        for i in range(len(arch_names)):
+            arch_names[i] = "TT" + arch_names[i]
 
         model_class, _ = get_model_architecture(model_config)
 
@@ -43,4 +45,10 @@ class TTModelLoader(BaseModelLoader):
 
     def download_model(self, model_config: ModelConfig) -> None:
         """Download a model so that it can be immediately loaded."""
+        raise NotImplementedError
+
+    def load_weights(self, model: nn.Module,
+                     model_config: ModelConfig) -> None:
+        """Load weights into a model. This standalone API allows 
+        inplace weights loading for an already-initialized model"""
         raise NotImplementedError

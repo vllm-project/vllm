@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import warnings
 
@@ -8,9 +9,9 @@ import torch.cuda
 from vllm.model_executor.models import (is_pooling_model,
                                         is_text_generation_model,
                                         supports_multimodal)
-from vllm.model_executor.models.adapters import (as_classification_model,
-                                                 as_embedding_model,
-                                                 as_reward_model)
+from vllm.model_executor.models.adapters import (as_embedding_model,
+                                                 as_reward_model,
+                                                 as_seq_cls_model)
 from vllm.model_executor.models.registry import (_MULTIMODAL_MODELS,
                                                  _SPECULATIVE_DECODING_MODELS,
                                                  _TEXT_GENERATION_MODELS,
@@ -37,7 +38,7 @@ def test_registry_imports(model_arch):
         assert is_text_generation_model(model_cls)
 
     # All vLLM models should be convertible to a pooling model
-    assert is_pooling_model(as_classification_model(model_cls))
+    assert is_pooling_model(as_seq_cls_model(model_cls))
     assert is_pooling_model(as_embedding_model(model_cls))
     assert is_pooling_model(as_reward_model(model_cls))
 
@@ -71,11 +72,15 @@ def test_registry_model_property(model_arch, is_mm, init_cuda, is_ce):
 
 
 @create_new_process_for_each_test()
-@pytest.mark.parametrize("model_arch,is_pp,init_cuda", [
-    ("MLPSpeculatorPreTrainedModel", False, False),
-    ("DeepseekV2ForCausalLM", True, False),
-    ("Qwen2VLForConditionalGeneration", True, True),
-])
+@pytest.mark.parametrize(
+    "model_arch,is_pp,init_cuda",
+    [
+        # TODO(woosuk): Re-enable this once the MLP Speculator is supported
+        # in V1.
+        # ("MLPSpeculatorPreTrainedModel", False, False),
+        ("DeepseekV2ForCausalLM", True, False),
+        ("Qwen2VLForConditionalGeneration", True, True),
+    ])
 def test_registry_is_pp(model_arch, is_pp, init_cuda):
     assert ModelRegistry.is_pp_supported_model(model_arch) is is_pp
 

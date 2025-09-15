@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A layer that compute logits from hidden_stats."""
 import inspect
 from concurrent.futures import ThreadPoolExecutor
@@ -58,11 +59,12 @@ class LogitsProcessor(nn.Module):
         hidden_states: torch.Tensor,
         sampling_metadata: Optional[SamplingMetadata] = None,
         embedding_bias: Optional[torch.Tensor] = None,
+        prune_hidden_states: bool = True,
     ) -> Optional[torch.Tensor]:
         if self.logits_as_input:
             logits = hidden_states
         else:
-            if sampling_metadata is not None:
+            if sampling_metadata is not None and prune_hidden_states:
                 hidden_states = _prune_hidden_states(hidden_states,
                                                      sampling_metadata)
 
@@ -119,7 +121,7 @@ class LogitsProcessor(nn.Module):
 
     def extra_repr(self) -> str:
         s = f"vocab_size={self.vocab_size}"
-        s += f", forg_vocab_size={self.org_vocab_size}"
+        s += f", org_vocab_size={self.org_vocab_size}"
         s += f", scale={self.scale}, logits_as_input={self.logits_as_input}"
         return s
 

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Copyright (c) 2024, Tri Dao, Albert Gu.
 # Adapted from https://github.com/state-spaces/mamba/blob/v2.2.4/mamba_ssm/ops/triton/ssd_chunk_state.py
@@ -8,8 +9,8 @@
 import math
 
 import torch
-import triton
-import triton.language as tl
+
+from vllm.triton_utils import tl, triton
 
 from .mamba_ssm import softplus
 
@@ -515,7 +516,7 @@ def _chunk_state_varlen_kernel(
                 offs_n[None, :] * stride_chunk_states_dstate)
         else:
 
-            # - this seems repetitve, buts its to help the compiler
+            # - this seems repetitive, buts its to help the compiler
             if start_idx < pid_c * chunk_size:
                 past_states_ptrs = chunk_states_ptr + (
                     offs_m[:, None] * stride_chunk_states_hdim +

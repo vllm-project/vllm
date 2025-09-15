@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Description: Test the lazy import module
 # The utility function cannot be placed in `vllm.utils`

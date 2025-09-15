@@ -1,83 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import base64
+from abc import abstractmethod
 from functools import partial
 from io import BytesIO
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
 from PIL import Image
 
-from vllm.inputs.registry import InputContext
-from vllm.logger import init_logger
-from vllm.transformers_utils.processor import cached_get_video_processor
-from vllm.utils import is_list_of
+from vllm import envs
 
-from .base import MediaIO, ModalityData
-from .image import ImageMediaIO, ImagePlugin
-from .inputs import MultiModalKwargs, VideoItem
-
-if TYPE_CHECKING:
-    from vllm.config import ModelConfig
-
-logger = init_logger(__name__)
-
-
-class VideoPlugin(ImagePlugin):
-    """Plugin for video data."""
-
-    def get_data_key(self) -> str:
-        return "video"
-
-    def _get_hf_video_processor(
-        self,
-        model_config: "ModelConfig",
-        mm_processor_kwargs: Optional[dict[str, Any]] = None,
-    ):
-        if mm_processor_kwargs is None:
-            mm_processor_kwargs = {}
-        return cached_get_video_processor(
-            model_config.model,
-            trust_remote_code=model_config.trust_remote_code,
-            **mm_processor_kwargs)
-
-    def _default_input_mapper(
-        self,
-        ctx: InputContext,
-        data: ModalityData[VideoItem],
-        **mm_processor_kwargs,
-    ) -> MultiModalKwargs:
-        model_config = ctx.model_config
-
-        if isinstance(data, list) and len(data) == 1:
-            data = data[0]  # type: ignore
-
-        if isinstance(data, np.ndarray) or is_list_of(data, np.ndarray):
-            video_processor = self._get_hf_video_processor(
-                model_config,
-                mm_processor_kwargs,
-            )
-            if video_processor is None:
-                raise RuntimeError("No HuggingFace processor is available "
-                                   "to process the video object")
-            try:
-                # NOTE: Similar to image; it may be a good idea to filter and
-                # pass mm_processor_kwargs here too, but for now we don't to
-                # avoid extra complexity if the initializer and preprocess
-                # signatures of the processor don't align
-                batch_data = video_processor(data, return_tensors="pt").data
-            except Exception:
-                logger.error("Failed to process video (%s)", data)
-                raise
-
-            return MultiModalKwargs(batch_data)
-
-        raise TypeError(f"Invalid video type: {type(data)}")
-
-    def _default_max_multimodal_tokens(self, ctx: InputContext) -> int:
-        return 4096
+from .base import MediaIO
+from .image import ImageMediaIO
 
 
 def resize_video(frames: npt.NDArray, size: tuple[int, int]) -> npt.NDArray:
@@ -87,6 +25,7 @@ def resize_video(frames: npt.NDArray, size: tuple[int, int]) -> npt.NDArray:
                               dtype=frames.dtype)
     # lazy import cv2 to avoid bothering users who only use text models
     import cv2
+
     for i, frame in enumerate(frames):
         resized_frame = cv2.resize(frame, (new_width, new_height))
         resized_frames[i] = resized_frame
@@ -115,10 +54,38 @@ def sample_frames_from_video(frames: npt.NDArray,
 class VideoLoader:
 
     @classmethod
-    def load_bytes(self, data: bytes, num_frames: int = -1) -> npt.NDArray:
+    @abstractmethod
+    def load_bytes(cls,
+                   data: bytes,
+                   num_frames: int = -1,
+                   **kwargs) -> tuple[npt.NDArray, dict[str, Any]]:
         raise NotImplementedError
 
 
+class VideoLoaderRegistry:
+
+    def __init__(self) -> None:
+        self.name2class: dict[str, type] = {}
+
+    def register(self, name: str):
+
+        def wrap(cls_to_register):
+            self.name2class[name] = cls_to_register
+            return cls_to_register
+
+        return wrap
+
+    @staticmethod
+    def load(cls_name: str) -> VideoLoader:
+        cls = VIDEO_LOADER_REGISTRY.name2class.get(cls_name)
+        assert cls is not None, f"VideoLoader class {cls_name} not found"
+        return cls()
+
+
+VIDEO_LOADER_REGISTRY = VideoLoaderRegistry()
+
+
+@VIDEO_LOADER_REGISTRY.register("opencv")
 class OpenCVVideoBackend(VideoLoader):
 
     def get_cv2_video_api(self):
@@ -130,14 +97,17 @@ class OpenCVVideoBackend(VideoLoader):
                 continue
             if not vr.isBackendBuiltIn(backend):
                 _, abi, api = vr.getStreamBufferedBackendPluginVersion(backend)
-                if (abi < 1 or (abi == 1 and api < 2)):
+                if abi < 1 or (abi == 1 and api < 2):
                     continue
             api_pref = backend
             break
         return api_pref
 
     @classmethod
-    def load_bytes(cls, data: bytes, num_frames: int = -1) -> npt.NDArray:
+    def load_bytes(cls,
+                   data: bytes,
+                   num_frames: int = -1,
+                   **kwargs) -> tuple[npt.NDArray, dict[str, Any]]:
         import cv2
 
         backend = cls().get_cv2_video_api()
@@ -146,9 +116,13 @@ class OpenCVVideoBackend(VideoLoader):
             raise ValueError("Could not open video stream")
 
         total_frames_num = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        original_fps = cap.get(cv2.CAP_PROP_FPS)
+        duration = total_frames_num / original_fps if original_fps > 0 else 0
+
         full_read = num_frames == -1 or total_frames_num < num_frames
         if full_read:
-            frame_idx = list(range(0, total_frames_num))
+            num_frames = total_frames_num
+            frame_idx = list(range(0, num_frames))
         else:
             uniform_sampled_frames = np.linspace(0,
                                                  total_frames_num - 1,
@@ -162,17 +136,27 @@ class OpenCVVideoBackend(VideoLoader):
 
         i = 0
         for idx in range(total_frames_num):
-            ok = cap.grab()  # next img
+            ok = cap.grab()
             if not ok:
                 break
-            if idx in frame_idx:  # only decompress needed
+            if idx in frame_idx:
                 ret, frame = cap.retrieve()
                 if ret:
                     frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     i += 1
-        # we expect all frames loaded
-        assert i == num_frames
-        return frames
+
+        assert i == num_frames, (f"Expected reading {num_frames} frames, "
+                                 f"but only loaded {i} frames from video.")
+
+        # Use transformers transformers.video_utils.VideoMetadata format
+        metadata = {
+            "total_num_frames": total_frames_num,
+            "fps": original_fps,
+            "duration": duration,
+            "video_backend": "opencv"
+        }
+
+        return frames, metadata
 
 
 class VideoMediaIO(MediaIO[npt.NDArray]):
@@ -180,19 +164,29 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
     def __init__(
         self,
         image_io: ImageMediaIO,
-        *,
         num_frames: int = 32,
+        **kwargs,
     ) -> None:
         super().__init__()
 
         self.image_io = image_io
         self.num_frames = num_frames
-        self.video_loader = OpenCVVideoBackend
+        # `kwargs` contains custom arguments from
+        # --media-io-kwargs for this modality.
+        # They can be passed to the underlying
+        # media loaders (e.g. custom implementations)
+        # for flexible control.
+        self.kwargs = kwargs
+        video_loader_backend = envs.VLLM_VIDEO_LOADER_BACKEND
+        self.video_loader = VIDEO_LOADER_REGISTRY.load(video_loader_backend)
 
-    def load_bytes(self, data: bytes) -> npt.NDArray:
-        return self.video_loader.load_bytes(data, self.num_frames)
+    def load_bytes(self, data: bytes) -> tuple[npt.NDArray, dict[str, Any]]:
+        return self.video_loader.load_bytes(data,
+                                            num_frames=self.num_frames,
+                                            **self.kwargs)
 
-    def load_base64(self, media_type: str, data: str) -> npt.NDArray:
+    def load_base64(self, media_type: str,
+                    data: str) -> tuple[npt.NDArray, dict[str, Any]]:
         if media_type.lower() == "video/jpeg":
             load_frame = partial(
                 self.image_io.load_base64,
@@ -200,13 +194,13 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
             )
 
             return np.stack([
-                np.array(load_frame(frame_data))
+                np.asarray(load_frame(frame_data))
                 for frame_data in data.split(",")
-            ])
+            ]), {}
 
         return self.load_bytes(base64.b64decode(data))
 
-    def load_file(self, filepath: Path) -> npt.NDArray:
+    def load_file(self, filepath: Path) -> tuple[npt.NDArray, dict[str, Any]]:
         with filepath.open("rb") as f:
             data = f.read()
 

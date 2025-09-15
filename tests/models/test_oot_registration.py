@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
 
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
+from vllm.multimodal.image import convert_image_mode
 
 from ..utils import create_new_process_for_each_test
 
@@ -18,10 +20,9 @@ def test_plugin(
         m.setenv("VLLM_USE_V1", "0")
         m.setenv("VLLM_PLUGINS", "")
 
-        with pytest.raises(Exception) as excinfo:
+        match = "Cannot find model module"
+        with pytest.raises(ValueError, match=match):
             LLM(model=dummy_opt_path, load_format="dummy")
-        error_msg = "has no vLLM implementation and the Transformers implementation is not compatible with vLLM"  # noqa: E501
-        assert (error_msg in str(excinfo.value))
 
 
 @create_new_process_for_each_test()
@@ -52,14 +53,16 @@ def test_oot_registration_embedding(
     with monkeypatch.context() as m:
         m.setenv("VLLM_PLUGINS", "register_dummy_model")
         prompts = ["Hello, my name is", "The text does not matter"]
-        llm = LLM(model=dummy_gemma2_embedding_path, load_format="dummy")
+        llm = LLM(model=dummy_gemma2_embedding_path,
+                  load_format="dummy",
+                  max_model_len=2048)
         outputs = llm.embed(prompts)
 
         for output in outputs:
             assert all(v == 0 for v in output.outputs.embedding)
 
 
-image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
+image = convert_image_mode(ImageAsset("cherry_blossom").pil_image, "RGB")
 
 
 @create_new_process_for_each_test()

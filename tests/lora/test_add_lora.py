@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import time
 
@@ -6,6 +7,8 @@ import pytest
 
 import vllm.envs as env
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.entrypoints.openai.api_server import (
+    build_async_engine_client_from_engine_args)
 from vllm.inputs import TextPrompt
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
@@ -14,14 +17,6 @@ from vllm.utils import merge_async_iterators
 MODEL_PATH = "THUDM/chatglm3-6b"
 LORA_RANK = 64
 DEFAULT_MAX_LORAS = 4 * 3
-
-
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines_lora):
-    # Simple autouse wrapper to run both engines for each test
-    # This can be promoted up to conftest.py to run for every
-    # test in a package
-    pass
 
 
 def get_lora_requests(lora_path) -> list[LoRARequest]:
@@ -87,17 +82,6 @@ async def test_add_lora(chatglm3_lora_files):
         gpu_memory_utilization=0.8,  #avoid OOM
         trust_remote_code=True,
         enforce_eager=True)
-
-    # The run_with_both_engines_lora fixture sets up the `VLLM_USE_V1`
-    # environment variable. reload vllm.enging.async_llm_engine as
-    # vllm.engine.async_llm_engine.AsyncLLMEgnine changes depending on the
-    # env var.
-    import importlib
-
-    import vllm.engine.async_llm_engine
-    importlib.reload(vllm.engine.async_llm_engine)
-    from vllm.entrypoints.openai.api_server import (
-        build_async_engine_client_from_engine_args)
 
     # split lora_requests into 3 parts
     part_size = len(lora_requests) // 3
