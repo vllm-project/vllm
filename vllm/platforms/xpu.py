@@ -9,6 +9,7 @@ import torch
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
+from vllm.v1.attention.backends.utils import set_kv_cache_layout
 
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
@@ -164,12 +165,9 @@ class XPUPlatform(Platform):
                 vllm_config.scheduler_config.max_model_len,
                 DEFAULT_MAX_NUM_BATCHED_TOKENS)
 
-        if (envs.VLLM_KV_CACHE_LAYOUT is None
-                or envs.VLLM_KV_CACHE_LAYOUT != "NHD"):
-            os.environ["VLLM_KV_CACHE_LAYOUT"] = "NHD"
-            logger.info(
-                "Setting VLLM_KV_CACHE_LAYOUT to 'NHD' for XPU; "
-                "only NHD layout is supported by XPU attention kernels.")
+        set_kv_cache_layout("NHD")
+        logger.info("Setting VLLM_KV_CACHE_LAYOUT to 'NHD' for XPU; "
+                    "only NHD layout is supported by XPU attention kernels.")
 
     @classmethod
     def is_pin_memory_available(cls):
