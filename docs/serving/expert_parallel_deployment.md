@@ -7,15 +7,17 @@ EP is typically coupled with Data Parallelism (DP). While DP can be used indepen
 ## Prerequisites
 
 Before using EP, you need to install the necessary dependencies. We are actively working on making this easier in the future:
-1. **Install `libgdrapi`**
+1. **Install DeepEP and pplx-kernels**: Set up host environment following vLLM's guide for EP kernels [here](gh-file:tools/ep_kernels).
+2. **Install DeepGEMM library**: Follow the [official instructions](https://github.com/deepseek-ai/DeepGEMM#installation).
+3. **For disaggregated serving**:
 ```sh
+# Installs gdrcopy dependency
 RUN curl https://developer.download.nvidia.com/compute/redist/gdrcopy/CUDA%2012.8/ubuntu24_04/x64/libgdrapi_2.5.1-1_amd64.Ubuntu24_04.deb --output libgdrapi_2.5.1-1_amd64.Ubuntu24_04.deb \
     && apt install ./libgdrapi_2.5.1-1_amd64.Ubuntu24_04.deb \
     && rm libgdrapi_2.5.1-1_amd64.Ubuntu24_04.deb
+# Installs nixl/ucx
+uv pip install -r requirements/kv_connectors.txt
 ```
-2. **Install nixl**: `uv pip install -r requirements/kv_connectors.txt`
-3. **Install DeepEP and pplx-kernels**: Set up host environment following vLLM's guide for EP kernels [here](gh-file:tools/ep_kernels).
-4. **Install DeepGEMM library**: Follow the [official instructions](https://github.com/deepseek-ai/DeepGEMM#installation).
 
 ### Backend Selection Guide
 
