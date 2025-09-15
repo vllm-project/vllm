@@ -54,6 +54,8 @@ class InputBatch:
     num_scheduled_tokens: np.ndarray
     # sum(num_scheduled_tokens)
     num_tokens: int
+    # [num_reqs]
+    is_chunked_prefilling: np.ndarray
 
     # [max_num_batched_tokens]
     input_ids: torch.Tensor
