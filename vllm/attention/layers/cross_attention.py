@@ -21,6 +21,7 @@ from vllm.v1.kv_cache_interface import CrossAttentionSpec
 
 logger = init_logger(__name__)
 
+
 def _get_max_encoder_len(vllm_config: "VllmConfig") -> int:
     """Gets the max number of encoder input tokens from the config.
     """
