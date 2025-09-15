@@ -79,6 +79,8 @@ async def test_basic_audio_with_lora(mary_had_lamb):
         f"{lora_model_name}={model_name}",
         "--max-model-len",
         "2048",
+        "--max-num-seqs",
+        "1",
     ]
 
     # Based on https://github.com/openai/openai-cookbook/blob/main/examples/Whisper_prompting_guide.ipynb.
