@@ -20,7 +20,8 @@ from vllm.distributed.device_communicators.pynccl_wrapper import (
     NCCLLibrary, buffer_type, cudaStream_t, ncclComm_t, ncclDataTypeEnum)
 from vllm.distributed.kv_transfer.kv_connector.v1.p2p.tensor_memory_pool import (  # noqa: E501
     TensorMemoryPool)
-from vllm.utils import current_stream, get_ip, is_valid_ipv6_address, join_host_port, split_host_port
+from vllm.utils import (current_stream, get_ip, is_valid_ipv6_address,
+                        join_host_port, split_host_port)
 
 logger = logging.getLogger(__name__)
 
@@ -86,17 +87,27 @@ class P2pNcclEngine:
         self._hostname = hostname
         self._port = port
 
-        # For HTTP address, use 127.0.0.1 to match where the HTTP server binds
-        # when --host 0.0.0.0 is used, as it doesn't actually bind to IPv6
-        http_hostname = "127.0.0.1" if hostname == get_ip() else hostname
-
         # Each card corresponds to a ZMQ address.
-        # Use IPv6-aware address formatting for ZMQ (for actual P2P communication)
+        # Use IPv6-aware address formatting for ZMQ (for actual P2P
+        # communication)
         self.zmq_address = join_host_port(self._hostname, self._port)
 
         # The `http_port` must be consistent with the port of OpenAI.
-        # Use IPv4 address for HTTP to match where the server actually binds
+        # Determine HTTP hostname based on server configuration:
+        # - For IPv6 wildcard (::), use localhost for HTTP connections
+        # - For IPv4 wildcard (0.0.0.0) or specific IP, use 127.0.0.1 for local
+        # - For specific hostnames/IPs, use the same hostname
         http_port = self.config.kv_connector_extra_config['http_port']
+        if self._hostname == "::":
+            # IPv6 wildcard - use localhost for HTTP connections
+            http_hostname = "localhost"
+        elif self._hostname == "0.0.0.0" or self._hostname == get_ip():
+            # IPv4 wildcard or auto-detected IP - use localhost for HTTP
+            http_hostname = "127.0.0.1"
+        else:
+            # Specific hostname or IP address - use as is
+            http_hostname = self._hostname
+
         self.http_address = join_host_port(http_hostname, http_port)
 
         # If `proxy_ip` or `proxy_port` is `""`,

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import ipaddress
 import os
 import socket
 import threading
@@ -81,9 +82,31 @@ def start_service_discovery(hostname, port):
     if port == 0:
         raise ValueError("Port cannot be 0")
 
+    # --- Start of the updated logic ---
+    bind_address = hostname
+    try:
+        # Attempt to parse the hostname as an IP address
+        ip = ipaddress.ip_address(hostname)
+        # If it's an IPv6 address, wrap it in square brackets for binding
+        if ip.version == 6:
+            bind_address = f"[{hostname}]"
+    except ValueError:
+        # If it's not a valid IP address, it's a hostname (e.g., 'localhost').
+        # ZMQ will handle DNS resolution, so no brackets are needed.
+        pass
+
+    bind_string = f"tcp://{bind_address}:{port}"
+    # --- End of the updated logic ---
+
+    print(f"✅ Attempting to bind router socket to: {bind_string}")
+
     context = zmq.Context()
     router_socket = context.socket(zmq.ROUTER)
-    router_socket.bind(f"tcp://{hostname}:{port}")
+
+    # Enable IPv6 on the socket
+    router_socket.setsockopt(zmq.IPV6, 1)
+
+    router_socket.bind(bind_string)
 
     poller = zmq.Poller()
     poller.register(router_socket, zmq.POLLIN)
@@ -185,6 +208,8 @@ async def handle_request():
 
 
 if __name__ == "__main__":
-    t = start_service_discovery("0.0.0.0", 30001)
-    app.run(host="0.0.0.0", port=10001)
+    # Use 0.0.0.0 for ZMQ since IPv6 binding has issues on this system
+    # but keep :: for HTTP server to support IPv6 HTTP requests
+    t = start_service_discovery("0.0.0.0", 30002)
+    app.run(host="::", port=10002)
     t.join()
