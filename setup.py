@@ -56,8 +56,6 @@ elif (sys.platform.startswith("linux") and torch.version.cuda is None
     # fallback to cpu
     VLLM_TARGET_DEVICE = "cpu"
 
-MAIN_CUDA_VERSION = "12.8"
-
 
 def is_sccache_available() -> bool:
     return which("sccache") is not None and \
@@ -507,7 +505,7 @@ def get_vllm_version() -> str:
             version += f"{sep}precompiled"
         else:
             cuda_version = str(get_nvcc_cuda_version())
-            if cuda_version != MAIN_CUDA_VERSION:
+            if cuda_version != envs.VLLM_MAIN_CUDA_VERSION:
                 cuda_version_str = cuda_version.replace(".", "")[:3]
                 # skip this for source tarball, required for pypi
                 if "sdist" not in sys.argv:
@@ -515,7 +513,7 @@ def get_vllm_version() -> str:
     elif _is_hip():
         # Get the Rocm Version
         rocm_version = get_rocm_version() or torch.version.hip
-        if rocm_version and rocm_version != MAIN_CUDA_VERSION:
+        if rocm_version and rocm_version != envs.VLLM_MAIN_CUDA_VERSION:
             version += f"{sep}rocm{rocm_version.replace('.', '')[:3]}"
     elif _is_tpu():
         version += f"{sep}tpu"
