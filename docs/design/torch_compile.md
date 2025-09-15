@@ -4,6 +4,9 @@ In vLLM's V1 architecture, `torch.compile` is enabled by default and is a critic
 
 Throughout the example, we will run a common Llama model using v1, and turn on debug level logging to show all the details. The command to be used is `VLLM_USE_V1=1 VLLM_LOGGING_LEVEL=DEBUG vllm serve meta-llama/Llama-3.2-1B`.
 
+!!! note
+    For more information and the latest progress of `torch.compile` integration, see this [Blog Post](https://blog.vllm.ai/2025/08/20/torch-compile.html).
+
 ## Compilation Cache
 
 In the very verbose logs, we can see:
@@ -16,7 +19,7 @@ vLLM will take all the available factors into consideration, and decide a direct
 
 The factors considered include:
 
-- All the related configs (see the `compute_hash` functions in the [config.py](gh-file:vllm/config.py))
+- All the related configs (see the `compute_hash` functions in the [compilation.py](gh-file:vllm/config/compilation.py))
 - PyTorch configs (see the `compute_hash` functions in the [compiler_interface.py](gh-file:vllm/compilation/compiler_interface.py))
 - The model's forward function and the relevant functions called by the forward function (see below)
 
@@ -133,7 +136,7 @@ Unfortunately, because auto-tuning takes quite a long time (from seconds to minu
 
 ## Cudagraph Capture
 
-vLLM's V1 architecture uses piecewise cudagraph. The full computation graph is split as mentioned above, and we only capture the cudagraph for the piece of graph between attention operations (including the first graph before any attention operation, and the last graph after all the attention operation). This is based on a common observation: computation between attentions are usually token-wise and easy to deal with for cudagraph; while the attention operation is non-trivial to be cudagraph compatible. Thus, by running the attention operation in eager mode while the rest operations in cudagraph, we keep the flexibility of the attention operation.
+vLLM's V1 architecture uses piecewise cudagraph by default, directly aligning with the piecewise compilation. The full computation graph is split as mentioned above, and we only capture the cudagraph for the piece of graph between attention operations (including the first graph before any attention operation, and the last graph after all the attention operation). This is based on a common observation: computation between attentions are usually token-wise and easy to deal with for cudagraph; while the attention operation is non-trivial to be cudagraph compatible. Thus, by running the attention operation in eager mode while the rest operations in cudagraph, we keep the flexibility of the attention operation.
 
 The piecewise cudagraph also has fine-grained memory management. The purpose is to only exclude the attention kernel from cudagraph, while keeping all the rest modules and the memory allocation operations in the cudagraph. This is why the attention operation in V1 has the output tensor as the input of the attention.
 
