@@ -19,8 +19,8 @@ from ...utils import build_model_context
         # but we still expect it to work without errors)
         (32, 1, 16),
         (32, 2, 16),
-        (128, 1, 16),
-        (128, 2, 16),
+        (128, 1, 64),
+        (128, 2, 64),
         # post-sampled frames (expected behavior)
         (-1, 1, 5),
         (-1, 2, 10),
