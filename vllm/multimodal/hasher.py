@@ -20,24 +20,25 @@ logger = init_logger(__name__)
 class MultiModalHasher:
 
     @classmethod
-    def serialize_item(cls, obj: object) -> Union[bytes, memoryview]:
+    def serialize_item(cls, obj: object) -> Iterable[Union[bytes, memoryview]]:
         # Simple cases
-        if isinstance(obj, str):
-            return obj.encode("utf-8")
         if isinstance(obj, (bytes, memoryview)):
-            return obj
-        if isinstance(obj, (int, float)):
-            return np.array(obj).tobytes()
+            yield obj
+        elif isinstance(obj, str):
+            yield obj.encode("utf-8")
+        elif isinstance(obj, (int, float)):
+            yield np.array(obj).tobytes()
 
-        if isinstance(obj, Image.Image):
+        elif isinstance(obj, Image.Image):
             exif = obj.getexif()
             if Image.ExifTags.Base.ImageID in exif and isinstance(
                     exif[Image.ExifTags.Base.ImageID], uuid.UUID):
                 # If the image has exif ImageID tag, use that
-                return exif[Image.ExifTags.Base.ImageID].bytes
-            return cls.item_to_bytes(
-                "image", np.asarray(convert_image_mode(obj, "RGBA")))
-        if isinstance(obj, torch.Tensor):
+                yield exif[Image.ExifTags.Base.ImageID].bytes
+            else:
+                yield from cls.iter_item_to_bytes(
+                    "image", np.asarray(convert_image_mode(obj, "RGBA")))
+        elif isinstance(obj, torch.Tensor):
             tensor_obj: torch.Tensor = obj.cpu()
             tensor_dtype = tensor_obj.dtype
             tensor_shape = tensor_obj.shape
@@ -49,43 +50,36 @@ class MultiModalHasher:
                 tensor_obj = tensor_obj.view(
                     (tensor_obj.numel(), )).view(torch.uint8)
 
-                return cls.item_to_bytes(
+                yield from cls.iter_item_to_bytes(
                     "tensor", {
                         "original_dtype": str(tensor_dtype),
                         "original_shape": tuple(tensor_shape),
                         "data": tensor_obj.numpy(),
                     })
-
-            return cls.item_to_bytes("tensor", tensor_obj.numpy())
-        if isinstance(obj, np.ndarray):
+            else:
+                yield from cls.iter_item_to_bytes("tensor", tensor_obj.numpy())
+        elif isinstance(obj, np.ndarray):
             # If the array is non-contiguous, we need to copy it first
-            arr_data = obj.data if obj.flags.c_contiguous else obj.tobytes()
-            return cls.item_to_bytes("ndarray", {
+            arr_data = obj.view(
+                np.uint8).data if obj.flags.c_contiguous else obj.tobytes()
+            yield from cls.iter_item_to_bytes("ndarray", {
                 "dtype": obj.dtype.str,
                 "shape": obj.shape,
                 "data": arr_data,
             })
+        else:
+            logger.warning(
+                "No serialization method found for %s. "
+                "Falling back to pickle.", type(obj))
 
-        logger.warning(
-            "No serialization method found for %s. "
-            "Falling back to pickle.", type(obj))
-
-        return pickle.dumps(obj)
-
-    @classmethod
-    def item_to_bytes(
-        cls,
-        key: str,
-        obj: object,
-    ) -> bytes:
-        return b''.join(kb + vb for kb, vb in cls.iter_item_to_bytes(key, obj))
+            yield pickle.dumps(obj)
 
     @classmethod
     def iter_item_to_bytes(
         cls,
         key: str,
         obj: object,
-    ) -> Iterable[tuple[bytes, Union[bytes, memoryview]]]:
+    ) -> Iterable[Union[bytes, memoryview]]:
         # Recursive cases
         if isinstance(obj, (list, tuple)):
             for i, elem in enumerate(obj):
@@ -94,17 +88,15 @@ class MultiModalHasher:
             for k, v in obj.items():
                 yield from cls.iter_item_to_bytes(f"{key}.{k}", v)
         else:
-            key_bytes = key.encode("utf-8")
-            value_bytes = cls.serialize_item(obj)
-            yield key_bytes, value_bytes
+            yield key.encode("utf-8")
+            yield from cls.serialize_item(obj)
 
     @classmethod
     def hash_kwargs(cls, **kwargs: object) -> str:
         hasher = blake3()
 
         for k, v in kwargs.items():
-            for k_bytes, v_bytes in cls.iter_item_to_bytes(k, v):
-                hasher.update(k_bytes)
-                hasher.update(v_bytes)
+            for bytes_ in cls.iter_item_to_bytes(k, v):
+                hasher.update(bytes_)
 
         return hasher.hexdigest()
