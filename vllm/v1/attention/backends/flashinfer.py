@@ -1104,7 +1104,6 @@ def fast_plan_decode(
             head_dim,
             head_dim,
             False,  # causal
-            window_left,  # for sliding window
         )
     except Exception as e:
         raise RuntimeError(f"Error in tensor core plan: {e}") from e
