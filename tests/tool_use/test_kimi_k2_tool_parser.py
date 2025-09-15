@@ -116,9 +116,8 @@ functions.get_weather:1 <|tool_call_argument_begin|> {"city": "Shanghai"} <|tool
                 ToolCall(id='functions.get_news:1',
                          function=FunctionCall(
                              name="get_news",
-                             arguments=json.dumps({
-                                 "content": "Los Angeles today"
-                             }),
+                             arguments=json.dumps(
+                                 {"content": "Los Angeles today"}),
                          ),
                          type='function')
             ],
@@ -130,17 +129,13 @@ functions.get_weather:1 <|tool_call_argument_begin|> {"city": "Shanghai"} <|tool
                 ToolCall(id='functions.get_weather:0',
                          function=FunctionCall(
                              name="get_weather",
-                             arguments=json.dumps({
-                                 "city": "New York"
-                             }),
+                             arguments=json.dumps({"city": "New York"}),
                          ),
                          type='function'),
                 ToolCall(id='functions.get_news:1',
                          function=FunctionCall(
                              name="get_news",
-                             arguments=json.dumps({
-                                 "topic": "technology"
-                             }),
+                             arguments=json.dumps({"topic": "technology"}),
                          ),
                          type='function'),
                 ToolCall(id='functions.send_email:2',
@@ -200,13 +195,15 @@ functions.get_weather:1 <|tool_call_argument_begin|> {"city": "Shanghai"} <|tool
                 ToolCall(id='functions.process_data:0',
                          function=FunctionCall(
                              name="process_data",
-                             arguments=json.dumps({
-                                 "name": "test",
-                                 "value": 123,
-                                 "nested": {
-                                     "key": "value"
-                                 }
-                             }, indent=2),
+                             arguments=json.dumps(
+                                 {
+                                     "name": "test",
+                                     "value": 123,
+                                     "nested": {
+                                         "key": "value"
+                                     }
+                                 },
+                                 indent=2),
                          ),
                          type='function')
             ],
@@ -307,5 +304,3 @@ def test_streaming_no_tool_calls(kimi_k2_tool_parser):
     assert result is not None
     assert hasattr(result, 'content')
     assert result.content == " without any tool calls."
-
-
