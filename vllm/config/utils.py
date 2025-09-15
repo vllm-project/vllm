@@ -132,7 +132,7 @@ def hash_factors(items: dict[str, object]) -> str:
     """Return a SHA-256 hex digest of the canonical items structure."""
     return hashlib.sha256(json.dumps(items,
                                      sort_keys=True).encode()).hexdigest()
-    
+
 def get_field(cls: ConfigType, name: str) -> Field:
     """Get the default factory field of a dataclass by name. Used for getting
     default factory fields in `EngineArgs`."""
