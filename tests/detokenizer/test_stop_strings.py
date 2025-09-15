@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import Any, Optional
 
@@ -101,42 +100,42 @@ def _stop_token_id(llm):
 def test_stop_strings():
     # If V0, must set enforce_eager=False since we use
     # async output processing below.
-    llm = LLM(MODEL, enforce_eager=envs.VLLM_USE_V1)
+    vllm_model = LLM(MODEL, enforce_eager=envs.VLLM_USE_V1)
 
     if envs.VLLM_USE_V1:
-        _stop_basic(llm)
+        _stop_basic(vllm_model)
     else:
-        _set_async_mode(llm, True)
-        _stop_basic(llm)
+        _set_async_mode(vllm_model, True)
+        _stop_basic(vllm_model)
 
-        _set_async_mode(llm, False)
-        _stop_basic(llm)
+        _set_async_mode(vllm_model, False)
+        _stop_basic(vllm_model)
 
     if envs.VLLM_USE_V1:
-        _stop_multi_tokens(llm)
+        _stop_multi_tokens(vllm_model)
     else:
-        _set_async_mode(llm, True)
-        _stop_multi_tokens(llm)
+        _set_async_mode(vllm_model, True)
+        _stop_multi_tokens(vllm_model)
 
-        _set_async_mode(llm, False)
-        _stop_multi_tokens(llm)
+        _set_async_mode(vllm_model, False)
+        _stop_multi_tokens(vllm_model)
 
     if envs.VLLM_USE_V1:
-        _stop_partial_token(llm)
+        _stop_partial_token(vllm_model)
     else:
-        _set_async_mode(llm, True)
-        _stop_partial_token(llm)
+        _set_async_mode(vllm_model, True)
+        _stop_partial_token(vllm_model)
 
-        _set_async_mode(llm, False)
-        _stop_partial_token(llm)
+        _set_async_mode(vllm_model, False)
+        _stop_partial_token(vllm_model)
 
     if envs.VLLM_USE_V1:
         # FIXME: this does not respect include_in_output=False
-        # _stop_token_id(llm)
+        # _stop_token_id(vllm_model)
         pass
     else:
-        _set_async_mode(llm, True)
-        _stop_token_id(llm)
+        _set_async_mode(vllm_model, True)
+        _stop_token_id(vllm_model)
 
-        _set_async_mode(llm, False)
-        _stop_token_id(llm)
+        _set_async_mode(vllm_model, False)
+        _stop_token_id(vllm_model)

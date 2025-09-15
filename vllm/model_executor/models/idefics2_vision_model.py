@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # adapted from https://github.com/huggingface/transformers/blob/v4.43.2/src/transformers/models/idefics2/modeling_idefics2.py
 # Copyright 2024 The vLLM team.
@@ -18,8 +17,7 @@
 # limitations under the License.
 """PyTorch Idefics2 model."""
 
-from collections.abc import Iterable
-from typing import Optional
+from typing import Iterable, Optional, Set, Tuple
 
 import torch
 from torch import nn
@@ -344,8 +342,8 @@ class Idefics2VisionTransformer(nn.Module):
         last_hidden_state = self.post_layernorm(encoder_outputs)
         return last_hidden_state
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -353,7 +351,7 @@ class Idefics2VisionTransformer(nn.Module):
             ("qkv_proj", "v_proj", "v"),
         ]
         params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
+        loaded_params: Set[str] = set()
         layer_count = len(self.encoder.layers)
 
         for name, loaded_weight in weights:

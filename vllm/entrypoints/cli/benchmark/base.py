@@ -1,17 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
 
 from vllm.entrypoints.cli.types import CLISubcommand
+from vllm.utils import FlexibleArgumentParser
 
 
 class BenchmarkSubcommandBase(CLISubcommand):
     """ The base class of subcommands for vllm bench. """
 
-    help: str
+    @property
+    def help(self) -> str:
+        """The help message of the subcommand."""
+        raise NotImplementedError
 
-    @classmethod
-    def add_cli_args(cls, parser: argparse.ArgumentParser) -> None:
+    def add_cli_args(self, parser: argparse.ArgumentParser) -> None:
         """Add the CLI arguments to the parser."""
         raise NotImplementedError
 
@@ -23,3 +25,14 @@ class BenchmarkSubcommandBase(CLISubcommand):
             args: The arguments to the command.
         """
         raise NotImplementedError
+
+    def subparser_init(
+            self,
+            subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
+        parser = subparsers.add_parser(
+            self.name,
+            help=self.help,
+            description=self.help,
+            usage=f"vllm bench {self.name} [options]")
+        self.add_cli_args(parser)
+        return parser

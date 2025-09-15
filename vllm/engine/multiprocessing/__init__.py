@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Mapping, Optional, Union
+from typing import List, Mapping, Optional, Union, overload
+
+from typing_extensions import deprecated
 
 from vllm import PoolingParams
 from vllm.inputs import PromptType
@@ -12,7 +13,7 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-from vllm.utils import Device
+from vllm.utils import Device, deprecate_kwargs
 
 VLLM_RPC_SUCCESS_STR = "SUCCESS"
 
@@ -36,6 +37,7 @@ class RPCProcessRequest:
     prompt_adapter_request: Optional[PromptAdapterRequest] = None
     priority: int = 0
 
+    @overload
     def __init__(
         self,
         prompt: PromptType,
@@ -46,6 +48,44 @@ class RPCProcessRequest:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> None:
+        ...
+
+    @overload
+    @deprecated("'inputs' will be renamed to 'prompt")
+    def __init__(
+        self,
+        *,
+        inputs: PromptType,
+        params: Union[SamplingParams, PoolingParams],
+        request_id: str,
+        lora_request: Optional[LoRARequest] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
+    ) -> None:
+        ...
+
+    @deprecate_kwargs(
+        "inputs",
+        additional_message="Please use the 'prompt' parameter instead.",
+    )
+    def __init__(
+            self,
+            prompt: Optional[PromptType] = None,
+            params: Optional[Union[SamplingParams, PoolingParams]] = None,
+            request_id: Optional[str] = None,
+            lora_request: Optional[LoRARequest] = None,
+            trace_headers: Optional[Mapping[str, str]] = None,
+            prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+            priority: int = 0,
+            *,
+            inputs: Optional[PromptType] = None,  # DEPRECATED
+    ) -> None:
+        if inputs is not None:
+            prompt = inputs
+        assert (prompt is not None and params is not None
+                and request_id is not None)
+
         super().__init__()
 
         self.prompt = prompt
@@ -81,10 +121,6 @@ class RPCStartupResponse:
 class RPCUProfileRequest(Enum):
     START_PROFILE = 1
     STOP_PROFILE = 2
-
-
-class RPCResetMultiModalCacheRequest(Enum):
-    RESET = 1
 
 
 @dataclass
@@ -128,7 +164,6 @@ class RPCAdapterLoadedResponse:
 
 RPC_REQUEST_T = Union[RPCProcessRequest, RPCAbortRequest, RPCStartupRequest,
                       RPCUProfileRequest, RPCLoadAdapterRequest,
-                      RPCResetMultiModalCacheRequest,
                       RPCResetPrefixCacheRequest, RPCSleepRequest,
                       RPCWakeUpRequest, RPCIsSleepingRequest]
 

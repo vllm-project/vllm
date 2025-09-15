@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
 import random
@@ -479,7 +478,7 @@ def test_sampler_mixed(seed: int, device: str):
             sampling_params = SamplingParams(
                 temperature=random.random() + 0.1,
                 top_p=min(random.random() + 0.1, 1),
-                top_k=random.randint(0, 10),
+                top_k=random.randint(0, 10) or -1,
                 n=n,
                 presence_penalty=random.randint(0, 1),
             )
@@ -647,8 +646,6 @@ def test_sampler_top_k_top_p(seed: int, device: str):
 def test_flashinfer_fallback(seed: int, device: str):
     if not envs.VLLM_USE_FLASHINFER_SAMPLER:
         pytest.skip("Flashinfer sampler is disabled")
-
-    pytest.skip("After FlashInfer 0.2.3, sampling will never fail")
 
     set_random_seed(seed)
     torch.set_default_device(device)

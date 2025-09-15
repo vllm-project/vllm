@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
 import dataclasses
@@ -21,7 +20,6 @@ class StructuredOutputRequest:
     sampling_params: SamplingParams
     _grammar: Optional[Union[Future[StructuredOutputGrammar],
                              StructuredOutputGrammar]] = None
-    reasoning_ended: Optional[bool] = None
 
     def _check_grammar_completion(self) -> bool:
         # NOTE: We have to lazy import to gate circular imports
@@ -80,7 +78,5 @@ def get_structured_output_key(
         return (StructuredOutputOptions.CHOICE, json_str)
     elif params.grammar is not None:
         return (StructuredOutputOptions.GRAMMAR, params.grammar)
-    elif params.structural_tag is not None:
-        return (StructuredOutputOptions.STRUCTURAL_TAG, params.structural_tag)
     else:
         raise ValueError("No valid structured output parameter found")

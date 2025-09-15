@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
-from typing import Any, Dict, List, Optional, Tuple, Type, Union, cast
+from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
 
@@ -10,7 +9,6 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.models.interfaces_base import VllmModelForPooling
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.multimodal import MultiModalKwargs
 from vllm.pooling_params import PoolingParams
@@ -86,17 +84,10 @@ class PoolingModelRunner(
         #  explore how to leverage it.
         if (prefill_meta is None and decode_meta is not None
                 and decode_meta.use_cuda_graph):
-            if model_input.inputs_embeds is None:
-                assert model_input.input_tokens is not None
-                graph_batch_size = model_input.input_tokens.shape[0]
-                model_executable = (
-                    self.graph_runners[model_input.virtual_engine][(
-                        graph_batch_size, False)])
-            else:
-                graph_batch_size = model_input.inputs_embeds.shape[0]
-                model_executable = (
-                    self.graph_runners[model_input.virtual_engine][(
-                        graph_batch_size, True)])
+            assert model_input.input_tokens is not None
+            graph_batch_size = model_input.input_tokens.shape[0]
+            model_executable = self.graph_runners[virtual_engine][
+                graph_batch_size]
         else:
             model_executable = self.model
 
@@ -121,13 +112,10 @@ class PoolingModelRunner(
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
                 intermediate_tensors=intermediate_tensors,
-                **MultiModalKwargs.as_kwargs(
-                    multi_modal_kwargs,
-                    device=self.device,
-                ),
+                **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
+                                             device=self.device),
                 **cross_enc_kwargs,
-                **seqlen_agnostic_kwargs,
-            )
+                **seqlen_agnostic_kwargs)
 
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
@@ -196,16 +184,7 @@ class PoolingModelRunner(
         seq_groups: List[Tuple[List[int], PoolingParams]] = []
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             seq_ids = list(seq_group_metadata.seq_data.keys())
-
             pooling_params = seq_group_metadata.pooling_params
-            assert pooling_params is not None
-            assert (task := pooling_params.task) is not None, (
-                "You did not set `task` in the API")
-
-            model = cast(VllmModelForPooling, self.model)
-            to_update = model.pooler.get_pooling_updates(task)
-            to_update.apply(pooling_params)
-
             seq_groups.append((seq_ids, pooling_params))
 
         seq_data: Dict[int, SequenceData] = {}

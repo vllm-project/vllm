@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from collections.abc import Iterable
+from typing import Iterable, List, Set, Tuple
 
 import torch
 import torch.nn as nn
@@ -149,7 +148,7 @@ class MLPSpeculator(nn.Module):
         previous_hidden_states: torch.Tensor,
         num_predict_tokens: int,
         sampling_metadata: SamplingMetadata,
-    ) -> list[SamplerOutput]:
+    ) -> List[SamplerOutput]:
         if num_predict_tokens > self.max_speculative_tokens:
             raise ValueError(f"Max speculative tokens for model is "
                              f"{self.max_speculative_tokens}, but "
@@ -191,10 +190,10 @@ class MLPSpeculator(nn.Module):
 
         return next_tokens
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             name = name.replace("speculator.", "")
             param = params_dict.get(name)

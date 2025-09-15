@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for Llama4's multimodal preprocessing kwargs."""
 
 import pytest
@@ -7,7 +6,7 @@ import pytest
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.transformers_utils.tokenizer import encode_tokens
 
-from ....conftest import ImageTestAssets
+from ....conftest import _ImageAssets
 from ...utils import build_model_context
 
 
@@ -18,7 +17,7 @@ from ...utils import build_model_context
 @pytest.mark.parametrize("disable_mm_preprocessor_cache", [True, False])
 @pytest.mark.parametrize("tokenized_prompt", [True, False])
 def test_processor_override(
-    image_assets: ImageTestAssets,
+    image_assets: _ImageAssets,
     model_id: str,
     mm_processor_kwargs: dict,
     num_imgs: int,

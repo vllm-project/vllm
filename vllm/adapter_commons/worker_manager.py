@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any, Optional, Set
 
 import torch
 
@@ -18,7 +17,7 @@ class AbstractWorkerManager(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def set_active_adapters(self, requests: set[Any],
+    def set_active_adapters(self, requests: Set[Any],
                             mapping: Optional[Any]) -> None:
         raise NotImplementedError
 
@@ -35,5 +34,5 @@ class AbstractWorkerManager(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def list_adapters(self) -> set[int]:
+    def list_adapters(self) -> Set[int]:
         raise NotImplementedError

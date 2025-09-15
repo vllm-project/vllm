@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import abc
 import operator
 from abc import abstractmethod
-from collections.abc import Iterable
+from typing import Iterable, List, Tuple
 
 from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
@@ -57,7 +56,7 @@ class MultiOutputMatch(abc.ABC):
         raise NotImplementedError
 
     @property
-    def nodes(self) -> list[fx.Node]:
+    def nodes(self) -> List[fx.Node]:
         return self.match.nodes
 
     @property
@@ -88,7 +87,7 @@ class MultiOutputMatch(abc.ABC):
         return self.graph.inserting_after(last_node_in_match)
 
     def insert_getitems(self, tuple_node: fx.Node,
-                        indices: Iterable[int]) -> tuple[fx.Node, ...]:
+                        indices: Iterable[int]) -> Tuple[fx.Node, ...]:
         """
         Insert operator.getitem nodes to extract elements from a tuple node.
 

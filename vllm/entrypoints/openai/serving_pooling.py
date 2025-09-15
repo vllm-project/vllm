@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
 import base64
@@ -9,7 +8,6 @@ from typing import Final, Literal, Optional, Union, cast
 
 import jinja2
 import numpy as np
-import torch
 from fastapi import Request
 from typing_extensions import assert_never
 
@@ -23,7 +21,6 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse,
                                               PoolingResponseData, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.utils import merge_async_iterators
@@ -40,8 +37,7 @@ def _get_data(
     elif encoding_format == "base64":
         # Force to use float32 for base64 encoding
         # to match the OpenAI python client behavior
-        pt_float32 = output.data.to(dtype=torch.float32)
-        pooling_bytes = np.array(pt_float32, dtype="float32").tobytes()
+        pooling_bytes = np.array(output.data, dtype="float32").tobytes()
         return base64.b64encode(pooling_bytes).decode("utf-8")
 
     assert_never(encoding_format)
@@ -89,11 +85,18 @@ class OpenAIServingPooling(OpenAIServing):
         request_id = f"pool-{self._base_request_id(raw_request)}"
         created_time = int(time.time())
 
-        truncate_prompt_tokens = request.truncate_prompt_tokens
+        truncate_prompt_tokens = None
+
+        if request.truncate_prompt_tokens is not None:
+            if request.truncate_prompt_tokens <= self.max_model_len:
+                truncate_prompt_tokens = request.truncate_prompt_tokens
+            else:
+                return self.create_error_response(
+                    "truncate_prompt_tokens value is "
+                    "greater than max_model_len."
+                    " Please, select a smaller truncation size.")
 
         try:
-            truncate_prompt_tokens = _validate_truncation_size(
-                self.max_model_len, truncate_prompt_tokens)
             (
                 lora_request,
                 prompt_adapter_request,
@@ -141,11 +144,6 @@ class OpenAIServingPooling(OpenAIServing):
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
         try:
             pooling_params = request.to_pooling_params()
-
-            try:
-                pooling_params.verify("encode", self.model_config)
-            except ValueError as e:
-                return self.create_error_response(str(e))
 
             for i, engine_prompt in enumerate(engine_prompts):
                 request_id_item = f"{request_id}-{i}"

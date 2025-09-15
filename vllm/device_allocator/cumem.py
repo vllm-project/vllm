@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # cumem-based pytorch pluggable allocator to implement sleep mode.
 # other approaches tried but failed:
@@ -12,7 +11,7 @@ import dataclasses
 import gc
 import os
 from contextlib import contextmanager
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
 
@@ -64,7 +63,7 @@ except ModuleNotFoundError:
     libcudart = None
 
 # py_device, py_alignedSize, py_d_mem, py_p_memHandle
-HandleType = tuple[int, int, int, int]
+HandleType = Tuple[int, int, int, int]
 
 
 @dataclasses.dataclass
@@ -149,9 +148,9 @@ class CuMemAllocator:
             "Please track https://github.com/pytorch/pytorch/issues/147851 "
             "for the latest updates.")
 
-        self.pointer_to_data: dict[int, AllocationData] = {}
+        self.pointer_to_data: Dict[int, AllocationData] = {}
         self.current_tag: str = CuMemAllocator.default_tag
-        self.allocator_and_pools: dict[str, Any] = {}
+        self.allocator_and_pools: Dict[str, Any] = {}
 
     def python_malloc_callback(self, allocation_handle: HandleType) -> None:
         """
@@ -173,7 +172,7 @@ class CuMemAllocator:
 
     def sleep(
             self,
-            offload_tags: Optional[Union[tuple[str, ...],
+            offload_tags: Optional[Union[Tuple[str, ...],
                                          str]] = None) -> None:
         """
         Put the allocator in sleep mode.

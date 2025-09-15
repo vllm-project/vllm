@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
 # https://huggingface.co/tiiuae/falcon-7b/blob/main/configuration_RW.py

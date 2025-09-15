@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
 
@@ -37,13 +36,10 @@ def bgmv_expand(inputs: torch.Tensor,
     if outputs.shape[0] == 1 and output_tensor.shape[0] != 1:
         limit = 1
 
-    # LoRA adapter and model may add different amounts of padding to output
-    common_len = min(outputs.shape[1], output_tensor.shape[1])
-
     if add_inputs:
-        output_tensor[:, :common_len] += outputs[:limit, :common_len]
+        output_tensor[:, :outputs.shape[1]] += outputs[:limit, :]
     else:
-        output_tensor[:, :common_len] = outputs[:limit, :common_len]
+        output_tensor[:, :outputs.shape[1]] = outputs[:limit, :]
 
 
 def sgmv_shrink(

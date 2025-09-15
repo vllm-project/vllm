@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
 import sys
 from abc import abstractmethod
 from contextlib import contextmanager
 from types import CodeType
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 import torch
 
@@ -41,20 +40,15 @@ class TorchCompileWrapperWithCustomDispatcher:
             # compiling the forward method
 
             backend = vllm_config.compilation_config.init_backend(vllm_config)
-            options = None
-            if isinstance(backend, str) and backend == "inductor":
-                options = get_current_vllm_config(
-                ).compilation_config.inductor_compile_config
 
             compiled_callable = torch.compile(
                 self.forward,
                 fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
-                backend=backend,
-                options=options)
+                backend=backend)
 
         self.compiled_callable = compiled_callable
         self.original_code_object = self.__class__.forward.__code__
-        self.compiled_codes: list[CodeType] = []
+        self.compiled_codes: List[CodeType] = []
         torch._dynamo.convert_frame.register_bytecode_hook(self.bytecode_hook)
 
         # read the env var to determine whether to use the custom dispatcher
@@ -93,10 +87,9 @@ class TorchCompileWrapperWithCustomDispatcher:
             return
 
         self.compiled_codes.append(new_code)
-        debug_dump_dir = self.vllm_config.compilation_config.debug_dump_path
-        if isinstance(debug_dump_dir, str) and debug_dump_dir != "":
-            rank = self.vllm_config.parallel_config.rank
-            decompiled_file = os.path.join(debug_dump_dir, f"rank_{rank}",
+        local_cache_dir = self.vllm_config.compilation_config.local_cache_dir
+        if isinstance(local_cache_dir, str):
+            decompiled_file = os.path.join(local_cache_dir,
                                            "transformed_code.py")
             if not os.path.exists(decompiled_file):
                 try:
@@ -106,7 +99,6 @@ class TorchCompileWrapperWithCustomDispatcher:
                     # not a reversible process.
                     import depyf
                     src = depyf.decompile(new_code)
-
                     with open(decompiled_file, "w") as f:
                         f.write(src)
 

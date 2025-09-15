@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 
@@ -19,7 +18,7 @@ class TritonScaledMMLinearKernel(CutlassScaledMMLinearKernel):
 
     @classmethod
     def can_implement(
-            cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, Optional[str]]:
+            cls, c: ScaledMMLinearLayerConfig) -> Tuple[bool, Optional[str]]:
         if current_platform.is_cpu():
             return (
                 False,

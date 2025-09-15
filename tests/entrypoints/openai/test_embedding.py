@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import base64
 
@@ -12,22 +11,11 @@ import requests
 from vllm.entrypoints.openai.protocol import EmbeddingResponse
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
-from ...models.language.pooling.embed_utils import (
-    run_embedding_correctness_test)
-from ...models.utils import check_embeddings_close
+from ...models.embedding.utils import check_embeddings_close
 from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
 DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' + message['content'] + '\\n'}}{% endfor %}"""  # noqa: E501
-DTYPE = "bfloat16"
-
-
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines):
-    # Simple autouse wrapper to run both engines for each test
-    # This can be promoted up to conftest.py to run for every
-    # test in a package
-    pass
 
 
 @pytest.fixture(scope="module")
@@ -37,7 +25,7 @@ def server():
         "embed",
         # use half precision for speed and memory savings in CI environment
         "--dtype",
-        DTYPE,
+        "bfloat16",
         "--enforce-eager",
         "--max-model-len",
         "512",
@@ -55,17 +43,9 @@ async def client(server):
         yield async_client
 
 
-@pytest.fixture(scope="module")
-def hf_model(hf_runner):
-    with hf_runner(MODEL_NAME, dtype=DTYPE,
-                   is_sentence_transformer=True) as hf_model:
-        yield hf_model
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_single_embedding(hf_model, client: openai.AsyncOpenAI,
-                                model_name: str):
+async def test_single_embedding(client: openai.AsyncOpenAI, model_name: str):
     input_texts = [
         "The chef prepared a delicious meal.",
     ]
@@ -85,9 +65,6 @@ async def test_single_embedding(hf_model, client: openai.AsyncOpenAI,
     assert embeddings.usage.completion_tokens == 0
     assert embeddings.usage.prompt_tokens == 11
     assert embeddings.usage.total_tokens == 11
-
-    vllm_outputs = [d.embedding for d in embeddings.data]
-    run_embedding_correctness_test(hf_model, input_texts, vllm_outputs)
 
     # test using token IDs
     input_tokens = [1, 1, 1, 1, 1]
@@ -109,8 +86,7 @@ async def test_single_embedding(hf_model, client: openai.AsyncOpenAI,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_batch_embedding(hf_model, client: openai.AsyncOpenAI,
-                               model_name: str):
+async def test_batch_embedding(client: openai.AsyncOpenAI, model_name: str):
     # test list[str]
     input_texts = [
         "The cat sat on the mat.", "A feline was resting on a rug.",
@@ -130,9 +106,6 @@ async def test_batch_embedding(hf_model, client: openai.AsyncOpenAI,
     assert embeddings.usage.completion_tokens == 0
     assert embeddings.usage.prompt_tokens == 33
     assert embeddings.usage.total_tokens == 33
-
-    vllm_outputs = [d.embedding for d in embeddings.data]
-    run_embedding_correctness_test(hf_model, input_texts, vllm_outputs)
 
     # test list[list[int]]
     input_tokens = [[4, 5, 7, 9, 20], [15, 29, 499], [24, 24, 24, 24, 24],
@@ -208,7 +181,7 @@ async def test_conversation_embedding(server: RemoteOpenAIServer,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_batch_base64_embedding(hf_model, client: openai.AsyncOpenAI,
+async def test_batch_base64_embedding(client: openai.AsyncOpenAI,
                                       model_name: str):
     input_texts = [
         "Hello my name is",
@@ -219,7 +192,6 @@ async def test_batch_base64_embedding(hf_model, client: openai.AsyncOpenAI,
                                                      model=model_name,
                                                      encoding_format="float")
     float_data = [d.embedding for d in responses_float.data]
-    run_embedding_correctness_test(hf_model, input_texts, float_data)
 
     responses_base64 = await client.embeddings.create(input=input_texts,
                                                       model=model_name,
@@ -230,13 +202,24 @@ async def test_batch_base64_embedding(hf_model, client: openai.AsyncOpenAI,
             np.frombuffer(base64.b64decode(data.embedding),
                           dtype="float32").tolist())
 
-    run_embedding_correctness_test(hf_model, input_texts, base64_data)
+    check_embeddings_close(
+        embeddings_0_lst=float_data,
+        embeddings_1_lst=base64_data,
+        name_0="float",
+        name_1="base64",
+    )
 
     # Default response is float32 decoded from base64 by OpenAI Client
     responses_default = await client.embeddings.create(input=input_texts,
                                                        model=model_name)
     default_data = [d.embedding for d in responses_default.data]
-    run_embedding_correctness_test(hf_model, input_texts, default_data)
+
+    check_embeddings_close(
+        embeddings_0_lst=float_data,
+        embeddings_1_lst=default_data,
+        name_0="float",
+        name_1="default",
+    )
 
 
 @pytest.mark.asyncio
@@ -297,75 +280,3 @@ async def test_single_embedding_truncation_invalid(client: openai.AsyncOpenAI,
         assert "error" in response.object
         assert "truncate_prompt_tokens value is greater than max_model_len. "\
                "Please, select a smaller truncation size." in response.message
-
-
-@pytest.mark.asyncio
-async def test_invocations(server: RemoteOpenAIServer,
-                           client: openai.AsyncOpenAI):
-    input_texts = [
-        "The chef prepared a delicious meal.",
-    ]
-
-    request_args = {
-        "model": MODEL_NAME,
-        "input": input_texts,
-        "encoding_format": "float",
-    }
-
-    completion_response = await client.embeddings.create(**request_args)
-
-    invocation_response = requests.post(server.url_for("invocations"),
-                                        json=request_args)
-    invocation_response.raise_for_status()
-
-    completion_output = completion_response.model_dump()
-    invocation_output = invocation_response.json()
-
-    assert completion_output.keys() == invocation_output.keys()
-    for completion_data, invocation_data in zip(completion_output["data"],
-                                                invocation_output["data"]):
-        assert completion_data.keys() == invocation_data.keys()
-        check_embeddings_close(embeddings_0_lst=[completion_data["embedding"]],
-                               embeddings_1_lst=[invocation_data["embedding"]],
-                               name_0="completion",
-                               name_1="invocation")
-
-
-@pytest.mark.asyncio
-async def test_invocations_conversation(server: RemoteOpenAIServer):
-    messages = [{
-        "role": "user",
-        "content": "The cat sat on the mat.",
-    }, {
-        "role": "assistant",
-        "content": "A feline was resting on a rug.",
-    }, {
-        "role": "user",
-        "content": "Stars twinkle brightly in the night sky.",
-    }]
-
-    request_args = {
-        "model": MODEL_NAME,
-        "messages": messages,
-        "encoding_format": "float",
-    }
-
-    chat_response = requests.post(server.url_for("v1/embeddings"),
-                                  json=request_args)
-    chat_response.raise_for_status()
-
-    invocation_response = requests.post(server.url_for("invocations"),
-                                        json=request_args)
-    invocation_response.raise_for_status()
-
-    chat_output = chat_response.json()
-    invocation_output = invocation_response.json()
-
-    assert chat_output.keys() == invocation_output.keys()
-    for chat_data, invocation_data in zip(chat_output["data"],
-                                          invocation_output["data"]):
-        assert chat_data.keys() == invocation_data.keys()
-        check_embeddings_close(embeddings_0_lst=[chat_data["embedding"]],
-                               embeddings_1_lst=[invocation_data["embedding"]],
-                               name_0="chat",
-                               name_1="invocation")

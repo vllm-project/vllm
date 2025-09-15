@@ -1,7 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-import json
 
 import openai
 import pytest
@@ -25,25 +22,6 @@ TEST_IMAGE_URLS = [
     "https://upload.wikimedia.org/wikipedia/commons/0/0b/RGBA_comp.png",
 ]
 
-EXPECTED_MM_BEAM_SEARCH_RES = [
-    [
-        "The image shows a wooden boardwalk leading through a",
-        "The image shows a wooden boardwalk extending into a",
-    ],
-    [
-        "The image shows two parrots perched on",
-        "The image shows two birds perched on a cur",
-    ],
-    [
-        "The image shows a Venn diagram with three over",
-        "The image shows a Venn diagram with three intersect",
-    ],
-    [
-        "This image displays a gradient of colors ranging from",
-        "The image displays a gradient of colors ranging from",
-    ],
-]
-
 
 @pytest.fixture(scope="module")
 def server():
@@ -57,7 +35,7 @@ def server():
         "--enforce-eager",
         "--trust-remote-code",
         "--limit-mm-per-prompt",
-        json.dumps({"image": MAXIMUM_IMAGES}),
+        f"image={MAXIMUM_IMAGES}",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
@@ -155,36 +133,6 @@ async def test_single_chat_session_image(client: openai.AsyncOpenAI,
     )
     message = chat_completion.choices[0].message
     assert message.content is not None and len(message.content) >= 0
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
-async def test_error_on_invalid_image_url_type(client: openai.AsyncOpenAI,
-                                               model_name: str,
-                                               image_url: str):
-    content_text = "What's in this image?"
-    messages = [{
-        "role":
-        "user",
-        "content": [
-            {
-                "type": "image_url",
-                "image_url": image_url
-            },
-            {
-                "type": "text",
-                "text": content_text
-            },
-        ],
-    }]
-
-    # image_url should be a dict {"url": "some url"}, not directly a string
-    with pytest.raises(openai.BadRequestError):
-        _ = await client.chat.completions.create(model=model_name,
-                                                 messages=messages,
-                                                 max_completion_tokens=10,
-                                                 temperature=0.0)
 
 
 @pytest.mark.asyncio
@@ -289,13 +237,10 @@ async def test_single_chat_session_image_base64encoded(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize("image_idx", list(range(len(TEST_IMAGE_URLS))))
+@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
 async def test_single_chat_session_image_base64encoded_beamsearch(
-        client: openai.AsyncOpenAI, model_name: str, image_idx: int,
+        client: openai.AsyncOpenAI, model_name: str, image_url: str,
         base64_encoded_image: dict[str, str]):
-    # NOTE: This test also validates that we pass MM data through beam search
-    image_url = TEST_IMAGE_URLS[image_idx]
-    expected_res = EXPECTED_MM_BEAM_SEARCH_RES[image_idx]
 
     messages = [{
         "role":
@@ -319,11 +264,10 @@ async def test_single_chat_session_image_base64encoded_beamsearch(
         messages=messages,
         n=2,
         max_completion_tokens=10,
-        temperature=0.0,
         extra_body=dict(use_beam_search=True))
     assert len(chat_completion.choices) == 2
-    for actual, expected_str in zip(chat_completion.choices, expected_res):
-        assert actual.message.content == expected_str
+    assert chat_completion.choices[
+        0].message.content != chat_completion.choices[1].message.content
 
 
 @pytest.mark.asyncio

@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
 import time
 from abc import ABC, abstractmethod
-from functools import cached_property
 from typing import (Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple,
                     Union)
 
@@ -16,7 +14,6 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.pooling_params import PoolingTask
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import ExecuteModelRequest, PoolerOutput
 from vllm.utils import make_async
@@ -77,7 +74,7 @@ class ExecutorBase(ABC):
                 `self` argument, in addition to the arguments passed in `args`
                 and `kwargs`. The `self` argument will be the worker object.
             timeout: Maximum time in seconds to wait for execution. Raises a
-                [`TimeoutError`][] on timeout. `None` means wait indefinitely.
+                :exc:`TimeoutError` on timeout. `None` means wait indefinitely.
             args: Positional arguments to pass to the worker method.
             kwargs: Keyword arguments to pass to the worker method.
 
@@ -136,11 +133,6 @@ class ExecutorBase(ABC):
             return func(worker.get_model())
 
         return self.collective_rpc(rpc_func)
-
-    @cached_property  # Avoid unnecessary RPC calls
-    def supported_pooling_tasks(self) -> tuple[PoolingTask, ...]:
-        output = self.collective_rpc("get_supported_pooling_tasks")
-        return tuple({task for tasks in output for task in tasks})
 
     def execute_model(
         self, execute_model_req: ExecuteModelRequest

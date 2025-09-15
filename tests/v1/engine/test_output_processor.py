@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
 import time
@@ -35,7 +34,7 @@ def _ref_convert_id_to_token(
     Returns:
       String representation of input token id
     """
-    return tokenizer.decode([token_id]) or ""
+    return tokenizer.convert_ids_to_tokens(token_id) or ""
 
 
 @pytest.mark.parametrize(
@@ -51,6 +50,7 @@ def test_incremental_detokenization(request_output_kind: RequestOutputKind,
     # Make N requests.
     requests = [
         EngineCoreRequest(request_id=f"request-{idx}",
+                          prompt=prompt,
                           prompt_token_ids=prompt_tokens,
                           arrival_time=0,
                           mm_inputs=None,
@@ -58,22 +58,20 @@ def test_incremental_detokenization(request_output_kind: RequestOutputKind,
                           mm_placeholders=None,
                           eos_token_id=None,
                           lora_request=None,
-                          cache_salt=None,
-                          data_parallel_rank=None,
                           sampling_params=SamplingParams(
                               skip_special_tokens=False,
                               spaces_between_special_tokens=False,
                               output_kind=request_output_kind,
                               stop=[],
                               include_stop_str_in_output=False,
-                          ),
-                          pooling_params=None)
-        for idx, prompt_tokens in enumerate(dummy_test_vectors.prompt_tokens)
+                          )) for idx, (prompt, prompt_tokens) in enumerate(
+                              zip(dummy_test_vectors.prompt_strings,
+                                  dummy_test_vectors.prompt_tokens))
     ]
 
     # Add requests to the detokenizer.
-    for request, prompt in zip(requests, dummy_test_vectors.prompt_strings):
-        output_processor.add_request(request, prompt)
+    for request in requests:
+        output_processor.add_request(request)
 
     gen_strings = {}
     gen_tokens = {}
@@ -400,6 +398,7 @@ def test_logprobs_processor(request_output_kind: RequestOutputKind,
     ]
     requests = [
         EngineCoreRequest(request_id=request_id_list[idx],
+                          prompt=prompt,
                           prompt_token_ids=prompt_tokens,
                           arrival_time=0,
                           mm_inputs=None,
@@ -407,8 +406,6 @@ def test_logprobs_processor(request_output_kind: RequestOutputKind,
                           mm_placeholders=None,
                           eos_token_id=None,
                           lora_request=None,
-                          cache_salt=None,
-                          data_parallel_rank=None,
                           sampling_params=SamplingParams(
                               skip_special_tokens=False,
                               spaces_between_special_tokens=False,
@@ -417,14 +414,14 @@ def test_logprobs_processor(request_output_kind: RequestOutputKind,
                               include_stop_str_in_output=False,
                               logprobs=num_sample_logprobs,
                               prompt_logprobs=num_prompt_logprobs,
-                          ),
-                          pooling_params=None)
-        for idx, prompt_tokens in enumerate(dummy_test_vectors.prompt_tokens)
+                          )) for idx, (prompt, prompt_tokens) in enumerate(
+                              zip(dummy_test_vectors.prompt_strings,
+                                  dummy_test_vectors.prompt_tokens))
     ]
 
     # Add requests to the detokenizer.
-    for request, prompt in zip(requests, dummy_test_vectors.prompt_strings):
-        output_processor.add_request(request, prompt)
+    for request in requests:
+        output_processor.add_request(request)
 
     gen_tokens = {}
     gen_logprobs = {}
@@ -510,7 +507,7 @@ def test_stop_token(include_stop_str_in_output: bool,
       reason should be "stop" (i.e. first control token causes stop
       and is represented in output text)
 
-    * else, the detokenized string should be
+    * else, the detokenized string should be 
       <token><token>...<token> and the finish reason should be "stop"
       (i.e. first control token causes stop but is not represented
       in output text.)
@@ -565,6 +562,7 @@ def test_stop_token(include_stop_str_in_output: bool,
     request_id = "request-0"
     request = EngineCoreRequest(
         request_id=request_id,
+        prompt=prompt_string,
         prompt_token_ids=prompt_tokens,
         arrival_time=0,
         mm_inputs=None,
@@ -572,8 +570,6 @@ def test_stop_token(include_stop_str_in_output: bool,
         mm_placeholders=None,
         eos_token_id=eos_token_id,
         lora_request=None,
-        cache_salt=None,
-        data_parallel_rank=None,
         sampling_params=SamplingParams(
             skip_special_tokens=False,
             spaces_between_special_tokens=False,
@@ -584,11 +580,10 @@ def test_stop_token(include_stop_str_in_output: bool,
             logprobs=num_sample_logprobs,
             prompt_logprobs=None,
             ignore_eos=ignore_eos,
-        ),
-        pooling_params=None)
+        ))
 
     # Add request to the detokenizer.
-    output_processor.add_request(request, prompt_string)
+    output_processor.add_request(request)
 
     # Loop over engine core steps; run output processor
     gen_string = ""
@@ -664,6 +659,7 @@ def test_stop_string(include_stop_str_in_output: bool,
     requests = [
         EngineCoreRequest(
             request_id=request_id_list[idx],
+            prompt=prompt,
             prompt_token_ids=prompt_tokens,
             arrival_time=0,
             mm_inputs=None,
@@ -671,8 +667,6 @@ def test_stop_string(include_stop_str_in_output: bool,
             mm_placeholders=None,
             eos_token_id=None,
             lora_request=None,
-            cache_salt=None,
-            data_parallel_rank=None,
             sampling_params=SamplingParams(
                 skip_special_tokens=False,
                 spaces_between_special_tokens=False,
@@ -681,14 +675,14 @@ def test_stop_string(include_stop_str_in_output: bool,
                 include_stop_str_in_output=include_stop_str_in_output,
                 logprobs=num_sample_logprobs,
                 prompt_logprobs=None,
-            ),
-            pooling_params=None)
-        for idx, prompt_tokens in enumerate(dummy_test_vectors.prompt_tokens)
+            )) for idx, (prompt, prompt_tokens) in enumerate(
+                zip(dummy_test_vectors.prompt_strings,
+                    dummy_test_vectors.prompt_tokens))
     ]
 
     # Add requests to the detokenizer.
-    for request, prompt in zip(requests, dummy_test_vectors.prompt_strings):
-        output_processor.add_request(request, prompt)
+    for request in requests:
+        output_processor.add_request(request)
 
     gen_strings = {}
     gen_tokens = {}
@@ -780,6 +774,7 @@ def test_iteration_stats(dummy_test_vectors):
     requests = [
         EngineCoreRequest(
             request_id=f"request-{idx}",
+            prompt=prompt,
             prompt_token_ids=prompt_tokens,
             arrival_time=0,
             mm_inputs=None,
@@ -787,17 +782,16 @@ def test_iteration_stats(dummy_test_vectors):
             mm_placeholders=None,
             eos_token_id=None,
             lora_request=None,
-            cache_salt=None,
-            data_parallel_rank=None,
             sampling_params=SamplingParams(),
-            pooling_params=None,
-        ) for idx, prompt_tokens in enumerate(dummy_test_vectors.prompt_tokens)
+        ) for idx, (prompt, prompt_tokens) in enumerate(
+            zip(dummy_test_vectors.prompt_strings,
+                dummy_test_vectors.prompt_tokens))
     ]
 
     # Add all requests except one to the OutputProcessor.
     num_active = len(dummy_test_vectors.generation_tokens) - 1
     for request in requests[:num_active]:
-        output_processor.add_request(request, None)
+        output_processor.add_request(request)
     inactive_request = requests[num_active]
 
     # First iteration has 2 prefills.
@@ -823,7 +817,7 @@ def test_iteration_stats(dummy_test_vectors):
     assert iteration_stats.num_generation_tokens == num_active
 
     # Add a new request - prefill and 2 decodes in this step.
-    output_processor.add_request(inactive_request, None)
+    output_processor.add_request(inactive_request)
     num_active += 1
     outputs = engine_core.get_outputs()[:num_active]
     iteration_stats = IterationStats()
@@ -927,84 +921,3 @@ async def test_request_output_collector():
     # Cumulative logprobs should be the last one.
     cumulative_logprob_expected = 1.0 * num_to_put
     assert output.outputs[0].cumulative_logprob == cumulative_logprob_expected
-
-
-@pytest.mark.asyncio
-async def test_cumulative_output_collector_n():
-    """Test collector correctly handles multiple outputs by index."""
-    collector = RequestOutputCollector(RequestOutputKind.CUMULATIVE)
-    outputs = [
-        RequestOutput(
-            request_id="my-request-id",
-            prompt=None,
-            prompt_token_ids=[1, 2, 3],
-            prompt_logprobs=None,
-            outputs=[
-                CompletionOutput(
-                    index=0,
-                    text="a",
-                    token_ids=[0],
-                    cumulative_logprob=None,
-                    logprobs=None,
-                    finish_reason=None,
-                ),
-                CompletionOutput(
-                    index=1,
-                    text="b",
-                    token_ids=[1],
-                    cumulative_logprob=None,
-                    logprobs=None,
-                    finish_reason=None,
-                ),
-            ],
-            finished=False,
-        ),
-        RequestOutput(
-            request_id="my-request-id",
-            prompt=None,
-            prompt_token_ids=[1, 2, 3],
-            prompt_logprobs=None,
-            outputs=[
-                CompletionOutput(
-                    index=0,
-                    text="ab",
-                    token_ids=[0, 1],
-                    cumulative_logprob=None,
-                    logprobs=None,
-                    finish_reason=None,
-                ),
-                CompletionOutput(
-                    index=2,
-                    text="c",
-                    token_ids=[2],
-                    cumulative_logprob=None,
-                    logprobs=None,
-                    finish_reason=None,
-                ),
-            ],
-            finished=False,
-        ),
-    ]
-    for output in outputs:
-        collector.put(output)
-
-    # Get the output and check that the text and token_ids are correct.
-    result = await collector.get()
-    # We are expecting
-    # [{index: 0, text: "ab"}, {index: 1, text: "b"}, {index: 2, text: "c"}]
-    assert len(result.outputs) == 3
-    # First is the one where index is 0
-    first = [k for k in result.outputs if k.index == 0]
-    assert len(first) == 1
-    assert first[0].text == "ab"
-
-    # Second is the one where index is 1
-    second = [k for k in result.outputs if k.index == 1]
-    assert len(second) == 1
-    assert second[0].text == "b"
-    assert second[0].token_ids == [1]
-
-    # Third is the one where index is 2
-    third = [k for k in result.outputs if k.index == 2]
-    assert len(third) == 1
-    assert third[0].text == "c"

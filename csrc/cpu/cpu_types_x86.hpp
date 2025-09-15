@@ -19,7 +19,6 @@ namespace vec_op {
 #define VLLM_DISPATCH_CASE_FLOATING_TYPES_FP8(...)        \
   AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__)    \
   AT_DISPATCH_CASE(at::ScalarType::BFloat16, __VA_ARGS__) \
-  AT_DISPATCH_CASE(at::ScalarType::Half, __VA_ARGS__)     \
   AT_DISPATCH_CASE(at::ScalarType::Float8_e5m2, __VA_ARGS__)
 
 #define VLLM_DISPATCH_FLOATING_TYPES(TYPE, NAME, ...) \
@@ -83,7 +82,7 @@ struct FP16Vec16 : public Vec<FP16Vec16> {
   explicit FP16Vec16(const void* ptr)
       : reg((__m256i)_mm256_loadu_si256((__m256i*)ptr)) {}
 
-  // non-temporal load
+  // non-temproal load
   explicit FP16Vec16(bool, void* ptr)
       : reg(_mm256_stream_load_si256((__m256i*)ptr)) {}
 
@@ -120,7 +119,7 @@ struct BF16Vec16 : public Vec<BF16Vec16> {
   explicit BF16Vec16(const void* ptr)
       : reg((__m256i)_mm256_loadu_si256((__m256i*)ptr)) {}
 
-  // non-temporal load
+  // non-temproal load
   explicit BF16Vec16(bool, void* ptr)
       : reg(_mm256_stream_load_si256((__m256i*)ptr)) {}
 
@@ -327,7 +326,7 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   // normal load
   explicit FP32Vec16(const float* ptr) : reg(_mm512_loadu_ps(ptr)) {}
 
-  // non-temporal load
+  // non-temproal load
   explicit FP32Vec16(bool, void* ptr)
       : reg((__m512)_mm512_stream_load_si512(ptr)) {}
 
@@ -576,7 +575,7 @@ struct INT8Vec64 : public Vec<INT8Vec64> {
   // normal load
   explicit INT8Vec64(void* ptr) : reg(_mm512_loadu_epi8(ptr)) {}
 
-  // non-temporal load
+  // non-temproal load
   explicit INT8Vec64(bool, void* ptr) : reg(_mm512_stream_load_si512(ptr)) {}
 
   void save(void* ptr) const { _mm512_storeu_epi8(ptr, reg); }
@@ -587,7 +586,7 @@ struct INT8Vec64 : public Vec<INT8Vec64> {
     _mm512_mask_storeu_epi8(ptr, mask, reg);
   }
 
-  // non-temporal save
+  // non-temproal save
   void nt_save(int8_t* ptr) { _mm512_stream_si512((__m512i*)ptr, reg); }
 };
 #endif

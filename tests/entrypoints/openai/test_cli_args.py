@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
 
@@ -123,21 +122,29 @@ def test_enable_auto_choice_fails_with_enable_reasoning(serve_parser):
     """Ensure validation fails if reasoning is enabled with auto tool choice"""
     args = serve_parser.parse_args(args=[
         "--enable-auto-tool-choice",
-        "--reasoning-parser",
-        "deepseek_r1",
+        "--enable-reasoning",
     ])
     with pytest.raises(TypeError):
         validate_parsed_serve_args(args)
 
 
-def test_passes_with_reasoning_parser(serve_parser):
+def test_enable_reasoning_passes_with_reasoning_parser(serve_parser):
     """Ensure validation passes if reasoning is enabled 
     with a reasoning parser"""
     args = serve_parser.parse_args(args=[
+        "--enable-reasoning",
         "--reasoning-parser",
         "deepseek_r1",
     ])
     validate_parsed_serve_args(args)
+
+
+def test_enable_reasoning_fails_without_reasoning_parser(serve_parser):
+    """Ensure validation fails if reasoning is enabled 
+    without a reasoning parser"""
+    args = serve_parser.parse_args(args=["--enable-reasoning"])
+    with pytest.raises(TypeError):
+        validate_parsed_serve_args(args)
 
 
 def test_chat_template_validation_for_happy_paths(serve_parser):
@@ -153,13 +160,3 @@ def test_chat_template_validation_for_sad_paths(serve_parser):
     args = serve_parser.parse_args(args=["--chat-template", "does/not/exist"])
     with pytest.raises(ValueError):
         validate_parsed_serve_args(args)
-
-
-@pytest.mark.parametrize(
-    "cli_args, expected_middleware",
-    [(["--middleware", "middleware1", "--middleware", "middleware2"
-       ], ["middleware1", "middleware2"]), ([], [])])
-def test_middleware(serve_parser, cli_args, expected_middleware):
-    """Ensure multiple middleware args are parsed properly"""
-    args = serve_parser.parse_args(args=cli_args)
-    assert args.middleware == expected_middleware

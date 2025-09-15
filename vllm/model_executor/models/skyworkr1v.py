@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # adapted from https://huggingface.co/Skywork/Skywork-R1V-38B/blob/main/modeling_skywork_chat.py
 # --------------------------------------------------------
@@ -9,7 +8,8 @@
 # --------------------------------------------------------
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Literal, Optional, TypedDict, TypeVar, Union
+from functools import cached_property
+from typing import Literal, Optional, Set, Tuple, TypedDict, TypeVar, Union
 
 import torch
 import torch.nn as nn
@@ -21,11 +21,11 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.awq import AWQConfig
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.models.intern_vit import (InternVisionModel,
                                                    InternVisionPatchModel)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargs, NestedTensors)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
@@ -80,7 +80,7 @@ SkyworkR1VImageInputs = Union[SkyworkR1VImagePixelInputs,
 def build_transform(input_size: int):
     MEAN, STD = IMAGENET_MEAN, IMAGENET_STD
     return T.Compose([
-        T.Lambda(lambda img: convert_image_mode(img, 'RGB')),
+        T.Lambda(lambda img: img.convert('RGB') if img.mode != 'RGB' else img),
         T.Resize((input_size, input_size),
                  interpolation=T.InterpolationMode.BICUBIC),
         T.ToTensor(),
@@ -534,13 +534,11 @@ class SkyworkR1VMultiModalProcessor(BaseMultiModalProcessor[_I]):
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> Mapping[str, NestedTensors]:
         processed_outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
         )
 
         hf_processor = self.info.get_hf_processor(**mm_kwargs)
@@ -648,13 +646,6 @@ class SkyworkR1VProcessingInfo(BaseSkyworkR1VProcessingInfo):
     dummy_inputs=SkyworkR1VDummyInputsBuilder)
 class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
-    @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
-        if modality.startswith("image"):
-            return "<image>"
-
-        raise ValueError("Only image modality is supported")
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
 
@@ -707,6 +698,13 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
             if (not quant_config.modules_to_not_convert) and \
                 (llm_quant_config is not None):
                 quant_config.modules_to_not_convert.append("vision_model")
+
+    @cached_property
+    def sampler(self):
+        if hasattr(self.language_model, "sampler"):
+            return self.language_model.sampler
+
+        return get_sampler()
 
     def _init_vision_model(
         self,
@@ -878,11 +876,11 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(self,
-                                  **kwargs: object) -> MultiModalEmbeddings:
+    def get_multimodal_embeddings(
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
-            return []
+            return None
 
         return self._process_image_input(image_input)
 
@@ -892,8 +890,7 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None \
-            and len(multimodal_embeddings) != 0:
+        if multimodal_embeddings is not None:
             assert self.img_context_token_id is not None
             self._set_visual_token_mask(input_ids)
             inputs_embeds = merge_multimodal_embeddings(
@@ -911,7 +908,7 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
-    ) -> IntermediateTensors:
+    ) -> Union[SamplerOutput, IntermediateTensors]:
 
         if intermediate_tensors is not None:
             input_ids = None
@@ -949,8 +946,15 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def sample(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[SamplerOutput]:
+        return self.language_model.sample(logits, sampling_metadata)
+
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         skip_prefixes = [
             "action_embed", "temporal_embed", "track_embed",
             "track_embed_decoder", "box_token", "cg_criterion", "cg_model",

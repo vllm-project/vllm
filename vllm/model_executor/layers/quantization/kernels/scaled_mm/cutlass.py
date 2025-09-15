@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 
@@ -23,7 +22,7 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
 
     @classmethod
     def can_implement(
-            cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, Optional[str]]:
+            cls, c: ScaledMMLinearLayerConfig) -> Tuple[bool, Optional[str]]:
 
         if (not current_platform.is_cuda() and not current_platform.is_cpu()):
             return False, "CutlassScaledMM requires running on CUDA or CPU."
@@ -112,7 +111,7 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
         # * dynamic, i_s is None and x_s computed from x.
         # * static, i_s is scalar and x_s is i_s.
         symmetric = azp_adj is None
-        x_q, x_s, x_zp = ops.scaled_int8_quant(x.contiguous(),
+        x_q, x_s, x_zp = ops.scaled_int8_quant(x,
                                                i_s,
                                                i_zp,
                                                symmetric=symmetric)

@@ -1,16 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import Callable, Union
 
 import torch
 
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 
-LogitsProcessor = Union[
-    Callable[[list[int], torch.Tensor], torch.Tensor],
-    Callable[[list[int], list[int], torch.Tensor], torch.Tensor],
-]
+LogitsProcessor = Union[Callable[[list[int], torch.Tensor], torch.Tensor],
+                        Callable[[list[int], list[int], torch.Tensor],
+                                 torch.Tensor]]
 """LogitsProcessor is a function that takes a list
 of previously generated tokens, the logits tensor
 for the next token and, optionally, prompt tokens as a
@@ -31,8 +29,12 @@ def get_bad_words_logits_processors(
             prefix = " " if add_prefix_space else ""
             prompt = prefix + bad_word.lstrip()
 
-            prompt_token_ids = tokenizer.encode(text=prompt,
-                                                add_special_tokens=False)
+            if isinstance(tokenizer, MistralTokenizer):
+                # Mistral tokenizers should not add special tokens
+                prompt_token_ids = tokenizer.encode(text=prompt)
+            else:
+                prompt_token_ids = tokenizer.encode(text=prompt,
+                                                    add_special_tokens=False)
 
             # If no space at the beginning
             # or if prefix space produces a new word token

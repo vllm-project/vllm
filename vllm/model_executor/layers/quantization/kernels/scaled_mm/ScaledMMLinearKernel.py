@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 
@@ -25,7 +24,7 @@ class ScaledMMLinearKernel(ABC):
     @classmethod
     @abstractmethod
     def can_implement(
-            cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, Optional[str]]:
+            cls, c: ScaledMMLinearLayerConfig) -> Tuple[bool, Optional[str]]:
         raise NotImplementedError
 
     def __init__(self, c: ScaledMMLinearLayerConfig, w_q_param_name: str,
@@ -51,7 +50,7 @@ class ScaledMMLinearKernel(ABC):
         raise NotImplementedError
 
     def _get_weight_params(
-            self, layer: torch.nn.Module) -> tuple[
+            self, layer: torch.nn.Module) -> Tuple[
                 torch.Tensor,  # weight
                 torch.Tensor,  # weight_scale
                 Optional[torch.Tensor],  # input_scale, 

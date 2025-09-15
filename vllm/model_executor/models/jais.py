@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
 # https://huggingface.co/inceptionai/jais-30b-chat-v3/blob/main/modeling_jais.py
@@ -22,8 +21,7 @@
 """Inference-only Jais model compatible with HuggingFace weights."""
 
 import math
-from collections.abc import Iterable
-from typing import Optional, Union
+from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
@@ -38,6 +36,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -309,6 +308,7 @@ class JAISLMHeadModel(nn.Module, SupportsPP):
                                         config.mup_width_scale)
         self.logits_processor = LogitsProcessor(vocab_size=config.vocab_size,
                                                 scale=self.output_logits_scale)
+        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.transformer.make_empty_intermediate_tensors)
 
@@ -335,10 +335,18 @@ class JAISLMHeadModel(nn.Module, SupportsPP):
                                        sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def sample(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[SamplerOutput]:
+        next_tokens = self.sampler(logits, sampling_metadata)
+        return next_tokens
+
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: set[str] = set()
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "lm_head.weight" in name:
                 # GPT-2 ties the weights of the embedding layer and the final

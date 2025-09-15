@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import random
 from dataclasses import dataclass
@@ -9,7 +8,8 @@ import torch
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from vllm.engine.arg_utils import EngineArgs
-from vllm.transformers_utils.tokenizer_group import TokenizerGroup
+from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
+    BaseTokenizerGroup)
 from vllm.v1.engine import EngineCoreOutput, FinishReason
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 
@@ -296,7 +296,7 @@ def generate_dummy_prompt_logprobs_tensors(
 class DummyOutputProcessorTestVectors:
     """Dummy test vectors for output processor tests"""
     tokenizer: GeneralTokenizerType
-    tokenizer_group: TokenizerGroup
+    tokenizer_group: BaseTokenizerGroup
     vllm_config: EngineArgs
     full_tokens: list[list[int]]  # Prompt + generated tokens
     prompt_tokens: list[list[int]]

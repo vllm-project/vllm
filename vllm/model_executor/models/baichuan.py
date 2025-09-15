@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
 #
@@ -21,8 +20,7 @@
 # limitations under the License.
 """Inference-only BaiChuan model compatible with HuggingFace weights."""
 import math
-from collections.abc import Iterable
-from typing import Optional, Union
+from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
@@ -41,10 +39,10 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, row_parallel_weight_loader)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
@@ -131,7 +129,7 @@ class BaiChuanAttention(nn.Module):
         self.num_heads = (self.total_num_heads //
                           tensor_model_parallel_world_size)
         self.head_dim = hidden_size // self.total_num_heads
-        self.position_embedding = position_embedding
+        self.postion_embedding = position_embedding
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
@@ -151,7 +149,7 @@ class BaiChuanAttention(nn.Module):
             quant_config=quant_config,
         )
         # Create the alibi slopes and slice them.
-        if self.position_embedding == "ALIBI":
+        if self.postion_embedding == "ALIBI":
             tp_rank = get_tensor_model_parallel_rank()
             head_start = tp_rank * self.num_heads
             head_end = (tp_rank + 1) * self.num_heads
@@ -187,7 +185,7 @@ class BaiChuanAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.W_pack(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
-        if self.position_embedding != "ALIBI":
+        if self.postion_embedding != "ALIBI":
             q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
@@ -233,7 +231,7 @@ class BaiChuanDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -323,15 +321,15 @@ class BaiChuanModel(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -386,7 +384,7 @@ class BaiChuanBaseForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
         lora_config = vllm_config.lora_config
         self.config = config
         self.lora_config = lora_config
-        self.tp_size = get_tensor_model_parallel_world_size()
+
         self.quant_config = quant_config
         self.model = BaiChuanModel(vllm_config=vllm_config,
                                    prefix=prefix,
@@ -398,6 +396,7 @@ class BaiChuanBaseForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
@@ -424,8 +423,16 @@ class BaiChuanBaseForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
                                        sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def sample(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[SamplerOutput]:
+        next_tokens = self.sampler(logits, sampling_metadata)
+        return next_tokens
+
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 
@@ -440,10 +447,8 @@ class BaiChuanBaseForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
         is_baichuan2 = self.config.vocab_size == 125696
         if is_baichuan2:
             loaded_weight = torch.nn.functional.normalize(loaded_weight)
-        if self.tp_size > 1:
-            row_parallel_weight_loader(param, loaded_weight)
-        else:
-            default_weight_loader(param, loaded_weight)
+
+        default_weight_loader(param, loaded_weight)
 
 
 class BaichuanForCausalLM(BaiChuanBaseForCausalLM):

@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
 from typing import NamedTuple, Optional
@@ -101,24 +100,12 @@ class ModelRunnerOutput:
     # [prompt_len]
     prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]]
 
-    # [num_reqs, hidden_size]
-    pooler_output: list[Optional[torch.Tensor]]
 
-    # [req_ids]
-    finished_sending: Optional[set[str]] = None
-    finished_recving: Optional[set[str]] = None
-
-    # req_id -> num_nans_in_logits
-    num_nans_in_logits: Optional[dict[str, int]] = None
-
-
-EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],
-                                              req_id_to_index={},
-                                              sampled_token_ids=[],
-                                              spec_token_ids=None,
-                                              logprobs=None,
-                                              prompt_logprobs_dict={},
-                                              pooler_output=[],
-                                              finished_sending=None,
-                                              finished_recving=None,
-                                              num_nans_in_logits=None)
+EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
+    req_ids=[],
+    req_id_to_index={},
+    sampled_token_ids=[],
+    spec_token_ids=None,
+    logprobs=None,
+    prompt_logprobs_dict={},
+)

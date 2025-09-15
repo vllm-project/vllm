@@ -13,6 +13,7 @@
 template <typename scalar_t, int bit, int GROUPS>
 __global__ void moe_wna16_gemm_kernel(
     const scalar_t* __restrict__ input, scalar_t* __restrict__ output,
+
     const uint32_t* __restrict__ qweight, const scalar_t* __restrict__ scales,
     const uint32_t* __restrict__ qzeros,
 
@@ -53,6 +54,8 @@ __global__ void moe_wna16_gemm_kernel(
       if (token_index / top_k >= size_m) break;
 
       num_valid_tokens = m + 1;
+      if (blockIdx.z == 0 && offset_n < size_n)
+        output[token_index * size_n + offset_n] = Dtype::int2num(0);
 
       if (expert_id != -1) {
         int k_per_thread = DIVIDE(BLOCK_SIZE_K, BLOCK_SIZE_N);
@@ -281,7 +284,8 @@ torch::Tensor moe_wna16_gemm(torch::Tensor input, torch::Tensor output,
                              int64_t BLOCK_SIZE_M, int64_t BLOCK_SIZE_N,
                              int64_t BLOCK_SIZE_K, int64_t bit) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
-  output.zero_();
+  auto options =
+      torch::TensorOptions().dtype(input.dtype()).device(input.device());
 
   const int num_experts = b_qweight.size(0);
   const int size_m = input.size(0);
@@ -298,9 +302,9 @@ torch::Tensor moe_wna16_gemm(torch::Tensor input, torch::Tensor output,
   const uint32_t* b_qzeros_ptr;
   if (b_qzeros.has_value())
     b_qzeros_ptr = (const uint32_t*)b_qzeros.value().data_ptr<uint8_t>();
-  const float* topk_weights_ptr = nullptr;
+  const float* topk_weights_ptr;
   if (topk_weights.has_value())
-    topk_weights_ptr = (const float*)topk_weights.value().data_ptr<float>();
+    topk_weights_ptr = (const float*)topk_weights.value().data_ptr();
 
   int groups_per_block_row = BLOCK_SIZE_K / group_size;
   TORCH_CHECK(bit == 4 || bit == 8, "bit must be 4 or 8");

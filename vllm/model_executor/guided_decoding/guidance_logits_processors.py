@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import copy
 import os
-from typing import Any
+from typing import Any, List
 
 import llguidance
 import llguidance.hf
@@ -36,23 +34,8 @@ class GuidanceLogitsProcessor:
         self.grammar = grammar
         self.tokenizer = tokenizer
         self.tokenizer_name = tokenizer.name_or_path
-        self.ll_tokenizer = None
-        self.ll_matcher = None
-        self.bitmask = None
         self.new_sampling = False
         self.initialized = False
-
-    def clone(self) -> "GuidanceLogitsProcessor":
-        cloned = copy.copy(self)
-        if self.initialized:
-            cloned.ll_matcher = llguidance.LLMatcher(
-                self.ll_tokenizer,  # type: ignore[assignment]
-                self.grammar,
-                log_level=int(os.environ.get("LLGUIDANCE_LOG_LEVEL", "1")),
-            )
-            self.bitmask = llguidance.torch.allocate_token_bitmask(
-                1, self.ll_tokenizer.vocab_size)  # type: ignore[attr-defined]
-        return cloned
 
     def _initialize(self):
         if self.initialized:
@@ -73,13 +56,13 @@ class GuidanceLogitsProcessor:
 
         # create reusable bitmask
         self.bitmask = llguidance.torch.allocate_token_bitmask(
-            1, self.ll_tokenizer.vocab_size)  # type: ignore[attr-defined]
+            1, self.ll_tokenizer.vocab_size)
 
         self.initialized = True
 
     def __call__(
         self,
-        input_ids: list[int],
+        input_ids: List[int],
         scores: torch.Tensor,
     ) -> torch.Tensor:
         # we initialize the guidance model here
@@ -87,17 +70,15 @@ class GuidanceLogitsProcessor:
         self._initialize()
 
         if self.new_sampling and len(input_ids) > 0:
-            self.ll_matcher.consume_token(  # type: ignore[attr-defined]
-                input_ids[-1])
-            err = self.ll_matcher.get_error()  # type: ignore[attr-defined]
+            self.ll_matcher.consume_token(input_ids[-1])
+            err = self.ll_matcher.get_error()
             if err:
                 logger.warning("Error in LLMatcher: %s", err)
 
         llguidance.torch.fill_next_token_bitmask(self.ll_matcher, self.bitmask,
                                                  0)
         llguidance.torch.apply_token_bitmask_inplace(
-            scores,
-            self.bitmask.to(scores.device))  # type: ignore[attr-defined]
+            scores, self.bitmask.to(scores.device))
 
         self.new_sampling = True
 

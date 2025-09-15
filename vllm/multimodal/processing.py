@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import json
+import re
 import sys
 from abc import ABC, abstractmethod
 from collections import defaultdict
@@ -12,8 +11,8 @@ from functools import lru_cache
 from typing import (TYPE_CHECKING, Generic, NamedTuple, Optional, Protocol,
                     TypeVar, Union, cast)
 
-import regex as re
 import torch
+from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
 from typing_extensions import assert_never
 
 from vllm.inputs import InputProcessingContext
@@ -31,10 +30,6 @@ from .parse import (DictEmbeddingItems, EmbeddingItems, MultiModalDataItems,
                     MultiModalDataParser)
 
 if TYPE_CHECKING:
-    from transformers.configuration_utils import PretrainedConfig
-    from transformers.feature_extraction_utils import BatchFeature
-    from transformers.processing_utils import ProcessorMixin
-
     from .profiling import BaseDummyInputsBuilder
 
 logger = init_logger(__name__)
@@ -115,14 +110,13 @@ class PromptUpdateDetails(Generic[_S]):
 
     is_embed: Optional[Callable[["_BoundPromptSequence"], torch.Tensor]] = None
     """
-    Given [`full`][vllm.multimodal.processing.PromptUpdateDetails.full],
-    return a boolean mask of shape `(len(full),)` indicating which positions
-    of `full` to assign embeddings to.
+    Given :attr:`full`, return a boolean mask of shape `(len(full),)`
+    indicating which positions of `full` to assign embeddings to.
 
     `None` (default) means to assign embeddings to all positions of `full`.
 
     The embeddings are obtained by calling
-    [`SupportsMultiModal.get_multimodal_embeddings`][vllm.model_executor.models.interfaces.SupportsMultiModal.get_multimodal_embeddings].
+    :class:`SupportsMultiModal.get_multimodal_embeddings`.
     """
 
     @staticmethod
@@ -161,15 +155,13 @@ PromptUpdateInfo = Union[PromptSeq, PromptUpdateDetails]
 The token sequence or text that are part of the update.
 
 If only part of the content corresponds to feature placeholders, you can
-use [`PromptUpdateDetails`][vllm.multimodal.processing.PromptUpdateDetails] to
-specify which part.
+use :class:`PromptUpdateDetails` to specify which part.
 """
 
 PromptUpdateContent = Union[Callable[[int], PromptUpdateInfo],
                             PromptUpdateInfo]
 """
-Given the index of the processed item within
-[`modality`][vllm.multimodal.processing.PromptUpdate.modality],
+Given the index of the processed item within :attr:`modality`,
 output the corresponding token sequence (or text).
 
 For convenience, you can directly pass in the token sequence (or text)
@@ -220,54 +212,52 @@ class PromptInsertion(PromptUpdate):
 
     Example:
 
-    For each image, insert a number of ``<image>`` feature placeholders
-    equal to the feature size of the vision encoder after the ``<s>`` token:
+        For each image, insert a number of ``<image>`` feature placeholders
+        equal to the feature size of the vision encoder after the ``<s>`` token:
 
-    ```python
-    PromptInsertion(
-        modality="image",
-        target="<s>",
-        insertion="<image>" * image_feature_size,
-    )
-    ```
+        .. code-block:: python
 
-    Insert these tokens at the start of the prompt:
+            PromptInsertion(
+                modality="image",
+                target="<s>",
+                insertion="<image>" * image_feature_size,
+            )
 
-    ```python
-    PromptInsertion(
-        modality="image",
-        target=PromptIndexTargets.start(),
-        insertion="<image>" * image_feature_size,
-    )
-    ```
+        Insert these tokens at the start of the prompt:
 
-    Insert these tokens after a prefix ``Images:``:
+        .. code-block:: python
 
-    ```python
-    PromptInsertion(
-        modality="image",
-        target=PromptIndexTargets.prefix("Images:"),
-        insertion="<image>" * image_feature_size,
-    )
-    ```
+            PromptInsertion(
+                modality="image",
+                target=PromptIndexTargets.start(),
+                insertion="<image>" * image_feature_size,
+            )
 
-    Insert these tokens at the end of the prompt:
+        Insert these tokens after a prefix ``Images:``:
 
-    ```python
-    PromptInsertion(
-        modality="image",
-        target=PromptIndexTargets.end(),
-        insertion="<image>" * image_feature_size,
-    )
-    ```
+        .. code-block:: python
+
+            PromptInsertion(
+                modality="image",
+                target=PromptIndexTargets.prefix("Images:"),
+                insertion="<image>" * image_feature_size,
+            )
+
+        Insert these tokens at the end of the prompt:
+
+        .. code-block:: python
+
+            PromptInsertion(
+                modality="image",
+                target=PromptIndexTargets.end(),
+                insertion="<image>" * image_feature_size,
+            )
     """
 
     insertion: PromptUpdateContent = field(repr=False)
     """
-    Given the index of the processed item within
-    [`modality`][vllm.multimodal.processing.PromptUpdate.modality],
-    output the token sequence (or text) to insert right after
-    [`target`][vllm.multimodal.processing.PromptUpdate.target].
+    Given the index of the processed item within :attr:`modality`,
+    output the token sequence (or text) to insert right after :attr:`target`.
 
     For convenience, you can directly pass in the token sequence (or text)
     instead of a function if it does not depend on the input.
@@ -289,59 +279,57 @@ class PromptReplacement(PromptUpdate):
 
     Example:
 
-    For each image, replace one ``<image>`` input placeholder in the prompt
-    with a number of ``<image>`` feature placeholders
-    equal to the feature size of the vision encoder:
+        For each image, replace one ``<image>`` input placeholder in the prompt
+        with a number of ``<image>`` feature placeholders
+        equal to the feature size of the vision encoder:
 
-    ```python
-    PromptReplacement(
-        modality="image",
-        target="<image>",
-        replacement="<image>" * image_feature_size,
-    )
-    ```
+        .. code-block:: python
 
-    As above, but further pad the feature placeholders with ``<image_bos>``
-    and `<image_eos>``, which are not supposed to be passed to the vision
-    encoder:
+            PromptReplacement(
+                modality="image",
+                target="<image>",
+                replacement="<image>" * image_feature_size,
+            )
 
-    ```python
-    PromptReplacement(
-        modality="image",
-        target="<image>",
-        replacement=PromptUpdateDetails(
-            full="".join([
-                "<image_bos>",
-                "<image>" * image_feature_size,
-                "<image_eos>",
-            ]),
-            features="<image>" * image_feature_size,
-        ),
-    )
-    ```
+        As above, but further pad the feature placeholders with ``<image_bos>``
+        and `<image_eos>``, which are not supposed to be passed to the vision
+        encoder:
 
-    To avoid unnecessary tokenization during prompt replacement,
-    we recommended passing token sequences instead of text:
+        .. code-block:: python
 
-    ```python
-    PromptReplacement(
-        modality="image",
-        target=[image_token_id],
-        replacement=PromptUpdateDetails(
-            full=([image_bos_id] + [image_token_id] * image_feature_size
-                    + [image_eos_id]),
-            features=[image_token_id] * image_feature_size,
-        ),
-    )
-    ```
+            PromptReplacement(
+                modality="image",
+                target="<image>",
+                replacement=PromptUpdateDetails(
+                    full="".join([
+                        "<image_bos>",
+                        "<image>" * image_feature_size,
+                        "<image_eos>",
+                    ]),
+                    features="<image>" * image_feature_size,
+                ),
+            )
+
+        To avoid unnecessary tokenization during prompt replacement,
+        we recommended passing token sequences instead of text:
+
+        .. code-block:: python
+
+            PromptReplacement(
+                modality="image",
+                target=[image_token_id],
+                replacement=PromptUpdateDetails(
+                    full=([image_bos_id] + [image_token_id] * image_feature_size
+                          + [image_eos_id]),
+                    features=[image_token_id] * image_feature_size,
+                ),
+            )
     """
 
     replacement: PromptUpdateContent = field(repr=False)
     """
-    Given the index of the processed item within
-    [`modality`][vllm.multimodal.processing.PromptUpdate.modality],
-    output the token sequence (or text) to replace
-    [`target`][vllm.multimodal.processing.PromptUpdate.target].
+    Given the index of the processed item within :attr:`modality`,
+    output the token sequence (or text) to replace :attr:`target`.
 
     For convenience, you can directly pass in the token sequence (or text)
     instead of a function if it does not depend on the input.
@@ -395,16 +383,14 @@ _M = TypeVar("_M", bound=Union[_HasModalityAttr, _HasModalityProp])
 
 
 def full_groupby_modality(values: Iterable[_M]) -> ItemsView[str, list[_M]]:
-    """Convenience function to apply [`full_groupby`][vllm.utils.full_groupby]
-    based on modality."""
+    """Convenience function to apply :func:`full_groupby` based on modality."""
     return full_groupby(values, key=lambda x: x.modality)
 
 
 @dataclass
 class _BoundPromptSequence:
     """
-    A [`_PromptSeq`][vllm.multimodal.processing.PromptSeq] bound
-    to a tokenizer to automatically
+    A :data:`_PromptSeq` bound to a tokenizer to automatically
     convert between token sequence and text representations.
     """
     tokenizer: AnyTokenizer = field(repr=False)
@@ -456,11 +442,9 @@ class _BoundPromptContent:
 @dataclass
 class BoundPromptUpdate:
     """
-    A [`PromptUpdate`][vllm.multimodal.processing.PromptUpdate] bound
-    to a tokenizer to automatically convert
-    [`target`][vllm.multimodal.processing.PromptUpdate.target] and the result of
-    [`get_content`][vllm.multimodal.processing.BoundPromptUpdate.get_content]
-    between token sequence and text representations.
+    A :class:`PromptUpdate` bound to a tokenizer to automatically convert
+    :attr:`target` and the result of :meth:`get_content` between
+    token sequence and text representations.
     """
     _origin: PromptUpdate
     tokenizer: AnyTokenizer = field(repr=False)
@@ -494,8 +478,7 @@ class BoundPromptUpdate:
 
     def get_content(self, item_idx: int) -> _BoundPromptContent:
         """
-        Given the index of the processed item within
-        [`modality`][vllm.multimodal.processing.PromptUpdate.modality],
+        Given the index of the processed item within :attr:`modality`,
         output the token sequence (or text) to update.
         """
         content = self.content
@@ -532,7 +515,7 @@ def iter_token_matches(
     match_ids: list[int],
 ) -> Generator[_TokenMatch]:
     """
-    Yield each occurrence of `match_ids` in `token_ids`.
+    Yield each occurrence of :code:`match_ids` in :code:`token_ids`.
 
     Note that empty matches are ignored.
     """
@@ -561,8 +544,8 @@ def replace_token_matches(
     new_ids: list[int],
 ) -> list[int]:
     """
-    Replace each occurrence of `match_ids` in `token_ids`
-    with `new_ids`.
+    Replace each occurrence of :code:`match_ids` in :code:`token_ids`
+    with :code:`new_ids`.
 
     Note that empty matches are ignored.
     """
@@ -670,7 +653,7 @@ def find_token_matches(
     prompt: list[int],
     prompt_updates: Sequence[BoundPromptUpdate],
 ) -> Sequence[PromptTargetMatch]:
-    """Return each target of `prompt_updates` found in `prompt`."""
+    """Return each target of :code:`prompt_updates` found in :code:`prompt`."""
 
     def get_matches(update: BoundPromptUpdate):
         target = update.target
@@ -696,7 +679,7 @@ def find_text_matches(
     prompt: str,
     prompt_updates: Sequence[BoundPromptUpdate],
 ) -> Sequence[PromptTargetMatch]:
-    """Return each target of `prompt_updates` found in `prompt`."""
+    """Return each target of :code:`prompt_updates` found in :code:`prompt`."""
 
     def get_matches(update: BoundPromptUpdate):
         target = update.target
@@ -723,7 +706,7 @@ def _resolve_matches(
     mm_matches: Mapping[str, Sequence[PromptTargetMatch]],
 ) -> list[PromptTargetMatch]:
     """
-    Resolve `mm_matches` to ensure that there are no overlapping matches,
+    Resolve :code:`mm_matches` to ensure that there are no overlapping matches,
     and sort them such that earlier matches take priority over later ones.
     """
     matches = [m for matches in mm_matches.values() for m in matches]
@@ -747,7 +730,7 @@ def _apply_matches(
     mm_matches: Mapping[str, Sequence[PromptTargetMatch]],
     mm_item_counts: Mapping[str, int],
 ) -> list[_S]:
-    """Apply the updates in `mm_matches` to `prompt`."""
+    """Apply the updates in :code:`mm_matches` to :code:`prompt`."""
     out_seqs = list[Union[str, list[int]]]()
     prev_end_idx = 0
     next_idx_by_modality = defaultdict[str, int](lambda: 0)
@@ -796,7 +779,7 @@ def apply_token_matches(
     mm_matches: Mapping[str, Sequence[PromptTargetMatch]],
     mm_item_counts: Mapping[str, int],
 ) -> list[int]:
-    """Apply the updates in `mm_matches` to `prompt`."""
+    """Apply the updates in :code:`mm_matches` to :code:`prompt`."""
     if not mm_matches:
         return prompt
 
@@ -810,7 +793,7 @@ def apply_text_matches(
     mm_matches: Mapping[str, Sequence[PromptTargetMatch]],
     mm_item_counts: Mapping[str, int],
 ) -> str:
-    """Apply the updates in `mm_matches` to `prompt`."""
+    """Apply the updates in :code:`mm_matches` to :code:`prompt`."""
     if not mm_matches:
         return prompt
 
@@ -825,7 +808,7 @@ def _iter_placeholders(
     mm_item_counts: Mapping[str, int],
 ) -> Iterable[PlaceholderFeaturesInfo]:
     """
-    Yield each set of placeholder tokens found in `prompt`.
+    Yield each set of placeholder tokens found in :code:`prompt`.
 
     Matches are exclusive even when multiple modalities share
     the same placeholder tokens. In that case, the modality that
@@ -890,16 +873,6 @@ def find_mm_placeholders(
 
 
 _V = TypeVar("_V", bound="Union[MultiModalKwargs, MultiModalKwargsItem]")
-
-
-class ProcessingCacheOptionalItem(NamedTuple):
-    key: str
-    value: Optional[MultiModalKwargsItem]
-
-
-class ProcessingCacheItem(NamedTuple):
-    key: str
-    value: MultiModalKwargsItem
 
 
 class ProcessingCache:
@@ -1006,22 +979,6 @@ class ProcessingCache:
 
         return self._cache.get(cache_key)
 
-    def get_item(
-        self,
-        model_id: str,
-        modality: str,
-        input_item: object,
-        input_kwargs: Mapping[str, object],
-    ) -> ProcessingCacheOptionalItem:
-        cache_key = MultiModalHasher.hash_kwargs(model_id=model_id,
-                                                 **{modality: input_item},
-                                                 **input_kwargs)
-
-        return ProcessingCacheOptionalItem(
-            key=cache_key,
-            value=self._cache.get(cache_key),
-        )
-
     def put(
         self,
         model_id: str,
@@ -1032,21 +989,12 @@ class ProcessingCache:
     ) -> None:
         """
         Put a processed multi-modal item into the cache
-        according to its dependencies
-        (see [`get`][vllm.multimodal.processing.ProcessingCache.get]).
+        according to its dependencies (see :meth:`get`).
         """
         cache_key = MultiModalHasher.hash_kwargs(model_id=model_id,
                                                  **{modality: input_item},
                                                  **input_kwargs)
         self._cache[cache_key] = output_kwargs
-
-    def put_item(self, item: ProcessingCacheItem) -> None:
-        self._cache[item.key] = item.value
-
-    def reset(self) -> bool:
-        self._cache.clear()
-
-        return True
 
 
 class BaseProcessingInfo:
@@ -1064,10 +1012,10 @@ class BaseProcessingInfo:
     def get_tokenizer(self) -> AnyTokenizer:
         return self.ctx.tokenizer
 
-    def get_hf_config(self) -> "PretrainedConfig":
+    def get_hf_config(self) -> PretrainedConfig:
         return self.ctx.get_hf_config()
 
-    def get_hf_processor(self, **kwargs: object) -> "ProcessorMixin":
+    def get_hf_processor(self, **kwargs: object) -> ProcessorMixin:
         """
         Subclasses can override this method to handle
         specific kwargs from model config or user inputs.
@@ -1100,59 +1048,29 @@ class BaseProcessingInfo:
 
         return allowed_limits
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Optional[Mapping[str, int]]:
-        """
-        Return the maximum number of tokens per item of for each modality.
-        
-        When `None` (the default) is returned, vLLM will generate dummy inputs
-        (images/videos) at maximum possible sizes and process them to determine
-        the maximum token count per modality.
-
-        This approach works but can be very slow for certain models (e.g.,
-        Qwen2.5-VL), leading to very long startup time. For better performance,
-        each model can override this method to return pre-computed maximum token
-        counts, avoiding the need for dummy input generation and processing.
-
-        Note:
-            The maximum number of tokens per item of each modality returned 
-            from this function should respect the model's maximum sequence
-            length and the maximum number of items of each modality allowed,
-            and agree with dummy inputs (images/videos) at maximum possible
-            sizes.
-        """
-        return None
-
 
 _I = TypeVar("_I", bound=BaseProcessingInfo)
-
-MultiModalHashes = dict[str, list[str]]
-"""
-A collection of hashes with a similar structure as
-[`MultiModalKwargs`][vllm.multimodal.inputs.MultiModalKwargs].
-"""
 
 
 class BaseMultiModalProcessor(ABC, Generic[_I]):
     """
     Abstract base class to process multi-modal inputs to be used in vLLM.
 
-    Not to be confused with `transformers.ProcessorMixin`.
+    Not to be confused with :class:`transformers.ProcessorMixin`.
     """
 
     def __init__(self,
                  info: _I,
                  dummy_inputs: "BaseDummyInputsBuilder[_I]",
                  *,
-                 cache: Optional[ProcessingCache] = None) -> None:
+                 cache: Optional[ProcessingCache] = None,
+                 enable_sanity_checks: bool = True) -> None:
         super().__init__()
 
         self.info = info
         self.dummy_inputs = dummy_inputs
         self.cache = cache
+        self.enable_sanity_checks = enable_sanity_checks
 
         self.data_parser = self._get_data_parser()
 
@@ -1167,12 +1085,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     def _get_data_parser(self) -> MultiModalDataParser:
         """
         Construct a parser to preprocess multi-modal data items
-        before passing them to
-        [`_get_hf_mm_data`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].
+        before passing them to :meth:`_get_hf_mm_data`.
 
         You can support additional modalities by creating a subclass
-        of [`MultiModalDataParser`][vllm.multimodal.parse.MultiModalDataParser]
-        that has additional subparsers.
+        of :class:`MultiModalDataParser` that has additional subparsers.
         """
         return MultiModalDataParser()
 
@@ -1181,11 +1097,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_data: MultiModalDataDict,
     ) -> MultiModalDataItems:
         """
-        Normalize
-        [`MultiModalDataDict`][vllm.multimodal.inputs.MultiModalDataDict]
-        to [`MultiModalDataItems`][vllm.multimodal.parse.MultiModalDataItems]
-        before passing them to
-        [`_get_hf_mm_data`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].
+        Normalize :class:`MultiModalDataDict` to :class:`MultiModalDataItems`
+        before passing them to :meth:`_get_hf_mm_data`.
         """
         mm_items = self.data_parser.parse_mm_data(mm_data)
         supported_mm_limits = self.info.get_supported_mm_limits()
@@ -1204,9 +1117,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
             if num_items > allowed_limit:
                 raise ValueError(
-                    "You set or defaulted to "
-                    f"'{json.dumps({modality: allowed_limit})}' in "
-                    f"`--limit-mm-per-prompt`, but passed {num_items} "
+                    f"You set or defaulted to {modality}={allowed_limit} "
+                    f"in --limit-mm-per-prompt`, but passed {num_items} "
                     f"{modality} items in the same prompt.")
 
         return mm_items
@@ -1214,7 +1126,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     @abstractmethod
     def _get_mm_fields_config(
         self,
-        hf_inputs: "BatchFeature",
+        hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         """Given the HF-processed data, output the metadata of each field."""
@@ -1237,8 +1149,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         inputs.
 
         Moreover, this information is critical to determine the token positions
-        in order to construct
-        [`PlaceholderRange`][vllm.multimodal.inputs.PlaceholderRange]
+        in order to construct  :class:`~vllm-multimodal.input.PlaceholderRange`
         for each multi-modal item.
         """
         raise NotImplementedError
@@ -1272,8 +1183,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         # This refers to the data to be passed to HF processor.
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> "BatchFeature":
+    ) -> BatchFeature:
         """
         Call the HF processor on the prompt text and
         associated multi-modal data.
@@ -1281,7 +1191,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         return self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**mm_kwargs),
             dict(text=prompt, **mm_data),
-            dict(**mm_kwargs, **tok_kwargs),
+            mm_kwargs,
         )
 
     def _hf_processor_applies_updates(
@@ -1289,13 +1199,12 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         prompt_text: str,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
     ) -> bool:
         """
         Return whether the HF processor applies prompt updates.
 
-        For most HF processors, this should be `True` when multi-modal
-        data items are passed, but `False` when multi-modal embeddings
+        For most HF processors, this should be :code:`True` when multi-modal
+        data items are passed, but :code:`False` when multi-modal embeddings
         are passed.
         """
         return not any(
@@ -1307,7 +1216,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         prompt_text: str,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
     ) -> tuple[list[int], MultiModalKwargs, bool]:
         """
         Apply the HF processor on the prompt text and multi-modal data
@@ -1321,7 +1229,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             prompt=prompt_text,
             mm_data=processor_data,
             mm_kwargs=hf_processor_mm_kwargs,
-            tok_kwargs=tokenization_kwargs,
         )
         processed_data.update(passthrough_data)
 
@@ -1336,14 +1243,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             prompt_text=prompt_text,
             mm_items=mm_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            tokenization_kwargs=tokenization_kwargs,
         )
 
         return prompt_ids, mm_kwargs, is_update_applied
 
-    def _apply_hf_processor_text_only(
-            self, prompt_text: str,
-            tokenization_kwargs: Mapping[str, object]) -> list[int]:
+    def _apply_hf_processor_text_only(self, prompt_text: str) -> list[int]:
         """
         Apply the HF processor on the prompt text only.
 
@@ -1355,7 +1259,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             prompt_text=prompt_text,
             mm_items=MultiModalDataItems({}),
             hf_processor_mm_kwargs={},
-            tokenization_kwargs=tokenization_kwargs,
         )
 
         return prompt_ids
@@ -1370,9 +1273,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         Most HF processors accept prompt text but not prompt tokens.
         If the HF processor adds or removes tokens that are not related to
         multi-modal data, you should override this method so it is consistent
-        with the output of
-        [`_apply_hf_processor_text_only`][vllm.multimodal.processing.BaseMultiModalProcessor._apply_hf_processor_text_only]
-        on the
+        with the output of :meth:`_apply_hf_processor_text_only` on the
         corresponding text.
         """
         return prompt_tokens
@@ -1381,15 +1282,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
     ) -> MultiModalKwargs:
         """
         Apply the HF processor on the multi-modal data only.
 
         Since HF processor requires that text and multi-modal items
         correspond to each other, we generate dummy text using
-        [`DummyInputsBuilder`][vllm.multimodal.profiling.BaseDummyInputsBuilder]
-        to go along with the multi-modal data.
+        :class:`DummyInputsBuilder` to go along with the multi-modal data.
         """
         mm_counts = mm_items.get_all_counts()
 
@@ -1397,7 +1296,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             prompt_text=self.dummy_inputs.get_dummy_text(mm_counts),
             mm_items=mm_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            tokenization_kwargs=tokenization_kwargs,
         )
 
         return mm_kwargs
@@ -1407,7 +1305,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         prompt: Union[str, list[int]],
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
         *,
         enable_hf_prompt_update: bool,
     ) -> tuple[list[int], MultiModalKwargs, bool]:
@@ -1415,10 +1312,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         Apply the HF processor on the prompt text and multi-modal data.
 
         In addition, return whether prompt updates have been applied
-        (for most HF processors, this should be `True`).
+        (for most HF processors, this should be :code:`True`).
 
         Note:
-            If `enable_hf_prompt_update=False`, we use HF processor
+            If :code:`enable_hf_prompt_update=False`, we use HF processor
             to perform prompt updates if available; HF processor requires
             that the prompt corresponds to multi-modal items.
         """
@@ -1428,169 +1325,59 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     prompt_text=prompt,
                     mm_items=mm_items,
                     hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-                    tokenization_kwargs=tokenization_kwargs,
                 )
 
-            prompt_ids = self._apply_hf_processor_text_only(
-                prompt, tokenization_kwargs)
+            prompt_ids = self._apply_hf_processor_text_only(prompt)
         else:
             prompt_ids = self._apply_hf_processor_tokens_only(prompt)
 
         mm_kwargs = self._apply_hf_processor_mm_only(
             mm_items=mm_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            tokenization_kwargs=tokenization_kwargs,
         )
 
         return prompt_ids, mm_kwargs, False
-
-    def _get_cache_missing_items(
-        self,
-        cache: ProcessingCache,
-        mm_data_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> tuple[dict[str, list[ProcessingCacheOptionalItem]], dict[
-            str, list[object]]]:
-        model_id = self.info.model_id
-
-        mm_cache_items = {
-            modality: [
-                cache.get_item(
-                    model_id, modality, item,
-                    dict(**hf_processor_mm_kwargs, **tokenization_kwargs))
-                for item in items
-            ]
-            for modality, items in mm_data_items.items()
-        }
-
-        mm_missing_idxs = {
-            modality: [
-                idx for idx, item in enumerate(cache_items)
-                if item.value is None
-            ]
-            for modality, cache_items in mm_cache_items.items()
-        }
-        mm_missing_data = {
-            modality: [mm_data_items[modality][idx] for idx in idxs]
-            for modality, idxs in mm_missing_idxs.items()
-        }
-
-        return mm_cache_items, mm_missing_data
-
-    def _hash_mm_items(
-            self, mm_items: MultiModalDataItems,
-            hf_processor_mm_kwargs: Mapping[str, object],
-            tokenization_kwargs: Mapping[str, object]) -> MultiModalHashes:
-        """Create MM hashes to be returned (only used in V1)."""
-        model_id = self.info.model_id
-
-        return {
-            modality: [
-                MultiModalHasher.hash_kwargs(model_id=model_id,
-                                             **{modality: item},
-                                             **hf_processor_mm_kwargs,
-                                             **tokenization_kwargs)
-                for item in items
-            ]
-            for modality, items in mm_items.items()
-        }
-
-    def _merge_mm_kwargs(
-        self,
-        cache: ProcessingCache,
-        mm_cache_items: dict[str, list[ProcessingCacheOptionalItem]],
-        mm_missing_data: dict[str, list[object]],
-        mm_missing_kwargs: MultiModalKwargs,
-    ) -> dict[str, list[ProcessingCacheItem]]:
-        mm_missing_next_idx = {modality: 0 for modality in mm_missing_data}
-
-        merged_items = defaultdict[str, list[ProcessingCacheItem]](list)
-        for modality, cache_items in mm_cache_items.items():
-            for cache_item in cache_items:
-                if cache_item.value is None:
-                    kw_item = mm_missing_kwargs.get_item(
-                        modality,
-                        mm_missing_next_idx[modality],
-                    )
-                    cache_item_new = ProcessingCacheItem(
-                        key=cache_item.key,
-                        value=kw_item,
-                    )
-
-                    cache.put_item(cache_item_new)
-                    mm_missing_next_idx[modality] += 1
-                else:
-                    cache_item_new = ProcessingCacheItem(
-                        key=cache_item.key,
-                        value=cache_item.value,
-                    )
-
-                merged_items[modality].append(cache_item_new)
-
-        return dict(merged_items)
-
-    def _apply_hf_processor(
-        self,
-        prompt: Union[str, list[int]],
-        mm_data_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-        *,
-        return_mm_hashes: bool,
-    ) -> tuple[list[int], MultiModalKwargs, Optional[MultiModalHashes], bool]:
-        (
-            prompt_ids,
-            mm_kwargs,
-            is_update_applied,
-        ) = self._apply_hf_processor_main(
-            prompt=prompt,
-            mm_items=mm_data_items,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            tokenization_kwargs=tokenization_kwargs,
-            enable_hf_prompt_update=True,
-        )
-
-        mm_hashes = (self._hash_mm_items(mm_data_items, hf_processor_mm_kwargs,
-                                         tokenization_kwargs)
-                     if return_mm_hashes else None)
-
-        return prompt_ids, mm_kwargs, mm_hashes, is_update_applied
 
     def _cached_apply_hf_processor(
         self,
         prompt: Union[str, list[int]],
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-        *,
-        return_mm_hashes: bool,
-    ) -> tuple[list[int], MultiModalKwargs, Optional[MultiModalHashes], bool]:
+    ) -> tuple[list[int], MultiModalKwargs, bool]:
         """
         Apply the HF processor on the full prompt text,
         caching the results and reusing cached results.
         """
         cache = self.cache
+        model_id = self.info.model_id
 
         _, passthrough_data = self._get_hf_mm_data(mm_data_items)
         if cache is None or passthrough_data:
-            return self._apply_hf_processor(
+            return self._apply_hf_processor_main(
                 prompt=prompt,
-                mm_data_items=mm_data_items,
+                mm_items=mm_data_items,
                 hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-                tokenization_kwargs=tokenization_kwargs,
-                return_mm_hashes=return_mm_hashes,
+                enable_hf_prompt_update=True,
             )
 
-        (
-            mm_cache_items,
-            mm_missing_data,
-        ) = self._get_cache_missing_items(
-            cache=cache,
-            mm_data_items=mm_data_items,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            tokenization_kwargs=tokenization_kwargs,
-        )
+        mm_maybe_cached_kw_items = {
+            modality: [
+                cache.get(model_id, modality, item, hf_processor_mm_kwargs)
+                for item in items
+            ]
+            for modality, items in mm_data_items.items()
+        }
+
+        mm_missing_idxs = {
+            modality:
+            [idx for idx, item in enumerate(kw_items) if item is None]
+            for modality, kw_items in mm_maybe_cached_kw_items.items()
+        }
+        mm_missing_data = {
+            modality: [mm_data_items[modality][idx] for idx in idxs]
+            for modality, idxs in mm_missing_idxs.items()
+        }
+        mm_missing_data_items = self._to_mm_items(mm_missing_data)
 
         # NOTE: `prompt` does not correspond to `mm_missing_data_items`,
         # so we can't apply prompt updates until the new multimodal
@@ -1601,30 +1388,48 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             is_update_applied,
         ) = self._apply_hf_processor_main(
             prompt=prompt,
-            mm_items=self._to_mm_items(mm_missing_data),
+            mm_items=mm_missing_data_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            tokenization_kwargs=tokenization_kwargs,
             enable_hf_prompt_update=False,
         )
 
-        mm_cache_items_merged = self._merge_mm_kwargs(
-            cache,
-            mm_cache_items=mm_cache_items,
-            mm_missing_data=mm_missing_data,
-            mm_missing_kwargs=mm_missing_kwargs,
-        )
+        mm_missing_next_idx = {
+            modality: 0
+            for modality in mm_missing_data_items
+        }
 
-        mm_kwargs = MultiModalKwargs.from_items([
-            item.value for cache_items in mm_cache_items_merged.values()
-            for item in cache_items
-        ])
+        merged_kw_items = list[MultiModalKwargsItem]()
+        for modality, kw_items in mm_maybe_cached_kw_items.items():
+            for idx, kw_item in enumerate(kw_items):
+                if kw_item is None:
+                    kw_item = mm_missing_kwargs.get_item(
+                        modality,
+                        mm_missing_next_idx[modality],
+                    )
 
-        mm_hashes = {
-            modality: [item.key for item in cache_items]
-            for modality, cache_items in mm_cache_items_merged.items()
-        } if return_mm_hashes else None
+                    cache.put(
+                        model_id,
+                        modality,
+                        mm_data_items[modality][idx],
+                        hf_processor_mm_kwargs,
+                        kw_item,
+                    )
 
-        return prompt_ids, mm_kwargs, mm_hashes, is_update_applied
+                    mm_missing_next_idx[modality] += 1
+
+                merged_kw_items.append(kw_item)
+
+        if self.enable_sanity_checks:
+            mm_missing_counts = mm_missing_data_items.get_all_counts()
+            assert all(
+                item_count == mm_missing_counts[modality]
+                for modality, item_count in mm_missing_next_idx.items()), dict(
+                    mm_missing_next_idx=mm_missing_next_idx,
+                    mm_missing_counts=mm_missing_counts)
+
+        mm_kwargs = MultiModalKwargs.from_items(merged_kw_items)
+
+        return prompt_ids, mm_kwargs, is_update_applied
 
     def _bind_and_group_updates(
         self,
@@ -1752,26 +1557,66 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             placeholders = mm_placeholders.get(modality, [])
 
             if len(placeholders) != item_count:
-                # NOTE: If you are a model developer, this can also arise from
-                # an inconsistency between `_call_hf_processor` and
-                # `_get_mm_fields_config` implementations
                 raise RuntimeError(
                     f"Expected there to be {item_count} prompt updates "
                     f"corresponding to {item_count} {modality} items, but "
                     f"instead found {len(placeholders)} prompt updates! "
-                    "This is likely because you forgot to include input "
-                    "placeholder tokens (e.g., `<image>`, `<|image_pad|>`) "
-                    "in the prompt. If the model has a chat template, make "
-                    "sure you have applied it before calling `LLM.generate`.")
+                    "Either the prompt text has missing/incorrect tokens for "
+                    "multi-modal inputs, or there is a problem with your "
+                    "implementation of merged multi-modal processor for this "
+                    "model (usually arising from an inconsistency between "
+                    "`_call_hf_processor` and `_get_prompt_updates`).")
 
-    def _maybe_apply_prompt_updates(
+    def apply(
         self,
-        mm_items: MultiModalDataItems,
+        prompt: Union[str, list[int]],
+        mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
-        prompt_ids: list[int],
-        mm_kwargs: MultiModalKwargs,
-        is_update_applied: bool,
-    ) -> tuple[list[int], str, Mapping[str, list[PlaceholderFeaturesInfo]]]:
+        return_mm_hashes: bool = False,
+    ) -> MultiModalInputs:
+        """
+        Process multi-modal inputs to be used in vLLM.
+
+        The main steps are:
+
+        1. Apply HF Processor on prompt text and multi-modal data together,
+           outputting token IDs and processed tensors.
+        2. Find and update sequences in the token IDs with placeholder tokens.
+           The number of placeholder tokens equals the feature size of the
+           multi-modal data outputted by the multi-modal encoder.
+        3. Extract information about the placeholder tokens from the
+           processed token IDs.
+        """
+        mm_items = self._to_mm_items(mm_data)
+
+        # Create MM hashes to be returned (only used in V1)
+        # TODO: Use these hash keys for caching operations in apply_hf_processor
+        # instead of rehashing.
+
+        if return_mm_hashes:
+            model_id = self.info.model_id
+            mm_hashes = {
+                modality: [
+                    MultiModalHasher.hash_kwargs(model_id=model_id,
+                                                 **{modality: item},
+                                                 **hf_processor_mm_kwargs)
+                    for item in items
+                ]
+                for modality, items in mm_items.items()
+            }
+        else:
+            mm_hashes = None
+
+        (
+            prompt_ids,
+            mm_kwargs,
+            is_update_applied,
+        ) = self._cached_apply_hf_processor(
+            prompt,
+            mm_items,
+            hf_processor_mm_kwargs,
+        )
+
         unbound_prompt_updates = self._get_prompt_updates(
             mm_items,
             hf_processor_mm_kwargs,
@@ -1805,56 +1650,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             )
             self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
 
-        return prompt_ids, prompt, mm_placeholders
-
-    def apply(
-        self,
-        prompt: Union[str, list[int]],
-        mm_data: MultiModalDataDict,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Optional[Mapping[str, object]] = None,
-        return_mm_hashes: bool = False,
-    ) -> MultiModalInputs:
-        """
-        Process multi-modal inputs to be used in vLLM.
-
-        The main steps are:
-
-        1. Apply HF Processor on prompt text and multi-modal data together,
-           outputting token IDs and processed tensors.
-        2. Find and update sequences in the token IDs with placeholder tokens.
-           The number of placeholder tokens equals the feature size of the
-           multi-modal data outputted by the multi-modal encoder.
-        3. Extract information about the placeholder tokens from the
-           processed token IDs.
-        """
-        mm_items = self._to_mm_items(mm_data)
-
-        if tokenization_kwargs is None:
-            tokenization_kwargs = {}
-
-        (
-            prompt_ids,
-            mm_kwargs,
-            mm_hashes,
-            is_update_applied,
-        ) = self._cached_apply_hf_processor(
-            prompt,
-            mm_items,
-            hf_processor_mm_kwargs,
-            tokenization_kwargs=tokenization_kwargs,
-            return_mm_hashes=return_mm_hashes,
-        )
-
-        # NOTE: tokenization_kwargs are not required to init processor
-        prompt_ids, prompt, mm_placeholders = self._maybe_apply_prompt_updates(
-            mm_items=mm_items,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            prompt_ids=prompt_ids,
-            mm_kwargs=mm_kwargs,
-            is_update_applied=is_update_applied,
-        )
-
         mm_placeholder_ranges = {
             modality: [item.to_range() for item in placeholders]
             for modality, placeholders in mm_placeholders.items()
@@ -1879,7 +1674,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         mm_data: MultiModalDataDict,
     ) -> Union[str, list[int]]:
         """
-        Create input prompt for the encoder. HF processor will be applied on
+        Create input prompt for the encoder. HF processor will be applied on 
         this prompt during profiling and generation.
         """
         raise NotImplementedError
@@ -1896,12 +1691,28 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         """Create input prompt for the decoder."""
         return prompt
 
-    def _get_enc_dec_inputs(
+    def apply(
         self,
         prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
-        encoder_inputs: MultiModalInputs,
-    ):
+        hf_processor_mm_kwargs: Mapping[str, object],
+        return_mm_hashes: bool = False,
+    ) -> MultiModalEncDecInputs:
+        """
+        Process multi-modal inputs to be used in vLLM.
+        The main processing steps are modified to fit encoder-decoder model:
+        1. Create encoder prompt from input prompt text.
+        2. Apply the HF processor on encoder prompt.
+        3. Copy the input prompt text as decoder prompt inputs.
+        """
+        encoder_prompt = self.create_encoder_prompt(prompt, mm_data)
+        encoder_inputs = super().apply(
+            encoder_prompt,
+            mm_data,
+            hf_processor_mm_kwargs,
+            return_mm_hashes,
+        )
+
         tokenizer = self.info.get_tokenizer()
         decoder_prompt = self.create_decoder_prompt(prompt, mm_data)
         if isinstance(decoder_prompt, str):
@@ -1921,33 +1732,3 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
             "prompt_token_ids": decoder_prompt_ids
         })
         return mm_inputs
-
-    def apply(
-        self,
-        prompt: Union[str, list[int]],
-        mm_data: MultiModalDataDict,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Optional[Mapping[str, object]] = None,
-        return_mm_hashes: bool = False,
-    ) -> MultiModalEncDecInputs:
-        """
-        Process multi-modal inputs to be used in vLLM.
-        The main processing steps are modified to fit encoder-decoder model:
-        1. Create encoder prompt from input prompt text.
-        2. Apply the HF processor on encoder prompt.
-        3. Copy the input prompt text as decoder prompt inputs.
-        """
-        encoder_prompt = self.create_encoder_prompt(prompt, mm_data)
-        encoder_inputs = super().apply(
-            encoder_prompt,
-            mm_data,
-            hf_processor_mm_kwargs,
-            tokenization_kwargs,
-            return_mm_hashes,
-        )
-
-        return self._get_enc_dec_inputs(
-            prompt=prompt,
-            mm_data=mm_data,
-            encoder_inputs=encoder_inputs,
-        )

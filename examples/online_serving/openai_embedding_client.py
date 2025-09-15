@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from openai import OpenAI
 
@@ -22,7 +21,7 @@ def main():
         # ruff: noqa: E501
         input=[
             "Hello my name is",
-            "The best thing about vLLM is that it supports many different models",
+            "The best thing about vLLM is that it supports many different models"
         ],
         model=model,
     )

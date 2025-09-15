@@ -1,20 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from typing import List
 
 from torch import fx as fx
 
-from vllm.config import VllmConfig
+from vllm.config import CompilationConfig
 from vllm.logger import init_logger
 
-from .activation_quant_fusion import ActivationQuantFusionPass
-from .collective_fusion import AllReduceFusionPass, AsyncTPPass
 from .fix_functionalization import FixFunctionalizationPass
 from .fusion import FusionPass
-from .fusion_attn import AttnFusionPass
-from .inductor_pass import CustomGraphPass, InductorPass, get_pass_context
+from .inductor_pass import CustomGraphPass, InductorPass
 from .noop_elimination import NoOpEliminationPass
-from .sequence_parallelism import SequenceParallelismPass
-from .vllm_inductor_pass import VllmInductorPass
 
 logger = init_logger(__name__)
 
@@ -35,36 +31,24 @@ class PostGradPassManager(CustomGraphPass):
     """
 
     def __init__(self):
-        self.passes: list[VllmInductorPass] = []
+        self.passes: List[InductorPass] = []
 
     def __call__(self, graph: fx.Graph):
-        shape = get_pass_context().runtime_shape
         for pass_ in self.passes:
-            if pass_.is_applicable_for_shape(shape):
-                pass_(graph)
+            pass_(graph)
 
         # always run fix_functionalization last
         self.fix_functionalization(graph)
 
-    def configure(self, config: VllmConfig):
-        self.pass_config = config.compilation_config.pass_config
-        if self.pass_config.enable_noop:
-            self.passes += [NoOpEliminationPass(config)]
+    def configure(self, pass_config: CompilationConfig.PassConfig):
+        self.pass_config = pass_config
+        if pass_config.enable_noop:
+            self.passes += [NoOpEliminationPass(pass_config)]
 
-        if self.pass_config.enable_sequence_parallelism:
-            self.passes += [SequenceParallelismPass(config)]
-            if self.pass_config.enable_async_tp:
-                self.passes += [AsyncTPPass(config)]
+        if pass_config.enable_fusion:
+            self.passes += [FusionPass.instance(pass_config)]
 
-        if self.pass_config.enable_fusion:
-            self.passes += [FusionPass.instance(config)]
-            self.passes += [ActivationQuantFusionPass(config)]
-
-        if self.pass_config.enable_attn_fusion:
-            self.passes += [AttnFusionPass(config)]
-        if self.pass_config.enable_fi_allreduce_fusion:
-            self.passes += [AllReduceFusionPass(config)]
-        self.fix_functionalization = FixFunctionalizationPass(config)
+        self.fix_functionalization = FixFunctionalizationPass(pass_config)
 
     def add(self, pass_: InductorPass):
         assert isinstance(pass_, InductorPass)

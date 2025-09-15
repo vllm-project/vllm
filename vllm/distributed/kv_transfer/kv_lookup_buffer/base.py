@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 This file contains a new class `KVLookupBufferBase` that allows developers to
 think of KV cache operations as inserting new KV cache entries (`insert`)
@@ -14,7 +13,7 @@ These classes above are abstracted behind class `KVCacheBufferBase`.
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import List, Optional
 
 import torch
 
@@ -94,7 +93,7 @@ class KVLookupBufferBase(KVCacheBufferBase):
     @abstractmethod
     def drop_select(
             self, input_tokens: Optional[torch.Tensor],
-            roi: Optional[torch.Tensor]) -> list[Optional[torch.Tensor]]:
+            roi: Optional[torch.Tensor]) -> List[Optional[torch.Tensor]]:
         """Select and *drop* KV cache entries from the lookup buffer.
         
         The functionality is similar to the following python statements
@@ -112,7 +111,7 @@ class KVLookupBufferBase(KVCacheBufferBase):
             roi (torch.Tensor): A binary mask on top of the input tokens
 
         Returns:
-            list[Optional[torch.Tensor]]: A list of tensors. Can be None.
+            List[Optional[torch.Tensor]]: A list of tensors. Can be None.
 
         Raises:
             NotImplementedError: This method must be implemented in subclasses.

@@ -1,22 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Optional, Union
+from typing import Any, Dict, List, Optional
 
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
-from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig, QuantizeMethodBase)
+    QuantizationConfig)
 from vllm.model_executor.parameter import (GroupQuantScaleParameter,
                                            PackedvLLMParameter)
-
-logger = init_logger(__name__)
 
 
 class AWQConfig(QuantizationConfig):
@@ -30,7 +24,7 @@ class AWQConfig(QuantizationConfig):
         weight_bits: int,
         group_size: int,
         zero_point: bool,
-        modules_to_not_convert: Optional[list[str]] = None,
+        modules_to_not_convert: Optional[List[str]] = None,
     ) -> None:
         super().__init__()
         self.weight_bits = weight_bits
@@ -50,10 +44,10 @@ class AWQConfig(QuantizationConfig):
                 f"zero_point={self.zero_point}, "
                 f"modules_to_not_convert={self.modules_to_not_convert})")
 
-    def get_name(self) -> QuantizationMethods:
+    def get_name(self) -> str:
         return "awq"
 
-    def get_supported_act_dtypes(self) -> list[torch.dtype]:
+    def get_supported_act_dtypes(self) -> List[torch.dtype]:
         return [torch.half]
 
     @classmethod
@@ -62,7 +56,7 @@ class AWQConfig(QuantizationConfig):
         return 75
 
     @staticmethod
-    def get_config_filenames() -> list[str]:
+    def get_config_filenames() -> List[str]:
         return [
             "quant_config.json",  # E.g., casperhansen/vicuna-7b-v1.5-awq
             # E.g., abhinavkulkarni/mosaicml-mpt-7b-instruct-w4-g128-awq
@@ -70,7 +64,7 @@ class AWQConfig(QuantizationConfig):
         ]
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "AWQConfig":
+    def from_config(cls, config: Dict[str, Any]) -> "AWQConfig":
         weight_bits = cls.get_from_keys(config, ["w_bit", "bits"])
         group_size = cls.get_from_keys(config, ["q_group_size", "group_size"])
         zero_point = cls.get_from_keys(config, ["zero_point"])
@@ -78,46 +72,16 @@ class AWQConfig(QuantizationConfig):
             config, ["modules_to_not_convert"], None)
         return cls(weight_bits, group_size, zero_point, modules_to_not_convert)
 
-    def get_quant_method(
-        self, layer: torch.nn.Module, prefix: str
-    ) -> Optional[Union["LinearMethodBase", "QuantizeMethodBase"]]:
+    def get_quant_method(self, layer: torch.nn.Module,
+                         prefix: str) -> Optional["LinearMethodBase"]:
         if isinstance(layer, LinearBase):
             if is_layer_skipped_awq(prefix, self.modules_to_not_convert):
                 return UnquantizedLinearMethod()
             return AWQLinearMethod(self)
-        elif isinstance(layer, FusedMoE):
-            # Lazy import to avoid circular import.
-            from .awq_marlin import AWQMarlinConfig, AWQMoEMethod
-            from .moe_wna16 import MoeWNA16Config
-            from .utils.marlin_utils import check_moe_marlin_supports_layer
-            if not check_moe_marlin_supports_layer(layer, self.group_size):
-                logger.warning_once(
-                    f"Layer '{prefix}' is not supported by AWQMoeMarlin. "
-                    "Falling back to Moe WNA16 kernels.")
-                config = {
-                    "quant_method": "awq",
-                    "bits": self.weight_bits,
-                    "group_size": self.group_size,
-                    "zero_point": self.zero_point,
-                    "lm_head": False,
-                }
-                return MoeWNA16Config.from_config(config).get_quant_method(
-                    layer, prefix)
-            marlin_compatible_config_dict = {
-                "quant_method": "awq",
-                "bits": self.weight_bits,
-                "group_size": self.group_size,
-                "zero_point": self.zero_point,
-                "lm_head": False,
-                "modules_to_not_convert": self.modules_to_not_convert,
-            }
-            awq_marlin_config = AWQMarlinConfig.from_config(
-                marlin_compatible_config_dict)
-            return AWQMoEMethod(awq_marlin_config)
         return None
 
 
-def is_layer_skipped_awq(prefix: str, modules_to_not_convert: list[str]):
+def is_layer_skipped_awq(prefix: str, modules_to_not_convert: List[str]):
     return any(module_name in prefix for module_name in modules_to_not_convert)
 
 
@@ -133,16 +97,10 @@ class AWQLinearMethod(LinearMethodBase):
 
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
-                       output_partition_sizes: list[int], input_size: int,
+                       output_partition_sizes: List[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
-        # Normalize group_size
-        if self.quant_config.group_size != -1:
-            group_size = self.quant_config.group_size
-        else:
-            group_size = input_size
-
-        if input_size_per_partition % group_size != 0:
+        if input_size_per_partition % self.quant_config.group_size != 0:
             raise ValueError(
                 "The input size is not aligned with the quantized "
                 "weight shape. This can be caused by too large "
@@ -168,11 +126,9 @@ class AWQLinearMethod(LinearMethodBase):
             packed_factor=self.quant_config.pack_factor,
             weight_loader=weight_loader)
 
-        num_groups = input_size_per_partition // group_size
-
         qzeros = PackedvLLMParameter(
             data=torch.empty(
-                num_groups,
+                input_size_per_partition // self.quant_config.group_size,
                 output_size_per_partition // self.quant_config.pack_factor,
                 dtype=torch.int32,
             ),
@@ -183,7 +139,7 @@ class AWQLinearMethod(LinearMethodBase):
             weight_loader=weight_loader)
 
         scales = GroupQuantScaleParameter(data=torch.empty(
-            num_groups,
+            input_size_per_partition // self.quant_config.group_size,
             output_size_per_partition,
             dtype=params_dtype,
         ),

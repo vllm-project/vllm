@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 if TYPE_CHECKING:
     from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
@@ -13,17 +12,17 @@ class TokenizerBase(ABC):
 
     @property
     @abstractmethod
-    def all_special_tokens_extended(self) -> list[str]:
+    def all_special_tokens_extended(self) -> List[str]:
         raise NotImplementedError()
 
     @property
     @abstractmethod
-    def all_special_tokens(self) -> list[str]:
+    def all_special_tokens(self) -> List[str]:
         raise NotImplementedError()
 
     @property
     @abstractmethod
-    def all_special_ids(self) -> list[int]:
+    def all_special_ids(self) -> List[int]:
         raise NotImplementedError()
 
     @property
@@ -67,7 +66,7 @@ class TokenizerBase(ABC):
     @abstractmethod
     def __call__(
         self,
-        text: Union[str, list[str], list[int]],
+        text: Union[str, List[str], List[int]],
         text_pair: Optional[str] = None,
         add_special_tokens: bool = False,
         truncation: bool = False,
@@ -76,11 +75,11 @@ class TokenizerBase(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def get_vocab(self) -> dict[str, int]:
+    def get_vocab(self) -> Dict[str, int]:
         raise NotImplementedError()
 
     @abstractmethod
-    def get_added_vocab(self) -> dict[str, int]:
+    def get_added_vocab(self) -> Dict[str, int]:
         raise NotImplementedError()
 
     @abstractmethod
@@ -89,46 +88,44 @@ class TokenizerBase(ABC):
         text: str,
         truncation: bool = False,
         max_length: Optional[int] = None,
-    ) -> list[int]:
+    ) -> List[int]:
         raise NotImplementedError()
 
     @abstractmethod
     def encode(self,
                text: str,
-               truncation: Optional[bool] = None,
-               max_length: Optional[int] = None,
-               add_special_tokens: Optional[bool] = None) -> list[int]:
+               add_special_tokens: Optional[bool] = None) -> List[int]:
         raise NotImplementedError()
 
     @abstractmethod
     def apply_chat_template(self,
-                            messages: list["ChatCompletionMessageParam"],
-                            tools: Optional[list[dict[str, Any]]] = None,
-                            **kwargs) -> list[int]:
+                            messages: List["ChatCompletionMessageParam"],
+                            tools: Optional[List[Dict[str, Any]]] = None,
+                            **kwargs) -> List[int]:
         raise NotImplementedError()
 
     @abstractmethod
-    def convert_tokens_to_string(self, tokens: list[str]) -> str:
+    def convert_tokens_to_string(self, tokens: List[str]) -> str:
         raise NotImplementedError()
 
     @abstractmethod
     def decode(self,
-               ids: Union[list[int], int],
+               ids: Union[List[int], int],
                skip_special_tokens: bool = True) -> str:
         raise NotImplementedError()
 
     @abstractmethod
     def convert_ids_to_tokens(
         self,
-        ids: list[int],
+        ids: List[int],
         skip_special_tokens: bool = True,
-    ) -> list[str]:
+    ) -> List[str]:
         raise NotImplementedError()
 
 
 class TokenizerRegistry:
     # Tokenizer name -> (tokenizer module, tokenizer class)
-    REGISTRY: dict[str, tuple[str, str]] = {}
+    REGISTRY: Dict[str, Tuple[str, str]] = {}
 
     @staticmethod
     def register(name: str, module: str, class_name: str) -> None:

@@ -1,18 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import inspect
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Optional
+from typing import Any, Dict, List, Optional, Type
 
 import torch
 from torch import nn
-
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.quantization import QuantizationMethods
-    from vllm.model_executor.models.utils import WeightsMapper
-else:
-    QuantizationMethods = str
 
 
 class QuantizeMethodBase(ABC):
@@ -50,7 +43,7 @@ class QuantizeMethodBase(ABC):
 
 
 def method_has_implemented_embedding(
-        method_class: type[QuantizeMethodBase]) -> bool:
+        method_class: Type[QuantizeMethodBase]) -> bool:
     """
     Not all quant methods have embedding implemented, so we need to check that
     it exists for our given method. We check this by making sure the function
@@ -70,15 +63,15 @@ class QuantizationConfig(ABC):
     def __init__(self):
         super().__init__()
         # mapping is updated by models as they initialize
-        self.packed_modules_mapping: dict[str, list[str]] = dict()
+        self.packed_modules_mapping: Dict[str, List[str]] = dict()
 
     @abstractmethod
-    def get_name(self) -> QuantizationMethods:
+    def get_name(self) -> str:
         """Name of the quantization method."""
         raise NotImplementedError
 
     @abstractmethod
-    def get_supported_act_dtypes(self) -> list[torch.dtype]:
+    def get_supported_act_dtypes(self) -> List[torch.dtype]:
         """List of supported activation dtypes."""
         raise NotImplementedError
 
@@ -95,19 +88,19 @@ class QuantizationConfig(ABC):
 
     @staticmethod
     @abstractmethod
-    def get_config_filenames() -> list[str]:
+    def get_config_filenames() -> List[str]:
         """List of filenames to search for in the model directory."""
         raise NotImplementedError
 
     @classmethod
     @abstractmethod
-    def from_config(cls, config: dict[str, Any]) -> "QuantizationConfig":
+    def from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         """Create a config class from the model's quantization config."""
         raise NotImplementedError
 
     @classmethod
-    def override_quantization_method(
-            cls, hf_quant_cfg, user_quant) -> Optional[QuantizationMethods]:
+    def override_quantization_method(cls, hf_quant_cfg,
+                                     user_quant) -> Optional[str]:
         """
            Detects if this quantization method can support a given checkpoint
            format by overriding the user specified quantization method -- 
@@ -117,7 +110,7 @@ class QuantizationConfig(ABC):
         return None
 
     @staticmethod
-    def get_from_keys(config: dict[str, Any], keys: list[str]) -> Any:
+    def get_from_keys(config: Dict[str, Any], keys: List[str]) -> Any:
         """Get a value from the model's quantization config."""
         for key in keys:
             if key in config:
@@ -126,7 +119,7 @@ class QuantizationConfig(ABC):
                          "quantization config.")
 
     @staticmethod
-    def get_from_keys_or(config: dict[str, Any], keys: list[str],
+    def get_from_keys_or(config: Dict[str, Any], keys: List[str],
                          default: Any) -> Any:
         """Get a optional value from the model's quantization config."""
         try:
@@ -150,15 +143,3 @@ class QuantizationConfig(ABC):
 
     def get_cache_scale(self, name: str) -> Optional[str]:
         return None
-
-    def apply_vllm_mapper(  # noqa: B027
-            self, hf_to_vllm_mapper: "WeightsMapper"):
-        """
-        Interface for models to update module names referenced in
-        quantization configs in order to reflect the vllm model structure
-
-        :param hf_to_vllm_mapper: maps from hf model structure (the assumed
-            structure of the qconfig) to vllm model structure
-        """
-        # TODO (@kylesayrs): add implementations for all subclasses
-        pass

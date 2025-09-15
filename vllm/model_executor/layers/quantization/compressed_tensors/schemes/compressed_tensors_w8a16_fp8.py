@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 import torch
 from compressed_tensors.quantization import QuantizationStrategy
@@ -56,10 +55,10 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
             # required by torch.compile to be torch.nn.Parameter
             layer.input_scale = torch.nn.Parameter(layer.input_scale.data,
                                                    requires_grad=False)
-        prepare_fp8_layer_for_marlin(layer)
+        prepare_fp8_layer_for_marlin(layer, strategy="channel")
 
     def create_weights(self, layer: torch.nn.Module, input_size: int,
-                       output_partition_sizes: list[int],
+                       output_partition_sizes: List[int],
                        input_size_per_partition: int,
                        params_dtype: torch.dtype, weight_loader: Callable,
                        **kwargs):
@@ -69,7 +68,6 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
         layer.orig_dtype = params_dtype
-        layer.weight_block_size = None
 
         # WEIGHT
         weight = ModelWeightParameter(data=torch.empty(

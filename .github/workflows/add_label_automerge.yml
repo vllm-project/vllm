@@ -1,6 +1,4 @@
 name: Add label on auto-merge enabled
-permissions:
-    pull-requests: write
 on:
     pull_request_target:
         types:

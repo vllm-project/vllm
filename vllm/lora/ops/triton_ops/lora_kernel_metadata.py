@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 LoRA kernels metadata preparation utilities.
 """
 
 from dataclasses import dataclass
-from typing import Union
+from typing import Tuple, Union
 
 import torch
 
@@ -126,7 +125,7 @@ class LoRAKernelMeta:
 
     def meta_args(
         self, token_nums: int
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
                torch.Tensor, torch.Tensor]:
         """
         This function returns the kernel metadata required for the current

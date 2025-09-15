@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from typing import List
 
 import numpy
 import torch
@@ -33,10 +34,10 @@ def marlin_qqq_weights(q_w, size_k, size_n, num_bits, perm, group_size):
 
 
 def get_qqq_scale_perms():
-    scale_perm: list[int] = []
+    scale_perm: List[int] = []
     for i in range(8):
         scale_perm.extend([i + 8 * j for j in range(8)])
-    scale_perm_single: list[int] = []
+    scale_perm_single: List[int] = []
     for i in range(4):
         scale_perm_single.extend(
             [2 * i + j for j in [0, 1, 8, 9, 16, 17, 24, 25]])
@@ -45,9 +46,9 @@ def get_qqq_scale_perms():
 
 # NOTE(HandH1998): QQQ employs different perms for per-group and per-channel weight quantization. # noqa: E501
 def get_qqq_weight_perm(num_bits: int, quant_type: str):
-    perm_list: list[int] = []
+    perm_list: List[int] = []
     for i in range(32):
-        perm1: list[int] = []
+        perm1: List[int] = []
         col = i // 4
         for block in [0, 1]:
             for row in [

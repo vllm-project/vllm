@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import glob
 import os
@@ -64,10 +63,9 @@ def test_tpu_compilation():
         numbers = [int(part) for part in parts if part.isdigit()]
         return numbers[0]
 
-    # Check all the compilations are as expected. The dump files include the
-    # captured graph for the forward function of the nn.Module.
+    # Check all the compilations are as expected
     compiled_fns = sorted(glob.glob(
-        os.path.join(temp_dir, "__compiled_fn*Forward_graph*.py")),
+        os.path.join(temp_dir, "__compiled_fn*Captured*.py")),
                           key=lambda s: extract_compiled_index(s))
 
     for i, compiled_fn in enumerate(compiled_fns):

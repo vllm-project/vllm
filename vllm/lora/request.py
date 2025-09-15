@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import warnings
 from typing import Optional
@@ -32,7 +31,6 @@ class LoRARequest(
     lora_local_path: Optional[str] = msgspec.field(default=None)
     long_lora_max_len: Optional[int] = None
     base_model_name: Optional[str] = msgspec.field(default=None)
-    tensorizer_config_dict: Optional[dict] = None
 
     def __post_init__(self):
         if self.lora_local_path:

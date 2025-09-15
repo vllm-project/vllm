@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 WARNING: This test runs in both single-node (4 GPUs) and multi-node
  (2 node with 2 GPUs each) modes. If the test only uses 2 GPUs, it is
@@ -14,9 +13,8 @@ from typing import Literal, NamedTuple, Optional
 
 import pytest
 
-from vllm.config import _FLOAT16_NOT_SUPPORTED_MODELS, TaskOption
+from vllm.config import TaskOption
 from vllm.logger import init_logger
-from vllm.transformers_utils.config import get_config
 
 from ..models.registry import HF_EXAMPLE_MODELS
 from ..utils import compare_two_settings, create_new_process_for_each_test
@@ -102,8 +100,9 @@ class PPTestSettings:
                               eager_mode=True,
                               chunked_prefill=False),
             ],
-            distributed_backends=["mp", "mp", "ray", "ray"],
-            vllm_major_versions=["0", "1", "0", "1"],
+            # only ray is supported for V1
+            distributed_backends=["mp", "ray", "ray"],
+            vllm_major_versions=["0", "0", "1"],
             task=task,
             test_options=PPTestOptions(multi_node_only=multi_node_only,
                                        load_format=load_format),
@@ -159,15 +158,15 @@ TEXT_GENERATION_MODELS = {
     "databricks/dbrx-instruct": PPTestSettings.fast(load_format="dummy"),
     "Deci/DeciLM-7B-instruct": PPTestSettings.fast(),
     "deepseek-ai/deepseek-llm-7b-chat": PPTestSettings.fast(),
-    "deepseek-ai/DeepSeek-V2-Lite-Chat": PPTestSettings.fast(tp_base=2),
+    "deepseek-ai/DeepSeek-V2-Lite-Chat": PPTestSettings.fast(),
     "LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct": PPTestSettings.fast(),
     "tiiuae/falcon-7b": PPTestSettings.fast(),
-    "google/gemma-1.1-2b-it": PPTestSettings.fast(),
+    "google/gemma-2b": PPTestSettings.fast(),
     "google/gemma-2-9b": PPTestSettings.fast(),
     "gpt2": PPTestSettings.fast(),
     "bigcode/starcoder": PPTestSettings.fast(),
     "EleutherAI/gpt-j-6b": PPTestSettings.fast(),
-    "EleutherAI/pythia-1.4b": PPTestSettings.fast(),
+    "EleutherAI/pythia-12b": PPTestSettings.fast(),
     "ibm/PowerLM-3b": PPTestSettings.fast(),
     "ibm/PowerMoE-3b": PPTestSettings.fast(),
     # Uses Llama
@@ -187,7 +186,7 @@ TEXT_GENERATION_MODELS = {
     "mosaicml/mpt-7b": PPTestSettings.fast(),
     "nvidia/Minitron-8B-Base": PPTestSettings.fast(),
     "allenai/OLMo-1B-hf": PPTestSettings.fast(),
-    "allenai/OLMo-2-0425-1B": PPTestSettings.fast(),
+    "shanearora/OLMo-7B-1124-hf": PPTestSettings.fast(),
     "allenai/OLMoE-1B-7B-0924-Instruct": PPTestSettings.fast(),
     "facebook/opt-iml-max-1.3b": PPTestSettings.fast(),
     "OrionStarAI/Orion-14B-Chat": PPTestSettings.fast(),
@@ -196,7 +195,7 @@ TEXT_GENERATION_MODELS = {
     "microsoft/Phi-3-small-8k-instruct": PPTestSettings.fast(),
     "microsoft/Phi-3.5-MoE-instruct": PPTestSettings.detailed(multi_node_only=True, load_format="dummy"),  # noqa: E501
     "Qwen/Qwen-7B-Chat": PPTestSettings.fast(),
-    "Qwen/Qwen2.5-0.5B-Instruct": PPTestSettings.fast(),
+    "Qwen/Qwen2-7B-Instruct": PPTestSettings.fast(),
     "Qwen/Qwen1.5-MoE-A2.7B-Chat": PPTestSettings.fast(),
     "stabilityai/stablelm-3b-4e1t": PPTestSettings.fast(),
     "bigcode/starcoder2-3b": PPTestSettings.fast(),
@@ -211,11 +210,9 @@ TEXT_GENERATION_MODELS = {
 
 EMBEDDING_MODELS = {  # type: ignore[var-annotated]
     # [Text-only]
-    "intfloat/e5-mistral-7b-instruct": PPTestSettings.fast(task="embed"),
-    "BAAI/bge-multilingual-gemma2": PPTestSettings.fast(task="embed"),
-    "Qwen/Qwen2.5-Math-RM-72B": PPTestSettings.fast(
-        load_format="dummy", task="embed"
-    ),
+    "intfloat/e5-mistral-7b-instruct": PPTestSettings.fast(),
+    "BAAI/bge-multilingual-gemma2": PPTestSettings.fast(),
+    "Qwen/Qwen2.5-Math-RM-72B": PPTestSettings.fast(load_format="dummy"),
 }
 
 MULTIMODAL_MODELS = {
@@ -231,7 +228,6 @@ MULTIMODAL_MODELS = {
     "llava-hf/llava-onevision-qwen2-0.5b-ov-hf": PPTestSettings.fast(),
     "openbmb/MiniCPM-Llama3-V-2_5": PPTestSettings.fast(),
     "allenai/Molmo-7B-D-0924": PPTestSettings.fast(),
-    "AIDC-AI/Ovis2-1B": PPTestSettings.fast(),
     "microsoft/Phi-3.5-vision-instruct": PPTestSettings.fast(),
     "mistralai/Pixtral-12B-2409": PPTestSettings.fast(load_format="dummy"),
     "Qwen/Qwen-VL-Chat": PPTestSettings.fast(),
@@ -251,7 +247,6 @@ TEST_MODELS = [
     "meta-llama/Llama-3.2-1B-Instruct",
     "ArthurZ/Ilama-3.2-1B",
     "ibm/PowerLM-3b",
-    "deepseek-ai/DeepSeek-V2-Lite-Chat",
     # [LANGUAGE EMBEDDING]
     "intfloat/e5-mistral-7b-instruct",
     "BAAI/bge-multilingual-gemma2",
@@ -291,11 +286,6 @@ def _compare_tp(
     trust_remote_code = model_info.trust_remote_code
     tokenizer_mode = model_info.tokenizer_mode
     hf_overrides = model_info.hf_overrides
-    hf_config = get_config(model_id, trust_remote_code)
-
-    dtype = "float16"
-    if hf_config.model_type in _FLOAT16_NOT_SUPPORTED_MODELS:
-        dtype = "bfloat16"
 
     if load_format == "dummy":
         # Avoid OOM
@@ -325,7 +315,7 @@ def _compare_tp(
     common_args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
-        dtype,
+        "float16",
         "--max-model-len",
         "2048",
         "--max-num-seqs",
@@ -347,7 +337,6 @@ def _compare_tp(
         common_args.extend(["--hf-overrides", json.dumps(hf_overrides)])
 
     specific_case = tp_size == 2 and pp_size == 2 and chunked_prefill
-    testing_ray_compiled_graph = False
     if distributed_backend == "ray" and (vllm_major_version == "1"
                                          or specific_case):
         # For V1, test Ray Compiled Graph for all the tests
@@ -361,12 +350,6 @@ def _compare_tp(
         # Temporary. Currently when zeromq + SPMD is used, it does not properly
         # terminate because of a Ray Compiled Graph issue.
         common_args.append("--disable-frontend-multiprocessing")
-        testing_ray_compiled_graph = True
-    elif distributed_backend == "mp":
-        # Both V0/V1 of multiprocessing executor support PP
-        pp_env = {
-            "VLLM_USE_V1": vllm_major_version,
-        }
     else:
         pp_env = None
 
@@ -405,6 +388,7 @@ def _compare_tp(
                              tp_env,
                              method=method)
     except Exception:
+        testing_ray_compiled_graph = pp_env is not None
         if testing_ray_compiled_graph and vllm_major_version == "0":
             # Ray Compiled Graph tests are flaky for V0,
             # so we don't want to fail the test

@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Simple KV Cache Connector for Distributed Machine Learning Inference
 
@@ -9,7 +8,7 @@ MooncakePipe.
 
 But the logic can be extended to support other pipe and lookup buffer.
 """
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 import torch
 
@@ -107,7 +106,7 @@ class SimpleConnector(KVConnectorBase):
         else:
 
             # the current vLLM instance is KV consumer, so it needs to connect
-            # its recv pipe to the send pipe of KV producer
+            # its recv pipe to the send pipe of KV producder
             if self.config.kv_connector == "PyNcclConnector":
                 self.consumer_data_pipe = PyNcclPipe(
                     local_rank=local_rank,
@@ -134,7 +133,7 @@ class SimpleConnector(KVConnectorBase):
             )
 
     def select(self, input_tokens: Optional[torch.Tensor],
-               roi: Optional[torch.Tensor]) -> list[Optional[torch.Tensor]]:
+               roi: Optional[torch.Tensor]) -> List[Optional[torch.Tensor]]:
 
         assert self.consumer_buffer is not None, "Please initialize the "\
             "consumer buffer before calling select."
@@ -153,7 +152,7 @@ class SimpleConnector(KVConnectorBase):
         self,
         model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
-        kv_caches: list[torch.Tensor],
+        kv_caches: List[torch.Tensor],
         hidden_or_intermediate_states: Union[torch.Tensor,
                                              IntermediateTensors],
     ) -> None:
@@ -208,8 +207,8 @@ class SimpleConnector(KVConnectorBase):
     def recv_kv_caches_and_hidden_states(
         self, model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
-        kv_caches: list[torch.Tensor]
-    ) -> tuple[Union[torch.Tensor, IntermediateTensors], bool,
+        kv_caches: List[torch.Tensor]
+    ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
                "ModelInputForGPUWithSamplingMetadata"]:
 
         # When bypass_model_exec is set to False, it means that at least for one

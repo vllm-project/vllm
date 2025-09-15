@@ -4,11 +4,8 @@
 
 set -euo pipefail
 
-# Accept file paths as arguments
-FILES=("$@")
-
-# Check if docker/Dockerfile is among the provided files
-if printf '%s\n' "${FILES[@]}" | grep -q "^docker/Dockerfile$"; then
+# Check if docker/Dockerfile is staged for commit
+if git diff --cached --name-only | grep -q "^docker/Dockerfile$"; then
   echo "docker/Dockerfile has changed, attempting to update dependency graph..."
 
   # Check if Docker is installed and running
@@ -24,7 +21,7 @@ if printf '%s\n' "${FILES[@]}" | grep -q "^docker/Dockerfile$"; then
   fi
 
   # Define the target file path
-  TARGET_GRAPH_FILE="docs/assets/contributing/dockerfile-stages-dependency.png"
+  TARGET_GRAPH_FILE="docs/source/assets/contributing/dockerfile-stages-dependency.png"
 
   # Ensure target directory exists
   mkdir -p "$(dirname "$TARGET_GRAPH_FILE")"
@@ -78,4 +75,4 @@ if printf '%s\n' "${FILES[@]}" | grep -q "^docker/Dockerfile$"; then
   fi
 fi
 
-exit 0
+exit 0 

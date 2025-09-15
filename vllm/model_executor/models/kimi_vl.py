@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: E501
 # Adapted from https://huggingface.co/moonshotai/Kimi-VL-A3B-Instruct/blob/main/modeling_kimi_vl.py
 # Copyright 2025 The Moonshot AI Team, DeepSeek-AI, and HuggingFace Inc. team. All rights reserved.
@@ -44,9 +43,10 @@
 
 import copy
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal, Optional, TypedDict, Union
+from typing import (Any, Iterable, List, Literal, Optional, Sequence, Tuple,
+                    TypedDict, Union)
 
 import torch
 from torch import nn
@@ -56,8 +56,10 @@ from transformers.activations import GELUActivation
 from vllm.config import VllmConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -68,19 +70,21 @@ from vllm.model_executor.models.moonvit import MoonVitPretrainedModel
 from vllm.model_executor.models.utils import merge_multimodal_embeddings
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs, NestedTensors)
+from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
+                                    NestedTensors)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import KimiVLConfig, MoonViTConfig
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekV2Config
 
 from .utils import is_pp_missing_parameter, maybe_prefix
+
+logger = init_logger(__name__)
 
 
 # For dummy input only
@@ -120,7 +124,7 @@ class KimiVLMultiModalProjector(nn.Module):
 
 class KimiVLImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
-    pixel_values: Union[torch.Tensor, list[torch.Tensor]]
+    pixel_values: Union[torch.Tensor, List[torch.Tensor]]
     """
     Shape:`(num_patches, num_channels, patch_size, patch_size)`
     """
@@ -138,9 +142,6 @@ class KimiVLProcessingInfo(BaseProcessingInfo):
 
     def get_hf_config(self):
         return self.ctx.get_hf_config(KimiVLConfig)
-
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        return {"image": None}
 
     def get_num_image_tokens(
         self,
@@ -179,6 +180,23 @@ class KimiVLProcessingInfo(BaseProcessingInfo):
         token_width = (width + pad_width) // (kernel_size[1] * patch_size)
         return int(token_height * token_width)
 
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        # None means unlimited
+        return {"image": None}
+
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        return {
+            "image":
+            self.get_num_image_tokens(
+                image_width=MaxImageTokenMeta.width,
+                image_height=MaxImageTokenMeta.height,
+            ),
+        }
+
     @property
     def image_token_id(self) -> int:
         return self.get_hf_config().media_placeholder_token_id
@@ -186,27 +204,33 @@ class KimiVLProcessingInfo(BaseProcessingInfo):
 
 class KimiVLDummyInputsBuilder(BaseDummyInputsBuilder[KimiVLProcessingInfo]):
 
-    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        num_images = mm_counts.get("image", 0)
+    def __init__(self, info: KimiVLProcessingInfo) -> None:
+        super().__init__(info)
 
-        processor = self.info.get_hf_processor()
-        image_token = processor.image_token
+        self.image_token_id = self.info.image_token_id
+        self.image_token = self.info.get_tokenizer().decode(
+            self.image_token_id)
 
-        return image_token * num_images
-
-    def get_dummy_mm_data(
+    def get_dummy_processor_inputs(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> MultiModalDataDict:
+    ) -> ProcessorInputs:
         num_images = mm_counts.get("image", 0)
 
-        return {
+        width = MaxImageTokenMeta.width
+        height = MaxImageTokenMeta.height
+        mm_data = {
             "image":
-            self._get_dummy_images(width=MaxImageTokenMeta.width,
-                                   height=MaxImageTokenMeta.height,
+            self._get_dummy_images(width=width,
+                                   height=height,
                                    num_images=num_images)
         }
+
+        return ProcessorInputs(
+            prompt_text=self.image_token * num_images,
+            mm_data=mm_data,
+        )
 
 
 class KimiVLMultiModalProcessor(BaseMultiModalProcessor[KimiVLProcessingInfo]):
@@ -264,13 +288,6 @@ class KimiVLMultiModalProcessor(BaseMultiModalProcessor[KimiVLProcessingInfo]):
                                         dummy_inputs=KimiVLDummyInputsBuilder)
 class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal):
 
-    @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
-        if modality.startswith("image"):
-            return "<|media_start|>image<|media_content|><|media_pad|><|media_end|>"
-
-        raise ValueError("Only image modality is supported")
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -304,6 +321,7 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal):
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size, logit_scale)
+        self.sampler = get_sampler()
         self.media_placeholder: int = self.config.media_placeholder_token_id
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_world_size = get_tensor_model_parallel_world_size()
@@ -347,7 +365,8 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal):
         else:
             pixel_values = pixel_values.reshape(-1, num_channels, patch_size,
                                                 patch_size)
-        pixel_values = pixel_values.to(self.vision_tower.dtype)
+        # fp32 -> bf16
+        pixel_values = pixel_values.to(torch.bfloat16)
         # image_grid_hws.shape = (N, 2)
         assert image_grid_hws.ndim == 2, f"unexpected shape for image_grid_hws: {image_grid_hws.shape}"
 
@@ -376,9 +395,6 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal):
         return self.multi_modal_projector(
             torch.cat(image_features)).split(lengths)
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
     def get_multimodal_embeddings(self,
                                   **kwargs: object) -> Optional[NestedTensors]:
         # Validate the multimodal input keyword arguments
@@ -400,8 +416,7 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal):
         # model as one of the requirements of basic vLLM model implementation.
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
 
-        if multimodal_embeddings is not None and len(
-                multimodal_embeddings) != 0:
+        if multimodal_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids=input_ids,
                 inputs_embeds=inputs_embeds,
@@ -417,7 +432,7 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
-    ) -> IntermediateTensors:
+    ) -> SamplerOutput:
         if intermediate_tensors is not None:
             inputs_embeds = None
         # NOTE: In v1, inputs_embeds is always generated at model runner from
@@ -455,7 +470,15 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal):
                                        sampling_metadata, **kwargs)
         return logits
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+    def sample(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[SamplerOutput]:
+        next_tokens = self.sampler(logits, sampling_metadata)
+        return next_tokens
+
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         config = self.config.text_config
         _KEYS_TO_MODIFY_MAPPING = {
             "language_model.lm_head": "lm_head",

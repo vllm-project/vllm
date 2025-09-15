@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import Optional
 
@@ -53,6 +52,3 @@ class XpuCommunicator(DeviceCommunicatorBase):
         else:
             output_tensor = None
         return output_tensor
-
-    def broadcast(self, input_: torch.Tensor, src: int = 0) -> None:
-        dist.broadcast(input_, src=src, group=self.device_group)

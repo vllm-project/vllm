@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import multiprocessing
 import random
@@ -10,7 +9,7 @@ import torch.distributed as dist
 
 from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 from vllm.distributed.utils import StatelessProcessGroup
-from vllm.utils import get_open_port, update_environment_variables
+from vllm.utils import get_ip, get_open_port, update_environment_variables
 
 
 def get_arrays(n: int, seed: int = 0) -> list[np.ndarray]:
@@ -61,12 +60,12 @@ def worker_fn():
     rank = dist.get_rank()
     if rank == 0:
         port = get_open_port()
-        ip = '127.0.0.1'
+        ip = get_ip()
         dist.broadcast_object_list([ip, port], src=0)
     else:
         recv = [None, None]
         dist.broadcast_object_list(recv, src=0)
-        ip, port = recv  # type: ignore
+        ip, port = recv
 
     stateless_pg = StatelessProcessGroup.create(ip, port, rank,
                                                 dist.get_world_size())
@@ -108,10 +107,10 @@ def worker_fn():
 
         if pg == dist.group.WORLD:
             dist.barrier()
-            print(f"torch distributed passed the test! Rank {rank}")
+            print("torch distributed passed the test!")
         else:
             pg.barrier()
-            print(f"StatelessProcessGroup passed the test! Rank {rank}")
+            print("StatelessProcessGroup passed the test!")
 
 
 def test_shm_broadcast():

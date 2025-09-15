@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # adapted from https://huggingface.co/h2oai/h2ovl-mississippi-2b/blob/main/modeling_h2ovl_chat.py
 # https://huggingface.co/h2oai/h2ovl-mississippi-2b/blob/main/image_process.py
@@ -20,16 +19,15 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    MultiModalDataItems)
-from vllm.multimodal.processing import (MultiModalHashes, PromptReplacement,
-                                        PromptUpdate, PromptUpdateDetails)
+from vllm.multimodal.processing import (PromptReplacement, PromptUpdate,
+                                        PromptUpdateDetails)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .intern_vit import InternVisionModel
 from .internvl import (IMG_CONTEXT, IMG_END, IMG_START,
-                       BaseInternVLDummyInputsBuilder,
-                       BaseInternVLMultiModalProcessor,
                        BaseInternVLProcessingInfo, BaseInternVLProcessor,
-                       InternVLChatModel, build_transform,
+                       InternVLChatModel, InternVLDummyInputsBuilder,
+                       InternVLMultiModalProcessor, build_transform,
                        find_closest_aspect_ratio, get_internvl_target_ratios)
 
 
@@ -432,8 +430,8 @@ class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
         )
 
 
-class H2OVLMultiModalProcessor(
-        BaseInternVLMultiModalProcessor[H2OVLProcessingInfo]):
+class H2OVLMultiModalProcessor(InternVLMultiModalProcessor[H2OVLProcessingInfo]
+                               ):
 
     def _get_prompt_updates(
         self,
@@ -490,36 +488,31 @@ class H2OVLMultiModalProcessor(
         prompt: Union[str, list[int]],
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-        *,
-        return_mm_hashes: bool,
-    ) -> tuple[list[int], MultiModalKwargs, Optional[MultiModalHashes], bool]:
+    ) -> tuple[list[int], MultiModalKwargs, bool]:
         # The processor logic is different for len(images) <= 1 vs > 1
         # Since the processing cache assumes that the processor output is
         # invariant of how many images are passed per prompt, we only
         # perform caching for the most common case
         if mm_data_items.get_count("image", strict=False) > 1:
-            return self._apply_hf_processor(
+            # This code path corresponds to the cache being disabled
+            return self._apply_hf_processor_main(
                 prompt=prompt,
-                mm_data_items=mm_data_items,
+                mm_items=mm_data_items,
                 hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-                tokenization_kwargs=tokenization_kwargs,
-                return_mm_hashes=return_mm_hashes,
+                enable_hf_prompt_update=True,
             )
 
         return super()._cached_apply_hf_processor(
             prompt=prompt,
             mm_data_items=mm_data_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            tokenization_kwargs=tokenization_kwargs,
-            return_mm_hashes=return_mm_hashes,
         )
 
 
 @MULTIMODAL_REGISTRY.register_processor(
     H2OVLMultiModalProcessor,
     info=H2OVLProcessingInfo,
-    dummy_inputs=BaseInternVLDummyInputsBuilder)
+    dummy_inputs=InternVLDummyInputsBuilder)
 class H2OVLChatModel(InternVLChatModel):
 
     def _init_vision_model(

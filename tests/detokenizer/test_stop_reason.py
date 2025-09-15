@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Test the different finish_reason="stop" situations during generation:
     1. One of the provided stop strings
     2. One of the provided stop tokens
@@ -28,7 +27,7 @@ def vllm_model(vllm_runner):
 def test_stop_reason(vllm_model, example_prompts):
     tokenizer = transformers.AutoTokenizer.from_pretrained(MODEL)
     stop_token_id = tokenizer.convert_tokens_to_ids(STOP_STR)
-    llm = vllm_model.llm
+    llm = vllm_model.model
 
     # test stop token
     outputs = llm.generate(example_prompts,

@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
 import dataclasses
@@ -31,7 +30,7 @@ class TestSetting:
         # basic llama model
         TestSetting(
             model="meta-llama/Llama-3.2-1B-Instruct",
-            model_args=["--max-model-len", "2048"],
+            model_args=[],
             pp_size=2,
             tp_size=2,
             attn_backend="FLASHINFER",
@@ -41,7 +40,7 @@ class TestSetting:
         # llama model with quantization
         TestSetting(
             model="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ",
-            model_args=["--quantization", "gptq", "--max-model-len", "2048"],
+            model_args=["--quantization", "gptq"],
             pp_size=1,
             tp_size=1,
             attn_backend="FLASH_ATTN",
@@ -51,7 +50,7 @@ class TestSetting:
         # MoE model
         TestSetting(
             model="ibm/PowerMoE-3b",
-            model_args=["--max-model-len", "2048"],
+            model_args=[],
             pp_size=1,
             tp_size=2,
             attn_backend="FLASH_ATTN",
@@ -61,27 +60,23 @@ class TestSetting:
         # embedding model
         TestSetting(
             model="BAAI/bge-multilingual-gemma2",
-            model_args=[
-                "--task", "embed", "--dtype", "bfloat16", "--max-model-len",
-                "2048"
-            ],
+            model_args=["--task", "embed", "--dtype", "bfloat16"],
             pp_size=1,
             tp_size=1,
             attn_backend="FLASH_ATTN",
             method="encode",
             fullgraph=True,
         ),
-        # TODO: bert models are not supported in V1 yet
-        # # encoder-based embedding model (BERT)
-        # TestSetting(
-        #     model="BAAI/bge-base-en-v1.5",
-        #     model_args=["--task", "embed"],
-        #     pp_size=1,
-        #     tp_size=1,
-        #     attn_backend="XFORMERS",
-        #     method="encode",
-        #     fullgraph=True,
-        # ),
+        # encoder-based embedding model (BERT)
+        TestSetting(
+            model="BAAI/bge-base-en-v1.5",
+            model_args=["--task", "embed"],
+            pp_size=1,
+            tp_size=1,
+            attn_backend="XFORMERS",
+            method="encode",
+            fullgraph=True,
+        ),
         # vision language model
         TestSetting(
             model="microsoft/Phi-3.5-vision-instruct",
@@ -108,8 +103,7 @@ def test_compile_correctness(
     method = test_setting.method
     fullgraph = test_setting.fullgraph
     if cuda_device_count_stateless() != pp_size * tp_size:
-        pytest.skip(f"Need exactly {pp_size}*{tp_size} CUDA gpus but got "
-                    f"{cuda_device_count_stateless()}")
+        pytest.skip("Not correct CUDA devices for the test.")
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_ATTENTION_BACKEND", attn_backend)

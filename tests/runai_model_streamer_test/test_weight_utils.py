@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import glob
 import tempfile
@@ -24,11 +23,10 @@ def test_runai_model_loader():
         runai_model_streamer_tensors = {}
         hf_safetensors_tensors = {}
 
-        for name, tensor in runai_safetensors_weights_iterator(
-                safetensors, True):
+        for name, tensor in runai_safetensors_weights_iterator(safetensors):
             runai_model_streamer_tensors[name] = tensor
 
-        for name, tensor in safetensors_weights_iterator(safetensors, True):
+        for name, tensor in safetensors_weights_iterator(safetensors):
             hf_safetensors_tensors[name] = tensor
 
         assert len(runai_model_streamer_tensors) == len(hf_safetensors_tensors)

@@ -1,11 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterable, Mapping
+import re
 from types import MappingProxyType
-from typing import Any, Optional
-
-import regex as re
+from typing import Any, Iterable, List, Mapping, Optional
 
 
 def deep_compare(dict1: Any, dict2: Any) -> bool:
@@ -24,7 +21,7 @@ def deep_compare(dict1: Any, dict2: Any) -> bool:
 def should_ignore_layer(
     layer_name: Optional[str],
     ignore: Iterable[str],
-    fused_mapping: Mapping[str, list[str]] = MappingProxyType({})
+    fused_mapping: Mapping[str, List[str]] = MappingProxyType({})
 ) -> bool:
     if layer_name is None:
         return False

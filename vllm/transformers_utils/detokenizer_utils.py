@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
+from typing import List, Optional, Tuple
 
 from .tokenizer import AnyTokenizer
 
 
-def _replace_none_with_empty(tokens: list[Optional[str]]):
+def _replace_none_with_empty(tokens: List[Optional[str]]):
     for i, token in enumerate(tokens):
         if token is None:
             tokens[i] = ""
@@ -14,7 +13,7 @@ def _replace_none_with_empty(tokens: list[Optional[str]]):
 
 def _convert_tokens_to_string_with_added_encoders(
     tokenizer: AnyTokenizer,
-    output_tokens: list[str],
+    output_tokens: List[str],
     skip_special_tokens: bool,
     spaces_between_special_tokens: bool,
 ) -> str:
@@ -23,8 +22,8 @@ def _convert_tokens_to_string_with_added_encoders(
     # NOTE(woosuk): The following code is slow because it runs a for loop over
     # the output_tokens. In Python, running a for loop over a list can be slow
     # even when the loop body is very simple.
-    sub_texts: list[str] = []
-    current_sub_text: list[str] = []
+    sub_texts: List[str] = []
+    current_sub_text: List[str] = []
     all_special_tokens = set(tokenizer.all_special_tokens)
     for token in output_tokens:
         if skip_special_tokens and token in all_special_tokens:
@@ -53,9 +52,9 @@ INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET = 5
 
 def convert_prompt_ids_to_tokens(
     tokenizer: AnyTokenizer,
-    prompt_ids: list[int],
+    prompt_ids: List[int],
     skip_special_tokens: bool = False,
-) -> tuple[list[str], int, int]:
+) -> Tuple[List[str], int, int]:
     """Converts the prompt ids to tokens and returns the tokens and offsets
     for incremental detokenization.
 
@@ -77,8 +76,8 @@ def convert_prompt_ids_to_tokens(
 
 def convert_ids_list_to_tokens(
     tokenizer: AnyTokenizer,
-    token_ids: list[int],
-) -> list[str]:
+    token_ids: List[int],
+) -> List[str]:
     """Detokenize the input ids individually.
 
     Args:
@@ -89,13 +88,8 @@ def convert_ids_list_to_tokens(
       Python list of token string representations
     
     """
-    token_str_lst = []
-    for token_id in token_ids:
-        # use default skip_special_tokens.
-        token_str = tokenizer.decode([token_id])
-        if token_str is None:
-            token_str = ""
-        token_str_lst.append(token_str)
+    token_str_lst = tokenizer.convert_ids_to_tokens(token_ids)
+    _replace_none_with_empty(token_str_lst)  # type: ignore
     return token_str_lst
 
 
@@ -104,13 +98,13 @@ def convert_ids_list_to_tokens(
 # under Apache 2.0 license
 def detokenize_incrementally(
     tokenizer: AnyTokenizer,
-    all_input_ids: list[int],
-    prev_tokens: Optional[list[str]],
+    all_input_ids: List[int],
+    prev_tokens: Optional[List[str]],
     prefix_offset: int,
     read_offset: int,
     skip_special_tokens: bool = False,
     spaces_between_special_tokens: bool = True,
-) -> tuple[list[str], str, int, int]:
+) -> Tuple[List[str], str, int, int]:
     """Detokenizes the input ids incrementally and returns the new tokens
     and the new text.
 

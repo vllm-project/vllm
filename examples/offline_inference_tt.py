@@ -1,6 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 import argparse
 import json
 import os
@@ -19,8 +17,7 @@ from vllm import LLM, ModelRegistry, SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.entrypoints.openai.api_server import (
-    build_async_engine_client_from_engine_args,
-)
+    build_async_engine_client_from_engine_args)
 from vllm.inputs.data import TokensPrompt
 from vllm.utils import merge_async_iterators
 
@@ -28,20 +25,18 @@ from vllm.utils import merge_async_iterators
 def register_tt_models():
     llama_text_version = os.getenv("TT_LLAMA_TEXT_VER", "tt_transformers")
     if llama_text_version == "tt_transformers":
-        path_llama_text = "models.tt_transformers.tt.generator_vllm:LlamaForCausalLM"
+        path_llama_text = \
+            "models.tt_transformers.tt.generator_vllm:LlamaForCausalLM"
     elif llama_text_version == "llama3_70b_galaxy":
-        path_llama_text = (
+        path_llama_text = \
             "models.demos.llama3_70b_galaxy.tt.generator_vllm:LlamaForCausalLM"
-        )
     elif llama_text_version == "llama2_70b":
-        path_llama_text = (
+        path_llama_text = \
             "models.demos.t3000.llama2_70b.tt.generator_vllm:TtLlamaForCausalLM"
-        )
     else:
         raise ValueError(
             f"Unsupported TT Llama version: {llama_text_version}, "
-            "pick one of [tt_transformers, llama3_70b_galaxy, llama2_70b]"
-        )
+            "pick one of [tt_transformers, llama3_70b_galaxy, llama2_70b]")
 
     # Llama3.1/3.2 - Text
     ModelRegistry.register_model("TTLlamaForCausalLM", path_llama_text)
@@ -49,7 +44,7 @@ def register_tt_models():
     # Llama3.2 - Vision
     ModelRegistry.register_model(
         "TTMllamaForConditionalGeneration",
-        "models.tt_transformers.tt.generator_vllm:MllamaForConditionalGeneration",
+        "models.tt_transformers.tt.generator_vllm:MllamaForConditionalGeneration"
     )
 
     # Qwen2.5 - Text
@@ -60,19 +55,18 @@ def register_tt_models():
     # Qwen2.5 - Vision
     ModelRegistry.register_model(
         "TTQwen2_5_VLForConditionalGeneration",
-        "models.demos.qwen25_vl.tt.generator_vllm:Qwen2_5_VLForConditionalGeneration",
+        "models.demos.qwen25_vl.tt.generator_vllm:Qwen2_5_VLForConditionalGeneration"
     )
 
     # Mistral
     ModelRegistry.register_model(
         "TTMistralForCausalLM",
-        "models.tt_transformers.tt.generator_vllm:MistralForCausalLM",
-    )
+        "models.tt_transformers.tt.generator_vllm:MistralForCausalLM")
 
     # Gemma3
     ModelRegistry.register_model(
         "TTGemma3ForConditionalGeneration",
-        "models.tt_transformers.tt.generator_vllm:Gemma3ForConditionalGeneration",
+        "models.tt_transformers.tt.generator_vllm:Gemma3ForConditionalGeneration"
     )
 
 
@@ -80,17 +74,16 @@ register_tt_models()  # Import and register models from tt-metal
 
 
 def get_sample_multi_modal_llama_inputs():
-    """
+    '''
     Prepare 4 sample multi-modal prompts for Llama3.2-11B
-    """
+    '''
     MLLAMA_IMAGE_TOKEN = "<|image|>"
     IMG_PATH = Path(resource_filename("llama_models", "scripts/resources/"))
     relative_img_paths = [None, "pasta.jpeg", "ocr_image.jpeg", "clutter.jpeg"]
     questions = [
-        "Write a haiku.",
-        "What is for dinner?",
+        "Write a haiku.", "What is for dinner?",
         "What is the full text of this image? Do OCR",
-        "What objects are in this image?",
+        "What objects are in this image?"
     ]
     inputs = []
     for relative_img_path, question in zip(relative_img_paths, questions):
@@ -98,7 +91,12 @@ def get_sample_multi_modal_llama_inputs():
             with open(IMG_PATH / relative_img_path, "rb") as f:
                 img = PIL_Image.open(f).convert("RGB")
             prompt = f"{MLLAMA_IMAGE_TOKEN}{question}"
-            inputs.append({"prompt": prompt, "multi_modal_data": {"image": img}})
+            inputs.append({
+                "prompt": prompt,
+                "multi_modal_data": {
+                    "image": img
+                }
+            })
         else:
             inputs.append({"prompt": question})
     return inputs
@@ -123,21 +121,23 @@ def get_sample_multi_modal_inputs(model: str, multi_image: bool):
         questions = ["Describe this image.", "What is the capital of France?"]
         img_refs = [
             "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg",
-            None,
+            None
         ]
         # Build chat-style prompts
-        prompts = [
-            [
+        prompts = [[{
+            "role":
+            "user",
+            "content": [
                 {
-                    "role": "user",
-                    "content": [
-                        {"type": "image", "image": img_ref},
-                        {"type": "text", "text": question},
-                    ],
-                }
-            ]
-            for img_ref, question in zip(img_refs, questions)
-        ]
+                    "type": "image",
+                    "image": img_ref
+                },
+                {
+                    "type": "text",
+                    "text": question
+                },
+            ],
+        }] for img_ref, question in zip(img_refs, questions)]
     else:
         # Example data
         question = "Compare these images."
@@ -165,25 +165,20 @@ def get_sample_multi_modal_inputs(model: str, multi_image: bool):
         image_inputs = None
         if "Qwen2.5-VL" in model:
             assert not multi_image, (
-                "Multi-image inputs not supported yet for Qwen2.5-VL"
-            )
+                "Multi-image inputs not supported yet for Qwen2.5-VL")
             # Lazy import only when needed
             from qwen_vl_utils import process_vision_info
-
             image_inputs, video_inputs = process_vision_info(prompt)
             assert video_inputs is None, "Video inputs not supported yet"
             image_inputs = image_inputs[0]
         elif "gemma-3" in model:
             image_inputs = [
-                ctnt["image"]
-                for entry in prompt
-                for ctnt in entry["content"]
+                ctnt["image"] for entry in prompt for ctnt in entry["content"]
                 if ctnt["type"] == "image"
             ]
             image_inputs = [
                 PIL_Image.open(requests.get(image_url, stream=True).raw)
-                if image_url is not None
-                else None
+                if image_url is not None else None
                 for image_url in image_inputs
             ]
         else:
@@ -249,28 +244,28 @@ def check_tt_model_supported(model):
 
 
 def run_seq_len_tests(engine_kw_args, sampling_params):
-    """
-    Test generation of a few simple counting prompts
+    '''
+    Test generation of a few simple counting prompts 
     with arbitrary increasing sequence lengths
-    """
+    '''
 
     model = engine_kw_args["model"]
     is_instruct = "Instruct" in model
     count_sizes = [10, 100, 2000, 16000, 40000]
 
     if is_instruct:
-        tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(model,
+                                                  trust_remote_code=True)
 
     prompts = []
     for size in count_sizes:
-        prompt = "Continue this counting sequence (with no explanation): " + " ".join(
-            str(i) for i in range(1, size + 1)
-        )
+        prompt = "Continue this counting sequence (with no explanation): " + \
+            " ".join(str(i) for i in range(1, size + 1))
         if is_instruct:
             prompt = {"role": "user", "content": prompt}
-            prompt = tokenizer.apply_chat_template(
-                [prompt], tokenize=False, add_generation_prompt=True
-            )
+            prompt = tokenizer.apply_chat_template([prompt],
+                                                   tokenize=False,
+                                                   add_generation_prompt=True)
         prompts.append(prompt)
 
     llm = LLM(**engine_kw_args)
@@ -281,25 +276,24 @@ def run_seq_len_tests(engine_kw_args, sampling_params):
 
 
 def run_inference(
-    model,
-    prompts_json,
-    max_tokens=128,
-    max_seqs_in_batch=32,
-    num_repeat_prompts=2,
-    measure_perf=False,
-    perf_prompt_len=None,
-    greedy_sampling=False,  # Use greedy decoding instead of top-k/p
-    async_engine=False,
-    num_scheduler_steps=10,
-    disable_async_output_proc=False,
-    multi_modal=False,
-    multi_image=False,
-    mm_processor_kwargs=None,
-    test_increasing_seq_lens=False,
-    override_tt_config=None,
-    max_model_len=None,
-    max_num_batched_tokens=None,
-):
+        model,
+        prompts_json,
+        max_tokens=128,
+        max_seqs_in_batch=32,
+        num_repeat_prompts=2,
+        measure_perf=False,
+        perf_prompt_len=None,
+        greedy_sampling=False,  # Use greedy decoding instead of top-k/p
+        async_engine=False,
+        num_scheduler_steps=10,
+        disable_async_output_proc=False,
+        multi_modal=False,
+        multi_image=False,
+        mm_processor_kwargs=None,
+        test_increasing_seq_lens=False,
+        override_tt_config=None,
+        max_model_len=None,
+        max_num_batched_tokens=None):
     check_tt_model_supported(model)
 
     if multi_modal:
@@ -310,8 +304,7 @@ def run_inference(
         ]
         assert any(name in model for name in supported_models), (
             "The multi-modal inference test "
-            f"currently only supports {supported_models} models"
-        )
+            f"currently only supports {supported_models} models")
 
     # LLM args
     engine_kw_args = {
@@ -328,39 +321,39 @@ def run_inference(
 
     try:
         if override_tt_config:
-            engine_kw_args["override_tt_config"] = json.loads(override_tt_config)
+            engine_kw_args["override_tt_config"] = json.loads(
+                override_tt_config)
     except json.JSONDecodeError as err:
-        raise ValueError(f"Invalid JSON string for override_tt_config: {err}") from err
+        raise ValueError(
+            f"Invalid JSON string for override_tt_config: {err}") from err
 
     try:
         if mm_processor_kwargs:
-            engine_kw_args["mm_processor_kwargs"] = json.loads(mm_processor_kwargs)
+            engine_kw_args["mm_processor_kwargs"] = json.loads(
+                mm_processor_kwargs)
     except json.JSONDecodeError as err:
-        raise ValueError(f"Invalid JSON string for mm_processor_kwargs: {err}") from err
+        raise ValueError(
+            f"Invalid JSON string for mm_processor_kwargs: {err}") from err
 
     # Generation args
     ignore_eos = measure_perf
 
     if greedy_sampling:
-        sampling_params = SamplingParams(
-            max_tokens=max_tokens, ignore_eos=ignore_eos, temperature=0.0
-        )
+        sampling_params = SamplingParams(max_tokens=max_tokens,
+                                         ignore_eos=ignore_eos,
+                                         temperature=0.0)
     else:
-        sampling_params = SamplingParams(
-            max_tokens=max_tokens,
-            ignore_eos=ignore_eos,
-            top_k=10,
-            top_p=0.9,
-            temperature=1.0,
-        )
+        sampling_params = SamplingParams(max_tokens=max_tokens,
+                                         ignore_eos=ignore_eos,
+                                         top_k=10,
+                                         top_p=0.9,
+                                         temperature=1.0)
 
     if test_increasing_seq_lens:
         assert not measure_perf, (
-            "measure_perf option not supported with test_increasing_seq_lens"
-        )
+            "measure_perf option not supported with test_increasing_seq_lens")
         assert not async_engine, (
-            "async_engine option not supported with test_increasing_seq_lens"
-        )
+            "async_engine option not supported with test_increasing_seq_lens")
         print("Ignoring prompts json for sequence length testing")
         run_seq_len_tests(engine_kw_args, sampling_params)
         return
@@ -371,7 +364,8 @@ def run_inference(
             # Load prompts from a JSON file
             with open(prompts_json) as file:
                 prompts = json.load(file)
-            assert isinstance(prompts, list), "Prompts must be a list of strings"
+            assert isinstance(prompts,
+                              list), "Prompts must be a list of strings"
         else:
             print("Ignoring prompts json for multi-modal inference")
             if "Llama-3.2" in model:
@@ -386,19 +380,18 @@ def run_inference(
             prompts = prompts * num_repeat_prompts
         print("Number of prompts:", len(prompts))
     else:
-        assert perf_prompt_len is not None, (
+        assert perf_prompt_len is not None, \
             "perf_prompt_len is required to generate dummy prompts"
-        )
-        print("Measuring performance with dummy prompts of length", perf_prompt_len)
+        print("Measuring performance with dummy prompts of length",
+              perf_prompt_len)
         print("Generating prompts with output length", max_tokens)
 
         # Prompt token ids (dummy prompts)
         prompt_token_ids_user = [0] * perf_prompt_len
         if not multi_modal:
-            prompts = [
-                {"prompt_token_ids": prompt_token_ids_user}
-                for _ in range(max_seqs_in_batch)
-            ]
+            prompts = [{
+                "prompt_token_ids": prompt_token_ids_user
+            } for _ in range(max_seqs_in_batch)]
         else:
             if "Llama-3.2" in model:
                 IMAGE_TOKEN_ID = 128256  # Specific to multi-modal llama
@@ -409,27 +402,24 @@ def run_inference(
             else:
                 raise ValueError(
                     f"Unsupported model for multi-modal inference test in perf "
-                    f"mode: {model}"
-                )
+                    f"mode: {model}")
             prompt_token_ids_user.insert(0, IMAGE_TOKEN_ID)
-            random_pixels = np.random.randint(0, 256, (512, 512, 3), dtype=np.uint8)
+            random_pixels = np.random.randint(0,
+                                              256, (512, 512, 3),
+                                              dtype=np.uint8)
             rand_img = PIL_Image.fromarray(
-                random_pixels, "RGB"
-            )  # Create a PIL Image from the random pixel data
-            prompts = [
-                {
-                    "prompt_token_ids": prompt_token_ids_user,
-                    "multi_modal_data": {"image": rand_img},
+                random_pixels,
+                'RGB')  # Create a PIL Image from the random pixel data
+            prompts = [{
+                "prompt_token_ids": prompt_token_ids_user,
+                "multi_modal_data": {
+                    "image": rand_img
                 }
-                for _ in range(max_seqs_in_batch)
-            ]
+            } for _ in range(max_seqs_in_batch)]
 
         # Sampling params
-        sampling_params = (
-            sampling_params[:max_seqs_in_batch]
-            if isinstance(sampling_params, list)
-            else sampling_params
-        )
+        sampling_params = sampling_params[:max_seqs_in_batch] if isinstance(
+            sampling_params, list) else sampling_params
         sampling_params.max_tokens = max_tokens
 
     # Create and run LLM
@@ -439,35 +429,38 @@ def run_inference(
             generate_tokens(llm, prompts, sampling_params, print_output=True)
         else:
             max_model_len = llm.llm_engine.model_config.max_model_len
-            check_valid_perf_prompt_len(max_model_len, perf_prompt_len, sampling_params)
+            check_valid_perf_prompt_len(max_model_len, perf_prompt_len,
+                                        sampling_params)
             run_inference_perf(llm, prompts, sampling_params)
     else:
         print("Using async engine")
         engine_args = AsyncEngineArgs(**engine_kw_args)
 
         async def _run_inference_async():
-            async with build_async_engine_client_from_engine_args(engine_args) as llm:
+            async with build_async_engine_client_from_engine_args(
+                    engine_args) as llm:
                 if not measure_perf:
-                    await generate_tokens_async(
-                        llm, prompts, sampling_params, print_output=True
-                    )
+                    await generate_tokens_async(llm,
+                                                prompts,
+                                                sampling_params,
+                                                print_output=True)
                 else:
                     max_model_len = llm.model_config.max_model_len
-                    check_valid_perf_prompt_len(
-                        max_model_len, perf_prompt_len, sampling_params
-                    )
-                    await run_inference_perf_async(llm, prompts, sampling_params)
+                    check_valid_perf_prompt_len(max_model_len, perf_prompt_len,
+                                                sampling_params)
+                    await run_inference_perf_async(llm, prompts,
+                                                   sampling_params)
 
         uvloop.run(_run_inference_async())
 
 
-def check_valid_perf_prompt_len(max_model_len, perf_prompt_len, sampling_params):
-    assert_str = (
-        f"prompt length ({perf_prompt_len}) + num generated tokens "
-        f"({sampling_params.max_tokens}) will exceed max_model_len "
-        f"({max_model_len})"
-    )
-    assert perf_prompt_len + sampling_params.max_tokens <= max_model_len, assert_str
+def check_valid_perf_prompt_len(max_model_len, perf_prompt_len,
+                                sampling_params):
+    assert_str = (f"prompt length ({perf_prompt_len}) + num generated tokens "
+                  f"({sampling_params.max_tokens}) will exceed max_model_len "
+                  f"({max_model_len})")
+    assert perf_prompt_len + sampling_params.max_tokens <= max_model_len, (
+        assert_str)
 
 
 def run_inference_perf(
@@ -495,14 +488,19 @@ async def run_inference_perf_async(
     for i in tqdm(range(N_inference), desc="Inference runs"):
         if i == N_warmup:
             start_time = time.perf_counter()
-        await generate_tokens_async(llm, prompts, sampling_params, print_output=False)
+        await generate_tokens_async(llm,
+                                    prompts,
+                                    sampling_params,
+                                    print_output=False)
     avg_time = (time.perf_counter() - start_time) / (N_inference - N_warmup)
     print(f"Average time taken per inference run: {avg_time:.2f} s")
 
 
-def generate_tokens(
-    llm: LLM, prompts, sampling_params, prompt_token_ids=None, print_output=True
-):
+def generate_tokens(llm: LLM,
+                    prompts,
+                    sampling_params,
+                    prompt_token_ids=None,
+                    print_output=True):
     # Generate texts from the prompts.
     # The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.
@@ -515,26 +513,23 @@ def generate_tokens(
         num_tokens_prompt = len(output.prompt_token_ids)
         num_tokens_output = len(output.outputs[0].token_ids)
         if print_output:
-            print(
-                f"Prompt #{request_id} "
-                f"({num_tokens_prompt} tokens): {prompt!r}, "
-                "Generated text "
-                f"({num_tokens_output} tokens): {generated_text!r}\n"
-            )
+            print(f"Prompt #{request_id} "
+                  f"({num_tokens_prompt} tokens): {prompt!r}, "
+                  "Generated text "
+                  f"({num_tokens_output} tokens): {generated_text!r}\n")
 
 
-async def generate_tokens_async(
-    llm: MQLLMEngineClient,
-    prompts,
-    sampling_params,
-    prompt_token_ids=None,
-    print_output=True,
-):
+async def generate_tokens_async(llm: MQLLMEngineClient,
+                                prompts,
+                                sampling_params,
+                                prompt_token_ids=None,
+                                print_output=True):
     # Use tokenized prompts if provided
     if prompt_token_ids is not None:
         prompts = []
         for single_prompt_token_ids in prompt_token_ids:
-            prompts.append(TokensPrompt(prompt_token_ids=single_prompt_token_ids))
+            prompts.append(
+                TokensPrompt(prompt_token_ids=single_prompt_token_ids))
 
     if not isinstance(sampling_params, list):
         sampling_params = [sampling_params] * len(prompts)
@@ -550,93 +545,80 @@ async def generate_tokens_async(
         num_tokens_prompt = len(res.prompt_token_ids)
         num_tokens_output = len(res.outputs[0].token_ids)
         if print_output and res.finished:
-            print(
-                f"Prompt "
-                f"({num_tokens_prompt} tokens): {prompt!r}, "
-                "Generated text "
-                f"({num_tokens_output} tokens): {generated_text!r}\n"
-            )
+            print(f"Prompt "
+                  f"({num_tokens_prompt} tokens): {prompt!r}, "
+                  "Generated text "
+                  f"({num_tokens_output} tokens): {generated_text!r}\n")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--model", type=str, default="meta-llama/Llama-3.1-70B", help="Model name"
-    )
-    parser.add_argument(
-        "--prompts_json",
-        type=str,
-        default="tt_metal/prompts.json",
-        help="Path to JSON file containing prompts",
-    )
-    parser.add_argument(
-        "--measure_perf", action="store_true", help="Measure performance"
-    )
+    parser.add_argument("--model",
+                        type=str,
+                        default="meta-llama/Llama-3.1-70B",
+                        help="Model name")
+    parser.add_argument("--prompts_json",
+                        type=str,
+                        default="tt_metal/prompts.json",
+                        help="Path to JSON file containing prompts")
+    parser.add_argument("--measure_perf",
+                        action="store_true",
+                        help="Measure performance")
     parser.add_argument(
         "--perf_prompt_len",
         type=int,
         default=128,
-        help="Length of dummy prompts for performance measurement",
-    )
-    parser.add_argument("--max_tokens", type=int, default=128, help="Length of outputs")
-    parser.add_argument(
-        "--greedy_sampling",
-        action="store_true",
-        help="Use greedy decoding instead of top-k/p",
-    )
-    parser.add_argument(
-        "--max_seqs_in_batch",
-        type=int,
-        default=32,
-        help="Maximum batch size for inference",
-    )
-    parser.add_argument(
-        "--num_repeat_prompts",
-        type=int,
-        default=2,
-        help="Number of times to repeat prompts",
-    )
-    parser.add_argument("--async_engine", action="store_true", help="Use async engine")
-    parser.add_argument(
-        "--disable_async_output_proc",
-        action="store_true",
-        help="Disable async output processing",
-    )
-    parser.add_argument(
-        "--num_scheduler_steps", type=int, default=10, help="Number of scheduler steps"
-    )
-    parser.add_argument(
-        "--multi_modal",
-        action="store_true",
-        help="Run multi-modal inference (vision + text)",
-    )
-    parser.add_argument(
-        "--multi_image", action="store_true", help="Run multi-image inference"
-    )
-    parser.add_argument(
-        "--test_increasing_seq_lens",
-        action="store_true",
-        help="Test generations of small to large sequences",
-    )
-    parser.add_argument(
-        "--override_tt_config",
-        type=str,
-        default=None,
-        help="Custom TT options as Json string",
-    )
-    parser.add_argument("--max_model_len", type=int, default=None, help="Max model len")
-    parser.add_argument(
-        "--max_num_batched_tokens",
-        type=int,
-        default=None,
-        help="Max num batched tokens",
-    )
-    parser.add_argument(
-        "--mm_processor_kwargs",
-        type=str,
-        default=None,
-        help="Multi-modal processor kwargs",
-    )
+        help="Length of dummy prompts for performance measurement")
+    parser.add_argument("--max_tokens",
+                        type=int,
+                        default=128,
+                        help="Length of outputs")
+    parser.add_argument("--greedy_sampling",
+                        action="store_true",
+                        help="Use greedy decoding instead of top-k/p")
+    parser.add_argument("--max_seqs_in_batch",
+                        type=int,
+                        default=32,
+                        help="Maximum batch size for inference")
+    parser.add_argument("--num_repeat_prompts",
+                        type=int,
+                        default=2,
+                        help="Number of times to repeat prompts")
+    parser.add_argument("--async_engine",
+                        action="store_true",
+                        help="Use async engine")
+    parser.add_argument("--disable_async_output_proc",
+                        action="store_true",
+                        help="Disable async output processing")
+    parser.add_argument("--num_scheduler_steps",
+                        type=int,
+                        default=10,
+                        help="Number of scheduler steps")
+    parser.add_argument("--multi_modal",
+                        action="store_true",
+                        help="Run multi-modal inference (vision + text)")
+    parser.add_argument("--multi_image",
+                        action="store_true",
+                        help="Run multi-image inference")
+    parser.add_argument("--test_increasing_seq_lens",
+                        action="store_true",
+                        help="Test generations of small to large sequences")
+    parser.add_argument("--override_tt_config",
+                        type=str,
+                        default=None,
+                        help="Custom TT options as Json string")
+    parser.add_argument("--max_model_len",
+                        type=int,
+                        default=None,
+                        help="Max model len")
+    parser.add_argument("--max_num_batched_tokens",
+                        type=int,
+                        default=None,
+                        help="Max num batched tokens")
+    parser.add_argument("--mm_processor_kwargs",
+                        type=str,
+                        default=None,
+                        help="Multi-modal processor kwargs")
 
     args = parser.parse_args()
 

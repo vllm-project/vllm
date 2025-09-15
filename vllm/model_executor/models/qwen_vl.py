@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
 # https://huggingface.co/Qwen/Qwen-VL/blob/main/modeling_qwen.py
@@ -8,12 +7,13 @@
 
 import copy
 import math
+import re
 import unicodedata
-from collections.abc import Collection, Mapping, Sequence, Set
+from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from functools import lru_cache, partial
-from typing import Callable, Literal, Optional, TypedDict, Union
+from typing import Callable, List, Literal, Optional, TypedDict, Union
 
-import regex as re
 import torch
 from torch import nn
 from torchvision import transforms
@@ -383,8 +383,7 @@ def _get_tokenizer_without_image_pad(
         tokenizer: PreTrainedTokenizer) -> PreTrainedTokenizer:
     """
     The logic of adding image pad tokens should only be applied in
-    [`QwenVLProcessor`][vllm.model_executor.models.qwen_vl.QwenVLProcessor],
-    so they are patched out here.
+    :class:`QwenVLProcessor`, so they are patched out here.
 
     The definition of the wrapped tokenizer can be found here:
     https://huggingface.co/Qwen/Qwen-VL/blob/main/tokenization_qwen.py
@@ -396,7 +395,7 @@ def _get_tokenizer_without_image_pad(
         def tokenize(
             self,
             text: str,
-            allowed_special: Union[Set[str], str] = "all",
+            allowed_special: Union[AbstractSet[str], str] = "all",
             disallowed_special: Union[Collection[str], str] = (),
             **kwargs,
         ) -> list[Union[bytes, str]]:
@@ -412,7 +411,7 @@ def _get_tokenizer_without_image_pad(
 
         def _decode(
             self,
-            token_ids: Union[int, list[int]],
+            token_ids: Union[int, List[int]],
             skip_special_tokens: bool = False,
             errors: Optional[str] = None,
             **kwargs,
@@ -580,7 +579,6 @@ class QwenVLMultiModalProcessor(BaseMultiModalProcessor[QwenVLProcessingInfo]):
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         # Drops anything between <img>/</img> tags; encoding with the tokenizer
         # will automatically add the image pads for the context.
@@ -601,7 +599,6 @@ class QwenVLMultiModalProcessor(BaseMultiModalProcessor[QwenVLProcessingInfo]):
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
         )
 
     def _hf_processor_applies_updates(
@@ -609,7 +606,6 @@ class QwenVLMultiModalProcessor(BaseMultiModalProcessor[QwenVLProcessingInfo]):
         prompt_text: str,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
     ) -> bool:
         return False
 
@@ -674,13 +670,6 @@ class QwenVLForConditionalGeneration(QWenBaseModel, SupportsPP, SupportsLoRA,
             language_model="transformer.h",
             connector="transformer.visual.attn_pool",
             tower_model="transformer.visual.transformer")
-
-    @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
-        if modality.startswith("image"):
-            return f"Picture {i}: <img></img>"
-
-        raise ValueError("Only image modality is supported")
 
     def __init__(
         self,
@@ -748,11 +737,11 @@ class QwenVLForConditionalGeneration(QWenBaseModel, SupportsPP, SupportsLoRA,
     def get_language_model(self) -> torch.nn.Module:
         return self.transformer
 
-    def get_multimodal_embeddings(self,
-                                  **kwargs: object) -> MultiModalEmbeddings:
+    def get_multimodal_embeddings(
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
-            return []
+            return None
 
         vision_embeddings = self._process_image_input(image_input)
         return vision_embeddings
@@ -764,8 +753,7 @@ class QwenVLForConditionalGeneration(QWenBaseModel, SupportsPP, SupportsLoRA,
     ) -> torch.Tensor:
         inputs_embeds = self.transformer.get_input_embeddings(input_ids)
 
-        if multimodal_embeddings is not None \
-            and len(multimodal_embeddings) != 0:
+        if multimodal_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings,
                 self.transformer.visual.image_pad_id)

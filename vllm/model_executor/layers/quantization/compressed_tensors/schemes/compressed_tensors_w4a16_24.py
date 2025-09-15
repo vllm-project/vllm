@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 import torch
 from torch.nn import Parameter
@@ -59,7 +58,7 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
         layer.meta = Parameter(layer.meta.data, requires_grad=False)
 
     def create_weights(self, layer: torch.nn.Module, input_size: int,
-                       output_partition_sizes: list[int],
+                       output_partition_sizes: List[int],
                        input_size_per_partition: int,
                        params_dtype: torch.dtype, weight_loader: Callable,
                        **kwargs):

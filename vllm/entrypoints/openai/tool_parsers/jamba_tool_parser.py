@@ -1,15 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import re
 from collections.abc import Sequence
 from typing import Union
 
 import partial_json_parser
-import regex as re
 from partial_json_parser.core.options import Allow
 
-from vllm.entrypoints.chat_utils import random_tool_call_id
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
@@ -21,6 +19,7 @@ from vllm.entrypoints.openai.tool_parsers.utils import (
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizers import MistralTokenizer
+from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
@@ -97,9 +96,8 @@ class JambaToolParser(ToolParser):
                         function=FunctionCall(
                             name=function_call["name"],
                             # function call args are JSON but as a string
-                            arguments=json.dumps(function_call["arguments"],
-                                                 ensure_ascii=False),
-                        )) for function_call in raw_function_calls
+                            arguments=json.dumps(function_call["arguments"])))
+                    for function_call in raw_function_calls
                 ]
 
                 content = model_output[:model_output.
@@ -189,7 +187,7 @@ class JambaToolParser(ToolParser):
                     diff: Union[str, None] = current_tool_call.get("arguments")
 
                     if diff:
-                        diff = json.dumps(diff, ensure_ascii=False).replace(
+                        diff = json.dumps(diff).replace(
                             self.streamed_args_for_tool[self.current_tool_id],
                             "")
                         delta = DeltaMessage(tool_calls=[
@@ -222,7 +220,7 @@ class JambaToolParser(ToolParser):
                     delta = DeltaMessage(tool_calls=[
                         DeltaToolCall(index=self.current_tool_id,
                                       type="function",
-                                      id=random_tool_call_id(),
+                                      id=f"chatcmpl-tool-{random_uuid()}",
                                       function=DeltaFunctionCall(
                                           name=function_name).model_dump(
                                               exclude_none=True))
@@ -250,8 +248,7 @@ class JambaToolParser(ToolParser):
                         "mid-arguments")
                     delta = None
                 elif cur_arguments and not prev_arguments:
-                    cur_arguments_json = json.dumps(cur_arguments,
-                                                    ensure_ascii=False)
+                    cur_arguments_json = json.dumps(cur_arguments)
                     logger.debug("finding %s in %s", new_text,
                                  cur_arguments_json)
 
@@ -270,10 +267,8 @@ class JambaToolParser(ToolParser):
                         self.current_tool_id] += arguments_delta
 
                 elif cur_arguments and prev_arguments:
-                    cur_args_json = json.dumps(cur_arguments,
-                                               ensure_ascii=False)
-                    prev_args_json = json.dumps(prev_arguments,
-                                                ensure_ascii=False)
+                    cur_args_json = json.dumps(cur_arguments)
+                    prev_args_json = json.dumps(prev_arguments)
                     logger.debug("Searching for diff between \n%s\n%s",
                                  cur_args_json, prev_args_json)
 

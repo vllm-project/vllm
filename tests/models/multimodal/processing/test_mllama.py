@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for mllama's multimodal preprocessing and profiling."""
 import pytest
 from transformers import MllamaConfig
@@ -50,7 +49,7 @@ def test_profiling(
                         ] * max_num_seqs
 
     mm_kwargs = processor.apply(
-        prompt=dummy_mm_data.prompt,
+        prompt=dummy_mm_data.prompt_text,
         mm_data=dummy_mm_data.mm_data,
         hf_processor_mm_kwargs=dict(),
     )["mm_kwargs"]

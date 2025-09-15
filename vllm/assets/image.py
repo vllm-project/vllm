@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
 from typing import Literal
@@ -11,12 +10,10 @@ from .base import get_vllm_public_assets
 
 VLM_IMAGES_DIR = "vision_model_images"
 
-ImageAssetName = Literal["stop_sign", "cherry_blossom"]
-
 
 @dataclass(frozen=True)
 class ImageAsset:
-    name: ImageAssetName
+    name: Literal["stop_sign", "cherry_blossom"]
 
     @property
     def pil_image(self) -> Image.Image:

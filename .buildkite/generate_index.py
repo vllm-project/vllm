@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
 import os
@@ -23,5 +22,5 @@ with open("index.html", "w") as f:
     print(f"Generated index.html for {args.wheel}")
     # cloudfront requires escaping the '+' character
     f.write(
-        template.format(wheel=filename, wheel_html_escaped=filename.replace("+", "%2B"))
-    )
+        template.format(wheel=filename,
+                        wheel_html_escaped=filename.replace("+", "%2B")))

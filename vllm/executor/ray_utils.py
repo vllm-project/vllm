@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
 import time
@@ -88,8 +87,9 @@ try:
             # TODO(swang): This is needed right now because Ray Compiled Graph
             # executes on a background thread, so we need to reset torch's
             # current device.
+            import torch
             if not self.compiled_dag_cuda_device_set:
-                current_platform.set_device(self.worker.device)
+                torch.cuda.set_device(self.worker.device)
                 self.compiled_dag_cuda_device_set = True
 
             output = self.worker._execute_model_spmd(execute_model_req,
@@ -113,7 +113,8 @@ try:
                     # Not needed
                     pass
                 else:
-                    current_platform.set_device(self.worker.device)
+                    import torch
+                    torch.cuda.set_device(self.worker.device)
 
                 self.compiled_dag_cuda_device_set = True
 

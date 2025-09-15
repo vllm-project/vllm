@@ -1,14 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # noqa: UP007
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, List
 
-import regex as re
 import torch
 
 import vllm.envs
@@ -176,7 +175,8 @@ class GrammarConfig:
             else:
                 json_str = guided_params.json
 
-            any_whitespace = not guided_params.disable_any_whitespace
+            any_whitespace = 'disable-any-whitespace' not in \
+                    guided_params.backend_options()
 
             # Check and log if model with xgrammar and whitespace have history
             # of runaway generation of whitespaces.
@@ -191,10 +191,11 @@ class GrammarConfig:
                 model_with_warn = 'Qwen'
 
             if model_with_warn is not None and any_whitespace:
-                logger.info_once(
-                    "%s model detected, consider setting `disable_any_whitespace` to prevent runaway generation of whitespaces.",  # noqa: E501
-                    model_with_warn,
-                )
+                msg = (f"{model_with_warn} "
+                       f"model detected, consider set "
+                       f"`guided_backend=xgrammar:disable-any-whitespace` "
+                       f"to prevent runaway generation of whitespaces.")
+                logger.info_once(msg)
             # Validate the schema and raise ValueError here if it is invalid.
             # This is to avoid exceptions in model execution, which will crash
             # the engine worker process.
@@ -274,7 +275,7 @@ class GrammarConfig:
         return re.sub(r'(["\\])', r'\\\1', s)
 
     @staticmethod
-    def choice_as_grammar(choice: list[str] | None) -> str:
+    def choice_as_grammar(choice: List[str] | None) -> str:
         if choice is None:
             raise ValueError("Choice is not set")
         escaped_choices = (GrammarConfig.escape_ebnf_string(c) for c in choice)
@@ -303,9 +304,8 @@ class XGrammarLogitsProcessor:
     prefilled: bool = field(default=False)
 
     def __post_init__(self):
-        if self.tokenizer_info is None:
-            self.tokenizer_info = self.config.tokenizer_info(
-                self.config.tokenizer_data)
+        self.tokenizer_info = self.config.tokenizer_info(
+            self.config.tokenizer_data)
 
     def __getstate__(self) -> dict[str, Any]:
         return {'config': self.config, 'reasoner': self.reasoner}
@@ -348,7 +348,7 @@ class XGrammarLogitsProcessor:
                  scores: torch.Tensor) -> torch.Tensor:
 
         # Skip the structured logits processing if reasoning is not finished.
-        # reasoner is not None only when `--reasoning-parser` is set.
+        # reasoner is not None only when `--enable-reasoning` is set.
         if self.reasoner is not None and \
         not self.reasoner.is_reasoning_end(
                 input_ids):
@@ -402,8 +402,7 @@ class XGrammarLogitsProcessor:
     def clone(self) -> XGrammarLogitsProcessor:
         """Create a new instance with shared compiled grammar
           but separate state"""
-        new_processor = XGrammarLogitsProcessor(self.config, self.reasoner,
-                                                None, self.tokenizer_info)
+        new_processor = XGrammarLogitsProcessor(self.config, self.reasoner)
 
         # Share the compiled grammar context (immutable after compilation)
         new_processor.ctx = self.ctx

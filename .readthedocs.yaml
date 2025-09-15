@@ -8,8 +8,12 @@ build:
   tools:
     python: "3.12"
 
-mkdocs:
-  configuration: mkdocs.yaml
+sphinx:
+  configuration: docs/source/conf.py
+  fail_on_warning: true
+
+# If using Sphinx, optionally build your docs in additional formats such as PDF
+formats: []
 
 # Optionally declare the Python requirements required to build your docs
 python:

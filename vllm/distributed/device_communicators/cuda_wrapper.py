@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """This file is a pure Python wrapper for the cudart library.
 It avoids the need to compile a separate shared library, and is
 convenient for use when we just need to call a few functions.
@@ -7,7 +6,7 @@ convenient for use when we just need to call a few functions.
 
 import ctypes
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 
 # this line makes it possible to directly load `libcudart.so` using `ctypes`
 import torch  # noqa
@@ -33,7 +32,7 @@ class cudaIpcMemHandle_t(ctypes.Structure):
 class Function:
     name: str
     restype: Any
-    argtypes: list[Any]
+    argtypes: List[Any]
 
 
 def find_loaded_library(lib_name) -> Optional[str]:
@@ -98,11 +97,11 @@ class CudaRTLibrary:
 
     # class attribute to store the mapping from the path to the library
     # to avoid loading the same library multiple times
-    path_to_library_cache: dict[str, Any] = {}
+    path_to_library_cache: Dict[str, Any] = {}
 
     # class attribute to store the mapping from library path
     #  to the corresponding dictionary
-    path_to_dict_mapping: dict[str, dict[str, Any]] = {}
+    path_to_dict_mapping: Dict[str, Dict[str, Any]] = {}
 
     def __init__(self, so_file: Optional[str] = None):
         if so_file is None:

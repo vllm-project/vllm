@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Make sure ignore_eos works.
 
 Run `pytest tests/samplers/test_ignore_eos.py`.
@@ -36,7 +35,7 @@ def test_ignore_eos(
                                          ignore_eos=True)
 
         for prompt in example_prompts:
-            ignore_eos_output = vllm_model.llm.generate(
+            ignore_eos_output = vllm_model.model.generate(
                 prompt, sampling_params=sampling_params)
             output_length = len(ignore_eos_output[0].outputs[0].token_ids)
             assert output_length == max_tokens

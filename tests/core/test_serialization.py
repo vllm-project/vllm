@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import msgspec
 
 from vllm.executor.msgspec_utils import decode_hook, encode_hook
 from vllm.sequence import ExecuteModelRequest
 
-from .utils import create_batch
+from ..spec_decode.utils import create_batch
 
 
 def test_msgspec_serialization():

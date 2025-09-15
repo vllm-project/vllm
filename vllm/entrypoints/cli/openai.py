@@ -1,21 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-from __future__ import annotations
+# Commands that act as an interactive OpenAI API client
 
 import argparse
 import os
 import signal
 import sys
-from typing import TYPE_CHECKING
+from typing import Optional
 
 from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam
 
 from vllm.entrypoints.cli.types import CLISubcommand
-
-if TYPE_CHECKING:
-    from vllm.utils import FlexibleArgumentParser
+from vllm.utils import FlexibleArgumentParser
 
 
 def _register_signal_handlers():
@@ -45,7 +41,8 @@ def _interactive_cli(args: argparse.Namespace) -> tuple[str, OpenAI]:
     return model_name, openai_client
 
 
-def chat(system_prompt: str | None, model_name: str, client: OpenAI) -> None:
+def chat(system_prompt: Optional[str], model_name: str,
+         client: OpenAI) -> None:
     conversation: list[ChatCompletionMessageParam] = []
     if system_prompt is not None:
         conversation.append({"role": "system", "content": system_prompt})
@@ -55,7 +52,7 @@ def chat(system_prompt: str | None, model_name: str, client: OpenAI) -> None:
         try:
             input_message = input("> ")
         except EOFError:
-            break
+            return
         conversation.append({"role": "user", "content": input_message})
 
         chat_completion = client.chat.completions.create(model=model_name,
@@ -94,31 +91,25 @@ def _add_query_options(
 
 class ChatCommand(CLISubcommand):
     """The `chat` subcommand for the vLLM CLI. """
-    name = "chat"
+
+    def __init__(self):
+        self.name = "chat"
+        super().__init__()
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
         model_name, client = _interactive_cli(args)
         system_prompt = args.system_prompt
         conversation: list[ChatCompletionMessageParam] = []
-
         if system_prompt is not None:
             conversation.append({"role": "system", "content": system_prompt})
-
-        if args.quick:
-            conversation.append({"role": "user", "content": args.quick})
-
-            chat_completion = client.chat.completions.create(
-                model=model_name, messages=conversation)
-            print(chat_completion.choices[0].message.content)
-            return
 
         print("Please enter a message for the chat model:")
         while True:
             try:
                 input_message = input("> ")
             except EOFError:
-                break
+                return
             conversation.append({"role": "user", "content": input_message})
 
             chat_completion = client.chat.completions.create(
@@ -145,35 +136,22 @@ class ChatCommand(CLISubcommand):
             default=None,
             help=("The system prompt to be added to the chat template, "
                   "used for models that support system prompts."))
-        chat_parser.add_argument("-q",
-                                 "--quick",
-                                 type=str,
-                                 metavar="MESSAGE",
-                                 help=("Send a single prompt as MESSAGE "
-                                       "and print the response, then exit."))
         return chat_parser
 
 
 class CompleteCommand(CLISubcommand):
     """The `complete` subcommand for the vLLM CLI. """
-    name = 'complete'
+
+    def __init__(self):
+        self.name = "complete"
+        super().__init__()
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
         model_name, client = _interactive_cli(args)
-
-        if args.quick:
-            completion = client.completions.create(model=model_name,
-                                                   prompt=args.quick)
-            print(completion.choices[0].text)
-            return
-
         print("Please enter prompt to complete:")
         while True:
-            try:
-                input_prompt = input("> ")
-            except EOFError:
-                break
+            input_prompt = input("> ")
             completion = client.completions.create(model=model_name,
                                                    prompt=input_prompt)
             output = completion.choices[0].text
@@ -190,13 +168,6 @@ class CompleteCommand(CLISubcommand):
                          "via the running API server."),
             usage="vllm complete [options]")
         _add_query_options(complete_parser)
-        complete_parser.add_argument(
-            "-q",
-            "--quick",
-            type=str,
-            metavar="PROMPT",
-            help=
-            "Send a single prompt and print the completion output, then exit.")
         return complete_parser
 
 

@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
 import os
@@ -202,7 +201,8 @@ class LoRANotSupportedWorkerBase(WorkerBase):
         raise ValueError(f"{type(self)} does not support LoRA")
 
     def pin_lora(self, lora_id: int) -> bool:
-        raise ValueError(f"{type(self)} does not support LoRA")
+        return ValueError(
+            f"{type(self)} does not support LoRA")  # type: ignore
 
     def list_loras(self) -> Set[int]:
         raise ValueError(f"{type(self)} does not support LoRA")
@@ -397,6 +397,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
         model_input, worker_input, kwargs = inputs
         num_steps = worker_input.num_steps
+        if (execute_model_req is not None and execute_model_req.spec_step_idx):
+            kwargs["spec_step_idx"] = execute_model_req.spec_step_idx
 
         self.execute_worker(worker_input)
 
@@ -507,7 +509,6 @@ class WorkerWrapperBase:
         """
         self.rpc_rank = rpc_rank
         self.worker: Optional[WorkerBase] = None
-        self.vllm_config: Optional[VllmConfig] = None
         # do not store this `vllm_config`, `init_worker` will set the final
         # one. TODO: investigate if we can remove this field in
         # `WorkerWrapperBase`, `init_cached_hf_modules` should be
@@ -595,8 +596,7 @@ class WorkerWrapperBase:
 
     def initialize_from_config(self, kv_cache_configs: List[Any]) -> None:
         kv_cache_config = kv_cache_configs[self.rpc_rank]
-        with set_current_vllm_config(self.vllm_config):
-            self.worker.initialize_from_config(kv_cache_config)  # type: ignore
+        self.worker.initialize_from_config(kv_cache_config)  # type: ignore
 
     def init_device(self):
         with set_current_vllm_config(self.vllm_config):

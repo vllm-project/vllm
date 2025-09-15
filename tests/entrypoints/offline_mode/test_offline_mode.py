@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for HF_HUB_OFFLINE mode"""
 import importlib
 import sys

@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only PLaMo2 model."""
 import math
-from collections.abc import Iterable
-from typing import Optional
+from typing import Iterable, Optional, Tuple
 
 import torch
 from torch import nn
@@ -26,6 +24,7 @@ from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
     selective_scan_fn, selective_state_update)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -629,6 +628,7 @@ class Plamo2ForCausalLM(Plamo2PreTrainedModel, HasInnerState, IsHybrid,
 
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 self.config.vocab_size)
+        self.sampler = get_sampler()
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -661,7 +661,7 @@ class Plamo2ForCausalLM(Plamo2PreTrainedModel, HasInnerState, IsHybrid,
         return self.mamba_cache.get_seqlen_agnostic_capture_inputs(batch_size)
 
     def _get_mamba_cache_shape(
-            self) -> tuple[tuple[int, int], tuple[int, int]]:
+            self) -> Tuple[Tuple[int, int], Tuple[int, int]]:
         world_size = get_tensor_model_parallel_world_size()
         hidden_size = (self.config.mamba_num_heads *
                        self.config.hidden_size_per_head)
@@ -684,7 +684,15 @@ class Plamo2ForCausalLM(Plamo2PreTrainedModel, HasInnerState, IsHybrid,
                                        sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+    def sample(
+        self,
+        logits: Optional[torch.Tensor],
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[SamplerOutput]:
+        next_tokens = self.sampler(logits, sampling_metadata)
+        return next_tokens
+
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
 
