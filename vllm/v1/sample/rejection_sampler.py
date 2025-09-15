@@ -17,7 +17,7 @@ PLACEHOLDER_TOKEN_ID: tl.constexpr = -1
 GREEDY_TEMPERATURE: tl.constexpr = -1
 # Maximum number of speculative draft tokens allowed per request in a single
 # step. This value is chosen to be large enough to handle typical use cases.
-# For example, in FR-SPEC (https://github.com/thunlp/FR-Spec/tree/main) 
+# For example, in FR-SPEC (https://github.com/thunlp/FR-Spec/tree/main)
 # they get a huge speedup with 60 speculative tokens
 MAX_SPEC_LEN = 64
 
@@ -84,6 +84,7 @@ class RejectionSampler(nn.Module):
             output_token_ids (torch.Tensor):
                 A tensor containing the final output token IDs.
         '''
+        ic(draft_probs.shape if draft_probs else draft_probs)
         assert metadata.max_spec_len <= MAX_SPEC_LEN
         # [num_tokens, vocab_size]
         # NOTE(woosuk): `target_logits` can be updated in place inside the
@@ -164,6 +165,8 @@ def rejection_sample(
     assert target_probs.is_contiguous()
     assert bonus_token_ids.is_contiguous()
     assert target_probs.shape == (num_tokens, vocab_size)
+
+    ic(batch_size, num_tokens, vocab_size)
 
     # Create output buffer.
     output_token_ids = torch.empty(

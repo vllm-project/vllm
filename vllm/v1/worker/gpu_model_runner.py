@@ -1709,6 +1709,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 sampling_metadata,
             )
             sampler_output.sampled_token_ids = output_token_ids
+            ic(target_logits.shape, bonus_token_ids.shape)
 
         return sampler_output
 
@@ -1910,6 +1911,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
             et = time.perf_counter()
             ic(f'target model forward: {et - st}')
+            ic(input_ids.shape)
 
         with record_function_or_nullcontext("Postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -2637,6 +2639,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
                 et = time.perf_counter()
                 ic(f'target model forward: {et - st}')
+                ic(input_ids.shape)
 
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
