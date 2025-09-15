@@ -280,6 +280,10 @@ class Attention(nn.Module, AttentionLayerBase):
             # We skip reshaping query, key and value tensors for the MLA
             # backend since these tensors have different semantics and are
             # processed differently.
+            if envs.VLLM_FUSE_QUERY_QUANT:
+                assert self._q_scale.numel() == 1
+                query = (query / self._q_scale).to(torch.float8_e4m3fn)
+
             if not self.use_mla:
                 # Reshape the query, key, and value tensors.
                 # NOTE(woosuk): We do this outside the custom op to minimize the

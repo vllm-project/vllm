@@ -7,6 +7,7 @@ from typing import Optional
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm import envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
@@ -510,12 +511,13 @@ class FlashAttentionImpl(AttentionImpl):
                 self.kv_cache_dtype)
             key_cache = key_cache.view(dtype)
             value_cache = value_cache.view(dtype)
-            num_tokens, num_heads, head_size = query.shape
-            query, _ = ops.scaled_fp8_quant(
-                query.reshape(
-                    (num_tokens, num_heads * head_size)).contiguous(),
-                layer._q_scale)
-            query = query.reshape((num_tokens, num_heads, head_size))
+            if not envs.VLLM_FUSE_QUERY_QUANT:
+                num_tokens, num_heads, head_size = query.shape
+                query, _ = ops.scaled_fp8_quant(
+                    query.reshape(
+                        (num_tokens, num_heads * head_size)).contiguous(),
+                    layer._q_scale)
+                query = query.reshape((num_tokens, num_heads, head_size))
 
         if not attn_metadata.use_cascade:
             cu_seqlens_q = attn_metadata.query_start_loc
