@@ -3157,12 +3157,25 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             remove_lora=False)
         self.maybe_remove_all_loras(self.lora_config)
 
-    def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_attn_backend(self,
+                                kv_cache_config: KVCacheConfig,
+                                incremental: bool = False) -> None:
         """
         Initialize the attention backends and attention metadata builders.
+
+        Args:
+            kv_cache_config: The KV cache configuration
+            incremental: If True, only initialize backends 
+            for newly added groups.
+            If False, initialize all groups
+            (asserts attn_groups is empty).
         """
-        assert len(self.attn_groups) == 0, \
-            "Attention backends are already initialized"
+        if not incremental:
+            assert len(self.attn_groups) == 0, \
+                "Attention backends are already initialized"
+
+        # If incremental, start from the existing group count
+        start_group_idx = len(self.attn_groups) if incremental else 0
 
         def get_attn_backends_for_layers(
                 layer_names: list[str]
@@ -3212,7 +3225,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 attn_groups.append(attn_group)
             return attn_groups
 
-        for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
+        # Only process groups starting from start_group_idx
+        for i in range(start_group_idx, len(kv_cache_config.kv_cache_groups)):
+            kv_cache_group_spec = kv_cache_config.kv_cache_groups[i]
             kv_cache_spec = kv_cache_group_spec.kv_cache_spec
             attn_backends = get_attn_backends_for_layers(
                 kv_cache_group_spec.layer_names)
@@ -3630,11 +3645,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         """
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
+        self.initialize_attn_backend(kv_cache_config)
+        # Reinitialize input batch (depends on attn_groups)
+        self.may_reinitialize_input_batch(kv_cache_config)
         self.may_add_encoder_only_layers_to_kv_cache_config()
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
-        self.initialize_attn_backend(kv_cache_config)
-        # Reinitialize need to after initialize_attn_backend
-        self.may_reinitialize_input_batch(kv_cache_config)
+        self.initialize_attn_backend(kv_cache_config, incremental=True)
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
 
         if self.speculative_config and self.speculative_config.use_eagle():
