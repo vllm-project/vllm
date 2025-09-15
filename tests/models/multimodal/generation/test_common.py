@@ -321,7 +321,6 @@ VLM_TEST_SETTINGS = {
         multi_image_prompt="Image-1: <image>\nImage-2: <image>\nDescribe the two images in short.",  # noqa: E501
         max_model_len=8192,
         use_tokenizer_eos=True,
-        image_size_factors=[(1.0,)],
         auto_cls=AutoModel,
         vllm_runner_kwargs={"mm_processor_kwargs": {"max_dynamic_tiles": 12}},
         patch_hf_runner=model_utils.eagle2_5_patch_hf_runner,
