@@ -373,6 +373,24 @@ async def test_code_interpreter(client: OpenAI, model_name: str):
     assert response.status == "completed"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.skip(reason="Code interpreter tool is not available in CI yet.")
+async def test_mcp_tool(client: OpenAI, model_name: str):
+    response = await client.responses.create(
+        model=model_name,
+        input="Please multiply 123 and 456 using the available python tool.",
+        tools=[{
+            "type": "mcp",
+            "server_label": "code_interpreter",
+            # URL unused for DemoToolServer
+            "server_url": "http://localhost:8888"
+        }],
+    )
+    assert response is not None
+    assert response.status == "completed"
+
+
 def get_weather(latitude, longitude):
     response = requests.get(
         f"https://api.open-meteo.com/v1/forecast?latitude={latitude}&longitude={longitude}&current=temperature_2m,wind_speed_10m&hourly=temperature_2m,relative_humidity_2m,wind_speed_10m"  # noqa
