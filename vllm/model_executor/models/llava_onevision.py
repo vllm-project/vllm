@@ -216,12 +216,9 @@ class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> int:
-        max_images = mm_counts.get("image", 0)
         max_videos = mm_counts.get("video", 0)
 
-        max_image_tokens = self.get_max_image_tokens() * max_images
-        max_total_frames = self._get_max_video_frames(seq_len -
-                                                      max_image_tokens)
+        max_total_frames = self._get_max_video_frames(seq_len)
         max_frames_per_video = min(max_total_frames // max(max_videos, 1),
                                    _MAX_FRAMES_PER_VIDEO)
 
@@ -838,7 +835,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
             return None
 
         # The result multimodal_embeddings is tuple of tensors, with each
-        # tensor correspoending to a multimodal data item (image or video).
+        # tensor corresponding to a multimodal data item (image or video).
         multimodal_embeddings: tuple[torch.Tensor, ...] = ()
 
         # NOTE: It is important to iterate over the keys in this dictionary

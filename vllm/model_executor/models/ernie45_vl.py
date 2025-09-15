@@ -34,6 +34,7 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 from transformers import BatchFeature
 
+from vllm.attention.layer import check_upstream_fa_availability
 from vllm.config import VllmConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
@@ -65,8 +66,6 @@ from .utils import (AutoWeightsLoader, WeightsMapper, maybe_prefix,
 from .vision import get_vit_attn_backend
 
 logger = init_logger(__name__)
-
-_MAX_FRAMES_PER_VIDEO = 16
 
 # === Vision Transformer === #
 
@@ -172,7 +171,16 @@ class Ernie4_5_VisionAttention(nn.Module):
                                       prefix=f"{prefix}.proj")
 
         # Detect attention implementation.
-        self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
+        self.attn_backend = get_vit_attn_backend(
+            head_size=self.hidden_size_per_attention_head,
+            dtype=torch.get_default_dtype())
+
+        self.use_upstream_fa = False
+        if self.attn_backend != _Backend.FLASH_ATTN and \
+            check_upstream_fa_availability(torch.get_default_dtype()):
+            self.attn_backend = _Backend.FLASH_ATTN
+            self.use_upstream_fa = True
+
         if self.attn_backend not in {
                 _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS,
                 _Backend.ROCM_AITER_FA
@@ -235,7 +243,10 @@ class Ernie4_5_VisionAttention(nn.Module):
             if self.attn_backend == _Backend.ROCM_AITER_FA:
                 from aiter import flash_attn_varlen_func
             else:
-                from flash_attn import flash_attn_varlen_func
+                if self.use_upstream_fa:
+                    from flash_attn import flash_attn_varlen_func
+                else:
+                    from vllm.vllm_flash_attn import flash_attn_varlen_func
 
             q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
 
@@ -459,7 +470,11 @@ class Ernie4_5_VisionTransformer(nn.Module):
                 ), "vit's config.hidden must be equal to config.embed_dim"
         self.ln = nn.LayerNorm(hidden_size, eps=1e-6)
 
-        self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
+        self.attn_backend = get_vit_attn_backend(
+            head_size=head_dim, dtype=torch.get_default_dtype())
+        if self.attn_backend != _Backend.FLASH_ATTN and \
+        check_upstream_fa_availability(torch.get_default_dtype()):
+            self.attn_backend = _Backend.FLASH_ATTN
 
     @property
     def dtype(self) -> torch.dtype:
@@ -839,6 +854,15 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None, "video": None}
 
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        max_image_tokens = self.get_max_image_tokens()
+        max_video_tokens = self.get_max_video_tokens(seq_len, mm_counts)
+        return {"image": max_image_tokens, "video": max_video_tokens}
+
     def _get_vision_info(
         self,
         *,
@@ -964,8 +988,7 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         max_image_tokens = self.get_max_image_tokens() * max_images
         max_total_frames = self._get_max_video_frames(seq_len -
                                                       max_image_tokens)
-        max_frames_per_video = min(max_total_frames // max(max_videos, 1),
-                                   _MAX_FRAMES_PER_VIDEO)
+        max_frames_per_video = max_total_frames // max(max_videos, 1)
 
         return max(max_frames_per_video, 2)
 
@@ -1315,7 +1338,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(nn.Module, SupportsMultiModal,
                 raise ValueError(f"{name} should be 2D or batched 3D tensor. "
                                  f"Got ndim: {mm_input.ndim} "
                                  f"(shape={mm_input.shape})")
-            return torch.concat(list(mm_input))
+            return mm_input.reshape(-1, mm_input.shape[-1])
         else:
             return torch.concat(mm_input)
 
@@ -1423,7 +1446,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(nn.Module, SupportsMultiModal,
             return None
 
         # The result multimodal_embeddings is tuple of tensors, with each
-        # tensor correspoending to a multimodal data item (image or video).
+        # tensor corresponding to a multimodal data item (image or video).
         multimodal_embeddings: tuple[torch.Tensor, ...] = ()
 
         # NOTE: It is important to iterate over the keys in this dictionary
