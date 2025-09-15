@@ -52,6 +52,7 @@ _TEXT_GENERATION_MODELS = {
     # baichuan-13b, lower case 'c' in the class name
     "BaichuanForCausalLM": ("baichuan", "BaichuanForCausalLM"),
     "BailingMoeForCausalLM": ("bailing_moe", "BailingMoeForCausalLM"),
+    "BailingMoeV2ForCausalLM": ("bailing_moe", "BailingMoeV2ForCausalLM"),
     "BambaForCausalLM": ("bamba", "BambaForCausalLM"),
     "BloomForCausalLM": ("bloom", "BloomForCausalLM"),
     "ChatGLMModel": ("chatglm", "ChatGLMForCausalLM"),
@@ -74,6 +75,7 @@ _TEXT_GENERATION_MODELS = {
     "Gemma2ForCausalLM": ("gemma2", "Gemma2ForCausalLM"),
     "Gemma3ForCausalLM": ("gemma3", "Gemma3ForCausalLM"),
     "Gemma3nForCausalLM": ("gemma3n", "Gemma3nForCausalLM"),
+    "Qwen3NextForCausalLM": ("qwen3_next", "Qwen3NextForCausalLM"),
     "GlmForCausalLM": ("glm", "GlmForCausalLM"),
     "Glm4ForCausalLM": ("glm4", "Glm4ForCausalLM"),
     "Glm4MoeForCausalLM": ("glm4_moe", "Glm4MoeForCausalLM"),
@@ -110,6 +112,7 @@ _TEXT_GENERATION_MODELS = {
     "MiniCPM3ForCausalLM": ("minicpm3", "MiniCPM3ForCausalLM"),
     "MistralForCausalLM": ("llama", "LlamaForCausalLM"),
     "MixtralForCausalLM": ("mixtral", "MixtralForCausalLM"),
+    "MotifForCausalLM": ("motif", "MotifForCausalLM"),
     # transformers's mpt class has lower case
     "MptForCausalLM": ("mpt", "MPTForCausalLM"),
     "MPTForCausalLM": ("mpt", "MPTForCausalLM"),
@@ -118,6 +121,7 @@ _TEXT_GENERATION_MODELS = {
     "NemotronHForCausalLM": ("nemotron_h", "NemotronHForCausalLM"),
     "OlmoForCausalLM": ("olmo", "OlmoForCausalLM"),
     "Olmo2ForCausalLM": ("olmo2", "Olmo2ForCausalLM"),
+    "Olmo3ForCausalLM": ("olmo2", "Olmo2ForCausalLM"),
     "OlmoeForCausalLM": ("olmoe", "OlmoeForCausalLM"),
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
     "OrionForCausalLM": ("orion", "OrionForCausalLM"),
@@ -223,6 +227,7 @@ _MULTIMODAL_MODELS = {
     "GraniteSpeechForConditionalGeneration": ("granite_speech", "GraniteSpeechForConditionalGeneration"),  # noqa: E501
     "H2OVLChatModel": ("h2ovl", "H2OVLChatModel"),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
+    "NemotronH_Nano_VL": ("nano_nemotron_vl", "NemotronH_Nano_VL"),
     "InternS1ForConditionalGeneration": ("interns1", "InternS1ForConditionalGeneration"),  # noqa: E501
     "InternVLForConditionalGeneration": ("interns1", "InternS1ForConditionalGeneration"),  # noqa: E501
     "Idefics3ForConditionalGeneration":("idefics3","Idefics3ForConditionalGeneration"),
@@ -277,13 +282,13 @@ _SPECULATIVE_DECODING_MODELS = {
     "EagleLlama4ForCausalLM": ("llama4_eagle", "EagleLlama4ForCausalLM"),
     "EagleMiniCPMForCausalLM": ("minicpm_eagle", "EagleMiniCPMForCausalLM"),
     "Eagle3LlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
-    # TODO: Re-enable this once tests/models/test_initialization.py is fixed, see PR #22333 #22611  # noqa: E501
-    # "LlamaForCausalLMEagle3": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
+    "LlamaForCausalLMEagle3": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "EagleDeepSeekMTPModel": ("deepseek_eagle", "EagleDeepseekV3ForCausalLM"),
     "DeepSeekMTPModel": ("deepseek_mtp", "DeepSeekMTP"),
     "ErnieMTPModel": ("ernie_mtp", "ErnieMTP"),
     "Glm4MoeMTPModel": ("glm4_moe_mtp", "Glm4MoeMTP"),
     "MedusaModel": ("medusa", "Medusa"),
+    "Qwen3NextMTP": ("qwen3_next_mtp", "Qwen3NextMTP"),
     # Temporarily disabled.
     # # TODO(woosuk): Re-enable this once the MLP Speculator is supported in V1.
     # "MLPSpeculatorPreTrainedModel": ("mlp_speculator", "MLPSpeculator"),

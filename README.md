@@ -15,6 +15,9 @@ Easy, fast, and cheap LLM serving for everyone
 </p>
 
 ---
+Join us at the [PyTorch Conference, October 22-23](https://events.linuxfoundation.org/pytorch-conference/) and [Ray Summit, November 3-5](https://www.anyscale.com/ray-summit/2025) in San Francisco for our latest updates on vLLM and to meet the vLLM team! Register now for the largest vLLM community events of the year!
+
+---
 
 *Latest News* 🔥
 
@@ -78,7 +81,7 @@ vLLM is flexible and easy to use with:
 - Tensor, pipeline, data and expert parallelism support for distributed inference
 - Streaming outputs
 - OpenAI-compatible API server
-- Support NVIDIA GPUs, AMD CPUs and GPUs, Intel CPUs and GPUs, PowerPC CPUs, TPU, and AWS Neuron
+- Support for NVIDIA GPUs, AMD CPUs and GPUs, Intel CPUs and GPUs, PowerPC CPUs, and TPU. Additionally, support for diverse hardware plugins such as Intel Gaudi, IBM Spyre and Huawei Ascend.
 - Prefix caching support
 - Multi-LoRA support
 

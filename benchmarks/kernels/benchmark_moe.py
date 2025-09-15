@@ -594,7 +594,11 @@ def main(args: argparse.Namespace):
         E = config.n_routed_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
-    elif config.architectures[0] in ("Qwen2MoeForCausalLM", "Qwen3MoeForCausalLM"):
+    elif config.architectures[0] in (
+        "Qwen2MoeForCausalLM",
+        "Qwen3MoeForCausalLM",
+        "Qwen3NextForCausalLM",
+    ):
         E = config.num_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
