@@ -665,7 +665,7 @@ class MiDashengLMModel(nn.Module, SupportsMultiModal, SupportsPP):
             raise ValueError(f"Incorrect type of {name}. "
                              f"Got type: {type(mm_input)}")
         if isinstance(mm_input, torch.Tensor):
-            return torch.concat(list(mm_input))
+            return mm_input.reshape(-1, *mm_input.shape[2:])
 
         if name == "input_values":
             max_length = max(tensor.shape[1] for tensor in mm_input)
