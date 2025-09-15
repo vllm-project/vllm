@@ -61,12 +61,14 @@ class SingleTypeKVCacheManager(ABC):
             new_computed_blocks: list[KVCacheBlock]) -> int:
         """
         Get the number of blocks needed to be allocated for the request.
+
         Args:
             request_id: The request ID.
             num_tokens: The total number of tokens that need a slot (including 
                 tokens that are already allocated).
             new_computed_blocks: The new computed blocks just hitting the
                 prefix caching.
+
         Returns:
             The number of blocks.
         """
@@ -397,35 +399,6 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         """
         return 0
 
-    def get_num_blocks_to_allocate(
-        self,
-        request_id: str,
-        total_tokens_need_slots: int,
-        new_computed_blocks: list[KVCacheBlock],
-        total_computed_tokens: int = 0,
-    ) -> int:
-        """
-        Get the # of blocks to allocate for the request with prefix cache
-        from connector.
-
-        The maximum # of blocks we need is the last sliding window in the
-        prefix cache, plus the blocks for new tokens.
-
-        NOTE(Kuntai): it is OK to slightly overclaim the number of blocks.
-        """
-
-        # The maximum # of blocks we need for sliding window layer is
-        # one sliding window of blocks for entire prefix, plus the new tokens.
-        num_new_tokens = total_tokens_need_slots - total_computed_tokens
-        max_blocks = cdiv(self.sliding_window + num_new_tokens,
-                          self.block_size) + 1
-        return min(super().get_num_blocks_to_allocate(
-            request_id,
-            total_tokens_need_slots,
-            new_computed_blocks,
-            total_computed_tokens,
-        ), max_blocks + 1)  # overclaim 1 block just in case.
-
 
 class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
 
@@ -544,34 +517,6 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
             blocks[i] = self._null_block
         self.block_pool.free_blocks(removed_blocks)
 
-    def get_num_blocks_to_allocate(
-        self,
-        request_id: str,
-        total_tokens_need_slots: int,
-        new_computed_blocks: list[KVCacheBlock],
-        total_computed_tokens: int = 0,
-    ) -> int:
-        """
-        Get the # of blocks to allocate for the request with prefix cache
-        from connector.
-
-        The maximum # of blocks we need is the last sliding window in the
-        prefix cache, plus the blocks for new tokens.
-        """
-
-        # The maximum # of blocks we need for sliding window layer is
-        # one chunk of blocks for entire prefix, plus the new tokens.
-        num_new_tokens = total_tokens_need_slots - total_computed_tokens
-        max_blocks = cdiv(self.attention_chunk_size + num_new_tokens,
-                          self.block_size) + 1
-        return min(
-            super().get_num_blocks_to_allocate(
-                request_id,
-                total_tokens_need_slots,
-                new_computed_blocks,
-                total_computed_tokens,
-            ), max_blocks + 1)
-
     def get_num_common_prefix_blocks(self, request_id: str,
                                      num_running_requests: int) -> int:
         """
@@ -658,18 +603,6 @@ class MambaManager(SingleTypeKVCacheManager):
 class CrossAttentionManager(SingleTypeKVCacheManager):
     """Manager for cross-attention KV cache in encoder-decoder models."""
 
-    def remove_skipped_blocks(self, request_id: str,
-                              num_computed_tokens: int) -> None:
-        """
-        Remove the blocks that are no longer needed from `blocks` and free the 
-        blocks. The removed blocks should be replaced by null_block.
-        Need to be customized for each attention type.
-        Args:
-            request_id: The request ID.
-            num_computed_tokens: The number of tokens that have been computed.
-        """
-        pass
-
     def save_new_computed_blocks(
             self, request_id: str,
             new_computed_blocks: list[KVCacheBlock]) -> None:
@@ -710,6 +643,12 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         # Return empty blocks to indicate no cache hits
         raise NotImplementedError(
             "CrossAttentionManager does not support caching")
+
+    def remove_skipped_blocks(self, request_id: str,
+                              num_computed_tokens: int) -> None:
+        # Cross-attention blocks represent encoder states which are needed
+        # for the entire decoding process, so no blocks should be skipped
+        pass
 
 
 spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
