@@ -228,7 +228,7 @@ class EagleProposer:
                 inputs_embeds=inputs_embeds,
             )
             et = time.perf_counter()
-            ic(f'target model forward: {et - st:.2f}')
+            ic(f'drafter forward: {et - st}')
             if self.method in ("deepseek_mtp", "ernie_mtp"):
                 last_hidden_states = ret_hidden_states
                 hidden_states = last_hidden_states
@@ -337,12 +337,15 @@ class EagleProposer:
             with set_forward_context(per_layer_attn_metadata,
                                      self.vllm_config,
                                      num_tokens=input_batch_size):
+                st = time.perf_counter()
                 last_hidden_states, hidden_states = self.model(
                     input_ids=input_ids,
                     positions=self.positions[:input_batch_size],
                     hidden_states=self.hidden_states[:input_batch_size],
                     inputs_embeds=inputs_embeds,
                 )
+                et = time.perf_counter()
+                ic(f'drafter forward: {et - st}')
             hidden_states = hidden_states[:batch_size]
             logits = self.model.compute_logits(last_hidden_states[:batch_size],
                                                None)
@@ -492,12 +495,15 @@ class EagleProposer:
             with set_forward_context(per_layer_attn_metadata,
                                      self.vllm_config,
                                      num_tokens=num_input_tokens):
+                st = time.perf_counter()
                 last_hidden_states, hidden_states = self.model(
                     input_ids=self.input_ids[:num_input_tokens],
                     positions=self.positions[:num_input_tokens],
                     hidden_states=self.hidden_states[:num_input_tokens],
                     inputs_embeds=None,
                 )
+                et = time.perf_counter()
+                ic(f'drafter forward: {et - st}')
 
             # Get the output hidden states for the draft tokens.
             draft_hidden_states = hidden_states[:num_tokens].view(

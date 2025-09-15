@@ -1900,6 +1900,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         ), record_function_or_nullcontext("Forward"),
               self.maybe_get_kv_connector_output(scheduler_output) as
               kv_connector_output):
+            st = time.perf_counter()
             model_output = self.model(
                 input_ids=input_ids,
                 positions=positions,
@@ -1907,6 +1908,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
+            et = time.perf_counter()
+            ic(f'target model forward: {et - st}')
 
         with record_function_or_nullcontext("Postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -1973,7 +1976,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.speculative_config:
             assert spec_decode_common_attn_metadata is not None
             with record_function_or_nullcontext("Draft"):
-                st = time.perf_counter()
                 self._draft_token_ids = self.propose_draft_token_ids(
                     scheduler_output,
                     valid_sampled_token_ids,
@@ -1984,8 +1986,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     spec_decode_metadata,
                     spec_decode_common_attn_metadata,
                 )
-                et = time.perf_counter()
-                ic(f"drafter forward: {et-st:.2f}")
 
         with record_function_or_nullcontext("EPLB"):
             self.eplb_step()
@@ -2627,6 +2627,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     num_tokens_across_dp=num_tokens_across_dp,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_descriptor):
+                st = time.perf_counter()
                 outputs = self.model(
                     input_ids=input_ids,
                     positions=positions,
@@ -2634,6 +2635,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     inputs_embeds=inputs_embeds,
                     **model_kwargs,
                 )
+                et = time.perf_counter()
+                ic(f'target model forward: {et - st}')
 
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
