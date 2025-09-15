@@ -514,7 +514,7 @@ class MoonVitEncoderLayer(nn.Module):
 
         residual = hidden_states
         hidden_states = self.mlp(self.norm1(hidden_states))
-        hidden_states = residual + hidden_states
+        hidden_states += residual
         return hidden_states
 
 

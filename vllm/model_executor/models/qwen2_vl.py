@@ -477,7 +477,7 @@ class Qwen2VisionBlock(nn.Module):
             max_seqlen: Optional[int] = None,  # Only used for Flash Attention
             seqlens: Optional[list[int]] = None,  # Only used for xFormers
     ) -> torch.Tensor:
-        x = x + self.attn(
+        x += self.attn(
             self.norm1(x),
             cu_seqlens=cu_seqlens,
             rotary_pos_emb=rotary_pos_emb,
@@ -485,7 +485,7 @@ class Qwen2VisionBlock(nn.Module):
             seqlens=seqlens,
         )
 
-        x = x + self.mlp(self.norm2(x))
+        x += self.mlp(self.norm2(x))
         return x
 
 

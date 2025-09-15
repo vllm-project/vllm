@@ -624,7 +624,7 @@ class Glm4vVisionEmbeddings(nn.Module):
                 pos_embed_weight.dtype).to(embeddings.device)
 
         # Add adapted position encoding to embeddings
-        embeddings = embeddings + adapted_pos_embed
+        embeddings += adapted_pos_embed
         return embeddings
 
 

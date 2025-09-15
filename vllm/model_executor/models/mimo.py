@@ -86,7 +86,7 @@ class MiMoModel(Qwen2Model):
                 "hidden_states": hidden_states,
                 "residual": residual
             })
-        hidden_states = hidden_states + residual
+        hidden_states += residual
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str,

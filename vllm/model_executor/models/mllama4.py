@@ -349,13 +349,13 @@ class Llama4VisionEncoderLayer(nn.Module):
         residual = hidden_state
         hidden_state = self.input_layernorm(hidden_state)
         hidden_state = self.self_attn(hidden_state)
-        hidden_state = residual + hidden_state
+        hidden_state += residual
 
         # Feed forward
         residual = hidden_state
         hidden_state = self.post_attention_layernorm(hidden_state)
         hidden_state = self.mlp(hidden_state)
-        hidden_state = residual + hidden_state
+        hidden_state += residual
 
         outputs = (hidden_state, )
         return outputs
@@ -506,7 +506,7 @@ class Llama4VisionModel(nn.Module):
         )
         positional_embedding = self.positional_embedding_vlm.to(
             dtype=hidden_state.dtype, device=hidden_state.device)
-        hidden_state = hidden_state + positional_embedding
+        hidden_state += positional_embedding
         hidden_state = self.layernorm_pre(hidden_state)
         hidden_state = hidden_state.view(num_tiles, -1, hidden_dim)
 

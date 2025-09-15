@@ -327,7 +327,7 @@ class Grok1Model(nn.Module):
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
-        hidden_states = hidden_states * self.embedding_multiplier_scale
+        hidden_states *= self.embedding_multiplier_scale
         return hidden_states
 
     def forward(

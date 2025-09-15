@@ -131,7 +131,7 @@ class Siglip2VisionEmbeddings(nn.Module):
                 pe = pe.permute(0, 1, 3, 2, 4, 5).reshape(volume, -1)
                 pos_embed_new[cnt:cnt + volume] = pe
                 cnt += volume
-            patch_embeds = patch_embeds + pos_embed_new
+            patch_embeds += pos_embed_new
 
         return patch_embeds
 
@@ -400,12 +400,12 @@ class Siglip2EncoderLayer(nn.Module):
         hidden_states = self.self_attn(hidden_states=hidden_states,
                                        cu_seqlens=cu_seqlens,
                                        position_embeddings=position_embeddings)
-        hidden_states = residual + hidden_states
+        hidden_states += residual
 
         residual = hidden_states
         hidden_states = self.layer_norm2(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
+        hidden_states += residual
         return hidden_states
 
 

@@ -299,13 +299,12 @@ class KeyeVisionEmbeddings(nn.Module):
                     image_embeddings = embeddings[start:end, :]
                     position_embedding = (self.interpolate_pos_encoding(
                         image_embeddings, h, w, True).squeeze(0).repeat(t, 1))
-                    image_embeddings = image_embeddings + position_embedding
+                    image_embeddings += position_embedding
                     tmp_embeddings.append(image_embeddings)
                     start = end
                 embeddings = torch.concat(tmp_embeddings, dim=0).unsqueeze(0)
             else:
-                embeddings = embeddings + self.packing_position_embedding(
-                    position_ids)
+                embeddings += self.packing_position_embedding(position_ids)
             return embeddings
         else:
             raise ValueError("Unsupported pixel_values dimension:"
@@ -545,13 +544,13 @@ class KeyeSiglipEncoderLayer(nn.Module):
             rope_emb=rope_emb,
         )
 
-        hidden_states = residual + hidden_states
+        hidden_states += residual
 
         residual = hidden_states
         hidden_states = self.layer_norm2(hidden_states)
         hidden_states = self.mlp(hidden_states)
 
-        hidden_states = residual + hidden_states
+        hidden_states += residual
 
         return hidden_states
 

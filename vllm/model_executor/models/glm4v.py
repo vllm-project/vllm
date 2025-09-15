@@ -344,7 +344,7 @@ class EVA2CLIPModel(nn.Module):
         boi = self.boi.expand(x.shape[0], -1, -1)
         eoi = self.eoi.expand(x.shape[0], -1, -1)
         x = torch.cat((boi, x, eoi), dim=1)
-        x = x / self.scaling_factor
+        x /= self.scaling_factor
         return x
 
 
