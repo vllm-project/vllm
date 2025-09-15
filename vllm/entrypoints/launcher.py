@@ -33,7 +33,7 @@ async def serve_http(app: FastAPI,
     options.  Supports http header limits via h11_max_incomplete_event_size and
     h11_max_header_count.
     """
-    logger.info("Available routes are:")
+    logger.debug_once("Available routes are:")
     for route in app.routes:
         methods = getattr(route, "methods", None)
         path = getattr(route, "path", None)
@@ -41,7 +41,7 @@ async def serve_http(app: FastAPI,
         if methods is None or path is None:
             continue
 
-        logger.info("Route: %s, Methods: %s", path, ', '.join(methods))
+        logger.debug("Route: %s, Methods: %s", path, ', '.join(methods))
 
     # Extract header limit options if present
     h11_max_incomplete_event_size = uvicorn_kwargs.pop(
