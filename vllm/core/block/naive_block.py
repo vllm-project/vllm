@@ -182,7 +182,7 @@ class NaiveBlockAllocator(BlockAllocator):
             # Increment refcount for each block.
             assert block.block_id is not None
             refcount = self._refcounter.incr(block.block_id)
-            assert refcount != 1, "can't fork free'd block"
+            assert refcount != 1, "can't fork freed block"
 
             forked_block = self._block_pool.init_block(
                 prev_block=prev_block,

@@ -200,11 +200,6 @@ def use_trtllm_attention(
         logger.info_once("Using TRTLLM attention (query is quantized).")
         return True
 
-    # TRTLLM prefill attention does not support FP8 kv cache with
-    # non-quantized query
-    if is_prefill and kv_cache_dtype.startswith("fp8"):
-        return False
-
     # If sinks are being used, we must use TRTLLM attention as it's
     # the only backend that supports them
     if has_sinks:
@@ -351,6 +346,12 @@ def flashinfer_scaled_fp8_mm(
     if bias is not None:
         output = output + bias
     return output
+
+
+@functools.cache
+def flashinfer_disable_q_quantization() -> bool:
+    """Cache result which only depends on the environment"""
+    return envs.VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION
 
 
 __all__ = [
