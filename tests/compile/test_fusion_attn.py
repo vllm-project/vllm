@@ -198,7 +198,8 @@ class AttentionQuantPatternModel(torch.nn.Module):
             device=self.device,
         )
 
-    def build_attn_metadata(self, batch_size: int, use_hnd: bool) -> AttentionMetadata:
+    def build_attn_metadata(self, batch_size: int, use_hnd: bool) \
+            -> AttentionMetadata:
         """Initialize attention metadata."""
 
         # Create common attn metadata
