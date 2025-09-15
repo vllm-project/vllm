@@ -463,6 +463,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "ROCM_FLASH": use ROCmFlashAttention
     # - "FLASHINFER": use flashinfer
     # - "FLASHMLA": use FlashMLA
+    # - "FLASH_ATTN_MLA": use FlashAttention for MLA
     "VLLM_ATTENTION_BACKEND":
     lambda: os.getenv("VLLM_ATTENTION_BACKEND", None),
 
@@ -1063,7 +1064,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # vllm should use flashinfer fused allreduce. The variable should be a
     # JSON with the following format:
     #     { <world size>: <max size in mb> }
-    # Unspecified world sizes will fallback to
+    # Unspecified world sizes will fall back to
     #     { 2: 64, 4: 1, <everything else>: 0.5 }
     "VLLM_FLASHINFER_ALLREDUCE_FUSION_THRESHOLDS_MB":
     lambda: json.loads(os.getenv(
