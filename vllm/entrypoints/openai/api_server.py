@@ -721,7 +721,6 @@ async def create_chat_completion(request: ChatCompletionRequest,
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
-
 @router.post("/v1/completions",
              dependencies=[Depends(validate_json_request)],
              responses={
@@ -1705,7 +1704,7 @@ async def init_app_state(
     else:
         supported_tasks = model_config.supported_tasks
 
-    logger.info("Supported_tasks: %s", supported_tasks)
+    logger.debug_once("Supported_tasks: %s", supported_tasks)
 
     resolved_chat_template = load_chat_template(args.chat_template)
     if resolved_chat_template is not None:
@@ -1909,7 +1908,7 @@ def setup_server(args):
     """Validate API server args, set up signal handler, create socket
     ready to serve."""
 
-    logger.info("vLLM API server version %s", VLLM_VERSION)
+    logger.debug_once("vLLM API server version %s", VLLM_VERSION)
     log_non_default_args(args)
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
@@ -1984,8 +1983,8 @@ async def run_server_worker(listen_address,
         vllm_config = await engine_client.get_vllm_config()
         await init_app_state(engine_client, vllm_config, app.state, args)
 
-        logger.info("Starting vLLM API server %d on %s", server_index,
-                    listen_address)
+        logger.debug_once("Starting vLLM API server %d on %s", server_index,
+                          listen_address)
         shutdown_task = await serve_http(
             app,
             sock=sock,
