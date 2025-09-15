@@ -257,16 +257,6 @@ def rotary_embedding(
                                   cos_sin_cache, is_neox)
 
 
-def batched_rotary_embedding(positions: torch.Tensor, query: torch.Tensor,
-                             key: Optional[torch.Tensor], head_size: int,
-                             cos_sin_cache: torch.Tensor, is_neox: bool,
-                             rot_dim: int,
-                             cos_sin_cache_offsets: torch.Tensor) -> None:
-    torch.ops._C.batched_rotary_embedding(positions, query, key, head_size,
-                                          cos_sin_cache, is_neox, rot_dim,
-                                          cos_sin_cache_offsets)
-
-
 # layer norm ops
 def rms_norm(out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
              epsilon: float) -> None:
@@ -278,6 +268,13 @@ def rms_norm(out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
 def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
                        weight: torch.Tensor, epsilon: float) -> None:
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
+
+
+def poly_norm(out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
+              bias: torch.Tensor, epsilon: float) -> None:
+    # TODO: Remove this contiguous call when the kernel is updated to support non-contiguous input
+    input_contiguous = input.contiguous()
+    torch.ops._C.poly_norm(out, input_contiguous, weight, bias, epsilon)
 
 
 def apply_repetition_penalties_torch(
@@ -709,6 +706,7 @@ def cutlass_sparse_scaled_mm_supported(cuda_device_capability: int) -> bool:
 
 def cutlass_group_gemm_supported(cuda_device_capability: int) -> bool:
     return torch.ops._C.cutlass_group_gemm_supported(cuda_device_capability)
+
 
 def cutlass_sparse_compress(a: torch.Tensor) \
     -> tuple[torch.Tensor, torch.Tensor]:
@@ -1625,20 +1623,6 @@ def concat_and_cache_mla(
                                                 scale)
 
 
-def cp_fused_concat_and_cache_mla(
-    kv_c: torch.Tensor,
-    k_pe: torch.Tensor,
-    cp_local_token_select_indices: torch.Tensor,
-    kv_cache: torch.Tensor,
-    slot_mapping: torch.Tensor,
-    kv_cache_dtype: str,
-    scale: torch.Tensor,
-) -> None:
-    torch.ops._C_cache_ops.cp_fused_concat_and_cache_mla(
-        kv_c, k_pe, cp_local_token_select_indices, kv_cache, slot_mapping,
-        kv_cache_dtype, scale)
-
-
 def copy_blocks(key_caches: list[torch.Tensor],
                 value_caches: list[torch.Tensor],
                 block_mapping: torch.Tensor) -> None:
@@ -1847,13 +1831,13 @@ def cutlass_mla_decode(out: torch.Tensor, q_nope: torch.Tensor,
     return out
 
 
-def sm100_cutlass_mla_decode(out: torch.Tensor, q_nope: torch.Tensor,
-                             q_pe: torch.Tensor,
+def sm100_cutlass_mla_decode(out: torch.Tensor, lse: torch.Tensor,
+                             q_nope: torch.Tensor, q_pe: torch.Tensor,
                              kv_c_and_k_pe_cache: torch.Tensor,
                              seq_lens: torch.Tensor, page_table: torch.Tensor,
                              workspace: torch.Tensor, scale: float,
                              num_kv_splits: int) -> torch.Tensor:
-    torch.ops._C.sm100_cutlass_mla_decode(out, q_nope, q_pe,
+    torch.ops._C.sm100_cutlass_mla_decode(out, lse, q_nope, q_pe,
                                           kv_c_and_k_pe_cache, seq_lens,
                                           page_table, workspace, scale,
                                           num_kv_splits)
