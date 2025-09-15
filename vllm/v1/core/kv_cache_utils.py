@@ -116,8 +116,8 @@ class PrefixCachingMetrics:
         This function is called with information gathered when new requests
         are being scheduled and are looking for computed blocks.
 
-        When there are more than `interval` requests, the oldest set of
-        requests are removed from the metrics.
+        When there are more than `max_recent_requests` requests, the oldest set
+        of requests are removed from the metrics.
 
         Args:
             stats: The prefix cache stats.
