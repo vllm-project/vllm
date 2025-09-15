@@ -36,7 +36,7 @@ def _auto_init_hash_fn(request):
     if "hash_fn" in request.fixturenames:
         hash_fn = init_none_hash(request.getfixturevalue("hash_fn"))
     else:
-        hash_fn = hash
+        hash_fn = sha256
     init_none_hash(hash_fn)
 
 

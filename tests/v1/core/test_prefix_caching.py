@@ -31,7 +31,7 @@ def _auto_init_hash_fn(request):
     if "hash_fn" in request.fixturenames:
         hash_fn = init_none_hash(request.getfixturevalue("hash_fn"))
     else:
-        hash_fn = hash
+        hash_fn = sha256
     init_none_hash(hash_fn)
 
 
@@ -853,8 +853,7 @@ def test_cache_blocks_multi_group():
                                        kv_cache_group_ids=[0, 1]) is None
 
 
-@pytest.mark.parametrize("hash_fn", [sha256])
-def test_mm_prefix_caching(hash_fn):
+def test_mm_prefix_caching():
     """
     This tests that the multi-modal prefix caching is correct.
     """
@@ -945,8 +944,7 @@ def test_mm_prefix_caching(hash_fn):
     assert num_computed_tokens == 3 * 16
 
 
-@pytest.mark.parametrize("hash_fn", [sha256])
-def test_cache_key_salting(hash_fn):
+def test_cache_key_salting():
     """
     This tests that cache salts are applied during hashing and the cache
     is separated cache as expected.
