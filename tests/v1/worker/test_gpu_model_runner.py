@@ -861,7 +861,7 @@ def test_hybrid_block_table_initialization():
                              max_num_batched_tokens=max_num_batched_tokens,
                              pin_memory=False,
                              device=torch.device(DEVICE),
-                             kernel_sizes=kernel_block_sizes)
+                             kernel_block_size=kernel_block_sizes[0])
 
     # Verify hybrid block configuration
     assert block_table.use_hybrid_blocks is True
@@ -902,7 +902,7 @@ def test_input_batch_with_kernel_block_sizes():
 
     # Test with different kernel block sizes
     physical_block_sizes = [32, 64]
-    kernel_block_sizes = [[16], [32]]
+    kernel_block_sizes = [16, 32]
 
     input_batch = InputBatch(max_num_reqs=max_num_reqs,
                              max_model_len=max_model_len,
@@ -917,10 +917,9 @@ def test_input_batch_with_kernel_block_sizes():
     assert len(
         input_batch.block_table.block_tables) == len(physical_block_sizes)
 
-    for i, (phys_size, kernel_size_list) in enumerate(
+    for i, (phys_size, kernel_size) in enumerate(
             zip(physical_block_sizes, kernel_block_sizes)):
         block_table = input_batch.block_table.block_tables[i]
-        kernel_size = kernel_size_list[0]  # Use first element from list
         if phys_size != kernel_size:
             assert block_table.use_hybrid_blocks is True
             assert block_table.physical_block_size == phys_size
@@ -979,7 +978,7 @@ def test_hybrid_cache_integration(model_runner, dist_init):
         block_sizes=[
             kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
         ],
-        kernel_block_sizes=[[16]])  # Use logical block size list
+        kernel_block_sizes=[16])  # Use logical block size
 
     runner.initialize_attn_backend(kv_cache_config)
 

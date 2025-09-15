@@ -291,7 +291,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.is_pooling_model,
                 self.vllm_config.model_config.logits_processors),
             is_pooling_model=self.is_pooling_model,
-            kernel_block_sizes=None,
+            kernel_block_sizes=[self.cache_config.block_size],
         )
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
@@ -3342,23 +3342,28 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # block splitting. Get the supported block sizes from
                 # the backend.
                 attn_groups = self.attn_groups[kv_cache_group_id]
+                physical_block_size = kv_cache_group.kv_cache_spec.block_size
                 if attn_groups:
                     # Use the backend's supported block size list
                     backend_cls = attn_groups[0].backend
                     supported_sizes = backend_cls.get_supported_block_size()
-                    # If no specific sizes supported, use cache config
-                    # block_size
-                    kernel_block_size_list = (supported_sizes
-                                              if supported_sizes else
-                                              [self.cache_config.block_size])
+                    # Select the first supported size that divides physical
+                    # block size evenly
+                    selected_kernel_size = physical_block_size
+                    if supported_sizes:
+                        for kernel_size in supported_sizes:
+                            if (kernel_size > 0 and
+                                    physical_block_size % kernel_size == 0):
+                                selected_kernel_size = kernel_size
+                                break
+                    kernel_block_sizes.append(selected_kernel_size)
                 else:
-                    # Fallback to cache config block_size if no backend found
-                    kernel_block_size_list = [self.cache_config.block_size]
-                kernel_block_sizes.append(kernel_block_size_list)
+                    kernel_block_sizes.append(physical_block_size)
             else:
                 # This is likely Mamba or other non-attention cache,
                 # no splitting.
-                kernel_block_sizes.append([0])
+                kernel_block_sizes.append(
+                    kv_cache_group.kv_cache_spec.block_size)
 
         if block_sizes != [self.cache_config.block_size]:
             assert self.cache_config.cpu_offload_gb == 0, (

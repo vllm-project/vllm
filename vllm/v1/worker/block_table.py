@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional, Union
+from typing import Optional
 
 import numpy as np
 import torch
@@ -31,10 +31,6 @@ class BlockTable:
         self.pin_memory = pin_memory
         self.device = device
         self.physical_block_size = block_size
-        # Validate kernel_block_size and set up logical block configuration
-        if kernel_block_size <= 0:
-            raise ValueError(f"kernel_block_size must be positive, got {kernel_block_size}")
-
         if kernel_block_size == block_size:
             # No splitting - use physical block size directly
             self.block_size = block_size
@@ -243,7 +239,7 @@ class MultiGroupBlockTable:
                  device: torch.device,
                  block_sizes: list[int],
                  num_speculative_tokens: int = 0,
-                 kernel_sizes: Optional[list[list[int]]] = None) -> None:
+                 kernel_block_sizes: Optional[list[int]] = None) -> None:
         # Note(hc): each dcp rank only store
         # (max_model_len//dcp_world_size) tokens in kvcache,
         # so the block_size which used for calc max_num_blocks_per_req
@@ -254,24 +250,25 @@ class MultiGroupBlockTable:
             # DCP might not be initialized in testing
             dcp_world_size = 1
 
-        if kernel_sizes is None:
-            kernel_sizes = [[0]] * len(block_sizes)
-        # Ensure kernel_sizes matches block_sizes length
-        elif len(kernel_sizes) == 1 and len(block_sizes) > 1:
-            kernel_sizes = kernel_sizes * len(block_sizes)
-        elif len(kernel_sizes) != len(block_sizes):
+        if kernel_block_sizes is None:
+            # Use physical block size by default
+            kernel_block_sizes = block_sizes
+        # Ensure kernel_block_sizes matches block_sizes length
+        elif len(kernel_block_sizes) == 1 and len(block_sizes) > 1:
+            kernel_block_sizes = kernel_block_sizes * len(block_sizes)
+        elif len(kernel_block_sizes) != len(block_sizes):
             raise ValueError(
-                f"kernel_sizes length ({len(kernel_sizes)}) must match "
-                f"block_sizes length ({len(block_sizes)})")
+                f"kernel_block_sizes length ({len(kernel_block_sizes)}) "
+                f"must match block_sizes length ({len(block_sizes)})")
 
-        # Use zip to pair block_sizes with kernel_sizes one-to-one
+        # Use zip to pair block_sizes with kernel_block_sizes one-to-one
         self.block_tables = [
             BlockTable(
                 block_size, max_num_reqs,
                 max(cdiv(max_model_len, block_size * dcp_world_size),
                     1 + num_speculative_tokens), max_num_batched_tokens,
-                pin_memory, device, kernel_size_list)
-            for block_size, kernel_size_list in zip(block_sizes, kernel_sizes)
+                pin_memory, device, kernel_block_size) for block_size,
+            kernel_block_size in zip(block_sizes, kernel_block_sizes)
         ]
 
     def append_row(self, block_ids: tuple[list[int], ...],
