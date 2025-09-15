@@ -450,7 +450,7 @@ RUN set -eux; \
       linux/amd64) UUARCH="x64" ;; \
       *) echo "Unsupported TARGETPLATFORM: ${TARGETPLATFORM}" >&2; exit 1 ;; \
     esac; \
-    gdrcopy-install.sh "${GDRCOPY_OS_VERSION}" "${GDRCOPY_CUDA_VERSION}" "${UUARCH}"
+    gdrcopy_install.sh "${GDRCOPY_OS_VERSION}" "${GDRCOPY_CUDA_VERSION}" "${UUARCH}"
 
 # Install EP kernels(pplx-kernels and DeepEP)
 COPY tools/ep_kernels/install_python_libraries.sh install_python_libraries.sh
