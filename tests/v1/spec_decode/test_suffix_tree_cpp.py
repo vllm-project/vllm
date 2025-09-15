@@ -3,17 +3,9 @@
 """Unit tests for C++ suffix tree implementation."""
 
 import pytest
-
-# Try to import C++ implementation
-try:
-    from vllm._suffix_cache_C import Candidate, SuffixTree
-    cpp_available = True
-except ImportError:
-    cpp_available = False
-    pytestmark = pytest.mark.skip(reason="C++ suffix tree not available")
+from vllm.v1.spec_decode.suffix_decode import Candidate, SuffixTree
 
 
-@pytest.mark.skipif(not cpp_available, reason="C++ suffix tree not available")
 class TestSuffixTreeCpp:
     """Test suite for C++ SuffixTree implementation."""
 

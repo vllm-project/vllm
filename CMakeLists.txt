@@ -944,7 +944,7 @@ define_gpu_extension_target(
 # _suffix_cache_C extension
 #
 set(VLLM_SUFFIX_CACHE_EXT_SRC
-  "csrc/suffix_cache/pybind.cc"
+  "csrc/suffix_cache/torch_bindings.cpp"
   "csrc/suffix_cache/suffix_tree.cc")
 
 message(STATUS "Enabling suffix_cache extension.")
