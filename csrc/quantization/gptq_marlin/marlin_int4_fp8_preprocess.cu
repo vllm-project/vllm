@@ -67,10 +67,10 @@ torch::Tensor marlin_int4_fp8_preprocess(
   torch::Tensor output = inplace ? qweight : torch::empty_like(qweight);
 
   if (!qzeros_or_none.has_value()) {
-    TORCH_CHECK(qweight.size(0) * qweight.size(1) * 8 % 256 == 0,
-                "qweight.size(0) * qweight.size(1) * 8 % 256 != 0");
+    TORCH_CHECK(qweight.numel() * 8 % 256 == 0,
+                "qweight.numel() * 8 % 256 != 0");
 
-    int blocks = qweight.size(0) * qweight.size(1) * 8 / 256;
+    int blocks = qweight.numel() * 8 / 256;
     marlin_int4_fp8_preprocess_kernel_without_zp<<<blocks, 32>>>(
         (const int32_t*)qweight.data_ptr(), (int32_t*)output.data_ptr());
   } else {
