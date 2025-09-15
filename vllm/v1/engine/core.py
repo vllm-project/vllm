@@ -165,8 +165,6 @@ class EngineCore:
         self.step_fn = (self.step if self.batch_queue is None else
                         self.step_with_batch_queue)
 
-        maybe_attach_gc_debug_callback()
-
     def _initialize_kv_caches(
             self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
         start = time.time()
@@ -532,6 +530,9 @@ class EngineCoreProc(EngineCore):
         # Reduces pause times of oldest generation collections.
         gc.collect()
         gc.freeze()
+
+        # If enable, attach GC debugger after static variable freeze.
+        maybe_attach_gc_debug_callback()
 
     @contextmanager
     def _perform_handshakes(
