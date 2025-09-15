@@ -203,8 +203,6 @@ For local `dataset-path`, please set `hf-name` to its Hugging Face ID like
 <details class="admonition abstract" markdown="1">
 <summary>Show more</summary>
 
-<br/>
-
 First start serving your model
 
 ```bash
@@ -467,8 +465,6 @@ The following arguments can be used to control the ramp-up:
 <details class="admonition abstract" markdown="1">
 <summary>Show more</summary>
 
-<br/>
-
 ```bash
 vllm bench throughput \
   --model NousResearch/Hermes-3-Llama-3.1-8B \
@@ -592,8 +588,6 @@ vllm bench throughput \
 <details class="admonition abstract" markdown="1">
 <summary>Show more</summary>
 
-<br/>
-
 Benchmark the performance of structured output generation (JSON, grammar, regex).
 
 ##### Server Setup
@@ -666,8 +660,6 @@ python3 benchmarks/benchmark_serving_structured_output.py \
 <details class="admonition abstract" markdown="1">
 <summary>Show more</summary>
 
-<br/>
-
 Benchmark the performance of long document question-answering with prefix caching.
 
 ##### Basic Long Document QA Test
@@ -720,8 +712,6 @@ python3 benchmarks/benchmark_long_document_qa_throughput.py \
 <details class="admonition abstract" markdown="1">
 <summary>Show more</summary>
 
-<br/>
-
 Benchmark the efficiency of automatic prefix caching.
 
 ##### Fixed Prompt with Prefix Caching
@@ -771,8 +761,6 @@ vllm bench serve \
 <details class="admonition abstract" markdown="1">
 <summary>Show more</summary>
 
-<br/>
-
 Benchmark the performance of request prioritization in vLLM.
 
 ##### Basic Prioritization Test
@@ -804,8 +792,6 @@ python3 benchmarks/benchmark_prioritization.py \
 
 <details class="admonition abstract" markdown="1">
 <summary>Show more</summary>
-
-<br/>
 
 Benchmark the performance of multi-modal requests in vLLM.
 
