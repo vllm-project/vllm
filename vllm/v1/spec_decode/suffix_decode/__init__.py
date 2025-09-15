@@ -13,6 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .suffix_cache import SuffixCache, SuffixSpecResult
+from .suffix_cache import SuffixCache, SuffixSpecResult, Candidate, SuffixTree
 
-__all__ = ["SuffixCache", "SuffixSpecResult"]
+__all__ = ["SuffixCache", "SuffixSpecResult", "Candidate", "SuffixTree"]

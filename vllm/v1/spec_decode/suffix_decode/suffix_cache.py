@@ -18,20 +18,125 @@ from __future__ import annotations
 
 from collections.abc import Hashable, KeysView, Sequence
 from dataclasses import dataclass, field
-from typing import Optional, Union
+from typing import Optional, Union, List, NamedTuple
+import torch
 
-try:
-    # Try to import the C++ implementation
-    from vllm._suffix_cache_C import Candidate, SuffixTree
-except ImportError:
-    # Fall back to Python implementation if C++ module is not available
-    import warnings
-    warnings.warn(
-        "C++ suffix tree implementation not available, "
-        "falling back to Python implementation",
-        stacklevel=2)
-    from vllm.v1.spec_decode.suffix_decode.suffix_tree import (Candidate,
-                                                               SuffixTree)
+
+class Candidate(NamedTuple):
+    """Result of suffix tree speculation from C++ implementation."""
+    token_ids: List[int]
+    parents: List[int]
+    probs: List[float]
+    score: float
+    match_len: int
+
+
+class SuffixTree:
+    """Python wrapper for the C++ SuffixTree implementation using TORCH_LIBRARY."""
+    
+    def __init__(self, max_depth: int):
+        """Initialize a new suffix tree.
+        
+        Args:
+            max_depth: Maximum depth of the suffix tree.
+        """
+        self._handle = torch.ops._suffix_cache.suffix_tree_create(max_depth)
+        self._destroyed = False
+    
+    def __del__(self):
+        """Clean up the C++ suffix tree object."""
+        if hasattr(self, '_handle') and not self._destroyed:
+            torch.ops._suffix_cache.suffix_tree_destroy(self._handle)
+            self._destroyed = True
+    
+    def num_seqs(self) -> int:
+        """Get the number of sequences in the suffix tree."""
+        return int(torch.ops._suffix_cache.suffix_tree_num_seqs(self._handle))
+    
+    def append(self, seq_id: int, token: int) -> None:
+        """Append a new element to the sequence with id seq_id.
+        
+        Args:
+            seq_id: ID of the sequence to append to.
+            token: Token to append.
+        """
+        torch.ops._suffix_cache.suffix_tree_append(self._handle, seq_id, token)
+    
+    def extend(self, seq_id: int, tokens: List[int]) -> None:
+        """Append multiple new elements to the sequence with id seq_id.
+        
+        Args:
+            seq_id: ID of the sequence to extend.
+            tokens: List of tokens to append.
+        """
+        tokens_tensor = torch.tensor(tokens, dtype=torch.int64)
+        torch.ops._suffix_cache.suffix_tree_extend(self._handle, seq_id, tokens_tensor)
+    
+    def remove(self, seq_id: int) -> None:
+        """Remove the sequence with id seq_id.
+        
+        Args:
+            seq_id: ID of the sequence to remove.
+        """
+        torch.ops._suffix_cache.suffix_tree_remove(self._handle, seq_id)
+    
+    def speculate(self, 
+                  pattern: List[int],
+                  max_spec_tokens: int,
+                  max_spec_factor: float = 1.0,
+                  max_spec_offset: float = 0.0,
+                  min_token_prob: float = 0.1,
+                  use_tree_spec: bool = False) -> Candidate:
+        """Given a pattern, speculate the next tokens using the suffix tree.
+        
+        Args:
+            pattern: The pattern to match.
+            max_spec_tokens: Maximum number of tokens to speculate.
+            max_spec_factor: Maximum speculation factor.
+            max_spec_offset: Maximum speculation offset.
+            min_token_prob: Minimum token probability threshold.
+            use_tree_spec: Whether to use tree-based speculation.
+            
+        Returns:
+            Candidate object containing speculation results.
+        """
+        pattern_tensor = torch.tensor(pattern, dtype=torch.int64)
+        
+        token_ids, parents, probs, score, match_len = torch.ops._suffix_cache.suffix_tree_speculate(
+            self._handle, 
+            pattern_tensor,
+            max_spec_tokens,
+            max_spec_factor,
+            max_spec_offset,
+            min_token_prob,
+            use_tree_spec
+        )
+        
+        return Candidate(
+            token_ids=token_ids.tolist(),
+            parents=parents.tolist(),
+            probs=probs.tolist(),
+            score=float(score),
+            match_len=int(match_len)
+        )
+    
+    def check_integrity(self) -> str:
+        """Check the integrity of the suffix tree.
+        
+        Returns:
+            Empty string if ok, otherwise an error message.
+        """
+        return torch.ops._suffix_cache.suffix_tree_check_integrity(self._handle)
+    
+    def estimate_memory(self) -> int:
+        """Estimate memory usage of the suffix tree.
+        
+        Note: This walks the entire tree so can be slow.
+        
+        Returns:
+            Estimated memory usage in bytes.
+        """
+        return int(torch.ops._suffix_cache.suffix_tree_estimate_memory(self._handle))
 
 
 @dataclass
