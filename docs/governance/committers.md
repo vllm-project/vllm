@@ -77,68 +77,68 @@ If you have PRs touching the area, please ping the area owner for review.
 ### Engine Core
 
 - Scheduler: the core vLLM engine loop scheduling requests to next batch
-  - @WoosukKwon, @robertgshaw2-redhat, @njhill, @heheda12345
+    - @WoosukKwon, @robertgshaw2-redhat, @njhill, @heheda12345
 - KV Cache Manager: memory management layer within scheduler maintaining KV cache logical block data
-  - @heheda12345, @WoosukKwon
+    - @heheda12345, @WoosukKwon
 - AsyncLLM: the zmq based protocol hosting engine core and making it accessible for entrypoints
-  - @robertgshaw2-redhat, @njhill, @russellb
+    - @robertgshaw2-redhat, @njhill, @russellb
 - ModelRunner, Executor, Worker: the abstractions for engine wrapping model implementation
-  - @WoosukKwon, @tlrmchlsmth, @heheda12345, @LucasWilkinson
+    - @WoosukKwon, @tlrmchlsmth, @heheda12345, @LucasWilkinson
 - KV Connector: Connector interface and implementation for KV cache offload and transfer
-  - @robertgshaw2-redhat, @njhill, @KuntaiDu, @NickLucche
+    - @robertgshaw2-redhat, @njhill, @KuntaiDu, @NickLucche
 - Distributed, Parallelism, Process Management: Process launchers managing each worker, and assign them to the right DP/TP/PP/EP ranks
-  - @youkaichao, @njhill, @WoosukKwon, @ruisearch42
+    - @youkaichao, @njhill, @WoosukKwon, @ruisearch42
 - Collectives: the usage of nccl and other communication libraries/kernels
-  - @tlrmchlsmth, @youkaichao
+    - @tlrmchlsmth, @youkaichao
 - Multimodality engine and memory management: core scheduling and memory management concerning vision, audio, and video inputs.
-  - @ywang96, @DarkLight1337
+    - @ywang96, @DarkLight1337
 
 ### Model Implementations
 
 - Model Interface: The `nn.Module` interface and implementation for various models
-  - @zhuohan123, @mgoin, @simon-mo, @houseroad, @ywang96 (multimodality)
+    - @zhuohan123, @mgoin, @simon-mo, @houseroad, @ywang96 (multimodality)
 - Logits Processors / Sampler: The provided sampler class and pluggable logits processors
-  - @njhill, @houseroad
+    - @njhill, @houseroad
 - Custom Layers: Utility layers in vLLM such as rotary embedding and rms norms
-  - @ProExpertProg
+    - @ProExpertProg
 - Attention: Attention interface for paged attention
-  - @WoosukKwon, @LucasWilkinson, @heheda12345
+    - @WoosukKwon, @LucasWilkinson, @heheda12345
 - FusedMoE: FusedMoE kernel, Modular kernel framework, EPLB
-  - @tlrmchlsmth
+    - @tlrmchlsmth
 - Quantization: Various quantization config, weight loading, and kernel.
-  - @mgoin
+    - @mgoin
 - Multi-modal Input Processing: Components that load and process image/video/audio data into feature tensors
-  - @DarkLight1337, @ywang96, @Isotr0py
+    - @DarkLight1337, @ywang96, @Isotr0py
 - torch compile: The torch compile integration for vLLM
-  - @ProExpertProg, @zou3519, @youkaichao
+    - @ProExpertProg, @zou3519, @youkaichao
 - State space models: The state space models implementation in vLLM
-  - @tdoublep, @tlrmchlsmth
+    - @tdoublep, @tlrmchlsmth
 
 ### Entrypoints
 
 - LLM Class: The LLM class for offline inference
-  - @DarkLight1337
+    - @DarkLight1337
 - API Server: The OpenAI-compatible API server
-  - @DarkLight1337, @njhill, @aarnphm, @simon-mo, @heheda12345 (Responses API)
+    - @DarkLight1337, @njhill, @aarnphm, @simon-mo, @heheda12345 (Responses API)
 - Batch Runner: The OpenAI-compatible batch runner
-  - @simon-mo
+    - @simon-mo
 
 ### Features
 
 - Spec Decode: Covers model definition, attention, sampler, and scheduler related to n-grams, EAGLE, and MTP.
-  - @WoosukKwon, @benchislett, @luccafong
+    - @WoosukKwon, @benchislett, @luccafong
 - Structured Output: The structured output implementation
-  - @russellb, @aarnphm
+    - @russellb, @aarnphm
 - RL: The RL related features such as collective rpc, sleep mode, etc.
-  - @youkaichao, @zhuohan123, @22quinn
+    - @youkaichao, @zhuohan123, @22quinn
 - LoRA: @jeejeelee
 - Observability: Metrics and Logging
-  - @robertgshaw2-redhat, @simon-mo
+    - @robertgshaw2-redhat, @simon-mo
 
 ### Code Base
 
 - Config: Configuration registration and parsing
-  - @hmellor
+    - @hmellor
 - Documentation: @hmellor, @DarkLight1337, @simon-mo
 - Benchmarks: @ywang96, @simon-mo
 - CI, Build, Release Process: @khluu, @njhill, @simon-mo
