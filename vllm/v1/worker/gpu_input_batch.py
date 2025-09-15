@@ -83,8 +83,6 @@ class InputBatch:
         device: torch.device,
         pin_memory: bool,
         vocab_size: int,
-        hidden_size: int,
-        dtype: torch.dtype,
         block_sizes: list[int],  # The block_size of each kv cache group
         logitsprocs: Optional[LogitsProcessors] = None,
         is_spec_decode: bool = False,
