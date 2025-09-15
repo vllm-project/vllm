@@ -1797,13 +1797,31 @@ class FlexibleArgumentParser(ArgumentParser):
             self._action_groups.append(group)
             return group
 
-    def format_help(self) -> str:
-        # Add tip about JSON arguments to the epilog
-        epilog = self.epilog or ""
-        if (self.add_json_tip
-                and not epilog.startswith(FlexibleArgumentParser._json_tip)):
-            self.epilog = FlexibleArgumentParser._json_tip + epilog
-        return super().format_help()
+    def format_help(self):
+        formatter = self._get_formatter()
+
+        # usage
+        formatter.add_usage(self.usage, self._actions,
+                            self._mutually_exclusive_groups)
+
+        # description
+        formatter.add_text(self.description)
+
+        # positionals, optionals and user-defined groups
+        formatter.start_section("Config Groups")
+        config_groups = ""
+        for action_group in self._action_groups:
+            title = action_group.title
+            description = action_group.description or ""
+            config_groups += f"{title: <24}{description}\n"
+        formatter.add_text(config_groups)
+        formatter.end_section()
+
+        # epilog
+        formatter.add_text(self.epilog)
+
+        # determine help from format above
+        return formatter.format_help()
 
     def parse_args(  # type: ignore[override]
         self,
