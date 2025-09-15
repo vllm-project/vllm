@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import dataclasses
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Type, Union
@@ -85,7 +87,7 @@ def top_pk_logits_efficient(logits,
                             return_probs=False):
     # Do not keep the entire vocab size after top k.
     # Instead, keep the k size tensor and record the associated indices.
-    if k == -1:  # no top-k sampling
+    if k < 1:  # no top-k sampling if set to -1 or 0
         top_k_values, top_k_indices = logits, torch.arange(
             logits.shape[-1]).unsqueeze(0).repeat(logits.shape[0], 1)
     else:
@@ -158,7 +160,8 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         # instead of selecting from default vllm loaders
         loader = TTModelLoader(self.load_config)
 
-        self.model = loader.load_model(vllm_config=self.vllm_config)
+        self.model = loader.load_model(vllm_config=self.vllm_config,
+                                       model_config=self.model_config)
         if self.model_config.is_encoder_decoder:
             self.max_cross_blocks = (self.model.max_cross_attn_tokens //
                                      self.cache_config.block_size)

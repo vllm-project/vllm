@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import torch
 from torch.nn.parameter import Parameter
@@ -8,6 +9,7 @@ from torch.nn.parameter import Parameter
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
@@ -30,6 +32,8 @@ class MarlinConfig(QuantizationConfig):
         group_size: int,
         lm_head_quantized: bool,
     ) -> None:
+        super().__init__()
+
         # Group size for the quantization.
         self.group_size = group_size
         self.lm_head_quantized = lm_head_quantized
@@ -63,11 +67,11 @@ class MarlinConfig(QuantizationConfig):
                 f"lm_head_quantized={self.lm_head_quantized})")
 
     @classmethod
-    def get_name(cls) -> str:
+    def get_name(cls) -> QuantizationMethods:
         return "marlin"
 
     @classmethod
-    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
         return [torch.half]
 
     @classmethod
@@ -76,19 +80,19 @@ class MarlinConfig(QuantizationConfig):
         return 80
 
     @classmethod
-    def get_config_filenames(cls) -> List[str]:
+    def get_config_filenames(cls) -> list[str]:
         return ["quantize_config.json"]
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "MarlinConfig":
+    def from_config(cls, config: dict[str, Any]) -> "MarlinConfig":
         group_size = cls.get_from_keys(config, ["group_size"])
         lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"],
                                                  default=False)
         return cls(group_size, lm_head_quantized)
 
     @classmethod
-    def override_quantization_method(cls, hf_quant_cfg,
-                                     user_quant) -> Optional[str]:
+    def override_quantization_method(
+            cls, hf_quant_cfg, user_quant) -> Optional[QuantizationMethods]:
         # compat: autogptq >=0.8.0 use checkpoint_format: str
         # compat: autogptq <=0.7.1 is_marlin_format: bool
         is_marlin_format = (hf_quant_cfg.get("checkpoint_format") == "marlin"
@@ -127,7 +131,7 @@ class MarlinLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         input_size_per_partition: int,
-        output_partition_sizes: List[int],
+        output_partition_sizes: list[int],
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,

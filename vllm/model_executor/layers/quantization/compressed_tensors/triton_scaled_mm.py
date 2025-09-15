@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional, Type
+from typing import Optional
 
 import torch
-import triton
-import triton.language as tl
+
+from vllm.triton_utils import tl, triton
 
 
 def is_weak_contiguous(x: torch.Tensor):
@@ -126,7 +127,7 @@ def triton_scaled_mm(input: torch.Tensor,
                      weight: torch.Tensor,
                      scale_a: torch.Tensor,
                      scale_b: torch.Tensor,
-                     out_dtype: Type[torch.dtype],
+                     out_dtype: type[torch.dtype],
                      bias: Optional[torch.Tensor] = None,
                      block_size_m: int = 32,
                      block_size_n: int = 32,
@@ -143,10 +144,10 @@ def triton_scaled_mm(input: torch.Tensor,
     scale_b = scale_b.reshape(-1, 1) if scale_b.dim() <= 1 else scale_b
 
     assert scale_a.dtype == scale_b.dtype and scale_a.is_floating_point()
-    assert scale_a.shape == torch.Size([1, 1]) or scale_a.shape == torch.Size(
-        [M, 1])
-    assert scale_b.shape == torch.Size([1, 1]) or scale_b.shape == torch.Size(
-        [N, 1])
+    assert scale_a.shape[1] == 1 and (scale_a.shape[0] == 1
+                                      or scale_a.shape[0] == M)
+    assert scale_b.shape[1] == 1 and (scale_b.shape[0] == 1
+                                      or scale_b.shape[0] == N)
     assert out_dtype.is_floating_point
     assert bias is None or bias.is_floating_point()
     assert is_weak_contiguous(input)

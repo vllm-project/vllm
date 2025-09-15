@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Copyright 2024 the HuggingFace Inc. team. All rights reserved.
 #
@@ -16,7 +17,7 @@
 """PyTorch Mllama model."""
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import List, Literal, Optional, Set, Tuple, TypedDict, Union
+from typing import Literal, Optional, TypedDict, Union
 
 import numpy as np
 import torch
@@ -47,7 +48,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -67,7 +67,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from .clip import CLIPMLP
 from .interfaces import SupportsMultiModal, SupportsV0Only
 from .llama import LlamaDecoderLayer, LlamaMLP
-from .utils import maybe_prefix
+from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -166,10 +166,11 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
         prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Optional[Mapping[str, object]] = None,
         return_mm_hashes: bool = False,
     ) -> MultiModalEncDecInputs:
         mm_inputs = super().apply(prompt, mm_data, hf_processor_mm_kwargs,
-                                  return_mm_hashes)
+                                  tokenization_kwargs, return_mm_hashes)
 
         image_token_id = self.info.get_hf_config().image_token_index
         # Check that the number of image tokens in the decoder prompt matches
@@ -225,7 +226,7 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
 
         return mm_inputs
 
-    def _get_num_image_in_last_group(self, prompt_token_ids: List[int]) -> int:
+    def _get_num_image_in_last_group(self, prompt_token_ids: list[int]) -> int:
         num_images = 0
         for token_id in prompt_token_ids[::-1]:
             if token_id == self.info.get_hf_config().image_token_index:
@@ -239,6 +240,7 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         tokenizer = self.info.get_tokenizer()
         if mm_data:
@@ -247,7 +249,7 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
                 for img in mm_data["images"]
             ]
             processed_outputs = super()._call_hf_processor(
-                prompt, mm_data, mm_kwargs)
+                prompt, mm_data, mm_kwargs, tok_kwargs)
             processed_outputs["num_tiles"] = torch.tensor(num_tiles)
             for k in ('pixel_values', 'aspect_ratio_ids', "aspect_ratio_mask"):
                 processed_outputs[k] = processed_outputs[k].squeeze(0)
@@ -371,8 +373,8 @@ class ColumnParallelConv2dPatch(torch.nn.Module):
         self,
         in_channels: int,
         out_channels: int,
-        kernel_size: Union[int, Tuple[int, int]],
-        stride: Union[int, Tuple[int, int]],
+        kernel_size: Union[int, tuple[int, int]],
+        stride: Union[int, tuple[int, int]],
         bias: bool = False,
     ) -> None:
         super().__init__()
@@ -604,7 +606,7 @@ class MllamaVisionEncoder(nn.Module):
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-    ) -> Union[Tuple, BaseModelOutput]:
+    ) -> Union[BaseModelOutput]:
         encoder_states = ()
 
         for i, encoder_layer in enumerate(self.layers):
@@ -790,6 +792,36 @@ class MllamaVisionModel(nn.Module):
                                  dim=-1)
         return hidden_state
 
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            (".qkv_proj", ".q_proj", "q"),
+            (".qkv_proj", ".k_proj", "k"),
+            (".qkv_proj", ".v_proj", "v"),
+        ]
+        params_dict = dict(self.named_parameters())
+        updated_params: set[str] = set()
+        for name, loaded_weight in weights:
+            if 'patch_embedding._linear.weight' in name:
+                loaded_weight = loaded_weight.view(loaded_weight.shape[0], -1)
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                param = params_dict[name]
+                updated_params.add(name)
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                param = params_dict.pop(name)
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
+                updated_params.add(name)
+        return updated_params
+
 
 class MllamaTextRMSNorm(nn.Module):
 
@@ -879,7 +911,7 @@ class MllamaTextCrossAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor],
-        kv_range_for_decode: Optional[List[Tuple[int, int]]],
+        kv_range_for_decode: Optional[list[tuple[int, int]]],
         cross_attention_states: Optional[torch.Tensor],
     ) -> torch.Tensor:
         q, k, v = self.qkv_proj(hidden_states, cross_attention_states)
@@ -906,7 +938,7 @@ class MllamaTextCrossAttention(nn.Module):
         k: torch.Tensor,
         v: torch.Tensor,
         attention_mask: torch.Tensor,
-        kv_range_for_decode: List[Tuple[int, int]],
+        kv_range_for_decode: list[tuple[int, int]],
     ) -> torch.Tensor:
         kv_cache = self.attn.kv_cache[self.pipeline_parallel_rank]
         attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
@@ -1020,7 +1052,7 @@ class MllamaCrossAttentionDecoderLayer(torch.nn.Module):
         hidden_states: torch.Tensor,
         cross_attention_states: torch.Tensor,
         cross_attention_mask: torch.Tensor,
-        kv_range_for_decode: Optional[List[Tuple[int, int]]],
+        kv_range_for_decode: Optional[list[tuple[int, int]]],
         full_text_row_masked_out_mask: torch.Tensor,
     ) -> torch.Tensor:
         residual = hidden_states
@@ -1090,8 +1122,8 @@ class MllamaTextModel(nn.Module):
         positions: Optional[torch.LongTensor],
         cross_attention_states: Optional[torch.LongTensor],
         cross_attention_mask: Optional[torch.LongTensor],
-        kv_range_for_decode: Optional[List[Tuple[int, int]]],
-        full_text_row_masked_out_mask: Optional[Tuple[torch.Tensor,
+        kv_range_for_decode: Optional[list[tuple[int, int]]],
+        full_text_row_masked_out_mask: Optional[tuple[torch.Tensor,
                                                       torch.Tensor]],
         skip_cross_attention: bool,
     ) -> torch.Tensor:
@@ -1132,6 +1164,7 @@ class MllamaForCausalLM(nn.Module):
 
         config = vllm_config.model_config.hf_config.text_config
         quant_config = vllm_config.quant_config
+        self.quant_config = quant_config
 
         self.vocab_size = config.vocab_size
         self.model = MllamaTextModel(vllm_config=vllm_config,
@@ -1151,8 +1184,8 @@ class MllamaForCausalLM(nn.Module):
         positions: Optional[torch.LongTensor],
         cross_attention_states: Optional[torch.LongTensor],
         cross_attention_mask: Optional[torch.LongTensor],
-        kv_range_for_decode: Optional[List[Tuple[int, int]]],
-        full_text_row_masked_out_mask: Optional[Tuple[torch.Tensor,
+        kv_range_for_decode: Optional[list[tuple[int, int]]],
+        full_text_row_masked_out_mask: Optional[tuple[torch.Tensor,
                                                       torch.Tensor]],
         skip_cross_attention: bool,
     ) -> torch.Tensor:
@@ -1167,6 +1200,58 @@ class MllamaForCausalLM(nn.Module):
         )
         return hidden_states
 
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            (".qkv_proj", ".q_proj", "q"),
+            (".qkv_proj", ".k_proj", "k"),
+            (".qkv_proj", ".v_proj", "v"),
+            (".gate_up_proj", ".gate_proj", 0),
+            (".gate_up_proj", ".up_proj", 1),
+        ]
+        params_dict = dict(self.named_parameters())
+        updated_params: set[str] = set()
+        for name, loaded_weight in weights:
+            if 'patch_embedding.weight' in name:
+                name = name.replace('patch_embedding.weight',
+                                    'patch_embedding._linear.weight')
+                loaded_weight = loaded_weight.view(loaded_weight.shape[0], -1)
+            if (self.quant_config is not None and
+                (scale_name := self.quant_config.get_cache_scale(name))):
+                # Loading kv cache quantization scales
+                param = params_dict[scale_name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
+                                 loaded_weight[0])
+                weight_loader(param, loaded_weight)
+                updated_params.add(scale_name)
+                continue
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                param = params_dict[name]
+                updated_params.add(name)
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                orig_name = name
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    logger.debug("Missing name %s, orig name %s", name,
+                                 orig_name)
+                    continue
+
+                param = params_dict.pop(name)
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
+                updated_params.add(name)
+        return updated_params
+
 
 @MULTIMODAL_REGISTRY.register_processor(MllamaMultiModalProcessor,
                                         info=MllamaProcessingInfo,
@@ -1177,6 +1262,26 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"]
     }
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            # mapping for new names in checkpoint saved after transformers v4.52
+            "model.vision_model.": "vision_model.",
+            "model.multi_modal_projector.": "multi_modal_projector.",
+            "model.language_model.": "language_model.model.",
+            "lm_head.": "language_model.lm_head.",
+        },
+        orig_to_new_suffix={
+            "patch_embedding.weight": "patch_embedding._linear.weight",
+        },
+    )
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<|image|>"
+
+        raise ValueError("Only image modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -1211,7 +1316,6 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
         )
         self.logits_processor = LogitsProcessor(config.output_hidden_states,
                                                 config.text_config.vocab_size)
-        self.sampler = get_sampler()
 
     def compute_logits(
         self,
@@ -1222,16 +1326,8 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
                                        hidden_states, sampling_metadata)
         return logits
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
-
     def unpack_data(self,
-                    image_data: Union[List[torch.Tensor], torch.Tensor],
+                    image_data: Union[list[torch.Tensor], torch.Tensor],
                     padding_value=0) -> torch.Tensor:
         if isinstance(image_data, torch.Tensor):
             # torch.Tensor
@@ -1240,7 +1336,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
             assert isinstance(
                 image_data[0],
                 torch.Tensor), "Image data is not properly batched."
-            # List[torch.Tensor]
+            # list[torch.Tensor]
             bsz = len(image_data)
             max_length = max(t.size(0) for t in image_data)
             trailing_dims = image_data[0].shape[1:]
@@ -1258,24 +1354,24 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
     def _parse_and_validate_image_input(self, **kwargs: object):
         # tensor with the same shape will be batched together by
         # MultiModalKwargs.batch, so pixel_values here can be:
-        #   - List[torch.Tensor]:
+        #   - list[torch.Tensor]:
         #       with shape (num_image, num_tiles, 3, image_res, image_res)
         #   - torch.Tensor:
         #       with shape (bs, num_image, num_tiles, 3, image_res, image_res)
-        pixel_values: Optional[Union[List[List[torch.Tensor]],
-                                     List[torch.Tensor],
+        pixel_values: Optional[Union[list[list[torch.Tensor]],
+                                     list[torch.Tensor],
                                      torch.Tensor]] = kwargs.pop(
                                          "pixel_values", None)
-        image_embeds: Optional[Union[List[List[torch.Tensor]],
-                                     List[torch.Tensor],
+        image_embeds: Optional[Union[list[list[torch.Tensor]],
+                                     list[torch.Tensor],
                                      torch.Tensor]] = kwargs.pop(
                                          "image_embeds", None)
-        aspect_ratio_ids: Optional[Union[List[List[torch.Tensor]],
-                                         List[torch.Tensor],
+        aspect_ratio_ids: Optional[Union[list[list[torch.Tensor]],
+                                         list[torch.Tensor],
                                          torch.Tensor]] = kwargs.pop(
                                              "aspect_ratio_ids", None)
-        aspect_ratio_mask: Optional[Union[List[List[torch.Tensor]],
-                                          List[torch.Tensor],
+        aspect_ratio_mask: Optional[Union[list[list[torch.Tensor]],
+                                          list[torch.Tensor],
                                           torch.Tensor]] = kwargs.pop(
                                               "aspect_ratio_mask", None)
 
@@ -1303,10 +1399,10 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
 
     def _get_and_validate_encoder_lens(
         self,
-        encoder_seq_lens: List[int],
-        num_tiles: List[List[int]],
+        encoder_seq_lens: list[int],
+        num_tiles: list[list[int]],
         num_tokens_per_tile: int,
-    ) -> List[int]:
+    ) -> list[int]:
         # Get the actual number of encoder tokens for each sample.
         # Because attn_metadata.encoder_seq_lens only counts the last
         # group of images for each sample, which is used to cheat the
@@ -1328,7 +1424,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
 
     def flat_encoder_result(self, cross_attention_states: torch.Tensor,
                             attn_metadata: AttentionMetadata,
-                            actual_encoder_seq_lens: List[int]):
+                            actual_encoder_seq_lens: list[int]):
 
         cross_attention_states_flat = torch.zeros(
             sum(actual_encoder_seq_lens),
@@ -1352,8 +1448,8 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
         self,
         image_inputs: MllamaImagePixelInputs,
         attn_metadata: AttentionMetadata,
-        actual_encoder_seq_lens: List[int],
-    ) -> Tuple[torch.Tensor]:
+        actual_encoder_seq_lens: list[int],
+    ) -> tuple[torch.Tensor]:
         # NOTE: llama's reference implementation runs vision model on CPU
         pixel_values = image_inputs['data']
         aspect_ratio_ids = image_inputs['aspect_ratio_ids']
@@ -1377,10 +1473,10 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
         self,
         input_ids: torch.Tensor,
         attn_metadata: AttentionMetadata,
-        num_tiles: List[List[int]],
+        num_tiles: list[list[int]],
         num_tokens_per_tile: int,
         dtype: torch.dtype,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         token_ids = input_ids.tolist()
         start = 0
         batch_token_ids = []
@@ -1432,7 +1528,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         **kwargs: object,
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
+    ) -> Union[CausalLMOutputWithPast]:
         attn_metadata = get_forward_context().attn_metadata
         if attn_metadata.num_prefill_tokens > 0 and \
             attn_metadata.num_decode_tokens > 0:
@@ -1486,57 +1582,10 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         return outputs
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            (".qkv_proj", ".q_proj", "q"),
-            (".qkv_proj", ".k_proj", "k"),
-            (".qkv_proj", ".v_proj", "v"),
-            (".gate_up_proj", ".gate_proj", 0),
-            (".gate_up_proj", ".up_proj", 1),
-        ]
-        params_dict = dict(self.named_parameters())
-        updated_params: Set[str] = set()
-        for name, loaded_weight in weights:
-            if 'patch_embedding.weight' in name:
-                name = name.replace('patch_embedding.weight',
-                                    'patch_embedding._linear.weight')
-                loaded_weight = loaded_weight.view(loaded_weight.shape[0], -1)
-            if (self.quant_config is not None and
-                (scale_name := self.quant_config.get_cache_scale(name))):
-                # Loading kv cache quantization scales
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
-                                 loaded_weight[0])
-                weight_loader(param, loaded_weight)
-                updated_params.add(scale_name)
-                continue
-            for (param_name, weight_name, shard_id) in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                param = params_dict[name]
-                updated_params.add(name)
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                orig_name = name
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
-                    logger.debug("Missing name %s, orig name %s", name,
-                                 orig_name)
-                    continue
-
-                param = params_dict.pop(name)
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, loaded_weight)
-                updated_params.add(name)
-        return updated_params
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """
@@ -1548,7 +1597,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
             tower_model="vision_model")
 
 
-def skip_attention_mask(sparse_mask: List[List[int]]) -> bool:
+def skip_attention_mask(sparse_mask: list[list[int]]) -> bool:
     for mask in sparse_mask:
         # Skip text-only samples.
         if len(mask) == 0:
@@ -1566,10 +1615,10 @@ def skip_attention_mask(sparse_mask: List[List[int]]) -> bool:
 
 
 def convert_sparse_cross_attention_mask_to_dense(
-    sparse_mask: List[List[List[int]]],
-    num_tiles: List[List[int]],
-    lengths: List[int],
-) -> Tuple[np.ndarray, List[Tuple[int, int]]]:
+    sparse_mask: list[list[list[int]]],
+    num_tiles: list[list[int]],
+    lengths: list[int],
+) -> tuple[np.ndarray, list[tuple[int, int]]]:
     total_length = sum(lengths)
     total_tiles = sum([sum(tiles) for tiles in num_tiles])
     dense_mask = np.zeros(shape=(total_length, total_tiles), dtype=np.int64)

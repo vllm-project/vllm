@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-import re
 from collections.abc import Sequence
 from typing import Any, Optional
 
+import regex as re
 from transformers import PreTrainedTokenizerBase
 
+from vllm.entrypoints.chat_utils import random_tool_call_id
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaMessage,
                                               ExtractedToolCallInformation,
@@ -14,7 +16,6 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
 from vllm.logger import init_logger
-from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
@@ -68,21 +69,22 @@ class Phi4MiniJsonToolParser(ToolParser):
                              len(function_call_arr))
             except json.JSONDecodeError as e:
                 logger.error(
-                    "Failed to parse function calls from model output: %s. "
-                    "Error: %s", model_output, str(e))
+                    "Failed to parse function calls from model output. "
+                    "Error: %s", str(e))
 
             tool_calls: list[ToolCall] = [
                 ToolCall(
-                    id=f"chatcmpl-tool-{random_uuid()}",
+                    id=random_tool_call_id(),
                     type="function",
                     function=FunctionCall(
                         name=raw_function_call["name"],
                         # function call args are JSON but as a string
                         arguments=json.dumps(
-                            raw_function_call["arguments"] if "arguments" in
-                            raw_function_call else
-                            raw_function_call["parameters"])))
-                for raw_function_call in function_call_arr
+                            raw_function_call["arguments"]
+                            if "arguments" in raw_function_call else
+                            raw_function_call["parameters"],
+                            ensure_ascii=False),
+                    )) for raw_function_call in function_call_arr
             ]
 
             # get any content before the tool call

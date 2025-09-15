@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # copied from https://pypi.org/project/nvidia-ml-py
 # version 12.570.86
 

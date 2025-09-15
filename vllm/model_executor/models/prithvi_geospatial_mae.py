@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Copyright 2025 The vLLM team.
 # Copyright 2025 IBM.
@@ -16,19 +17,20 @@
 # limitations under the License.
 """Inference-only IBM/NASA Prithvi Geospatial model."""
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Optional, Set, Tuple, Union
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.pooler import (AllPool, PoolerHead,
+                                               PoolerIdentity, SimplePooler)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (IsAttentionFree,
                                                    SupportsMultiModal,
                                                    SupportsV0Only)
 from vllm.model_executor.models.utils import AutoWeightsLoader
-from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalInputs, MultiModalKwargs)
@@ -36,8 +38,7 @@ from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
-from vllm.sequence import (IntermediateTensors, PoolerOutput,
-                           PoolingSequenceGroupOutput)
+from vllm.sequence import IntermediateTensors
 
 
 class PrithviGeoSpatialMAEProcessingInfo(BaseProcessingInfo):
@@ -91,6 +92,7 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
         prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Optional[Mapping[str, object]] = None,
         return_mm_hashes: bool = False,
     ) -> MultiModalInputs:
         mm_kwargs = {}
@@ -114,7 +116,16 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
     dummy_inputs=PrithviGeoSpatialMAEInputBuilder)
 class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree, SupportsMultiModal,
                            SupportsV0Only):
-    """ Prithvi Masked Autoencoder"""
+    """Prithvi Masked Autoencoder"""
+
+    is_pooling_model = True
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return None
+
+        raise ValueError("Only image modality is supported")
 
     def _instantiate_model(self, config: dict) -> Optional[nn.Module]:
 
@@ -153,8 +164,10 @@ class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree, SupportsMultiModal,
                 "Only SemanticSegmentationTask is supported for now "
                 "by PrithviGeospatialMAE.")
 
+        self.pooler = SimplePooler(AllPool(), PoolerHead(PoolerIdentity()))
+
     def _parse_and_validate_multimodal_data(
-            self, **kwargs) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+            self, **kwargs) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
 
         pixel_values = kwargs.pop("pixel_values", None)
         if not isinstance(pixel_values, torch.Tensor):
@@ -180,7 +193,6 @@ class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree, SupportsMultiModal,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ):
-
         pixel_values, location_coords = (
             self._parse_and_validate_multimodal_data(**kwargs))
         model_output = self.model(pixel_values,
@@ -188,15 +200,8 @@ class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree, SupportsMultiModal,
 
         return model_output.output
 
-    def pooler(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> Optional[PoolerOutput]:
-        return PoolerOutput([PoolingSequenceGroupOutput(hidden_states)])
-
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         params_list = []
         model_buffers = dict(self.named_buffers())
         loaded_buffers = []

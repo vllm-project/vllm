@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
 #
@@ -108,7 +109,7 @@ class SolarConfig(PretrainedConfig):
             Whether to tie weight embeddings
         rope_theta (`float`, *optional*, defaults to 10000.0):
             The base period of the RoPE embeddings.
-        rope_scaling (`Dict`, *optional*):
+        rope_scaling (`dict`, *optional*):
             Dictionary containing the scaling configuration for
             the RoPE embeddings.
             Currently supports two scaling

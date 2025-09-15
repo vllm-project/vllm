@@ -26,7 +26,7 @@ sed -i '/\*\*BEFORE SUBMITTING, PLEASE READ.*\*\*/,$d' "${NEW}"
 
 # Remove HTML <details> section that includes <summary> text of "PR Checklist (Click to Expand)"
 python3 - <<EOF
-import re
+import regex as re
 
 with open("${NEW}", "r") as file:
     content = file.read()

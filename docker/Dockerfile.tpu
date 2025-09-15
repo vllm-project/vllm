@@ -1,5 +1,5 @@
-ARG NIGHTLY_DATE="20250124"
-ARG BASE_IMAGE="us-central1-docker.pkg.dev/tpu-pytorch-releases/docker/xla:nightly_3.10_tpuvm_$NIGHTLY_DATE"
+ARG NIGHTLY_DATE="20250714"
+ARG BASE_IMAGE="us-central1-docker.pkg.dev/tpu-pytorch-releases/docker/xla:nightly_3.12_tpuvm_$NIGHTLY_DATE"
 
 FROM $BASE_IMAGE
 WORKDIR /workspace/vllm
@@ -23,7 +23,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,source=.git,target=.git \
     python3 -m pip install \
         -r requirements/tpu.txt
-RUN python3 setup.py develop
+RUN python3 -m pip install -e .
 
 # install development dependencies (for testing)
 RUN python3 -m pip install -e tests/vllm_test_utils

@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from https://github.com/fixie-ai/ultravox/blob/ecd58c4041030bae2ad15aa6bcf04ab43199ea02/ultravox/model/ultravox_model.py
 """PyTorch Ultravox model."""
 from collections.abc import Iterable, Mapping, Sequence
-from functools import cached_property
-from typing import Any, Literal, Optional, Set, Tuple, TypedDict, Union
+from typing import Any, Literal, Optional, TypedDict, Union
 
 import torch
 from torch import nn
@@ -18,8 +18,7 @@ from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import MulAndSilu, get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
-from vllm.model_executor.model_loader.loader import DefaultModelLoader
+from vllm.model_executor.model_loader import DefaultModelLoader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -145,6 +144,7 @@ class UltravoxMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         # Text-only input not supported in composite processor
         if not mm_data.get("audios", []):
@@ -166,10 +166,15 @@ class UltravoxMultiModalProcessor(
 
         item_processor_data = dict(**mm_data, audios=audios)
 
+        # some tokenizer kwargs are incompatible with UltravoxProcessor
+        tok_kwargs.pop("padding", None)
+        tok_kwargs.pop("truncation", None)
+
         output = super()._call_hf_processor(
             prompt=prompt,
             mm_data=item_processor_data,
             mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
         )
         output['audio_features'] = output.pop('audio_values')
 
@@ -402,6 +407,13 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"audio_tower.model.encoder.": "audio_tower."})
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("audio"):
+            return "<|audio|>"
+
+        raise ValueError("Only audio modality is supported")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -437,13 +449,6 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
-
-    @cached_property
-    def sampler(self):
-        if hasattr(self.language_model, "sampler"):
-            return self.language_model.sampler
-
-        return get_sampler()
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """
@@ -554,11 +559,11 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         if audio_input is None:
-            return None
+            return []
         audio_embeddings = self._process_audio_input(audio_input)
         return audio_embeddings
 
@@ -568,7 +573,8 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings is not None \
+            and len(multimodal_embeddings) != 0:
 
             # TODO(ywang96): remove this block after v0 is deprecated.
             if not envs.VLLM_USE_V1:
@@ -628,15 +634,8 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        return self.language_model.sample(logits, sampling_metadata)
-
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
 
         loader = AutoWeightsLoader(self,
                                    ignore_unexpected_prefixes=["audio_tower."])

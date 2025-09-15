@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-
-import math
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
 import pytest
@@ -11,6 +10,15 @@ from torch import tensor
 from vllm.entrypoints.openai.protocol import ScoreResponse
 
 from ...utils import RemoteOpenAIServer
+
+
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines):
+    # Simple autouse wrapper to run both engines for each test
+    # This can be promoted up to conftest.py to run for every
+    # test in a package
+    pass
+
 
 MODELS = [
     {
@@ -92,7 +100,7 @@ class TestModel:
         hf_outputs = run_transformers(runner, model, text_pairs)
 
         for i in range(len(vllm_outputs)):
-            assert math.isclose(hf_outputs[i], vllm_outputs[i], rel_tol=0.01)
+            assert hf_outputs[i] == pytest.approx(vllm_outputs[i], rel=0.01)
 
     def test_text_1_list_text_2_list(self, server: RemoteOpenAIServer,
                                      model: dict[str, Any], runner):
@@ -124,7 +132,7 @@ class TestModel:
         hf_outputs = run_transformers(runner, model, text_pairs)
 
         for i in range(len(vllm_outputs)):
-            assert math.isclose(hf_outputs[i], vllm_outputs[i], rel_tol=0.01)
+            assert hf_outputs[i] == pytest.approx(vllm_outputs[i], rel=0.01)
 
     def test_text_1_str_text_2_str(self, server: RemoteOpenAIServer,
                                    model: dict[str, Any], runner):
@@ -150,7 +158,7 @@ class TestModel:
         hf_outputs = run_transformers(runner, model, text_pairs)
 
         for i in range(len(vllm_outputs)):
-            assert math.isclose(hf_outputs[i], vllm_outputs[i], rel_tol=0.01)
+            assert hf_outputs[i] == pytest.approx(vllm_outputs[i], rel=0.01)
 
     def test_score_max_model_len(self, server: RemoteOpenAIServer,
                                  model: dict[str, Any]):
@@ -183,3 +191,32 @@ class TestModel:
         assert score_response.status_code == 400
         assert "Please, select a smaller truncation size." in \
             score_response.text
+
+    def test_invocations(self, server: RemoteOpenAIServer, model: dict[str,
+                                                                       Any]):
+        text_1 = "What is the capital of France?"
+        text_2 = "The capital of France is Paris."
+
+        request_args = {
+            "model": model["name"],
+            "text_1": text_1,
+            "text_2": text_2,
+        }
+
+        score_response = requests.post(server.url_for("score"),
+                                       json=request_args)
+        score_response.raise_for_status()
+
+        invocation_response = requests.post(server.url_for("invocations"),
+                                            json=request_args)
+        invocation_response.raise_for_status()
+
+        score_output = score_response.json()
+        invocation_output = invocation_response.json()
+
+        assert score_output.keys() == invocation_output.keys()
+        for score_data, invocation_data in zip(score_output["data"],
+                                               invocation_output["data"]):
+            assert score_data.keys() == invocation_data.keys()
+            assert score_data["score"] == pytest.approx(
+                invocation_data["score"], rel=0.01)

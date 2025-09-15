@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
 import functools
@@ -14,6 +15,7 @@ from vllm.model_executor.layers.sampler import (PromptLogprobs, SampleLogprobs,
                                                 SamplerOutput,
                                                 SamplingMetadata, get_logprobs,
                                                 get_pythonized_sample_results)
+from vllm.platforms import current_platform
 from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
                            Logprob, SequenceGroupMetadata, SequenceOutput)
 from vllm.utils import PyObjectCache, async_tensor_h2d, current_stream
@@ -158,8 +160,8 @@ class StatefulModelInput(BroadcastableModelInput):
     is_first_multi_step: bool = False
     base_output_proc_callback: Optional[Callable] = None
     # ping-pong data structures for multi-step to wait on the previous step
-    step_cuda_events: List[torch.cuda.Event] = field(
-        default_factory=lambda: [torch.cuda.Event(blocking=True)] * 2)
+    step_cuda_events: List[current_platform.Event] = field(
+        default_factory=lambda: [current_platform.Event(blocking=True)] * 2)
     num_seqs: int = -1
     num_queries: int = -1
     num_single_step_prefills: int = 0
@@ -275,7 +277,7 @@ class StatefulModelInput(BroadcastableModelInput):
         assert fmi.input_tokens.shape[0] >= self.num_seqs
         fmi_new_input_tokens: torch.Tensor = fmi.input_tokens[:self.num_seqs]
 
-        # Update frozen_model_input::input_positons.
+        # Update frozen_model_input::input_positions.
         assert fmi.input_positions is not None
         assert fmi.input_positions.shape[0] >= self.num_seqs
         fmi_new_input_positions: torch.Tensor = fmi.input_positions[:self.
@@ -488,8 +490,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
                     device="cpu",
                     pin_memory=True)
 
-            self._base_model_runner.model.sampler.include_gpu_probs_tensor = (
-                True)
+            self._base_model_runner.sampler.include_gpu_probs_tensor = True
             if frozen_model_input.sampling_metadata:
                 frozen_model_input.sampling_metadata.skip_sampler_cpu_output = (
                     True)
@@ -733,12 +734,13 @@ def _pythonize_sampler_output(
     logprobs_tensor: Optional[torch.Tensor],
     cache: Optional[PythonizationCache],
 ) -> None:
-    """ This function is only called when the output tensors are ready. 
-    See :class:`ModelOutput`. 
-    
-    Modifies `output.outputs` and `pinned_sampled_token_buffer` in-place, 
+    """ This function is only called when the output tensors are ready.
+    See [`ModelOutput`][vllm.worker.multi_step_model_runner.ModelOutput].
+
+    Modifies `output.outputs` and `pinned_sampled_token_buffer` in-place,
     adding a Pythonized output data structure
-    (:class:`CompletionSequenceGroupOutput`) for each :class:`SequenceGroup`.
+    ([`CompletionSequenceGroupOutput`][vllm.sequence.CompletionSequenceGroupOutput])
+    for each [`SequenceGroup`][vllm.sequence.SequenceGroup].
 
     Args:
       model_input
@@ -824,7 +826,7 @@ def _pythonize_sampler_output(
 
     for sgdx, (seq_group,
                sample_result) in enumerate(zip(seq_groups, samples_list)):
-        # Reminder: Please update docs/source/features/compatibility_matrix.md
+        # Reminder: Please update docs/features/compatibility_matrix.md
         # If the feature combo become valid
         # (Check for Guided Decoding)
         if seq_group.sampling_params.logits_processors:
