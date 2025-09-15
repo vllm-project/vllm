@@ -25,7 +25,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.models.vision import get_vit_attn_backend
 from vllm.platforms import _Backend, current_platform
-from vllm.utils import direct_register_custom_op
+from vllm.utils import GiB_bytes, direct_register_custom_op
 
 logger = init_logger(__name__)
 USE_XFORMERS_OPS = None
@@ -225,9 +225,26 @@ class Attention(nn.Module, AttentionLayerBase):
             ).parallel_config.pipeline_parallel_size)
         ]
 
-        self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
-        self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
-        self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
+        try:
+            self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT,
+                                        dtype=torch.float32)
+            self.k_range = torch.tensor(envs.K_SCALE_CONSTANT,
+                                        dtype=torch.float32)
+            self.v_range = torch.tensor(envs.V_SCALE_CONSTANT,
+                                        dtype=torch.float32)
+        except torch.cuda.OutOfMemoryError as e:
+            logger.error(
+                "Failed to initialize attention q/k/v range constants: %s", e)
+            if torch.cuda.is_available():
+                logger.debug("CUDA device: %s", torch.cuda.current_device())
+                logger.debug("Allocated: %.2f GiB",
+                             torch.cuda.memory_allocated() / GiB_bytes)
+                logger.debug("Reserved: %.2f GiB",
+                             torch.cuda.memory_reserved() / GiB_bytes)
+            raise RuntimeError(
+                "Failed to initialize q/k/v range constants. "
+                "This may be caused by insufficient memory to allocate "
+                "kv cache.") from e
 
     def forward(
         self,
