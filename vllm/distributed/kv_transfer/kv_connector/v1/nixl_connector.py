@@ -56,11 +56,12 @@ except ImportError:
     logger.warning("NIXL is not available")
     NixlWrapper = None
 
-# Supported xPUs and types of kv transfer buffer.
-# {xPU: tuple of supported kv buffer types}
-_NIXL_SUPPORTED_XPUS = {
+# Supported platforms and types of kv transfer buffer.
+# {device: tuple of supported kv buffer types}
+_NIXL_SUPPORTED_DEVICE = {
     "cuda": ("cuda", ),
     "tpu": ("cpu", ),
+    "xpu": ("cpu", ),
 }
 
 
@@ -161,7 +162,7 @@ class NixlConnector(KVConnectorBase_V1):
 
     def get_num_new_matched_tokens(
             self, request: "Request",
-            num_computed_tokens: int) -> tuple[int, bool]:
+            num_computed_tokens: int) -> tuple[Optional[int], bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(
             request, num_computed_tokens)
@@ -457,9 +458,9 @@ class NixlConnectorWorker:
         self.device_type = current_platform.device_type
         self.kv_buffer_device: str = \
             vllm_config.kv_transfer_config.kv_buffer_device
-        if self.device_type not in _NIXL_SUPPORTED_XPUS:
+        if self.device_type not in _NIXL_SUPPORTED_DEVICE:
             raise RuntimeError(f"{self.device_type} is not supported.")
-        elif self.kv_buffer_device not in _NIXL_SUPPORTED_XPUS[
+        elif self.kv_buffer_device not in _NIXL_SUPPORTED_DEVICE[
                 self.device_type]:
             raise RuntimeError(
                 f"{self.device_type} with {self.kv_buffer_device} kv_buffer "
@@ -467,7 +468,7 @@ class NixlConnectorWorker:
         self.device_kv_caches: dict[str, torch.Tensor] = {}
 
         # cpu kv buffer for xfer
-        # used when xPU memory can not be registered under nixl
+        # used when device memory can not be registered under nixl
         self.host_xfer_buffers: dict[str, torch.Tensor] = {}
         self.use_host_buffer = self.kv_buffer_device == "cpu"
         if self.kv_buffer_device == "cuda":
@@ -707,8 +708,6 @@ class NixlConnectorWorker:
         caches_data = []
         # With hybrid allocator, layers can share a kv cache tensor
         seen_base_addresses = []
-        xfer_buffers = (self.host_xfer_buffers
-                        if self.use_host_buffer else kv_caches)
 
         # Note(tms): I modified this from the original region setup code.
         # K and V are now in different regions. Advantage is that we can
@@ -769,7 +768,7 @@ class NixlConnectorWorker:
             # with joint KV for each block. This minimizes the overhead in
             # registerMem allowing faster descs queries. In order to be able to
             # split on kv_heads dim as required by heterogeneous TP, one must
-            # be able to index K/V separately. Hence the we double the number
+            # be able to index K/V separately. Hence we double the number
             # of 'virtual' regions here and halve `block_len` below.
             self.num_regions *= 2
 
@@ -928,6 +927,9 @@ class NixlConnectorWorker:
             if tp_ratio > 1:
                 # Heterogeneous TP expects same kv_cache_layout.
                 assert nixl_agent_meta.kv_cache_layout == self.kv_cache_layout
+                if self.device_type == "xpu":
+                    raise ValueError(
+                        "Heterogeneous TP is not supported on XPU")
 
             assert nixl_agent_meta.block_len == self.block_len * tp_ratio, (
                 "Remote P worker KV layer cache must be of shape [2, N, "

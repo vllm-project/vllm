@@ -534,7 +534,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
     EM = sorted_token_ids.size(0)
     if A.size(0) < config["BLOCK_SIZE_M"]:
         # optimize for small batch_size.
-        # We assume that top_ids of each token is unique, so
+        # We assume that top_ids of each token is unique,
         # so num_valid_experts <= batch_size <= BLOCK_SIZE_M,
         # and we can skip some invalid blocks.
         EM = min(sorted_token_ids.size(0),
@@ -720,7 +720,10 @@ def get_moe_configs(
                 logger.info("Using configuration from %s for MoE layer.",
                             config_file_path)
                 # If a configuration has been found, return it
-                return {int(key): val for key, val in json.load(f).items()}
+                tuned_config = json.load(f)
+                # Delete triton_version from tuned_config
+                tuned_config.pop("triton_version", None)
+                return {int(key): val for key, val in tuned_config.items()}
 
     # If no optimized configuration is available, we will use the default
     # configuration

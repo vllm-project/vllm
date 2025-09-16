@@ -31,7 +31,7 @@ def _mk_processor(monkeypatch,
                         raising=True)
     monkeypatch.setattr(ModelConfig,
                         "__post_init__",
-                        lambda self: None,
+                        lambda self, *args: None,
                         raising=True)
     monkeypatch.setattr(UnspecifiedPlatform,
                         "is_async_output_supported",
@@ -152,8 +152,8 @@ def test_multi_modal_uuids_accepts_none_and_passes_through(
                         *,
                         tokenization_kwargs=None,
                         lora_request=None,
-                        mm_hash_overrides=None):
-        captured["mm_hash_overrides"] = mm_hash_overrides
+                        mm_uuids=None):
+        captured["mm_uuids"] = mm_uuids
         # Minimal processed inputs for decoder-only flow
         return {"type": "token", "prompt_token_ids": [1]}
 
@@ -180,7 +180,7 @@ def test_multi_modal_uuids_accepts_none_and_passes_through(
         params=SamplingParams(),
     )
 
-    assert captured["mm_hash_overrides"] == mm_uuids
+    assert captured["mm_uuids"] == mm_uuids
 
 
 def test_multi_modal_uuids_ignored_when_caching_disabled(monkeypatch):
@@ -196,8 +196,8 @@ def test_multi_modal_uuids_ignored_when_caching_disabled(monkeypatch):
                         *,
                         tokenization_kwargs=None,
                         lora_request=None,
-                        mm_hash_overrides=None):
-        captured["mm_hash_overrides"] = mm_hash_overrides
+                        mm_uuids=None):
+        captured["mm_uuids"] = mm_uuids
         return {"type": "token", "prompt_token_ids": [1]}
 
     monkeypatch.setattr(processor.input_preprocessor,
@@ -223,7 +223,7 @@ def test_multi_modal_uuids_ignored_when_caching_disabled(monkeypatch):
     )
 
     # Expect request-id-based overrides are passed through
-    assert captured["mm_hash_overrides"] == {
+    assert captured["mm_uuids"] == {
         "image": [f"{request_id}-image-0", f"{request_id}-image-1"],
         "video": [f"{request_id}-video-0"],
     }
