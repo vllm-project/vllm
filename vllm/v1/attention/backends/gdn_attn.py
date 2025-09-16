@@ -74,8 +74,8 @@ class GDNAttentionMetadataBuilder(
         self.use_full_cuda_graph = \
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         self.decode_cudagraph_max_bs = min(
-            self.vllm_config.scheduler_config.max_num_seqs,
-            self.compilation_config.max_capture_size)
+            self.vllm_config.scheduler_config.max_num_seqs *
+            (self.num_spec + 1), self.compilation_config.max_capture_size)
 
         self.spec_state_indices_tensor = torch.empty(
             (self.decode_cudagraph_max_bs, self.num_spec + 1),
@@ -194,9 +194,8 @@ class GDNAttentionMetadataBuilder(
                              dim=0,
                              out=non_spec_query_start_loc[1:])
 
-            num_spec_decode_tokens = min(
-                num_spec_decodes * (self.num_spec + 1),
-                spec_token_masks.size(0))
+            num_spec_decode_tokens = (query_lens.sum().item() -
+                                      num_prefill_tokens - num_decode_tokens)
             assert num_accepted_tokens is not None
             num_accepted_tokens = num_accepted_tokens[spec_sequence_masks]
 
@@ -208,9 +207,20 @@ class GDNAttentionMetadataBuilder(
             has_initial_state = None
 
         # prepare tensors for cudagraph
+        #
+        # With speculative decoding, the xgrammar backend may rollback tokens
+        # and causing some sequences has less draft tokens than self.num_spec.
+        #
+        # During cudagraph capture, the GDN backends requires an assumption
+        # that num_spec_decode_tokens == num_spec_decodes * (self.num_spec + 1).
+        #
+        # More than one such sequences may break the assumption (less tokens),
+        # causing incompatible inputs for cuda graph replay.
         if (self.use_full_cuda_graph and num_prefills == 0 and num_decodes == 0
                 and num_spec_decodes <= self.decode_cudagraph_max_bs
-                and m.num_actual_tokens <= self.decode_cudagraph_max_bs):
+                and num_spec_decode_tokens <= self.decode_cudagraph_max_bs
+                and num_spec_decode_tokens == num_spec_decodes *
+            (self.num_spec + 1)):
             num_total_tokens = self.vllm_config.pad_for_cudagraph(
                 m.num_actual_tokens)
             batch_size = num_total_tokens // (self.num_spec + 1)
