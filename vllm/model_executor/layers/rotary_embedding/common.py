@@ -2,13 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
+from typing import Callable
 
 import torch
 
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 if current_platform.is_cuda():
     from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
+
+import importlib
+from functools import cache
+
+logger = init_logger(__name__)
 
 
 # common functions
@@ -62,6 +69,23 @@ def apply_rotary_emb_dispatch(x: torch.Tensor, cos: torch.Tensor,
                                 not is_neox_style).squeeze(0)
     else:
         return apply_rotary_emb_torch(x, cos, sin, is_neox_style)
+
+
+@cache
+def dispatch_rotary_emb_function() -> Callable[..., torch.Tensor]:
+    if current_platform.is_cuda():
+        return apply_rotary_emb
+
+    if current_platform.is_rocm():
+        if importlib.util.find_spec("flash_attn") is not None:
+            from flash_attn.ops.triton.rotary import apply_rotary
+            return apply_rotary
+        else:
+            logger.warning(
+                "flash_attn is not installed. Falling back to PyTorch "
+                "implementation for rotary embeddings.")
+
+    return apply_rotary_emb_torch
 
 
 # yarn functions
