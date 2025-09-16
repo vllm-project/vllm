@@ -583,6 +583,16 @@ class FusedMoEModularKernel(torch.nn.Module):
                 f"{fused_experts.__class__.__name__}."
                 f"{fused_experts.activation_formats[0]}")
 
+    @staticmethod
+    def _reset_buffers():
+        """
+        Reset the workspace and output buffers in case the type changes.
+        For use in tests.
+        """
+        FusedMoEModularKernel.fused_out_buffer.reset()
+        FusedMoEModularKernel.workspace13_buffer.reset()
+        FusedMoEModularKernel.workspace2_buffer.reset()
+
     def _do_fused_experts(
         self,
         fused_out: Optional[torch.Tensor],
