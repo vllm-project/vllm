@@ -92,12 +92,12 @@ def test_gpqa_correctness(request):
         print(f"GPQA Results for {model_name}:")
         print(f"  Measured metric: {measured_metric:.4f}")
         print(f"  Expected metric: {expected_metric:.4f}")
-        print(f"  Tolerance: {RTOL:.4f}")
+        print(f"  Tolerance: {ABS_TOL:.4f}")
 
         # Verify metric is within tolerance
-        assert measured_metric >= expected_metric - RTOL, (
+        assert measured_metric >= expected_metric - ABS_TOL, (
             f"GPQA metric too low: {measured_metric:.4f} < "
-            f"{expected_metric:.4f} - {RTOL:.4f} = {expected_metric - RTOL:.4f}"
+            f"{expected_metric:.4f} - {ABS_TOL:.4f} = {expected_metric - ABS_TOL:.4f}"
         )
 
         print(f"✅ GPQA test passed for {model_name}")
