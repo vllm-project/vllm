@@ -1911,7 +1911,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
             et = time.perf_counter()
             ic(f'target model forward: {et - st}')
-            ic(input_ids.shape)
+            ic(input_ids.shape, num_input_tokens, batch_descriptor)
 
         with record_function_or_nullcontext("Postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -2638,8 +2638,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     **model_kwargs,
                 )
                 et = time.perf_counter()
-                ic(f'target model forward: {et - st}')
-                ic(input_ids.shape)
+                # ignore b/c this is dummy run
+                # ic(f'target model forward: {et - st}')
+                # ic(input_ids.shape)
 
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs

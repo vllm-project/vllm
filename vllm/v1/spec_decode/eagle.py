@@ -229,7 +229,7 @@ class EagleProposer:
             )
             et = time.perf_counter()
             ic(f'drafter forward: {et - st}')
-            ic(input_ids.shape)
+            ic(input_ids.shape, num_input_tokens)
             if self.method in ("deepseek_mtp", "ernie_mtp"):
                 last_hidden_states = ret_hidden_states
                 hidden_states = last_hidden_states

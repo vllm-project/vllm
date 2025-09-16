@@ -171,8 +171,10 @@ def main():
 
     sampling_params = SamplingParams(temperature=args.temp, max_tokens=args.output_len)
     if not args.custom_mm_prompts:
+        tokenized_prompts = [TokensPrompt(prompt_token_ids=x) for x in prompt_ids]
+        ic([len(prompt['prompt_token_ids']) for prompt in tokenized_prompts])
         outputs = llm.generate(
-            [TokensPrompt(prompt_token_ids=x) for x in prompt_ids],
+            tokenized_prompts,
             sampling_params=sampling_params,
         )
     else:
