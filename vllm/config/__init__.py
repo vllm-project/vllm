@@ -41,6 +41,7 @@ from vllm.config.multimodal import (MMCacheType, MMEncoderTPMode,
 from vllm.config.parallel import (DistributedExecutorBackend, EPLBConfig,
                                   ParallelConfig)
 from vllm.config.scheduler import SchedulerConfig, SchedulerPolicy
+from vllm.config.speculative import SpeculativeConfig
 from vllm.config.utils import ConfigType, config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -66,7 +67,6 @@ if TYPE_CHECKING:
 
     import vllm.model_executor.layers.quantization as me_quant
     import vllm.model_executor.models as me_models
-    from vllm.config.speculative import SpeculativeConfig
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.model_executor.layers.quantization.base_config import (
         QuantizationConfig)
@@ -77,7 +77,6 @@ else:
     DataclassInstance = Any
     PretrainedConfig = Any
     QuantizationConfig = Any
-    SpeculativeConfig = Any
     QuantizationMethods = Any
     BaseModelLoader = Any
     LogitsProcessor = Any
