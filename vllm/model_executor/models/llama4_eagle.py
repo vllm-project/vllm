@@ -68,8 +68,7 @@ class LlamaModel(nn.Module):
 
         self.layers = nn.ModuleList([
             Llama4DecoderLayer(
-                self.config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, f"layers.{i + start_layer_id}"),
             ) for i in range(self.config.num_hidden_layers)
         ])
