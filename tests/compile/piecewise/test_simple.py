@@ -127,10 +127,13 @@ def test_simple_piecewise_compile(use_inductor):
 
 
 @torch.inference_mode()
-def test_simple_inductor_graph_partition():
+@pytest.mark.parametrize("splitting_ops", [["silly.attention"], []])
+def test_simple_inductor_graph_partition(splitting_ops):
     assert VLLM_USE_V1
     _run_simple_model(
-        splitting_ops=[],
+        # inductor graph partition automatically resets splitting_ops
+        # to be an empty list
+        splitting_ops=splitting_ops,
         use_inductor_graph_partition=True,
         use_inductor=True,
         expected_num_piecewise_graphs_seen=

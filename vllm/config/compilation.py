@@ -567,14 +567,21 @@ class CompilationConfig:
             "level is CompilationLevel.PIECEWISE")
 
         if self.splitting_ops is None:
-            # NOTE: When using full cudagraph, instead of setting an empty
-            # list and capture the full cudagraph inside the flattened fx
-            # graph, we keep the piecewise fx graph structure but capture the
-            # full cudagraph outside the fx graph. This reduces some cpu
-            # overhead when the runtime batch_size is not cudagraph captured.
-            # see https://github.com/vllm-project/vllm/pull/20059 for details.
-            # make a copy to avoid mutating the class-level list via reference.
-            self.splitting_ops = list(self._attention_ops)
+            if self.use_inductor_graph_partition:
+                # When using inductor graph partition, we set splitting_ops
+                # to be empty and rely on torch._C.Tag.cudagraph_unsafe to
+                # annotate custom ops as splitting ops.
+                self.splitting_ops = []
+            else:
+                # NOTE: When using full cudagraph, instead of setting an empty
+                # list and capture the full cudagraph inside the flattened fx
+                # graph, we keep the piecewise fx graph structure but capture
+                # the full cudagraph outside the fx graph. This reduces some
+                # cpu overhead when the runtime batch_size is not cudagraph
+                # captured. see https://github.com/vllm-project/vllm/pull/20059
+                # for details. make a copy to avoid mutating the class-level
+                # list via reference.
+                self.splitting_ops = list(self._attention_ops)
         elif len(self.splitting_ops) == 0:
             logger.warning_once(
                 "Using piecewise compilation with empty "

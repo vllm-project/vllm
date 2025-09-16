@@ -116,7 +116,6 @@ def test_full_graph(
                 level=CompilationLevel.PIECEWISE,
                 # inductor graph partition uses
                 # torch._C.Tag.cudagraph_unsafe to specify splitting ops
-                splitting_ops=[],
                 use_inductor_graph_partition=True,
                 cudagraph_mode=CUDAGraphMode.PIECEWISE,
                 compile_sizes=[1, 2]),
