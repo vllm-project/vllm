@@ -680,6 +680,25 @@ def _causal_conv1d_update_kernel(
             # not processing as this is not the actual sequence
             return
 
+    if IS_VARLEN:
+        query_start_index = tl.load(query_start_loc_ptr + idx_seq).to(tl.int64)
+        query_end_index = tl.load(query_start_loc_ptr + (idx_seq + 1)).to(
+            tl.int64)
+        # revise state_len and seqlen
+        state_len = state_len - (seqlen -
+                                 (query_end_index - query_start_index))
+        seqlen = query_end_index - query_start_index
+        x_offset = query_start_index * stride_x_token
+        o_offset = query_start_index * stride_o_token
+    else:
+        query_start_index = idx_seq * seqlen
+        query_end_index = query_start_index + seqlen
+        x_offset = idx_seq * stride_x_seq
+        o_offset = idx_seq * stride_o_seq
+
+    if query_start_index == query_end_index:
+        return
+
     if IS_SPEC_DECODING:
         # The rolling of conv state:
         #
@@ -721,22 +740,6 @@ def _causal_conv1d_update_kernel(
     if KERNEL_WIDTH >= 6:
         conv_states_ptrs = prior_tokens + 4 * stride_conv_state_tok  # [BLOCK_N]
         col4 = tl.load(conv_states_ptrs, mask_w, 0.0)
-
-    if IS_VARLEN:
-        query_start_index = tl.load(query_start_loc_ptr + idx_seq).to(tl.int64)
-        query_end_index = tl.load(query_start_loc_ptr + (idx_seq + 1)).to(
-            tl.int64)
-        # revise state_len and seqlen
-        state_len = state_len - (seqlen -
-                                 (query_end_index - query_start_index))
-        seqlen = query_end_index - query_start_index
-        x_offset = query_start_index * stride_x_token
-        o_offset = query_start_index * stride_o_token
-    else:
-        query_start_index = idx_seq * seqlen
-        query_end_index = query_start_index + seqlen
-        x_offset = idx_seq * stride_x_seq
-        o_offset = idx_seq * stride_o_seq
 
     # STEP 2: assume state_len > seqlen
     idx_tokens = tl.arange(0, NP2_STATELEN)  # [BLOCK_M]
