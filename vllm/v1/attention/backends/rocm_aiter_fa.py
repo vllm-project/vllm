@@ -479,8 +479,12 @@ class AiterFlashAttentionImpl(AttentionImpl):
             )
 
         if self.kv_cache_dtype.startswith("fp8"):
-            key_cache = key_cache.view(torch.float8_e4m3fnuz)
-            value_cache = value_cache.view(torch.float8_e4m3fnuz)
+            if current_platform.is_fp8_fnuz():
+                key_cache = key_cache.view(torch.float8_e4m3fnuz)
+                value_cache = value_cache.view(torch.float8_e4m3fnuz)
+            else:
+                key_cache = key_cache.view(torch.float8_e4m3fn)
+                value_cache = value_cache.view(torch.float8_e4m3fn)
 
         if not attn_metadata.use_cascade:
             cu_seqlens_q = attn_metadata.query_start_loc
