@@ -138,8 +138,12 @@ class PrefixCachingMetrics:
         self.aggregated_query_total += stats.queries
         self.aggregated_query_hit += stats.hits
 
-        # Remove the oldest stats if the number of requests exceeds.
-        if self.aggregated_requests > self.max_recent_requests:
+        # Remove the oldest stats until number of requests does not exceed
+        # the limit.
+        # NOTE: We preserve the latest added stats regardless.
+        while len(
+                self.query_queue
+        ) > 1 and self.aggregated_requests > self.max_recent_requests:
             old_requests, old_queries, old_hits = self.query_queue.popleft()
             self.aggregated_requests -= old_requests
             self.aggregated_query_total -= old_queries
