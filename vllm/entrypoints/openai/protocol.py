@@ -22,6 +22,7 @@ from openai.types.responses import (ResponseFunctionToolCall,
                                     ResponseInputItemParam, ResponseOutputItem,
                                     ResponsePrompt, ResponseReasoningItem,
                                     ResponseStatus)
+from openai_harmony import Message as HarmonyMessage
 
 # Backward compatibility for OpenAI client versions
 try:  # For older openai versions (< 1.100.0)
@@ -256,6 +257,9 @@ class ResponsesRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/responses/create
     background: Optional[bool] = False
+    # Dictates whether or not to return Messages as part of the response object
+    # Currently only supported for non-streaming non-background, and gpt-oss
+    enable_response_messages: bool = False
     include: Optional[list[
         Literal[
             "code_interpreter_call.outputs",
@@ -1874,6 +1878,9 @@ class ResponsesResponse(OpenAIBaseModel):
     model: str
     object: Literal["response"] = "response"
     output: list[ResponseOutputItem]
+    # These are populated when enable_response_messages is set to True
+    input_messages: Optional[list[dict[str, Any]]] = None
+    output_messages: Optional[list[dict[str, Any]]] = None
     parallel_tool_calls: bool
     temperature: float
     tool_choice: ToolChoice
@@ -1903,6 +1910,8 @@ class ResponsesResponse(OpenAIBaseModel):
         output: list[ResponseOutputItem],
         status: ResponseStatus,
         usage: Optional[ResponseUsage] = None,
+        input_messages: Optional[list[ChatCompletionMessageParam]] = None,
+        output_messages: Optional[list[ChatCompletionMessageParam]] = None,
     ) -> "ResponsesResponse":
 
         incomplete_details: Optional[IncompleteDetails] = None
@@ -1920,7 +1929,15 @@ class ResponsesResponse(OpenAIBaseModel):
             metadata=request.metadata,
             model=model_name,
             output=output,
-            parallel_tool_calls=request.parallel_tool_calls,
+            input_messages=[(message.to_dict() if isinstance(
+                message, HarmonyMessage) else message)
+                            for message in input_messages]
+            if input_messages else None,
+            output_messages=[(message.to_dict() if isinstance(
+                message, HarmonyMessage) else message)
+                             for message in output_messages]
+            if output_messages else None,
+            parallel_tool_calls=bool(request.parallel_tool_calls),
             temperature=sampling_params.temperature,
             tool_choice=request.tool_choice,
             tools=request.tools,
