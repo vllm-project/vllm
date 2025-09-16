@@ -10,6 +10,7 @@ import torch
 from typing_extensions import Self
 
 from vllm.config import VllmConfig
+from vllm.config.cache import MambaCacheStrategy
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.utils import cdiv, get_dtype_size
@@ -194,7 +195,7 @@ class MambaSpec(KVCacheSpec):
     dtypes: tuple[torch.dtype]
     page_size_padded: Optional[int] = None
     mamba_type: str = "mamba2"
-    cache_strategy: str = "disabled"
+    cache_strategy: MambaCacheStrategy = "disabled"
     num_speculative_blocks: int = 0
 
     @property

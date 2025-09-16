@@ -373,23 +373,21 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             # With prefix caching, select attention block size to 
             # optimize for mamba kernel performance
 
-            # mamba SSD kernel uses a chunk_size, e.g. 256. Align the block to the kernel:
-            # use lowest multiple of 256 attention tokens that would fit mamba_page_size
-            # e.g. mamba page size of 788kB ; attn_1_token 2kB -> fits ~394 tokens
-            # then round up to a mulitple of 256 -> 512 tokens
-            # attn_block_size = 512
-            # mamba_block_size = 512 (aligned to a multiple of kernel chunk_size)
+            # mamba SSD kernel uses a chunk_size, e.g. 256
+            # Align the block to the kernel: use lowest multiple of chunk_size
+            # of attention tokens that would fit mamba_page_size:
+            # e.g. for mamba page size = 788kB
+            #          attn_1_token = 2kB -> fits ~394 tokens
+            #      then round up to a mulitple of 256 -> 512 tokens
+            # End result:
+            #  attn_block_size = 512
+            #  mamba_block_size = 512 (aligned to a multiple of chunk_size)
             chunk_size = model_config.get_mamba_chunk_size()
-            attn_tokens_per_mamba_state = cdiv(mamba_page_size, attn_page_size_1_token)
-            attn_block_size = chunk_size * cdiv(attn_tokens_per_mamba_state, chunk_size)
+            attn_tokens_per_mamba_state = \
+                cdiv(mamba_page_size, attn_page_size_1_token)
+            attn_block_size = chunk_size * \
+                cdiv(attn_tokens_per_mamba_state, chunk_size)
             cache_config.mamba_block_size = attn_block_size
-
-            # This below might be redundant now:
-            if model_config.max_model_len % attn_block_size != 0:
-                # Currently HybridCacheManager uses max_model_len for Mamba block
-                # and requires it to be a multiple of attention block
-                model_config.max_model_len -= model_config.max_model_len % attn_block_size
-                print("Adjusting max_model_len to", model_config.max_model_len)
         else:
             # Without prefix caching, select minimum valid attention block size
             # to minimize mamba state padding

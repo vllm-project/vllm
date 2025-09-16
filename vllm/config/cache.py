@@ -24,6 +24,7 @@ logger = init_logger(__name__)
 BlockSize = Literal[1, 8, 16, 32, 64, 128]
 CacheDType = Literal["auto", "fp8", "fp8_e4m3", "fp8_e5m2", "fp8_inc"]
 MambaDType = Literal["auto", "float32"]
+MambaCacheStrategy = Literal["disabled", "all", "last"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor"]
 
 
@@ -89,9 +90,9 @@ class CacheConfig:
     models to ensure exact alignment with attention page size."""
     mamba_block_size: Optional[int] = None
     """Size of a contiguous cache block in number of tokens for mamba cache."""
-    mamba_cache_strategy: str = "all"
+    mamba_cache_strategy: MambaCacheStrategy = "all"
     """Logic for mamba cache:
-    * disabled - turn of prefix caching
+    * disabled - turn off prefix caching
     * all - keep states for all prefixes
     * last - keep the states of the last full blocks after each request
     """

@@ -640,7 +640,8 @@ class MambaManager(SingleTypeKVCacheManager):
         if num_new_blocks <= 0:
             return []
         else:
-            if num_new_blocks > 2 and self.kv_cache_spec.cache_strategy == "last":
+            if num_new_blocks > 2 and \
+                self.kv_cache_spec.cache_strategy == "last":
                 # for the last strategy only - allocate 2 blocks:
                 #  one for block_size aligned state
                 #  and one for the last temporary state

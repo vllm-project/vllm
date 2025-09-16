@@ -3703,10 +3703,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 raise NotImplementedError(
                     "Mamba with speculative decoding is not supported yet.")
             if self.vllm_config.cache_config.enable_prefix_caching:
-                mamba_block_size = self.vllm_config.cache_config.mamba_block_size
+                mamba_block_size = \
+                    self.vllm_config.cache_config.mamba_block_size
             else:                
-                # Set block_size to max_model_len, so that mamba model will always
-                # have only one block
+                # Set block_size to max_model_len, so that mamba model 
+                # will always have only one block
                 mamba_block_size = self.vllm_config.model_config.max_model_len
                 self.vllm_config.cache_config.mamba_cache_strategy = "disabled"
 
