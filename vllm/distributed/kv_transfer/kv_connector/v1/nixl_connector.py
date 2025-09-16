@@ -407,8 +407,9 @@ class NixlConnectorScheduler:
 
         params = request.kv_transfer_params
         logger.debug(
-            "NIXLConnector request_finished, request_status=%s, "
-            "kv_transfer_params=%s", request.status, params)
+            "NIXLConnector request_finished(%s), request_status=%s, "
+            "kv_transfer_params=%s", request.request_id, request.status,
+            params)
         if not params:
             return False, None
 
@@ -433,6 +434,10 @@ class NixlConnectorScheduler:
 
         if delay_free_blocks:
             # Prefill request on remote. It will be read from D upon completion
+            logger.debug(
+                "NIXLConnector request_finished(%s) waiting for %d seconds "
+                "for remote decode to fetch blocks", request.request_id,
+                envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT)
             self._reqs_need_send[request.request_id] = time.perf_counter(
             ) + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT
 
