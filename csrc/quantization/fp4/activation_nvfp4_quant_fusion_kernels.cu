@@ -47,15 +47,15 @@ __inline__ __device__ PackedVec<Type> compute_silu_mul(PackedVec<Type>& vec,
 
 #pragma unroll
   for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; ++i) {
-    // silu in float32
+    // silu_mul in float32
     if constexpr (std::is_same_v<Type, half>) {
-      packed_type silu_vec =
-          __float22half2_rn(silu2(__half22float2(vec.elts[i])));
-      result.elts[i] = __hmul2(silu_vec, vec2.elts[i]);
+      float2 silu_vec = silu2(__half22float2(vec.elts[i]));
+      result.elts[i] =
+          __float22half2_rn(__fmul2_rn(silu_vec, __half22float2(vec2.elts[i])));
     } else {
-      packed_type silu_vec =
-          __float22bfloat162_rn(silu2(__bfloat1622float2(vec.elts[i])));
-      result.elts[i] = __hmul2(silu_vec, vec2.elts[i]);
+      float2 silu_vec = silu2(__bfloat1622float2(vec.elts[i]));
+      result.elts[i] = __float22bfloat162_rn(
+          __fmul2_rn(silu_vec, __bfloat1622float2(vec2.elts[i])));
     }
   }
   return result;
