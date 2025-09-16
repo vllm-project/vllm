@@ -52,7 +52,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             QuickAllReduce)
         from vllm.distributed.device_communicators.symm_mem import (
             SymmMemCommunicator)
-        from vllm.distributed.device_communicators.ucc_allreduce import (
+        from vllm.distributed.device_communicators.ucc_communicator import (
             UCCCommunicator)
 
         self.pynccl_comm: Optional[PyNcclCommunicator] = None

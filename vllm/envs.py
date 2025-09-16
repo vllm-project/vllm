@@ -1365,6 +1365,7 @@ def compute_hash() -> str:
         "VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16",
         "VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB",
         "VLLM_ROCM_FP8_MFMA_PAGE_ATTN",
+        "VLLM_USE_UCC"
     ]
     for key in environment_variables_to_hash:
         # if this goes out of sync with environment_variables,
