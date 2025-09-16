@@ -202,28 +202,28 @@ class BlockTable:
         self.block_table_cpu.fill_(0)
 
     def _convert_physical_to_logical_blocks(
-            self, kv_manager_block_size: np.ndarray) -> np.ndarray:
-        """Convert kv_manager_block_size IDs to logical block IDs.
+            self, kv_manager_block_id: np.ndarray) -> np.ndarray:
+        """Convert kv_manager_block_id IDs to logical block IDs.
 
         Example:
-            # kv_manager_block_size: 32 tokens,
+            # kv_manager_block_id: 32 tokens,
             # Kernel block size: 16 tokens
             # blocks_per_phys_block = 2
-            >>> kv_manager_block_size = np.array([0, 1, 2])
+            >>> kv_manager_block_id = np.array([0, 1, 2])
             >>> Result: [0, 1, 2, 3, 4, 5]
 
-            # Each kv_manager_block_size maps to 2 logical blocks:
-            # kv_manager_block_size 0 → Logical blocks [0, 1]
-            # kv_manager_block_size 1 → Logical blocks [2, 3]
-            # kv_manager_block_size 2 → Logical blocks [4, 5]
+            # Each kv_manager_block_id maps to 2 logical block id:
+            # kv_manager_block_id 0 → Logical block id [0, 1]
+            # kv_manager_block_id 1 → Logical block id [2, 3]
+            # kv_manager_block_id 2 → Logical block id [4, 5]
         """
         if not self.use_hybrid_blocks:
-            return kv_manager_block_size
+            return kv_manager_block_id
 
-        logical_blocks = kv_manager_block_size.reshape(
+        logical_block_id = kv_manager_block_id.reshape(
             -1, 1) * self.blocks_per_phys_block + self._bias_array
 
-        return logical_blocks.reshape(-1)
+        return logical_block_id.reshape(-1)
 
     def get_device_tensor(self) -> torch.Tensor:
         """Returns the device tensor of the block table."""
