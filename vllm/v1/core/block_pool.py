@@ -82,22 +82,24 @@ class BlockHashToBlockMap:
         """
         Checks if block_hash exists and pop block_id from the cache
         """
-        blocks = self._cache.get(key)
+        blocks = self._cache.pop(key, None)
         if blocks is None:
             # block_hash not found in the cache
             return None
         elif isinstance(blocks, KVCacheBlock):
-            # If the single block ID matched the given one, directly
-            # remove the whole cached block hash entry
             if blocks.block_id == block_id:
-                self._cache.pop(key)
                 return blocks
+            else:
+                # If the single block ID doesn't match, we should put the
+                # block back (it should happen rarely)
+                self._cache[key] = blocks
+                return None
         elif isinstance(blocks, dict):
-            # Try to pop block_id from the block dict, and if dict became
-            # empty, remove the whole cached block hash entry
+            # Try to pop block_id from the block dict, and if dict still
+            # contain blocks, put back to the cache.
             block = blocks.pop(block_id, None)
-            if len(blocks) == 0:
-                self._cache.pop(key)
+            if len(blocks) > 0:
+                self._cache[key] = blocks
             return block
         else:
             self._unexpected_blocks_type(blocks)
