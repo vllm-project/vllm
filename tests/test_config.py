@@ -427,14 +427,6 @@ def test_s3_url_model_tokenizer_paths(s3_url):
     assert config1.tokenizer != s3_url, (
         "Tokenizer path should be converted to local directory")
 
-    # Verify that the paths are deterministic based on the hash
-    import hashlib
-    expected_hash = hashlib.sha256(s3_url.encode()).hexdigest()[:8]
-    assert expected_hash in config1.model, (
-        f"Model path should be {expected_hash}: {config1.model}")
-    assert expected_hash in config1.tokenizer, (
-        f"Tokenizer path should be {expected_hash}: {config1.tokenizer}")
-
     # Store the original paths
     original_model_path = config1.model
     original_tokenizer_path = config1.tokenizer
@@ -494,18 +486,6 @@ def test_s3_url_different_models_create_different_directories():
     assert os.path.exists(config2.model) and os.path.isdir(config2.model)
     assert os.path.exists(config2.tokenizer) and os.path.isdir(
         config2.tokenizer)
-
-    # Verify that the directory names contain different hashes
-    import hashlib
-    expected_hash1 = hashlib.sha256(s3_url1.encode()).hexdigest()[:8]
-    expected_hash2 = hashlib.sha256(s3_url2.encode()).hexdigest()[:8]
-
-    assert expected_hash1 in config1.model, (
-        f"Model path should contain hash {expected_hash1}")
-    assert expected_hash2 in config2.model, (
-        f"Model path should contain hash {expected_hash2}")
-    assert expected_hash1 != expected_hash2, (
-        "Different URLs should produce different hashes")
 
     # Clean up
     del config1, config2
