@@ -69,7 +69,7 @@ def parse_args():
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--top-k", type=int, default=-1)
     parser.add_argument("--print-output", action="store_true")
-    parser.add_argument("--batch-size", type=int, default=None) # use vllm default
+    parser.add_argument("--max-num-seqs", type=int, default=None)
     parser.add_argument("--output-len", type=int, default=256)
     parser.add_argument("--model-dir", type=str, default=None)
     parser.add_argument("--eagle-dir", type=str, default=None)
@@ -156,7 +156,7 @@ def main():
         disable_log_stats=False,
         max_model_len=16384,
         seed=0,
-        max_num_seqs=args.batch_size,
+        max_num_seqs=args.max_num_seqs,
         limit_mm_per_prompt={"image": 5},
         disable_chunked_mm_input=True,
         compilation_config=(
@@ -171,7 +171,8 @@ def main():
     sampling_params = SamplingParams(temperature=args.temp, max_tokens=args.output_len)
     if not args.custom_mm_prompts:
         tokenized_prompts = [TokensPrompt(prompt_token_ids=x) for x in prompt_ids]
-        ic([len(prompt['prompt_token_ids']) for prompt in tokenized_prompts])
+        lengths = [len(prompt['prompt_token_ids']) for prompt in tokenized_prompts]
+        ic(lengths)
         outputs = llm.generate(
             tokenized_prompts,
             sampling_params=sampling_params,
