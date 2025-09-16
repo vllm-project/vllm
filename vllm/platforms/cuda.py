@@ -237,11 +237,9 @@ class CudaPlatformBase(Platform):
             return _Backend.XFORMERS
 
         if cls.has_device_capability(80):
-            FLASH_ATTN_V1 = backend_to_class_str(_Backend.FLASH_ATTN_VLLM_V1)
-            from vllm.attention.selector import is_attn_backend_supported
-            is_default_fa_supported = is_attn_backend_supported(
-                FLASH_ATTN_V1, head_size, dtype, allow_import_error=False)
-            if is_default_fa_supported:
+            backend_class = backend_to_class(_Backend.FLASH_ATTN_VLLM_V1)
+            if (backend_class.supports_head_size(head_size)
+                    and backend_class.supports_dtype(dtype)):
                 return _Backend.FLASH_ATTN
             else:
                 # Fallback to XFORMERS
