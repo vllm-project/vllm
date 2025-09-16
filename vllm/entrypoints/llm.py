@@ -933,7 +933,7 @@ class LLM:
             instead pass them via the `inputs` parameter.
         """
 
-        if self.supported_tasks == ["encode"]:
+        if self.supported_tasks == ["encode"] and pooling_task is None:
             pooling_task = "encode"
 
         if pooling_task is None:
