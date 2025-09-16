@@ -14,7 +14,6 @@ from vllm.reasoning import ReasoningParser, ReasoningParserManager
 logger = init_logger(__name__)
 
 
-@ReasoningParserManager.register_module("identity")
 class IdentityReasoningParser(ReasoningParser):
     """
     Identity reasoning parser.
@@ -23,7 +22,7 @@ class IdentityReasoningParser(ReasoningParser):
     It treats the entire model output as content and ignores reasoning.
     """
 
-    def __init__(self, tokenizer: PreTrainedTokenizerBase):
+    def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
         super().__init__(tokenizer)
         if not self.model_tokenizer:
             raise ValueError(

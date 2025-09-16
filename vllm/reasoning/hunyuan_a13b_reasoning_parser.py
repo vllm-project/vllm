@@ -40,7 +40,7 @@ class HunyuanA13BReasoningParser(ReasoningParser):
     response ends: "\n</answer>": [524, 9399, 29]
     """
 
-    def __init__(self, tokenizer: PreTrainedTokenizerBase):
+    def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
         super().__init__(tokenizer)
         self.think_start_expr = r"<think>\n"
         self.think_end_expr = r"\n</think>\n"

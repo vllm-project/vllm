@@ -24,7 +24,7 @@ class GptOssReasoningParser(ReasoningParser):
     is only used for detecting the end of the reasoning content.
     """
 
-    def __init__(self, tokenizer: PreTrainedTokenizerBase):
+    def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
         super().__init__(tokenizer)
         self.reasoning_end_token_ids = self.model_tokenizer.encode(
             "<|start|>assistant<|channel|>final<|message|>")

@@ -26,7 +26,7 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
     from the model's output.
     """
 
-    def __init__(self, tokenizer: PreTrainedTokenizerBase):
+    def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
         super().__init__(tokenizer)
         self.think_start_token = "<think>"
         self.think_end_token = "</think>"
