@@ -1201,11 +1201,8 @@ class ModelConfig:
                 getattr(self.hf_config, "max_source_positions", 0))
         self.max_seq_len_to_capture = min(self.max_seq_len_to_capture,
                                           effective_max_seq_len)
-        # CUDAGraph capture not supported for enc-dec models and mllama on ROCm
-        ROCM_UNSUPPORTED_MODELS = ['mllama']
-        unsupported_rocm = (self.hf_config.model_type
-                            in ROCM_UNSUPPORTED_MODELS
-                            or self.is_encoder_decoder)
+        # CUDAGraph capture not supported for encoder-decoder models on ROCm
+        unsupported_rocm = self.is_encoder_decoder
 
         if (unsupported_rocm and not self.enforce_eager
                 and current_platform.is_rocm()):
@@ -1671,10 +1668,6 @@ class ModelConfig:
     @property
     def is_encoder_decoder(self) -> bool:
         """Extract the HF encoder/decoder model flag."""
-        """
-        For Mllama, VLLM overrides HF's is_encoder_decoder flag and sets it to
-        True to enable cross-attention
-        """
         return is_encoder_decoder(self.hf_config)
 
     @property
