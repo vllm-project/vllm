@@ -329,7 +329,9 @@ class EagleProposer:
                 exceeds_max_model_len, PADDING_SLOT_ID)
 
             # Rebuild attention metadata
-            attn_metadata = self.runner.attn_groups[0][0].metadata_builder\
+            attn_metadata_builder = \
+                self.runner.attn_groups[0][0].metadata_builders[ubatch_id]
+            attn_metadata = attn_metadata_builder\
                 .build_for_drafting(common_attn_metadata=common_attn_metadata,
                                 draft_index=token_index + 1)
             for layer_name in self.attn_layer_names:
