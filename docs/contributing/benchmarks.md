@@ -20,134 +20,38 @@ become available.
 
 ### Dataset Overview
 
-<table style="width:100%; border-collapse: collapse;">
-  <thead>
-    <tr>
-      <th style="width:15%; text-align: left;">Dataset</th>
-      <th style="width:10%; text-align: center;">Online</th>
-      <th style="width:10%; text-align: center;">Offline</th>
-      <th style="width:65%; text-align: left;">Data Path</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td><strong>ShareGPT</strong></td>
-      <td style="text-align: center;">✅</td>
-      <td style="text-align: center;">✅</td>
-      <td><code>wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json</code></td>
-    </tr>
-    <tr>
-      <td><strong>ShareGPT4V (Image)</strong></td>
-      <td style="text-align: center;">✅</td>
-      <td style="text-align: center;">✅</td>
-      <td>
-        <code>wget https://huggingface.co/datasets/Lin-Chen/ShareGPT4V/blob/main/sharegpt4v_instruct_gpt4-vision_cap100k.json</code>
-        <br>
-        <div>Note that the images need to be downloaded separately. For example, to download COCO's 2017 Train images:</div>
-        <code>wget http://images.cocodataset.org/zips/train2017.zip</code>
-      </td>
-    </tr>
-        <tr>
-      <td><strong>ShareGPT4Video (Video)</strong></td>
-      <td style="text-align: center;">✅</td>
-      <td style="text-align: center;">✅</td>
-      <td>
-        <code>git clone https://huggingface.co/datasets/ShareGPT4Video/ShareGPT4Video</code>
-      </td>
-    </tr>
-    <tr>
-      <td><strong>BurstGPT</strong></td>
-      <td style="text-align: center;">✅</td>
-      <td style="text-align: center;">✅</td>
-      <td><code>wget https://github.com/HPMLL/BurstGPT/releases/download/v1.1/BurstGPT_without_fails_2.csv</code></td>
-    </tr>
-    <tr>
-      <td><strong>Sonnet (deprecated)</strong></td>
-      <td style="text-align: center;">✅</td>
-      <td style="text-align: center;">✅</td>
-      <td>Local file: <code>benchmarks/sonnet.txt</code></td>
-    </tr>
-    <tr>
-      <td><strong>Random</strong></td>
-      <td style="text-align: center;">✅</td>
-      <td style="text-align: center;">✅</td>
-      <td><code>synthetic</code></td>
-    </tr>
-    <tr>
-      <td><strong>RandomMultiModal (Image/Video)</strong></td>
-      <td style="text-align: center;">🟡</td>
-      <td style="text-align: center;">🚧</td>
-      <td><code>synthetic</code> </td>
-    </tr>
-    <tr>
-      <td><strong>Prefix Repetition</strong></td>
-      <td style="text-align: center;">✅</td>
-      <td style="text-align: center;">✅</td>
-      <td><code>synthetic</code></td>
-    </tr>
-    <tr>
-      <td><strong>HuggingFace-VisionArena</strong></td>
-      <td style="text-align: center;">✅</td>
-      <td style="text-align: center;">✅</td>
-      <td><code>lmarena-ai/VisionArena-Chat</code></td>
-    </tr>
-    <tr>
-      <td><strong>HuggingFace-InstructCoder</strong></td>
-      <td style="text-align: center;">✅</td>
-      <td style="text-align: center;">✅</td>
-      <td><code>likaixin/InstructCoder</code></td>
-    </tr>
-      <tr>
-      <td><strong>HuggingFace-AIMO</strong></td>
-      <td style="text-align: center;">✅</td>
-      <td style="text-align: center;">✅</td>
-      <td><code>AI-MO/aimo-validation-aime</code> , <code>AI-MO/NuminaMath-1.5</code>, <code>AI-MO/NuminaMath-CoT</code></td>
-    </tr>
-    <tr>
-      <td><strong>HuggingFace-Other</strong></td>
-      <td style="text-align: center;">✅</td>
-      <td style="text-align: center;">✅</td>
-      <td><code>lmms-lab/LLaVA-OneVision-Data</code>, <code>Aeala/ShareGPT_Vicuna_unfiltered</code></td>
-    </tr>
-    <tr>
-      <td><strong>HuggingFace-MTBench</strong></td>
-      <td style="text-align: center;">✅</td>
-      <td style="text-align: center;">✅</td>
-      <td><code>philschmid/mt-bench</code></td>
-    </tr>
-    <tr>
-      <td><strong>HuggingFace-Blazedit</strong></td>
-      <td style="text-align: center;">✅</td>
-      <td style="text-align: center;">✅</td>
-      <td><code>vdaita/edit_5k_char</code>, <code>vdaita/edit_10k_char</code></td>
-    </tr>
-    <tr>
-      <td><strong>Spec Bench</strong></td>
-      <td style="text-align: center;">✅</td>
-      <td style="text-align: center;">✅</td>
-      <td><code>wget https://raw.githubusercontent.com/hemingkx/Spec-Bench/refs/heads/main/data/spec_bench/question.jsonl</code></td>
-    </tr>
-    <tr>
-      <td><strong>Custom</strong></td>
-      <td style="text-align: center;">✅</td>
-      <td style="text-align: center;">✅</td>
-      <td>Local file: <code>data.jsonl</code></td>
-    </tr>
-  </tbody>
-</table>
+| Dataset | Online | Offline | Data Path |
+|---------|--------|---------|-----------|
+| ShareGPT | ✅ | ✅ | `wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json` |
+| ShareGPT4V (Image) | ✅ | ✅ | `wget https://huggingface.co/datasets/Lin-Chen/ShareGPT4V/blob/main/sharegpt4v_instruct_gpt4-vision_cap100k.json`<br>Note that the images need to be downloaded separately. For example, to download COCO's 2017 Train images:<br>`wget http://images.cocodataset.org/zips/train2017.zip` |
+| ShareGPT4Video (Video) | ✅ | ✅ | `git clone https://huggingface.co/datasets/ShareGPT4Video/ShareGPT4Video` |
+| BurstGPT | ✅ | ✅ | `wget https://github.com/HPMLL/BurstGPT/releases/download/v1.1/BurstGPT_without_fails_2.csv` |
+| Sonnet (deprecated) | ✅ | ✅ | Local file: `benchmarks/sonnet.txt` |
+| Random | ✅ | ✅ | `synthetic` |
+| RandomMultiModal (Image/Video) | 🟡 | 🚧 | `synthetic` |
+| Prefix Repetition | ✅ | ✅ | `synthetic` |
+| HuggingFace-VisionArena | ✅ | ✅ | `lmarena-ai/VisionArena-Chat` |
+| HuggingFace-InstructCoder | ✅ | ✅ | `likaixin/InstructCoder` |
+| HuggingFace-AIMO | ✅ | ✅ | `AI-MO/aimo-validation-aime`, `AI-MO/NuminaMath-1.5`, `AI-MO/NuminaMath-CoT` |
+| HuggingFace-Other | ✅ | ✅ | `lmms-lab/LLaVA-OneVision-Data`, `Aeala/ShareGPT_Vicuna_unfiltered` |
+| HuggingFace-MTBench | ✅ | ✅ | `philschmid/mt-bench` |
+| HuggingFace-Blazedit | ✅ | ✅ | `vdaita/edit_5k_char`, `vdaita/edit_10k_char` |
+| Spec Bench | ✅ | ✅ | `wget https://raw.githubusercontent.com/hemingkx/Spec-Bench/refs/heads/main/data/spec_bench/question.jsonl` |
+| Custom | ✅ | ✅ | Local file: `data.jsonl` |
 
-✅: supported
+Legend:
 
-🟡: Partial support
+- ✅ - supported
+- 🟡 - Partial support
+- 🚧 - to be supported
 
-🚧: to be supported
+!!! note
+    HuggingFace dataset's `dataset-name` should be set to `hf`.
+    For local `dataset-path`, please set `hf-name` to its Hugging Face ID like
 
-**Note**: HuggingFace dataset's `dataset-name` should be set to `hf`.
-For local `dataset-path`, please set `hf-name` to its Hugging Face ID like
-
-```bash
---dataset-path /datasets/VisionArena-Chat/ --hf-name lmarena-ai/VisionArena-Chat
-```
+    ```bash
+    --dataset-path /datasets/VisionArena-Chat/ --hf-name lmarena-ai/VisionArena-Chat
+    ```
 
 ### Examples
 
