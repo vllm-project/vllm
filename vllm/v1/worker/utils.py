@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Optional
 import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
-from vllm.config import ModelConfig, SchedulerConfig
+from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.multimodal.cache import processor_only_cache_from_config
@@ -288,3 +288,28 @@ def bind_kv_cache(
     for layer_name, kv_cache in kv_caches.items():
         # NOTE: Use list because of v0 PP virtual engine.
         forward_context[layer_name].kv_cache = [kv_cache]
+
+
+def is_residual_scattered_for_sp(vllm_config: VllmConfig,
+                                 num_input_tokens: int) -> bool:
+    """Check if the residual tensor is scattered for sequence parallelism.
+
+    The residual tensor is scattered across tensor parallel ranks when sequence
+    parallelism and tensor parallelism is enabled, and the number of
+    input tokens is one of the compilation sizes.
+    """
+    if not vllm_config.compilation_config.pass_config.\
+        enable_sequence_parallelism:
+        return False
+
+    tp = vllm_config.parallel_config.tensor_parallel_size
+
+    if tp == 1:
+        return False
+
+    # When sequence parallelism is enabled, we always pad num_input_tokens
+    # to be a multiple of tensor_parallel_size (tp) earlier.
+    assert num_input_tokens % tp == 0
+
+    # Currently, SP is only enabled for static size fx graphs.
+    return (num_input_tokens in vllm_config.compilation_config.compile_sizes)
