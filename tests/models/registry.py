@@ -354,11 +354,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MiMoForCausalLM": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL",
                                         trust_remote_code=True),
     "Dots1ForCausalLM": _HfExamplesInfo("rednote-hilab/dots.llm1.inst"),
-    # [Encoder-decoder]
-    "BartModel": _HfExamplesInfo("facebook/bart-base"),
-    "BartForConditionalGeneration": _HfExamplesInfo("facebook/bart-large-cnn"),
-    "MBartForConditionalGeneration": _HfExamplesInfo("facebook/mbart-large-en-ro",  # noqa: E501
-                                                    hf_overrides={"architectures": ["MBartForConditionalGeneration"]}),  # noqa: E501
 }
 
 _EMBEDDING_EXAMPLE_MODELS = {
@@ -496,7 +491,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                       trust_remote_code=True),
     "Llama4ForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-4-Scout-17B-16E-Instruct",   # noqa: E501
                                                       max_model_len=10240,
-                                                      extras={"llama-guard-4": "meta-llama/Llama-Guard-4-12B"}, # noqa: E501
+                                                      extras={"llama-guard-4": "meta-llama/Llama-Guard-4-12B"},  # noqa: E501
                                                       ),
     "LlavaForConditionalGeneration": _HfExamplesInfo("llava-hf/llava-1.5-7b-hf",
                                                      extras={"mistral": "mistral-community/pixtral-12b", # noqa: E501
@@ -583,15 +578,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         is_available_online=False,
     ),
     # [Encoder-decoder]
-    "DonutForConditionalGeneration": _HfExamplesInfo("naver-clova-ix/donut-base-finetuned-docvqa",  # noqa: E501
-                                                    hf_overrides={"architectures": ["DonutForConditionalGeneration"], "model_type": "donut"},  # noqa: E501
-                                                    extras={"dolphin": "ByteDance/Dolphin"}),  # noqa: E501
-    # Florence-2 uses BartFastTokenizer which can't be loaded from AutoTokenizer
-    # Therefore, we borrow the BartTokenizer from the original Bart model
-    "Florence2ForConditionalGeneration": _HfExamplesInfo("microsoft/Florence-2-base",  # noqa: E501
-                                                         tokenizer="Isotr0py/Florence-2-tokenizer",  # noqa: E501
-                                                         trust_remote_code=True),  # noqa: E501
-    "MllamaForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-3.2-11B-Vision-Instruct"),  # noqa: E501
     "WhisperForConditionalGeneration": _HfExamplesInfo("openai/whisper-large-v3"),  # noqa: E501
     # [Cross-encoder]
     "JinaVLForRanking": _HfExamplesInfo("jinaai/jina-reranker-m0"),   # noqa: E501
