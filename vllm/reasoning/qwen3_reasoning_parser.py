@@ -111,10 +111,8 @@ class Qwen3ReasoningParser(ReasoningParser):
                                       request: ChatCompletionRequest) -> bool:
         if request.vllm_xargs is not None:
             prompt = request.vllm_xargs.get("rendered_prompt", "").strip()
-        else:
-            prompt = ""
-
-        return prompt.endswith(self.think_start_token)
+            return prompt.endswith(self.think_start_token)
+        return False
 
     def extract_reasoning_content_streaming(
         self,
