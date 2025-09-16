@@ -9,7 +9,7 @@ from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from torch._ops import OpOverload
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape, QuantKey, ScaleDesc, kFp8DynamicTensorSym, kFp8DynamicTokenSym,
@@ -117,6 +117,10 @@ class RMSNormStaticQuantPattern(RMSNormQuantPattern):
 
         def replacement(input: torch.Tensor, weight: torch.Tensor,
                         scale: torch.Tensor):
+            # In case we're matching native rms-norm, conversions might be
+            # optimized out. We convert here just to be safe.
+            input = input.to(dtype=torch.float16)  # TODO model dtype
+
             result = torch.empty_like(input, dtype=self.quant_dtype)
             at = auto_functionalized(self.FUSED_OP,
                                      result=result,
@@ -130,7 +134,7 @@ class RMSNormStaticQuantPattern(RMSNormQuantPattern):
 
         inputs = [
             empty_bf16(5, 4),  # input
-            empty_bf16(4,),  # weight
+            empty_bf16(4, ),  # weight
             empty_fp32(1, 1)  # scale
         ]
         pattern(*inputs)
@@ -163,6 +167,11 @@ class FusedAddRMSNormStaticQuantPattern(RMSNormQuantPattern):
 
         def replacement(input: torch.Tensor, residual: torch.Tensor,
                         weight: torch.Tensor, scale: torch.Tensor):
+            # In case we're matching native rms-norm, conversions might be
+            # optimized out. We convert here just to be safe.
+            input = input.to(dtype=torch.float16)  # TODO model dtype
+            residual = residual.to(dtype=torch.float16)
+
             result = torch.empty_like(input, dtype=self.quant_dtype)
             at = auto_functionalized(self.FUSED_OP,
                                      result=result,
@@ -176,9 +185,11 @@ class FusedAddRMSNormStaticQuantPattern(RMSNormQuantPattern):
             return at[1], at[2]
 
         inputs = [
+            # TODO: maybe 32bit for torch impl?
+            #  TODO dtype doesn't seem to matter?
             empty_bf16(5, 4),  # input
             empty_bf16(5, 4),  # residual
-            empty_bf16(4, ),   # weight
+            empty_bf16(4, ),  # weight
             empty_fp32(1, 1)  # scale
         ]
 
@@ -213,6 +224,10 @@ class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
             return self.quant_matcher(result_rms)
 
         def replacement(input: torch.Tensor, weight: torch.Tensor):
+            # In case we're matching native rms-norm, conversions might be
+            # optimized out. We convert here just to be safe.
+            input = input.to(dtype=torch.float16)  # TODO model dtype
+
             result = torch.empty_like(input, dtype=self.quant_dtype)
             scale = self.quant_matcher.make_scale(input)
             at = auto_functionalized(self.FUSED_OP,
@@ -267,6 +282,11 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
 
         def replacement(input: torch.Tensor, residual: torch.Tensor,
                         weight: torch.Tensor):
+            # In case we're matching native rms-norm, conversions might be
+            # optimized out. We convert here just to be safe.
+            input = input.to(dtype=torch.float16)  # TODO model dtype
+            residual = residual.to(dtype=torch.float16)
+
             result = torch.empty_like(input, dtype=self.quant_dtype)
             scale = self.quant_matcher.make_scale(input)
             at = auto_functionalized(self.FUSED_OP,
@@ -309,22 +329,23 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="rmsnorm_quant_fusion_pass")
 
-        for epsilon in [1e-5, 1e-6]:
-            # Fuse rms_norm + static fp8 quant
-            RMSNormStaticQuantPattern(epsilon,
-                                      FP8_DTYPE).register(self.patterns)
+        with set_current_vllm_config(config, check_compile=False):
+            for epsilon in [1e-5, 1e-6]:
+                # Fuse rms_norm + static fp8 quant
+                RMSNormStaticQuantPattern(epsilon,
+                                          FP8_DTYPE).register(self.patterns)
 
-            # Fuse fused_add_rms_norm + static fp8 quant
-            FusedAddRMSNormStaticQuantPattern(epsilon, FP8_DTYPE).register(
-                self.patterns)
+                # Fuse fused_add_rms_norm + static fp8 quant
+                FusedAddRMSNormStaticQuantPattern(epsilon, FP8_DTYPE).register(
+                    self.patterns)
 
-            # Fuse rms_norm + dynamic per-token fp8 quant
-            RMSNormDynamicQuantPattern(epsilon,
-                                       FP8_DTYPE).register(self.patterns)
+                # Fuse rms_norm + dynamic per-token fp8 quant
+                RMSNormDynamicQuantPattern(epsilon,
+                                           FP8_DTYPE).register(self.patterns)
 
-            # Fuse fused_add_rms_norm + dynamic per-token fp8 quant
-            FusedAddRMSNormDynamicQuantPattern(epsilon, FP8_DTYPE).register(
-                self.patterns)
+                # Fuse fused_add_rms_norm + dynamic per-token fp8 quant
+                FusedAddRMSNormDynamicQuantPattern(
+                    epsilon, FP8_DTYPE).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
 
