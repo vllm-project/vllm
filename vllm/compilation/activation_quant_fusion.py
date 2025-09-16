@@ -36,7 +36,8 @@ if silu_and_mul_nvfp4_quant_supported:
     FUSED_OPS[
         kNvfp4Quant] = torch.ops._C.silu_and_mul_nvfp4_quant.default  # noqa: E501
 
-if current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER:
+if current_platform.is_rocm(
+) and envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR:
     import aiter as rocm_aiter
     from aiter.ops.triton.activation import act_mul_and_fp8_group_quant
 
@@ -74,6 +75,55 @@ if current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER:
         fake_impl=_rocm_aiter_act_mul_and_fp8_group_quant_fake,
         dispatch_key=current_platform.dispatch_key,
     )
+    BLOCK_LINEAR_OP = torch.ops.vllm.apply_w8a8_block_fp8_linear.default
+    FUSED_SILU_MUL_QUANT_OP = \
+        torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant.default
+    AITER_BLOCK_LINEAR_OP = \
+        torch.ops.vllm.rocm_aiter_gemm_w8a8_blockscale.default
+
+    class AiterSiluMulFp8BlockQuantPattern:
+
+        def __init__(self):
+            pass
+
+        def register(self, pm_pass: PatternMatcherPass):
+
+            def pattern(input: torch.Tensor, result_silu_mul: torch.Tensor,
+                        linear_weight: torch.Tensor,
+                        linear_weight_scale: torch.Tensor):
+                at1 = auto_functionalized(SILU_MUL_OP,
+                                          result=result_silu_mul,
+                                          input=input)
+                at2 = auto_functionalized(BLOCK_LINEAR_OP,
+                                          input=at1[1],
+                                          weight=linear_weight,
+                                          weight_scale=linear_weight_scale,
+                                          block_size=[128, 128],
+                                          use_aiter_and_is_supported=True)
+                return at2[1]
+
+            def replacement(input: torch.Tensor, result_silu_mul: torch.Tensor,
+                            linear_weight: torch.Tensor,
+                            linear_weight_scale: torch.Tensor):
+                at1 = auto_functionalized(FUSED_SILU_MUL_QUANT_OP, x=input)
+                at2 = auto_functionalized(AITER_BLOCK_LINEAR_OP,
+                                          A=at1[1],
+                                          B=linear_weight,
+                                          As=at1[2],
+                                          Bs=linear_weight_scale,
+                                          block_size=[128, 128],
+                                          output_dtype=input.dtype())
+                return at2[1]
+
+            inputs = [
+                empty_bf16(5, 4),  # input
+                empty_bf16(5, 4),  # result_silu_mul
+                empty_bf16(2, 5),  # linear_weight
+                empty_fp32(1, 1)  # linear_weight_scale
+            ]
+
+            register_replacement(pattern, replacement, inputs, fwd_only,
+                                 pm_pass)
 
 
 class ActivationQuantPattern(ABC):
@@ -216,6 +266,12 @@ class ActivationQuantFusionPass(VllmInductorPass):
             pattern_silu_mul_nvfp4 = SiluMulNvfp4QuantPattern()
             pattern_silu_mul_nvfp4.register(self.patterns)
 
+        if current_platform.is_rocm(
+        ) and envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR:
+            pattern_silu_mul_aiter_block_fp8 = AiterSiluMulFp8BlockQuantPattern(
+            )
+            pattern_silu_mul_aiter_block_fp8.register(self.patterns)
+
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
         self.dump_graph(graph, "before_act_quant_fusion")
@@ -230,4 +286,5 @@ class ActivationQuantFusionPass(VllmInductorPass):
     def uuid(self):
         return VllmInductorPass.hash_source(self, ActivationQuantPattern,
                                             SiluMulFp8StaticQuantPattern,
-                                            SiluMulNvfp4QuantPattern)
+                                            SiluMulNvfp4QuantPattern,
+                                            AiterSiluMulFp8BlockQuantPattern)
