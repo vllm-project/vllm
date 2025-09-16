@@ -213,6 +213,7 @@ class LLMEngine:
         self.device_config = vllm_config.device_config
         self.speculative_config = vllm_config.speculative_config  # noqa
         self.load_config = vllm_config.load_config
+        self.structured_outputs_config = vllm_config.structured_outputs_config
         self.observability_config = vllm_config.observability_config or ObservabilityConfig(  # noqa
         )
 
@@ -371,10 +372,9 @@ class LLMEngine:
                 self.observability_config.otlp_traces_endpoint)
 
         # Initialize reasoning parser if reasoning backend is set.
-        if self.decoding_config.reasoning_backend and \
-                self.tokenizer:
+        if self.structured_outputs_config.reasoning_parser and self.tokenizer:
             reasoner_class = ReasoningParserManager.get_reasoning_parser(
-                self.decoding_config.reasoning_backend)
+                self.structured_outputs_config.reasoning_parser)
             self.reasoner: ReasoningParser = reasoner_class(
                 self.tokenizer.get_lora_tokenizer())
 
@@ -390,7 +390,8 @@ class LLMEngine:
                 stop_checker=StopChecker(
                     self.scheduler_config.max_model_len,
                     get_tokenizer_for_seq,
-                    self.reasoner if self.decoding_config.reasoning_backend
+                    self.reasoner
+                    if self.structured_outputs_config.reasoning_parser
                     and self.tokenizer else None,
                 ),
             ))
