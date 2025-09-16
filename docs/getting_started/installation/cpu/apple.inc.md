@@ -52,6 +52,8 @@ uv pip install -e .
         1 error generated.
     ```
 
+    ---
+
     If the build fails with C++11/C++17 compatibility errors like the following, the issue is that the build system is defaulting to an older C++ standard:
 
     ```text
