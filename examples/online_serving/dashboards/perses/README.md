@@ -3,6 +3,12 @@
 This directory contains Perses dashboard configurations designed to monitor vLLM
 performance and metrics.
 
+## Requirements
+
+- Perses instance (standalone or via operator)
+- Prometheus data source configured in Perses
+- vLLM deployment with Prometheus metrics enabled
+
 ## Dashboard Format
 
 We provide dashboards in the **native Perses YAML format** that works across all
@@ -13,9 +19,16 @@ deployment methods:
 - **Usage**: Works with standalone Perses, API imports, CLI, and file provisioning
 - **Kubernetes**: Directly compatible with Perses Operator
 
+## Dashboard Descriptions
+
+- **[performance_statistics.yaml](./performance_statistics.yaml)**: Performance metrics with aggregated latency
+  statistics
+- **[query_statistics.yaml](./query_statistics.yaml)**: Query performance and deployment metrics
+
+
 ## Deployment Options
 
-### Option 1: Direct Import to Perses
+### Direct Import to Perses
 
 Import the dashboard specifications via Perses API or CLI:
 
@@ -23,7 +36,7 @@ Import the dashboard specifications via Perses API or CLI:
 percli apply -f performance_statistics.yaml
 ```
 
-### Option 2: Perses Operator (Kubernetes)
+### Perses Operator (Kubernetes)
 
 The native YAML format works directly with the Perses Operator:
 
@@ -31,18 +44,6 @@ The native YAML format works directly with the Perses Operator:
 kubectl apply -f performance_statistics.yaml -n <namespace>
 ```
 
-### Option 3: File Provisioning
+### File Provisioning
 
 Place the YAML files in a Perses provisioning folder for automatic loading.
-
-## Dashboard Descriptions
-
-- **performance_statistics.yaml**: Performance metrics with aggregated latency
-  statistics
-- **query_statistics.yaml**: Query performance and deployment metrics
-
-## Requirements
-
-- Perses instance (standalone or via operator)
-- Prometheus data source configured in Perses
-- vLLM deployment with Prometheus metrics enabled

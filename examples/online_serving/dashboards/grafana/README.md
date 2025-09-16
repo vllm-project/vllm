@@ -3,9 +3,22 @@
 This directory contains Grafana dashboard configurations (as JSON) designed to monitor
 vLLM performance and metrics.
 
+## Requirements
+
+- Grafana 8.0+
+- Prometheus data source configured in Grafana
+- vLLM deployment with Prometheus metrics enabled
+
+## Dashboard Descriptions
+
+- **[performance_statistics.json](./performance_statistics.json)**: Tracks performance metrics including latency and
+  throughput for your vLLM service.
+- **[query_statistics.json](./query_statistics.json)**: Tracks query performance, request volume, and key
+  performance indicators for your vLLM service.
+
 ## Deployment Options
 
-### Option 1: Manual Import (Recommended)
+### Manual Import (Recommended)
 
 The easiest way to use these dashboards is to manually import the JSON configurations
 directly into your Grafana instance:
@@ -16,7 +29,7 @@ directly into your Grafana instance:
 4. Copy and paste the JSON content from the dashboard files, or upload the JSON files
    directly
 
-### Option 2: Grafana Operator
+### Grafana Operator
 
 If you're using the [Grafana Operator](https://github.com/grafana-operator/grafana-operator)
 in Kubernetes, you can wrap these JSON configurations in a `GrafanaDashboard` custom
@@ -44,16 +57,3 @@ Then apply to your cluster:
 ```bash
 kubectl apply -f your-dashboard.yaml -n <namespace>
 ```
-
-## Dashboard Descriptions
-
-- **performance_statistics.json**: Tracks performance metrics including latency and
-  throughput for your vLLM service.
-- **query_statistics.json**: Tracks query performance, request volume, and key
-  performance indicators for your vLLM service.
-
-## Requirements
-
-- Grafana 8.0+
-- Prometheus data source configured in Grafana
-- vLLM deployment with Prometheus metrics enabled

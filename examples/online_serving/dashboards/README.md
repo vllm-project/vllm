@@ -3,14 +3,14 @@
 This directory contains monitoring dashboard configurations for vLLM, providing
 comprehensive observability for your vLLM deployments.
 
-## Platforms
+## Dashboard Platforms
 
 We provide dashboards for two popular observability platforms:
 
 - **[Grafana](https://grafana.com)**
 - **[Perses](https://perses.dev)**
 
-## Format Approach
+## Dashboard Format Approach
 
 All dashboards are provided in **native formats** that work across different
 deployment methods:
