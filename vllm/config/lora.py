@@ -66,6 +66,7 @@ class LoRAConfig:
     max_num_labels: Optional[int] = None
     """Max classification label number.
     """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

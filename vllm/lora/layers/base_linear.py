@@ -15,7 +15,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.platforms import current_platform
 
 from .base import BaseLayerWithLoRA
-from .utils import _get_lora_device
+from .utils import _get_layer_weight, _get_lora_device
 
 
 class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
@@ -157,24 +157,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
 
     @property
     def weight(self) -> torch.Tensor:
-
-        # unquantizedLinear
-        if hasattr(self.base_layer, "weight"):
-            return self.base_layer.weight
-        # Compressed Tensor
-        elif hasattr(self.base_layer, "weight_packed"):
-            return self.base_layer.weight_packed
-        # GPTQ/AWQ
-        elif hasattr(self.base_layer, "qweight"):
-            return self.base_layer.qweight
-        # marlin
-        elif hasattr(self.base_layer, "B"):
-            return self.base_layer.B
-        # HQQ marlin
-        elif hasattr(self.base_layer, "W_q"):
-            return self.base_layer.W_q
-        else:
-            raise ValueError(f"Unsupported base layer: {self.base_layer}")
+        return _get_layer_weight(self.base_layer)
 
     @property
     def bias(self) -> Optional[torch.Tensor]:

@@ -19,7 +19,8 @@ from vllm.adapter_commons.utils import (add_adapter, deactivate_adapter,
 from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import BaseLayerWithLoRA, LoRAMapping
-from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
+from vllm.lora.lora_weights import (ClassifierLoRALayerWeights,
+                                    LoRALayerWeights, PackedLoRALayerWeights)
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.punica_wrapper import get_punica_wrapper
 from vllm.lora.utils import (from_layer, from_layer_classifier,
@@ -567,6 +568,16 @@ class LoRAModelManager(AdapterModelManager):
                         "cpu",
                         embeddings_tensor_dim=embeddings_tensor_dim,
                         bias_enabled=bias_enabled)
+                elif self.is_pooling_model and parts[-1] == "score":
+                    lora = ClassifierLoRALayerWeights.create_dummy_lora_weights(
+                        module_name,
+                        module.lora_a_stacked[0].shape[-1],
+                        module.lora_a_stacked[0].shape[-2],
+                        module.lora_a_stacked[0].dtype,
+                        "cpu",
+                        embeddings_tensor_dim=None,
+                        bias_enabled=bias_enabled,
+                    )
                 else:
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name,
