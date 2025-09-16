@@ -25,7 +25,6 @@ deployment methods:
   statistics
 - **[query_statistics.yaml](./query_statistics.yaml)**: Query performance and deployment metrics
 
-
 ## Deployment Options
 
 ### Direct Import to Perses
