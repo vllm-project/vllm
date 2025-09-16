@@ -699,10 +699,6 @@ class Scheduler(SchedulerInterface):
         assert len(mm_positions) > 0
         external_load_encoder_input = []
 
-        # Check remote cache first
-        if self.ec_connector is not None:
-            remote_cache_bools = self.ec_connector.check_caches_exist(request)
-
         for i, pos_info in enumerate(mm_positions):
             start_pos = pos_info.offset
             num_encoder_tokens = pos_info.length
@@ -750,7 +746,8 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens = 0
                 break
 
-            if self.ec_connector is not None and remote_cache_bools[i]:
+            if (self.ec_connector is not None
+                    and self.ec_connector.check_caches_exist(request, i)):
                 external_load_encoder_input.append(i)
                 continue
 

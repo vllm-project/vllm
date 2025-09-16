@@ -175,12 +175,14 @@ class ECConnectorBase(ABC):
     def check_caches_exist(
         self,
         request: "Request",
+        index: Optional[int] = None,
     ) -> list[bool]:
         """
         Check if encoder cache exit for each mm data of requests
         
         Args:
             request (Request): the request object.
+            index (Optional[int]): the index of the request in the batch.
 
         Returns:
             A list bool where ith value is True if cache exist for 

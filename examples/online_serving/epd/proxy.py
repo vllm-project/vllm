@@ -69,6 +69,8 @@ async def forward_streaming_request(
     if has_mm_input(request_data):
         encoder_request_data = copy.deepcopy(request_data)
         encoder_request_data["max_tokens"] = 1
+        encoder_request_data["stream"] = False
+        encoder_request_data.pop("stream_options", None)
         if "max_completion_tokens" in encoder_request_data:
             encoder_request_data["max_completion_tokens"] = 1
         task1 = asyncio.create_task(
