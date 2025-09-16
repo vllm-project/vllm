@@ -216,10 +216,20 @@ class Processor:
             )
 
         backend = self.structured_outputs_config.backend
-        if params.structured_outputs._backend and backend != "auto":
-            raise ValueError(
-                "StructuredOutputsParams._backend should only be set here if "
-                "StructuredOutputsConfig.backend is 'auto'.")
+        if _backend := params.structured_outputs._backend:
+            # Request-level backend selection is not supported.
+            # The values may differ if `params` is reused and was set
+            # to a specific backend based on `auto` behavior in a previous
+            # request. We remember that it was set as a result of `auto`
+            # using the `_auto` option set on the backend in the params.
+            if (backend != _backend
+                    and not (backend == "auto"
+                             and params.structured_outputs._backend_was_auto)):
+                raise ValueError(
+                    "Request-level structured output backend selection is not "
+                    f"supported. The request specified '{_backend}', but vLLM "
+                    f"was initialised with '{backend}'. This error can be "
+                    "resolved by removing '_backend' from the request.")
         else:
             params.structured_outputs._backend = backend
 
@@ -262,6 +272,8 @@ class Processor:
                 # are not supported in xgrammar. Fall back to guidance.
                 validate_guidance_grammar(params, tokenizer=None)
                 params.structured_outputs._backend = "guidance"
+            # Remember that this backend was set automatically
+            params.structured_outputs._backend_was_auto = True
 
     def _maybe_build_mm_uuids(
         self,
