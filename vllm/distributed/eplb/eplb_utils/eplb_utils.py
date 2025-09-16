@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from functools import partial
-from typing import Sequence, MutableSequence
-
 import random
+from collections.abc import Sequence, MutableSequence
+
+from functools import partial
+
 
 import torch
+
+
 
 def idx_local_to_global(
     local_idx: int,
@@ -88,6 +91,7 @@ def get_ep_ranks_with_expert(
 
     return ranks_to_send, ranks_to_recv_actual
 
+
 def generate_log2phy_map(expert_map):
     """
     Generates a logical-to-physical expert mapping for all ranks based on an initial
@@ -125,12 +129,13 @@ def generate_log2phy_map(expert_map):
                 log2phy_map[positive_rank_idx, idx].item(),
                 dtype=log2phy_map.dtype)
         else:
+            holding_ranks_values = log2phy_map[positive_rank_idx, idx].tolist()
             random_list = [
-                random.choice(log2phy_map[positive_rank_idx, idx])
+                random.choice(holding_ranks_values)
                 for _ in range(num_ranks - num_rank_holding_expert)
             ]
-            log2phy_map[negative_rank_idx, idx] = torch.tensor(random_list, \
-                                                               dtype=log2phy_map.dtype)
+            log2phy_map[negative_rank_idx, idx] = torch.tensor(
+                random_list, dtype=log2phy_map.dtype)
 
     return log2phy_map
 
