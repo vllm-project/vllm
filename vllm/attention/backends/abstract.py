@@ -116,7 +116,7 @@ class AttentionBackend(ABC):
 
     @classmethod
     def get_supported_dtypes(cls) -> list[torch.dtype]:
-        raise NotImplementedError
+        return [torch.float16, torch.bfloat16]
 
     @classmethod
     def supports_dtype(cls, dtype: torch.dtype) -> bool:
@@ -125,13 +125,14 @@ class AttentionBackend(ABC):
 
     @classmethod
     def get_supported_kv_cache_dtypes(cls) -> list[Optional[str]]:
-        raise NotImplementedError
+        return ["auto"]
 
     @classmethod
     def supports_kv_cache_dtype(cls, kv_cache_dtype: Optional[str]) -> bool:
         supported_kv_cache_dtypes = cls.get_supported_kv_cache_dtypes()
         return ((not supported_kv_cache_dtypes)
-                or (kv_cache_dtype in supported_kv_cache_dtypes))
+                or (kv_cache_dtype is not None and \
+                    kv_cache_dtype in supported_kv_cache_dtypes))
 
     @classmethod
     def get_supported_block_sizes(cls) -> list[int]:

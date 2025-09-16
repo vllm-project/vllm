@@ -72,6 +72,14 @@ class XFormersBackend(AttentionBackend):
     ) -> None:
         PagedAttention.copy_blocks(kv_caches, src_to_dists)
 
+    @classmethod
+    def is_v1(cls) -> bool:
+        return False
+
+    @classmethod
+    def is_mla(cls) -> bool:
+        return False
+
 
 @dataclass
 class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
