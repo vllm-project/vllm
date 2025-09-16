@@ -200,7 +200,11 @@ void run_fp4_blockwise_scaled_group_mm(
   static constexpr int AlignmentD = 128 / cutlass::sizeof_bits<ElementD>::value;
 
   // Architecture definitions
+#if defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120
+  using ArchTag = cutlass::arch::Sm120;
+#else
   using ArchTag = cutlass::arch::Sm100;
+#endif
   using EpilogueOperatorClass =
       cutlass::arch::OpClassTensorOp;  // Epilogue Operator class tag
   using MainloopOperatorClass =
@@ -212,10 +216,16 @@ void run_fp4_blockwise_scaled_group_mm(
   using ClusterShape = Shape<_1, _1, _1>;
   struct MMA1SMConfig {
     using MmaTileShape = Shape<_128, _128, _128>;
-    using KernelSchedule = cutlass::gemm::
-        KernelPtrArrayTmaWarpSpecialized1SmNvf4Sm100;  // Kernel to launch
-    using EpilogueSchedule =
-        cutlass::epilogue::PtrArrayTmaWarpSpecialized1Sm;  // Epilogue to launch
+#if defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120
+    using KernelSchedule = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong;
+#else
+    using KernelSchedule = cutlass::gemm::KernelPtrArrayTmaWarpSpecialized1SmNvf4Sm100;
+#endif
+#if defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120
+    using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
+#else
+    using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecialized1Sm;
+#endif
   };
 
   using CollectiveEpilogue =
@@ -287,11 +297,7 @@ void run_fp4_blockwise_scaled_group_mm(
 
   // Set the Scheduler info
   cutlass::KernelHardwareInfo hw_info;
-  using RasterOrderOptions = typename cutlass::gemm::kernel::detail::
-      PersistentTileSchedulerSm100GroupParams<
-          typename ProblemShape::UnderlyingProblemShape>::RasterOrderOptions;
-  typename Gemm::GemmKernel::TileSchedulerArguments scheduler;
-  scheduler.raster_order = RasterOrderOptions::AlongM;
+  typename Gemm::GemmKernel::TileSchedulerArguments scheduler{};
   hw_info.device_id = a.get_device();
   static std::unordered_map<int, int> cached_sm_counts;
   if (cached_sm_counts.find(hw_info.device_id) == cached_sm_counts.end()) {
