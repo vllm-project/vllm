@@ -4,27 +4,23 @@
 from typing import Optional
 
 import torch
+import torch.nn as nn
 from transformers import PretrainedConfig
 
 from vllm.config import LoRAConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 
 from .base import BaseLayerWithLoRA
-from .utils import _get_layer_weight, _get_lora_device
-
+from .utils import _get_lora_device
 
 class ClassifierWithLoRA(BaseLayerWithLoRA):
-    """
-    TODO: Add docs
-    """
 
     def __init__(self, base_layer: ReplicatedLinear) -> None:
         super().__init__()
-        self.base_layer = base_layer
-        self.dtype = _get_layer_weight(base_layer).dtype
+        self.base_layer=base_layer
         self.input_size = base_layer.input_size
         self._label_slot: list = []
-        self.device = _get_lora_device(base_layer)
+        self.device=_get_lora_device(base_layer)
 
     def create_lora_weights(
         self,
@@ -41,10 +37,9 @@ class ClassifierWithLoRA(BaseLayerWithLoRA):
             1,
             self.max_class_label,
             self.input_size,
-            dtype=self.dtype,
+            dtype=lora_config.lora_dtype,
             device=self.device,
         )
-        pass
 
     def reset_lora(self, index: int):
         self.lora_a_stacked[index] = 0
@@ -75,16 +70,22 @@ class ClassifierWithLoRA(BaseLayerWithLoRA):
             - output
     
         """
-        # We set the buffer to be float32 by default, refer to:
-        # https://github.com/triton-lang/triton/issues/1387
-        y = torch.zeros((self.input_size, self.max_class_label),
-                        dtype=torch.float32,
+        y = torch.zeros(self.input_size,
+                        self.max_class_label,
                         device=input_.device)
-        lora_a = (self.lora_a_stacked, )
-        self.punica_wrapper.add_shrink(y,
-                                       input_,
-                                       lora_a,
-                                       scale=1.0,
-                                       add_input=True)
-        # Cast y using self._label_slot
+
+        self.punica_wrapper.add_shrink(y, self.lora_a_stacked, add_input=True)
+        #TODO Cast y using self._label_slot
         return y
+
+    # ReplicatedLinear should always be replaced, regardless of the fully
+    # sharded LoRAs setting, because it is, by definition, copied per GPU.
+    @classmethod
+    def can_replace_layer(
+        cls,
+        source_layer: nn.Module,
+        lora_config: LoRAConfig,
+        packed_modules_list: list,
+        model_config: Optional[PretrainedConfig],
+    ) -> bool:
+        return type(source_layer) is ReplicatedLinear
