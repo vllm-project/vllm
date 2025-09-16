@@ -129,8 +129,9 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     ) -> tuple[Callable, mk.ReceiverType]:
 
         hidden_size = a1.size(1)
-
-        a2a_idx = dbo_current_ubatch_id()
+        assert hidden_size in self.SUPPORTED_HIDDEN_SIZES, \
+            (f"Hidden Size {hidden_size} not in supported list of hidden sizes"
+            f"{self.SUPPORTED_HIDDEN_SIZES}")
 
         a2a_idx = dbo_current_ubatch_id()
 
