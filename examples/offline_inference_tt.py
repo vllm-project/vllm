@@ -120,11 +120,26 @@ def get_sample_multi_modal_inputs(model: str, multi_image: bool):
 
     if not multi_image:
         # Example data
-        questions = ["Describe this image.", "What is the capital of France?"]
-        img_refs = [
-            "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg",
-            None,
-        ]
+        if "Qwen2.5-VL" in model:
+            # [INFO] Qwen-VL currently does not support a mixture of
+            # text-image and text-only inputs
+            img_refs = [
+                "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg",
+                "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg",
+            ]
+            questions = [
+                "Describe this image.",
+                "Is there a cat?",
+            ]
+        else:
+            questions = [
+                "Describe this image.",
+                "What is the capital of France?",
+            ]
+            img_refs = [
+                "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg",
+                None,
+            ]
         # Build chat-style prompts
         prompts = [
             [
@@ -172,7 +187,7 @@ def get_sample_multi_modal_inputs(model: str, multi_image: bool):
 
             image_inputs, video_inputs = process_vision_info(prompt)
             assert video_inputs is None, "Video inputs not supported yet"
-            image_inputs = image_inputs[0]
+            image_inputs = image_inputs[0] if image_inputs else None
         elif "gemma-3" in model:
             image_inputs = [
                 ctnt["image"]
