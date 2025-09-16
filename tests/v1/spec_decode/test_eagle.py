@@ -365,7 +365,9 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
     # Mock runner for attention metadata building
     proposer.runner = mock.MagicMock()
     proposer.runner.attn_groups.append([mock.MagicMock()])
-    proposer.runner.attn_groups[0][0].metadata_builder = attn_metadata_builder
+    proposer.runner.attn_groups[0][0].metadata_builders = [
+        attn_metadata_builder
+    ]
 
     result = proposer.propose(target_token_ids=target_token_ids,
                               target_positions=target_positions,
@@ -489,7 +491,9 @@ def test_propose_tree(spec_token_tree):
     # Mock runner for attention metadata building.
     proposer.runner = mock.MagicMock()
     proposer.runner.attn_groups.append([mock.MagicMock()])
-    proposer.runner.attn_groups[0][0].metadata_builder = attn_metadata_builder
+    proposer.runner.attn_groups[0][0].metadata_builders = [
+        attn_metadata_builder
+    ]
 
     # Setup inputs for the proposer.
     target_token_ids = torch.randint(0,
