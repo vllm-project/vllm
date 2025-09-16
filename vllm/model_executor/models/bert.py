@@ -614,8 +614,7 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
 
 
 @default_pooling_type("ALL")
-class BertForTokenClassification(nn.Module, SupportsCrossEncoding,
-                                 SupportsQuant):
+class BertForTokenClassification(nn.Module):
     is_pooling_model = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
