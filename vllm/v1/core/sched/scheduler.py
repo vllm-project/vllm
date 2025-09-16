@@ -1192,7 +1192,8 @@ class Scheduler(SchedulerInterface):
                               spec_decoding_stats=spec_decoding_stats,
                               num_corrupted_reqs=sum(req.is_output_corrupted
                                                      for req in self.running),
-                              kv_transfer_stats=kv_transfer_stats)
+                              kv_transfer_stats=kv_transfer_stats.data
+                              if kv_transfer_stats else None)
 
     def make_spec_decoding_stats(
         self,

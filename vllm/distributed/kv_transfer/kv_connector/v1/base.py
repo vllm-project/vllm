@@ -369,8 +369,21 @@ class KVConnectorBase_V1(ABC):
 
         return None
 
+    @classmethod
+    def build_kv_transfer_stats(
+            cls,
+            data: Optional[dict[str,
+                                Any]] = None) -> Optional["KVTransferStats"]:
+        """
+        KVConnectorStats resolution method. This method allows dynamically 
+        registered connectors to return their own KVTransferStats object,
+        which can implement custom aggregation logic on the data dict.
+        """
+        return None
+
     def get_kv_transfer_stats(self) -> Optional["KVTransferStats"]:
         """
-        Get the KV transfer stats for the connector.
+        Get the KV transfer stats for the connector collected during the last 
+        interval.
         """
         return None

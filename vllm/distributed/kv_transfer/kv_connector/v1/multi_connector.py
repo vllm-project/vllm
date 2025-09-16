@@ -5,7 +5,6 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
-import msgspec
 import torch
 
 from vllm.config import VllmConfig
@@ -36,38 +35,42 @@ class MultiKVConnectorMetadata(KVConnectorMetadata):
     extra_async_saves: Optional[dict[str, int]] = None
 
 
+@dataclass
 class MultiKVTransferStats(KVTransferStats):
-    stats: dict[str, KVTransferStats] = msgspec.field(default_factory=dict)
+    """
+    Maintain a dict of KVTransferStats objects, one for each connector.
+    This is used to aggregate the stats from all connectors separately.
+    """
 
     def aggregate(self,
                   other: "MultiKVTransferStats") -> "MultiKVTransferStats":
-        for connector_id, xfer_stats in other.stats.items():
-            if connector_id not in self.stats:
+        for connector_id, xfer_stats in other.data.items():
+            if connector_id not in self.data:
                 self[connector_id] = xfer_stats
             else:
-                assert isinstance(xfer_stats, type(self.stats[connector_id]))
+                assert isinstance(xfer_stats, type(self.data[connector_id]))
                 self[connector_id] = self[connector_id].aggregate(xfer_stats)
         return self
 
     def reset(self):
-        for xfer_stats in self.stats.values():
+        for xfer_stats in self.data.values():
             xfer_stats.reset()
 
     def reduce(self) -> dict[str, Any]:
         # TODO (NickLucche) Adjust for logging on separate lines
         return {
             connector_id: xfer_stats.reduce()
-            for connector_id, xfer_stats in self.stats.items()
+            for connector_id, xfer_stats in self.data.items()
         }
 
     def is_empty(self) -> bool:
-        return all(xfer_stats.is_empty() for xfer_stats in self.stats.values())
+        return all(xfer_stats.is_empty() for xfer_stats in self.data.values())
 
     def __getitem__(self, connector_id: str) -> KVTransferStats:
-        return self.stats[connector_id]
+        return self.data[connector_id]
 
     def __setitem__(self, connector_id: str, xfer_stats: KVTransferStats):
-        self.stats[connector_id] = xfer_stats
+        self.data[connector_id] = xfer_stats
 
 
 class MultiConnector(KVConnectorBase_V1):
@@ -303,6 +306,13 @@ class MultiConnector(KVConnectorBase_V1):
                              f"({', '.join(layouts) })."
                              f"All connectors must use the same layout.")
         return next(iter(layouts), None)
+
+    @classmethod
+    def build_kv_transfer_stats(
+            cls,
+            data: Optional[dict[str,
+                                Any]] = None) -> Optional[KVTransferStats]:
+        return MultiKVTransferStats(data=data)
 
     def get_kv_transfer_stats(self) -> Optional[MultiKVTransferStats]:
         # Group xfer stats by connector type.

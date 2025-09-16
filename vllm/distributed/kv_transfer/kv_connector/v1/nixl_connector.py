@@ -212,6 +212,13 @@ class NixlConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         return self.connector_worker.get_kv_transfer_stats()
 
+    @classmethod
+    def build_kv_transfer_stats(
+            cls,
+            data: Optional[dict[str,
+                                Any]] = None) -> Optional[KVTransferStats]:
+        return NixlKVTransferStats(data=data)
+
     def start_load_kv(self, forward_context: "ForwardContext",
                       **kwargs) -> None:
         assert self.connector_worker is not None
@@ -1335,29 +1342,20 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
             ctx.destroy(linger=0)
 
 
-class NixlKVTransferStats(KVTransferStats,
-                          tag="NIXL"):  # type: ignore[call-arg]
+@dataclass
+class NixlKVTransferStats(KVTransferStats):
     """Container for transfer performance metrics"""
-    # Setup buffers
-    # We could use specialized data structures to avoid copying the data
-    # or even just maintaining order when merging. Let's keep it simple for now
-    transfer_durations: list[float] = msgspec.field(
-        default_factory=list)  # Transfer durations in seconds
-    bytes_transferred: list[int] = msgspec.field(
-        default_factory=list)  # Bytes transferred per transfer
-    num_blocks_transferred: list[int] = msgspec.field(
-        default_factory=list)  # Number of blocks per transfer
-    num_successful_transfers: int = 0
+
+    def __post_init__(self):
+        if "num_successful_transfers" not in self.data:
+            self.data["num_successful_transfers"] = 0
 
     def reset(self):
-        self.transfer_durations = []
-        self.bytes_transferred = []
-        self.num_blocks_transferred = []
-        self.num_successful_transfers = 0
+        self.data = {"num_successful_transfers": 0}
 
     def record_transfer(self):
         # TODO: record actual transfer stats when available
-        self.num_successful_transfers += 1
+        self.data["num_successful_transfers"] += 1
 
     def clone_and_reset(self) -> "NixlKVTransferStats":
         old = copy.copy(self)
@@ -1365,7 +1363,7 @@ class NixlKVTransferStats(KVTransferStats,
         return old
 
     def is_empty(self) -> bool:
-        return self.num_successful_transfers == 0
+        return self.data["num_successful_transfers"] == 0
 
     def aggregate(self, other: "NixlKVTransferStats") -> "NixlKVTransferStats":
         if self == EMPTY_NIXL_KV_TRANSFER_STATS:
@@ -1373,15 +1371,15 @@ class NixlKVTransferStats(KVTransferStats,
             # always be semantically correct, as EMPTY | other => other.
             return other
         if not other.is_empty():
-            self.transfer_durations.extend(other.transfer_durations)
-            self.bytes_transferred.extend(other.bytes_transferred)
-            self.num_blocks_transferred.extend(other.num_blocks_transferred)
-            self.num_successful_transfers += other.num_successful_transfers
+            self.data["num_successful_transfers"] += other.data[
+                "num_successful_transfers"]
         return self
 
     def reduce(self) -> dict[str, Union[int, float]]:
         # TODO: reduce stats to a single value, calculate latency/throughput
-        return {"num_successful_transfers": self.num_successful_transfers}
+        return {
+            "num_successful_transfers": self.data["num_successful_transfers"]
+        }
 
 
 EMPTY_NIXL_KV_TRANSFER_STATS = NixlKVTransferStats()
