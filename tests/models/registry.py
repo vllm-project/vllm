@@ -418,8 +418,8 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
                                                        trust_remote_code=True,
                                                        hf_overrides={
                                                            "architectures": ["GteNewForSequenceClassification"]}),# noqa: E501
-    "ModernBertForSequenceClassification": _HfExamplesInfo("Alibaba-NLP/gte-reranker-modernbert-base", v0_only=True), # noqa: E501
-    "RobertaForSequenceClassification": _HfExamplesInfo("cross-encoder/quora-roberta-base", v0_only=True),  # noqa: E501
+    "ModernBertForSequenceClassification": _HfExamplesInfo("Alibaba-NLP/gte-reranker-modernbert-base"), # noqa: E501
+    "RobertaForSequenceClassification": _HfExamplesInfo("cross-encoder/quora-roberta-base"),  # noqa: E501
 }
 
 _AUTOMATIC_CONVERTED_MODELS = {
