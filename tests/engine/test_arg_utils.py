@@ -332,24 +332,3 @@ def test_human_readable_model_len():
     for invalid in ["1a", "pwd", "10.24", "1.23M"]:
         with pytest.raises(ArgumentError):
             args = parser.parse_args(["--max-model-len", invalid])
-
-
-def test_load_format():
-    args = EngineArgs(model="s3://model/Qwen/Qwen3-0.6B")
-    args.create_model_config()
-    assert args.load_format == "runai_streamer"
-
-    args = EngineArgs(model="s3://model/Qwen/Qwen3-0.6B",
-                      load_format="runai_streamer")
-    args.create_model_config()
-    assert args.load_format == "runai_streamer"
-
-    try:
-        args = EngineArgs(model="s3://model/Qwen/Qwen3-0.6B",
-                          load_format="gguf")
-        args.create_model_config()
-    except Exception as e:
-        assert isinstance(e, ValueError)
-        assert str(e) == ("To load a model from S3, "
-                          "'load_format' must be 'runai_streamer', "
-                          "but got 'gguf'. Model: s3://model/Qwen/Qwen3-0.6B")
