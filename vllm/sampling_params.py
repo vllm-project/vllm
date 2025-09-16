@@ -2,12 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Sampling parameters for text generation."""
 import copy
-from dataclasses import dataclass
+from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
 from typing import Annotated, Any, Optional, Union
 
 import msgspec
+from pydantic.dataclasses import dataclass
 
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
@@ -28,18 +29,21 @@ class SamplingType(IntEnum):
 # maybe make msgspec?
 @dataclass
 class StructuredOutputsParams:
-    """One of these fields will be used to build a logit processor."""
+    # One of these fields will be used to build a logit processor.
     json: Optional[Union[str, dict]] = None
     regex: Optional[str] = None
     choice: Optional[list[str]] = None
     grammar: Optional[str] = None
     json_object: Optional[bool] = None
-    """These are other options that can be set"""
+    # These are other options that can be set.
     disable_fallback: bool = False
     disable_any_whitespace: bool = False
     disable_additional_properties: bool = False
     whitespace_pattern: Optional[str] = None
     structural_tag: Optional[str] = None
+
+    _backend: Optional[str] = field(default=None, init=False)
+    """CAUTION: Should only be set by Processor._validate_structured_output"""
 
     def __post_init__(self):
         """Validate that some fields are mutually exclusive."""

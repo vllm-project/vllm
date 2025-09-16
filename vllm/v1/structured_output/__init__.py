@@ -83,9 +83,10 @@ class StructuredOutputManager:
         #
         # NOTE: We only support a single backend. We do NOT support different
         # backends on a per-request basis in V1 (for now, anyway...).
+        # _backend is set in Processor._validate_structured_output
         if self.backend is None:
             assert request.sampling_params is not None
-            backend = self.vllm_config.structured_outputs_config.backend
+            backend = request.sampling_params.structured_outputs._backend
             vocab_size = self.vllm_config.model_config.get_vocab_size()
             if backend == "xgrammar":
                 self.backend = XgrammarBackend(

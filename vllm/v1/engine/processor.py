@@ -216,6 +216,12 @@ class Processor:
             )
 
         backend = self.structured_outputs_config.backend
+        if params.structured_outputs._backend and backend != "auto":
+            raise ValueError(
+                "StructuredOutputsParams._backend should only be set here if "
+                "StructuredOutputsConfig.backend is 'auto'.")
+        else:
+            params.structured_outputs._backend = backend
 
         # Request content validation
         if (isinstance(params.structured_outputs.choice, list)
@@ -249,11 +255,13 @@ class Processor:
             # other setting where a specific backend was specified.
             try:
                 validate_xgrammar_grammar(params)
+                params.structured_outputs._backend = "xgrammar"
             except ValueError:
                 # The request either failed validation
                 # or includes some jsonschema feature(s) that
                 # are not supported in xgrammar. Fall back to guidance.
                 validate_guidance_grammar(params, tokenizer=None)
+                params.structured_outputs._backend = "guidance"
 
     def _maybe_build_mm_uuids(
         self,
