@@ -834,7 +834,7 @@ def unify_kv_cache_spec_page_size(
     """
     Unify the page size of the given KVCacheSpec. If the page size of all layers
     are the same, return the original KVCacheSpec. If not same, unify the page
-    size by reducing the block size of layers with larger page size. Raise 
+    size by increasing the block size of layers with smaller page size. Raise 
     NotImplementedError if failed to unify the page size.
 
     Args:
