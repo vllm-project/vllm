@@ -560,7 +560,7 @@ def save_configs(
     filename = os.path.join(save_dir, filename)
     print(f"Writing best config to {filename}...")
     with open(filename, "w") as f:
-        json.dump(configs, f, indent=4)
+        json.dump({"triton_version": triton.__version__, **configs}, f, indent=4)
         f.write("\n")
 
 
@@ -594,7 +594,11 @@ def main(args: argparse.Namespace):
         E = config.n_routed_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
-    elif config.architectures[0] in ("Qwen2MoeForCausalLM", "Qwen3MoeForCausalLM"):
+    elif config.architectures[0] in (
+        "Qwen2MoeForCausalLM",
+        "Qwen3MoeForCausalLM",
+        "Qwen3NextForCausalLM",
+    ):
         E = config.num_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import torch
 
 import vllm.envs as envs
+from vllm.logger import init_logger
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
@@ -18,6 +19,8 @@ from vllm.utils.flashinfer import has_flashinfer
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
     from vllm.v1.worker.gpu_worker import Worker
+
+logger = init_logger(__name__)
 
 
 def kernel_warmup(worker: "Worker"):
@@ -30,9 +33,32 @@ def kernel_warmup(worker: "Worker"):
         max_tokens = worker.scheduler_config.max_num_batched_tokens
         deep_gemm_warmup(model, max_tokens)
 
-    # FlashInfer autotune for Blackwell (SM 10.0) GPUs
-    if has_flashinfer() and current_platform.is_device_capability(100):
+    # FlashInfer autotune for Hopper (SM 9.0) and Blackwell (SM 10.0) GPUs
+    if has_flashinfer() and current_platform.has_device_capability(90):
         flashinfer_autotune(worker.model_runner)
+
+    # FlashInfer attention warmup
+    # Only warmup if the model has FlashInfer attention groups
+    # and is not a pooling model
+    def _is_flashinfer_backend(backend):
+        try:
+            return backend.get_name() == "FLASHINFER_VLLM_V1"
+        except NotImplementedError:
+            return False
+
+    if not worker.model_runner.is_pooling_model and all(
+            _is_flashinfer_backend(group.backend)
+            for groups in worker.model_runner.attn_groups for group in groups):
+        logger.info("Warming up FlashInfer attention.")
+        # Warmup with mixed batch containing both prefill and decode tokens
+        # This is to warm up both prefill and decode attention kernels
+        worker.model_runner._dummy_run(
+            num_tokens=16,
+            skip_eplb=True,
+            is_profile=True,
+            force_attention=True,
+            create_mixed_batch=True,
+        )
 
 
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:
