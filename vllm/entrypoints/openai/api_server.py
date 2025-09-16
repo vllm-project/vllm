@@ -19,7 +19,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
-from typing import Annotated, Any, Callable, Optional
+from typing import Annotated, Any, Callable, Optional, Union
 
 import prometheus_client
 import pydantic
@@ -107,8 +107,8 @@ from vllm.transformers_utils.config import (
 from vllm.transformers_utils.tokenizer import MistralTokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (Device, FlexibleArgumentParser, decorate_logs,
-                        get_open_zmq_ipc_path, is_valid_ipv6_address,
-                        set_ulimit)
+                        get_open_zmq_ipc_path, is_valid_ipv4_address,
+                        is_valid_ipv6_address, set_ulimit)
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -1870,23 +1870,51 @@ async def init_app_state(
     state.server_load_metrics = 0
 
 
-def create_server_socket(addr: tuple[str, int]) -> socket.socket:
-    family = socket.AF_INET
-    if is_valid_ipv6_address(addr[0]):
-        family = socket.AF_INET6
+def create_server_sockets(
+        addr: tuple[Optional[str], int]) -> list[socket.socket]:
+    """Create and bind server sockets for each resolved address."""
 
-    sock = socket.socket(family=family, type=socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-    sock.bind(addr)
+    # This method is a subset of the asyncio.loop.create_server
+    # logic for name resolution for host binding.
+    sockets = []
 
-    return sock
+    # Avoid name resolution on already resolved IP addresses
+    infos: list[Union[tuple[socket.AddressFamily, socket.SocketKind, int, str,
+                            Union[tuple[str, int], tuple[str, int, int,
+                                                         int]]]]]
+    host, port = addr
+    if host and is_valid_ipv6_address(host):
+        infos = [(socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP, "",
+                  (host, port))]
+    elif host and is_valid_ipv4_address(host):
+        infos = [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "",
+                  (host, port))]
+    else:
+        infos = socket.getaddrinfo(host,
+                                   port,
+                                   type=socket.SOCK_STREAM,
+                                   flags=socket.AI_PASSIVE)
+
+    for family, socktype, proto, _, sa in infos:
+        sock = socket.socket(family, socktype, proto)
+        sockets.append(sock)
+
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # Since Linux 6.12.9, SO_REUSEPORT is not allowed
+        # on other address families than AF_INET/AF_INET6
+        if family in (socket.AF_INET, socket.AF_INET6):
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+
+        logger.debug("binding to socket family=%d socktype=%d proto=%d: %s",
+                     family, socktype, proto, sa)
+        sock.bind(sa)
+    return sockets
 
 
-def create_server_unix_socket(path: str) -> socket.socket:
+def create_server_unix_sockets(path: str) -> list[socket.socket]:
     sock = socket.socket(family=socket.AF_UNIX, type=socket.SOCK_STREAM)
     sock.bind(path)
-    return sock
+    return [sock]
 
 
 def validate_api_server_args(args):
@@ -1920,10 +1948,10 @@ def setup_server(args):
     # This avoids race conditions with ray.
     # see https://github.com/vllm-project/vllm/issues/8204
     if args.uds:
-        sock = create_server_unix_socket(args.uds)
+        sockets = create_server_unix_sockets(args.uds)
     else:
-        sock_addr = (args.host or "", args.port)
-        sock = create_server_socket(sock_addr)
+        sock_addr = (args.host or None, args.port)
+        sockets = create_server_sockets(sock_addr)
 
     # workaround to avoid footguns where uvicorn drops requests with too
     # many concurrent requests active
@@ -1940,10 +1968,9 @@ def setup_server(args):
     else:
         addr, port = sock_addr
         is_ssl = args.ssl_keyfile and args.ssl_certfile
-        host_part = f"[{addr}]" if is_valid_ipv6_address(
-            addr) else addr or "0.0.0.0"
+        host_part = f"[{addr}]" if is_valid_ipv6_address(addr) else addr or ""
         listen_address = f"http{'s' if is_ssl else ''}://{host_part}:{port}"
-    return listen_address, sock
+    return listen_address, sockets
 
 
 async def run_server(args, **uvicorn_kwargs) -> None:
@@ -1952,12 +1979,12 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     # Add process-specific prefix to stdout and stderr.
     decorate_logs("APIServer")
 
-    listen_address, sock = setup_server(args)
-    await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
+    listen_address, sockets = setup_server(args)
+    await run_server_worker(listen_address, sockets, args, **uvicorn_kwargs)
 
 
 async def run_server_worker(listen_address,
-                            sock,
+                            sockets,
                             args,
                             client_config=None,
                             **uvicorn_kwargs) -> None:
@@ -1987,7 +2014,7 @@ async def run_server_worker(listen_address,
                     listen_address)
         shutdown_task = await serve_http(
             app,
-            sock=sock,
+            sockets=sockets,
             enable_ssl_refresh=args.enable_ssl_refresh,
             host=args.host,
             port=args.port,
@@ -2009,7 +2036,8 @@ async def run_server_worker(listen_address,
     try:
         await shutdown_task
     finally:
-        sock.close()
+        for sock in sockets:
+            sock.close()
 
 
 if __name__ == "__main__":

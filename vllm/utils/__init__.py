@@ -881,7 +881,15 @@ def get_loopback_ip() -> str:
             "Set the VLLM_LOOPBACK_IP environment variable explicitly.")
 
 
-def is_valid_ipv6_address(address: str) -> bool:
+def is_valid_ipv4_address(address: str | None) -> bool:
+    try:
+        ipaddress.IPv4Address(address)
+        return True
+    except ValueError:
+        return False
+
+
+def is_valid_ipv6_address(address: str | None) -> bool:
     try:
         ipaddress.IPv6Address(address)
         return True
