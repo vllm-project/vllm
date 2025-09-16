@@ -125,7 +125,7 @@ def test_prepare_inputs():
     proposer = _create_proposer("eagle", 1)
 
     updated_metadata, token_indices = proposer.prepare_inputs(
-        common_attn_metadata, num_rejected_tokens.cpu())
+        common_attn_metadata, num_rejected_tokens.cpu(), [], [])
 
     assert torch.equal(updated_metadata.query_start_loc,
                        expected_cu_num_tokens)
@@ -405,7 +405,9 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
         [(0, ), (1, ), (2, ), (0, 0), (0, 1), (1, 0), (1, 1), (2, 0),
          (2, 1)],  # Tree
     ])
-def test_propose_tree(spec_token_tree):
+def test_propose_tree(spec_token_tree, monkeypatch):
+    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", "TREE_ATTN")
+
     # Get GPU device.
     device = torch.device(current_platform.device_type)
 
@@ -444,7 +446,7 @@ def test_propose_tree(spec_token_tree):
     # Mock the model forward calls.
     forward_returns = [(torch.zeros(total_tokens, hidden_size, device=device),
                         torch.zeros(total_tokens, hidden_size, device=device))]
-    for cu_num_drafts in proposer.cu_drafts_per_level:
+    for cu_num_drafts in proposer.cu_drafts_per_level[1:]:
         h_logits = torch.zeros(batch_size * cu_num_drafts,
                                hidden_size,
                                device=device)
@@ -455,7 +457,7 @@ def test_propose_tree(spec_token_tree):
     model_mock.side_effect = forward_returns
 
     # Mock the compute_logits calls.
-    cu_num_drafts_tensor = torch.tensor([0] + proposer.cu_drafts_per_level,
+    cu_num_drafts_tensor = torch.tensor(proposer.cu_drafts_per_level,
                                         dtype=torch.int32,
                                         device=device)
     logits_returns = []

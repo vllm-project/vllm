@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Optional
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -108,7 +109,7 @@ class RejectionSampler(nn.Module):
     def parse_output(
         output_token_ids: torch.Tensor,
         vocab_size: int,
-    ) -> list[list[int]]:
+    ) -> tuple[list[list[int]], list[list[int]]]:
         """Parse the output of the rejection sampler.
 
         Args:
@@ -119,17 +120,21 @@ class RejectionSampler(nn.Module):
             vocab_size: The size of the vocabulary.
 
         Returns:
-            A list of lists of token IDs.
+            outputs: A list of lists of token IDs.
+            indices: A list of lists of token indices.
         """
         output_token_ids_np = output_token_ids.cpu().numpy()
         # Create mask for valid tokens.
         valid_mask = ((output_token_ids_np != PLACEHOLDER_TOKEN_ID) &
                       (output_token_ids_np < vocab_size))
-        outputs = [
-            row[valid_mask[i]].tolist()
-            for i, row in enumerate(output_token_ids_np)
-        ]
-        return outputs
+
+        outputs = []
+        indices = []
+        for i, row in enumerate(output_token_ids_np):
+            idxs = np.nonzero(valid_mask[i])[0]
+            outputs.append(row[idxs].tolist())
+            indices.append(idxs.tolist())
+        return outputs, indices
 
 
 def rejection_sample(

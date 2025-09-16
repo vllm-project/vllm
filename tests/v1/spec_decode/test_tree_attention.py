@@ -120,9 +120,11 @@ def forward_attention(
     )
 
 
-def test_tree_attn_correctness() -> None:
+def test_tree_attn_correctness(monkeypatch) -> None:
     torch.manual_seed(42)
     torch.cuda.manual_seed_all(42)
+
+    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", "TREE_ATTN")
 
     device = "cuda"
     tree_attn_masks = {
