@@ -64,8 +64,7 @@ class CudaPlatformBase(Platform):
         if self.has_device_capability(80):
             # Ampere and Hopper or later NVIDIA GPUs.
             return [torch.bfloat16, torch.float16, torch.float32]
-        elif (not self.has_device_capability(80)
-              ) and self.has_device_capability(60):
+        if self.has_device_capability(60):
             # Pascal, Volta and Turing NVIDIA GPUs, BF16 is not supported
             return [torch.float16, torch.float32]
         # Kepler and Maxwell NVIDIA GPUs, only FP32 is supported,
@@ -179,6 +178,7 @@ class CudaPlatformBase(Platform):
                 cache_config.block_size = 128
                 logger.info("Forcing kv cache block size to 128 for "
                             "CUTLASS_MLA backend.")
+
             if use_flashinfer_mla and cache_config.block_size not in [32, 64]:
                 cache_config.block_size = 64
                 logger.info(
@@ -541,7 +541,9 @@ class CudaPlatformBase(Platform):
                     attention_backend = "FLASHMLA"
 
             # Only FlashMLA and CUTLASS_MLA support fp8
-            if attention_backend in ["FLASHMLA", "CUTLASS_MLA"]:
+            if attention_backend in [
+                    "FLASHMLA", "CUTLASS_MLA", "FLASHINFER_MLA"
+            ]:
                 supported = True
             else:
                 supported = (not fp8_attention)
