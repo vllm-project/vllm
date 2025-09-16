@@ -595,12 +595,14 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
             self,
             metadata: dict[str, Any],
             out_item: MultiModalKwargsItem,
+            do_sample_frames: Optional[bool] = None,
             sampled_fps: Optional[float] = None) -> list[int]:
         video_processor = self.get_video_processor()
         merge_size = video_processor.merge_size
         indices = metadata["frames_indices"]
         video_fps = metadata["fps"]
-        do_sample_frames = metadata["do_sample_frames"]
+        if do_sample_frames is None:
+            do_sample_frames = metadata.get("do_sample_frames", False)
 
         # if frames is sampled in HF processor, we need to re-calculate the
         # indices from original metadata.
@@ -820,13 +822,10 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo]
             assert isinstance(grid_thw, torch.Tensor)
 
             video, metadata = mm_items["video"][item_idx]
-            if (do_sampled_frames :=
-                    hf_processor_mm_kwargs.get("do_sample_frames")
-                ) is not None:
-                metadata["do_sample_frames"] = do_sampled_frames
-            sampled_fps = hf_processor_mm_kwargs.get("fps")
+            do_sample_frames = hf_processor_mm_kwargs.get("do_sample_frames")
+            sampled_fps = hf_processor_mm_kwargs.get("fps")[item_idx]
             timestamps = self.info._get_video_second_idx(
-                metadata, out_item, sampled_fps)
+                metadata, out_item, do_sample_frames, sampled_fps)
 
             assert len(timestamps) == grid_thw[0], (
                 f"The timestamps length({len(timestamps)}) should be equal "
