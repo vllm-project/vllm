@@ -478,8 +478,10 @@ class EplbState:
         self.expert_rearrangement_step += 1
         logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: step: expert_rearrangement_step={self.expert_rearrangement_step}, interval={self.expert_rearrangement_step_interval}, is_async={self.is_async}, ep_buffer_ready={self.ep_buffer_ready}")
 
-        if self.is_async and self.ep_buffer_ready:
+        if self.is_async and self.ep_buffer_ready and self._synchronize_rearrange_completion(ep_group):
             logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Calling move_to_workspace from step()")
+            
+            logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: _synchronize_rearrange_completion done, proceeding to move_to_workspace")
             self.move_to_workspace(model=model,
                                    ep_group=ep_group,
                                    is_profile=is_profile)
@@ -691,12 +693,7 @@ class EplbState:
                         rank_mapping=rank_mapping,
                     )
                     logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: transfer_layer completed for layer {self.layer_to_transfer}")
-                    # After move_to_buffer of each layer, perform a global synchronization to ensure all ranks have completed move_to_buffer for this layer
-                    logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: starting _synchronize_rearrange_completion for layer {self.layer_to_transfer}")
                     self.ep_buffer_ready = 1
-                    await self._synchronize_rearrange_completion(ep_group)
-                    logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: per-layer _synchronize_rearrange_completion done for layer {self.layer_to_transfer}")
-                    # Do not advance layer_to_transfer here, wait for main thread consumption before advancing
                 finally:
                     logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Releasing buffer lock for layer {self.layer_to_transfer}")
                     self.buffer_lock.release()
@@ -711,7 +708,7 @@ class EplbState:
         self.post_eplb(model, is_profile)
         logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: transfer_run_periodically completed")
 
-    async def _synchronize_rearrange_completion(self, ep_group: ProcessGroup):
+    def _synchronize_rearrange_completion(self, ep_group: ProcessGroup):
         """
         Wait for all ranks to complete ep_buffer_ready=1 (use CPU Gloo group for synchronization).
         Only when every rank's completion_flag=1 (all_reduce sum equals world_size), will all ranks pass together.
@@ -722,16 +719,14 @@ class EplbState:
         world = cpu_group.size()
         logger.info(f"[EPLB Debug] Rank {rank}: _synchronize_rearrange_completion started on CPU group (world={world})")
 
-        # Continuously wait until all ranks are set to 1
-        while True:
-            flag = torch.tensor((int(self.ep_buffer_ready),), dtype=torch.int32, device="cpu")
-            all_reduce(flag, group=cpu_group)
-            total = int(flag.item())
-            logger.info(f"[EPLB Debug] Rank {rank}: CPU all_reduce total={total}, expected={world}")
-            if total == world:
-                logger.info(f"[EPLB Debug] Rank {rank}: all ranks ready, synchronization passed")
-                return
-            await asyncio.sleep(0.1)
+        flag = torch.tensor((int(self.ep_buffer_ready),), dtype=torch.int32, device="cpu")
+        all_reduce(flag, group=cpu_group)
+        total = int(flag.item())
+        logger.info(f"[EPLB Debug] Rank {rank}: CPU all_reduce total={total}, expected={world}")
+        if total == world:
+            logger.info(f"[EPLB Debug] Rank {rank}: all ranks ready, synchronization passed")
+            return True
+        return False
 
     def move_to_workspace(self,
                           model: MixtureOfExperts,
