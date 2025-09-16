@@ -404,7 +404,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         else:
             other_block_hashes = MergedBlockHash(
                 block_hashes,
-                self.hash_block_size // self.other_spec.block_size)
+                self.other_spec.block_size // self.hash_block_size)
         hit_blocks_other_attn = (
             self.other_attention_cls.find_longest_cache_hit(
                 block_hashes=other_block_hashes,

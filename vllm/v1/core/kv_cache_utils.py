@@ -803,11 +803,11 @@ def get_num_blocks(vllm_config: VllmConfig, num_layers: int,
     return num_blocks
 
 
-def get_uniform_page_size(kv_cache_spec: dict[str, KVCacheSpec]) -> int:
+def get_uniform_page_size(kv_cache_specs: Iterable[KVCacheSpec]) -> int:
     """
     Get the page size of the KV cache.
     """
-    page_sizes = set(layer.page_size_bytes for layer in kv_cache_spec.values())
+    page_sizes = set(layer.page_size_bytes for layer in kv_cache_specs)
     assert len(page_sizes) == 1
     return page_sizes.pop()
 
@@ -848,25 +848,21 @@ def unify_kv_cache_spec_page_size(
         # All layers have the same page size, no need to unify.
         return kv_cache_spec
 
-    min_page_size = min(page_sizes)
+    max_page_size = max(page_sizes)
     new_kv_cache_spec = {}
     for layer_name, layer_spec in kv_cache_spec.items():
-        if layer_spec.page_size_bytes == min_page_size:
+        if layer_spec.page_size_bytes == max_page_size:
             new_kv_cache_spec[layer_name] = layer_spec
         else:
             layer_page_size = layer_spec.page_size_bytes
-            if layer_page_size % min_page_size != 0:
+            if max_page_size % layer_page_size != 0:
                 raise NotImplementedError(
                     "The page size of the layer is not divisible by the "
                     "minimum page size")
-            ratio = layer_page_size // min_page_size
-            if layer_spec.block_size % ratio != 0:
-                raise NotImplementedError(
-                    "Cannot unify the page size of the layer by changing the "
-                    "block size")
-            new_block_size = layer_page_size // min_page_size
+            ratio = max_page_size // layer_page_size
+            new_block_size = layer_spec.block_size * ratio
             new_spec = replace(layer_spec, block_size=new_block_size)
-            assert new_spec.page_size_bytes == min_page_size
+            assert new_spec.page_size_bytes == max_page_size
             new_kv_cache_spec[layer_name] = new_spec
     return new_kv_cache_spec
 
@@ -990,7 +986,6 @@ def _get_kv_cache_groups_uniform_page_size(
 
 def get_kv_cache_config_from_groups(vllm_config: VllmConfig,
                                     kv_cache_groups: list[KVCacheGroupSpec],
-                                    kv_cache_specs: dict[str, KVCacheSpec],
                                     available_memory: int) -> KVCacheConfig:
     """
     Generate the KV cache configuration from the KV cache groups and spec
@@ -999,7 +994,6 @@ def get_kv_cache_config_from_groups(vllm_config: VllmConfig,
     Args:
         vllm_config: The global VllmConfig
         kv_cache_groups: The KV cache groups
-        kv_cache_specs: The KV cache spec of each attention layer in the model
         available_memory: Memory available for KV cache in bytes
     Returns:
         The generated KVCacheConfig
@@ -1023,7 +1017,8 @@ def get_kv_cache_config_from_groups(vllm_config: VllmConfig,
     # full.1, sw.2: share another Tensor with size=available_memory//2
     group_size = max(len(group.layer_names) for group in kv_cache_groups)
 
-    page_size = get_uniform_page_size(kv_cache_specs)
+    page_size = get_uniform_page_size(
+        [group.kv_cache_spec for group in kv_cache_groups])
     assert group_size > 0, "group_size must be greater than 0"
     num_blocks = get_num_blocks(vllm_config, group_size, available_memory,
                                 page_size)
@@ -1222,7 +1217,6 @@ def get_kv_cache_configs(vllm_config: VllmConfig,
         kv_cache_configs.append(
             get_kv_cache_config_from_groups(vllm_config,
                                             kv_cache_groups_one_worker,
-                                            kv_cache_spec_one_worker,
                                             available_memory_one_worker))
 
     # Change the num_blocks of each rank to the smallest among all ranks. We
@@ -1279,11 +1273,11 @@ class MergedBlockHash:
             yield self._merge_at(i)
 
     def _merge_at(self, idx: int) -> BlockHash:
-        merged_hash = bytearray()
         base = idx * self.merge_size
         end = base + self.merge_size
-        for i in range(base, end):
-            merged_hash.extend(self.block_hashes[i])
+        merged_hash: bytes = self.block_hashes[base]
+        for i in range(base + 1, end):
+            merged_hash += self.block_hashes[i]
         return BlockHash(merged_hash)
 
 
