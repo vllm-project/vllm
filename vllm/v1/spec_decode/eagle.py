@@ -403,7 +403,7 @@ class EagleProposer:
                                       device=self.input_ids.device)
         return next_token_ids
 
-    def prepare_next_token_ids_gpu(self,
+    def prepare_next_token_ids_padded(self,
                                common_attn_metadata: CommonAttentionMetadata,
                                sampled_token_ids: torch.Tensor,
                                requests: dict[str, CachedRequestState],
@@ -416,6 +416,7 @@ class EagleProposer:
         It calculates the next token ids and the number of valid sampled tokens
         for each request, considering the "discarded" requests whose next token
         is not sampled and comes from `request.get_token_id()` instead.
+        It also accounts for the rejected tokens in `sampled_token_ids`.
         This function must use device functions to operate on the inputs, and
         should not introduce any blocking CPU-GPU synchronization.
         """
@@ -469,7 +470,7 @@ class EagleProposer:
 
         return next_token_ids, valid_sampled_tokens_count
 
-    def prepare_inputs_deferred(self,
+    def prepare_inputs_padded(self,
                                 common_attn_metadata: CommonAttentionMetadata,
                                 spec_decode_metadata: SpecDecodeMetadata,
                                 valid_sampled_tokens_count: torch.Tensor) -> \

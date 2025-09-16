@@ -148,7 +148,7 @@ def test_prepare_inputs():
     assert torch.equal(token_indices, expected_token_indices)
 
 
-def test_prepare_inputs_deferred():
+def test_prepare_inputs_padded():
     """
     Input scenario is 3 requests with num_speculative_tokens == 2 and:
     - Request 1: query_len = 3, rejected = 1
@@ -206,7 +206,7 @@ def test_prepare_inputs_deferred():
     proposer = _create_proposer("eagle", num_speculative_tokens)
 
     output_metadata, token_indices, token_indices_to_sample = \
-        proposer.prepare_inputs_deferred(
+        proposer.prepare_inputs_padded(
             common_attn_metadata,
             spec_decode_metadata,
             valid_sampled_tokens_count)

@@ -1910,7 +1910,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_nans_in_logits = self._get_nans_in_logits(logits)
 
         discard_sampled_tokens_req_indices = \
-            self.discard_request_indices.np[:self.num_discarded_requests].tolist()
+            self.discard_request_indices.np[:self.num_discarded_requests]
         for i in discard_sampled_tokens_req_indices:
             gen = self.input_batch.generators.get(int(i))
             if gen is not None:
@@ -1951,10 +1951,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
             # Mask out the sampled tokens that should not be sampled.
             for i in discard_sampled_tokens_req_indices:
-                valid_sampled_token_ids[i].clear()
+                valid_sampled_token_ids[int(i)].clear()
         else:
             valid_sampled_token_ids = []
-            invalid_req_indices = list(discard_sampled_tokens_req_indices)
+            invalid_req_indices = discard_sampled_tokens_req_indices.tolist()
             invalid_req_indices_set = set(invalid_req_indices)
             assert sampled_token_ids.shape[-1] == 1
 
@@ -2141,17 +2141,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         with record_function_or_nullcontext("Sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
-        use_padded_batch_for_eagle = self.speculative_config and \
-            self.speculative_config.use_eagle() and \
-            not self.speculative_config.disable_padded_batch
-        if use_padded_batch_for_eagle:
-            # EAGLE speculative decoding can use the GPU sampled tokens
-            # as inputs, and does not need to wait for bookkeeping to finish.
+        def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
             with record_function_or_nullcontext("Draft"):
                 self._draft_token_ids = self.propose_draft_token_ids(
                     scheduler_output,
-                    sampler_output.sampled_token_ids,
+                    sampled_token_ids,
                     self.input_batch.sampling_metadata,
                     hidden_states,
                     sample_hidden_states,
@@ -2159,6 +2154,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     spec_decode_metadata,
                     spec_decode_common_attn_metadata,
                 )
+
+        use_padded_batch_for_eagle = self.speculative_config and \
+            self.speculative_config.use_eagle() and \
+            not self.speculative_config.disable_padded_drafter_batch
+        if use_padded_batch_for_eagle:
+            # EAGLE speculative decoding can use the GPU sampled tokens
+            # as inputs, and does not need to wait for bookkeeping to finish.
+            propose_draft_token_ids(sampler_output.sampled_token_ids)
 
         with record_function_or_nullcontext("Bookkeep"):
             (
@@ -2176,18 +2179,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.speculative_config and not use_padded_batch_for_eagle:
             # ngram and other speculative decoding methods use the sampled
             # tokens on the CPU, so they are run after bookkeeping.
-            assert spec_decode_common_attn_metadata is not None
-            with record_function_or_nullcontext("Draft"):
-                self._draft_token_ids = self.propose_draft_token_ids(
-                    scheduler_output,
-                    valid_sampled_token_ids,
-                    self.input_batch.sampling_metadata,
-                    hidden_states,
-                    sample_hidden_states,
-                    aux_hidden_states,
-                    spec_decode_metadata,
-                    spec_decode_common_attn_metadata,
-                )
+            propose_draft_token_ids(valid_sampled_token_ids)
 
         with record_function_or_nullcontext("EPLB"):
             self.eplb_step()
@@ -2266,7 +2258,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         elif self.speculative_config.use_eagle():
             assert isinstance(self.drafter, EagleProposer)
 
-            if self.speculative_config.disable_padded_batch:
+            if self.speculative_config.disable_padded_drafter_batch:
                 # When padded-batch is disabled, the sampled_token_ids should be
                 # the cpu-side list[list[int]] of valid sampled tokens for each
                 # request, with invalid requests having empty lists.
@@ -2285,7 +2277,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     "sampled_token_ids should be a torch.Tensor when" \
                     "padded-batch is enabled."
                 next_token_ids, valid_sampled_tokens_count = \
-                    self.drafter.prepare_next_token_ids_gpu(
+                    self.drafter.prepare_next_token_ids_padded(
                         common_attn_metadata,
                         sampled_token_ids,
                         self.requests,
@@ -2307,7 +2299,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 else:
                     target_hidden_states = hidden_states[:num_scheduled_tokens]
             else:
-                if self.speculative_config.disable_padded_batch:
+                if self.speculative_config.disable_padded_drafter_batch:
                     token_indices_to_sample = None
                     common_attn_metadata, token_indices =\
                         self.drafter.prepare_inputs(
@@ -2317,7 +2309,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 else:
                     common_attn_metadata, token_indices, \
                         token_indices_to_sample =\
-                        self.drafter.prepare_inputs_deferred(
+                        self.drafter.prepare_inputs_padded(
                             common_attn_metadata,
                             spec_decode_metadata,
                             valid_sampled_tokens_count)
