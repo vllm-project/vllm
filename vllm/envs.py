@@ -70,6 +70,7 @@ if TYPE_CHECKING:
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
     VLLM_MM_INPUT_CACHE_GIB: int = 4
     VLLM_TARGET_DEVICE: str = "cuda"
+    VLLM_MAIN_CUDA_VERSION: str = "12.8"
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
     VLLM_USE_PRECOMPILED: bool = False
@@ -92,6 +93,7 @@ if TYPE_CHECKING:
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
+    VLLM_DISABLE_NCCL_FOR_DP_SYNCHRONIZATION: bool = False
     VLLM_USE_V1: bool = True
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
@@ -247,6 +249,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # rocm, cpu]
     "VLLM_TARGET_DEVICE":
     lambda: os.getenv("VLLM_TARGET_DEVICE", "cuda").lower(),
+
+    # Main CUDA version of vLLM, supporting [12.6, 12.8, 12.9],
+    # 12.8 is the default. This follows PyTorch but can be overridden.
+    "VLLM_MAIN_CUDA_VERSION":
+    lambda: os.getenv("VLLM_MAIN_CUDA_VERSION", "").lower() or "12.8",
 
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs
@@ -744,6 +751,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DISABLED_KERNELS":
     lambda: [] if "VLLM_DISABLED_KERNELS" not in os.environ else os.environ[
         "VLLM_DISABLED_KERNELS"].split(","),
+
+    # Swaps the all reduce backend that we use to coordinate the DP padding
+    # information from NCCL to gloo.
+    "VLLM_DISABLE_NCCL_FOR_DP_SYNCHRONIZATION":
+    lambda:
+    (os.getenv("VLLM_DISABLE_NCCL_FOR_DP_SYNCHRONIZATION", "False").lower() in
+             ("true", "1")),
 
     # If set, use the V1 code path.
     "VLLM_USE_V1":
