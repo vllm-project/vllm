@@ -3395,14 +3395,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # the backend.
                 attn_groups = self.attn_groups[kv_cache_group_id]
                 kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
-                if attn_groups:
-                    # Use the backend's supported block size list
-                    backend_cls = attn_groups[0].backend
-                    selected_kernel_size = self._select_kernel_block_size(
-                        kv_manager_block_size, backend_cls)
-                    kernel_block_sizes.append(selected_kernel_size)
-                else:
-                    kernel_block_sizes.append(kv_manager_block_size)
+                backend_cls = attn_groups[0].backend
+                selected_kernel_size = self._select_kernel_block_size(
+                    kv_manager_block_size, backend_cls)
+                kernel_block_sizes.append(selected_kernel_size)
             else:
                 # This is likely Mamba or other non-attention cache,
                 # no splitting.
