@@ -946,7 +946,6 @@ steps:
   commands:
   - pytest -v -s distributed/test_pp_cudagraph.py
   - pytest -v -s distributed/test_pipeline_parallel.py
-  # - pytest -v -s distributed/test_context_parallel.py # TODO: enable it on Hopper runners or add triton MLA support
 
 - label: LoRA TP Test (Distributed) # 17 min
   timeout_in_minutes: 30
@@ -1020,9 +1019,21 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
 
-- label: Qwen MoE EP Test # optional
+##### H200 test #####
+- label: Distrubted Tests (H200) # optional
   gpu: h200
   optional: true
+  working_dir: "/vllm-workspace/"
   num_gpus: 2
   commands:
-    - CUDA_VISIBLE_DEVICES=1,2 VLLM_ALL2ALL_BACKEND=deepep_high_throughput VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 /vllm-workspace/examples/offline_inference/data_parallel.py --model Qwen/Qwen1.5-MoE-A2.7B --tp-size=1  --dp-size=2 --max-model-len 2048
+    - pytest -v -s tests/distributed/test_context_parallel.py
+    - CUDA_VISIBLE_DEVICES=1,2 VLLM_ALL2ALL_BACKEND=deepep_high_throughput VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model Qwen/Qwen1.5-MoE-A2.7B --tp-size=1  --dp-size=2 --max-model-len 2048
+
+##### B200 test #####
+- label: Distributed Tests (B200) # optional
+  gpu: b200
+  optional: true
+  working_dir: "/vllm-workspace/"
+  num_gpus: 2
+  commands:
+    - pytest -v -s tests/distributed/test_context_parallel.py
