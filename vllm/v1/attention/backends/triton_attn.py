@@ -3,13 +3,14 @@
 """Attention layer with PagedAttention and Triton prefix prefill."""
 from dataclasses import dataclass
 from functools import cache
-from typing import ClassVar, Optional
+from typing import ClassVar, Optional, Union
 
 import torch
 
 from vllm import envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata, AttentionType)
+                                              AttentionMetadata, AttentionType,
+                                              MultipleOf)
 from vllm.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode)
 from vllm.attention.ops.paged_attn import PagedAttention
@@ -149,6 +150,10 @@ class TritonAttentionBackend(AttentionBackend):
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return [32, 64, 96, 128, 160, 192, 224, 256]
+
+    @staticmethod
+    def get_supported_block_size() -> list[Union[int, MultipleOf]]:
+        return [MultipleOf(16)]
 
     @classmethod
     def validate_head_size(cls, head_size: int) -> None:
