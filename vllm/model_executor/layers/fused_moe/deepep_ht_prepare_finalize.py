@@ -191,7 +191,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-    ) -> Callable:
+    ) -> tuple[Callable, mk.ReceiverType]:
 
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)
@@ -217,13 +217,14 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             a1q_scale = None
             a1_post_scale = a1_scale
 
-        return self._do_dispatch(tokens=a1q,
-                                 token_scales=a1q_scale,
-                                 rank_topk_ids=topk_ids,
-                                 rank_topk_weights=topk_weights,
-                                 num_experts=num_experts,
-                                 a1_scale=a1_post_scale,
-                                 quant_config=quant_config)
+        return (lambda *args: None,
+                self._do_dispatch(tokens=a1q,
+                                  token_scales=a1q_scale,
+                                  rank_topk_ids=topk_ids,
+                                  rank_topk_weights=topk_weights,
+                                  num_experts=num_experts,
+                                  a1_scale=a1_post_scale,
+                                  quant_config=quant_config))
 
     def prepare(
         self,
@@ -237,10 +238,11 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
-        receiver = self.prepare_async(a1, a1_scale, a2_scale, topk_weights,
-                                      topk_ids, num_experts, expert_map,
-                                      apply_router_weight_on_input,
-                                      quant_config)
+        (_, receiver) = self.prepare_async(a1, a1_scale, a2_scale,
+                                           topk_weights, topk_ids, num_experts,
+                                           expert_map,
+                                           apply_router_weight_on_input,
+                                           quant_config)
         return receiver()
 
     def finalize(
