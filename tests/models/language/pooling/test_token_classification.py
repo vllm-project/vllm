@@ -13,6 +13,7 @@ from tests.models.utils import softmax
         pytest.param("boltuix/NeuroBERT-NER", ),
     ],
 )
+# The float32 is required for this tiny model to pass the test.
 @pytest.mark.parametrize("dtype", ["float"])
 @torch.inference_mode
 def test_models(
@@ -22,8 +23,6 @@ def test_models(
     model: str,
     dtype: str,
 ) -> None:
-    # The float32 is required for this tiny model to pass the test.
-
     with vllm_runner(model,
                      max_model_len=None,
                      dtype=dtype,
