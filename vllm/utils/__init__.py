@@ -78,6 +78,7 @@ if TYPE_CHECKING:
     from argparse import Namespace
 
     from vllm.config import ModelConfig, VllmConfig
+    from vllm.sequence import IntermediateTensors
 
 logger = init_logger(__name__)
 
@@ -161,6 +162,12 @@ STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
 STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
 STR_DUAL_CHUNK_FLASH_ATTN_VAL: str = "DUAL_CHUNK_FLASH_ATTN"
 STR_INVALID_VAL: str = "INVALID"
+
+MB_bytes = 1_000_000
+"""The number of bytes in one megabyte (MB)."""
+
+MiB_bytes = 1 << 20
+"""The number of bytes in one mebibyte (MiB)."""
 
 GB_bytes = 1_000_000_000
 """The number of bytes in one gigabyte (GB)."""
@@ -516,8 +523,8 @@ def random_uuid() -> str:
 class AsyncMicrobatchTokenizer:
     """Asynchronous tokenizer with micro-batching.
 
-    Pulls pending encode/decode requests from a queue and batches them 
-    up to reduce overhead. A single-thread ThreadPoolExecutor is used 
+    Pulls pending encode/decode requests from a queue and batches them
+    up to reduce overhead. A single-thread ThreadPoolExecutor is used
     so the event loop stays responsive.
     """
 
@@ -664,18 +671,18 @@ class AsyncMicrobatchTokenizer:
     def _queue_key(self, op: str, kwargs: dict) -> tuple:
         """
         Return a normalized key describing operation + kwargs.
-        
+
         - `add_special_tokens`: {True/False}
         - `truncation`: {True/False}
-          - If `truncation` is False (`max_length` is None), 
+          - If `truncation` is False (`max_length` is None),
             returns a key for a can_batch queue.
           - If `truncation` is True and `max_length` is None or equals
             `tokenizer.model_max_length`, returns a key for a can_batch queue.
           - Otherwise, returns a key for a cannot_batch queue.
-        
+
         Examples:
           - Decode: ("decode",)
-          - Encode typical: 
+          - Encode typical:
             ("encode", add_special_tokens, bool_truncation, max_length_label)
           - Fallback: ("encode", "other")
         """
@@ -938,6 +945,14 @@ def get_open_port() -> int:
             if candidate_port not in reserved_port_range:
                 return candidate_port
     return _get_open_port()
+
+
+def get_open_ports_list(count: int = 5) -> list[int]:
+    """Get a list of open ports."""
+    ports = set()
+    while len(ports) < count:
+        ports.add(get_open_port())
+    return list(ports)
 
 
 def _get_open_port() -> int:
@@ -1320,6 +1335,12 @@ def as_list(maybe_list: Iterable[T]) -> list[T]:
     return maybe_list if isinstance(maybe_list, list) else list(maybe_list)
 
 
+def as_iter(obj: Union[T, Iterable[T]]) -> Iterable[T]:
+    if isinstance(obj, str) or not isinstance(obj, Iterable):
+        obj = [obj]
+    return obj
+
+
 # `collections` helpers
 def is_list_of(
     value: object,
@@ -1432,6 +1453,12 @@ def _patched_set_stream(stream: torch.cuda.Stream) -> None:
 torch.cuda.set_stream = _patched_set_stream
 
 
+class _StreamPlaceholder:
+
+    def __init__(self):
+        self.synchronize = lambda: None
+
+
 def current_stream() -> torch.cuda.Stream:
     """
     replace `torch.cuda.current_stream()` with `vllm.utils.current_stream()`.
@@ -1451,8 +1478,19 @@ def current_stream() -> torch.cuda.Stream:
         # On ROCm using the default 0 stream in combination with RCCL
         # is hurting performance. Therefore creating a dedicated stream
         # per process
-        _current_stream_tls.value = torch.cuda.Stream(
-        ) if current_platform.is_rocm() else torch.cuda.current_stream()
+        if current_platform.is_rocm():
+            # torch.cuda.set_stream here is the alias of _pathed_set_stream
+            torch.cuda.set_stream(torch.cuda.Stream())
+        elif current_platform.is_cpu():
+            _current_stream_tls.value = _StreamPlaceholder()
+        else:
+            current_stream = current_platform.current_stream
+            if current_stream is not None:
+                _current_stream_tls.value = current_stream()
+            else:
+                raise ValueError(
+                    "Fail to set current stream, current platform "
+                    "may not support current_stream with torch API")
     return _current_stream_tls.value
 
 
@@ -1950,15 +1988,18 @@ class FlexibleArgumentParser(ArgumentParser):
 
         file_path = args[index + 1]
 
-        config_args = self._load_config_file(file_path)
+        config_args = self.load_config_file(file_path)
 
-        # 0th index is for {serve,chat,complete}
+        # 0th index might be the sub command {serve,chat,complete,...}
         # optionally followed by model_tag (only for serve)
         # followed by config args
         # followed by rest of cli args.
         # maintaining this order will enforce the precedence
         # of cli > config > defaults
-        if args[0] == "serve":
+        if args[0].startswith('-'):
+            # No sub command (e.g., api_server entry point)
+            args = config_args + args[0:index] + args[index + 2:]
+        elif args[0] == "serve":
             model_in_cli = len(args) > 1 and not args[1].startswith('-')
             model_in_config = any(arg == '--model' for arg in config_args)
 
@@ -1981,7 +2022,7 @@ class FlexibleArgumentParser(ArgumentParser):
 
         return args
 
-    def _load_config_file(self, file_path: str) -> list[str]:
+    def load_config_file(self, file_path: str) -> list[str]:
         """Loads a yaml file and returns the key value pairs as a
         flattened list with argparse like pattern
         ```yaml
@@ -2022,6 +2063,11 @@ class FlexibleArgumentParser(ArgumentParser):
             if isinstance(value, bool) and key not in store_boolean_arguments:
                 if value:
                     processed_args.append('--' + key)
+            elif isinstance(value, list):
+                if value:
+                    processed_args.append('--' + key)
+                    for item in value:
+                        processed_args.append(str(item))
             else:
                 processed_args.append('--' + key)
                 processed_args.append(str(value))
@@ -2036,6 +2082,7 @@ async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
         return await task(*args, **kwargs)
 
 
+@lru_cache
 def supports_kw(
     callable: Callable[..., object],
     kw_name: str,
@@ -2240,7 +2287,8 @@ def weak_ref_tensor(tensor: Any) -> Any:
 
 
 def weak_ref_tensors(
-    tensors: Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]
+    tensors: Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor],
+                   IntermediateTensors]
 ) -> Union[torch.Tensor, list[Any], tuple[Any], Any]:
     """
     Convenience function to create weak references to tensors,
@@ -2252,6 +2300,15 @@ def weak_ref_tensors(
         return [weak_ref_tensor(t) for t in tensors]
     if isinstance(tensors, tuple):
         return tuple(weak_ref_tensor(t) for t in tensors)
+
+    # For IntermediateTensors used in pipeline parallelism
+    from vllm.sequence import IntermediateTensors
+    if isinstance(tensors, IntermediateTensors):
+        ret = IntermediateTensors({
+            key: weak_ref_tensor(val)
+            for key, val in tensors.tensors.items()
+        })
+        return ret
     raise ValueError("Invalid type for tensors")
 
 
@@ -2458,7 +2515,7 @@ class PlaceholderModule(_PlaceholderBase):
     A placeholder object to use when a module does not exist.
 
     This enables more informative errors when trying to access attributes
-    of a module that does not exists.
+    of a module that does not exist.
     """
 
     def __init__(self, name: str) -> None:
@@ -2741,7 +2798,10 @@ def memory_profiling(
     result.torch_peak_increase = diff_profile.torch_peak
     result.non_torch_increase = diff_from_create.non_torch_memory
     result.profile_time = diff_profile.timestamp
-    result.non_kv_cache_memory = result.non_torch_increase + result.torch_peak_increase + result.weights_memory  # noqa
+
+    non_torch_memory = result.non_torch_increase
+    peak_activation_memory = result.torch_peak_increase
+    result.non_kv_cache_memory = non_torch_memory + peak_activation_memory + result.weights_memory  # noqa
 
 
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L630 # noqa: E501
@@ -3085,7 +3145,7 @@ class LazyLoader(types.ModuleType):
     """
     LazyLoader module borrowed from Tensorflow
     https://github.com/tensorflow/tensorflow/blob/main/tensorflow/python/util/lazy_loader.py
-    with a addition of "module caching".
+    with an addition of "module caching".
 
     Lazily import a module, mainly to avoid pulling in large dependencies.
     Modules such as `xgrammar` might do additional side effects, so we
@@ -3211,7 +3271,7 @@ def check_use_alibi(model_config: ModelConfig) -> bool:
                       and getattr(cfg.attn_config, "alibi", False)))))
 
 
-def sha256(input) -> int:
+def sha256(input) -> bytes:
     """Hash any picklable Python object using SHA-256.
 
     The input is serialized using pickle before hashing, which allows
@@ -3222,16 +3282,15 @@ def sha256(input) -> int:
         input: Any picklable Python object.
 
     Returns:
-        An integer representing the SHA-256 hash of the serialized input.
+        Bytes representing the SHA-256 hash of the serialized input.
     """
     input_bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
-    return int.from_bytes(hashlib.sha256(input_bytes).digest(),
-                          byteorder="big")
+    return hashlib.sha256(input_bytes).digest()
 
 
-def sha256_cbor_64bit(input) -> int:
+def sha256_cbor(input) -> bytes:
     """
-    Hash objects using CBOR serialization and SHA-256, then truncate to 64bits.
+    Hash objects using CBOR serialization and SHA-256.
 
     This option is useful for non-Python-dependent serialization and hashing.
 
@@ -3242,17 +3301,13 @@ def sha256_cbor_64bit(input) -> int:
             Custom classes must implement CBOR serialization methods.
 
     Returns:
-        An integer in the range [0, 2^64-1] representing the lower 64 bits
-        of the SHA-256 hash of the CBOR serialized input.
+        Bytes representing the SHA-256 hash of the CBOR serialized input.
     """
     input_bytes = cbor2.dumps(input, canonical=True)
-    full_hash = int.from_bytes(hashlib.sha256(input_bytes).digest(),
-                               byteorder="big")
-
-    return full_hash & ((1 << 64) - 1)
+    return hashlib.sha256(input_bytes).digest()
 
 
-def get_hash_fn_by_name(hash_fn_name: str) -> Callable:
+def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], bytes]:
     """Get a hash function by name, or raise an error if
     the function is not found.
     Args:
@@ -3262,10 +3317,8 @@ def get_hash_fn_by_name(hash_fn_name: str) -> Callable:
     """
     if hash_fn_name == "sha256":
         return sha256
-    if hash_fn_name == "sha256_cbor_64bit":
-        return sha256_cbor_64bit
-    if hash_fn_name == "builtin":
-        return hash
+    if hash_fn_name == "sha256_cbor":
+        return sha256_cbor
 
     raise ValueError(f"Unsupported hash function: {hash_fn_name}")
 
@@ -3328,7 +3381,7 @@ def has_triton_kernels() -> bool:
 
 def set_process_title(name: str,
                       suffix: str = "",
-                      append: bool = False) -> None:
+                      prefix: str = envs.VLLM_PROCESS_NAME_PREFIX) -> None:
     """
     Set the current process title to a specific name with an
     optional suffix.
@@ -3336,15 +3389,11 @@ def set_process_title(name: str,
     Args:
         name: The title to assign to the current process.
         suffix: An optional suffix to append to the base name.
-        append: Whether to append to the existing process title.
+        prefix: A prefix to prepend to the front separated by `::`.
     """
     if suffix:
         name = f"{name}_{suffix}"
-    if append:
-        name = f"{setproctitle.getproctitle()}_{name}"
-    else:
-        name = f"{envs.VLLM_PROCESS_NAME_PREFIX}::{name}"
-    setproctitle.setproctitle(name)
+    setproctitle.setproctitle(f"{prefix}::{name}")
 
 
 def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:

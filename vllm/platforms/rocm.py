@@ -171,19 +171,19 @@ class RocmPlatform(Platform):
 
     supported_quantization: list[str] = [
         "awq", "gptq", "fp8", "compressed-tensors", "fbgemm_fp8", "gguf",
-        "quark", "ptpc_fp8", "mxfp4"
+        "quark", "ptpc_fp8", "mxfp4", "petit_nvfp4", "torchao"
     ]
 
     @classmethod
-    def get_vit_attn_backend(cls, support_fa: bool = False) -> _Backend:
-        if support_fa:
-            if (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA
-                    and on_gfx9()):
-                # Note: AITER FA is only supported for Qwen-VL models.
-                # TODO: Add support for other VL models in their model class.
-                return _Backend.ROCM_AITER_FA
-            if on_gfx9():
-                return _Backend.FLASH_ATTN
+    def get_vit_attn_backend(cls, head_size: int,
+                             dtype: torch.dtype) -> _Backend:
+        if (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA
+                and on_gfx9()):
+            # Note: AITER FA is only supported for Qwen-VL models.
+            # TODO: Add support for other VL models in their model class.
+            return _Backend.ROCM_AITER_FA
+        if on_gfx9():
+            return _Backend.FLASH_ATTN
         return _Backend.TORCH_SDPA
 
     @classmethod
@@ -322,23 +322,35 @@ class RocmPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        from vllm.config.compilation import CUDAGraphMode
+
         cache_config = vllm_config.cache_config
+        compilation_config = vllm_config.compilation_config
+        parallel_config = vllm_config.parallel_config
+        is_eager_execution = compilation_config == CUDAGraphMode.NONE
+
+        use_v1 = envs.VLLM_USE_V1
+        use_aiter_rms_norm = envs.VLLM_ROCM_USE_AITER and \
+             envs.VLLM_ROCM_USE_AITER_RMSNORM
+
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
 
-        parallel_config = vllm_config.parallel_config
         if parallel_config.worker_cls == "auto":
             if vllm_config.speculative_config:
-                if not envs.VLLM_USE_V1:
+                if not use_v1:
                     raise NotImplementedError(
                         "Speculative decoding is not supported on vLLM V0.")
                 parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
             else:
-                if envs.VLLM_USE_V1:
+                if use_v1:
                     parallel_config.worker_cls = \
                         "vllm.v1.worker.gpu_worker.Worker"
                 else:
                     parallel_config.worker_cls = "vllm.worker.worker.Worker"
+        #  Aiter rms norm perform best when CUDA Graph capture is enabled.
+        if use_v1 and use_aiter_rms_norm and not is_eager_execution:
+            compilation_config.custom_ops.append("+rms_norm")
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
@@ -412,6 +424,10 @@ class RocmPlatform(Platform):
         return any(gfx in gcn_arch for gfx in supported_archs)
 
     @classmethod
+    def opaque_attention_op(cls) -> bool:
+        return True
+
+    @classmethod
     def get_cu_count(cls, device_id: int = 0) -> int:
         return torch.cuda.get_device_properties(
             device_id).multi_processor_count
@@ -459,5 +475,30 @@ class RocmPlatform(Platform):
         return cuda_device_count_stateless()
 
     @classmethod
-    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str) -> bool:
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
+                                    model_config: "ModelConfig") -> bool:
+        return True
+
+    @classmethod
+    def check_if_supports_dtype(cls, torch_dtype: torch.dtype):
+        if torch_dtype == torch.bfloat16:  # noqa: SIM102
+            if not cls.has_device_capability(80):
+                capability = cls.get_device_capability()
+                gpu_name = cls.get_device_name()
+
+                if capability is None:
+                    compute_str = "does not have a compute capability"
+                else:
+                    version_str = capability.as_version_str()
+                    compute_str = f"has compute capability {version_str}"
+
+                raise ValueError(
+                    "Bfloat16 is only supported on GPUs "
+                    "with compute capability of at least 8.0. "
+                    f"Your {gpu_name} GPU {compute_str}. "
+                    "You can use float16 instead by explicitly setting the "
+                    "`dtype` flag in CLI, for example: --dtype=half.")
+
+    @classmethod
+    def support_hybrid_kv_cache(cls) -> bool:
         return True

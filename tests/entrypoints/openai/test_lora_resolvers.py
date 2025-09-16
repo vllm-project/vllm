@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from vllm.config import MultiModalConfig
+from vllm.config.multimodal import MultiModalConfig
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.entrypoints.openai.protocol import CompletionRequest, ErrorResponse
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
@@ -47,6 +47,7 @@ class MockModelConfig:
     allowed_local_media_path: str = ""
     encoder_config = None
     generation_config: str = "auto"
+    skip_tokenizer_init: bool = False
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}

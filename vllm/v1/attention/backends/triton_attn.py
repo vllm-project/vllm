@@ -7,7 +7,6 @@ from typing import ClassVar, Optional
 
 import torch
 
-from vllm import _custom_ops as ops
 from vllm import envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
@@ -16,12 +15,19 @@ from vllm.attention.ops.chunked_prefill_paged_decode import (
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey, kFp8StaticTensorSym)
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.utils import (AttentionCGSupport,
                                               AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
 from vllm.v1.kv_cache_interface import AttentionSpec
+
+if current_platform.is_cuda_alike():
+    from vllm import _custom_ops as ops
+elif current_platform.is_xpu():
+    from vllm._ipex_ops import ipex_ops as ops
 
 logger = init_logger(__name__)
 
@@ -62,9 +68,9 @@ class TritonAttentionMetadataBuilder(
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
-        self.device = device
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+
         self.block_size = kv_cache_spec.block_size
-        self.kv_cache_spec = kv_cache_spec
 
         model_config = vllm_config.model_config
         self.num_heads_q = model_config.get_num_attention_heads(
@@ -90,7 +96,7 @@ class TritonAttentionMetadataBuilder(
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
 
-        max_seq_len = int(common_attn_metadata.seq_lens_cpu.max())
+        max_seq_len = common_attn_metadata.max_seq_len
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
         block_table_tensor = common_attn_metadata.block_table_tensor
@@ -198,6 +204,9 @@ def use_aiter_unified_attention() -> bool:
 
 class TritonAttentionImpl(AttentionImpl):
 
+    def fused_output_quant_supported(self, quant_key: QuantKey):
+        return quant_key == kFp8StaticTensorSym
+
     def __init__(
         self,
         num_heads: int,
@@ -277,6 +286,7 @@ class TritonAttentionImpl(AttentionImpl):
         attn_metadata: FlashAttentionMetadata,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
+        output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 
@@ -284,16 +294,17 @@ class TritonAttentionImpl(AttentionImpl):
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
-            kv_cache = [2, num_blocks, block_size, num_kv_heads, head_size]
+            kv_cache: shape =
+                [2, num_blocks, block_size, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
         assert output is not None, "Output tensor must be provided."
 
-        if output_scale is not None:
+        if output_block_scale is not None:
             raise NotImplementedError(
-                "fused output quantization is not yet supported"
+                "fused block_scale output quantization is not yet supported"
                 " for TritonAttentionImpl")
 
         if attn_metadata is None:
@@ -335,7 +346,7 @@ class TritonAttentionImpl(AttentionImpl):
                     layer._v_scale,
                 )
             else:
-                torch.ops._C_cache_ops.reshape_and_cache_flash(
+                ops.reshape_and_cache_flash(
                     key,
                     value,
                     key_cache,
@@ -352,9 +363,10 @@ class TritonAttentionImpl(AttentionImpl):
             num_tokens, num_heads, head_size = query.shape
             assert layer._q_scale == 1.0, \
                 "A non 1.0 q_scale is not currently supported."
-            if not current_platform.is_rocm():
-                # Skip Q quantization on ROCm, since dequantizing back to
-                # f32 in the attention kernel is not supported.
+            if current_platform.is_cuda():
+                # Skip Q quantization on ROCm and XPU, enable this on cuda
+                # only, since dequantizing back to f32 in the attention kernel
+                # is not supported.
                 query, _ = ops.scaled_fp8_quant(
                     query.reshape(
                         (num_tokens, num_heads * head_size)).contiguous(),
@@ -387,6 +399,7 @@ class TritonAttentionImpl(AttentionImpl):
                 alibi_slopes=self.alibi_slopes,
                 sliding_window=self.sliding_window[0],
                 sm_scale=self.scale,
+                output_scale=output_scale,
                 sinks=self.sinks,
             )
 
@@ -412,6 +425,6 @@ class TritonAttentionImpl(AttentionImpl):
                 k_descale=layer._k_scale.expand(descale_shape),
                 v_descale=layer._v_scale.expand(descale_shape),
                 sinks=self.sinks,
-            )
+                output_scale=output_scale)
 
         return output

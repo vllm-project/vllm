@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utilities for downloading and initializing model weights."""
+import concurrent.futures
 import fnmatch
 import glob
 import hashlib
@@ -18,10 +19,12 @@ import huggingface_hub.constants
 import numpy as np
 import torch
 from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
-from safetensors.torch import load_file, safe_open, save_file
+from safetensors.torch import load, load_file, safe_open, save_file
 from tqdm.auto import tqdm
 
-from vllm.config import LoadConfig, ModelConfig
+from vllm import envs
+from vllm.config import ModelConfig
+from vllm.config.load import LoadConfig
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QuantizationConfig,
@@ -31,9 +34,7 @@ from vllm.utils import PlaceholderModule
 
 try:
     from runai_model_streamer import SafetensorsStreamer
-except (ImportError, OSError):
-    # see https://github.com/run-ai/runai-model-streamer/issues/26
-    # OSError will be raised on arm64 platform
+except ImportError:
     runai_model_streamer = PlaceholderModule(
         "runai_model_streamer")  # type: ignore[assignment]
     SafetensorsStreamer = runai_model_streamer.placeholder_attr(
@@ -95,6 +96,41 @@ def get_lock(model_name_or_path: Union[str, Path],
     lock = filelock.FileLock(os.path.join(lock_dir, lock_file_name),
                              mode=0o666)
     return lock
+
+
+def maybe_download_from_modelscope(
+        model: str,
+        revision: Optional[str] = None,
+        download_dir: Optional[str] = None,
+        ignore_patterns: Optional[Union[str, list[str]]] = None,
+        allow_patterns: Optional[Union[list[str],
+                                       str]] = None) -> Optional[str]:
+    """Download model from ModelScope hub if VLLM_USE_MODELSCOPE is True.
+
+        Returns the path to the downloaded model, or None if the model is not
+        downloaded from ModelScope."""
+    if envs.VLLM_USE_MODELSCOPE:
+        # download model from ModelScope hub,
+        # lazy import so that modelscope is not required for normal use.
+        # pylint: disable=C.
+        from modelscope.hub.snapshot_download import snapshot_download
+
+        # Use file lock to prevent multiple processes from
+        # downloading the same model weights at the same time.
+        with get_lock(model, download_dir):
+            if not os.path.exists(model):
+                model_path = snapshot_download(
+                    model_id=model,
+                    cache_dir=download_dir,
+                    local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+                    revision=revision,
+                    ignore_file_pattern=ignore_patterns,
+                    allow_patterns=allow_patterns,
+                )
+            else:
+                model_path = model
+        return model_path
+    return None
 
 
 def _shared_pointers(tensors):
@@ -171,7 +207,13 @@ def get_quant_config(model_config: ModelConfig,
     # Inflight BNB quantization
     if model_config.quantization == "bitsandbytes":
         return quant_cls.from_config({})
-    is_local = os.path.isdir(model_config.model)
+    model_name_or_path = maybe_download_from_modelscope(
+        model_config.model,
+        revision=model_config.revision,
+        download_dir=load_config.download_dir,
+        allow_patterns=["*.json"],
+    ) or model_config.model
+    is_local = os.path.isdir(model_name_or_path)
     if not is_local:
         # Download the config files.
         with get_lock(model_config.model, load_config.download_dir):
@@ -184,7 +226,7 @@ def get_quant_config(model_config: ModelConfig,
                 tqdm_class=DisabledTqdm,
             )
     else:
-        hf_folder = model_config.model
+        hf_folder = model_name_or_path
 
     possible_config_filenames = quant_cls.get_config_filenames()
 
@@ -280,33 +322,48 @@ def download_weights_from_hf(
     Returns:
         str: The path to the downloaded model weights.
     """
+    assert len(allow_patterns) > 0
     local_only = huggingface_hub.constants.HF_HUB_OFFLINE
     if not local_only:
-        # Before we download we look at that is available:
-        fs = HfFileSystem()
-        file_list = fs.ls(model_name_or_path, detail=False, revision=revision)
+        # Attempt to reduce allow_patterns to a single pattern
+        # so we only have to call snapshot_download once.
+        try:
+            fs = HfFileSystem()
+            file_list = fs.ls(model_name_or_path,
+                              detail=False,
+                              revision=revision)
 
-        # depending on what is available we download different things
-        for pattern in allow_patterns:
-            matching = fnmatch.filter(file_list, pattern)
-            if len(matching) > 0:
-                allow_patterns = [pattern]
+            # Use the first pattern found in the HF repo's files.
+            for pattern in allow_patterns:
+                matching = fnmatch.filter(file_list, pattern)
+                if len(matching) > 0:
+                    allow_patterns = [pattern]
                 break
+        except Exception as e:
+            logger.warning(
+                "Failed to get file list for '%s'. Trying each pattern in "
+                "allow_patterns individually until weights have been "
+                "downloaded. Error: %s", model_name_or_path, e)
 
     logger.info("Using model weights format %s", allow_patterns)
     # Use file lock to prevent multiple processes from
     # downloading the same model weights at the same time.
     with get_lock(model_name_or_path, cache_dir):
         start_time = time.perf_counter()
-        hf_folder = snapshot_download(
-            model_name_or_path,
-            allow_patterns=allow_patterns,
-            ignore_patterns=ignore_patterns,
-            cache_dir=cache_dir,
-            tqdm_class=DisabledTqdm,
-            revision=revision,
-            local_files_only=local_only,
-        )
+        for allow_pattern in allow_patterns:
+            hf_folder = snapshot_download(
+                model_name_or_path,
+                allow_patterns=allow_pattern,
+                ignore_patterns=ignore_patterns,
+                cache_dir=cache_dir,
+                tqdm_class=DisabledTqdm,
+                revision=revision,
+                local_files_only=local_only,
+            )
+            # If we have downloaded weights for this allow_pattern,
+            # we don't need to check the rest.
+            if any(Path(hf_folder).glob(allow_pattern)):
+                break
         time_taken = time.perf_counter() - start_time
         if time_taken > 0.5:
             logger.info("Time spent downloading weights for %s: %.6f seconds",
@@ -462,18 +519,58 @@ def np_cache_weights_iterator(
 def safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
+    safetensors_load_strategy: str = "lazy",
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
+    loading_desc = "Loading safetensors checkpoint shards"
+    if safetensors_load_strategy == "eager":
+        loading_desc += " (eager)"
+
     for st_file in tqdm(
             hf_weights_files,
-            desc="Loading safetensors checkpoint shards",
+            desc=loading_desc,
             disable=not enable_tqdm(use_tqdm_on_load),
             bar_format=_BAR_FORMAT,
     ):
-        with safe_open(st_file, framework="pt") as f:
-            for name in f.keys():  # noqa: SIM118
-                param = f.get_tensor(name)
-                yield name, param
+        if safetensors_load_strategy == "eager":
+            with open(st_file, "rb") as f:
+                state_dict = load(f.read())
+            yield from state_dict.items()
+        else:
+            with safe_open(st_file, framework="pt") as f:
+                for name in f.keys():  # noqa: SIM118
+                    param = f.get_tensor(name)
+                    yield name, param
+
+
+def multi_thread_safetensors_weights_iterator(
+    hf_weights_files: list[str],
+    use_tqdm_on_load: bool,
+    max_workers: int = 4,
+) -> Generator[tuple[str, torch.Tensor], None, None]:
+    """Multi-Thread iterate over the weights in the model safetensor files."""
+
+    def _load_file(st_file: str):
+        result = load_file(st_file, device="cpu")
+        return result
+
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=max_workers) as executor:
+        futures = [
+            executor.submit(_load_file, st_file)
+            for st_file in hf_weights_files
+        ]
+        futures_iter = tqdm(
+            concurrent.futures.as_completed(futures),
+            total=len(hf_weights_files),
+            desc="Multi-thread loading shards",
+            disable=not enable_tqdm(use_tqdm_on_load),
+            bar_format=_BAR_FORMAT,
+        )
+
+        for future in futures_iter:
+            state_dict = future.result()
+            yield from state_dict.items()
 
 
 def runai_safetensors_weights_iterator(
@@ -556,6 +653,39 @@ def pt_weights_iterator(
         del state
 
 
+def multi_thread_pt_weights_iterator(
+    hf_weights_files: list[str],
+    use_tqdm_on_load: bool,
+    pt_load_map_location: Union[str, dict[str, str]] = "cpu",
+    max_workers: int = 4,
+) -> Generator[tuple[str, torch.Tensor], None, None]:
+    """Multi-Thread iterate over the weights in the model bin/pt files."""
+
+    def _load_file(bin_file: str):
+        return torch.load(bin_file,
+                          map_location=pt_load_map_location,
+                          weights_only=True)
+
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=max_workers) as executor:
+        futures = [
+            executor.submit(_load_file, bin_file)
+            for bin_file in hf_weights_files
+        ]
+        futures_iter = tqdm(
+            concurrent.futures.as_completed(futures),
+            total=len(hf_weights_files),
+            desc="Multi-thread loading pt checkpoint shards",
+            disable=not enable_tqdm(use_tqdm_on_load),
+            bar_format=_BAR_FORMAT,
+        )
+
+        for future in futures_iter:
+            state = future.result()
+            yield from state.items()
+            del state
+
+
 def get_gguf_extra_tensor_names(
         gguf_file: str, gguf_to_hf_name_map: dict[str, str]) -> list[str]:
     reader = gguf.GGUFReader(gguf_file)
@@ -563,6 +693,18 @@ def get_gguf_extra_tensor_names(
     exact_gguf_keys = set([tensor.name for tensor in reader.tensors])
     extra_keys = expected_gguf_keys - exact_gguf_keys
     return [gguf_to_hf_name_map[key] for key in extra_keys]
+
+
+def get_gguf_weight_type_map(
+        gguf_file: str, gguf_to_hf_name_map: dict[str, str]) -> dict[str, str]:
+    """
+    Return GGUF mapped weight's name and its quant type
+    """
+    reader = gguf.GGUFReader(gguf_file)
+    return {
+        gguf_to_hf_name_map[tensor.name]: tensor.tensor_type.name
+        for tensor in reader.tensors if tensor.name in gguf_to_hf_name_map
+    }
 
 
 def gguf_quant_weights_iterator(

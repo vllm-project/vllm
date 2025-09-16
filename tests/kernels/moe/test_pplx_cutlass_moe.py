@@ -17,6 +17,7 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
 from vllm.platforms import current_platform
 from vllm.utils import cdiv
 
+from ...utils import multi_gpu_test
 from .parallel_utils import ProcessGroupInfo, parallel_launch
 
 try:
@@ -76,6 +77,7 @@ def pplx_cutlass_moe(
     assert torch.cuda.current_device() == pgi.local_rank
 
     num_tokens, hidden_dim = a.shape
+    intermediate_dim = w2.shape[2]
     num_experts = w1.shape[0]
     block_size = hidden_dim  # TODO support more cases
     device = pgi.device
@@ -124,8 +126,27 @@ def pplx_cutlass_moe(
         num_local_experts=num_local_experts,
         num_dispatchers=num_dispatchers)
 
+    ab_strides1 = torch.full((num_local_experts, ),
+                             hidden_dim,
+                             device="cuda",
+                             dtype=torch.int64)
+    ab_strides2 = torch.full((num_local_experts, ),
+                             intermediate_dim,
+                             device="cuda",
+                             dtype=torch.int64)
+    c_strides1 = torch.full((num_local_experts, ),
+                            2 * intermediate_dim,
+                            device="cuda",
+                            dtype=torch.int64)
+    c_strides2 = torch.full((num_local_experts, ),
+                            hidden_dim,
+                            device="cuda",
+                            dtype=torch.int64)
+
     experts = CutlassBatchedExpertsFp8(num_local_experts, num_dispatchers,
-                                       out_dtype, per_act_token, per_out_ch)
+                                       out_dtype, per_act_token, per_out_ch,
+                                       ab_strides1, ab_strides2, c_strides1,
+                                       c_strides2)
 
     fused_cutlass_experts = FusedMoEModularKernel(
         prepare_finalize,
@@ -227,6 +248,7 @@ def _pplx_moe(
 @pytest.mark.parametrize("per_out_ch", [True, False])
 @pytest.mark.parametrize("world_dp_size", [[2, 1]])  #, [4, 2]])
 @pytest.mark.parametrize("use_internode", [False])
+@multi_gpu_test(num_gpus=2)
 @pytest.mark.skipif(
     (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
         current_platform.get_device_capability()),

@@ -371,8 +371,8 @@ def test_fused_moe_wn16(m: int, n: int, k: int, e: int, topk: int,
 @pytest.mark.parametrize(
     "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False])
 @torch.inference_mode()
-def test_mixtral_moe(dtype: torch.dtype, padding: bool, use_rocm_aiter: bool,
-                     monkeypatch):
+def test_mixtral_moe(dist_init, dtype: torch.dtype, padding: bool,
+                     use_rocm_aiter: bool, monkeypatch):
     """Make sure our Mixtral MoE implementation agrees with the one from
     huggingface."""
 
@@ -429,11 +429,11 @@ def test_mixtral_moe(dtype: torch.dtype, padding: bool, use_rocm_aiter: bool,
                 vllm_moe.experts.w13_weight, (0, 128), "constant", 0)[...,
                                                                       0:-128],
                                                     requires_grad=False)
-            torch.cuda.empty_cache()
             vllm_moe.experts.w2_weight = Parameter(F.pad(
                 vllm_moe.experts.w2_weight, (0, 128), "constant", 0)[...,
                                                                      0:-128],
                                                    requires_grad=False)
+            torch.cuda.synchronize()
             torch.cuda.empty_cache()
 
         # Run forward passes for both MoE blocks
