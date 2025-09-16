@@ -238,9 +238,12 @@ class LLM:
                 compilation_config_instance = CompilationConfig(
                     level=compilation_config)
             elif isinstance(compilation_config, dict):
-                predicate = lambda x: is_init_field(CompilationConfig, x[0])
                 compilation_config_instance = CompilationConfig(
-                    **dict(filter(predicate, compilation_config.items())))
+                    **{
+                        k: v
+                        for k, v in compilation_config.items()
+                        if is_init_field(CompilationConfig, k)
+                    })
             else:
                 compilation_config_instance = compilation_config
         else:
@@ -248,13 +251,12 @@ class LLM:
 
         if structured_outputs_config is not None:
             if isinstance(structured_outputs_config, dict):
-                predicate = lambda x: is_init_field(StructuredOutputsConfig, x[
-                    0])
-                structured_outputs_instance = StructuredOutputsConfig(**dict(
-                    filter(
-                        predicate,
-                        structured_outputs_config.items(),
-                    )))
+                structured_outputs_instance = StructuredOutputsConfig(
+                    **{
+                        k: v
+                        for k, v in structured_outputs_config.items()
+                        if is_init_field(StructuredOutputsConfig, k)
+                    })
             else:
                 structured_outputs_instance = structured_outputs_config
         else:
