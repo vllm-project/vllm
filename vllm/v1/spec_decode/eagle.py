@@ -152,7 +152,9 @@ class EagleProposer:
             dtype=torch.int32,
         ).repeat(max_batch_size, 1)
 
+        # todo: delete
         self.forward_times = []
+        self.input_ids_shapes = []
 
 
     def propose(
@@ -231,6 +233,7 @@ class EagleProposer:
             )
             et = time.perf_counter()
             self.forward_times.append(et-st)
+            self.input_ids_shapes.append(input_ids.shape)
             # ic(f'drafter forward: {et - st}')
             # ic(input_ids.shape, num_input_tokens)
             if self.method in ("deepseek_mtp", "ernie_mtp"):
@@ -350,6 +353,7 @@ class EagleProposer:
                 )
                 et = time.perf_counter()
                 self.forward_times.append(et-st)
+                self.input_ids_shapes.append(input_ids.shape)
                 # ic(f'drafter forward: {et - st}')
                 # ic(input_ids.shape)
             hidden_states = hidden_states[:batch_size]
@@ -510,6 +514,7 @@ class EagleProposer:
                 )
                 et = time.perf_counter()
                 self.forward_times.append(et-st)
+                self.input_ids_shapes.append(input_ids.shape)
                 # ic(f'drafter forward: {et - st}')
                 # ic(input_ids.shape)
 
@@ -701,7 +706,7 @@ class EagleProposer:
                     "`draft_vocab_frequency_keep_threshold` cannot be None."
                 )
 
-            logger.info(f"Loading draft model vocabulary from {vocab_freq_path}")
+            logger.info(f"Loading draft model vocabulary scores from {vocab_freq_path}")
             vocab_freq = load_vocab_freq(vocab_freq_path)
 
             logger.info(f"Pruning draft vocabulary with ratio {keep_threshold}")

@@ -377,6 +377,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             device="cpu",
             pin_memory=self.pin_memory)
 
+        # todo: delete
+        self.forward_times = []
+        self.input_ids_shapes = []
+
     def _make_buffer(self,
                      *size: Union[int, torch.SymInt],
                      dtype: torch.dtype,
@@ -1910,6 +1914,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 **model_kwargs,
             )
             et = time.perf_counter()
+            self.forward_times.append(et-st)
+            self.input_ids_shapes.append(input_ids.shape)
             # ic(f'target model forward: {et - st}')
             # ic(input_ids.shape, num_input_tokens, batch_descriptor)
 
