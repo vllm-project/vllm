@@ -11,7 +11,6 @@
 #endif
 
 #include "cpu_types.hpp"
-#include <omp.h>
 
 #ifdef VLLM_NUMA_DISABLED
 std::string init_cpu_threads_env(const std::string& cpu_ids) {
