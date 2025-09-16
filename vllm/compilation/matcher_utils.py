@@ -6,6 +6,7 @@ import torch
 from torch._higher_order_ops import auto_functionalized
 from torch._ops import OpOverload
 
+from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey, _normalize_quant_group_shape, kFp8DynamicTensorSym,
@@ -29,16 +30,18 @@ QUANT_OPS: dict[QuantKey, OpOverload] = {
 #         kNvfp4Quant] = torch.ops._C.scaled_fp4_quant.default  # noqa: E501
 
 
-class MatcherRMSNorm: # TODO separate residual and not residual
+class MatcherRMSNorm:  # TODO separate residual and not residual
 
     def __init__(self, epsilon: float, enabled: Optional[bool] = None):
         self.epsilon = epsilon
 
         if enabled is None:
-            # TODO either pass config to enabled or set it globally (global during pass init seems reasonable)
+            # TODO either pass config to enabled or set it globally
+            #  (global during pass init seems reasonable)
             enabled = RMSNorm.enabled()
 
         self.forward = self.forward_custom if enabled else self.forward_native
+        self.model_dtype = get_current_vllm_config().model_config.dtype
 
     def forward_custom(
         self,
@@ -72,21 +75,19 @@ class MatcherRMSNorm: # TODO separate residual and not residual
         weight: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        orig_dtype = input.dtype
-        x = input.to(torch.float32)
+        x = input  # .to(torch.float32)
         if residual is not None:
             x = x + residual.to(torch.float32)
-            residual = x
+            residual = x  # conversion to 16-bit is eliminated in full graph
 
         variance = x.pow(2).mean(dim=-1, keepdim=True)
 
         x = x * torch.rsqrt(variance + self.epsilon)
-        x = x.to(orig_dtype)
+        x = x.to(self.model_dtype)
         if weight is not None:
             x = x * weight
 
         return x if residual is None else (x, residual)
-
 
     def __call__(
         self,

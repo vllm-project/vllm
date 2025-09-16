@@ -9,8 +9,8 @@ from vllm.compilation.fusion import (FUSED_OPS, QUANT_OPS, RMS_OP,
                                      FusedRMSQuantKey, RMSNormQuantFusionPass)
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.compilation.post_cleanup import PostCleanupPass
-from vllm.config import (CompilationConfig, CompilationLevel, PassConfig,
-                         VllmConfig)
+from vllm.config import (CompilationConfig, CompilationLevel, ModelConfig,
+                         PassConfig, VllmConfig)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape, QuantKey, ScaleDesc)
@@ -119,13 +119,16 @@ def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static,
         custom_ops.append("+rms_norm")
     if enable_quant_fp8:
         custom_ops.append("+quant_fp8")
-    vllm_config = VllmConfig(compilation_config=CompilationConfig(
-        debug_dump_path=f"/home/luka/git/vllm/._workspace/"
-                        f"debug_dump_{enable_rms_norm}_{enable_quant_fp8}",
-        level=CompilationLevel.PIECEWISE,
-        custom_ops=custom_ops,
-        pass_config=PassConfig(enable_fusion=True, enable_noop=True),
-    ))
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(dtype=dtype),
+        compilation_config=CompilationConfig(
+            debug_dump_path=f"/home/luka/git/vllm/._workspace/"
+            f"debug_dump_{enable_rms_norm}_{enable_quant_fp8}",
+            level=CompilationLevel.PIECEWISE,
+            custom_ops=custom_ops,
+            pass_config=PassConfig(enable_fusion=True, enable_noop=True),
+        ),
+    )
     with vllm.config.set_current_vllm_config(vllm_config):
         # Reshape pass is needed for the fusion pass to work
         noop_pass = NoOpEliminationPass(vllm_config)
