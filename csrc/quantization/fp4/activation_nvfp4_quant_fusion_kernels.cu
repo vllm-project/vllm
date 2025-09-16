@@ -30,6 +30,15 @@
 
 namespace vllm {
 
+// sigmoid in float32
+__device__ __forceinline__ float sigmoid(float x) {
+  return reciprocal_approximate_ftz(1.f + __expf(-x));
+}
+
+__device__ __forceinline__ float2 sigmoid2(float2 x) {
+  return make_float2(sigmoid(x.x), sigmoid(x.y));
+}
+
 template <class Type>
 __inline__ __device__ PackedVec<Type> compute_silu_mul(PackedVec<Type>& vec,
                                                        PackedVec<Type>& vec2) {
@@ -38,11 +47,16 @@ __inline__ __device__ PackedVec<Type> compute_silu_mul(PackedVec<Type>& vec,
 
 #pragma unroll
   for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; ++i) {
-    // silu_mul in float16
-    packed_type ONES(1.0f, 1.0f);
-    packed_type silu_vec =
-        __h2div(vec.elts[i], __hadd2(ONES, h2exp(-vec.elts[i])));
-    result.elts[i] = __hmul2(silu_vec, vec2.elts[i]);
+    // sigmoid in float32
+    if constexpr (std::is_same_v<Type, half>) {
+      packed_type sigmoid_vec =
+          __float22half2_rn(sigmoid2(__half22float2(vec.elts[i])));
+      result.elts[i] = __hmul2(__hmul2(sigmoid_vec, vec.elts[i]), vec2.elts[i]);
+    } else {
+      packed_type sigmoid_vec =
+          __float22bfloat162_rn(sigmoid2(__bfloat1622float2(vec.elts[i])));
+      result.elts[i] = __hmul2(__hmul2(sigmoid_vec, vec.elts[i]), vec2.elts[i]);
+    }
   }
   return result;
 }
