@@ -148,7 +148,7 @@ class XPUWorker(Worker):
             model_dtype = self.model_config.dtype
             if model_dtype == torch.bfloat16 and not \
                 current_platform.check_if_supports_dtype(model_dtype):
-                    self.model_config.dtype = torch.float16
+                self.model_config.dtype = torch.float16
             torch.xpu.empty_cache()
             self.init_gpu_memory = torch.xpu.get_device_properties(
                 self.local_rank).total_memory

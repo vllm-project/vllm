@@ -211,8 +211,9 @@ class XPUPlatform(Platform):
             device_name = cls.get_device_name().lower()
             # client gpu a770
             if device_name.count("a770") > 0:
-                logger.warning("Intel Arc A770 have bfloat16 accuracy known issue,"
-                               " fallback to float16")
+                logger.warning(
+                    "Intel Arc A770 have bfloat16 accuracy known issue,"
+                    " fallback to float16")
                 return False
         return True
 
