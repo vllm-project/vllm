@@ -257,15 +257,13 @@ def main():
     print(f"Input token throughput (tok/sec):          {input_speed:<10.2f}")
     print(f"Output token throughput (tok/sec):         {output_speed:<10.2f}")
     print(f"Total throughput (tok/sec):                {overall_speed:<10.2f}")
+    print()
 
-    # Only print if we use a speculative decoding method
-    if args.method != "None":
-        print()
-        print(f"Number of drafts:                            {drafts:<10}")
-        print(f"Draft tokens generated:                      {draft_tokens:<10}")
-        print(f"Draft utilization rate:                      {draft_utilization_rate:<10.1f}")
-        print(f"Accepted tokens:                             {accepted_tokens:<10}")
-        print(f"Mean acceptance length:                      {acceptance_length:<10.2f}")
+    print(f"Number of drafts:                            {drafts:<10}")
+    print(f"Draft tokens generated:                      {draft_tokens:<10}")
+    print(f"Draft utilization rate:                      {draft_utilization_rate:<10.1f}")
+    print(f"Accepted tokens:                             {accepted_tokens:<10}")
+    print(f"Mean acceptance length:                      {acceptance_length:<10.2f}")
 
     print("====================================================")
 
