@@ -313,6 +313,10 @@ class OpenAIServingChat(OpenAIServing):
 
         assert len(generators) == 1
         result_generator, = generators
+        prompt = request_prompts[0]
+        if request.vllm_xargs is None:
+            request.vllm_xargs = {}
+        request.vllm_xargs["rendered_prompt"] = prompt
 
         # Streaming response
         if request.stream:
@@ -758,6 +762,7 @@ class OpenAIServingChat(OpenAIServing):
                                     previous_token_ids,
                                     current_token_ids,
                                     output.token_ids,
+                                    request,
                                 ))
                             # When encountering think end id in delta_token_ids
                             # or think end id in prompt_token_ids
@@ -846,6 +851,7 @@ class OpenAIServingChat(OpenAIServing):
                                     previous_token_ids,
                                     current_token_ids,
                                     output_token_ids,
+                                    request,
                                 ))
                             # When encountering think end id in prompt_token_ids
                             # i.e {"enable_thinking": False},
@@ -927,6 +933,7 @@ class OpenAIServingChat(OpenAIServing):
                                              previous_token_ids,
                                              current_token_ids,
                                              output.token_ids,
+                                             request,
                                          ))
                     # handle streaming just a content delta
                     else:

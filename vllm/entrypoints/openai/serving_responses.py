@@ -1006,6 +1006,7 @@ class OpenAIServingResponses(OpenAIServing):
                         current_token_ids=previous_token_ids +
                         output.token_ids,
                         delta_token_ids=output.token_ids,
+                        request=request,
                     )
                 else:
                     delta_message = DeltaMessage(content=output.text, )
