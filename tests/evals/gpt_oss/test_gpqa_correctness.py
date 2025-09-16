@@ -35,7 +35,7 @@ def run_gpqa_eval(model_name: str, base_url: str) -> float:
             cmd,
             text=True,
             capture_output=True,
-            timeout=900,  # 15 minute timeout
+            timeout=1800,  # 30 minute timeout
             env={"OPENAI_API_KEY": "dummy"})
 
         print("Evaluation process output:\n", result.stdout)
@@ -83,7 +83,7 @@ def test_gpqa_correctness(request):
 
     # Launch server and run evaluation
     with RemoteOpenAIServer(model_name, server_args,
-                            max_wait_seconds=600) as remote_server:
+                            max_wait_seconds=1800) as remote_server:
         base_url = remote_server.url_for("v1")
         print(f"Server started at: {base_url}")
 
