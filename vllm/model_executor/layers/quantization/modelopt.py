@@ -181,10 +181,9 @@ class ModelOptFp8Config(QuantizationConfig):
             if (is_layer_skipped(prefix, self.exclude_modules,
                                  self.packed_modules_mapping)
                     or self.is_layer_excluded(prefix)):
+                return UnquantizedLinearMethod()
             # Check if this is a vision model layer that should not be quantized
             if ("vision_tower" in prefix or "vision_model" in prefix):
-                return UnquantizedLinearMethod()
-            if self.is_layer_excluded(prefix):
                 return UnquantizedLinearMethod()
             return ModelOptFp8LinearMethod(self)
         elif isinstance(layer, Attention):
@@ -784,11 +783,10 @@ class ModelOptNvFp4Config(QuantizationConfig):
         if isinstance(layer, LinearBase):
             if (is_layer_skipped(prefix, self.exclude_modules,
                                  self.packed_modules_mapping)
+                    or self.is_layer_excluded(prefix)):
+                return UnquantizedLinearMethod()
             # Check if this is a vision model layer that should not be quantized
             if ("vision_tower" in prefix or "vision_model" in prefix):
-                return UnquantizedLinearMethod()
-            if (is_layer_skipped(prefix, self.exclude_modules)
-                    or self.is_layer_excluded(prefix, self.exclude_modules)):
                 return UnquantizedLinearMethod()
             return ModelOptNvFp4LinearMethod(self)
         elif isinstance(layer, Attention):
