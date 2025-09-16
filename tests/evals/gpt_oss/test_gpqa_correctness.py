@@ -13,9 +13,11 @@ pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py \
 import subprocess
 import sys
 
+import regex as re
+
 from ...utils import RemoteOpenAIServer
 
-ABS_TOL = 0.05  # Absolute tolerance for accuracy comparison
+TOL = 0.05  # Absolute tolerance for accuracy comparison
 
 
 def run_gpqa_eval(model_name: str, base_url: str) -> float:
@@ -39,8 +41,6 @@ def run_gpqa_eval(model_name: str, base_url: str) -> float:
         print("Evaluation process output:\n", result.stdout)
 
         # Parse the output to extract the score
-        import re
-        # Use regex to find the metric in the whole output at once.
         match = re.search(r"'metric':\s*([\d.]+)", result.stdout)
         if match:
             return float(match.group(1))
@@ -92,12 +92,11 @@ def test_gpqa_correctness(request):
         print(f"GPQA Results for {model_name}:")
         print(f"  Measured metric: {measured_metric:.4f}")
         print(f"  Expected metric: {expected_metric:.4f}")
-        print(f"  Tolerance: {ABS_TOL:.4f}")
+        print(f"  Tolerance: {TOL:.4f}")
 
         # Verify metric is within tolerance
-        assert measured_metric >= expected_metric - ABS_TOL, (
+        assert measured_metric >= expected_metric - TOL, (
             f"GPQA metric too low: {measured_metric:.4f} < "
-            f"{expected_metric:.4f} - {ABS_TOL:.4f} = {expected_metric - ABS_TOL:.4f}"
-        )
+            f"{expected_metric:.4f} - {TOL:.4f} = {expected_metric - TOL:.4f}")
 
         print(f"✅ GPQA test passed for {model_name}")
