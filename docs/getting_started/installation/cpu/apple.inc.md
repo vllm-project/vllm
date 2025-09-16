@@ -52,6 +52,24 @@ uv pip install -e .
         1 error generated.
     ```
 
+    ---
+
+    If the build fails with C++11/C++17 compatibility errors like the following, the issue is that the build system is defaulting to an older C++ standard:
+
+    ```text
+    [...] error: 'constexpr' is not a type
+    [...] error: expected ';' before 'constexpr'
+    [...] error: 'constexpr' does not name a type
+    ```
+
+    **Solution**: Your compiler might be using an older C++ standard. Edit `cmake/cpu_extension.cmake` and add `set(CMAKE_CXX_STANDARD 17)` before `set(CMAKE_CXX_STANDARD_REQUIRED ON)`.
+
+    To check your compiler's C++ standard support:
+    ```bash
+    clang++ -std=c++17 -pedantic -dM -E -x c++ /dev/null | grep __cplusplus
+    ```
+    On Apple Clang 16 you should see: `#define __cplusplus 201703L`
+
 # --8<-- [end:build-wheel-from-source]
 # --8<-- [start:pre-built-images]
 
