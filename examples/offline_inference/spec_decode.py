@@ -257,7 +257,7 @@ def main():
     target_forward_times, _ = read_stats(OUTPUTS_DIR / "target.csv")
     drafter_forward_time = sum(drafter_forward_times) # measure in secs
     target_forward_time = sum(target_forward_times)
-    forward_ratio = target_forward_time / drafter_forward_time
+    forward_ratio = drafter_forward_time / target_forward_time
 
     # Print formatted benchmark results
     print("=========== Speculative Decoding Stats ============")
@@ -272,7 +272,7 @@ def main():
 
     print(f"Drafter forward time (sec)                 {drafter_forward_time:<10.2f}")
     print(f"Target forward time (sec)                  {target_forward_time:<10.2f}")
-    print(f"Forward ratio (T:D)                        {forward_ratio:<10.2f}")
+    print(f"Forward ratio (D:T)                        {forward_ratio:<10.2f}")
     print()
 
     print(f"Input token throughput (tok/sec):          {input_speed:<10.2f}")
