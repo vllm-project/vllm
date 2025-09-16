@@ -308,6 +308,23 @@ VLM_TEST_SETTINGS = {
         stop_str=["<｜end▁of▁sentence｜>", "<｜begin▁of▁sentence｜>"],  # noqa: E501
         image_size_factors=[(), (1.0, ), (1.0, 1.0, 1.0), (0.1, 0.5, 1.0)],
     ),
+    "eagle2_5_vl": VLMTestInfo(
+        models=[
+            "nvidia/Eagle2.5-8B",
+        ],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE, VLMTestType.VIDEO),
+        prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n", # noqa: E501
+        single_image_prompts=IMAGE_ASSETS.prompts({
+            "stop_sign": "Image-1: <image>\nWhat's the content in the center of the image?",  # noqa: E501
+            "cherry_blossom": "Image-1: <image>\nWhat is the season?",
+        }),
+        multi_image_prompt="Image-1: <image>\nImage-2: <image>\nDescribe the two images in short.",  # noqa: E501
+        max_model_len=8192,
+        use_tokenizer_eos=True,
+        auto_cls=AutoModel,
+        vllm_runner_kwargs={"mm_processor_kwargs": {"max_dynamic_tiles": 12}},
+        patch_hf_runner=model_utils.eagle2_5_patch_hf_runner,
+    ),
     "fuyu": VLMTestInfo(
         models=["adept/fuyu-8b"],
         test_type=VLMTestType.IMAGE,

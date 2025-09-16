@@ -657,6 +657,72 @@ def _internvl_generate(
     return outputs
 
 
+def eagle2_5_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    """Patches and returns an instance of the HfRunner for Eagle2.5 VL."""
+
+    class Eagle2_5_VLProcessor:
+        """Wrap the HF version of Eagle 2.5 VL Processor to make it compatible with vllm tests."""
+
+        def __init__(self, hf_runner: HfRunner):
+            self.processor = hf_runner.processor
+
+        def replace_placeholders(self, text: str) -> str:
+            """
+            Retrieves and replaces all <image> and <video> placeholders in the input text.
+            <image> placeholders are replaced with <image-{idx}>, and <video> placeholders
+            are replaced with <video-{idx}>, where {idx} is a sequential index starting from 1.
+
+            Args:
+                text: The input string containing placeholders.
+
+            Returns:
+                The string with placeholders replaced.
+            """
+            image_count = 1
+            video_count = 1
+            new_text = ""
+            i = 0
+            while i < len(text):
+                if text[i:i + 7] == "<image>":
+                    new_text += f"<image-{image_count}>"
+                    image_count += 1
+                    i += 7
+                elif text[i:i + 7] == "<video>":
+                    new_text += f"<video-{video_count}>"
+                    video_count += 1
+                    i += 7
+                else:
+                    new_text += text[i]
+                    i += 1
+            return new_text
+
+        def __call__(
+            self,
+            text: str,
+            images: Union[Image, list[Image]] = None,
+            videos: Union[npt.NDArray, list[npt.NDArray]] = None,
+            **kwargs,
+        ):
+            if not isinstance(images, list):
+                images = [images]
+            if not isinstance(videos, list):
+                videos = [videos]
+            text = self.replace_placeholders(text)
+            prompt = self.processor(text=text,
+                                    images=images,
+                                    videos=videos,
+                                    return_tensors="pt",
+                                    padding=True)
+            return {
+                "input_ids": prompt["input_ids"],
+                "attention_mask": prompt["attention_mask"],
+                "pixel_values": prompt["pixel_values"],
+            }
+
+    hf_model.processor = Eagle2_5_VLProcessor(hf_model)
+    return hf_model
+
+
 def mantis_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     from mantis.models.mllava import MLlavaProcessor
 
