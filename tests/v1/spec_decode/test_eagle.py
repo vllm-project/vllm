@@ -20,6 +20,7 @@ from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 model_dir = "meta-llama/Llama-3.1-8B-Instruct"
 eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
@@ -63,6 +64,86 @@ def _create_proposer(
 
     return EagleProposer(vllm_config=vllm_config,
                          device=current_platform.device_type)
+
+
+def test_prepare_next_token_ids():
+    """
+    Test for prepare_next_token_ids_cpu and prepare_next_token_ids_padded.
+    Each will produce a device tensor of next_token_ids, taking as input
+    either the GPU tensor of sampled_token_ids with -1 for rejected tokens,
+    or the CPU python list[list[int]] with the rejected tokens removed.
+    """
+    device = torch.device(current_platform.device_type)
+
+    num_requests = 4
+    num_speculative_tokens = 4
+    batch_spec = BatchSpec(
+        seq_lens=[num_speculative_tokens + 1] * num_requests,
+        query_lens=[num_speculative_tokens + 1] * num_requests,
+    )
+
+    req_ids = [f"req_{i+1}" for i in range(num_requests)]
+    mock_input_batch = mock.MagicMock(spec=InputBatch)
+    mock_input_batch.req_ids = req_ids
+    mock_input_batch.num_reqs = num_requests
+    mock_input_batch.vocab_size = 100
+
+    mock_num_scheduled_tokens = {req_id: 0 for req_id in req_ids}
+    mock_requests = {}
+    for req_id in req_ids:
+        mock_request = mock.MagicMock(spec=CachedRequestState)
+        # Each request will have a backup next token id of 10, 20, 30, 40
+        mock_request.get_token_id.return_value = int(req_id.split("_")[1]) * 10
+        mock_request.num_computed_tokens = 0
+        mock_requests[req_id] = mock_request
+
+    sampled_token_ids = [
+        [0, 1, -1, -1, -1],  # 1 accepted, 3 rejected, "1" sampled
+        [0, 1, 2, 3, 4],  # all accepted, "4" sampled
+        [-1, -1, -1, -1, -1],  # sampling skipped, use backup token "30"
+        [-1, -1, -1, -1, -1]  # this request will be discarded
+    ]
+    sampled_token_ids_tensor = torch.tensor(sampled_token_ids,
+                                            dtype=torch.int32,
+                                            device=device)
+    sampled_token_ids_cpu = [[i for i in seq if i != -1]
+                             for seq in sampled_token_ids]
+
+    expected_next_token_ids_cpu = [1, 4, 30, 40]
+    expected_next_token_ids_tensor = torch.tensor(expected_next_token_ids_cpu,
+                                                  dtype=torch.int32,
+                                                  device=device)
+
+    proposer = _create_proposer("eagle", num_speculative_tokens)
+
+    next_token_ids_from_cpu = proposer.prepare_next_token_ids_cpu(
+        sampled_token_ids_cpu, mock_requests, mock_input_batch,
+        mock_num_scheduled_tokens)
+
+    assert torch.equal(next_token_ids_from_cpu, expected_next_token_ids_tensor)
+
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec,
+        block_size=16,
+        device=device,
+    )
+
+    discarded_req_indices = torch.tensor([3], dtype=torch.int64, device=device)
+    num_discarded_reqs = 1
+
+    expected_valid_sampled_tokens_count = torch.tensor([2, 5, 0, 0],
+                                                       dtype=torch.int32,
+                                                       device=device)
+
+    next_token_ids_from_padded, valid_sampled_tokens_count = \
+        proposer.prepare_next_token_ids_padded(
+            common_attn_metadata, sampled_token_ids_tensor, mock_requests,
+            mock_input_batch, discarded_req_indices, num_discarded_reqs)
+
+    assert torch.equal(next_token_ids_from_padded,
+                       expected_next_token_ids_tensor)
+    assert torch.equal(valid_sampled_tokens_count,
+                       expected_valid_sampled_tokens_count)
 
 
 def test_prepare_inputs():
@@ -457,6 +538,7 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
                               target_positions=target_positions,
                               target_hidden_states=target_hidden_states,
                               next_token_ids=next_token_ids,
+                              last_token_indices=None,
                               common_attn_metadata=common_attn_metadata,
                               sampling_metadata=sampling_metadata)
 
@@ -608,6 +690,7 @@ def test_propose_tree(spec_token_tree):
                               target_positions=target_positions,
                               target_hidden_states=target_hidden_states,
                               next_token_ids=next_token_ids,
+                              last_token_indices=None,
                               common_attn_metadata=common_attn_metadata,
                               sampling_metadata=sampling_metadata)
     assert result.shape == (batch_size, num_speculative_tokens)
