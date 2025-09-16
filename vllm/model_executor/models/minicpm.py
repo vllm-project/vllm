@@ -514,7 +514,6 @@ class MiniCPMModel(nn.Module):
 
 
 class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
-    supports_eagle3 = True
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
