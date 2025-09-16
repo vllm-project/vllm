@@ -28,11 +28,14 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          GuidedDecodingBackend, HfOverrides, KVEventsConfig,
                          KVTransferConfig, LoadConfig, LogprobsMode,
                          LoRAConfig, MambaDType, MMEncoderTPMode, ModelConfig,
-                         ModelDType, ModelImpl, MultiModalConfig,
-                         ObservabilityConfig, ParallelConfig, PoolerConfig,
-                         PrefixCachingHashAlgo, RunnerOption, SchedulerConfig,
-                         SchedulerPolicy, SpeculativeConfig, TaskOption,
-                         TokenizerMode, VllmConfig, get_attr_docs, get_field)
+                         ModelDType, ModelImpl, ObservabilityConfig,
+                         ParallelConfig, PoolerConfig, PrefixCachingHashAlgo,
+                         RunnerOption, SchedulerConfig, SchedulerPolicy,
+                         SpeculativeConfig, TaskOption, TokenizerMode,
+                         VllmConfig, get_attr_docs)
+from vllm.config.multimodal import MMCacheType, MultiModalConfig
+from vllm.config.parallel import ExpertPlacementStrategy
+from vllm.config.utils import get_field
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
@@ -326,6 +329,8 @@ class EngineArgs:
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     eplb_config: EPLBConfig = get_field(ParallelConfig, "eplb_config")
     enable_eplb: bool = ParallelConfig.enable_eplb
+    expert_placement_strategy: ExpertPlacementStrategy = \
+        ParallelConfig.expert_placement_strategy
     num_redundant_experts: int = EPLBConfig.num_redundant_experts
     eplb_window_size: int = EPLBConfig.window_size
     eplb_step_interval: int = EPLBConfig.step_interval
@@ -373,6 +378,10 @@ class EngineArgs:
         MultiModalConfig.mm_processor_kwargs
     disable_mm_preprocessor_cache: bool = False  # DEPRECATED
     mm_processor_cache_gb: float = MultiModalConfig.mm_processor_cache_gb
+    mm_processor_cache_type: Optional[MMCacheType] = \
+        MultiModalConfig.mm_processor_cache_type
+    mm_shm_cache_max_object_size_mb: int = \
+        MultiModalConfig.mm_shm_cache_max_object_size_mb
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
     io_processor_plugin: Optional[str] = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
@@ -691,6 +700,9 @@ class EngineArgs:
         parallel_group.add_argument("--eplb-config",
                                     **parallel_kwargs["eplb_config"])
         parallel_group.add_argument(
+            "--expert-placement-strategy",
+            **parallel_kwargs["expert_placement_strategy"])
+        parallel_group.add_argument(
             "--num-redundant-experts",
             type=int,
             help=
@@ -782,6 +794,12 @@ class EngineArgs:
         multimodal_group.add_argument("--disable-mm-preprocessor-cache",
                                       action="store_true",
                                       deprecated=True)
+        multimodal_group.add_argument(
+            "--mm-processor-cache-type",
+            **multimodal_kwargs["mm_processor_cache_type"])
+        multimodal_group.add_argument(
+            "--mm-shm-cache-max-object-size-mb",
+            **multimodal_kwargs["mm_shm_cache_max_object_size_mb"])
         multimodal_group.add_argument(
             "--mm-encoder-tp-mode", **multimodal_kwargs["mm_encoder_tp_mode"])
         multimodal_group.add_argument(
@@ -998,6 +1016,9 @@ class EngineArgs:
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,
             mm_processor_cache_gb=self.mm_processor_cache_gb,
+            mm_processor_cache_type=self.mm_processor_cache_type,
+            mm_shm_cache_max_object_size_mb=self.
+            mm_shm_cache_max_object_size_mb,
             mm_encoder_tp_mode=self.mm_encoder_tp_mode,
             override_pooler_config=self.override_pooler_config,
             logits_processor_pattern=self.logits_processor_pattern,
@@ -1283,11 +1304,8 @@ class EngineArgs:
             # Async scheduling does not work with the uniprocess backend.
             if self.distributed_executor_backend is None:
                 self.distributed_executor_backend = "mp"
-                logger.info("Using mp-based distributed executor backend "
-                            "for async scheduling.")
-            if self.distributed_executor_backend == "uni":
-                raise ValueError("Async scheduling is not supported with "
-                                 "uni-process backend.")
+                logger.info("Defaulting to mp-based distributed executor "
+                            "backend for async scheduling.")
             if self.pipeline_parallel_size > 1:
                 raise ValueError("Async scheduling is not supported with "
                                  "pipeline-parallel-size > 1.")
@@ -1323,6 +1341,7 @@ class EngineArgs:
             enable_expert_parallel=self.enable_expert_parallel,
             enable_eplb=self.enable_eplb,
             eplb_config=self.eplb_config,
+            expert_placement_strategy=self.expert_placement_strategy,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
             ray_workers_use_nsight=self.ray_workers_use_nsight,
