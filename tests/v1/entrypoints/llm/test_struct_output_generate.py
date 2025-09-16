@@ -646,7 +646,7 @@ def test_structured_output_auto_mode(
 
     llm = LLM(model=model_name,
               max_model_len=1024,
-              structured_outputs=dict(backend="auto"),
+              structured_outputs_config=dict(backend="auto"),
               tokenizer_mode=tokenizer_mode)
 
     sampling_params = SamplingParams(
