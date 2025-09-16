@@ -25,8 +25,8 @@ from openai.types.responses import (
     ResponseCodeInterpreterCallInProgressEvent,
     ResponseCodeInterpreterCallInterpretingEvent, ResponseCompletedEvent,
     ResponseContentPartAddedEvent, ResponseContentPartDoneEvent,
-    ResponseFunctionToolCall, ResponseInProgressEvent, ResponseInputItemParam,
-    ResponseOutputItem, ResponseOutputItemAddedEvent,
+    ResponseCreatedEvent, ResponseFunctionToolCall, ResponseInProgressEvent,
+    ResponseInputItemParam, ResponseOutputItem, ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent, ResponsePrompt, ResponseReasoningItem,
     ResponseReasoningTextDeltaEvent, ResponseReasoningTextDoneEvent,
     ResponseStatus, ResponseWebSearchCallCompletedEvent,
@@ -261,7 +261,7 @@ ResponseInputOutputItem: TypeAlias = Union[ResponseInputItemParam,
                                            ResponseFunctionToolCall]
 
 StreamingResponsesResponse: TypeAlias = Union[
-    # ResponseCreatedEvent,
+    ResponseCreatedEvent,
     ResponseInProgressEvent,
     ResponseCompletedEvent,
     ResponseOutputItemAddedEvent,
