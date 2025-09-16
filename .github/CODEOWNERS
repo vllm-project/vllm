@@ -2,6 +2,7 @@
 # for more info about CODEOWNERS file
 
 # This lists cover the "core" components of vLLM that require careful review
+/vllm/attention @LucasWilkinson
 /vllm/attention/backends/abstract.py @WoosukKwon @zhuohan123 @youkaichao @alexm-redhat @comaniac @njhill
 /vllm/core @zhuohan123 @youkaichao @alexm-redhat @comaniac @njhill
 /vllm/engine/llm_engine.py @zhuohan123 @youkaichao @alexm-redhat @comaniac @njhill
@@ -14,6 +15,7 @@
 /vllm/model_executor/layers/mamba @tdoublep
 /vllm/model_executor/model_loader @22quinn
 /vllm/multimodal @DarkLight1337 @ywang96 @NickLucche
+/vllm/v1/attention @LucasWilkinson
 /vllm/v1/sample @22quinn @houseroad
 /vllm/vllm_flash_attn @LucasWilkinson
 /vllm/lora @jeejeelee
@@ -31,9 +33,7 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /vllm/v1 @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @comaniac @alexm-redhat
 /vllm/v1/structured_output @mgoin @russellb @aarnphm @benchislett
 /vllm/v1/spec_decode @benchislett @luccafong
-/vllm/v1/attention/backends/flash_attn.py @LucasWilkinson
 /vllm/v1/attention/backends/flashinfer.py @mgoin
-/vllm/v1/attention/backends/mla @LucasWilkinson
 /vllm/v1/attention/backends/triton_attn.py @tdoublep
 /vllm/v1/core @heheda12345
 /vllm/v1/kv_cache_interface.py @heheda12345
