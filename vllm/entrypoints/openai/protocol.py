@@ -814,15 +814,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
             return data
 
         structured_outputs_kwargs = data['structured_outputs']
-
-        count = sum([
-            "json" in structured_outputs_kwargs
-            and structured_outputs_kwargs["json"] is not None,
-            "regex" in structured_outputs_kwargs
-            and structured_outputs_kwargs["regex"] is not None,
-            "choice" in structured_outputs_kwargs
-            and structured_outputs_kwargs["choice"] is not None
-        ])
+        count = sum(
+            structured_outputs_kwargs.get(k) is not None
+            for k in ("json", "regex", "choice"))
         # you can only use one kind of constraints for structured outputs
         if count > 1:
             raise ValueError(
@@ -1175,14 +1169,9 @@ class CompletionRequest(OpenAIBaseModel):
             return data
 
         structured_outputs_kwargs = data['structured_outputs']
-        count = sum([
-            "json" in structured_outputs_kwargs
-            and structured_outputs_kwargs["json"] is not None,
-            "regex" in structured_outputs_kwargs
-            and structured_outputs_kwargs["regex"] is not None,
-            "choice" in structured_outputs_kwargs
-            and structured_outputs_kwargs["choice"] is not None
-        ])
+        count = sum(
+            structured_outputs_kwargs.get(k) is not None
+            for k in ("json", "regex", "choice"))
         if count > 1:
             raise ValueError(
                 "You can only use one kind of constraints for structured "
