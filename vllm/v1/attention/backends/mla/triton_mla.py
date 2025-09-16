@@ -46,6 +46,14 @@ class TritonMLABackend(MLACommonBackend):
     def is_v1(cls) -> bool:
         return True
 
+    @classmethod
+    def get_min_compute_capability(cls) -> Optional[int]:
+        return None
+
+    @classmethod
+    def get_max_compute_capability(cls) -> Optional[int]:
+        return None
+
 
 class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
 

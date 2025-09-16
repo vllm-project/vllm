@@ -61,7 +61,7 @@ class CutlassMLABackend(MLACommonBackend):
 
     @classmethod
     def get_max_compute_capability(cls) -> Optional[int]:
-        return 100
+        return 109
 
 
 class SM100Workspace:

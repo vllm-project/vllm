@@ -58,6 +58,14 @@ class FlashMLABackend(MLACommonBackend):
     def is_v1(cls) -> bool:
         return True
 
+    @classmethod
+    def get_min_compute_capability(cls) -> Optional[int]:
+        return 90
+
+    @classmethod
+    def get_max_compute_capability(cls) -> Optional[int]:
+        return 99
+
 
 @dataclass
 class FlashMLADecodeMetadata(MLACommonDecodeMetadata):
