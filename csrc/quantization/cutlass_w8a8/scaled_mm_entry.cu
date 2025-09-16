@@ -296,7 +296,7 @@ void get_cutlass_moe_mm_data(
       false,
       "No compiled get_cutlass_moe_mm_data: no cutlass_scaled_mm kernel for "
       "CUDA device capability: ",
-      version_num, ". Required capability: 90 or 100");
+      version_num, ". Required capability: 90, 100, or 120");
 }
 
 void get_cutlass_moe_mm_problem_sizes(
@@ -316,7 +316,7 @@ void get_cutlass_moe_mm_problem_sizes(
       false,
       "No compiled get_cutlass_moe_mm_problem_sizes: no cutlass_scaled_mm "
       "kernel for CUDA device capability: ",
-      version_num, ". Required capability: 90 or 100");
+      version_num, ". Required capability: 90, 100, or 120");
 }
 
 void get_cutlass_pplx_moe_mm_data(torch::Tensor& expert_offsets,
@@ -341,7 +341,7 @@ void get_cutlass_pplx_moe_mm_data(torch::Tensor& expert_offsets,
       false,
       "No compiled get_cutlass_pplx_moe_mm_data: no cutlass_scaled_mm kernel "
       "for CUDA device capability: ",
-      version_num, ". Required capability: 90 or 100");
+      version_num, ". Required capability: 90, 100, or 120");
 }
 
 void cutlass_scaled_mm_azp(torch::Tensor& c, torch::Tensor const& a,
