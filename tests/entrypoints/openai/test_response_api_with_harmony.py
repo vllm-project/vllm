@@ -28,8 +28,6 @@ def server(monkeypatch_module: pytest.MonkeyPatch):
 
     with monkeypatch_module.context() as m:
         m.setenv("VLLM_ENABLE_RESPONSES_API_STORE", "1")
-        # This is necessary to test with code_interpreter on the demo server
-        m.setenv("PYTHON_EXECUTION_BACKEND", "dangerously_use_uv")
         with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
             yield remote_server
 
@@ -396,6 +394,7 @@ async def test_web_search(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.skip(reason="Code interpreter tool is not available in CI yet.")
 async def test_code_interpreter(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
@@ -420,6 +419,7 @@ async def test_code_interpreter(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.skip(reason="Code interpreter tool is not available in CI yet.")
 async def test_mcp_tool(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
