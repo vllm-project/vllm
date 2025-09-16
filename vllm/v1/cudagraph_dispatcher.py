@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional, Union
+from typing import Any, Optional, Union
+
+import torch
 
 import vllm.envs as envs
 from vllm.config import CompilationLevel, CUDAGraphMode, VllmConfig
@@ -30,11 +32,15 @@ class CudagraphDispatcher:
     without cudagraph (if mode no match or mode is NONE).
     """
 
-    def __init__(self, vllm_config: VllmConfig, is_drafter: bool = False):
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 is_drafter: bool = False,
+                 runner: Any = None):
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
         self.cudagraph_mode = self.compilation_config.cudagraph_mode
         self.is_drafter = is_drafter
+        self.runner = runner
 
         # Dict to store valid cudagraph dispatching keys.
         self.cudagraph_keys: dict[CUDAGraphMode, set[BatchDescriptor]] = {
@@ -58,6 +64,10 @@ class CudagraphDispatcher:
             f"splitting_ops={self.compilation_config.splitting_ops}"
 
         self.keys_initialized = False
+
+        # For storing temp variables
+        self._uniform_decode: bool = False
+        self._uniform_query_len: int = 0
 
     def add_cudagraph_key(self, runtime_mode: CUDAGraphMode,
                           batch_descriptor: BatchDescriptor):
@@ -188,19 +198,21 @@ class CudagraphDispatcher:
         # otherwise, it is not cudagraph padded
         return num_tokens, False
 
-    def plan(
-        self,
-        num_scheduled_tokens: int,
-        num_reqs: int,
-        max_query_len: int,
-    ) -> tuple[CUDAGraphMode, Optional[BatchDescriptor], int]:
-        """Plan cudagraph execution in a single call.
-
-        Returns (runtime_mode, batch_descriptor, num_input_tokens_padded).
-        """
+    def caculate_uniform_decode(self, num_scheduled_tokens: int, num_reqs: int,
+                                max_query_len: int) -> tuple[bool, int]:
         uniform_decode = (max_query_len in self.uniform_query_lens) and (
             num_scheduled_tokens == num_reqs * max_query_len)
         uniform_query_len = max_query_len if uniform_decode else 0
+        return uniform_decode, uniform_query_len
+
+    def get_num_input_tokens(self, num_scheduled_tokens: int, num_reqs: int,
+                             max_query_len: int) -> int:
+        uniform_decode, uniform_query_len = self.caculate_uniform_decode(
+            num_scheduled_tokens, num_reqs, max_query_len)
+
+        # store for later use in plan
+        self._uniform_decode = uniform_decode
+        self._uniform_query_len = uniform_query_len
 
         # Compute padded tokens
         cudagraph_padded = False
@@ -219,13 +231,39 @@ class CudagraphDispatcher:
             if self.compilation_config.pass_config. \
                 enable_sequence_parallelism and tp_size > 1:
                 num_input_tokens = round_up(num_scheduled_tokens, tp_size)
+        return num_input_tokens
 
-        # Build initial descriptor and dispatch
+    def maybe_pad_for_dp(
+            self, num_input_tokens: int) -> tuple[int, Optional[torch.Tensor]]:
+        if self.runner and hasattr(self.runner, 'get_dp_padding'):
+            return self.runner.get_dp_padding(num_input_tokens)
+        return 0, None
+
+    def plan(
+        self,
+        num_scheduled_tokens: int,
+        num_reqs: int,
+        max_query_len: int,
+    ) -> tuple[CUDAGraphMode, Optional[BatchDescriptor], int,
+               Optional[torch.Tensor]]:
+        """Plan cudagraph execution in a single call.
+
+        Returns (runtime_mode, batch_descriptor, num_input_tokens, 
+                 num_tokens_across_dp).
+        """
+        num_input_tokens = self.get_num_input_tokens(num_scheduled_tokens,
+                                                     num_reqs, max_query_len)
+
+        # maybe pad for dp
+        num_pad, num_tokens_across_dp = self.maybe_pad_for_dp(num_input_tokens)
+        num_input_tokens += num_pad
+
+        # Build initial descriptor and then dispatch
         descriptor = BatchDescriptor(num_tokens=num_input_tokens,
-                                     uniform_decode=uniform_decode,
-                                     uniform_query_len=uniform_query_len)
+                                     uniform_decode=self._uniform_decode,
+                                     uniform_query_len=self._uniform_query_len)
         runtime_mode, descriptor = self.dispatch(descriptor)
-        return runtime_mode, descriptor, num_input_tokens
+        return runtime_mode, descriptor, num_input_tokens, num_tokens_across_dp
 
     def dispatch(
         self, batch_descriptor: BatchDescriptor

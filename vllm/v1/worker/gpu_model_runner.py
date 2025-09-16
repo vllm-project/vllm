@@ -89,6 +89,7 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.kv_connector_model_runner_mixin import (
     KVConnectorModelRunnerMixin)
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from vllm.v1.worker.utils import is_residual_scattered_for_sp
 
 from .utils import (AttentionGroup, MultiModalBudget,
                     add_kv_sharing_layers_to_kv_cache_groups, bind_kv_cache,
@@ -387,7 +388,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             1 + self.speculative_config.num_speculative_tokens
 
         # Cudagraph dispatcher for runtime cudagraph dispatching.
-        self.cudagraph_dispatcher = CudagraphDispatcher(self.vllm_config)
+        self.cudagraph_dispatcher = CudagraphDispatcher(self.vllm_config,
+                                                        is_drafter=False,
+                                                        runner=self)
 
         self.mm_budget = MultiModalBudget(
             self.model_config,
@@ -1634,21 +1637,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         assert self.intermediate_tensors is not None
 
         tp = self.vllm_config.parallel_config.tensor_parallel_size
-        enabled_sp = self.compilation_config.pass_config. \
-            enable_sequence_parallelism
-        if enabled_sp:
-            # When sequence parallelism is enabled, we always pad num_tokens
-            # to be a multiple of tensor_parallel_size (tp) earlier
-            assert num_tokens % tp == 0
-        is_residual_scattered = tp > 1 and enabled_sp \
-            and num_tokens % tp == 0
+        is_rs = is_residual_scattered_for_sp(self.vllm_config, num_tokens)
 
         # When sequence parallelism is enabled, the "residual" tensor is sharded
         # across tensor parallel ranks, so each rank only needs its own slice.
         if sync_self:
             assert intermediate_tensors is not None
             for k, v in intermediate_tensors.items():
-                is_scattered = k == "residual" and is_residual_scattered
+                is_scattered = k == "residual" and is_rs
                 copy_len = num_tokens // tp if is_scattered else \
                     num_tokens
                 self.intermediate_tensors[k][:copy_len].copy_(
@@ -1656,8 +1652,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         return IntermediateTensors({
             k:
-            v[:num_tokens // tp]
-            if k == "residual" and is_residual_scattered else v[:num_tokens]
+            v[:num_tokens //
+              tp] if k == "residual" and is_rs else v[:num_tokens]
             for k, v in self.intermediate_tensors.items()
         })
 
@@ -1741,6 +1737,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             prompt_logprobs_dict={},
             pooler_output=pooler_output,
         )
+
+    def _get_num_input_tokens(self, num_scheduled_tokens: int, num_reqs: int,
+                              max_query_len: int) -> int:
+        return self.cudagraph_dispatcher.get_num_input_tokens(
+            num_scheduled_tokens, num_reqs, max_query_len)
 
     def _preprocess(
         self,
@@ -2016,16 +2017,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             # cudagraph dispatcher planing + padding
             num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-            cudagraph_runtime_mode, batch_descriptor, num_input_tokens = \
+            (cudagraph_runtime_mode, batch_descriptor, num_input_tokens,
+            num_tokens_across_dp)= \
                 self.cudagraph_dispatcher.plan(
                     num_scheduled_tokens=num_scheduled_tokens,
                     num_reqs=self.input_batch.num_reqs,
                     max_query_len=max_query_len)
-
-            # Padding for DP
-            num_pad, num_tokens_across_dp = self.get_dp_padding(
-                num_input_tokens)
-            num_input_tokens += num_pad
 
             (
                 input_ids,
@@ -2087,8 +2084,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 assert not self.is_pooling_model
 
                 if not get_pp_group().is_last_rank:
+                    all_gather_tensors = {
+                        "residual":
+                        not is_residual_scattered_for_sp(
+                            self.vllm_config, num_input_tokens)
+                    }
                     get_pp_group().send_tensor_dict(
-                        hidden_states.tensors, all_gather_group=get_tp_group())
+                        hidden_states.tensors,
+                        all_gather_group=get_tp_group(),
+                        all_gather_tensors=all_gather_tensors)
                     logits = None
                 else:
                     sample_hidden_states = hidden_states[logits_indices]
