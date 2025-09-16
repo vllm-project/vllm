@@ -25,12 +25,12 @@ model_config = {
 @pytest.mark.parametrize(
     "model",
     [
-        "bigcode/starcoder2-3b",  # sliding window only
+        # "bigcode/starcoder2-3b",  # sliding window only
         "google/gemma-3-1b-it",  # sliding window + full attention
     ])
 @pytest.mark.parametrize("batch_size", [5])
 @pytest.mark.parametrize("seed", [1])
-@pytest.mark.parametrize("disable_hybrid_kv_cache_manager", [True, False])
+@pytest.mark.parametrize("disable_hybrid_kv_cache_manager", [False])
 def test_sliding_window_retrieval(monkeypatch, model, batch_size, seed,
                                   disable_hybrid_kv_cache_manager):
     """

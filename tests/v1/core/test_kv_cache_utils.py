@@ -1063,7 +1063,8 @@ def test_allocate_with_lookahead():
 
     # Test case 1: Requires additional lookahead tokens
     kv_cache_manager = KVCacheManager(kv_cache_config=config,
-                                      max_model_len=100)
+                                      max_model_len=100,
+                                      hash_block_size=block_size)
     blocks = kv_cache_manager.allocate_slots(
         request,
         num_new_tokens=3,
@@ -1073,7 +1074,8 @@ def test_allocate_with_lookahead():
 
     # Test case 2: With precomputed blocks
     kv_cache_manager = KVCacheManager(kv_cache_config=config,
-                                      max_model_len=100)
+                                      max_model_len=100,
+                                      hash_block_size=block_size)
     # required_blocks = ceil((3 + 2) /4) = 2
     blocks = kv_cache_manager.allocate_slots(
         request,
@@ -1085,7 +1087,8 @@ def test_allocate_with_lookahead():
     # Test case 3: With precomputed blocks
     # required_blocks = ceil((3 + 4) / 4) = 2
     kv_cache_manager = KVCacheManager(kv_cache_config=config,
-                                      max_model_len=100)
+                                      max_model_len=100,
+                                      hash_block_size=block_size)
     blocks = kv_cache_manager.allocate_slots(
         request,
         num_new_tokens=3,
@@ -1254,11 +1257,34 @@ def test_get_kv_cache_config_one_worker():
         ],
     )
 
-    # different hidden size, unimplemented
+    # Different hidden size, align by using different block size
     kv_cache_specs_hybrid = {
-        'layer_1': new_kv_cache_spec(head_size=128),
-        'layer_2': new_kv_cache_spec(),
+        'layer_1': new_kv_cache_spec(head_size=64),
+        'layer_2': new_sliding_window_spec(head_size=32),
     }
+    kv_cache_config_hybrid = get_kv_cache_configs(
+        vllm_config, [kv_cache_specs_hybrid],
+        [mem_per_block_per_layer * 32])[0]
+    assert kv_cache_config_hybrid == KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[
+            KVCacheTensor(size=mem_per_block_per_layer * 32,
+                          shared_by=["layer_1", "layer_2"]),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["layer_1"], new_kv_cache_spec(head_size=64)),
+            KVCacheGroupSpec(["layer_2"],
+                             new_sliding_window_spec(head_size=32,
+                                                     block_size=32)),
+        ],
+    )
+
+    # different hidden size that cannot be aligned by using different block size
+    kv_cache_specs_hybrid = {
+        'layer_1': new_kv_cache_spec(head_size=64),
+        'layer_2': new_sliding_window_spec(head_size=96),
+    }
+
     with pytest.raises(NotImplementedError):
         get_kv_cache_configs(vllm_config, [kv_cache_specs_hybrid],
                              [mem_per_block_per_layer * 2 * 32])[0]
