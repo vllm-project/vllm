@@ -82,7 +82,12 @@ async def test_fetch_image_http(image_url: str):
 @pytest.mark.parametrize("suffix", get_supported_suffixes())
 async def test_fetch_image_base64(url_images: dict[str, Image.Image],
                                   raw_image_url: str, suffix: str):
-    connector = MediaConnector()
+    connector = MediaConnector(
+        # Domain restriction should not apply to data URLs.
+        allowed_media_domains=[
+            "www.bogotobogo.com",
+            "github.com",
+        ])
     url_image = url_images[raw_image_url]
 
     try:

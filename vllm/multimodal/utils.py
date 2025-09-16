@@ -142,9 +142,9 @@ class MediaConnector:
     ) -> _M:
         url_spec = urlparse(url)
 
-        self._assert_url_in_allowed_media_domains(url_spec)
-
         if url_spec.scheme.startswith("http"):
+            self._assert_url_in_allowed_media_domains(url_spec)
+
             connection = self.connection
             data = connection.get_bytes(url, timeout=fetch_timeout)
 
@@ -167,12 +167,11 @@ class MediaConnector:
         fetch_timeout: Optional[int] = None,
     ) -> _M:
         url_spec = urlparse(url)
-
-        self._assert_url_in_allowed_media_domains(url_spec)
-
         loop = asyncio.get_running_loop()
 
         if url_spec.scheme.startswith("http"):
+            self._assert_url_in_allowed_media_domains(url_spec)
+
             connection = self.connection
             data = await connection.async_get_bytes(url, timeout=fetch_timeout)
             future = loop.run_in_executor(global_thread_pool,
