@@ -50,7 +50,7 @@ def main(args):
 
     # Run inference
     output = pooling_response.json()["data"][0]
-    logits = torch.tensor(output['data'])
+    logits = torch.tensor(output["data"])
     predictions = logits.argmax(dim=-1)
     inputs = tokenizer(text, return_tensors="pt")
 
