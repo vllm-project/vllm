@@ -83,7 +83,7 @@ For more advanced usage, including parallel tool calls and different model-speci
 
 ## Named Function Calling
 
-vLLM supports named function calling in the chat completion API by default. This should work with most structured outputs backend supported by vLLM. You are guaranteed a validly-parsable function call - not a
+vLLM supports named function calling in the chat completion API by default. This should work with most structured outputs backends supported by vLLM. You are guaranteed a validly-parsable function call - not a
 high-quality one.
 
 vLLM will use structured outputs to ensure the response matches the tool parameter object defined by the JSON schema in the `tools` parameter.
