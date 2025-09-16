@@ -256,8 +256,8 @@ class CudaPlatformBase(Platform):
         valid_backends_priorities = []
         invalid_reasons = {}
         device_capability = cls.get_device_capability()
-        if device_capability is not None:
-            device_capability = device_capability.to_int()
+        device_capability_int = device_capability.to_int(
+        ) if device_capability is not None else None
         for backend in _Backend:
             if backend not in BACKEND_PRIORITIES:
                 continue
@@ -265,7 +265,7 @@ class CudaPlatformBase(Platform):
             backend_class = backend_to_class(backend)
             maybe_invalid_reason = backend_class.validate_configuration(
                 head_size, dtype, kv_cache_dtype, block_size, use_v1, use_mla,
-                has_sink, device_capability)
+                has_sink, device_capability_int)
             if maybe_invalid_reason is None:
                 valid_backends_priorities.append((backend, priority))
             else:
