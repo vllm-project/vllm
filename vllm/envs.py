@@ -6,7 +6,7 @@ import json
 import os
 import sys
 import tempfile
-from typing import TYPE_CHECKING, Any, Callable, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional, Union
 
 if TYPE_CHECKING:
     VLLM_HOST_IP: str = ""
@@ -56,11 +56,12 @@ if TYPE_CHECKING:
     VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING: bool = True
     VLLM_USE_RAY_SPMD_WORKER: bool = False
     VLLM_USE_RAY_COMPILED_DAG: bool = False
-    VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: str = "auto"
+    VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl",
+                                                    "shm"] = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
     VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
     VLLM_XLA_USE_SPMD: bool = False
-    VLLM_WORKER_MULTIPROC_METHOD: str = "fork"
+    VLLM_WORKER_MULTIPROC_METHOD: Literal["fork", "spawn"] = "fork"
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_VIDEO_FETCH_TIMEOUT: int = 30
@@ -77,7 +78,8 @@ if TYPE_CHECKING:
     VLLM_DOCKER_BUILD_CONTEXT: bool = False
     VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL: bool = False
     VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: bool = False
-    CMAKE_BUILD_TYPE: Optional[str] = None
+    CMAKE_BUILD_TYPE: Optional[Literal["Debug", "Release",
+                                       "RelWithDebInfo"]] = None
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_RPC_TIMEOUT: int = 10000  # ms
@@ -140,22 +142,25 @@ if TYPE_CHECKING:
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
-    VLLM_FLASHINFER_MOE_BACKEND: str = "throughput"
+    VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput",
+                                         "latency"] = "throughput"
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5557
-    VLLM_ALL2ALL_BACKEND: str = "naive"
+    VLLM_ALL2ALL_BACKEND: Literal["naive", "pplx", "deepep_high_throughput",
+                                  "deepep_low_latency"] = "naive"
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_SLEEP_WHEN_IDLE: bool = False
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
-    VLLM_KV_CACHE_LAYOUT: Optional[str] = None
+    VLLM_KV_CACHE_LAYOUT: Optional[Literal["NHD", "HND"]] = None
     VLLM_COMPUTE_NANS_IN_LOGITS: bool = False
     VLLM_USE_NVFP4_CT_EMULATIONS: bool = False
-    VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: str = "NONE"
+    VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: Literal["FP", "INT8", "INT6", "INT4",
+                                                 "NONE"] = "NONE"
     VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: Optional[int] = None
     VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 120
