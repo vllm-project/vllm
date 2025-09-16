@@ -71,6 +71,15 @@ class FlashAttnMLABackend(MLACommonBackend):
     def get_max_compute_capability(cls) -> Optional[int]:
         return 90
 
+    @classmethod
+    def supports_combination(cls, head_size: int, dtype: torch.dtype,
+                             kv_cache_dtype: Optional[str], block_size: int,
+                             use_v1: bool, use_mla: bool, has_sink: bool,
+                             device_capability: int) -> bool:
+        if use_mla:
+            return flash_attn_supports_mla()
+        return True
+
 
 @dataclass
 class FlashAttnMLADecodeMetadata(MLACommonDecodeMetadata):

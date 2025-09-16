@@ -106,7 +106,7 @@ class AttentionBackend(ABC):
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        raise NotImplementedError
+        return []
 
     @classmethod
     def supports_head_size(cls, head_size: int) -> bool:
@@ -135,7 +135,7 @@ class AttentionBackend(ABC):
 
     @classmethod
     def get_supported_block_sizes(cls) -> list[int]:
-        raise NotImplementedError
+        return []
 
     @classmethod
     def supports_block_size(cls, block_size: int) -> bool:
@@ -152,8 +152,12 @@ class AttentionBackend(ABC):
         raise NotImplementedError
 
     @classmethod
+    def supports_sink(cls) -> bool:
+        return True
+
+    @classmethod
     def get_min_compute_capability(cls) -> Optional[int]:
-        raise NotImplementedError
+        return None
 
     @classmethod
     def get_max_compute_capability(cls) -> Optional[int]:
@@ -166,6 +170,13 @@ class AttentionBackend(ABC):
         return (((min_capability is None) or (capability >= min_capability))
                 and ((max_capability is None) or
                      (capability <= max_capability)))
+
+    @classmethod
+    def supports_combination(cls, head_size: int, dtype: torch.dtype,
+                             kv_cache_dtype: Optional[str], block_size: int,
+                             use_v1: bool, use_mla: bool, has_sink: bool,
+                             device_capability: int) -> bool:
+        return True
 
     @classmethod
     def validate_configuration(cls, head_size: int, dtype: torch.dtype,
@@ -186,7 +197,11 @@ class AttentionBackend(ABC):
             return False
         if (has_sink and not cls.supports_sink()):
             return False
-        return cls.supports_compute_capability(device_capability)
+        if not cls.supports_compute_capability(device_capability):
+            return False
+        return cls.supports_combination(head_size, dtype, kv_cache_dtype,
+                                        block_size, use_v1, use_mla, has_sink,
+                                        device_capability)
 
 
 @dataclass

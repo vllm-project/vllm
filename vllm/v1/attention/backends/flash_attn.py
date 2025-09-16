@@ -101,8 +101,8 @@ class FlashAttentionBackend(AttentionBackend):
         return ["auto", "fp16", "bf16", "fp8", "fp8_e4m3"]
 
     @classmethod
-    def get_supported_block_sizes(cls) -> list[int]:
-        return []
+    def supports_block_size(cls, block_size: int) -> bool:
+        return block_size % 16 == 0
 
     @classmethod
     def is_v1(cls) -> bool:
@@ -119,6 +119,18 @@ class FlashAttentionBackend(AttentionBackend):
     @classmethod
     def get_max_compute_capability(cls) -> Optional[int]:
         return None
+
+    @classmethod
+    def supports_combination(cls, head_size: int, dtype: torch.dtype,
+                             kv_cache_dtype: Optional[str], block_size: int,
+                             use_v1: bool, use_mla: bool, has_sink: bool,
+                             device_capability: int) -> bool:
+        if has_sink and device_capability < 90:
+            return False
+        if kv_cache_dtype is not None \
+           and kv_cache_dtype.startswith("fp8"):
+            return flash_attn_supports_fp8()
+        return True
 
 
 @dataclass
