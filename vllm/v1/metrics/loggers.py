@@ -11,6 +11,7 @@ import prometheus_client
 from vllm.config import SupportsMetricsInfo, VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import PrefixCachingMetrics
+from vllm.v1.core.mfu_utils import MFUAnalysisLogging
 from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
@@ -59,6 +60,7 @@ class LoggingStatLogger(StatLoggerBase):
         # TODO: Make the interval configurable.
         self.prefix_caching_metrics = PrefixCachingMetrics()
         self.spec_decoding_logging = SpecDecodingLogging()
+        self.mfu_analysis_logging = MFUAnalysisLogging()
         self.last_prompt_throughput: float = 0.0
         self.last_generation_throughput: float = 0.0
 
@@ -89,6 +91,8 @@ class LoggingStatLogger(StatLoggerBase):
 
         if iteration_stats:
             self._track_iteration_stats(iteration_stats)
+            if iteration_stats.mfu_info is not None:
+                self.mfu_analysis_logging.observe(iteration_stats.mfu_info)
 
         if scheduler_stats is not None:
             self.prefix_caching_metrics.observe(
@@ -136,6 +140,7 @@ class LoggingStatLogger(StatLoggerBase):
             self.prefix_caching_metrics.hit_rate * 100,
         )
         self.spec_decoding_logging.log(log_fn=log_fn)
+        self.mfu_analysis_logging.log(log_fn=log_fn)
 
     def log_engine_initialized(self):
         if self.vllm_config.cache_config.num_gpu_blocks:
