@@ -15,7 +15,7 @@ import sys
 
 from ...utils import RemoteOpenAIServer
 
-RTOL = 0.05  # Relative tolerance for accuracy comparison
+ABS_TOL = 0.05  # Absolute tolerance for accuracy comparison
 
 
 def run_gpqa_eval(model_name: str, base_url: str) -> float:
