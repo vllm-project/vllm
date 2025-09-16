@@ -89,7 +89,7 @@ class CachedRequestData:
     new_token_ids: list[list[int]]
     # If resumed_from_preemption is True, propogate the token ids to the
     # connector, otherwise will be empty.
-    token_ids: list[list[int]]
+    resumed_req_token_ids: list[Optional[list[int]]]
     new_block_ids: list[Optional[tuple[list[int], ...]]]
     num_computed_tokens: list[int]
 
@@ -103,7 +103,7 @@ class CachedRequestData:
             req_ids=[],
             resumed_from_preemption=[],
             new_token_ids=[],
-            token_ids=[],
+            resumed_req_token_ids=[],
             new_block_ids=[],
             num_computed_tokens=[],
         )
