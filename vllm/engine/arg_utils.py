@@ -418,10 +418,10 @@ class EngineArgs:
         VllmConfig, "structured_outputs_config")
     reasoning_parser: str = StructuredOutputsConfig.reasoning_parser
     # Deprecated guided decoding fields
-    guided_decoding_backend: str = None
-    guided_decoding_disable_fallback: bool = None
-    guided_decoding_disable_any_whitespace: bool = None
-    guided_decoding_disable_additional_properties: bool = None
+    guided_decoding_backend: Optional[str] = None
+    guided_decoding_disable_fallback: Optional[bool] = None
+    guided_decoding_disable_any_whitespace: Optional[bool] = None
+    guided_decoding_disable_additional_properties: Optional[bool] = None
 
     logits_processor_pattern: Optional[
         str] = ModelConfig.logits_processor_pattern
