@@ -9,11 +9,12 @@ from vllm.v1.spec_decode.ngram_proposer import (
 
 def test_find_longest_matched_ngram_and_propose_tokens():
     tokens = np.array([1, 2, 3, 4, 1, 2, 3, 5, 6])
-    result = _find_longest_matched_ngram_and_propose_tokens(origin_tokens=tokens,
-                                                          min_ngram=2,
-                                                          max_ngram=2,
-                                                          max_model_len=1024,
-                                                          k=2) 
+    result = _find_longest_matched_ngram_and_propose_tokens(
+        origin_tokens=tokens,
+        min_ngram=2,
+        max_ngram=2,
+        max_model_len=1024,
+        k=2)
     assert result is None or len(result) == 0
 
     tokens = np.array([1, 2, 3, 4, 1, 2, 3])

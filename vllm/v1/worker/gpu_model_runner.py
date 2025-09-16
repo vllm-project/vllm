@@ -2422,7 +2422,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if num_tokens >= self.max_model_len:
                 # Skip requests that have already reached the max model length.
                 continue
-            
+
             valid_ngram_requests.append(i)
 
         draft_token_ids = self.drafter_ngram.batch_propose(
@@ -2430,8 +2430,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             valid_ngram_requests,
             self.input_batch.num_tokens_no_spec,
             self.input_batch.token_ids_cpu,
-            )
-            
+        )
+
         return draft_token_ids
 
     def update_config(self, overrides: dict[str, Any]) -> None:
