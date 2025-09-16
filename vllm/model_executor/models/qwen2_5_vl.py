@@ -417,7 +417,7 @@ class Qwen2_5_VisionAttention(nn.Module):
             self.is_flash_attn_backend,
             self.attn_backend == _Backend.ROCM_AITER_FA,
             self.attn_backend == _Backend.TORCH_SDPA,
-            self.attn_backend == _Backend.XFORMERS)
+            self.attn_backend == _Backend.XFORMERS, self.use_upstream_fa)
 
         output, _ = self.proj(context_layer)
         return output
@@ -428,13 +428,16 @@ def custom_vision_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
                             cu_seqlens: torch.Tensor, max_seqlen: torch.Tensor,
                             seqlens: torch.Tensor, batch_size: int,
                             is_flash_attn: bool, is_rocm_aiter: bool,
-                            is_sdpa: bool, is_xformers: bool) -> torch.Tensor:
+                            is_sdpa: bool, is_xformers: bool,
+                            use_upstream_fa: bool) -> torch.Tensor:
     if is_flash_attn:
         if is_rocm_aiter:
             from aiter import flash_attn_varlen_func
         else:
-            from flash_attn import flash_attn_varlen_func
-
+            if use_upstream_fa:
+                from flash_attn import flash_attn_varlen_func
+            else:
+                from vllm.vllm_flash_attn import flash_attn_varlen_func
         q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
 
         output = flash_attn_varlen_func(q,
@@ -489,8 +492,8 @@ def custom_vision_attention_fake(q: torch.Tensor, k: torch.Tensor,
                                  max_seqlen: torch.Tensor,
                                  seqlens: torch.Tensor, batch_size: int,
                                  is_flash_attn: bool, is_rocm_aiter: bool,
-                                 is_sdpa: bool,
-                                 is_xformers: bool) -> torch.Tensor:
+                                 is_sdpa: bool, is_xformers: bool,
+                                 use_upstream_fa: bool) -> torch.Tensor:
     return torch.empty((
         q.shape[1],
         batch_size,
