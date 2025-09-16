@@ -283,7 +283,7 @@ void get_cutlass_moe_mm_data(
   // This function currently gets compiled only if we have a valid cutlass moe
   // mm to run it for.
   int32_t version_num = get_sm_version_num();
-#if (defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90) || \
+#if (defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90) ||   \
     (defined ENABLE_CUTLASS_MOE_SM100 && ENABLE_CUTLASS_MOE_SM100) || \
     (defined ENABLE_NVFP4_SM120 && ENABLE_NVFP4_SM120)
   get_cutlass_moe_mm_data_caller(topk_ids, expert_offsets, problem_sizes1,
@@ -304,7 +304,7 @@ void get_cutlass_moe_mm_problem_sizes(
     torch::Tensor& problem_sizes2, const int64_t num_experts, const int64_t n,
     const int64_t k, const std::optional<torch::Tensor>& blockscale_offsets) {
   int32_t version_num = get_sm_version_num();
-#if (defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90) || \
+#if (defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90) ||   \
     (defined ENABLE_CUTLASS_MOE_SM100 && ENABLE_CUTLASS_MOE_SM100) || \
     (defined ENABLE_NVFP4_SM120 && ENABLE_NVFP4_SM120)
   get_cutlass_moe_mm_problem_sizes_caller(topk_ids, problem_sizes1,
@@ -329,7 +329,7 @@ void get_cutlass_pplx_moe_mm_data(torch::Tensor& expert_offsets,
   // This function currently gets compiled only if we have a valid cutlass moe
   // mm to run it for.
   int32_t version_num = get_sm_version_num();
-#if (defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90) || \
+#if (defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90) ||   \
     (defined ENABLE_CUTLASS_MOE_SM100 && ENABLE_CUTLASS_MOE_SM100) || \
     (defined ENABLE_NVFP4_SM120 && ENABLE_NVFP4_SM120)
   get_cutlass_pplx_moe_mm_data_caller(expert_offsets, problem_sizes1,
