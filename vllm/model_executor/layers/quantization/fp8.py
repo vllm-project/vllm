@@ -32,6 +32,8 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     get_col_major_tma_aligned_tensor, requant_weight_ue8m0_inplace,
     should_use_deepgemm_for_fp8_linear)
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    get_marlin_input_dtype)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear, prepare_fp8_layer_for_marlin,
     prepare_moe_fp8_layer_for_marlin)
@@ -172,9 +174,14 @@ class Fp8Config(QuantizationConfig):
                                 ignored_layers=self.ignored_layers,
                                 fused_mapping=self.packed_modules_mapping):
                 return UnquantizedLinearMethod()
-            return Fp8LinearMethod(self)
+            quant_method = Fp8LinearMethod(self)
+            quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
+            return quant_method
         elif isinstance(layer, FusedMoE):
-            return Fp8MoEMethod(self, layer)
+            moe_quant_method = Fp8MoEMethod(self, layer)
+            moe_quant_method.marlin_input_dtype = get_marlin_input_dtype(
+                prefix)
+            return moe_quant_method
         elif isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)
         return None
@@ -225,6 +232,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
+        self.marlin_input_dtype = None
         self.use_marlin = (not current_platform.has_device_capability(89)
                            or envs.VLLM_TEST_FORCE_FP8_MARLIN)
         # Disable marlin for rocm
@@ -446,7 +454,9 @@ class Fp8LinearMethod(LinearMethodBase):
                                               requires_grad=False)
 
         if self.use_marlin:
-            prepare_fp8_layer_for_marlin(layer, size_k_first)
+            prepare_fp8_layer_for_marlin(layer,
+                                         size_k_first,
+                                         input_dtype=self.marlin_input_dtype)
             # Activations not quantized for marlin.
             del layer.input_scale
 
@@ -485,6 +495,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 workspace=layer.workspace,
                 size_n=layer.output_size_per_partition,
                 size_k=layer.input_size_per_partition,
+                input_dtype=self.marlin_input_dtype,
                 bias=bias)
 
         if self.block_quant:
@@ -538,6 +549,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             )
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
+        self.marlin_input_dtype = None
         self.use_marlin = (not current_platform.has_device_capability(89)
                            or envs.VLLM_TEST_FORCE_FP8_MARLIN)
         # Disable marlin for rocm
@@ -900,7 +912,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 layer.w13_weight.data = w13_weight.data
 
         if self.use_marlin:
-            prepare_moe_fp8_layer_for_marlin(layer, False)
+            prepare_moe_fp8_layer_for_marlin(
+                layer, False, input_dtype=self.marlin_input_dtype)
             # Activations not quantized for marlin.
             del layer.w13_input_scale
             del layer.w2_input_scale
@@ -1103,7 +1116,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 quant_type_id=scalar_types.float8_e4m3fn.id,
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
-                expert_map=expert_map)
+                expert_map=expert_map,
+                input_dtype=self.marlin_input_dtype)
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
             assert self.block_quant is None
             assert (not renormalize and custom_routing_function is not None)

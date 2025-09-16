@@ -412,6 +412,7 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
                                b_q_weight: torch.Tensor,
                                b_bias: Optional[torch.Tensor],
                                b_scales: torch.Tensor,
+                               a_scales: Optional[torch.Tensor],
                                global_scale: Optional[torch.Tensor],
                                b_zeros: Optional[torch.Tensor],
                                g_idx: Optional[torch.Tensor],
@@ -425,7 +426,10 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
                                use_atomic_add: bool = False,
                                use_fp32_reduce: bool = False,
                                is_zp_float: bool = False) -> torch.Tensor:
-        return torch.empty((size_m, size_n), device=a.device, dtype=a.dtype)
+        dtype = a.dtype
+        if dtype not in [torch.half, torch.bfloat16]:
+            dtype = b_scales.dtype
+        return torch.empty((size_m, size_n), device=a.device, dtype=dtype)
 
     @register_fake("_C::awq_dequantize")
     def _awq_dequantize_fake(qweight: torch.Tensor, scales: torch.Tensor,
@@ -950,22 +954,32 @@ def cutlass_fp4_moe_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor,
 
 
 # gptq_marlin
-def gptq_marlin_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
-                       size_k: int, size_n: int,
-                       num_bits: int) -> torch.Tensor:
+def gptq_marlin_repack(b_q_weight: torch.Tensor,
+                       perm: torch.Tensor,
+                       size_k: int,
+                       size_n: int,
+                       num_bits: int,
+                       is_a_8bit: bool = False) -> torch.Tensor:
     return torch.ops._C.gptq_marlin_repack(b_q_weight, perm, size_k, size_n,
-                                           num_bits)
+                                           num_bits, is_a_8bit)
 
 
 # gptq_marlin
-def awq_marlin_repack(b_q_weight: torch.Tensor, size_k: int, size_n: int,
-                      num_bits: int) -> torch.Tensor:
-    return torch.ops._C.awq_marlin_repack(b_q_weight, size_k, size_n, num_bits)
+def awq_marlin_repack(b_q_weight: torch.Tensor,
+                      size_k: int,
+                      size_n: int,
+                      num_bits: int,
+                      is_a_8bit: bool = False) -> torch.Tensor:
+    return torch.ops._C.awq_marlin_repack(b_q_weight, size_k, size_n, num_bits,
+                                          is_a_8bit)
 
 
-def gptq_marlin_moe_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
-                           size_k: int, size_n: int,
-                           num_bits: int) -> torch.Tensor:
+def gptq_marlin_moe_repack(b_q_weight: torch.Tensor,
+                           perm: torch.Tensor,
+                           size_k: int,
+                           size_n: int,
+                           num_bits: int,
+                           is_a_8bit: bool = False) -> torch.Tensor:
     num_experts = b_q_weight.shape[0]
     assert size_k % 16 == 0
     output = torch.empty((num_experts, size_k // 16, size_n * (num_bits // 2)),
@@ -973,13 +987,17 @@ def gptq_marlin_moe_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
                          dtype=b_q_weight.dtype)
     for e in range(num_experts):
         output[e] = torch.ops._C.gptq_marlin_repack(b_q_weight[e], perm[e],
-                                                    size_k, size_n, num_bits)
+                                                    size_k, size_n, num_bits,
+                                                    is_a_8bit)
     return output
 
 
-def awq_marlin_moe_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
-                          size_k: int, size_n: int,
-                          num_bits: int) -> torch.Tensor:
+def awq_marlin_moe_repack(b_q_weight: torch.Tensor,
+                          perm: torch.Tensor,
+                          size_k: int,
+                          size_n: int,
+                          num_bits: int,
+                          is_a_8bit: bool = False) -> torch.Tensor:
     num_experts = b_q_weight.shape[0]
     assert size_k % 16 == 0
     output = torch.empty((num_experts, size_k // 16, size_n * (num_bits // 2)),
@@ -987,8 +1005,15 @@ def awq_marlin_moe_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
                          dtype=b_q_weight.dtype)
     for e in range(num_experts):
         output[e] = torch.ops._C.awq_marlin_repack(b_q_weight[e], size_k,
-                                                   size_n, num_bits)
+                                                   size_n, num_bits, is_a_8bit)
     return output
+
+
+def marlin_int4_fp8_preprocess(qweight: torch.Tensor,
+                               qzeros_or_none: Optional[torch.Tensor] = None,
+                               inplace: bool = False):
+    return torch.ops._C.marlin_int4_fp8_preprocess(qweight, qzeros_or_none,
+                                                   inplace)
 
 
 def gptq_marlin_gemm(a: torch.Tensor,
@@ -996,6 +1021,7 @@ def gptq_marlin_gemm(a: torch.Tensor,
                      b_q_weight: torch.Tensor,
                      b_bias: Optional[torch.Tensor],
                      b_scales: torch.Tensor,
+                     a_scales: Optional[torch.Tensor],
                      global_scale: Optional[torch.Tensor],
                      b_zeros: Optional[torch.Tensor],
                      g_idx: Optional[torch.Tensor],
@@ -1010,9 +1036,9 @@ def gptq_marlin_gemm(a: torch.Tensor,
                      use_fp32_reduce: bool = False,
                      is_zp_float: bool = False) -> torch.Tensor:
     return torch.ops._C.gptq_marlin_gemm(a, c, b_q_weight, b_bias, b_scales,
-                                         global_scale, b_zeros, g_idx, perm,
-                                         workspace, b_q_type.id, size_m,
-                                         size_n, size_k, is_k_full,
+                                         a_scales, global_scale, b_zeros,
+                                         g_idx, perm, workspace, b_q_type.id,
+                                         size_m, size_n, size_k, is_k_full,
                                          use_atomic_add, use_fp32_reduce,
                                          is_zp_float)
 
@@ -1512,10 +1538,12 @@ def grouped_topk(scores: torch.Tensor, scores_with_bias: torch.Tensor,
                                          renormalize, routed_scaling_factor)
 
 
-def moe_wna16_marlin_gemm(input: torch.Tensor, output: Optional[torch.Tensor],
+def moe_wna16_marlin_gemm(input: torch.Tensor,
+                          output: Optional[torch.Tensor],
                           b_qweight: torch.Tensor,
                           b_bias: Optional[torch.Tensor],
                           b_scales: torch.Tensor,
+                          a_scales: Optional[torch.Tensor],
                           global_scale: Optional[torch.Tensor],
                           b_qzeros: Optional[torch.Tensor],
                           g_idx: Optional[torch.Tensor],
@@ -1524,18 +1552,29 @@ def moe_wna16_marlin_gemm(input: torch.Tensor, output: Optional[torch.Tensor],
                           sorted_token_ids: torch.Tensor,
                           expert_ids: torch.Tensor,
                           num_tokens_past_padded: torch.Tensor,
-                          topk_weights: torch.Tensor, moe_block_size: int,
-                          top_k: int, mul_topk_weights: bool, is_ep: bool,
-                          b_q_type: ScalarType, size_m: int, size_n: int,
-                          size_k: int, is_k_full: bool, use_atomic_add: bool,
+                          topk_weights: torch.Tensor,
+                          moe_block_size: int,
+                          top_k: int,
+                          mul_topk_weights: bool,
+                          is_ep: bool,
+                          b_q_type: ScalarType,
+                          size_m: int,
+                          size_n: int,
+                          size_k: int,
+                          is_k_full: bool,
+                          use_atomic_add: bool,
                           use_fp32_reduce: bool,
-                          is_zp_float: bool) -> torch.Tensor:
+                          is_zp_float: bool,
+                          thread_k: int = -1,
+                          thread_n: int = -1,
+                          blocks_per_sm: int = -1) -> torch.Tensor:
     return torch.ops._moe_C.moe_wna16_marlin_gemm(
-        input, output, b_qweight, b_bias, b_scales, global_scale, b_qzeros,
-        g_idx, perm, workspace, sorted_token_ids, expert_ids,
+        input, output, b_qweight, b_bias, b_scales, a_scales, global_scale,
+        b_qzeros, g_idx, perm, workspace, sorted_token_ids, expert_ids,
         num_tokens_past_padded, topk_weights, moe_block_size, top_k,
         mul_topk_weights, is_ep, b_q_type.id, size_m, size_n, size_k,
-        is_k_full, use_atomic_add, use_fp32_reduce, is_zp_float)
+        is_k_full, use_atomic_add, use_fp32_reduce, is_zp_float, thread_k,
+        thread_n, blocks_per_sm)
 
 
 if supports_moe_ops and hasattr(torch.ops._moe_C, "marlin_gemm_moe"):
@@ -1557,24 +1596,19 @@ if supports_moe_ops and hasattr(torch.ops._moe_C, "marlin_gemm_moe"):
                            device=a.device)
 
     @register_fake("_moe_C::moe_wna16_marlin_gemm")
-    def moe_wna16_marlin_gemm_fake(input: torch.Tensor,
-                                   output: Optional[torch.Tensor],
-                                   b_qweight: torch.Tensor,
-                                   b_scales: torch.Tensor,
-                                   b_qzeros: Optional[torch.Tensor],
-                                   g_idx: Optional[torch.Tensor],
-                                   perm: Optional[torch.Tensor],
-                                   workspace: torch.Tensor,
-                                   sorted_token_ids: torch.Tensor,
-                                   expert_ids: torch.Tensor,
-                                   num_tokens_past_padded: torch.Tensor,
-                                   topk_weights: torch.Tensor,
-                                   moe_block_size: int, top_k: int,
-                                   mul_topk_weights: bool, is_ep: bool,
-                                   b_q_type: ScalarType, size_m: int,
-                                   size_n: int, size_k: int, is_k_full: bool,
-                                   use_atomic_add: bool, use_fp32_reduce: bool,
-                                   is_zp_float: bool) -> torch.Tensor:
+    def moe_wna16_marlin_gemm_fake(
+            input: torch.Tensor, output: Optional[torch.Tensor],
+            b_qweight: torch.Tensor, b_bias: Optional[torch.Tensor],
+            b_scales: torch.Tensor, a_scales: Optional[torch.Tensor],
+            global_scale: Optional[torch.Tensor],
+            b_qzeros: Optional[torch.Tensor], g_idx: Optional[torch.Tensor],
+            perm: Optional[torch.Tensor], workspace: torch.Tensor,
+            sorted_token_ids: torch.Tensor, expert_ids: torch.Tensor,
+            num_tokens_past_padded: torch.Tensor, topk_weights: torch.Tensor,
+            moe_block_size: int, top_k: int, mul_topk_weights: bool,
+            is_ep: bool, b_q_type: ScalarType, size_m: int, size_n: int,
+            size_k: int, is_k_full: bool, use_atomic_add: bool,
+            use_fp32_reduce: bool, is_zp_float: bool):
         return torch.empty((size_m * top_k, size_n),
                            dtype=input.dtype,
                            device=input.device)

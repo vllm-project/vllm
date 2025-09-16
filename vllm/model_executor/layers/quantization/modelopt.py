@@ -31,6 +31,8 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     flashinfer_cutlass_moe_fp8, get_flashinfer_moe_backend,
     register_moe_scaling_factors, rotate_flashinfer_fp8_moe_weights,
     select_cutlass_fp8_gemm_impl, swap_w13_to_w31)
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    get_marlin_input_dtype)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     apply_fp4_marlin_linear, is_fp4_marlin_supported,
     prepare_fp4_layer_for_marlin, prepare_moe_fp4_layer_for_marlin)
@@ -782,11 +784,17 @@ class ModelOptNvFp4Config(QuantizationConfig):
                                  self.packed_modules_mapping)
                     or self.is_layer_excluded(prefix, self.exclude_modules)):
                 return UnquantizedLinearMethod()
-            return ModelOptNvFp4LinearMethod(self)
+            quant_method = ModelOptNvFp4LinearMethod(self)
+            quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
+            return quant_method
         elif isinstance(layer, Attention):
             return ModelOptFp8KVCacheMethod(self)
         elif isinstance(layer, FusedMoE):
-            return ModelOptNvFp4FusedMoE(self, layer.moe_config, layer)
+            moe_quant_method = ModelOptNvFp4FusedMoE(self, layer.moe_config,
+                                                     layer)
+            moe_quant_method.marlin_input_dtype = get_marlin_input_dtype(
+                prefix)
+            return moe_quant_method
         return None
 
 
@@ -814,6 +822,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
     def __init__(self, quant_config: ModelOptNvFp4Config) -> None:
         self.quant_config = quant_config
 
+        self.marlin_input_dtype = None
         if envs.VLLM_USE_TRTLLM_FP4_GEMM:
             assert has_flashinfer(), "TRTLLM FP4 GEMM requires FlashInfer"
             self.backend = "flashinfer-trtllm"
@@ -957,7 +966,8 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
                 workspace=layer.workspace,
                 size_n=layer.output_size_per_partition,
                 size_k=layer.input_size_per_partition,
-                bias=bias)
+                bias=bias,
+                input_dtype=self.marlin_input_dtype)
 
         output_dtype = x.dtype
         output_shape = [x.shape[0], layer.weight.shape[0]]
@@ -1025,6 +1035,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.cutlass_nvfp4_supported = _nvfp4.cutlass_supported
         self.allow_flashinfer = _nvfp4.allow_flashinfer
         self.use_marlin = _nvfp4.use_marlin
+        self.marlin_input_dtype = None
         self.flashinfer_moe_backend = None
 
         if self.allow_flashinfer:
@@ -1474,7 +1485,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 quant_type_id=scalar_types.float4_e2m1f.id,
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
-                expert_map=expert_map)
+                expert_map=expert_map,
+                input_dtype=self.marlin_input_dtype)
 
         if self.fused_experts is not None:
             assert self.allow_flashinfer and \
