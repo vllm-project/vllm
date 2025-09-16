@@ -1,28 +1,29 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
+from collections.abc import Iterable, Sequence
 from multiprocessing import Manager
+from typing import Optional
 
-from typing import Optional, Sequence, Iterable
-
+import numpy
 import torch
+import torch.distributed as dist
+from overrides import override
 from torch._C._distributed_c10d import ProcessGroup
-from torch.distributed import all_reduce, all_gather
+from torch.distributed import all_gather, all_reduce
 
 from vllm.distributed import get_ep_group, get_node_count
-from vllm.distributed.eplb.eplb_loader.eplb_weight_loader import (
-    EplbWeightLoader,
-)
 from vllm.distributed.eplb.eplb_data.eplb_data import EplbData
-from vllm.distributed.eplb.eplb_updator.abstract_updator import BaseUpdator
+from vllm.distributed.eplb.eplb_loader.eplb_weight_loader import (
+    EplbWeightLoader)
 from vllm.distributed.eplb.eplb_process.eplb_process import EplbProcess
+from vllm.distributed.eplb.eplb_updator.abstract_updator import BaseUpdator
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.utils import logger
-import numpy
-import torch.distributed as dist
-
-from overrides import override
 
 # To DO: The mock eplb_process and eplb_weight_loader class 
 # will be deleted after the related PR merges.
+
 
 class EplbUpdator(BaseUpdator):
     """
@@ -50,7 +51,7 @@ class EplbUpdator(BaseUpdator):
         self.cur_iterations = 0
         self.device = None
         self.world_size = None
-        self._gather_buffer = None
+        self._gather_buffer = Optional[torch.Tensor] = None
         self.eplb_policy = None
         self.reqs = None
         self.eplb_process = eplb_process
@@ -235,7 +236,8 @@ class EplbUpdator(BaseUpdator):
     def update_expert_weight_flag(self):
         """
         Determines if expert weights should be updated in the current iteration.
-        This is typically true for a short window after the EPLB update and worker wait.
+        This is typically true for a short window after the EPLB update 
+            and worker wait.
 
         Returns:
             True if expert weights should be updated, False otherwise.
@@ -248,7 +250,8 @@ class EplbUpdator(BaseUpdator):
 
     def wakeup_eplb_worker_flag(self):
         """
-        Determines if the EPLB worker process should be woken up in the current iteration.
+        Determines if the EPLB worker process should be woken up in the 
+            current iteration.
         This typically happens just before the expert weight update phase.
 
         Returns:
@@ -258,7 +261,8 @@ class EplbUpdator(BaseUpdator):
 
     def compute_and_set_moe_load(self, is_clear=False):
         """
-        Computes the MoE load across all ranks and sets it in the shared dictionary.
+        Computes the MoE load across all ranks and sets it in the 
+            shared dictionary.
         It gathers local expert load from all ranks and combines them.
 
         Args:
@@ -357,7 +361,9 @@ class EplbUpdator(BaseUpdator):
                                             group_src=0)
 
             # Perform all-reduce to get the expert load across all ranks
-            global_expert_load_window = logical_expert_load_window.sum(dim=0)
+            global_expert_load_window = (
+                logical_expert_load_window.sum(dim=0)
+            )
             all_reduce(global_expert_load_window, group=ep_group)
 
             if not execute_shuffle:
@@ -426,7 +432,9 @@ class EplbUpdator(BaseUpdator):
             else:
                 self.physical_to_logical_map.copy_(new_physical_to_logical_map)
             max_physical_slots = new_logical_to_physical_map.shape[-1]
-            assert max_physical_slots <= self.eplb_data.logical_to_physical_map.shape[-1]
+            assert max_physical_slots <= (
+                self.eplb_data.logical_to_physical_map.shape[-1]
+            )
             new_logical_to_physical_map = torch.nn.functional.pad(
                 new_logical_to_physical_map,
                 (0,

@@ -39,10 +39,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.distributed.eplb.eplb_data.eplb_data import EplbData
 from vllm.distributed.eplb.eplb_loader.eplb_weight_loader import (
-    EplbWeightLoader,
-)
-from vllm.distributed.eplb.eplb_updator.eplb_updator import EplbUpdator
+    EplbWeightLoader)
 from vllm.distributed.eplb.eplb_process.eplb_process import EplbProcess
+from vllm.distributed.eplb.eplb_updator.eplb_updator import EplbUpdator
 
 
 
@@ -63,12 +62,13 @@ class EplbState:
         # Initialize asynchronous process manager
         self._async_processor = EplbProcess(
             target_func=self.eplb_policy.rebalance_experts,
-            num_wait_worker_iterations=self.eplb_data.num_wait_worker_iterations)
+            num_wait_worker_iterations=self.eplb_data.
+            num_wait_worker_iterations)
 
     @staticmethod
     def build_initial_global_physical_to_logical_map(
-            num_routed_experts: int,
-            num_redundant_experts: int,
+        num_routed_experts: int,
+        num_redundant_experts: int,
     ) -> Sequence[int]:
         """
         Build an initial expert arrangement using the following structure:
@@ -86,13 +86,13 @@ class EplbState:
         return global_physical_to_logical_map
 
     def build(
-            self,
-            model: MixtureOfExperts,
-            device: torch.device,
-            parallel_config: ParallelConfig,
-            global_expert_load: Optional[torch.Tensor] = None,
-            old_global_expert_indices: Optional[torch.Tensor] = None,
-            rank_mapping: Optional[dict[int, int]] = None,
+        self,
+        model: MixtureOfExperts,
+        device: torch.device,
+        parallel_config: ParallelConfig,
+        global_expert_load: Optional[torch.Tensor] = None,
+        old_global_expert_indices: Optional[torch.Tensor] = None,
+        rank_mapping: Optional[dict[int, int]] = None,
     ) -> "EplbState":
         """
         Build the initial EPLB state.
@@ -120,7 +120,7 @@ class EplbState:
             device=device,
         )
         logical_replica_count = torch.zeros(
-            (model.num_logical_experts,),
+            (model.num_logical_experts, ),
             device=device,
             dtype=torch.long,
         )
@@ -232,7 +232,10 @@ class EplbState:
             expert_rearrangement_step_interval=eplb_step_interval,
         )
         self.__post_init__()
-        self.eplb_updator = EplbUpdator(eplb_data=self.eplb_data, eplb_loader=self.eplb_loader, eplb_process=self._async_processor, adaptor=self.eplb_adaptor)
+        self.eplb_updator = EplbUpdator(eplb_data=self.eplb_data, 
+                                        eplb_loader=self.eplb_loader, 
+                                        eplb_process=self._async_processor, 
+                                        adaptor=self.eplb_adaptor)
 
         return self
 
@@ -269,7 +272,8 @@ class EplbState:
                   execute_shuffle: bool = True,
                   global_expert_load: Optional[torch.Tensor] = None,
                   rank_mapping: Optional[dict[int, int]] = None) -> None:
-        self.eplb_updator.rearrange(model, is_profile, execute_shuffle, global_expert_load, rank_mapping)
+        self.eplb_updator.rearrange(model, is_profile, execute_shuffle, 
+                                    global_expert_load, rank_mapping)
 
     def recv_state(self) -> tuple[torch.Tensor, torch.Tensor]:
         """
@@ -283,16 +287,18 @@ class EplbState:
 
     def forward_before(self):
         """
-        Executes necessary operations or updates before the model's forward pass.
+        Executes necessary operations or updates 
+            before the model's forward pass.
         This typically involves preparing the EPLB updator for 
-        the upcoming forward computation.
+            the upcoming forward computation.
         """
         self.eplb_updator.step_before_forward()
 
     def forward_end(self):
         """
-        Executes necessary operations or updates after the model's forward pass.
+        Executes necessary operations or updates 
+            after the model's forward pass.
         This typically involves processing results or updating states 
-        based on the completed forward computation.
+            based on the completed forward computation.
         """
         self.eplb_updator.step_after_forward()

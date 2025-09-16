@@ -1,3 +1,5 @@
+#SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from typing import Union
 
@@ -12,6 +14,7 @@ logger = init_logger(__name__)
 
 
 class BaseUpdator(ABC):
+    
     @abstractmethod
     def step(self, model, is_dummy, is_profile, log_stats):
         """
