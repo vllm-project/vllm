@@ -46,7 +46,6 @@ Engine classes for offline and online inference.
 Inference parameters for vLLM APIs.
 
 [](){ #sampling-params }
-[](){ #pooling-params }
 
 - [vllm.SamplingParams][]
 - [vllm.PoolingParams][]
