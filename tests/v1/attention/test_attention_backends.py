@@ -70,22 +70,6 @@ BATCH_SPECS = {
 }
 
 
-def create_dummy_kv_cache(kv_cache_spec: FullAttentionSpec,
-                          device: torch.device,
-                          num_blocks: int = 100) -> torch.Tensor:
-    """Create a dummy KV cache tensor for testing."""
-    kv_cache = torch.randn(
-        2,  # K and V
-        num_blocks,
-        kv_cache_spec.block_size,
-        kv_cache_spec.num_kv_heads,
-        kv_cache_spec.head_size,
-        dtype=_convert_dtype_to_torch(kv_cache_spec.dtype),
-        device=device,
-    )
-    return kv_cache
-
-
 def create_and_prepopulate_kv_cache(
         k_contexts: list[torch.Tensor],
         v_contexts: list[torch.Tensor],
@@ -194,6 +178,7 @@ class MockAttentionLayer:
         self._k_scale = torch.tensor(1.0, device=device)
         self._v_scale = torch.tensor(1.0, device=device)
         # Add float versions for flashinfer
+        self._q_scale_float = 1.0
         self._k_scale_float = 1.0
         self._v_scale_float = 1.0
 
