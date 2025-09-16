@@ -145,7 +145,10 @@ class XPUWorker(Worker):
         ):
             self.device = torch.device(f"xpu:{self.local_rank}")
             current_platform.set_device(self.device)
-            current_platform.check_if_supports_dtype(self.model_config.dtype)
+            model_dtype = self.model_config.dtype
+            if model_dtype == torch.bfloat16 and not \
+                current_platform.check_if_supports_dtype(model_dtype):
+                    self.model_config.dtype = torch.float16
             torch.xpu.empty_cache()
             self.init_gpu_memory = torch.xpu.get_device_properties(
                 self.local_rank).total_memory

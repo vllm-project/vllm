@@ -211,10 +211,10 @@ class XPUPlatform(Platform):
             device_name = cls.get_device_name().lower()
             # client gpu a770
             if device_name.count("a770") > 0:
-                raise ValueError(
-                    "Intel Arc A770 have bfloat16 accuracy known issue. "
-                    "You can use float16 instead by explicitly setting the "
-                    "`dtype` flag in CLI, for example: --dtype=half.")
+                logger.warning("Intel Arc A770 have bfloat16 accuracy known issue,"
+                               " fallback to float16")
+                return False
+        return True
 
     @classmethod
     def opaque_attention_op(cls) -> bool:
