@@ -38,7 +38,9 @@ from vllm.distributed.parallel_state import get_ep_group, get_node_count
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.distributed.eplb.eplb_data.eplb_data import EplbData
-from vllm.distributed.eplb.eplb_loader.eplb_weight_loader import EplbWeightLoader
+from vllm.distributed.eplb.eplb_loader.eplb_weight_loader import (
+    EplbWeightLoader,
+)
 from vllm.distributed.eplb.eplb_updator.eplb_updator import EplbUpdator
 from vllm.distributed.eplb.eplb_process.eplb_process import EplbProcess
 
@@ -271,23 +273,26 @@ class EplbState:
 
     def recv_state(self) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Receives and returns the current state (e.g., expert load and capacity) from the EPLB updator.
+        Receives and returns the current state 
+        (e.g., expert load and capacity) from the EPLB updator.
 
-        Returns:
-            tuple[torch.Tensor, torch.Tensor]: A tuple containing two tensors representing the received state.
+        Returns: tuple[torch.Tensor, torch.Tensor]: A tuple containing 
+        two tensors representing the received state.
         """
         return self.eplb_updator.recv_state()
 
     def forward_before(self):
         """
         Executes necessary operations or updates before the model's forward pass.
-        This typically involves preparing the EPLB updator for the upcoming forward computation.
+        This typically involves preparing the EPLB updator for 
+        the upcoming forward computation.
         """
         self.eplb_updator.step_before_forward()
 
     def forward_end(self):
         """
         Executes necessary operations or updates after the model's forward pass.
-        This typically involves processing results or updating states based on the completed forward computation.
+        This typically involves processing results or updating states 
+        based on the completed forward computation.
         """
         self.eplb_updator.step_after_forward()

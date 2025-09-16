@@ -51,13 +51,15 @@ class BaseUpdator(ABC):
             rank_mapping: dict[int, int],
     ) -> int:
         """
-        Calculates the number of distinct physical nodes involved in a process group,
-        considering a given rank mapping.
+        Calculates the number of distinct physical nodes involved in a 
+        process group, considering a given rank mapping.
 
         Args:
-            pg: The PyTorch distributed ProcessGroup or a custom StatelessProcessGroup.
-            rank_mapping: A dictionary mapping global ranks to their logical ranks
-                          or a special value like -1 (for pending shutdown).
+            pg: The PyTorch distributed ProcessGroup or 
+                a custom StatelessProcessGroup.
+            rank_mapping: A dictionary mapping global ranks to their 
+                          logical ranks or a special value like -1 
+                          (for pending shutdown).
 
         Returns:
             The total number of distinct physical nodes.

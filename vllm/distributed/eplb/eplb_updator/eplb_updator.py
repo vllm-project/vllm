@@ -8,19 +8,22 @@ from torch._C._distributed_c10d import ProcessGroup
 from torch.distributed import all_reduce, all_gather
 
 from vllm.distributed import get_ep_group, get_node_count
-from vllm.distributed.eplb.eplb_loader.eplb_weight_loader import EplbWeightLoader
+from vllm.distributed.eplb.eplb_loader.eplb_weight_loader import (
+    EplbWeightLoader,
+)
 from vllm.distributed.eplb.eplb_data.eplb_data import EplbData
 from vllm.distributed.eplb.eplb_updator.abstract_updator import BaseUpdator
 from vllm.distributed.eplb.eplb_process.eplb_process import EplbProcess
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.utils import logger
 import numpy
-import torch.distrubuted as dist
+import torch.distributed as dist
 
 from overrides import override
 
-# To DO: The mock eplb_process class will be deleted after the related PR merges.
-# To DO: The mock eplb_weight_loader class will be deleted after the related PR merges.
+# To DO: The mock eplb_process and eplb_weight_loader class 
+# will be deleted after the related PR merges.
+
 class EplbUpdator(BaseUpdator):
     """
     Manages the Expert Parallel Load Balancing (EPLB) update process,
@@ -35,12 +38,16 @@ class EplbUpdator(BaseUpdator):
         Initializes the EplbUpdator.
 
         Args:
-            eplb_data: An instance of EplbData holding shared EPLB configuration and metrics.
-            eplb_loader: An instance of EplbWeightLoader responsible for expert weight transfer.
-            adaptor: An adaptor to interact with the vLLM model's expert parameters.
-            eplb_process: An instance of EplbProcess for handling expert mapping logic.
+            eplb_data: An instance of EplbData holding shared EPLB 
+                        configuration and metrics.
+            eplb_loader: An instance of EplbWeightLoader responsible 
+                        or expert weight transfer.
+            adaptor: An adaptor to interact with the vLLM model's 
+                        expert parameters.
+            eplb_process: An instance of EplbProcess for handling 
+                        expert mapping logic.
         """
-        self.cur_iterations = None
+        self.cur_iterations = 0
         self.device = None
         self.world_size = None
         self._gather_buffer = None
@@ -156,7 +163,10 @@ class EplbUpdator(BaseUpdator):
         self.eplb_data.expert_load_window[self.eplb_data.expert_load_window_step] = (
             self.eplb_data.expert_load_pass.clone())
         self.eplb_data.expert_load_window_step += 1
-        if self.eplb_data.expert_load_window_step >= self.eplb_data.expert_load_window_size:
+        if (
+            self.eplb_data.expert_load_window_step 
+            >= self.eplb_data.expert_load_window_size
+        ):
             self.eplb_data.expert_load_window_step = 0
         self.eplb_data.expert_load_pass.zero_()
 
@@ -178,7 +188,6 @@ class EplbUpdator(BaseUpdator):
         is pending), it initiates asynchronous shuffling for each MoE layer.
         """
         if self.eplb_process._should_process():
-            # adaptor与updator解耦，数据相关的类型放到数据侧
             for layer_id in range(self.eplb_adaptor.num_moe_layers):
                 self.shuffer_layer_async(layer_id)
 
@@ -232,7 +241,9 @@ class EplbUpdator(BaseUpdator):
             True if expert weights should be updated, False otherwise.
         """
         weight_update_counter = self.cur_iterations - (
-            self.eplb_data.num_iterations_eplb_update + self.eplb_data.num_wait_worker_iterations)
+            self.eplb_data.num_iterations_eplb_update 
+            + self.eplb_data.num_wait_worker_iterations
+        )
         return 0 <= weight_update_counter < self.eplb_data.num_moe_layers
 
     def wakeup_eplb_worker_flag(self):
@@ -251,16 +262,17 @@ class EplbUpdator(BaseUpdator):
         It gathers local expert load from all ranks and combines them.
 
         Args:
-            is_clear: If True, indicates a clear operation (though not explicitly used here).
+            is_clear: If True, indicates a clear operation 
+                      (though not explicitly used here).
 
         Returns:
             The gathered MoE load tensor.
         """
-        local_load = self.eplb_adaptor.get_rank_expert_workload() #取local load逻辑
+        local_load = self.eplb_adaptor.get_rank_expert_workload() 
 
         if dist.is_initialized():
             self.world_size = dist.get_world_size()
-            self.device = local_load.device #local load换成self.expert_load_view
+            self.device = local_load.device
             if self._gather_buffer is None:
                 shape = (self.world_size, *local_load.shape)
                 self._gather_buffer = torch.empty(shape,
@@ -272,13 +284,15 @@ class EplbUpdator(BaseUpdator):
             moe_load = self._gather_buffer.permute(1, 0, 2)
             self.shared_dict["moe_load"] = moe_load.cpu()
             logger.debug(
-                f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}"
+                f"[ModelRunner] Updated shared_dict['moe_load'] "
+                f"shape={moe_load.shape}"
             )
         else:
             moe_load = local_load.unsqueeze(1)
             self.shared_dict["moe_load"] = moe_load.cpu()
             logger.debug(
-                f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}"
+                f"[ModelRunner] Updated shared_dict['moe_load'] "
+                f"shape={moe_load.shape}"
             )
         return moe_load
 
@@ -289,17 +303,18 @@ class EplbUpdator(BaseUpdator):
                   global_expert_load: Optional[torch.Tensor] = None,
                   rank_mapping: Optional[dict[int, int]] = None) -> None:
         """
-        Rearranges the experts according to the current load and the chosen EPLB policy.
-        This involves aggregating global expert load, applying the rebalancing policy,
-        and then physically moving expert weights.
+        Rearranges the experts according to the current load and the chosen 
+        EPLB policy.This involves aggregating global expert load, applying 
+        the rebalancing policy, and then physically moving expert weights.
 
         Args:
             model: The MoE model.
             is_profile: If `True`, performs a dummy rearrangement for profiling.
-            execute_shuffle: If `True`, actually shuffles the weights; otherwise,
-                             only calculates new mappings.
+            execute_shuffle: If `True`, actually shuffles the weights; 
+                             otherwise, only calculates new mappings.
             global_expert_load: Pre-computed global expert load (optional).
-            rank_mapping: A dictionary mapping old rank to new rank, used for scaling.
+            rank_mapping: A dictionary mapping old rank to new rank, 
+                          used for scaling.
         """
         ep_group = get_ep_group().device_group
         ep_rank = ep_group.rank()
@@ -440,7 +455,8 @@ class EplbUpdator(BaseUpdator):
         Returns:
             A tuple containing:
             - global_expert_load: The aggregated expert load across all ranks.
-            - old_global_expert_indices: The previous mapping of physical to logical experts.
+            - old_global_expert_indices: The previous mapping of physical to 
+                                         logical experts.
         """
         ep_group = get_ep_group()
         metadata = torch.empty(3, dtype=torch.int32, device="cpu")
@@ -477,14 +493,17 @@ class EplbUpdator(BaseUpdator):
         rank_mapping: Optional[dict[int, int]] = None,
     ) -> None:
         """
-        Rearranges the expert weights in place according to the new expert indices.
+        Rearranges the expert weights in place according to the 
+        new expert indices.
 
         The value of the indices arguments are logical indices of the experts,
         while keys are physical.
 
         Args:
-            old_global_expert_indices: Shape (num_moe_layers, num_physical_experts).
-            new_global_expert_indices: Shape (num_moe_layers, num_physical_experts).
+            old_global_expert_indices: 
+                Shape (num_moe_layers, num_physical_experts).
+            new_global_expert_indices: 
+                Shape (num_moe_layers, num_physical_experts).
             expert_weights: A sequence of shape (num_moe_layers)(weight_count)
                 of tensors of shape (num_local_physical_experts, hidden_size_i).
                 For example, a linear layer may have up and down projection,
@@ -533,7 +552,8 @@ class EplbUpdator(BaseUpdator):
 
         if is_profile:
             # Maximum send size is to send all local experts to all ranks,
-            # So we use a dummy `all_gather` to reserve enough communication buffer
+            # So we use a dummy `all_gather` to reserve 
+            # enough communication buffer.
             for weight, buffer in zip(expert_weights[0], expert_weights_buffer):
                 # A `/dev/null`-like buffer to avoid real memory allocation
                 dummy_recv_buffer = [buffer for _ in range(ep_size)]
@@ -548,7 +568,8 @@ class EplbUpdator(BaseUpdator):
             return
 
         for layer in range(num_moe_layers):
-            # NOTE(bowen): We need this synchronize to run, but I don't know why.
+            # NOTE(bowen): We need this synchronize to run, 
+            # but I don't know why.
             # If you figure out the reason, please let me know -- thank you!
             torch.cuda.synchronize()
             self.eplb_loader.shuffle_layer(
@@ -600,7 +621,11 @@ class EplbUpdator(BaseUpdator):
         # Handle rank mapping (scale up/down with rank changes)
         for old_rank in range(old_ep_size):
             new_rank = rank_mapping.get(old_rank)
-            if new_rank is not None and new_rank >= 0 and new_rank < new_ep_size:
+            if (
+                new_rank is not None 
+                and new_rank >= 0 
+                and new_rank < new_ep_size
+            ):
                 # This old rank exists in the new configuration
                 old_start_idx = old_rank * num_local_physical_experts
                 old_end_idx = (old_rank + 1) * num_local_physical_experts

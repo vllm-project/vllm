@@ -1,5 +1,5 @@
 from queue import Queue
-from typing import Optional, Any,List
+from typing import Optional, Any
 import threading
 
 class EplbProcess:
@@ -10,5 +10,5 @@ class EplbProcess:
     def _should_process(self) -> bool:
         return True
     
-    def get_at_index(self,*args) -> List[Any]:
+    def get_at_index(self,*args) -> list[Any]:
         return []
