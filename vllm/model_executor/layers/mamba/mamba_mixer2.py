@@ -518,22 +518,19 @@ class MambaMixer2(MambaBase, CustomOp):
                 conv_state = self_kv_cache[0].transpose(-1, -2)
                 ssm_state = self_kv_cache[1]
                 state_indices_tensor = attn_metadata.state_indices_tensor
-                has_initial_states_p = attn_metadata.has_initial_states_p
-                prep_initial_states = attn_metadata.prep_initial_states
-                chunk_size = attn_metadata.chunk_size
-                seq_idx_p = attn_metadata.seq_idx_p
-                chunk_indices_p = attn_metadata.chunk_indices_p
-                chunk_offsets_p = attn_metadata.chunk_offsets_p
         else:
             conv_state = mamba_cache_params.conv_state
             ssm_state = mamba_cache_params.ssm_state
             state_indices_tensor = mamba_cache_params.state_indices_tensor
-            has_initial_states_p = mamba2_metadata.has_initial_states
+
+        # Common members between V1 metadata and V0 metadata
+        if mamba2_metadata is not None:
+            has_initial_states_p = mamba2_metadata.has_initial_states_p
             prep_initial_states = mamba2_metadata.prep_initial_states
             chunk_size = mamba2_metadata.chunk_size
-            seq_idx_p = mamba2_metadata.seq_idx
-            chunk_indices_p = mamba2_metadata.chunk_indices
-            chunk_offsets_p = mamba2_metadata.chunk_offsets
+            seq_idx_p = mamba2_metadata.seq_idx_p
+            chunk_indices_p = mamba2_metadata.chunk_indices_p
+            chunk_offsets_p = mamba2_metadata.chunk_offsets_p
 
         # 1. Gated MLP's linear projection
         projected_states, _ = self.in_proj(hidden_states)
@@ -677,15 +674,9 @@ class MambaMixer2(MambaBase, CustomOp):
             # 3. State Space Model sequence transformation
             initial_states = None
             if (has_initial_states_p is not None and prep_initial_states):
-                # making a copy of the states
-                if envs.VLLM_USE_V1:
-                    initial_states = torch.where(
-                        has_initial_states_p[:, None, None, None],
-                        ssm_state[state_indices_tensor_p], 0)
-                else:
-                    initial_states = torch.where(
-                        has_initial_states_p[:num_prefills, None, None, None],
-                        ssm_state[state_indices_tensor_p], 0)
+                initial_states = torch.where(
+                    has_initial_states_p[:, None, None, None],
+                    ssm_state[state_indices_tensor_p], 0)
 
             # NOTE: final output is an in-place update of out tensor
             varlen_state = mamba_chunk_scan_combined(
