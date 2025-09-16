@@ -162,7 +162,7 @@ def cp_lse_ag_out_rs(
     if return_lse:
         cp_num_heads = lse.shape[1] // cp_group.world_size
         cp_rank = cp_group.rank_in_group
-        lse = lse[ : , cp_num_heads*cp_rank : cp_num_heads*(cp_rank+1)]
+        lse = lse[:, cp_num_heads * cp_rank:cp_num_heads * (cp_rank + 1)]
         return out, lse
     return out
 
