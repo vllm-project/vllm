@@ -844,7 +844,7 @@ def unify_kv_cache_spec_page_size(
         The updated KVCacheSpec with the same page_size_bytes.
     """
     page_sizes = {layer.page_size_bytes for layer in kv_cache_spec.values()}
-    if len(page_sizes) == 1:
+    if len(page_sizes) <= 1:
         # All layers have the same page size, no need to unify.
         return kv_cache_spec
 
@@ -858,7 +858,7 @@ def unify_kv_cache_spec_page_size(
             if max_page_size % layer_page_size != 0:
                 raise NotImplementedError(
                     "The page size of the layer is not divisible by the "
-                    "minimum page size")
+                    "maximum page size. Cannot unify by adjusting block_size.")
             ratio = max_page_size // layer_page_size
             new_block_size = layer_spec.block_size * ratio
             new_spec = replace(layer_spec, block_size=new_block_size)
