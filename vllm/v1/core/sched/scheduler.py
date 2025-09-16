@@ -688,9 +688,8 @@ class Scheduler(SchedulerInterface):
                 # stage worker and the last-stage worker. Otherwise, we don't
                 # need to send the sampled tokens back because the model runner
                 # will cache them.
-                tokens = req.all_token_ids[
-                    req.num_computed_tokens : req.num_computed_tokens + num_tokens
-                ]
+                tokens = req.all_token_ids[req.num_computed_tokens:req.
+                                           num_computed_tokens + num_tokens]
                 new_token_ids.append(tokens)
                 token_ids.append([])
             elif use_connector:
@@ -699,7 +698,8 @@ class Scheduler(SchedulerInterface):
                 # is updated to handle token IDs properly.
                 new_token_ids.append([])
                 if resumed_from_preemption[idx]:
-                    tokens = req.all_token_ids[: req.num_computed_tokens + num_tokens]
+                    tokens = req.all_token_ids[:req.num_computed_tokens +
+                                               num_tokens]
                     token_ids.append(tokens)
                 else:
                     token_ids.append([])
