@@ -3,13 +3,14 @@
 from typing import Any
 
 
-class VllmEplbAdaptor():
+class VllmEplbAdaptor:
+
     def __init__(self, model, **args):
         self.model = model
         self.expert_map_per_layer = dict()
         self.buffer_tensor_list: list[list[Any]]
         self.expert_param_per_layer = dict()
-    
+
     def do_update_expert_map(self, *args, **kwargs):
         pass
 

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Sequence, Iterable
+from collections.abc import Iterable, Sequence
 from functools import partial
 from typing import Optional
 
@@ -9,12 +9,12 @@ import torch
 import torch.distributed as dist
 from overrides import override
 from torch._C._distributed_c10d import ProcessGroup
-from torch.distributed import P2POp, batch_isend_irecv, get_global_rank, Work
+from torch.distributed import P2POp, Work, batch_isend_irecv, get_global_rank
 
 from vllm.distributed.eplb.eplb_adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm.distributed.eplb.eplb_loader.abstract_loader import BaseLoader
 from vllm.distributed.eplb.eplb_utils.eplb_utils import (
-    idx_local_to_global, get_ep_ranks_with_expert)
+    get_ep_ranks_with_expert, idx_local_to_global)
 
 
 class EplbWeightLoader(BaseLoader):
@@ -25,7 +25,6 @@ class EplbWeightLoader(BaseLoader):
     This class is responsible for managing the transfer and update of 
     expert weights across different ranks during expert rearrangement.
     """
-
 
     def __init__(self, eplb_adaptor: VllmEplbAdaptor):
         """
@@ -97,7 +96,7 @@ class EplbWeightLoader(BaseLoader):
                 if is_received_locally[dst]:
                     continue
                 if old_indices[src_global] == -1 or new_indices[
-                    dst_global] == -1:
+                        dst_global] == -1:
                     continue
                 if old_indices[src_global] == new_indices[dst_global]:
                     is_received_locally[dst] = True
@@ -343,21 +342,17 @@ class EplbWeightLoader(BaseLoader):
                 expert will occupy.
         """
         for buffer_tensor_id, (
-            recv_rank,
-            global_expert_id_to_recv,
+                recv_rank,
+                global_expert_id_to_recv,
         ) in enumerate(expert_recv_info):
             for buffer_tensor in (
-                self.eplb_adaptor.buffer_tensor_list[buffer_tensor_id]
-            ):
+                    self.eplb_adaptor.buffer_tensor_list[buffer_tensor_id]):
                 self.comm_op_list.append(
-                    dist.P2POp(dist.irecv, buffer_tensor, recv_rank)
-                )
+                    dist.P2POp(dist.irecv, buffer_tensor, recv_rank))
             local_expert_to_replace = (
-                updated_expert_map[global_expert_id_to_recv].item()
-            )
+                updated_expert_map[global_expert_id_to_recv].item())
             self.recv_expert_list.append(
-                (local_expert_to_replace, buffer_tensor_id)
-            )
+                (local_expert_to_replace, buffer_tensor_id))
 
     def generate_expert_d2d_transfer_task(self, expert_send_info,
                                           expert_recv_info, updated_expert_map,
