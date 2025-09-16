@@ -143,7 +143,11 @@ async def test_chat_full_of_tool_and_reasoning(client: openai.AsyncOpenAI):
 async def test_stop_str_with_reasoning(client: openai.AsyncOpenAI):
     response = await client.chat.completions.create(
         model=MODEL_NAME,
-        messages=[{"role": "user", "content": "9.11 and 9.8, which is greater?"}],
+        messages=[{
+            "role": "user",
+            "content": "9.11 and 9.8, which is greater?"
+        }],
+        temperature=1.0,
         stop="9.8",
     )
 
