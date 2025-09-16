@@ -199,8 +199,10 @@ def invoke_main() -> None:
         benchmark_batched_propose(args)
 
 
+"""
 # Example command lines:
 # time python3 benchmarks/benchmark_ngram_proposer.py
 # time python3 benchmarks/benchmark_ngram_proposer.py --batched --num-iteration 4 --num-token 1000000 --num-req 128
+"""  # noqa: E501
 if __name__ == "__main__":
     invoke_main()  # pragma: no cover

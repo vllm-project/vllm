@@ -28,8 +28,8 @@ class NgramProposer:
         # tokens until the end.
         self.method = vllm_config.speculative_config.method
         if self.method == "ngram-eagle":
-            self.k = vllm_config.speculative_config.num_speculative_tokens_per_method[
-                "ngram"]
+            self.k = vllm_config.speculative_config \
+                                .num_speculative_tokens_per_method["ngram"]
         else:
             self.k = vllm_config.speculative_config.num_speculative_tokens
         # Maximum length of the model.
@@ -64,12 +64,19 @@ class NgramProposer:
         """Batch version of ngram proposer using numba for acceleration.
         
         Args:
-            valid_ngram_requests: Set of indices of requests that need ngram proposals.
-            num_tokens_no_spec: Numpy array of shape (batch_size,) representing the number of tokens without speculative tokens for each request.
-            token_ids_cpu: Numpy array of shape (batch_size, max_model_len) representing the token IDs for each request.
+            valid_ngram_requests: 
+                Set of indices of requests that need ngram proposals.
+                num_tokens_no_spec: 
+            Numpy array of shape (batch_size,) representing the number 
+                of tokens without speculative tokens for each request.
+            token_ids_cpu: 
+                Numpy array of shape (batch_size, max_model_len) 
+                representing the token IDs for each request.
 
         Returns:
-            list[list[int]]: A list where each element is a list of proposed token IDs for the corresponding request.
+            list[list[int]]: 
+                A list where each element is a list of proposed 
+                token IDs for the corresponding request.
         """
         original_num_numba_threads = get_num_threads()
         set_num_threads(min(self.num_numba_thread, len(valid_ngram_requests)))
