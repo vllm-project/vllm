@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib.util
 import os
 from dataclasses import MISSING, Field, asdict, dataclass, field
 
@@ -12,6 +13,21 @@ from vllm.config.load import LoadConfig
 from vllm.config.utils import get_field
 from vllm.model_executor.layers.pooler import PoolingType
 from vllm.platforms import current_platform
+
+
+# Check if runai_model_streamer is available and can be imported
+def _check_runai_available():
+    if importlib.util.find_spec("runai_model_streamer") is None:
+        return False
+    try:
+        # Try to import the module to catch OSError on incompatible platforms
+        importlib.import_module("runai_model_streamer")
+        return True
+    except (ImportError, OSError):
+        return False
+
+
+runai_available = _check_runai_available()
 
 
 def test_compile_config_repr_succeeds():
@@ -398,6 +414,8 @@ def test_get_and_verify_max_len(model_id, max_model_len, expected_max_len,
         assert actual_max_len == expected_max_len
 
 
+@pytest.mark.skipif(not runai_available,
+                    reason="RunAI model streamer not available")
 @pytest.mark.parametrize("s3_url", [
     "s3://air-example-data/rayllm-ossci/facebook-opt-350m/",
     "s3://air-example-data/rayllm-ossci/meta-Llama-3.2-1B-Instruct/",
@@ -461,6 +479,8 @@ def test_s3_url_model_tokenizer_paths(s3_url):
     del config2
 
 
+@pytest.mark.skipif(not runai_available,
+                    reason="RunAI model streamer not available")
 def test_s3_url_different_models_create_different_directories():
     """Test that different S3 URLs create different local directories."""
     s3_url1 = "s3://air-example-data/rayllm-ossci/facebook-opt-350m/"
