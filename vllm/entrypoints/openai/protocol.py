@@ -519,7 +519,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
     )
-    structured_outputs: Optional[dict[str, Any]] = Field(
+    structured_outputs: Optional[StructuredOutputsParams] = Field(
         default=None,
         description="Additional kwargs for structured outputs",
     )
@@ -640,28 +640,23 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if prompt_logprobs is None and self.echo:
             prompt_logprobs = self.top_logprobs
 
-        structured_outputs = None
-        if (self.structured_outputs is not None
-                and any(v is not None
-                        for v in self.structured_outputs.values())):
-            structured_outputs = StructuredOutputsParams(
-                **self.structured_outputs)
-
+        if self.structured_outputs is not None:
             if self.response_format is not None:
                 if self.response_format.type == "json_object":
-                    structured_outputs.json_object = True
+                    self.structured_outputs.json_object = True
                 elif self.response_format.type == "json_schema":
                     json_schema = self.response_format.json_schema
                     assert json_schema is not None
-                    structured_outputs.json = json_schema.json_schema
+                    self.structured_outputs.json = json_schema.json_schema
                 elif self.response_format.type == "structural_tag":
                     structural_tag = self.response_format
                     assert structural_tag is not None and isinstance(
                         structural_tag, StructuralTagResponseFormat)
                     s_tag_obj = structural_tag.model_dump(by_alias=True)
-                    structured_outputs.structural_tag = json.dumps(s_tag_obj)
+                    self.structured_outputs.structural_tag = json.dumps(
+                        s_tag_obj)
             if structured_outputs_json := self._get_json_schema_from_tool():
-                structured_outputs.json = structured_outputs_json
+                self.structured_outputs.json = structured_outputs_json
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
@@ -693,9 +688,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             output_kind=RequestOutputKind.DELTA if self.stream \
                 else RequestOutputKind.FINAL_ONLY,
-            structured_outputs=structured_outputs,
+            structured_outputs=self.structured_outputs,
             logit_bias=self.logit_bias,
-            bad_words= self.bad_words,
+            bad_words=self.bad_words,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
         )
@@ -983,7 +978,7 @@ class CompletionRequest(OpenAIBaseModel):
             ", {'type': 'structural_tag'}, or {'type': 'text' } is supported."
         ),
     )
-    structured_outputs: Optional[dict[str, Any]] = Field(
+    structured_outputs: Optional[StructuredOutputsParams] = Field(
         default=None,
         description="Additional kwargs for structured outputs",
     )
@@ -1116,15 +1111,10 @@ class CompletionRequest(OpenAIBaseModel):
 
         echo_without_generation = self.echo and self.max_tokens == 0
 
-        structured_outputs = None
         if (self.structured_outputs is not None
-                and any(v is not None
-                        for v in self.structured_outputs.values())):
-            structured_outputs = StructuredOutputsParams(
-                **self.structured_outputs)
-            if (self.response_format is not None
-                    and self.response_format.type == "json_object"):
-                structured_outputs.json_object = True
+                and self.response_format is not None
+                and self.response_format.type == "json_object"):
+            self.structured_outputs.json_object = True
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
@@ -1156,7 +1146,7 @@ class CompletionRequest(OpenAIBaseModel):
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             output_kind=RequestOutputKind.DELTA if self.stream \
                 else RequestOutputKind.FINAL_ONLY,
-            structured_outputs=structured_outputs,
+            structured_outputs=self.structured_outputs,
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
