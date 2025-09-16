@@ -60,6 +60,12 @@ become available.
       <td><code>synthetic</code></td>
     </tr>
     <tr>
+      <td><strong>RandomMultiModal (Image/Video)</strong></td>
+      <td style="text-align: center;">🟡</td>
+      <td style="text-align: center;">🚧</td>
+      <td><code>synthetic</code> </td>
+    </tr>
+    <tr>
       <td><strong>Prefix Repetition</strong></td>
       <td style="text-align: center;">✅</td>
       <td style="text-align: center;">✅</td>
@@ -90,6 +96,24 @@ become available.
       <td><code>lmms-lab/LLaVA-OneVision-Data</code>, <code>Aeala/ShareGPT_Vicuna_unfiltered</code></td>
     </tr>
     <tr>
+      <td><strong>HuggingFace-MTBench</strong></td>
+      <td style="text-align: center;">✅</td>
+      <td style="text-align: center;">✅</td>
+      <td><code>philschmid/mt-bench</code></td>
+    </tr>
+    <tr>
+      <td><strong>HuggingFace-Blazedit</strong></td>
+      <td style="text-align: center;">✅</td>
+      <td style="text-align: center;">✅</td>
+      <td><code>vdaita/edit_5k_char</code>, <code>vdaita/edit_10k_char</code></td>
+    </tr>
+    <tr>
+      <td><strong>Spec Bench</strong></td>
+      <td style="text-align: center;">✅</td>
+      <td style="text-align: center;">✅</td>
+      <td><code>wget https://raw.githubusercontent.com/hemingkx/Spec-Bench/refs/heads/main/data/spec_bench/question.jsonl</code></td>
+    </tr>
+    <tr>
       <td><strong>Custom</strong></td>
       <td style="text-align: center;">✅</td>
       <td style="text-align: center;">✅</td>
@@ -104,7 +128,12 @@ become available.
 
 🚧: to be supported
 
-**Note**: HuggingFace dataset's `dataset-name` should be set to `hf`
+**Note**: HuggingFace dataset's `dataset-name` should be set to `hf`.
+For local `dataset-path`, please set `hf-name` to its Hugging Face ID like
+
+```bash
+--dataset-path /datasets/VisionArena-Chat/ --hf-name lmarena-ai/VisionArena-Chat
+```
 
 ## 🚀 Example - Online Benchmark
 
@@ -228,6 +257,43 @@ vllm bench serve \
     --num-prompts 2048
 ```
 
+### Spec Bench Benchmark with Speculative Decoding
+
+``` bash
+VLLM_USE_V1=1 vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
+    --speculative-config $'{"method": "ngram",
+    "num_speculative_tokens": 5, "prompt_lookup_max": 5,
+    "prompt_lookup_min": 2}'
+```
+
+[SpecBench dataset](https://github.com/hemingkx/Spec-Bench)
+
+Run all categories:
+
+``` bash
+# Download the dataset using:
+# wget https://raw.githubusercontent.com/hemingkx/Spec-Bench/refs/heads/main/data/spec_bench/question.jsonl
+
+vllm bench serve \
+    --model meta-llama/Meta-Llama-3-8B-Instruct \
+    --dataset-name spec_bench \ 
+    --dataset-path "<YOUR_DOWNLOADED_PATH>/data/spec_bench/question.jsonl" \
+    --num-prompts -1
+```
+
+Available categories include `[writing, roleplay, reasoning, math, coding, extraction, stem, humanities, translation, summarization, qa, math_reasoning, rag]`.
+
+Run only a specific category like "summarization":
+
+``` bash
+vllm bench serve \
+    --model meta-llama/Meta-Llama-3-8B-Instruct \
+    --dataset-name spec_bench \ 
+    --dataset-path "<YOUR_DOWNLOADED_PATH>/data/spec_bench/question.jsonl" \
+    --num-prompts -1
+    --spec-bench-category "summarization"
+```
+
 ### Other HuggingFaceDataset Examples
 
 ```bash
@@ -282,6 +348,18 @@ vllm bench serve \
     --dataset-name hf \
     --dataset-path philschmid/mt-bench \
     --num-prompts 80
+```
+
+`vdaita/edit_5k_char` or `vdaita/edit_10k_char`:
+
+``` bash
+vllm bench serve \
+    --model Qwen/QwQ-32B \
+    --dataset-name hf \
+    --dataset-path vdaita/edit_5k_char \
+    --num-prompts 90 \
+    --blazedit-min-distance 0.01 \
+    --blazedit-max-distance 0.99
 ```
 
 ### Running With Sampling Parameters
@@ -683,7 +761,7 @@ python -m vllm.entrypoints.openai.api_server \
 Send requests with images:
 
 ```bash
-python benchmarks/benchmark_serving.py \
+vllm bench serve \
   --backend openai-chat \
   --model Qwen/Qwen2.5-VL-7B-Instruct \
   --dataset-name sharegpt \
@@ -710,7 +788,7 @@ python -m vllm.entrypoints.openai.api_server \
 Send requests with videos:
 
 ```bash
-python benchmarks/benchmark_serving.py \
+vllm bench serve \
   --backend openai-chat \
   --model Qwen/Qwen2.5-VL-7B-Instruct \
   --dataset-name sharegpt \
@@ -721,5 +799,76 @@ python benchmarks/benchmark_serving.py \
   --save-detailed \
   --endpoint /v1/chat/completion
 ```
+
+### Synthetic Random Images (random-mm)
+
+Generate synthetic image inputs alongside random text prompts to stress-test vision models without external datasets.
+
+Notes:
+
+- Works only with online benchmark via the OpenAI  backend (`--backend openai-chat`) and endpoint `/v1/chat/completions`.
+- Video sampling is not yet implemented.
+
+Start the server (example):
+
+```bash
+vllm serve Qwen/Qwen2.5-VL-3B-Instruct \
+  --dtype bfloat16 \
+  --max-model-len 16384 \
+  --limit-mm-per-prompt '{"image": 3, "video": 0}' \
+  --mm-processor-kwargs max_pixels=1003520
+```
+
+Benchmark. It is recommended to use the flag `--ignore-eos` to simulate real responses. You can set the size of the output via the arg `random-output-len`.
+
+Ex.1: Fixed number of items and a single image resolution, enforcing generation of approx 40 tokens:
+
+```bash
+vllm bench serve \
+  --backend openai-chat \
+  --model Qwen/Qwen2.5-VL-3B-Instruct \
+  --endpoint /v1/chat/completions \
+  --dataset-name random-mm \
+  --num-prompts 100 \
+  --max-concurrency 10 \
+  --random-prefix-len 25 \
+  --random-input-len 300 \
+  --random-output-len 40 \
+  --random-range-ratio 0.2 \
+  --random-mm-base-items-per-request 2 \
+  --random-mm-limit-mm-per-prompt '{"image": 3, "video": 0}' \
+  --random-mm-bucket-config '{(224, 224, 1): 1.0}' \
+  --request-rate inf \
+  --ignore-eos \
+  --seed 42
+```
+
+The number of items per request can be controlled by passing multiple image buckets:
+
+```bash
+  --random-mm-base-items-per-request 2 \
+  --random-mm-num-mm-items-range-ratio 0.5 \
+  --random-mm-limit-mm-per-prompt '{"image": 4, "video": 0}' \
+  --random-mm-bucket-config '{(256, 256, 1): 0.7, (720, 1280, 1): 0.3}' \
+```
+
+Flags specific to `random-mm`:
+
+- `--random-mm-base-items-per-request`: base number of multimodal items per request.
+- `--random-mm-num-mm-items-range-ratio`: vary item count uniformly in the closed integer range [floor(n·(1−r)), ceil(n·(1+r))]. Set r=0 to keep it fixed; r=1 allows 0 items.
+- `--random-mm-limit-mm-per-prompt`: per-modality hard caps, e.g. '{"image": 3, "video": 0}'.
+- `--random-mm-bucket-config`: dict mapping (H, W, T) → probability. Entries with probability 0 are removed; remaining probabilities are renormalized to sum to 1. Use T=1 for images. Set any T>1 for videos (video sampling not yet supported).
+
+Behavioral notes:
+
+- If the requested base item count cannot be satisfied under the provided per-prompt limits, the tool raises an error rather than silently clamping.
+
+How sampling works:
+
+- Determine per-request item count k by sampling uniformly from the integer range defined by `--random-mm-base-items-per-request` and `--random-mm-num-mm-items-range-ratio`, then clamp k to at most the sum of per-modality limits.
+- For each of the k items, sample a bucket (H, W, T) according to the normalized probabilities in `--random-mm-bucket-config`, while tracking how many items of each modality have been added.
+- If a modality (e.g., image) reaches its limit from `--random-mm-limit-mm-per-prompt`, all buckets of that modality are excluded and the remaining bucket probabilities are renormalized before continuing.
+This should be seen as an edge case, and if this behavior can be avoided by setting `--random-mm-limit-mm-per-prompt` to a large number. Note that this might result in errors due to engine config `--limit-mm-per-prompt`.
+- The resulting request contains synthetic image data in `multi_modal_data` (OpenAI Chat format). When `random-mm` is used with the OpenAI Chat backend, prompts remain text and MM content is attached via `multi_modal_data`.
 
 </details>

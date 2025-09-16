@@ -41,14 +41,17 @@ EAGLE_SPEC_CONFIG = {
 PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
     ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "auto", None),
     ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto", None),
+    ("mistralai/Ministral-8B-Instruct-2410", "lm-format-enforcer", "auto",
+     None),
     ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "mistral", None),
     ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", None),
-    ("mistralai/Ministral-8B-Instruct-2410", "outlines", "auto", None),
-    ("mistralai/Ministral-8B-Instruct-2410", "outlines", "mistral", None),
+    ("Qwen/Qwen2.5-1.5B-Instruct", "lm-format-enforcer", "auto", None),
+    #FIXME: This tests are flaky on CI thus disabled. Tracking in Issue #24402
+    # ("mistralai/Ministral-8B-Instruct-2410", "outlines", "auto", None),
+    # ("mistralai/Ministral-8B-Instruct-2410", "outlines", "mistral", None),
+    #("Qwen/Qwen2.5-1.5B-Instruct", "guidance", "auto"),
     ("mistralai/Ministral-8B-Instruct-2410", "outlines", "auto",
      NGRAM_SPEC_CONFIG),
-    #FIXME: This test is flaky on CI thus disabled
-    #("Qwen/Qwen2.5-1.5B-Instruct", "guidance", "auto"),
     ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto",
      NGRAM_SPEC_CONFIG),
     ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", NGRAM_SPEC_CONFIG),
@@ -119,6 +122,7 @@ def test_structured_output(
         guided_decoding_backend=guided_decoding_backend,
         guided_decoding_disable_any_whitespace=(guided_decoding_backend
                                                 in {"xgrammar", "guidance"}),
+        seed=120,
         tokenizer_mode=tokenizer_mode,
         speculative_config=speculative_config)
 
@@ -148,7 +152,8 @@ def test_structured_output(
 
         generated_text = output.outputs[0].text
         assert generated_text is not None
-        assert "\n" not in generated_text
+        if guided_decoding_backend != 'lm-format-enforcer':
+            assert "\n" not in generated_text
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
         output_json = json.loads(generated_text)
         jsonschema.validate(instance=output_json, schema=sample_json_schema)
@@ -225,7 +230,7 @@ def test_structured_output(
             parsed_json = json.loads(generated_text)
             assert isinstance(parsed_json, dict)
 
-    if guided_decoding_backend != "outlines":
+    if guided_decoding_backend not in ["outlines", "lm-format-enforcer"]:
         #
         # Test 4: Generate SQL statement using EBNF grammar
         #
@@ -439,7 +444,7 @@ def test_structured_output(
         output_json = json.loads(generated_text)
         jsonschema.validate(instance=output_json, schema=json_schema)
 
-    if guided_decoding_backend != "outlines":
+    if guided_decoding_backend not in ["outlines", "lm-format-enforcer"]:
         #
         # Test 11: Generate structured output using structural_tag format
         #

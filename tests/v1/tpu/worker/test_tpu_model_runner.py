@@ -10,7 +10,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils import GiB_bytes
 from vllm.v1.core.kv_cache_utils import (estimate_max_model_len,
-                                         get_kv_cache_config)
+                                         get_kv_cache_configs)
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
 from vllm.v1.worker.tpu_model_runner import (
@@ -64,9 +64,7 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
             NewRequestData(
                 req_id=req_id,
                 prompt_token_ids=[1, 2, 3],
-                mm_kwargs=[],
-                mm_hashes=[],
-                mm_positions=[],
+                mm_features=[],
                 sampling_params=SamplingParams(),
                 pooling_params=PoolingParams(),
                 block_ids=([0], ),  # block_ids should be tuple[list[int]]
@@ -85,7 +83,7 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -164,7 +162,7 @@ def test_update_states_request_finished(model_runner):
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids={req_id},
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -194,7 +192,7 @@ def test_update_states_request_resumed(model_runner):
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -221,7 +219,7 @@ def test_update_states_request_resumed(model_runner):
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -252,7 +250,7 @@ def test_update_states_no_changes(model_runner):
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -287,7 +285,7 @@ def test_update_states_request_unscheduled(model_runner):
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -479,8 +477,8 @@ def test_init_kv_cache_without_kv_sharing():
     # 2 (non-MLA) * 8 (num_heads) * 128 (head_dim)
     # * 2 (bfloat16, kv_cache dtype) * 128 (block_size) = 512KB
     num_expected_blocks = 20480  # 20GB / 512KB / 2 (num layers)
-    kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec,
-                                          available_memory)
+    kv_cache_config = get_kv_cache_configs(vllm_config, [kv_cache_spec],
+                                           [available_memory])[0]
     assert kv_cache_config.num_blocks == num_expected_blocks
     assert len(kv_cache_config.kv_cache_tensors) == 2
     assert kv_cache_config.kv_cache_tensors[0].size == available_memory // 2
@@ -552,8 +550,8 @@ def test_init_kv_cache_with_kv_sharing_valid():
     # with KV sharing, we can allocate (available_mem//page_size//1) blocks
     # which is twice as many as without KV sharing
     num_expected_blocks = 2 * 20480  # 20GB / 512KB
-    kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec,
-                                          available_memory)
+    kv_cache_config = get_kv_cache_configs(vllm_config, [kv_cache_spec],
+                                           [available_memory])[0]
     assert kv_cache_config.num_blocks == num_expected_blocks
     assert len(kv_cache_config.kv_cache_tensors) == 1
     # Each layer now has twice the available memory for KV cache
