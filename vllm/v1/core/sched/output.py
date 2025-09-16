@@ -28,13 +28,13 @@ class NewRequestData:
 
     req_id: str
     prompt_token_ids: Optional[list[int]]
-    prompt_embeds: Optional[torch.Tensor]
     mm_features: list[MultiModalFeatureSpec]
     sampling_params: Optional[SamplingParams]
     pooling_params: Optional[PoolingParams]
     block_ids: tuple[list[int], ...]
     num_computed_tokens: int
     lora_request: Optional[LoRARequest]
+    prompt_embeds: Optional[torch.Tensor] = None
 
     @classmethod
     def from_request(
@@ -45,13 +45,13 @@ class NewRequestData:
         return cls(
             req_id=request.request_id,
             prompt_token_ids=request.prompt_token_ids,
-            prompt_embeds=request.prompt_embeds,
             mm_features=request.mm_features,
             sampling_params=request.sampling_params,
             pooling_params=request.pooling_params,
             block_ids=block_ids,
             num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
+            prompt_embeds=request.prompt_embeds,
         )
 
     def __repr__(self) -> str:
@@ -60,12 +60,12 @@ class NewRequestData:
         return (f"NewRequestData("
                 f"req_id={self.req_id},"
                 f"prompt_token_ids={self.prompt_token_ids},"
-                f"prompt_embeds_shape={prompt_embeds_shape},"
                 f"mm_features={self.mm_features},"
                 f"sampling_params={self.sampling_params},"
                 f"block_ids={self.block_ids},"
                 f"num_computed_tokens={self.num_computed_tokens},"
-                f"lora_request={self.lora_request}"
+                f"lora_request={self.lora_request},"
+                f"prompt_embeds_shape={prompt_embeds_shape}"
                 ")")
 
     # Version of __repr__ with the prompt data obfuscated
@@ -78,12 +78,12 @@ class NewRequestData:
         return (f"NewRequestData("
                 f"req_id={self.req_id},"
                 f"prompt_token_ids_len={prompt_token_ids_len},"
-                f"prompt_embeds_shape={prompt_embeds_shape},"
                 f"mm_features={self.mm_features},"
                 f"sampling_params={self.sampling_params},"
                 f"block_ids={self.block_ids},"
                 f"num_computed_tokens={self.num_computed_tokens},"
-                f"lora_request={self.lora_request}"
+                f"lora_request={self.lora_request},"
+                f"prompt_embeds_shape={prompt_embeds_shape}"
                 ")")
 
 

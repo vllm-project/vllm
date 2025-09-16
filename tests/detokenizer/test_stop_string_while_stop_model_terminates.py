@@ -32,7 +32,6 @@ def _make_request(stop, include_stop_str_in_output: bool, min_tokens: int = 0):
     req = EngineCoreRequest(
         request_id="test",
         prompt_token_ids=[],
-        prompt_embeds=None,
         mm_features=None,
         sampling_params=params,
         pooling_params=None,

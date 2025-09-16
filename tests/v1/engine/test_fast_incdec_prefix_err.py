@@ -28,7 +28,6 @@ def test_fast_inc_detok_invalid_utf8_err_case():
     request = EngineCoreRequest(
         request_id="test",
         prompt_token_ids=prompt_token_ids,
-        prompt_embeds=None,
         mm_features=None,
         sampling_params=params,
         pooling_params=None,

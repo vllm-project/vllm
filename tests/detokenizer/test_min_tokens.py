@@ -33,7 +33,6 @@ def test_min_tokens_with_stop(min_tokens: int, stop: str, truth: str):
     )
     request = EngineCoreRequest(request_id="",
                                 prompt_token_ids=prompt_token_ids,
-                                prompt_embeds=None,
                                 mm_features=None,
                                 sampling_params=params,
                                 pooling_params=None,

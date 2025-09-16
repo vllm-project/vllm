@@ -63,7 +63,6 @@ def _run_incremental_decode(tokenizer,
     )
     request = EngineCoreRequest(request_id="",
                                 prompt_token_ids=prompt_token_ids,
-                                prompt_embeds=None,
                                 mm_features=None,
                                 sampling_params=params,
                                 pooling_params=None,
