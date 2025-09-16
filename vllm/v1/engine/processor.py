@@ -9,6 +9,7 @@ from vllm.config import VllmConfig
 from vllm.inputs import ProcessorInputs, PromptType, SingletonInputs
 from vllm.inputs.parse import split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.cache import processor_cache_from_config
@@ -27,6 +28,8 @@ from vllm.v1.structured_output.backend_outlines import (
     validate_structured_output_request_outlines)
 from vllm.v1.structured_output.backend_xgrammar import (
     validate_xgrammar_grammar)
+
+logger = init_logger(__name__)
 
 
 class Processor:
@@ -199,9 +202,21 @@ class Processor:
             _validate_single_prompt(prompt)  # type: ignore[arg-type]
 
     def _validate_lora(self, lora_request: Optional[LoRARequest]) -> None:
-        if lora_request is not None and not self.lora_config:
+        if lora_request is None:
+            return
+
+        # LoRA request passed in while LoRA is not enabled
+        if not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
+
+        if self.tokenizer is not None:
+            logger.warning_once(
+                "vLLM has deprecated support for supporting different "
+                "tokenizers for different LoRAs. By default, vLLM uses base "
+                "model's tokenizer. If you are using a LoRA "
+                "with its own tokenizer, consider specifying `--tokenizer "
+                "[lora_path]` to use the LoRA tokenizer.")
 
     def _validate_structured_output(self, params: SamplingParams) -> None:
         if not params.guided_decoding or not self.decoding_config:
