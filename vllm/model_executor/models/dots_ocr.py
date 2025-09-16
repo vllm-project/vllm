@@ -31,6 +31,7 @@ from vllm.multimodal.inputs import MultiModalDataDict
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.dotsocr import (DotsOCRConfig,
                                                      DotsVisionConfig)
+from vllm.attention.layer import MultiHeadAttention
 
 
 class DotsOCRImagePixelInputs(TypedDict):
@@ -211,6 +212,16 @@ class VisionSdpaAttention(nn.Module):
                  bias=True) -> None:
         super().__init__()
         self.num_heads = num_heads
+        self.head_size = dim // num_heads
+        self.scale = self.head_size**-0.5
+
+        # vLLM MultiHeadAttention
+        self.attn = MultiHeadAttention(
+            num_heads=num_heads,
+            head_size=self.head_size,
+            scale=self.scale,
+        )
+
         self.qkv = nn.Linear(dim, dim * 3, bias=bias)
         self.proj = nn.Linear(dim, dim, bias=bias)
         self.config = config
@@ -222,39 +233,48 @@ class VisionSdpaAttention(nn.Module):
         rotary_pos_emb: torch.Tensor = None,
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
-        q, k, v = self.qkv(hidden_states).reshape(seq_length, 3,
-                                                  self.num_heads,
-                                                  -1).permute(1, 0, 2,
-                                                              3).unbind(0)
+        qkv = self.qkv(hidden_states)
+        q, k, v = (
+            qkv.reshape(seq_length, 3, self.num_heads, -1)
+            .permute(1, 0, 2, 3)
+            .unbind(0)
+        )
 
         q = apply_rotary_pos_emb_vision(q.unsqueeze(0),
                                         rotary_pos_emb).squeeze(0)
         k = apply_rotary_pos_emb_vision(k.unsqueeze(0),
                                         rotary_pos_emb).squeeze(0)
 
-        # Rearrange to batch-first format for processing
-        q, k, v = (rearrange(x, "s h d -> 1 s h d") for x in (q, k, v))
+        q = q.reshape(1, seq_length, -1)
+        k = k.reshape(1, seq_length, -1)
+        v = v.reshape(1, seq_length, -1)
 
-        # Execute attention entry by entry for speed & less VRAM
-        outputs = []
-        for i in range(1, len(cu_seqlens)):
-            start_idx = cu_seqlens[i - 1]
-            end_idx = cu_seqlens[i]
-            q_i = q[:, start_idx:end_idx]
-            k_i = k[:, start_idx:end_idx]
-            v_i = v[:, start_idx:end_idx]
-            q_i, k_i, v_i = (rearrange(x, "b s h d -> b h s d")
-                             for x in [q_i, k_i, v_i])
-            output_i = F.scaled_dot_product_attention(q_i,
-                                                      k_i,
-                                                      v_i,
-                                                      dropout_p=0.0)
-            output_i = rearrange(output_i, "b h s d -> b s h d")
-            outputs.append(output_i)
-        attn_output = torch.cat(outputs, dim=1)
+        attn_output = self.attn(q, k, v)
+        attn_output = attn_output.squeeze(0)
 
-        # Convert back to sequence-first format and reshape
-        attn_output = rearrange(attn_output, "1 s h d -> s (h d)")
+        # # Rearrange to batch-first format for processing
+        # q, k, v = (rearrange(x, "s h d -> 1 s h d") for x in (q, k, v))
+
+        # # Execute attention entry by entry for speed & less VRAM
+        # outputs = []
+        # for i in range(1, len(cu_seqlens)):
+        #     start_idx = cu_seqlens[i - 1]
+        #     end_idx = cu_seqlens[i]
+        #     q_i = q[:, start_idx:end_idx]
+        #     k_i = k[:, start_idx:end_idx]
+        #     v_i = v[:, start_idx:end_idx]
+        #     q_i, k_i, v_i = (rearrange(x, "b s h d -> b h s d")
+        #                      for x in [q_i, k_i, v_i])
+        #     output_i = F.scaled_dot_product_attention(q_i,
+        #                                               k_i,
+        #                                               v_i,
+        #                                               dropout_p=0.0)
+        #     output_i = rearrange(output_i, "b h s d -> b s h d")
+        #     outputs.append(output_i)
+        # attn_output = torch.cat(outputs, dim=1)
+
+        # # Convert back to sequence-first format and reshape
+        # attn_output = rearrange(attn_output, "1 s h d -> s (h d)")
 
         attn_output = self.proj(attn_output)
         return attn_output
