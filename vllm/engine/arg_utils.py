@@ -1382,7 +1382,6 @@ class EngineArgs:
             otlp_traces_endpoint=self.otlp_traces_endpoint,
             collect_detailed_traces=self.collect_detailed_traces,
         )
-        logger.info(f"At engine args the ec transfer config is {self.ec_transfer_config}")
         config = VllmConfig(
             model_config=model_config,
             cache_config=cache_config,

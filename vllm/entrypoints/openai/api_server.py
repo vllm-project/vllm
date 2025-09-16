@@ -720,7 +720,6 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
             message="The model does not support Completions API")
 
     try:
-        logger.info(f"Handler is {handler}")
         generator = await handler.create_completion(request, raw_request)
     except OverflowError as e:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST.value,
