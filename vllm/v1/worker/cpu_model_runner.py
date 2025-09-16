@@ -55,11 +55,28 @@ class CPUModelRunner(GPUModelRunner):
             raise ValueError("Multiple KVCacheGroups is not"
                              "currently supported with CPU model runner.")
 
-        assert type(self.attn_groups[0]
-                    [0].metadata_builder) is TorchSDPAMetadataBuilderV1
+        # Guard against encoder-only / pooling models where `attn_groups`
+        # may be empty or lack the expected metadata_builder.
+        # Without this check, accessing `attn_groups[0][0]` would trigger
+        # an AssertionError on CPU backend.
+        if not hasattr(self, "attn_groups") or not self.attn_groups:
+            return
+        if not self.attn_groups[0]:
+            return
 
-        self.attn_groups[0][0].metadata_builder.reorder_batch(
-            self.input_batch, scheduler_output)
+        mb = getattr(self.attn_groups[0][0], "metadata_builders", None)
+        if isinstance(mb, list):
+            if not isinstance(mb[0], TorchSDPAMetadataBuilderV1):
+                return
+            mb[0].reorder_batch(self.input_batch, scheduler_output)
+            return
+        elif not isinstance(mb, TorchSDPAMetadataBuilderV1):
+            # Encoder-only / rerank models do not benefit from reordering,
+            # so we safely skip here.
+            return
+
+        # Safe path for decoder/attention-heavy models
+        mb.reorder_batch(self.input_batch, scheduler_output)
 
     def _postprocess_tensors(self) -> None:
         # Note: replace device tensors with cpu tensors

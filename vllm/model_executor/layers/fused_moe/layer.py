@@ -4,7 +4,7 @@
 from abc import abstractmethod
 from collections.abc import Iterable
 from enum import Enum
-from typing import Callable, Literal, Optional, Union, overload
+from typing import Callable, Literal, Optional, Union, get_args, overload
 
 import torch
 import torch.nn.functional as F
@@ -12,6 +12,7 @@ from torch.nn.parameter import UninitializedParameter
 
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config
+from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.distributed import (get_dp_group, get_ep_group,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
@@ -35,8 +36,9 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
-from vllm.utils import (direct_register_custom_op, has_deep_ep, has_pplx,
+from vllm.utils import (cdiv, direct_register_custom_op, has_deep_ep, has_pplx,
                         round_up)
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 if current_platform.is_cuda_alike():
     from .fused_batched_moe import BatchedTritonExperts
@@ -675,8 +677,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
 
 def determine_expert_map(
-        ep_size: int, ep_rank: int,
-        global_num_experts: int) -> tuple[int, Optional[torch.Tensor]]:
+    ep_size: int,
+    ep_rank: int,
+    global_num_experts: int,
+    expert_placement_strategy: ExpertPlacementStrategy = "linear",
+) -> tuple[int, Optional[torch.Tensor]]:
     """
         Calculates how many experts should be assigned to each rank for EP and
         creates a mapping from global to local expert index. Experts are
@@ -684,8 +689,11 @@ def determine_expert_map(
         last rank.
 
         Args:
-            ep_size (int): The size of the expert parallel group
-            global_num_experts (int): The total number of experts in the model.
+            ep_size: The size of the expert parallel group
+            ep_rank: The rank of the current process in the expert parallel
+                group
+            global_num_experts: The total number of experts in the model.
+            expert_placement_strategy: The expert placement strategy.
 
         Returns:
             tuple[int, Optional[torch.Tensor]]: A tuple containing:
@@ -711,9 +719,23 @@ def determine_expert_map(
     # Create a tensor of size num_experts filled with -1
     expert_map = torch.full((global_num_experts, ), -1, dtype=torch.int32)
     # Create an expert map for the local experts
-    start_idx = ep_rank * base_experts + min(ep_rank, remainder)
-    expert_map[start_idx:start_idx + local_num_experts] = torch.arange(
-        0, local_num_experts, dtype=torch.int32)
+    if expert_placement_strategy == "linear":
+        start_idx = ep_rank * base_experts + min(ep_rank, remainder)
+        expert_map[start_idx:start_idx + local_num_experts] = torch.arange(
+            0, local_num_experts, dtype=torch.int32)
+    elif expert_placement_strategy == "round_robin":
+        local_log_experts = torch.arange(ep_rank,
+                                         global_num_experts,
+                                         ep_size,
+                                         dtype=torch.int32)
+
+        expert_map[local_log_experts] = torch.arange(0,
+                                                     local_num_experts,
+                                                     dtype=torch.int32)
+    else:
+        raise ValueError("Unsupported expert placement strategy "
+                         f"'{expert_placement_strategy}', expected one of "
+                         f"{get_args(ExpertPlacementStrategy)}")
     return (local_num_experts, expert_map)
 
 
@@ -755,7 +777,7 @@ class FusedMoE(CustomOp):
         intermediate_size: Intermediate size of the experts
         params_dtype: Data type for the parameters.
         reduce_results: Whether to all all_reduce on the output of the layer
-        renomalize: Whether to renormalize the logits in the fused_moe kernel
+        renormalize: Whether to renormalize the logits in the fused_moe kernel
         quant_config: Quantization configure.
         enable_eplb: Whether to enable expert parallelism load balancer.
     """
@@ -786,6 +808,7 @@ class FusedMoE(CustomOp):
         enable_eplb: bool = False,
         num_redundant_experts: int = 0,
         has_bias: bool = False,
+        is_sequence_parallel=False,
     ):
         super().__init__()
         if params_dtype is None:
@@ -796,6 +819,10 @@ class FusedMoE(CustomOp):
                     get_tensor_model_parallel_world_size())
         dp_size_ = (dp_size
                     if dp_size is not None else get_dp_group().world_size)
+
+        self.is_sequence_parallel = is_sequence_parallel
+        if self.is_sequence_parallel:
+            self.sp_size = tp_size_
 
         vllm_config = get_current_vllm_config()
         self.moe_parallel_config: FusedMoEParallelConfig = (
@@ -808,9 +835,16 @@ class FusedMoE(CustomOp):
 
         # we are padding globally so EP buffer allocation works
         if quant_config and quant_config.get_name() == "mxfp4":
-            from vllm.model_executor.layers.quantization.mxfp4 import (  # noqa: E501
-                should_use_flashinfer_mxfp4)
-            if current_platform.is_rocm() or should_use_flashinfer_mxfp4():
+            from vllm.model_executor.layers.quantization.mxfp4 import (
+                Mxfp4Backend, get_mxfp4_backend)
+            current_mxfp4_backend = get_mxfp4_backend()
+            if (current_mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
+                    or current_mxfp4_backend
+                    == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS):
+                hidden_size = round_up(hidden_size, 128)
+            elif (current_platform.is_rocm() or current_mxfp4_backend
+                  == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM or
+                  current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16):
                 hidden_size = round_up(hidden_size, 256)
 
         # For smuggling this layer into the fused moe custom op
@@ -834,15 +868,36 @@ class FusedMoE(CustomOp):
             else:
                 assert num_redundant_experts == 0, \
                     "Redundant experts are only supported with EPLB."
+
+            expert_placement_strategy = (
+                vllm_config.parallel_config.expert_placement_strategy)
+            if expert_placement_strategy == "round_robin":
+                # TODO(Bruce): will support round robin expert placement with
+                # EPLB enabled in the future.
+                round_robin_supported = ((num_expert_group is not None
+                                          and num_expert_group > 1)
+                                         and num_redundant_experts == 0
+                                         and not self.enable_eplb)
+
+                if not round_robin_supported:
+                    logger.warning(
+                        "Round-robin expert placement is only supported for "
+                        "models with multiple expert groups and no redundant "
+                        "experts. Falling back to linear expert placement.")
+                    expert_placement_strategy = "linear"
+
             self.local_num_experts, self.expert_map = determine_expert_map(
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
-                global_num_experts=self.global_num_experts)
+                global_num_experts=self.global_num_experts,
+                expert_placement_strategy=expert_placement_strategy,
+            )
             logger.info_once(
-                "[EP Rank %s/%s] Expert parallelism is enabled. Local/global"
+                "[EP Rank %s/%s] Expert parallelism is enabled. Expert "
+                "placement strategy: %s. Local/global"
                 " number of experts: %s/%s. Experts local to global index map:"
-                " %s.", self.ep_rank, self.ep_size, self.local_num_experts,
-                self.global_num_experts,
+                " %s.", self.ep_rank, self.ep_size, expert_placement_strategy,
+                self.local_num_experts, self.global_num_experts,
                 get_compressed_expert_map(self.expert_map))
         else:
             self.local_num_experts, self.expert_map = (self.global_num_experts,
@@ -938,16 +993,28 @@ class FusedMoE(CustomOp):
         if (self.moe_parallel_config.use_pplx_kernels
                 or self.moe_parallel_config.use_deepep_ll_kernels
                 or self.moe_config.use_flashinfer_cutlass_kernels):
-            self.batched_hidden_states = torch.zeros(
-                (moe.max_num_tokens, self.hidden_size),
-                dtype=moe.in_dtype,
-                device=torch.cuda.current_device())
+            if vllm_config.parallel_config.enable_dbo:
+                self.batched_hidden_states = torch.zeros(
+                    (2, moe.max_num_tokens, self.hidden_size),
+                    dtype=moe.in_dtype,
+                    device=torch.cuda.current_device())
 
-            # Note here we use `num_experts` which is logical expert count
-            self.batched_router_logits = torch.zeros(
-                (moe.max_num_tokens, num_experts),
-                dtype=moe.in_dtype,
-                device=torch.cuda.current_device())
+                # Note here we use `num_experts` which is logical expert count
+                self.batched_router_logits = torch.zeros(
+                    (2, moe.max_num_tokens, num_experts),
+                    dtype=moe.in_dtype,
+                    device=torch.cuda.current_device())
+            else:
+                self.batched_hidden_states = torch.zeros(
+                    (moe.max_num_tokens, self.hidden_size),
+                    dtype=moe.in_dtype,
+                    device=torch.cuda.current_device())
+
+                # Note here we use `num_experts` which is logical expert count
+                self.batched_router_logits = torch.zeros(
+                    (moe.max_num_tokens, num_experts),
+                    dtype=moe.in_dtype,
+                    device=torch.cuda.current_device())
 
     @property
     def shared_experts(self) -> Optional[torch.nn.Module]:
@@ -1588,7 +1655,7 @@ class FusedMoE(CustomOp):
         else:
             return tensor_model_parallel_all_reduce(final_hidden_states)
 
-    def forward(
+    def forward_native(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
@@ -1622,6 +1689,13 @@ class FusedMoE(CustomOp):
             return (shared_output[..., :og_hidden_states],
                     fused_output[..., :og_hidden_states])
 
+    def forward_cuda(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        return self.forward_native(hidden_states, router_logits)
+
     def forward_impl_chunked(
         self,
         full_hidden_states: torch.Tensor,
@@ -1647,14 +1721,29 @@ class FusedMoE(CustomOp):
             hidden_states = full_hidden_states[chunk_start:chunk_end, :]
             router_logits = full_router_logits[chunk_start:chunk_end, :]
 
-            assert (self.batched_hidden_states.size(0)  # type: ignore
+            assert self.batched_hidden_states is not None
+            assert self.batched_router_logits is not None
+            # This is only true when DBO has been enabled in the config.
+            # Both tensors will have an outer dimension for the ubatch id
+            if self.batched_hidden_states.dim() == 3:
+                assert self.batched_router_logits.dim() == 3
+                batch_buffer_idx = dbo_current_ubatch_id()
+                batched_hidden_states = self.batched_hidden_states[
+                    batch_buffer_idx, :]
+                batched_router_logits = self.batched_router_logits[
+                    batch_buffer_idx, :]
+            else:
+                batched_hidden_states = self.batched_hidden_states
+                batched_router_logits = self.batched_router_logits
+
+            assert (batched_hidden_states.size(0)  # type: ignore
                     >= chunk_size)
-            assert (self.batched_router_logits.size(0)  # type: ignore
+            assert (batched_router_logits.size(0)  # type: ignore 
                     >= chunk_size)
-            staged_hidden_states = self.batched_hidden_states[:
-                                                              chunk_size, :]  # type: ignore
-            staged_router_logits = self.batched_router_logits[:
-                                                              chunk_size, :]  # type: ignore
+            staged_hidden_states = batched_hidden_states[:
+                                                         chunk_size, :]  # type: ignore
+            staged_router_logits = batched_router_logits[:
+                                                         chunk_size, :]  # type: ignore
             staged_hidden_states.copy_(hidden_states, non_blocking=True)
             staged_router_logits.copy_(router_logits, non_blocking=True)
 
@@ -1699,14 +1788,22 @@ class FusedMoE(CustomOp):
 
         ctx = get_forward_context()
         # flashinfer_cutlass_kernels can handle: optional DP + TP/EP
-        max_tokens_across_dp = ctx.dp_metadata.max_tokens_across_dp_cpu
+        max_tokens_across_dispatchers = ctx.dp_metadata.max_tokens_across_dp_cpu
         moe_dp_chunk_size_per_rank = self.moe_config.max_num_tokens
+
+        # If the input to the MoE is sequence parallel then divide by sp_size
+        # to find the maximum number of tokens for any individual dispatcher.
+        if self.is_sequence_parallel:
+            max_tokens_across_dispatchers = cdiv(max_tokens_across_dispatchers,
+                                                 self.sp_size)
+
         num_tokens = full_hidden_states.size(0)
         for chunk_idx, chunk_start_ in enumerate(
-                range(0, max_tokens_across_dp, moe_dp_chunk_size_per_rank)):
+                range(0, max_tokens_across_dispatchers,
+                      moe_dp_chunk_size_per_rank)):
             chunk_start = chunk_start_
             chunk_end = min(chunk_start + moe_dp_chunk_size_per_rank,
-                            max_tokens_across_dp)
+                            max_tokens_across_dispatchers)
             # clamp start and end
             chunk_start = min(chunk_start, num_tokens - 1)
             chunk_end = min(chunk_end, num_tokens)
@@ -1742,9 +1839,6 @@ class FusedMoE(CustomOp):
             self.dp_size > 1
             and not self.moe_parallel_config.use_deepep_ht_kernels
             and not self.moe_config.use_flashinfer_cutlass_kernels)
-        if do_naive_dispatch_combine:
-            hidden_states, router_logits = get_ep_group().dispatch(
-                hidden_states, router_logits)
 
         # If there are shared experts but we are not using a modular kernel, the
         # shared experts must be called here
@@ -1754,6 +1848,10 @@ class FusedMoE(CustomOp):
             shared_output = self.shared_experts(hidden_states)
         else:
             shared_output = None
+
+        if do_naive_dispatch_combine:
+            hidden_states, router_logits = get_ep_group().dispatch(
+                hidden_states, router_logits)
 
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(
@@ -1787,8 +1885,9 @@ class FusedMoE(CustomOp):
                 final_hidden_states,
             )
 
-        def reduce_output(states: torch.Tensor) -> torch.Tensor:
-            if do_naive_dispatch_combine:
+        def reduce_output(states: torch.Tensor,
+                          do_combine: bool = True) -> torch.Tensor:
+            if do_naive_dispatch_combine and do_combine:
                 states = get_ep_group().combine(states)
 
             if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
@@ -1797,10 +1896,11 @@ class FusedMoE(CustomOp):
             return states
 
         if self.shared_experts is None:
+            assert not isinstance(final_hidden_states, tuple)
             return reduce_output(final_hidden_states)
         else:
             return (
-                reduce_output(final_hidden_states[0]),
+                reduce_output(final_hidden_states[0], do_combine=False),
                 reduce_output(final_hidden_states[1]),
             )
 

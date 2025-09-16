@@ -9,7 +9,7 @@ import torch.nn as nn
 from transformers import LlamaConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear
@@ -33,10 +33,14 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
     def __init__(
         self,
         config: LlamaConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
-        super().__init__(config, quant_config=quant_config, prefix=prefix)
+        super().__init__(config,
+                         cache_config=cache_config,
+                         quant_config=quant_config,
+                         prefix=prefix)
 
         # override qkv
         self.self_attn.qkv_proj = QKVParallelLinear(
@@ -114,6 +118,8 @@ class LlamaModel(nn.Module):
             speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
 
+        current_vllm_config = get_current_vllm_config()
+
         self.embed_tokens = VocabParallelEmbedding(
             self.config.vocab_size,
             self.config.hidden_size,
@@ -123,6 +129,7 @@ class LlamaModel(nn.Module):
         self.layers = nn.ModuleList([
             LlamaDecoderLayer(
                 config=self.config,
+                cache_config=current_vllm_config.cache_config,
                 prefix=maybe_prefix(prefix, f"layers.{start_layer_id}"),
             )
         ])
@@ -199,6 +206,10 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             speculative_config.draft_model_config.hf_config
         target_layer_num = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config)
+
+        # Store target layer count in draft config for
+        # proper layer_types indexing in draft models
+        self.config.target_layer_count = target_layer_num
         self.model = LlamaModel(vllm_config=vllm_config,
                                 prefix="model",
                                 start_layer_id=target_layer_num)
