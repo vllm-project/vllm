@@ -476,9 +476,8 @@ class EplbState:
         # rearrangement step and perform rearrangement to ensure all ranks are
         # performing collective communication.
         self.expert_rearrangement_step += 1
-        logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: step: expert_rearrangement_step={self.expert_rearrangement_step}, interval={self.expert_rearrangement_step_interval}, is_async={self.is_async}, ep_buffer_ready={self.ep_buffer_ready}")
 
-        if self.is_async and self.ep_buffer_ready and self._synchronize_rearrange_completion(ep_group):
+        if self.is_async and self.ep_buffer_ready:
             logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Calling move_to_workspace from step()")
             
             logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: _synchronize_rearrange_completion done, proceeding to move_to_workspace")
