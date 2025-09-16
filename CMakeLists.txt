@@ -13,6 +13,10 @@ cmake_minimum_required(VERSION 3.26)
 # cmake --install . --component _C
 project(vllm_extensions LANGUAGES CXX)
 
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+
 # CUDA by default, can be overridden by using -DVLLM_TARGET_DEVICE=... (used by setup.py)
 set(VLLM_TARGET_DEVICE "cuda" CACHE STRING "Target device backend for vLLM")
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
@@ -30,7 +34,7 @@ install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)" ALL_COMPONENTS)
 # Supported python versions.  These versions will be searched in order, the
 # first match will be selected.  These should be kept in sync with setup.py.
 #
-set(PYTHON_SUPPORTED_VERSIONS "3.9" "3.10" "3.11" "3.12", "3.13")
+set(PYTHON_SUPPORTED_VERSIONS "3.9" "3.10" "3.11" "3.12" "3.13")
 
 # Supported AMD GPU architectures.
 set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1200;gfx1201")
@@ -45,8 +49,8 @@ set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1
 # requirements.txt files and should be kept consistent.  The ROCm torch
 # versions are derived from docker/Dockerfile.rocm
 #
-set(TORCH_SUPPORTED_VERSION_CUDA "2.7.1")
-set(TORCH_SUPPORTED_VERSION_ROCM "2.7.0")
+set(TORCH_SUPPORTED_VERSION_CUDA "2.8.0")
+set(TORCH_SUPPORTED_VERSION_ROCM "2.8.0")
 
 #
 # Try to find python package with an executable that exactly matches
@@ -541,6 +545,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND FP4_ARCHS)
     set(SRCS
       "csrc/quantization/fp4/nvfp4_quant_kernels.cu"
+      "csrc/quantization/fp4/activation_nvfp4_quant_fusion_kernels.cu"
       "csrc/quantization/fp4/nvfp4_scaled_mm_sm120_kernels.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
@@ -559,6 +564,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND FP4_ARCHS)
     set(SRCS
       "csrc/quantization/fp4/nvfp4_quant_kernels.cu"
+      "csrc/quantization/fp4/activation_nvfp4_quant_fusion_kernels.cu"
       "csrc/quantization/fp4/nvfp4_experts_quant.cu"
       "csrc/quantization/fp4/nvfp4_scaled_mm_kernels.cu"
       "csrc/quantization/fp4/nvfp4_blockwise_moe_kernel.cu")
@@ -777,6 +783,17 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     endif()
   endif()
 
+  # Hadacore kernels
+  cuda_archs_loose_intersection(HADACORE_ARCHS "8.0;8.9;9.0" "${CUDA_ARCHS}")
+  if(HADACORE_ARCHS)
+    set(SRCS "csrc/quantization/hadamard/hadacore/hadamard_transform_cuda.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${HADACORE_ARCHS}")
+    list(APPEND VLLM_EXT_SRC "${SRCS}")
+    message(STATUS "Building hadacore")
+  endif()
+
 # if CUDA endif
 endif()
 
@@ -817,7 +834,9 @@ set(VLLM_MOE_EXT_SRC
   "csrc/moe/topk_softmax_kernels.cu")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
-  list(APPEND VLLM_MOE_EXT_SRC "csrc/moe/moe_wna16.cu")
+  list(APPEND VLLM_MOE_EXT_SRC
+    "csrc/moe/moe_wna16.cu"
+    "csrc/moe/grouped_topk_kernels.cu")
 endif()
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")

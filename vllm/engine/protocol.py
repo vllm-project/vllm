@@ -3,7 +3,7 @@
 
 import asyncio
 from abc import ABC, abstractmethod
-from typing import AsyncGenerator, Iterable, Mapping, Optional, Union
+from typing import Any, AsyncGenerator, Iterable, Mapping, Optional, Union
 
 from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
 from vllm.config import DecodingConfig, ModelConfig, VllmConfig
@@ -15,6 +15,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.outputs import CompletionOutput, PoolingRequestOutput, RequestOutput
+from vllm.plugins.io_processors.interface import IOProcessor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -77,6 +78,7 @@ class EngineClient(ABC):
         preprocessor = await self.get_input_preprocessor()
         tokenizer_group = preprocessor.get_tokenizer_group()
         tokenizer = await tokenizer_group.get_lora_tokenizer_async()
+        eos_token_id = tokenizer.eos_token_id
 
         if is_explicit_encoder_decoder_prompt(prompt):
             raise NotImplementedError
@@ -103,7 +105,7 @@ class EngineClient(ABC):
         tokenized_length = len(prompt_token_ids)
 
         sort_beams_key = create_sort_beams_key_function(
-            tokenizer.eos_token_id, length_penalty)
+            eos_token_id, length_penalty)
 
         beam_search_params = SamplingParams(
             logprobs=2 * beam_width,
@@ -153,7 +155,7 @@ class EngineClient(ABC):
                 if result.outputs[0].logprobs is not None:
                     logprobs = result.outputs[0].logprobs[0]
                     for token_id, logprob_obj in logprobs.items():
-                        if token_id == tokenizer.eos_token_id and \
+                        if token_id == eos_token_id and \
                             not ignore_eos:
                             completed.append(
                                 BeamSearchSequence(
@@ -165,7 +167,7 @@ class EngineClient(ABC):
                                     cum_logprob=current_beam.cum_logprob +
                                     logprob_obj.logprob,
                                     finish_reason="stop",
-                                    stop_reason=tokenizer.eos_token_id))
+                                    stop_reason=eos_token_id))
                         else:
                             new_beams.append(
                                 BeamSearchSequence(
@@ -188,14 +190,14 @@ class EngineClient(ABC):
         best_beams = sorted_completed[:beam_width]
 
         for beam in best_beams:
-            if (beam.tokens[-1] == tokenizer.eos_token_id and not ignore_eos):
+            if (beam.tokens[-1] == eos_token_id and not ignore_eos):
                 # Skip the eos token in the text.
                 tokens = beam.tokens[tokenized_length:-1]
             else:
                 tokens = beam.tokens[tokenized_length:]
             beam.text = tokenizer.decode(tokens)
 
-        beam_search_output = RequestOutput(
+        yield RequestOutput(
             request_id=request_id,
             prompt=prompt_text,
             outputs=[
@@ -213,8 +215,6 @@ class EngineClient(ABC):
             prompt_token_ids=prompt_token_ids,
             prompt_logprobs=None)
 
-        yield beam_search_output
-
     @abstractmethod
     def encode(
         self,
@@ -224,6 +224,7 @@ class EngineClient(ABC):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """Generate outputs for a request from a pooling model."""
         ...
@@ -265,6 +266,9 @@ class EngineClient(ABC):
     ) -> AnyTokenizer:
         """Get the appropriate tokenizer for the request"""
         ...
+
+    async def get_io_processor(self) -> IOProcessor:
+        raise NotImplementedError
 
     @abstractmethod
     async def is_tracing_enabled(self) -> bool:
@@ -320,7 +324,7 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def add_lora(self, lora_request: LoRARequest) -> None:
+    async def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""
         ...
 
