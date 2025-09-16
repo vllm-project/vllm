@@ -16,79 +16,85 @@
 
 from __future__ import annotations
 
-from collections.abc import Hashable, KeysView, Sequence
+from collections.abc import Hashable, KeysView
 from dataclasses import dataclass, field
-from typing import Optional, Union, List, NamedTuple
+from typing import NamedTuple, Optional, Union
+
 import torch
+
+import vllm._suffix_cache_C  # noqa: F401
 
 
 class Candidate(NamedTuple):
     """Result of suffix tree speculation from C++ implementation."""
-    token_ids: List[int]
-    parents: List[int]
-    probs: List[float]
+    token_ids: list[int]
+    parents: list[int]
+    probs: list[float]
     score: float
     match_len: int
 
 
 class SuffixTree:
-    """Python wrapper for the C++ SuffixTree implementation using TORCH_LIBRARY."""
-    
+    """Python wrapper for the C++ SuffixTree implementation."""
+
     def __init__(self, max_depth: int):
         """Initialize a new suffix tree.
-        
+
         Args:
             max_depth: Maximum depth of the suffix tree.
         """
-        self._handle = torch.ops._suffix_cache.suffix_tree_create(max_depth)
+        self._handle = torch.ops._suffix_cache_C.suffix_tree_create(max_depth)
         self._destroyed = False
-    
+
     def __del__(self):
         """Clean up the C++ suffix tree object."""
         if hasattr(self, '_handle') and not self._destroyed:
-            torch.ops._suffix_cache.suffix_tree_destroy(self._handle)
+            torch.ops._suffix_cache_C.suffix_tree_destroy(self._handle)
             self._destroyed = True
-    
+
     def num_seqs(self) -> int:
         """Get the number of sequences in the suffix tree."""
-        return int(torch.ops._suffix_cache.suffix_tree_num_seqs(self._handle))
-    
+        return int(torch.ops._suffix_cache_C.suffix_tree_num_seqs(
+            self._handle))
+
     def append(self, seq_id: int, token: int) -> None:
         """Append a new element to the sequence with id seq_id.
-        
+
         Args:
             seq_id: ID of the sequence to append to.
             token: Token to append.
         """
-        torch.ops._suffix_cache.suffix_tree_append(self._handle, seq_id, token)
-    
-    def extend(self, seq_id: int, tokens: List[int]) -> None:
+        torch.ops._suffix_cache_C.suffix_tree_append(self._handle, seq_id,
+                                                     token)
+
+    def extend(self, seq_id: int, tokens: list[int]) -> None:
         """Append multiple new elements to the sequence with id seq_id.
-        
+
         Args:
             seq_id: ID of the sequence to extend.
-            tokens: List of tokens to append.
+            tokens: list of tokens to append.
         """
         tokens_tensor = torch.tensor(tokens, dtype=torch.int64)
-        torch.ops._suffix_cache.suffix_tree_extend(self._handle, seq_id, tokens_tensor)
-    
+        torch.ops._suffix_cache_C.suffix_tree_extend(self._handle, seq_id,
+                                                     tokens_tensor)
+
     def remove(self, seq_id: int) -> None:
         """Remove the sequence with id seq_id.
-        
+
         Args:
             seq_id: ID of the sequence to remove.
         """
-        torch.ops._suffix_cache.suffix_tree_remove(self._handle, seq_id)
-    
-    def speculate(self, 
-                  pattern: List[int],
+        torch.ops._suffix_cache_C.suffix_tree_remove(self._handle, seq_id)
+
+    def speculate(self,
+                  pattern: list[int],
                   max_spec_tokens: int,
                   max_spec_factor: float = 1.0,
                   max_spec_offset: float = 0.0,
                   min_token_prob: float = 0.1,
                   use_tree_spec: bool = False) -> Candidate:
         """Given a pattern, speculate the next tokens using the suffix tree.
-        
+
         Args:
             pattern: The pattern to match.
             max_spec_tokens: Maximum number of tokens to speculate.
@@ -96,47 +102,43 @@ class SuffixTree:
             max_spec_offset: Maximum speculation offset.
             min_token_prob: Minimum token probability threshold.
             use_tree_spec: Whether to use tree-based speculation.
-            
+
         Returns:
             Candidate object containing speculation results.
         """
         pattern_tensor = torch.tensor(pattern, dtype=torch.int64)
-        
-        token_ids, parents, probs, score, match_len = torch.ops._suffix_cache.suffix_tree_speculate(
-            self._handle, 
-            pattern_tensor,
-            max_spec_tokens,
-            max_spec_factor,
-            max_spec_offset,
-            min_token_prob,
-            use_tree_spec
-        )
-        
-        return Candidate(
-            token_ids=token_ids.tolist(),
-            parents=parents.tolist(),
-            probs=probs.tolist(),
-            score=float(score),
-            match_len=int(match_len)
-        )
-    
+
+        token_ids, parents, probs, score, match_len = \
+            torch.ops._suffix_cache_C.suffix_tree_speculate(
+                self._handle, pattern_tensor, max_spec_tokens, max_spec_factor,
+                max_spec_offset, min_token_prob, use_tree_spec)
+
+        return Candidate(token_ids=token_ids.tolist(),
+                         parents=parents.tolist(),
+                         probs=probs.tolist(),
+                         score=float(score),
+                         match_len=int(match_len))
+
     def check_integrity(self) -> str:
         """Check the integrity of the suffix tree.
-        
+
         Returns:
             Empty string if ok, otherwise an error message.
         """
-        return torch.ops._suffix_cache.suffix_tree_check_integrity(self._handle)
-    
+        return torch.ops._suffix_cache_C.suffix_tree_check_integrity(
+            self._handle)
+
     def estimate_memory(self) -> int:
         """Estimate memory usage of the suffix tree.
-        
+
         Note: This walks the entire tree so can be slow.
-        
+
         Returns:
             Estimated memory usage in bytes.
         """
-        return int(torch.ops._suffix_cache.suffix_tree_estimate_memory(self._handle))
+        return int(
+            torch.ops._suffix_cache_C.suffix_tree_estimate_memory(
+                self._handle))
 
 
 @dataclass
@@ -145,11 +147,11 @@ class SuffixSpecResult:
     A dataclass representing the result of a speculation using SuffixDecoding.
 
     Attributes:
-        token_ids (List[int]): List of token IDs in the speculation result.
-        parents (List[int]): List of parent indices for each token used to
+        token_ids (list[int]): list of token IDs in the speculation result.
+        parents (list[int]): list of parent indices for each token used to
             encode the tree structure. The parent token of token_ids[i] is
             token_ids[parents[i]].
-        probs (List[float]): List of estimated probabilities for each token.
+        probs (list[float]): list of estimated probabilities for each token.
         score (float): The overall score of the suffix match computed as the
             sum of the estimated probabilities of each speculated token.
         match_len (int): The length of the pattern match that yielded this
@@ -230,7 +232,7 @@ class SuffixCache:
         """
         return self._req_to_seq_id.keys()
 
-    def start_request(self, req_id: Hashable, prompt_token_ids: Sequence[int]):
+    def start_request(self, req_id: Hashable, prompt_token_ids: list[int]):
         """
         This method should be called when starting to process a new request. It
         will store the prompt for the request, allowing future speculations for
@@ -240,7 +242,7 @@ class SuffixCache:
         Args:
             req_id (Hashable): The request identifier. Must be a hashable value
                 that uniquely identifies the request.
-            prompt_token_ids (Sequence[int]): A sequence of token IDs
+            prompt_token_ids (list[int]): A sequence of token IDs
                 representing the prompt of the request.
 
         Raises:
@@ -272,7 +274,7 @@ class SuffixCache:
     def add_active_response(
         self,
         req_id: Hashable,
-        token_ids: Union[int, Sequence[int]],
+        token_ids: Union[int, list[int]],
     ):
         """
         Update the cached response for a given request by appending token(s) to
@@ -281,7 +283,7 @@ class SuffixCache:
 
         Args:
             req_id (Hashable): The unique identifier for the request.
-            token_ids (Union[int, Sequence[int]]): Either a single token ID
+            token_ids (Union[int, list[int]]): Either a single token ID
                 (int) or a sequence of token IDs to be appended to the response
                 for the given request.
 
@@ -301,7 +303,7 @@ class SuffixCache:
     def insert_new_response(
         self,
         req_id: Hashable,
-        token_ids: Union[int, Sequence[int]],
+        token_ids: list[int],
     ):
         """
         Insert a complete response to the global cache for a request that is
@@ -309,7 +311,7 @@ class SuffixCache:
 
         Args:
             req_id (Hashable): The unique identifier for the request.
-            token_ids (Sequence[int]): A sequence of token IDs to be inserted
+            token_ids (list[int]): A sequence of token IDs to be inserted
                 as the response for the given request.
 
         Raises:
@@ -345,7 +347,7 @@ class SuffixCache:
     def speculate(
         self,
         req_id: Hashable,
-        pattern: Sequence[int],
+        pattern: list[int],
         max_spec_tokens: Optional[int] = None,
         max_spec_factor: float = 1.0,
         max_spec_offset: float = 0.0,
@@ -360,7 +362,7 @@ class SuffixCache:
 
         Args:
             req_id (Hashable): The unique identifier for the request.
-            pattern (Sequence[int]): The sequence of token IDs to match and
+            pattern (list[int]): The sequence of token IDs to match and
                 continue from.
             max_spec_tokens (int): Maximum number of tokens to speculate. If 0,
                 uses the cache's max_depth.
@@ -369,7 +371,7 @@ class SuffixCache:
             min_token_prob (float): Minimum estimated probability threshold for
                 candidate tokens.
             use_tree_spec (bool): If True, uses tree-based speculation.
-        
+
         Returns:
             The speculation result containing the most likely continuation
             tokens, their probabilities, and overall score.

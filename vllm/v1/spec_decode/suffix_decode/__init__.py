@@ -1,5 +1,6 @@
 # Copyright 2025 Snowflake Inc.
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,6 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .suffix_cache import SuffixCache, SuffixSpecResult, Candidate, SuffixTree
+from .suffix_cache import Candidate, SuffixCache, SuffixSpecResult, SuffixTree
 
 __all__ = ["SuffixCache", "SuffixSpecResult", "Candidate", "SuffixTree"]
