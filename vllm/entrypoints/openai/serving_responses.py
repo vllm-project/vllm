@@ -1271,9 +1271,9 @@ class OpenAIServingResponses(OpenAIServing):
         _increment_sequence_number_and_return: Callable[[BaseModel],
                                                         BaseModel],
     ) -> AsyncGenerator[BaseModel, None]:
-        current_content_index = 0  # FIXME: this number is never changed
+        current_content_index = -1
         current_output_index = 0
-        current_item_id = ""  # FIXME: this number is never changed
+        current_item_id: str = ""
         sent_output_item_added = False
 
         async for ctx in result_generator:
@@ -1364,6 +1364,7 @@ class OpenAIServingResponses(OpenAIServing):
                         and ctx.parser.current_recipient is None):
                     if not sent_output_item_added:
                         sent_output_item_added = True
+                        current_item_id = f"msg_{random_uuid()}"
                         yield _increment_sequence_number_and_return(
                             openai_responses_types.
                             ResponseOutputItemAddedEvent(
@@ -1379,6 +1380,7 @@ class OpenAIServingResponses(OpenAIServing):
                                     status="in_progress",
                                 ),
                             ))
+                        current_content_index += 1
                         yield _increment_sequence_number_and_return(
                             openai_responses_types.
                             ResponseContentPartAddedEvent(
@@ -1409,6 +1411,7 @@ class OpenAIServingResponses(OpenAIServing):
                       and ctx.parser.current_recipient is None):
                     if not sent_output_item_added:
                         sent_output_item_added = True
+                        current_item_id = f"msg_{random_uuid()}"
                         yield _increment_sequence_number_and_return(
                             openai_responses_types.
                             ResponseOutputItemAddedEvent(
@@ -1423,6 +1426,7 @@ class OpenAIServingResponses(OpenAIServing):
                                     status="in_progress",
                                 ),
                             ))
+                        current_content_index += 1
                         yield _increment_sequence_number_and_return(
                             openai_responses_types.
                             ResponseContentPartAddedEvent(
@@ -1455,6 +1459,7 @@ class OpenAIServingResponses(OpenAIServing):
                       ) and ctx.parser.current_recipient == "python":
                     if not sent_output_item_added:
                         sent_output_item_added = True
+                        current_item_id = f"tool_{random_uuid()}"
                         yield _increment_sequence_number_and_return(
                             openai_responses_types.
                             ResponseOutputItemAddedEvent(
@@ -1527,6 +1532,7 @@ class OpenAIServingResponses(OpenAIServing):
                         raise ValueError(
                             f"Unknown function name: {function_name}")
 
+                    current_item_id = f"tool_{random_uuid()}"
                     yield _increment_sequence_number_and_return(
                         openai_responses_types.ResponseOutputItemAddedEvent(
                             type="response.output_item.added",
