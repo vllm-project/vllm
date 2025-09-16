@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import importlib.util
 import os
 from dataclasses import MISSING, Field, asdict, dataclass, field
+from unittest.mock import patch
 
 import pytest
 
@@ -13,21 +13,6 @@ from vllm.config.load import LoadConfig
 from vllm.config.utils import get_field
 from vllm.model_executor.layers.pooler import PoolingType
 from vllm.platforms import current_platform
-
-
-# Check if runai_model_streamer is available and can be imported
-def _check_runai_available():
-    if importlib.util.find_spec("runai_model_streamer") is None:
-        return False
-    try:
-        # Try to import the module to catch OSError on incompatible platforms
-        importlib.import_module("runai_model_streamer")
-        return True
-    except (ImportError, OSError):
-        return False
-
-
-runai_available = _check_runai_available()
 
 
 def test_compile_config_repr_succeeds():
@@ -414,98 +399,104 @@ def test_get_and_verify_max_len(model_id, max_model_len, expected_max_len,
         assert actual_max_len == expected_max_len
 
 
-@pytest.mark.skipif(not runai_available,
-                    reason="RunAI model streamer not available")
+class MockConfig:
+    """Simple mock object for testing maybe_pull_model_tokenizer_for_runai"""
+
+    def __init__(self, model: str, tokenizer: str):
+        self.model = model
+        self.tokenizer = tokenizer
+        self.model_weights = None
+
+
 @pytest.mark.parametrize("s3_url", [
-    "s3://air-example-data/rayllm-ossci/facebook-opt-350m/",
-    "s3://air-example-data/rayllm-ossci/meta-Llama-3.2-1B-Instruct/",
+    "s3://example-bucket-1/model/",
+    "s3://example-bucket-2/model/",
 ])
-def test_s3_url_model_tokenizer_paths(s3_url):
+@patch('vllm.transformers_utils.runai_utils.ObjectStorageModel.pull_files')
+def test_s3_url_model_tokenizer_paths(mock_pull_files, s3_url):
     """Test that S3 URLs create deterministic local directories for model and
     tokenizer."""
+    # Mock pull_files to avoid actually downloading files during tests
+    mock_pull_files.return_value = None
 
-    # Create first config with S3 URL
-    config1 = ModelConfig(model=s3_url, tokenizer=s3_url)
+    # Create first mock and run the method
+    mock1 = MockConfig(model=s3_url, tokenizer=s3_url)
+    ModelConfig.maybe_pull_model_tokenizer_for_runai(mock1, s3_url, s3_url)
 
     # Check that model and tokenizer point to existing directories
     assert os.path.exists(
-        config1.model), f"Model directory does not exist: {config1.model}"
+        mock1.model), f"Model directory does not exist: {mock1.model}"
     assert os.path.isdir(
-        config1.model), f"Model path is not a directory: {config1.model}"
+        mock1.model), f"Model path is not a directory: {mock1.model}"
     assert os.path.exists(
-        config1.tokenizer
-    ), f"Tokenizer directory does not exist: {config1.tokenizer}"
+        mock1.tokenizer
+    ), f"Tokenizer directory does not exist: {mock1.tokenizer}"
     assert os.path.isdir(
-        config1.tokenizer
-    ), f"Tokenizer path is not a directory: {config1.tokenizer}"
+        mock1.tokenizer
+    ), f"Tokenizer path is not a directory: {mock1.tokenizer}"
 
     # Verify that the paths are different from the original S3 URL
-    assert config1.model != s3_url, (
+    assert mock1.model != s3_url, (
         "Model path should be converted to local directory")
-    assert config1.tokenizer != s3_url, (
+    assert mock1.tokenizer != s3_url, (
         "Tokenizer path should be converted to local directory")
 
     # Store the original paths
-    original_model_path = config1.model
-    original_tokenizer_path = config1.tokenizer
+    original_model_path = mock1.model
+    original_tokenizer_path = mock1.tokenizer
 
-    # Delete the config to trigger cleanup
-    del config1
-
-    # Create a new config with the same S3 URL
-    config2 = ModelConfig(model=s3_url, tokenizer=s3_url)
+    # Create a new mock and run the method with the same S3 URL
+    mock2 = MockConfig(model=s3_url, tokenizer=s3_url)
+    ModelConfig.maybe_pull_model_tokenizer_for_runai(mock2, s3_url, s3_url)
 
     # Check that the new directories exist
     assert os.path.exists(
-        config2.model), f"Model directory does not exist: {config2.model}"
+        mock2.model), f"Model directory does not exist: {mock2.model}"
     assert os.path.isdir(
-        config2.model), f"Model path is not a directory: {config2.model}"
+        mock2.model), f"Model path is not a directory: {mock2.model}"
     assert os.path.exists(
-        config2.tokenizer
-    ), f"Tokenizer directory does not exist: {config2.tokenizer}"
+        mock2.tokenizer
+    ), f"Tokenizer directory does not exist: {mock2.tokenizer}"
     assert os.path.isdir(
-        config2.tokenizer
-    ), f"Tokenizer path is not a directory: {config2.tokenizer}"
+        mock2.tokenizer
+    ), f"Tokenizer path is not a directory: {mock2.tokenizer}"
 
     # Verify that the paths are deterministic (same as before)
-    assert config2.model == original_model_path, (
+    assert mock2.model == original_model_path, (
         f"Model paths are not deterministic. "
-        f"Original: {original_model_path}, New: {config2.model}")
-    assert config2.tokenizer == original_tokenizer_path, (
+        f"Original: {original_model_path}, New: {mock2.model}")
+    assert mock2.tokenizer == original_tokenizer_path, (
         f"Tokenizer paths are not deterministic. "
-        f"Original: {original_tokenizer_path}, New: {config2.tokenizer}")
-
-    # Clean up
-    del config2
+        f"Original: {original_tokenizer_path}, New: {mock2.tokenizer}")
 
 
-@pytest.mark.skipif(not runai_available,
-                    reason="RunAI model streamer not available")
-def test_s3_url_different_models_create_different_directories():
+@patch('vllm.transformers_utils.runai_utils.ObjectStorageModel.pull_files')
+def test_s3_url_different_models_create_different_directories(mock_pull_files):
     """Test that different S3 URLs create different local directories."""
-    s3_url1 = "s3://air-example-data/rayllm-ossci/facebook-opt-350m/"
-    s3_url2 = "s3://air-example-data/rayllm-ossci/meta-Llama-3.2-1B-Instruct/"
+    # Mock pull_files to avoid actually downloading files during tests
+    mock_pull_files.return_value = None
 
-    # Create configs with different S3 URLs
-    config1 = ModelConfig(model=s3_url1, tokenizer=s3_url1)
-    config2 = ModelConfig(model=s3_url2, tokenizer=s3_url2)
+    s3_url1 = "s3://example-bucket-1/model/"
+    s3_url2 = "s3://example-bucket-2/model/"
+
+    # Create mocks with different S3 URLs and run the method
+    mock1 = MockConfig(model=s3_url1, tokenizer=s3_url1)
+    ModelConfig.maybe_pull_model_tokenizer_for_runai(mock1, s3_url1, s3_url1)
+
+    mock2 = MockConfig(model=s3_url2, tokenizer=s3_url2)
+    ModelConfig.maybe_pull_model_tokenizer_for_runai(mock2, s3_url2, s3_url2)
 
     # Verify that different URLs produce different directories
-    assert config1.model != config2.model, (
+    assert mock1.model != mock2.model, (
         f"Different S3 URLs should create different model directories. "
-        f"URL1 model: {config1.model}, URL2 model: {config2.model}")
-    assert config1.tokenizer != config2.tokenizer, (
+        f"URL1 model: {mock1.model}, URL2 model: {mock2.model}")
+    assert mock1.tokenizer != mock2.tokenizer, (
         f"Different S3 URLs should create different tokenizer directories. "
-        f"URL1 tokenizer: {config1.tokenizer}, "
-        f"URL2 tokenizer: {config2.tokenizer}")
+        f"URL1 tokenizer: {mock1.tokenizer}, "
+        f"URL2 tokenizer: {mock2.tokenizer}")
 
     # Verify that both sets of directories exist
-    assert os.path.exists(config1.model) and os.path.isdir(config1.model)
-    assert os.path.exists(config1.tokenizer) and os.path.isdir(
-        config1.tokenizer)
-    assert os.path.exists(config2.model) and os.path.isdir(config2.model)
-    assert os.path.exists(config2.tokenizer) and os.path.isdir(
-        config2.tokenizer)
-
-    # Clean up
-    del config1, config2
+    assert os.path.exists(mock1.model) and os.path.isdir(mock1.model)
+    assert os.path.exists(mock1.tokenizer) and os.path.isdir(mock1.tokenizer)
+    assert os.path.exists(mock2.model) and os.path.isdir(mock2.model)
+    assert os.path.exists(mock2.tokenizer) and os.path.isdir(mock2.tokenizer)

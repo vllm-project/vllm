@@ -60,9 +60,12 @@ class ObjectStorageModel:
         for sig in (signal.SIGINT, signal.SIGTERM):
             existing_handler = signal.getsignal(sig)
             signal.signal(sig, self._close_by_signal(existing_handler))
-
-        self.dir = os.path.join(tempfile.gettempdir(),
-                                dir) if dir else tempfile.mkdtemp()
+        if dir:
+            dir = os.path.join(tempfile.gettempdir(), dir)
+            os.makedirs(dir, exist_ok=True)
+            self.dir = dir
+        else:
+            self.dir = tempfile.mkdtemp()
 
     def __del__(self):
         self._close()
