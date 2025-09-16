@@ -3325,7 +3325,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             backend_cls: The attention backend class
 
         Returns:
-            The selected kernel block size
+            The selected kernel block size (largest available)
 
         Raises:
             ValueError: If no valid kernel block size can be found that
@@ -3334,18 +3334,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         supported_constraints = backend_cls.get_supported_block_size()
         selected_kernel_size = kv_manager_block_size
         constraint_satisfied = False
+        valid_constraints = []
 
         for constraint in supported_constraints:
             if (isinstance(constraint, int)
                     and kv_manager_block_size % constraint == 0):
-                selected_kernel_size = constraint
-                constraint_satisfied = True
-                break
+                valid_constraints.append(constraint)
             elif (isinstance(constraint, MultipleOf)
                   and kv_manager_block_size % constraint.base == 0):
-                selected_kernel_size = constraint.base
-                constraint_satisfied = True
-                break
+                valid_constraints.append(constraint.base)
+
+        if valid_constraints:
+            selected_kernel_size = max(valid_constraints)
+            constraint_satisfied = True
 
         if not constraint_satisfied and supported_constraints:
             # Only raise error if there are actual constraints to satisfy
