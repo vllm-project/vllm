@@ -36,6 +36,10 @@ logger = init_logger(__name__)
 
 PADDING_SLOT_ID = -1
 
+def save_stats(forward_time, input_ids_shape):
+    os.makedirs('outputs', exist_ok=True)
+    with open('outputs/drafter.csv', 'a') as f:
+        print(f"{forward_time},{input_ids_shape}", file=f)
 
 class EagleAttentionMetadata(Protocol):
     # Required attributes
@@ -152,10 +156,6 @@ class EagleProposer:
             dtype=torch.int32,
         ).repeat(max_batch_size, 1)
 
-        # todo: delete
-        self.forward_times = []
-        self.input_ids_shapes = []
-
 
     def propose(
         self,
@@ -232,10 +232,8 @@ class EagleProposer:
                 inputs_embeds=inputs_embeds,
             )
             et = time.perf_counter()
-            self.forward_times.append(et-st)
-            self.input_ids_shapes.append(input_ids.shape)
-            # ic(f'drafter forward: {et - st}')
-            # ic(input_ids.shape, num_input_tokens)
+            save_stats(et - st, input_ids.shape)
+
             if self.method in ("deepseek_mtp", "ernie_mtp"):
                 last_hidden_states = ret_hidden_states
                 hidden_states = last_hidden_states
@@ -352,10 +350,8 @@ class EagleProposer:
                     inputs_embeds=inputs_embeds,
                 )
                 et = time.perf_counter()
-                self.forward_times.append(et-st)
-                self.input_ids_shapes.append(input_ids.shape)
-                # ic(f'drafter forward: {et - st}')
-                # ic(input_ids.shape)
+                save_stats(et - st, input_ids.shape)
+
             hidden_states = hidden_states[:batch_size]
             logits = self.model.compute_logits(last_hidden_states[:batch_size],
                                                None)
@@ -513,10 +509,7 @@ class EagleProposer:
                     inputs_embeds=None,
                 )
                 et = time.perf_counter()
-                self.forward_times.append(et-st)
-                self.input_ids_shapes.append(input_ids.shape)
-                # ic(f'drafter forward: {et - st}')
-                # ic(input_ids.shape)
+                save_stats(et - st, input_ids.shape)
 
             # Get the output hidden states for the draft tokens.
             draft_hidden_states = hidden_states[:num_tokens].view(

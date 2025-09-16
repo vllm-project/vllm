@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ast
 import json
-import time
+import pathlib
 
 from transformers import AutoTokenizer
 
@@ -16,6 +16,16 @@ try:
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
+OUTPUTS_DIR = pathlib.Path("outputs/")
+
+def read_stats(path):
+    forward_times, shapes = [], []
+    with open(path, 'r') as f:
+        for line in f:
+            parts = line.strip().split(',')
+            forward_times.append(float(parts[0]))
+            shapes.append(parts[1])
+    return forward_times, shapes
 
 QUESTION = "What is the content of each image?"
 IMAGE_URLS = [
@@ -243,6 +253,12 @@ def main():
     acceptance_length = 1 + (accepted_tokens / drafts) if drafts > 0 else 1
     draft_utilization_rate = accepted_tokens / draft_tokens * 100 if draft_tokens > 0 else 0
 
+    drafter_forward_times, _ = read_stats(OUTPUTS_DIR / "drafter.csv")
+    target_forward_times, _ = read_stats(OUTPUTS_DIR / "target.csv")
+    drafter_forward_time = sum(drafter_forward_times) # measure in secs
+    target_forward_time = sum(target_forward_times)
+    forward_ratio = target_forward_time / drafter_forward_time
+
     # Print formatted benchmark results
     print("=========== Speculative Decoding Stats ============")
     print(f"Number of input tokens:                    {input_tokens:<10}")
@@ -252,6 +268,11 @@ def main():
     print(f"Input time (sec):                          {input_time_sec:<10.2f}")
     print(f"Output time (sec):                         {output_time_sec:<10.2f}")
     print(f"Total time (sec):                          {time_sec:<10.2f}")
+    print()
+
+    print(f"Drafter forward time (sec)                 {drafter_forward_time:<10.2f}")
+    print(f"Target forward time (sec)                  {target_forward_time:<10.2f}")
+    print(f"Forward ratio (T:D)                        {forward_ratio:<10.2f}")
     print()
 
     print(f"Input token throughput (tok/sec):          {input_speed:<10.2f}")

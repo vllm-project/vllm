@@ -4,6 +4,7 @@
 import gc
 import itertools
 import time
+import os
 from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -100,6 +101,10 @@ else:
 
 logger = init_logger(__name__)
 
+def save_stats(forward_time, input_ids_shape):
+    os.makedirs('outputs', exist_ok=True)
+    with open('outputs/target.csv', 'a') as f:
+        print(f"{forward_time},{input_ids_shape}", file=f)
 
 # Wrapper for ModelRunnerOutput to support overlapped execution.
 class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
@@ -1914,10 +1919,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 **model_kwargs,
             )
             et = time.perf_counter()
-            self.forward_times.append(et-st)
-            self.input_ids_shapes.append(input_ids.shape)
-            # ic(f'target model forward: {et - st}')
-            # ic(input_ids.shape, num_input_tokens, batch_descriptor)
+            save_stats(et - st, input_ids.shape)
 
         with record_function_or_nullcontext("Postprocess"):
             if self.use_aux_hidden_state_outputs:
