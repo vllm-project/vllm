@@ -646,9 +646,6 @@ class EagleProposer:
         with set_model_tag("eagle_head"):
             self.model = get_model(vllm_config=self.vllm_config,
                                    model_config=draft_model_config)
-        print(target_model)
-        print(draft_model_config)
-        print(self.model)
 
         draft_attn_layer_names = (
             get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
