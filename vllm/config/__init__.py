@@ -1342,6 +1342,11 @@ class ModelConfig:
             parallel_config.decode_context_parallel_size
         if decode_context_parallel_size > 1 and not self.use_mla:
             total_num_kv_heads = self.get_total_num_kv_heads()
+            assert tensor_parallel_size > total_num_kv_heads, (
+                f"tensor parallel size {tensor_parallel_size} must be greater "
+                f"than total num kv heads {total_num_kv_heads} when enable "
+                f"decode context parallel for GQA")
+            
             max_dcp_size = tensor_parallel_size // total_num_kv_heads
             assert decode_context_parallel_size <= max_dcp_size, (
                 f"decode context parallel size must less than or equal to "
