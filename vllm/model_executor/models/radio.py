@@ -103,10 +103,6 @@ class ClsToken(nn.Module):
 
         self.num_patches = self.num_tokens + self.num_registers
 
-    def disable(self):
-        self.token = None
-        self.enabled = False
-
     def forward(self, x: torch.Tensor):
         if self.token is None:
             return x
@@ -118,11 +114,6 @@ class ClsToken(nn.Module):
         ], dim=1)
 
         return x
-
-    def no_weight_decay(self):
-        return [
-            'token',
-        ]
 
 
 class ViTPatchGenerator(nn.Module):
@@ -225,11 +216,6 @@ class ViTPatchGenerator(nn.Module):
     @property
     def num_skip(self):
         return self.num_cls_tokens + self.num_registers
-
-    def no_weight_decay(self):
-        return [
-            'pos_embed',
-        ]
 
     def _load_embed(self, src_embed: torch.Tensor, targ_embed: nn.Parameter):
         if src_embed.shape != targ_embed.shape:
