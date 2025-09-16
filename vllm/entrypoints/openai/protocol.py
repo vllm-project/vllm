@@ -257,9 +257,6 @@ class ResponsesRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/responses/create
     background: Optional[bool] = False
-    # Dictates whether or not to return Messages as part of the response object
-    # Currently only supported for non-streaming non-background, and gpt-oss
-    enable_response_messages: bool = False
     include: Optional[list[
         Literal[
             "code_interpreter_call.outputs",
@@ -321,6 +318,13 @@ class ResponsesRequest(OpenAIBaseModel):
             "access by 3rd parties, and long enough to be "
             "unpredictable (e.g., 43 characters base64-encoded, corresponding "
             "to 256 bit). Not supported by vLLM engine V0."))
+
+    enable_response_messages: bool = Field(
+        default=False,
+        description=(
+            "Dictates whether or not to return messages as part of the "
+            "response object. Currently only supported for non-streaming "
+            "non-background and gpt-oss only. "))
     # --8<-- [end:responses-extra-params]
 
     _DEFAULT_SAMPLING_PARAMS = {
@@ -1920,7 +1924,6 @@ class ResponsesResponse(OpenAIBaseModel):
         # TODO: implement the other reason for incomplete_details,
         # which is content_filter
         # incomplete_details = IncompleteDetails(reason='content_filter')
-
         return cls(
             id=request.request_id,
             created_at=created_time,
@@ -1937,7 +1940,7 @@ class ResponsesResponse(OpenAIBaseModel):
                 message, HarmonyMessage) else message)
                              for message in output_messages]
             if output_messages else None,
-            parallel_tool_calls=bool(request.parallel_tool_calls),
+            parallel_tool_calls=request.parallel_tool_calls,
             temperature=sampling_params.temperature,
             tool_choice=request.tool_choice,
             tools=request.tools,
