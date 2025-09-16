@@ -31,9 +31,9 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          ModelDType, ModelImpl, ObservabilityConfig,
                          ParallelConfig, PoolerConfig, PrefixCachingHashAlgo,
                          RunnerOption, SchedulerConfig, SchedulerPolicy,
-                         TaskOption, TokenizerMode, VllmConfig, get_attr_docs)
+                         SpeculativeConfig, TaskOption, TokenizerMode,
+                         VllmConfig, get_attr_docs)
 from vllm.config.multimodal import MMCacheType, MultiModalConfig
-from vllm.config.speculative import SpeculativeConfig
 from vllm.config.utils import get_field
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform

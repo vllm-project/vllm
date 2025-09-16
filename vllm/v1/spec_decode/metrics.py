@@ -8,7 +8,7 @@ from typing import Optional
 import numpy as np
 import prometheus_client
 
-from vllm.config.speculative import SpeculativeConfig
+from vllm.config import SpeculativeConfig
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)

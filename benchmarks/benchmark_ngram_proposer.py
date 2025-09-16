@@ -6,8 +6,7 @@ import numpy as np
 from tabulate import tabulate
 
 from benchmark_utils import TimeCollector
-from vllm.config import ModelConfig, VllmConfig
-from vllm.config.speculative import SpeculativeConfig
+from vllm.config import ModelConfig, SpeculativeConfig, VllmConfig
 from vllm.utils import FlexibleArgumentParser
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
