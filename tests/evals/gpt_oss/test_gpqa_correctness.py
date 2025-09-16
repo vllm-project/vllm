@@ -39,11 +39,11 @@ def run_gpqa_eval(model_name: str, base_url: str) -> float:
         print("Evaluation process output:\n", result.stdout)
 
         # Parse the output to extract the score
-        for line in result.stdout.split('\n'):
-            if "'metric':" in line:
-                # Extract metric from line like: 'metric': 0.5820707070707071
-                metric_str = line.split("'metric':")[1].strip().rstrip('}],')
-                return float(metric_str)
+        import re
+        # Use regex to find the metric in the whole output at once.
+        match = re.search(r"'metric':\s*([\d.]+)", result.stdout)
+        if match:
+            return float(match.group(1))
 
         # If we still can't find it, raise an error
         raise ValueError(
