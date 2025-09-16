@@ -285,7 +285,7 @@ void get_cutlass_moe_mm_data(
   int32_t version_num = get_sm_version_num();
 #if (defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90) ||   \
     (defined ENABLE_CUTLASS_MOE_SM100 && ENABLE_CUTLASS_MOE_SM100) || \
-    (defined ENABLE_NVFP4_SM120 && ENABLE_NVFP4_SM120)
+    (defined ENABLE_SCALED_MM_SM120 && ENABLE_SCALED_MM_SM120)
   get_cutlass_moe_mm_data_caller(topk_ids, expert_offsets, problem_sizes1,
                                  problem_sizes2, input_permutation,
                                  output_permutation, num_experts, n, k,
@@ -306,7 +306,7 @@ void get_cutlass_moe_mm_problem_sizes(
   int32_t version_num = get_sm_version_num();
 #if (defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90) ||   \
     (defined ENABLE_CUTLASS_MOE_SM100 && ENABLE_CUTLASS_MOE_SM100) || \
-    (defined ENABLE_NVFP4_SM120 && ENABLE_NVFP4_SM120)
+    (defined ENABLE_SCALED_MM_SM120 && ENABLE_SCALED_MM_SM120)
   get_cutlass_moe_mm_problem_sizes_caller(topk_ids, problem_sizes1,
                                           problem_sizes2, num_experts, n, k,
                                           blockscale_offsets);
@@ -331,7 +331,7 @@ void get_cutlass_pplx_moe_mm_data(torch::Tensor& expert_offsets,
   int32_t version_num = get_sm_version_num();
 #if (defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90) ||   \
     (defined ENABLE_CUTLASS_MOE_SM100 && ENABLE_CUTLASS_MOE_SM100) || \
-    (defined ENABLE_NVFP4_SM120 && ENABLE_NVFP4_SM120)
+    (defined ENABLE_SCALED_MM_SM120 && ENABLE_SCALED_MM_SM120)
   get_cutlass_pplx_moe_mm_data_caller(expert_offsets, problem_sizes1,
                                       problem_sizes2, expert_num_tokens,
                                       num_local_experts, padded_m, n, k);
