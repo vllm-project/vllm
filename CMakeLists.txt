@@ -932,6 +932,24 @@ define_gpu_extension_target(
   USE_SABI 3
   WITH_SOABI)
 
+#
+# _suffix_cache_C extension
+#
+set(VLLM_SUFFIX_CACHE_EXT_SRC
+  "csrc/suffix_cache/torch_bindings.cpp"
+  "csrc/suffix_cache/suffix_tree.cc")
+
+message(STATUS "Enabling suffix_cache extension.")
+define_gpu_extension_target(
+  _suffix_cache_C
+  DESTINATION vllm
+  LANGUAGE CXX
+  SOURCES ${VLLM_SUFFIX_CACHE_EXT_SRC}
+  COMPILE_FLAGS ${CXX_COMPILE_FLAGS}
+  USE_SABI 3
+  WITH_SOABI
+)
+
 if(VLLM_GPU_LANG STREQUAL "HIP")
   #
   # _rocm_C extension

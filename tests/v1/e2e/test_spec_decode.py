@@ -125,6 +125,115 @@ def test_ngram_correctness(
         cleanup_dist_env_and_memory()
 
 
+def test_suffix_correctness(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+    model_name: str,
+):
+    '''
+    Compare the outputs of an original LLM and a speculative LLM
+    should be the same when using suffix speculative decoding.
+    '''
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1")
+
+        # Create test prompts with repetitive patterns that suffix decode
+        # can leverage
+        test_prompts = []
+
+        # Add prompts with repetitive patterns
+        repetitive_prompts = [
+            # Code-like patterns
+            [{
+                "role":
+                "user",
+                "content":
+                "Write a Python function that prints numbers 1 to 10, "
+                "each on a new line using a for loop."
+            }],
+            [{
+                "role":
+                "user",
+                "content":
+                "Create a list of dictionaries where each dictionary "
+                "has 'id' and 'name' keys for 5 users."
+            }],
+            # Repetitive text patterns
+            [{
+                "role":
+                "user",
+                "content":
+                "List the days of the week, each followed by a colon "
+                "and the word 'workday' or 'weekend'."
+            }],
+            [{
+                "role":
+                "user",
+                "content":
+                "Generate a multiplication table for 5 "
+                "(5x1=5, 5x2=10, etc.) up to 5x5."
+            }],
+            # Template-like patterns
+            [{
+                "role":
+                "user",
+                "content":
+                "Create 3 email signatures, each with Name, Title, "
+                "Company, and Email format."
+            }],
+        ]
+
+        # Add some of the original test prompts for variety
+        original_prompts = get_test_prompts(mm_enabled=False)[:20]
+
+        test_prompts = repetitive_prompts + original_prompts
+
+        ref_llm = LLM(model=model_name,
+                      max_model_len=1024,
+                      gpu_memory_utilization=0.25)
+        ref_outputs = ref_llm.chat(test_prompts, sampling_config)
+        del ref_llm
+        torch.cuda.empty_cache()
+        cleanup_dist_env_and_memory()
+
+        spec_llm = LLM(
+            model=model_name,
+            gpu_memory_utilization=0.25,
+            speculative_config={
+                "method": "suffix",
+                "num_speculative_tokens": 8,
+                "suffix_cache_max_depth": 64,
+                "suffix_cache_max_requests": 1000,
+                "suffix_min_token_prob": 0.1,
+            },
+            max_model_len=1024,
+        )
+        spec_outputs = spec_llm.chat(test_prompts, sampling_config)
+        matches = 0
+        misses = 0
+        for ref_output, spec_output in zip(ref_outputs, spec_outputs):
+            if ref_output.outputs[0].text == spec_output.outputs[0].text:
+                matches += 1
+            else:
+                misses += 1
+                print(f"ref_output: {ref_output.outputs[0].text}")
+                print(f"spec_output: {spec_output.outputs[0].text}")
+
+        # Suffix decode should maintain correctness
+        # We expect at least 66% match rate - suffix decode may have
+        # slightly different token boundaries but should produce
+        # semantically similar outputs
+        assert matches >= int(0.66 * len(ref_outputs)), \
+            f"Suffix decode correctness too low: " \
+            f"{matches}/{len(ref_outputs)} matches"
+
+        # Also ensure we have a reasonable number of matches
+        assert matches >= 15, f"Too few matches: {matches}"
+        del spec_llm
+        torch.cuda.empty_cache()
+        cleanup_dist_env_and_memory()
+
+
 @pytest.mark.parametrize(["model_setup", "mm_enabled"], [
     (("eagle3", "Qwen/Qwen3-8B", "AngelSlim/Qwen3-8B_eagle3", 1), False),
     (("eagle", "meta-llama/Llama-3.1-8B-Instruct",
