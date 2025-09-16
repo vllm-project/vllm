@@ -1,28 +1,28 @@
-# vLLM Monitoring Dashboards
+# Monitoring Dashboards
 
 This directory contains monitoring dashboard configurations for vLLM, providing
 comprehensive observability for your vLLM deployments.
 
-## Dashboard Platforms
+## Platforms
 
 We provide dashboards for two popular observability platforms:
 
-- **[Grafana](./grafana/)** - JSON dashboard configurations
-- **[Perses](./perses/)** - YAML dashboard specifications
+- **[Grafana](https://grafana.com)**
+- **[Perses](https://perses.dev)**
 
-## Dashboard Format Approach
+## Format Approach
 
 All dashboards are provided in **native formats** that work across different
 deployment methods:
 
-### Grafana Dashboards (JSON)
+### Grafana (JSON)
 
 - ✅ Works with any Grafana instance (cloud, self-hosted, Docker)
 - ✅ Direct import via Grafana UI or API
 - ✅ Can be wrapped in Kubernetes operators when needed
 - ✅ No vendor lock-in or deployment dependencies
 
-### Perses Dashboards (YAML)
+### Perses (YAML)
 
 - ✅ Works with standalone Perses instances
 - ✅ Compatible with Perses API and CLI
@@ -40,11 +40,17 @@ Both platforms provide equivalent monitoring capabilities:
 
 ## Quick Start
 
-### Grafana
+First, navigate to this example's directory:
 
 ```bash
-# Import JSON directly into Grafana UI
-# Or use the API:
+cd examples/online_serving/dashboards
+```
+
+### Grafana
+
+Import the JSON directly into the Grafana UI, or use the API:
+
+```bash
 curl -X POST http://grafana/api/dashboards/db \
   -H "Content-Type: application/json" \
   -d @grafana/performance_statistics.json
@@ -52,8 +58,9 @@ curl -X POST http://grafana/api/dashboards/db \
 
 ### Perses
 
+Import via the Perses CLI:
+
 ```bash
-# Import via Perses CLI
 percli apply -f perses/performance_statistics.yaml
 ```
 
@@ -67,8 +74,8 @@ percli apply -f perses/performance_statistics.yaml
 
 For detailed deployment instructions and platform-specific options, see:
 
-- **[Grafana Documentation](./grafana/README.md)** - JSON dashboards, operator usage, manual import
-- **[Perses Documentation](./perses/README.md)** - YAML specs, CLI usage, operator wrapping
+- **[Grafana Documentation](./grafana)** - JSON dashboards, operator usage, manual import
+- **[Perses Documentation](./perses)** - YAML specs, CLI usage, operator wrapping
 
 ## Contributing
 
