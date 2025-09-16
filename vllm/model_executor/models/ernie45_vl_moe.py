@@ -287,8 +287,13 @@ class Ernie4_5_VLMoeMoE(nn.Module):
         if self.has_shared_experts:
             shared_output = self.shared_experts(hidden_states)
 
-        if visual_token_mask is not None and visual_token_mask.any():
-            # assert visual_token_mask.shape[0] != hidden_states.shape[0]
+        if visual_token_mask is not None and visual_token_mask.all():
+            # only vision modal input
+            router_logits, _ = self.vision_experts_gate(hidden_states)
+            final_hidden_states = self.vision_experts(
+                hidden_states=hidden_states, router_logits=router_logits)
+        elif visual_token_mask is not None and visual_token_mask.any():
+            # text and vision modals input
             visual_token_mask = visual_token_mask.repeat(
                 1, self.hidden_size).bool()
             text_token_mask = ~visual_token_mask
@@ -310,7 +315,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
                 hidden_states=vision_hidden_states,
                 router_logits=vision_router_logits).flatten()
         else:
-            # text modal input processing directly
+            # only text modal input
             text_router_logits, _ = self.text_experts_gate(hidden_states)
 
             final_hidden_states = self.text_experts(
