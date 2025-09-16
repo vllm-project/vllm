@@ -8,8 +8,9 @@ torch::Tensor LLMM1(at::Tensor& in_a, at::Tensor& in_b,
 torch::Tensor wvSplitK(at::Tensor& in_a, at::Tensor& in_b, at::Tensor& in_bias,
                        const int64_t CuCount);
 
-void wvSplitKQ(at::Tensor& in_a, at::Tensor& in_b, at::Tensor& in_bias, at::Tensor& out_c,
-               at::Tensor& scale_a, at::Tensor& scale_b, const int64_t CuCount);
+void wvSplitKQ(at::Tensor& in_a, at::Tensor& in_b, at::Tensor& in_bias,
+               at::Tensor& out_c, at::Tensor& scale_a, at::Tensor& scale_b,
+               const int64_t CuCount);
 
 void paged_attention(
     torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
