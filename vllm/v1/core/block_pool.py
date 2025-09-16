@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any, Optional, Union
 
@@ -21,32 +20,30 @@ logger = init_logger(__name__)
 
 class BlockHashToBlockMap:
     """
-    Cache of blocks that are used for prefix caching.
+    Cache of blocks that are used for prefix caching. It caches blocks 
+    from hash directly to a block or multiple blocks
+    (i.e. {block_hash: KVCacheBlocks})
+    - Mostly block_hash maps to a single KVCacheBlock, and KVCacheBlocks
+        would simply be a KVCacheBlock.
+    - Otherwise, KVCacheBlocks is a dict from {block_id: KVCacheBlock}
+
+    A cached block is a full block with a block hash that can be used
+    for prefix caching.
+    The cached block may be used by running requests or in the
+    free_block_queue that could potentially be evicted.
+
+    NOTE #1: We currently don't de-duplicate the blocks in the cache,
+    meaning that if a block becomes full and is cached, we don't check
+    if there is already an identical block in the cache. This is because
+    we want to make sure the allocated block IDs won't change so that
+    block tables are append-only.
+    NOTE #2: The union type is introduced in order to reduce GC costs
+    from the inner dict.
     """
 
     def __init__(self):
-        # Caches blocks from hash directly to a block or multiple blocks
-        # (i.e. {block_hash: KVCacheBlocks})
-        # - Mostly block_hash maps to a single KVCacheBlock, and KVCacheBlocks
-        #   would simply be a KVCacheBlock.
-        # - Otherwise, KVCacheBlocks is a dict from {block_id: KVCacheBlock}
-        #
-        # A cached block is a full block with a block hash that can be used
-        # for prefix caching.
-        # The cached block may be used by running requests or in the
-        # free_block_queue that could potentially be evicted.
-        #
-        # NOTE #1: We currently don't de-duplicate the blocks in the cache,
-        # meaning that if a block becomes full and is cached, we don't check
-        # if there is already an identical block in the cache. This is because
-        # we want to make sure the allocated block IDs won't change so that
-        # block tables are append-only.
-        # NOTE #2: The union type is introduced in order to reduce GC costs
-        # from the inner dict.
-        self._cache: defaultdict[BlockHashWithGroupId,
-                                 Union[KVCacheBlock,
-                                       dict[int,
-                                            KVCacheBlock]]] = defaultdict(dict)
+        self._cache: dict[BlockHashWithGroupId,
+                          Union[KVCacheBlock, dict[int, KVCacheBlock]]] = {}
 
     def get_one_block(self,
                       key: BlockHashWithGroupId) -> Optional[KVCacheBlock]:
@@ -54,13 +51,12 @@ class BlockHashToBlockMap:
         Gets any block with the given block hash key.
         """
         blocks = self._cache.get(key)
-        if blocks is None:
-            return None
-        if isinstance(blocks, KVCacheBlock):
-            return blocks
-        if isinstance(blocks, dict):
-            return next(iter(blocks.values()))
-        self._unexpected_blocks_type(blocks)
+        if blocks is not None:
+            if isinstance(blocks, KVCacheBlock):
+                return blocks
+            if isinstance(blocks, dict):
+                return next(iter(blocks.values()))
+            self._unexpected_blocks_type(blocks)
         return None
 
     def insert(self, key: BlockHashWithGroupId, block: KVCacheBlock) -> None:
