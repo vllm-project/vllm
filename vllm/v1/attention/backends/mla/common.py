@@ -359,6 +359,8 @@ class CudnnPrefillMetadata(MLACommonPrefillMetadata):
 class MLACommonDecodeMetadata:
     block_table: torch.Tensor
     seq_lens: torch.Tensor
+    query_base_positions: Optional[torch.Tensor] = field(default=None,
+                                                         kw_only=True)
 
 
 D = TypeVar("D", bound=MLACommonDecodeMetadata)
@@ -615,9 +617,19 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                       query_start_loc_cpu: torch.Tensor,
                       query_start_loc_device: torch.Tensor,
                       num_decode_tokens: int) -> MLACommonDecodeMetadata:
+
+        # Compute DCP query base positions if using DCP
+        query_base_positions = None
+
+        if self.dcp_world_size > 1:
+            query_lens = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+            query_base_positions = (seq_lens_cpu - query_lens).to(
+                seq_lens_device.device)
+
         return MLACommonDecodeMetadata(
             block_table=block_table_tensor,
             seq_lens=seq_lens_device,
+            query_base_positions=query_base_positions,
         )
 
     def build_for_cudagraph_capture(
