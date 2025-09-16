@@ -3,8 +3,9 @@
 from dataclasses import dataclass, field
 from typing import Any, Optional, Union
 
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorBase_V1)
+from vllm.config.kv_transfer import KVTransferConfig
+from vllm.distributed.kv_transfer.kv_connector.factory import (
+    KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_transfer_state import (
     has_kv_transfer_group)
 from vllm.logger import init_logger
@@ -47,22 +48,35 @@ class KVTransferStats:
 
 class KVTransferLogging:
 
-    def __init__(self, connector_cls: type[KVConnectorBase_V1]):
+    def __init__(self, kv_tranfer_config: KVTransferConfig):
         # This should be called on frontend process.
         assert not has_kv_transfer_group()
-        self.connector_cls = connector_cls
+        # Instantiate the connector's stats class.
+        if kv_tranfer_config and kv_tranfer_config.kv_connector:
+            self.connector_cls = KVConnectorFactory.get_connector_class(
+                kv_tranfer_config)
         self.reset()
 
     def reset(self):
         self.transfer_stats_accumulator: Optional[KVTransferStats] = None
 
     def observe(self, transfer_stats_data: dict[str, Any]):
+        # Should not be called when a KVConnector is not configured.
+        assert self.connector_cls is not None
         # Called periodically when connector syncs with the scheduler.
         # Note that this is not the same as the logging interval.
         # We expect transfer_stats_data to be aggregated across all workers and
         # consist of observations from a single connector or a MultiConnector.
         transfer_stats = self.connector_cls.build_kv_transfer_stats(
             transfer_stats_data)
+        if transfer_stats is None:
+            logger.warning_once(
+                "The connector %s is collecting stats but "
+                "does not implement the "
+                "`build_kv_transfer_stats` method. "
+                "Stats will not be logged.", self.connector_cls)
+            return
+
         if self.transfer_stats_accumulator is None:
             self.transfer_stats_accumulator = transfer_stats
         else:

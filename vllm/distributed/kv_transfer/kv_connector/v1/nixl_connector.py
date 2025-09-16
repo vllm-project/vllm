@@ -217,7 +217,8 @@ class NixlConnector(KVConnectorBase_V1):
             cls,
             data: Optional[dict[str,
                                 Any]] = None) -> Optional[KVTransferStats]:
-        return NixlKVTransferStats(data=data)
+        return NixlKVTransferStats(data=data) if data is not None \
+            else NixlKVTransferStats()
 
     def start_load_kv(self, forward_context: "ForwardContext",
                       **kwargs) -> None:
@@ -1365,7 +1366,7 @@ class NixlKVTransferStats(KVTransferStats):
     def is_empty(self) -> bool:
         return self.data["num_successful_transfers"] == 0
 
-    def aggregate(self, other: "NixlKVTransferStats") -> "NixlKVTransferStats":
+    def aggregate(self, other: KVTransferStats) -> KVTransferStats:
         if self == EMPTY_NIXL_KV_TRANSFER_STATS:
             # Make sure EMPTY_KV_TRANSFER_STATS is not mutated. This should also
             # always be semantically correct, as EMPTY | other => other.

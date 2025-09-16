@@ -42,8 +42,7 @@ class MultiKVTransferStats(KVTransferStats):
     This is used to aggregate the stats from all connectors separately.
     """
 
-    def aggregate(self,
-                  other: "MultiKVTransferStats") -> "MultiKVTransferStats":
+    def aggregate(self, other: KVTransferStats) -> KVTransferStats:
         for connector_id, xfer_stats in other.data.items():
             if connector_id not in self.data:
                 self[connector_id] = xfer_stats
@@ -312,7 +311,8 @@ class MultiConnector(KVConnectorBase_V1):
             cls,
             data: Optional[dict[str,
                                 Any]] = None) -> Optional[KVTransferStats]:
-        return MultiKVTransferStats(data=data)
+        return MultiKVTransferStats(data=data) if data is not None \
+            else MultiKVTransferStats()
 
     def get_kv_transfer_stats(self) -> Optional[MultiKVTransferStats]:
         # Group xfer stats by connector type.

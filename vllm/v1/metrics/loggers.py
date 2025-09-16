@@ -9,8 +9,6 @@ from typing import Callable, Optional, Union
 import prometheus_client
 
 from vllm.config import SupportsMetricsInfo, VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.factory import (
-    KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVTransferLogging)
 from vllm.logger import init_logger
@@ -64,12 +62,7 @@ class LoggingStatLogger(StatLoggerBase):
         self.prefix_caching_metrics = PrefixCachingMetrics()
         self.spec_decoding_logging = SpecDecodingLogging()
         kv_tranfer_config = self.vllm_config.kv_transfer_config
-        if kv_tranfer_config.kv_connector:
-            connector_cls = KVConnectorFactory.get_connector_class(
-                kv_tranfer_config)
-            self.kv_transfer_logging = KVTransferLogging(connector_cls)
-        else:
-            self.kv_transfer_logging = None
+        self.kv_transfer_logging = KVTransferLogging(kv_tranfer_config)
         self.last_prompt_throughput: float = 0.0
         self.last_generation_throughput: float = 0.0
 
@@ -109,7 +102,6 @@ class LoggingStatLogger(StatLoggerBase):
                 self.spec_decoding_logging.observe(
                     scheduler_stats.spec_decoding_stats)
             if kv_transfer_stats := scheduler_stats.kv_transfer_stats:
-                assert self.kv_transfer_logging
                 self.kv_transfer_logging.observe(kv_transfer_stats)
             self.last_scheduler_stats = scheduler_stats
 
