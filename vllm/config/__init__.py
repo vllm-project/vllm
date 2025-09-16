@@ -1136,6 +1136,9 @@ class ModelConfig:
                 "modelopt",
                 "modelopt_fp4",
                 "petit_nvfp4",
+                # Ensure heavy backends are probed last to avoid unnecessary
+                # imports during override detection (e.g., MXFP4 imports Triton)
+                "mxfp4",
             ]
             quantization_methods = [
                 q for q in supported_quantization if q not in overrides
@@ -2408,8 +2411,8 @@ class PoolerConfig:
     """
     Maximum input length allowed for embedding generation. When set, allows
     inputs longer than max_embed_len to be accepted for embedding models.
-    When an input exceeds max_embed_len, it will be handled according to 
-    the original max_model_len validation logic. 
+    When an input exceeds max_embed_len, it will be handled according to
+    the original max_model_len validation logic.
     Defaults to None (i.e. set to max_model_len).
     """
 
