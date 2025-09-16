@@ -5,16 +5,14 @@ import pytest
 
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
-MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
-
 
 @pytest.mark.asyncio
-async def test_basic_completion_with_emoji(server):
+async def test_basic_completion_with_emoji(server, model_name):
     """Test basic completion with emoji to verify token_ids field."""
     async with server.get_async_client() as client:
         # Test with return_token_ids enabled
         completion = await client.completions.create(
-            model=MODEL_NAME,
+            model=model_name,
             prompt="Complete this sentence with emojis: I love coding 🚀",
             max_tokens=10,
             temperature=0,
@@ -30,7 +28,7 @@ async def test_basic_completion_with_emoji(server):
         assert isinstance(completion.choices[0].prompt_token_ids, list)
 
         # Check against the expected prompt token IDs
-        tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
+        tokenizer = get_tokenizer(tokenizer_name=model_name)
         encoded_tokens = tokenizer.encode(
             "Complete this sentence with emojis: I love coding 🚀")
         # Check that encoded_tokens is a subsequence of prompt_token_ids
@@ -52,7 +50,7 @@ async def test_basic_completion_with_emoji(server):
 
         # Test without return_token_ids (should be None)
         completion_without = await client.completions.create(
-            model=MODEL_NAME,
+            model=model_name,
             prompt="Complete this sentence with emojis: I love coding 🚀",
             max_tokens=10,
             temperature=0,
@@ -66,7 +64,7 @@ async def test_basic_completion_with_emoji(server):
 
 
 @pytest.mark.asyncio
-async def test_chat_completion_with_tool_use(server):
+async def test_chat_completion_with_tool_use(server, model_name):
     """Test chat completion with tool use (get_weather function)."""
     tools = [{
         "type": "function",
@@ -96,7 +94,7 @@ async def test_chat_completion_with_tool_use(server):
     async with server.get_async_client() as client:
         # Test with return_token_ids enabled
         response = await client.chat.completions.create(
-            model=MODEL_NAME,
+            model=model_name,
             messages=[
                 {
                     "role": "system",
@@ -124,7 +122,7 @@ async def test_chat_completion_with_tool_use(server):
         assert isinstance(response.prompt_token_ids, list)
 
         # Verify the prompt texts and response texts
-        tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
+        tokenizer = get_tokenizer(tokenizer_name=model_name)
         prompt_text = tokenizer.decode(response.prompt_token_ids)
         assert "You are a helpful assistant" in prompt_text
         assert "What's the weather like in Paris?" in prompt_text
@@ -141,7 +139,7 @@ async def test_chat_completion_with_tool_use(server):
 
         # Test without return_token_ids
         response_without = await client.chat.completions.create(
-            model=MODEL_NAME,
+            model=model_name,
             messages=[
                 {
                     "role": "system",
@@ -165,7 +163,8 @@ async def test_chat_completion_with_tool_use(server):
 
 
 @pytest.mark.asyncio
-async def test_comparison_with_prompt_logprobs_and_logprobs(server):
+async def test_comparison_with_prompt_logprobs_and_logprobs(
+        server, model_name):
     """
     Test that token_ids align with prompt_logprobs and
     logprobs when return_tokens_as_token_ids is enabled.
@@ -173,7 +172,7 @@ async def test_comparison_with_prompt_logprobs_and_logprobs(server):
     async with server.get_async_client() as client:
         # Test with both return_token_ids and return_tokens_as_token_ids enabled
         completion = await client.completions.create(
-            model=MODEL_NAME,
+            model=model_name,
             prompt="Hello, world! How are you today?",
             max_tokens=20,
             temperature=0,
@@ -211,7 +210,7 @@ async def test_comparison_with_prompt_logprobs_and_logprobs(server):
             completion.choices[0].token_ids
 
         # Verify tokenizer consistency
-        tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
+        tokenizer = get_tokenizer(tokenizer_name=model_name)
 
         # Decode prompt tokens
         if completion.choices[0].prompt_token_ids:
@@ -227,7 +226,7 @@ async def test_comparison_with_prompt_logprobs_and_logprobs(server):
 
         # Test streaming mode
         stream = await client.completions.create(
-            model=MODEL_NAME,
+            model=model_name,
             prompt="Tell me a short fact about Python:",
             max_tokens=30,
             temperature=0,
@@ -263,7 +262,7 @@ async def test_comparison_with_prompt_logprobs_and_logprobs(server):
 
 
 @pytest.mark.asyncio
-async def test_chat_completion_with_emoji_and_token_ids(server):
+async def test_chat_completion_with_emoji_and_token_ids(server, model_name):
     """Test chat completion with emojis to verify token_ids handling."""
     chat_messages = [
         {
@@ -277,7 +276,7 @@ async def test_chat_completion_with_emoji_and_token_ids(server):
     ]
     async with server.get_async_client() as client:
         response = await client.chat.completions.create(
-            model=MODEL_NAME,
+            model=model_name,
             messages=chat_messages,
             max_tokens=50,
             temperature=0,
@@ -294,7 +293,7 @@ async def test_chat_completion_with_emoji_and_token_ids(server):
         assert response.choices[0].message.content is not None
 
         # Decode token_ids and verify consistency
-        tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
+        tokenizer = get_tokenizer(tokenizer_name=model_name)
 
         decoded_prompt = tokenizer.decode(response.prompt_token_ids)
         assert "You like to use emojis in your responses" in decoded_prompt
@@ -306,7 +305,7 @@ async def test_chat_completion_with_emoji_and_token_ids(server):
 
         # Test with streaming
         stream = await client.chat.completions.create(
-            model=MODEL_NAME,
+            model=model_name,
             messages=chat_messages,
             max_tokens=50,
             temperature=0,

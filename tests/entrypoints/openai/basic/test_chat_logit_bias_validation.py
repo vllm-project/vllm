@@ -7,8 +7,6 @@ import pytest_asyncio
 
 from vllm.config import ModelConfig
 
-MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
-
 
 def get_vocab_size(model_name):
     config = ModelConfig(
@@ -26,13 +24,13 @@ async def client(server):
 
 
 @pytest.mark.asyncio
-async def test_chat_logit_bias_valid(client):
+async def test_chat_logit_bias_valid(client, model_name):
     """Test that valid logit_bias values are accepted in chat completions."""
-    vocab_size = get_vocab_size(MODEL_NAME)
+    vocab_size = get_vocab_size(model_name)
     valid_token_id = vocab_size - 1
 
     completion = await client.chat.completions.create(
-        model=MODEL_NAME,
+        model=model_name,
         messages=[{
             "role": "user",
             "content": "Testing valid logit bias"
@@ -45,14 +43,14 @@ async def test_chat_logit_bias_valid(client):
 
 
 @pytest.mark.asyncio
-async def test_chat_logit_bias_invalid(client):
+async def test_chat_logit_bias_invalid(client, model_name):
     """Test that invalid logit_bias values are rejected in chat completions."""
-    vocab_size = get_vocab_size(MODEL_NAME)
+    vocab_size = get_vocab_size(model_name)
     invalid_token_id = vocab_size + 1
 
     with pytest.raises(openai.BadRequestError) as excinfo:
         await client.chat.completions.create(
-            model=MODEL_NAME,
+            model=model_name,
             messages=[{
                 "role": "user",
                 "content": "Testing invalid logit bias"

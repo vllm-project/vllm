@@ -16,8 +16,13 @@ BASIC_SERVER_ARGS = [
 
 
 @pytest.fixture(scope="package")
-def server():
-    with RemoteOpenAIServer("hmellor/tiny-random-LlamaForCausalLM",
+def model_name():
+    return "hmellor/tiny-random-LlamaForCausalLM"
+
+
+@pytest.fixture(scope="package")
+def server(model_name):
+    with RemoteOpenAIServer(model_name,
                             BASIC_SERVER_ARGS,
                             max_wait_seconds=120) as server:
         yield server

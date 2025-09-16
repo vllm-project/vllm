@@ -7,9 +7,6 @@ import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
 
-# # any model with a chat template should work here
-MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
-
 
 @pytest_asyncio.fixture
 async def client(server):
@@ -18,24 +15,20 @@ async def client(server):
 
 
 class TestCase(NamedTuple):
-    model_name: str
     echo: bool
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "test_case",
-    [
-        TestCase(model_name=MODEL_NAME, echo=True),
-        TestCase(model_name=MODEL_NAME, echo=False)
-    ],
+    [TestCase(echo=True), TestCase(echo=False)],
 )
 async def test_chat_session_with_echo_and_continue_final_message(
-        client: openai.AsyncOpenAI, test_case: TestCase):
+        client: openai.AsyncOpenAI, test_case: TestCase, model_name):
     saying: str = "Here is a common saying about apple. An apple a day, keeps"
     # test echo with continue_final_message parameter
     chat_completion = await client.chat.completions.create(
-        model=test_case.model_name,
+        model=model_name,
         messages=[{
             "role": "user",
             "content": "tell me a common saying"

@@ -11,8 +11,6 @@ import requests
 
 from vllm.version import __version__ as VLLM_VERSION
 
-MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
-
 
 @pytest_asyncio.fixture
 async def client(server):
@@ -36,7 +34,7 @@ async def test_check_health(server):
 
 
 @pytest.mark.asyncio
-async def test_request_cancellation(server):
+async def test_request_cancellation(server, model_name):
     # clunky test: send an ungodly amount of load in with short timeouts
     # then ensure that it still responds quickly afterwards
 
@@ -46,7 +44,7 @@ async def test_request_cancellation(server):
     for _ in range(20):
         task = asyncio.create_task(
             client.chat.completions.create(messages=chat_input,
-                                           model=MODEL_NAME,
+                                           model=model_name,
                                            max_tokens=1000,
                                            extra_body={"min_tokens": 1000}))
         tasks.append(task)
@@ -66,14 +64,14 @@ async def test_request_cancellation(server):
     # be able to respond to this one within the timeout
     client = server.get_async_client(timeout=5)
     response = await client.chat.completions.create(messages=chat_input,
-                                                    model=MODEL_NAME,
+                                                    model=model_name,
                                                     max_tokens=10)
 
     assert len(response.choices) == 1
 
 
 @pytest.mark.asyncio
-async def test_request_wrong_content_type(server):
+async def test_request_wrong_content_type(server, model_name):
 
     chat_input = [{"role": "user", "content": "Write a long story"}]
     client = server.get_async_client()
@@ -81,7 +79,7 @@ async def test_request_wrong_content_type(server):
     with pytest.raises(openai.APIStatusError):
         await client.chat.completions.create(
             messages=chat_input,
-            model=MODEL_NAME,
+            model=model_name,
             max_tokens=1000,
             extra_headers={
                 "Content-Type": "application/x-www-form-urlencoded"
