@@ -79,11 +79,11 @@ def _moe_problem_size(
     if a1.dim() == 2:
         # Make sure we are using the correct a1 (pre-permute).
         assert topk_ids.size(0) == a1.size(0), \
-            f"{topk_ids.size(0)} != {a1.size(0)}"
+            f"{topk_ids.size()}[0] != {a1.size()[0]}"
         M = a1.size(0)
     else:
         assert a1.dim() == 3
-        assert a1.size(0) == E, f"{a1.size(0)} == {E}"
+        assert a1.size(0) == E, f"{a1.size()}[0] == {E}"
         M = a1.size(1)  # This is max_num_tokens
 
     assert topk_ids.dim() == 2
@@ -793,7 +793,10 @@ class FusedMoEModularKernel(torch.nn.Module):
         """
 
         a1 = hidden_states
-        output = a1 if inplace else torch.zeros_like(a1)
+        if inplace and self.shared_experts is None:
+            output = a1
+        else:
+            output = torch.zeros_like(a1)
 
         local_num_experts = w1.size(0)
         if global_num_experts == -1:
