@@ -52,11 +52,11 @@ class EplbUpdator(BaseUpdator):
         self.eplb_adaptor = adaptor
         self.manager = Manager()
         self.shared_dict = self.manager.dict({
-            # 当前rank_id的专家表[num_layers,num_experts]
+            # Expert map of the current rank_id [num_layers,num_experts]
             "expert_map": None,
-            # 热度负载信息 [num_layers, world_size, num_experts]
+            # Load balance info [num_layers, world_size, num_experts]
             "moe_load": None,
-            # 所有的专家表[num_layers, world_size, num_experts]
+            # Expert maps of all ranks [num_layers, world_size, num_experts]
             "expert_maps": None,
         })
 

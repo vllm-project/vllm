@@ -1,9 +1,6 @@
-from vllm.distributed.eplb.eplb_adaptor.vllm_adaptor import VllmEplbAdaptor
-
 class EplbWeightLoader():
-    def __init__(self, eplb_adaptor: VllmEplbAdaptor):
+    def __init__(self, *args):
         self.reqs = list()
-        self.eplb_adaptor = eplb_adaptor
         self.layer_id = -1
         self.recv_expert_list = list()
         self.comm_op_list = list()
