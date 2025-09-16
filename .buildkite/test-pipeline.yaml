@@ -124,21 +124,19 @@ steps:
   torch_nightly: true
   source_file_dependencies:
   - vllm/
-  - tests/entrypoints/openai/basic_tests
-  - tests/entrypoints/openai/embedding_tests
-  - tests/entrypoints/openai/individual_tests
-  - tests/entrypoints/openai/lora_tests
-  - tests/entrypoints/openai/multimodal_tests
-  - tests/entrypoints/openai/tool_parsers
-  - tests/entrypoints/test_chat_utils
+  - tests/entrypoints/openai/basic
+  - tests/entrypoints/openai/individual
+  - tests/entrypoints/openai/lora
+  - tests/entrypoints/openai/multimodal
+  - tests/entrypoints/test_chat_utils.py
+  - tests/entrypoints/openai/test_collective_rpc.py
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/openai/test_collective_rpc.py # PYTHONPATH is needed to import custom Worker extension
-  - pytest -v -s entrypoints/openai/basic_tests/
-  - pytest -v -s entrypoints/openai/embedding_tests/
-  - pytest -v -s entrypoints/openai/individual_tests/
-  - pytest -v -s entrypoints/openai/lora_tests/
-  - pytest -v -s entrypoints/openai/multimodal_tests/
+  - pytest -v -s entrypoints/openai/basic/
+  - pytest -v -s entrypoints/openai/individual/
+  - pytest -v -s entrypoints/openai/lora/
+  - pytest -v -s entrypoints/openai/multimodal/
   - pytest -v -s entrypoints/test_chat_utils.py
 
 - label: Entrypoints Integration Test (Pooling)

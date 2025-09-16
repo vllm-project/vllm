@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import NamedTuple
-
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
@@ -14,17 +12,10 @@ async def client(server):
         yield async_client
 
 
-class TestCase(NamedTuple):
-    echo: bool
-
-
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "test_case",
-    [TestCase(echo=True), TestCase(echo=False)],
-)
+@pytest.mark.parametrize("echo", [True, False])
 async def test_chat_session_with_echo_and_continue_final_message(
-        client: openai.AsyncOpenAI, test_case: TestCase, model_name):
+        client: openai.AsyncOpenAI, echo: bool, model_name):
     saying: str = "Here is a common saying about apple. An apple a day, keeps"
     # test echo with continue_final_message parameter
     chat_completion = await client.chat.completions.create(
@@ -37,7 +28,7 @@ async def test_chat_session_with_echo_and_continue_final_message(
             "content": saying
         }],
         extra_body={
-            "echo": test_case.echo,
+            "echo": echo,
             "continue_final_message": True,
             "add_generation_prompt": False
         })
@@ -48,7 +39,7 @@ async def test_chat_session_with_echo_and_continue_final_message(
     assert choice.finish_reason in ["stop", "length"]
 
     message = choice.message
-    if test_case.echo:
+    if echo:
         assert message.content is not None and saying in message.content
     else:
         assert message.content is not None and saying not in message.content
