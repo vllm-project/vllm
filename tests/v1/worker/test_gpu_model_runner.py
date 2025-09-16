@@ -249,6 +249,7 @@ def test_update_states_request_resumed(model_runner, dist_init):
         req_ids=[req_id],
         resumed_from_preemption=[False],
         new_token_ids=[[]],
+        token_ids=[[]],
         new_block_ids=([[0]], ),
         num_computed_tokens=[0],
     )

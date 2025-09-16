@@ -87,6 +87,9 @@ class CachedRequestData:
     # NOTE(woosuk): new_token_ids is only used for pipeline parallelism.
     # When PP is not used, new_token_ids will be empty.
     new_token_ids: list[list[int]]
+    # If resumed_from_preemption is True, propogate the token ids to the
+    # connector, otherwise will be empty.
+    token_ids: list[list[int]]
     new_block_ids: list[Optional[tuple[list[int], ...]]]
     num_computed_tokens: list[int]
 
@@ -100,6 +103,7 @@ class CachedRequestData:
             req_ids=[],
             resumed_from_preemption=[],
             new_token_ids=[],
+            token_ids=[],
             new_block_ids=[],
             num_computed_tokens=[],
         )
