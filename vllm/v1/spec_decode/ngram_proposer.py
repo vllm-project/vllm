@@ -55,7 +55,11 @@ class NgramProposer:
 
         # Trigger Numba JIT compilation for N-gram proposer.
         # This usually takes less than 1 second.
-        self.propose(np.zeros(1024, dtype=np.int32))
+        self.propose([[]]*1024, 
+                     [""] * 1024, 
+                     np.zeros(1024, dtype=np.int32), 
+                     np.zeros((1024, self.max_model_len), dtype=np.int32),
+                     set())
 
     def batch_propose(
         self,
@@ -94,11 +98,13 @@ class NgramProposer:
                     1,
                     min(self.num_numba_thread_available,
                         len(valid_ngram_requests))))
+            
             batch_propose_numba(valid_ngram_requests, num_tokens_no_spec,
                                 token_ids_cpu, self.min_n, self.max_n,
                                 self.max_model_len, self.k,
                                 self.valid_ngram_draft,
                                 self.valid_ngram_num_drafts)
+            
             set_num_threads(original_num_numba_threads)
 
         for i in range(num_requests):
@@ -113,39 +119,42 @@ class NgramProposer:
 
     def propose(
         self,
-        context_token_ids: np.ndarray,
-    ) -> Optional[np.ndarray]:
-        """Proposes the next sequence of tokens based on n-gram pattern 
-        matching in the context. The function finds matches of the last n 
-        tokens in the previous context, and returns k tokens that followed 
-        that match.
-        
-        Args:
-            context_token_ids: Numpy array of token IDs representing the 
-                               context sequence.
+        sampled_token_ids: list[list[int]],
+        req_ids: list[str],
+        num_tokens_no_spec: np.ndarray,
+        token_ids_cpu: np.ndarray,
+        spec_decode_unsupported_reqs: set,
+    ) -> list[list[int]]:
 
-        Returns:
-            np.ndarray: The sequence of tokens that followed 
-                        the matched n-gram in the context.
-            None: If no matching n-gram pattern is found.
+        # find which requests need ngram proposals
+        valid_ngram_requests = []
+        for i, sampled_ids in enumerate(sampled_token_ids):
+            num_sampled_ids = len(sampled_ids)
+            if not num_sampled_ids:
+                # Skip speculative decoding.
+                continue
 
-        Example:
-            If context_token_ids = [1,2,3,4,2,3], min_n = 2, max_n = 3, and
-            k = 4:
-            - The last 3 (= max_n) tokens [4,2,3] cannot find a match.
-            - The last 2 tokens [2,3] will be matched against the previous 
-              4 tokens [1,2,3,4].
-            - Finding a match of [2,3] would return the tokens that 
-              followed that pattern. Here we will return [4,2,3] because 
-              we only have three tokens after the match.
-        """
-        # TODO(woosuk): Optimize this.
-        return _find_longest_matched_ngram_and_propose_tokens(
-            origin_tokens=context_token_ids,
-            min_ngram=self.min_n,
-            max_ngram=self.max_n,
-            max_model_len=self.max_model_len,
-            k=self.k)
+            # Skip requests that require sampling parameters that are not
+            # supported with speculative decoding.
+            req_id = req_ids[i]
+            if req_id in spec_decode_unsupported_reqs:
+                continue
+
+            num_tokens = num_tokens_no_spec[i]
+            if num_tokens >= self.max_model_len:
+                # Skip requests that have already reached the max model length.
+                continue
+            
+            valid_ngram_requests.append(i)
+
+        draft_token_ids = self.batch_propose(
+            len(sampled_token_ids),
+            valid_ngram_requests,
+            num_tokens_no_spec,
+            token_ids_cpu,
+        )
+            
+        return draft_token_ids
 
     def load_model(self, *args, **kwargs):
         # No model to load.

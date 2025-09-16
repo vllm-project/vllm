@@ -2307,8 +2307,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if self.speculative_config.method == "ngram":
             assert isinstance(self.drafter, NgramProposer)
-            draft_token_ids = self.propose_ngram_draft_token_ids(
-                sampled_token_ids)
+            draft_token_ids = self.drafter.propose(
+                sampled_token_ids, self.input_batch.req_ids,
+                self.input_batch.num_tokens_no_spec,
+                self.input_batch.token_ids_cpu,
+                self.input_batch.spec_decode_unsupported_reqs
+            )
         elif self.speculative_config.method == "medusa":
             assert isinstance(self.drafter, MedusaProposer)
             if sample_hidden_states.shape[0] == len(sampled_token_ids):
@@ -2397,41 +2401,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 common_attn_metadata=common_attn_metadata,
                 mm_embeds=mm_embeds,
             )
-        return draft_token_ids
-
-    def propose_ngram_draft_token_ids(
-        self,
-        sampled_token_ids: list[list[int]],
-    ) -> list[list[int]]:
-
-        # find which requests need ngram proposals
-        valid_ngram_requests = []
-        for i, sampled_ids in enumerate(sampled_token_ids):
-            num_sampled_ids = len(sampled_ids)
-            if not num_sampled_ids:
-                # Skip speculative decoding.
-                continue
-
-            # Skip requests that require sampling parameters that are not
-            # supported with speculative decoding.
-            req_id = self.input_batch.req_ids[i]
-            if req_id in self.input_batch.spec_decode_unsupported_reqs:
-                continue
-
-            num_tokens = self.input_batch.num_tokens_no_spec[i]
-            if num_tokens >= self.max_model_len:
-                # Skip requests that have already reached the max model length.
-                continue
-
-            valid_ngram_requests.append(i)
-
-        draft_token_ids = self.drafter_ngram.batch_propose(
-            len(sampled_token_ids),
-            valid_ngram_requests,
-            self.input_batch.num_tokens_no_spec,
-            self.input_batch.token_ids_cpu,
-        )
-
         return draft_token_ids
 
     def update_config(self, overrides: dict[str, Any]) -> None:
