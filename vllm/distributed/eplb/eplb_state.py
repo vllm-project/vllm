@@ -185,6 +185,14 @@ class EplbState:
     The flag indicates whether the expert buffer is ready for transfer.
     0 or 1.
     """
+    rearrange_event: threading.Event = field(default_factory=threading.Event)
+    """
+    Event to signal when a new rearrangement is needed for the async thread.
+    """
+    shutdown_event: threading.Event = field(default_factory=threading.Event)
+    """
+    Event to signal the async thread to shutdown.
+    """
     buffer_lock: threading.Lock = field(default_factory=threading.Lock)
     """
     The lock to protect the expert buffer.
@@ -478,12 +486,19 @@ class EplbState:
         self.expert_rearrangement_step += 1
 
         if self.is_async and self.ep_buffer_ready:
-            logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Calling move_to_workspace from step()")
-            
-            logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: _synchronize_rearrange_completion done, proceeding to move_to_workspace")
+            logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Buffer ready for layer {self.layer_to_transfer}, calling move_to_workspace")
             self.move_to_workspace(model=model,
                                    ep_group=ep_group,
                                    is_profile=is_profile)
+            
+            # Check if all layers have been processed
+            if self.layer_to_transfer >= model.num_moe_layers:
+                logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: All layers processed in main thread, calling post_eplb")
+                self.post_eplb(model, is_profile)
+                # Reset for next rearrangement cycle
+                self.rebalanced = False
+                self.layer_to_transfer = 0
+                logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Reset state for next rearrangement cycle")
         if (self.expert_rearrangement_step
                 >= self.expert_rearrangement_step_interval):
             logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Triggering rearrange - step={self.expert_rearrangement_step}, interval={self.expert_rearrangement_step_interval}")
@@ -622,6 +637,13 @@ class EplbState:
                 )
         self.rebalanced = True
         logger.info(f"[EPLB Debug] Rank {ep_rank}: rebalanced flag set to True")
+        
+        # Signal async thread to start transferring layers
+        if self.is_async:
+            self.layer_to_transfer = 0  # Reset for new rearrangement
+            logger.info(f"[EPLB Debug] Rank {ep_rank}: Signaling async thread to start transfers")
+            self.rearrange_event.set()
+        
         return None
 
 
@@ -663,49 +685,77 @@ class EplbState:
             is_profile: bool = False,
             rank_mapping: Optional[dict[int, int]] = None):
         experts_stream = torch.cuda.Stream()
-        logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Starting transfer_run_periodically, num_moe_layers={model.num_moe_layers}")
-        while self.layer_to_transfer < model.num_moe_layers:
-            if not self.ep_buffer_ready and self.rebalanced:
-                logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Starting transfer for layer {self.layer_to_transfer}")
-                # get lock
-                assert self.new_physical_to_logical_map is not None
-                logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Acquiring buffer lock for layer {self.layer_to_transfer}")
-                await asyncio.to_thread(self.buffer_lock.acquire)
-                try:
-                    logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Buffer lock acquired, initializing expert_buffer for layer {self.layer_to_transfer}")
-                    for i, w in enumerate(model.expert_weights[0]):
-                        self.expert_buffer[i] = torch.empty_like(w)                   
-                    logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Starting transfer_layer for layer {self.layer_to_transfer}")
-                    (
-                    self.is_unchanged,
-                    self.is_received_locally, 
-                    self.experts_recv_loc)=await transfer_layer(
-                        old_global_expert_indices=self.physical_to_logical_map,
-                        new_global_expert_indices=self.
-                        new_physical_to_logical_map,
-                        expert_weights=model.expert_weights,
-                        expert_weights_buffer=self.expert_buffer,
-                        ep_group=ep_group,
-                        is_profile=is_profile,
-                        layer=self.layer_to_transfer,
-                        cuda_stream=experts_stream,
-                        rank_mapping=rank_mapping,
-                    )
-                    logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: transfer_layer completed for layer {self.layer_to_transfer}")
-                    self.ep_buffer_ready = 1
-                finally:
-                    logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Releasing buffer lock for layer {self.layer_to_transfer}")
-                    self.buffer_lock.release()
-                    logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Releasing buffer lock for layer {self.layer_to_transfer} successful")
-            else:
-                await asyncio.sleep(0.5) 
+        logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Starting persistent transfer_run_periodically")
         
-        logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: All layers processed, exiting loop")
-        self.rebalanced = False
-        self.layer_to_transfer = 0
-        logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Calling post_eplb")
-        self.post_eplb(model, is_profile)
-        logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: transfer_run_periodically completed")
+        while not self.shutdown_event.is_set():
+            # Wait for rearrangement signal or shutdown
+            logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Waiting for rearrangement signal")
+            await asyncio.to_thread(self.rearrange_event.wait)
+            
+            if self.shutdown_event.is_set():
+                logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Shutdown signal received, exiting")
+                break
+                
+            logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Rearrangement signal received, starting transfers")
+            
+            # Process all layers for this rearrangement
+            current_num_layers = model.num_moe_layers
+            while self.layer_to_transfer < current_num_layers and not self.shutdown_event.is_set():
+                if not self.ep_buffer_ready and self.rebalanced:
+                    logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Starting transfer for layer {self.layer_to_transfer}")
+                    # get lock
+                    assert self.new_physical_to_logical_map is not None
+                    logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Acquiring buffer lock for layer {self.layer_to_transfer}")
+                    await asyncio.to_thread(self.buffer_lock.acquire)
+                    try:
+                        # Re-check layer_to_transfer after acquiring lock in case it was updated
+                        if self.layer_to_transfer >= current_num_layers:
+                            logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Layer {self.layer_to_transfer} >= {current_num_layers}, breaking")
+                            break
+                            
+                        logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Buffer lock acquired, initializing expert_buffer for layer {self.layer_to_transfer}")
+                        for i, w in enumerate(model.expert_weights[0]):
+                            self.expert_buffer[i] = torch.empty_like(w)                   
+                        logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Starting transfer_layer for layer {self.layer_to_transfer}")
+                        (
+                        self.is_unchanged,
+                        self.is_received_locally, 
+                        self.experts_recv_loc)=await transfer_layer(
+                            old_global_expert_indices=self.physical_to_logical_map,
+                            new_global_expert_indices=self.
+                            new_physical_to_logical_map,
+                            expert_weights=model.expert_weights,
+                            expert_weights_buffer=self.expert_buffer,
+                            ep_group=ep_group,
+                            is_profile=is_profile,
+                            layer=self.layer_to_transfer,
+                            cuda_stream=experts_stream,
+                            rank_mapping=rank_mapping,
+                        )
+                        logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: transfer_layer completed for layer {self.layer_to_transfer}")
+                        self.ep_buffer_ready = 1
+                    finally:
+                        logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Releasing buffer lock for layer {self.layer_to_transfer}")
+                        self.buffer_lock.release()
+                        logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Releasing buffer lock for layer {self.layer_to_transfer} successful")
+                else:
+                    await asyncio.sleep(0.1)  # Shorter sleep for more responsiveness
+            
+            logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: All layers processed for this rearrangement")
+            # Reset for next rearrangement cycle
+            self.rearrange_event.clear()
+            logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Cleared rearrange_event, ready for next cycle")
+        
+        logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: transfer_run_periodically exiting")
+
+    def shutdown_async_eplb(self) -> None:
+        """
+        Shutdown the async EPLB thread gracefully.
+        """
+        if self.is_async:
+            logger.info("Shutting down async EPLB thread")
+            self.shutdown_event.set()
+            self.rearrange_event.set()  # Wake up the thread so it can see shutdown signal
 
     def _synchronize_rearrange_completion(self, ep_group: ProcessGroup):
         """
