@@ -88,6 +88,7 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                     "Setting it to k_scale. This only matters for "
                     "the flash-attn backend.")
                 layer._q_scale.copy_(k_scale)
+                layer._q_scale_float = k_scale
 
             # These are used in the final Attention.forward()
             layer._k_scale.copy_(k_scale)
