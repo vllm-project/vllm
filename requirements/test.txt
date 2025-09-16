@@ -1088,6 +1088,7 @@ tomli==2.2.1
     # via
     #   alembic
     #   black
+    #   coverage
     #   pytest
     #   schemathesis
 tomli-w==1.2.0
