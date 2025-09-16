@@ -423,6 +423,7 @@ class EngineArgs:
 
     speculative_config: Optional[Dict[str, Any]] = None
 
+
     show_hidden_metrics_for_version: Optional[str] = \
         ObservabilityConfig.show_hidden_metrics_for_version
     otlp_traces_endpoint: Optional[str] = \
@@ -469,6 +470,8 @@ class EngineArgs:
     """Custom logitproc types"""
 
     async_scheduling: bool = SchedulerConfig.async_scheduling
+
+    intermediate_log_config: Optional[dict[str, Any]] = None
 
     kv_sharing_fast_prefill: bool = \
         CacheConfig.kv_sharing_fast_prefill
@@ -906,6 +909,9 @@ class EngineArgs:
             title="VllmConfig",
             description=VllmConfig.__doc__,
         )
+
+        vllm_group.add_argument("--intermediate-log-config",
+                                **vllm_kwargs["intermediate_log_config"])
         # We construct SpeculativeConfig using fields from other configs in
         # create_engine_config. So we set the type to a JSON string here to
         # delay the Pydantic validation that comes with SpeculativeConfig.
@@ -1420,7 +1426,6 @@ class EngineArgs:
             otlp_traces_endpoint=self.otlp_traces_endpoint,
             collect_detailed_traces=self.collect_detailed_traces,
         )
-
         config = VllmConfig(
             model_config=model_config,
             cache_config=cache_config,
@@ -1435,6 +1440,7 @@ class EngineArgs:
             compilation_config=self.compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
+            intermediate_log_config=self.intermediate_log_config,
             additional_config=self.additional_config,
         )
 
