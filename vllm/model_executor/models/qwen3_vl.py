@@ -596,7 +596,7 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         video_processor = self.get_video_processor()
         merge_size = video_processor.merge_size
         indices = metadata["frames_indices"]
-        do_sample_frames = metadata["do_sample_frames"]
+        do_sample_frames = metadata.get("do_sample_frames", False)
         # The fps here refers to the sampled video fps.
         video_fps = video_processor.fps
 
@@ -709,8 +709,11 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo]
 
                 # don't update mm_kwargs inplace, otherwise hash is incorrect
                 video_mm_kwargs = dict(**mm_kwargs)
-                video_mm_kwargs["do_sample_frames"] = metadata.get(
-                    "do_sample_frames", True)
+                if "do_sample_frames" not in video_mm_kwargs:
+                    # qwen_vl_utils already has "do_sample_frames" in
+                    # mm_kwargs, don't overwrite it.
+                    video_mm_kwargs["do_sample_frames"] = metadata.get(
+                        "do_sample_frames", False)
 
                 metadata = VideoMetadata(**{
                     k: metadata[k]
