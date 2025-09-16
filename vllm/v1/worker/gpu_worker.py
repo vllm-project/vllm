@@ -421,6 +421,7 @@ class Worker(WorkerBase):
         return self.model_runner.get_model()
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+        return "generate"
         return self.model_runner.get_supported_tasks()
 
     @torch.inference_mode()
