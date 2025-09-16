@@ -70,6 +70,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
+from vllm.utils import is_list_of
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
@@ -823,7 +824,9 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo]
 
             video, metadata = mm_items["video"][item_idx]
             do_sample_frames = hf_processor_mm_kwargs.get("do_sample_frames")
-            sampled_fps = hf_processor_mm_kwargs.get("fps")[item_idx]
+            sampled_fps = hf_processor_mm_kwargs.get("fps")
+            if is_list_of(sampled_fps, float):
+                sampled_fps = sampled_fps[item_idx]
             timestamps = self.info._get_video_second_idx(
                 metadata, out_item, do_sample_frames, sampled_fps)
 
