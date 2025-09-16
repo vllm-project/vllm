@@ -52,7 +52,6 @@ class NgramProposer:
         # Trigger Numba JIT compilation for N-gram proposer.
         # This usually takes less than 1 second.
         self.propose(np.zeros(1024, dtype=np.int32))
-        logger.info(f"NgramProposer: min_n={self.min_n}, max_n={self.max_n}, k={self.k}, max_model_len={self.max_model_len}")  # noqa: E501
 
 
     def batch_propose(
@@ -205,7 +204,7 @@ def _find_longest_matched_ngram_and_propose_tokens(
     longest_ngram = 0
     position = 0
 
-    # lps[0] always equal to 0, we starts with index 1
+    # lps[0] always equal to 0, we start with index 1
     prev_lps = 0
     i = 1
     while i < total_token:
