@@ -34,6 +34,7 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          SpeculativeConfig, TaskOption, TokenizerMode,
                          VllmConfig, get_attr_docs)
 from vllm.config.multimodal import MMCacheType, MultiModalConfig
+from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.config.utils import get_field
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
@@ -331,6 +332,8 @@ class EngineArgs:
         ParallelConfig.dbo_decode_token_threshold
     eplb_config: EPLBConfig = get_field(ParallelConfig, "eplb_config")
     enable_eplb: bool = ParallelConfig.enable_eplb
+    expert_placement_strategy: ExpertPlacementStrategy = \
+        ParallelConfig.expert_placement_strategy
     num_redundant_experts: int = EPLBConfig.num_redundant_experts
     eplb_window_size: int = EPLBConfig.window_size
     eplb_step_interval: int = EPLBConfig.step_interval
@@ -704,6 +707,9 @@ class EngineArgs:
                                     **parallel_kwargs["enable_eplb"])
         parallel_group.add_argument("--eplb-config",
                                     **parallel_kwargs["eplb_config"])
+        parallel_group.add_argument(
+            "--expert-placement-strategy",
+            **parallel_kwargs["expert_placement_strategy"])
         parallel_group.add_argument(
             "--num-redundant-experts",
             type=int,
@@ -1345,6 +1351,7 @@ class EngineArgs:
             dbo_decode_token_threshold=self.dbo_decode_token_threshold,
             enable_eplb=self.enable_eplb,
             eplb_config=self.eplb_config,
+            expert_placement_strategy=self.expert_placement_strategy,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
             ray_workers_use_nsight=self.ray_workers_use_nsight,
