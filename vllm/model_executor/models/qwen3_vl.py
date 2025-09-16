@@ -598,11 +598,12 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         indices = metadata["frames_indices"]
         do_sample_frames = metadata.get("do_sample_frames", False)
         # The fps here refers to the sampled video fps.
-        video_fps = video_processor.fps
+        video_fps = metadata["fps"]
 
         # if frames is sampled in HF processor, we need to re-calculate the
         # indices from original metadata.
         if do_sample_frames:
+            video_fps = video_processor.fps
             total_num_frames = metadata["total_num_frames"]
             num_frames = int(total_num_frames / metadata["fps"] * video_fps)
             num_frames = min(
