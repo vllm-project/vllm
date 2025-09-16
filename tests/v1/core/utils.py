@@ -160,7 +160,6 @@ def create_requests(
         request = Request(
             request_id=f"{i}",
             prompt_token_ids=prompt_token_ids,
-            prompt_embeds=None,
             sampling_params=sampling_params,
             pooling_params=None,
             mm_features=mm_features if mm_features else None,

@@ -1324,7 +1324,6 @@ def create_requests_with_priority(
         request = Request(
             request_id=f"{i + starting_idx}",
             prompt_token_ids=[i + starting_idx] * num_tokens,
-            prompt_embeds=None,
             sampling_params=sampling_params,
             pooling_params=None,
             mm_features=mm_features if mm_features else None,
@@ -1806,7 +1805,6 @@ def test_schedule_skip_tokenizer_init_structured_output_request():
     request = Request(
         request_id="0",
         prompt_token_ids=[0, 1],
-        prompt_embeds=None,
         mm_features=None,
         sampling_params=sampling_params,
         pooling_params=None,

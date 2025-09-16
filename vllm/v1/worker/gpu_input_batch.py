@@ -30,7 +30,6 @@ class CachedRequestState:
 
     req_id: str
     prompt_token_ids: Optional[list[int]]
-    prompt_embeds: Optional[torch.Tensor]
     mm_features: list[MultiModalFeatureSpec]
     sampling_params: Optional[SamplingParams]
     pooling_params: Optional[PoolingParams]
@@ -44,6 +43,7 @@ class CachedRequestState:
     mrope_position_delta: Optional[int] = None
 
     lora_request: Optional[LoRARequest] = None
+    prompt_embeds: Optional[torch.Tensor] = None
 
     def __post_init__(self):
         self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(

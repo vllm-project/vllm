@@ -62,7 +62,6 @@ def make_request(
 
     return Request(request_id=request_id,
                    prompt_token_ids=prompt_token_ids,
-                   prompt_embeds=None,
                    mm_features=mm_features if mm_features else None,
                    sampling_params=SamplingParams(max_tokens=17),
                    pooling_params=None,
