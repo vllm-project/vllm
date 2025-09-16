@@ -171,8 +171,8 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
     """Enable the /get_tokenizer_info endpoint. May expose chat
     templates and other tokenizer configuration."""
     enable_log_outputs: bool = False
-    """If set to True, enable logging of model outputs (generations) 
-    in addition to the input logging that is enabled by default."""
+    """If True, log model outputs (generations).
+    Requires --enable-log-requests."""
     h11_max_incomplete_event_size: int = H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT
     """Maximum size (bytes) of an incomplete HTTP event (header or body) for
     h11 parser. Helps mitigate header abuse. Default: 4194304 (4 MB)."""
@@ -273,6 +273,9 @@ def validate_parsed_serve_args(args: argparse.Namespace):
     if args.enable_auto_tool_choice and not args.tool_call_parser:
         raise TypeError("Error: --enable-auto-tool-choice requires "
                         "--tool-call-parser")
+    if args.enable_log_outputs and not args.enable_log_requests:
+        raise TypeError("Error: --enable-log-outputs requires "
+                        "--enable-log-requests")
 
 
 def create_parser_for_docs() -> FlexibleArgumentParser:

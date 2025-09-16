@@ -19,6 +19,7 @@ from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
+from vllm.tracing import init_tracer
 from vllm.transformers_utils.tokenizer_group import (
     TokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import UsageContext
@@ -65,6 +66,7 @@ class LLMEngine:
                 "Set VLLM_USE_V1=0 and file and issue on Github.")
 
         self.vllm_config = vllm_config
+        self.observability_config = vllm_config.observability_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
 
@@ -99,6 +101,11 @@ class LLMEngine:
         # OutputProcessor (convert EngineCoreOutputs --> RequestOutput).
         self.output_processor = OutputProcessor(self.tokenizer,
                                                 log_stats=self.log_stats)
+        if self.observability_config.otlp_traces_endpoint is not None:
+            tracer = init_tracer(
+                "vllm.llm_engine",
+                self.observability_config.otlp_traces_endpoint)
+            self.output_processor.tracer = tracer
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
         self.engine_core = EngineCoreClient.make_client(
