@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
+from math import lcm
 from typing import Optional
 
 from vllm.v1.core.block_pool import BlockPool
@@ -341,13 +342,13 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self.other_spec = other_spec
         self.full_attention_block_size = self.full_attention_spec.block_size
         self.other_block_size = self.other_spec.block_size
-
-        if self.enable_caching:
-            # this requirement is only needed for the prefix caching logic
-            divisible = self.other_block_size % self.full_attention_block_size
-            assert divisible == 0, (
-                "KVCacheCoordinator assumes the block_size of full "
-                "attention layers is divisible by other layers now.")
+        # The LCM of the block sizes of full attention and other attention.
+        # The cache hit length must be a multiple of the LCM of the block sizes
+        # to make sure the cache hit length is a multiple of the block size of
+        # each attention type. Requiring this because we don't support partial
+        # block cache hit yet.
+        self.lcm_block_size = lcm(self.full_attention_block_size,
+                                  self.other_block_size)
 
         if max(self.full_attention_group_ids) < min(self.other_group_ids):
             self.full_attn_first = True
@@ -394,6 +395,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 block_pool=self.block_pool,
                 kv_cache_spec=self.full_attention_spec,
                 use_eagle=self.use_eagle,
+                alignment=self.lcm_block_size,
             ))
         hit_length = len(
             hit_blocks_full_attn[0]) * self.full_attention_block_size
@@ -413,6 +415,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 block_pool=self.block_pool,
                 kv_cache_spec=self.other_spec,
                 use_eagle=self.use_eagle,
+                alignment=self.lcm_block_size,
             ))
         hit_length = len(hit_blocks_other_attn[0]) * self.other_block_size
 

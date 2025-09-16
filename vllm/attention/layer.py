@@ -125,7 +125,7 @@ class Attention(nn.Module, AttentionLayerBase):
             f"divisible by num_kv_heads ({num_kv_heads})"
 
         # TODO in this PR: only for testing now. remove this hardcode later
-        if sliding_window is not None:
+        if sliding_window is None:
             print("set kv_cache_dtype to fp8_e4m3 for layer", prefix)
             kv_cache_dtype = "fp8_e4m3"
         # The default k/v_scale is set to 1.0. This is ignored
