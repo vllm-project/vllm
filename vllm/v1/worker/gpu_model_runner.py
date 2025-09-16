@@ -183,7 +183,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.device = device
         self.pin_memory = is_pin_memory_available()
         self.dtype = self.model_config.dtype
-        assert isinstance(self.dtype, torch.dtype)
         if cache_config.cache_dtype == "auto":
             self.kv_cache_dtype = self.dtype
         else:
