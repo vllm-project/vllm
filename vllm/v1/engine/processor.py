@@ -221,7 +221,7 @@ class Processor:
             # The values may differ if `params` is reused and was set
             # to a specific backend based on `auto` behavior in a previous
             # request. We remember that it was set as a result of `auto`
-            # using the `_auto` option set on the backend in the params.
+            # using the `_backend_was_auto` field set in the params.
             if (backend != _backend
                     and not (backend == "auto"
                              and params.structured_outputs._backend_was_auto)):
