@@ -8,11 +8,13 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 if current_platform.is_cuda_alike():
+    from .activation_quant_fusion import ActivationQuantFusionPass
     from .fusion import FusionPass
-    from .collective_fusion import AllReduceFusionPass, AsyncTPPass
     from .fusion_attn import AttnFusionPass
 
-from .activation_quant_fusion import ActivationQuantFusionPass
+if current_platform.is_cuda():
+    from .collective_fusion import AllReduceFusionPass, AsyncTPPass
+
 from .fix_functionalization import FixFunctionalizationPass
 from .inductor_pass import CustomGraphPass, InductorPass, get_pass_context
 from .noop_elimination import NoOpEliminationPass

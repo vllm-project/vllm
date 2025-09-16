@@ -8,10 +8,10 @@ import torch
 from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
 from typing_extensions import TypeVar
 
-from vllm.jsontree import JSONTree, json_map_leaves
 from vllm.logger import init_logger
 from vllm.transformers_utils.processor import cached_processor_from_config
-from vllm.utils import resolve_mm_processor_kwargs
+from vllm.utils import get_allowed_kwarg_only_overrides
+from vllm.utils.jsontree import JSONTree, json_map_leaves
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -154,14 +154,11 @@ class InputProcessingContext(InputContext):
         assert callable(hf_processor)
 
         mm_config = self.model_config.get_multimodal_config()
-        base_kwargs = mm_config.mm_processor_kwargs
-        if base_kwargs is None:
-            base_kwargs = {}
+        merged_kwargs = mm_config.merge_mm_processor_kwargs(kwargs)
 
-        merged_kwargs = resolve_mm_processor_kwargs(
-            base_kwargs,
-            kwargs,
+        allowed_kwargs = get_allowed_kwarg_only_overrides(
             hf_processor,
+            merged_kwargs,
             requires_kw_only=False,
             allow_var_kwargs=True,
         )
@@ -173,7 +170,9 @@ class InputProcessingContext(InputContext):
             return x
 
         try:
-            output = hf_processor(**data, **merged_kwargs, return_tensors="pt")
+            output = hf_processor(**data,
+                                  **allowed_kwargs,
+                                  return_tensors="pt")
             # this emulates output.to(dtype=self.model_config.dtype)
             if isinstance(output, BatchFeature):
                 cast_output = json_map_leaves(maybe_cast_dtype, output.data)
@@ -189,7 +188,7 @@ class InputProcessingContext(InputContext):
 
         except Exception as exc:
             msg = (f"Failed to apply {type(hf_processor).__name__} "
-                   f"on data={data} with kwargs={merged_kwargs}")
+                   f"on data={data} with kwargs={allowed_kwargs}")
 
             raise ValueError(msg) from exc
 
@@ -224,23 +223,29 @@ class InputRegistry:
         The model is identified by ``model_config``.
         """
         # Avoid circular import
+        from vllm.multimodal.cache import processor_only_cache_from_config
         from vllm.sequence import SequenceData
 
         if not model_config.is_multimodal_model:
             seq_data = SequenceData.from_prompt_token_counts((0, seq_len))
             return DummyData(seq_data=seq_data)
 
+        cache = processor_only_cache_from_config(model_config, mm_registry)
+
         # Encoder dummy data does not contain multi-modal data
         if is_encoder_data:
-            enc_data = mm_registry.get_encoder_dummy_data(
-                model_config, seq_len)
+            enc_data = mm_registry.get_encoder_dummy_data(model_config,
+                                                          seq_len,
+                                                          cache=cache)
             seq_data = SequenceData.from_seqs(enc_data.prompt_token_ids)
             return DummyData(seq_data=seq_data)
 
-        dec_data = mm_registry.get_decoder_dummy_data(model_config, seq_len)
+        dec_data = mm_registry.get_decoder_dummy_data(model_config,
+                                                      seq_len,
+                                                      cache=cache)
 
         return DummyData(
             seq_data=SequenceData.from_seqs(dec_data.prompt_token_ids),
-            multi_modal_data=dec_data.multi_modal_data,
+            multi_modal_data=dec_data.multi_modal_data.get_data(),
             multi_modal_placeholders=dec_data.multi_modal_placeholders,
         )

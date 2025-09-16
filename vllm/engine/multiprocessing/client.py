@@ -5,8 +5,8 @@ import asyncio
 import copy
 import pickle
 from contextlib import contextmanager, suppress
-from typing import (Any, AsyncGenerator, Dict, Iterator, List, Mapping,
-                    Optional, Union, cast)
+from typing import (Any, AsyncGenerator, Dict, Iterable, Iterator, List,
+                    Mapping, Optional, Union)
 
 import cloudpickle
 import psutil
@@ -20,8 +20,6 @@ from vllm.config import DecodingConfig, ModelConfig, VllmConfig
 from vllm.core.scheduler import SchedulerOutputs
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.engine.async_llm_engine import (
-    build_guided_decoding_logits_processor_async)
 from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_HEALTH_EXT, IPC_INPUT_EXT,
                                          IPC_OUTPUT_EXT, RPC_REQUEST_T,
@@ -237,7 +235,7 @@ class MQLLMEngineClient(EngineClient):
                         # therefore we have to inform that the current
                         # processed requests failed as well. Send back a dead
                         # engine error give this feedback and also give a
-                        # 'hint' to the server to shutdown next.
+                        # 'hint' to the server to shut down next.
                         exception = self.dead_error
 
                     if request_id is None:
@@ -272,7 +270,7 @@ class MQLLMEngineClient(EngineClient):
             queue.put_nowait(request_output)
 
     async def setup(self):
-        """Setup the client before it starts sending server requests."""
+        """Set up the client before it starts sending server requests."""
 
         # Start output_loop
         if self.output_loop is None:
@@ -406,8 +404,12 @@ class MQLLMEngineClient(EngineClient):
             error_message="Unable to start RPC Server",
             socket=socket)
 
-    async def abort(self, request_id: str):
+    async def abort(self, request_id: Union[str, Iterable[str]]):
         """Send an ABORT_REQUEST signal to the RPC Server"""
+
+        if not isinstance(request_id, str):
+            raise RuntimeError("Only single-request abort supported in"
+                               " deprecated V0")
 
         with suppress(MQClientClosedError):
             await self._send_one_way_rpc_request(
@@ -475,10 +477,8 @@ class MQLLMEngineClient(EngineClient):
                 Any priority other than 0 will lead to an error if the
                 scheduling policy is not "priority".
         """
-        return cast(
-            AsyncGenerator[RequestOutput, None],
-            self._process_request(prompt, sampling_params, request_id,
-                                  lora_request, trace_headers, priority))
+        return self._process_request(prompt, sampling_params, request_id,
+                                     lora_request, trace_headers, priority)
 
     def encode(
         self,
@@ -488,45 +488,20 @@ class MQLLMEngineClient(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
-        """Generate outputs for a request from a pooling model.
-
-        Generate outputs for a request. This method is a coroutine. It adds the
-        request into the waiting queue of the LLMEngine and streams the outputs
-        from the LLMEngine to the caller.
-
-        Args:
-            prompt: The prompt to the LLM. See
-                [`PromptType`][vllm.inputs.PromptType] for more details about
-                the format of each input.
-            pooling_params: The pooling parameters of the request.
-            request_id: The unique id of the request.
-            lora_request: LoRA request to use for generation, if any.
-            trace_headers: OpenTelemetry trace headers.
-
-        Yields:
-            The output `PoolingRequestOutput` objects from the LLMEngine
-            for the request.
-        """
-        return cast(
-            AsyncGenerator[PoolingRequestOutput, None],
-            self._process_request(prompt,
-                                  pooling_params,
-                                  request_id,
-                                  lora_request,
-                                  trace_headers,
-                                  priority=priority))
+        raise NotImplementedError(
+            "Pooling models are not supported in vLLM V0")
 
     async def _process_request(
         self,
         prompt: PromptType,
-        params: Union[SamplingParams, PoolingParams],
+        params: SamplingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
-    ) -> Union[AsyncGenerator[RequestOutput, None], AsyncGenerator[
-            PoolingRequestOutput, None]]:
+    ) -> AsyncGenerator[RequestOutput, None]:
         """Send an RPCGenerateRequest to the RPCServer and stream responses."""
 
         # If already dead, error out.
@@ -537,23 +512,7 @@ class MQLLMEngineClient(EngineClient):
         if request_id in self.output_queues:
             raise ValueError(f"Request {request_id} already exists")
 
-        # Constructing guided decoding logits processors is expensive, so we do
-        # it here to avoid contending with cpu resources and the GIL on the
-        # backend process.
-        if isinstance(params, SamplingParams) and \
-            params.guided_decoding is not None:
-            params = await \
-                build_guided_decoding_logits_processor_async(
-                    sampling_params=params,
-                    tokenizer=await self.get_tokenizer(lora_request),
-                    default_guided_backend=(self.decoding_config.backend
-                        if self.decoding_config
-                        else DecodingConfig.backend),
-                    model_config=self.model_config,
-                    reasoning_backend=self.decoding_config.reasoning_backend,
-                )
-
-        # 1) Create output queue for this requests.
+        # 1) Create output queue for this request.
         queue: asyncio.Queue[Union[RequestOutput,
                                    BaseException]] = asyncio.Queue()
         self.output_queues[request_id] = queue
@@ -561,7 +520,7 @@ class MQLLMEngineClient(EngineClient):
         try:
             # 2) Detach logits processors so that they can be pickled
             # separately (may require cloudpickle which is slower)
-            if isinstance(params, SamplingParams) and params.logits_processors:
+            if params.logits_processors:
                 # Defensive shallow copy
                 params = copy.copy(params)
                 logits_processors = params.logits_processors
@@ -660,13 +619,14 @@ class MQLLMEngineClient(EngineClient):
             raise request_output
         return request_output.is_sleeping
 
-    async def add_lora(self, lora_request: LoRARequest) -> None:
+    async def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""
         # Uses the same I/O as generate requests
         request = RPCLoadAdapterRequest(lora_request)
 
-        # Create output queue for this requests.
-        queue: asyncio.Queue[Union[None, BaseException]] = asyncio.Queue()
+        # Create output queue for this request.
+        queue: asyncio.Queue[Union[
+            BaseException, RPCAdapterLoadedResponse]] = asyncio.Queue()
         self.output_queues[request.request_id] = queue
 
         # Send the request
@@ -680,3 +640,4 @@ class MQLLMEngineClient(EngineClient):
         # Raise on error, otherwise happily return None
         if isinstance(request_output, BaseException):
             raise request_output
+        return request_output.lora_loaded

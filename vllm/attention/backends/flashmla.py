@@ -3,7 +3,7 @@
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Optional, Tuple, Type
+from typing import List, Optional, Tuple, Type
 
 import torch
 
@@ -17,9 +17,6 @@ from vllm.attention.backends.mla.common import (MLACommonBackend,
 from vllm.attention.ops.flashmla import (flash_mla_with_kvcache,
                                          get_mla_metadata,
                                          is_flashmla_supported)
-
-if TYPE_CHECKING:
-    from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
 
 class FlashMLABackend(MLACommonBackend):
@@ -61,16 +58,6 @@ class FlashMLAMetadata(MLACommonMetadata):
             decode_metadata.decode_num_splits=\
                 self.decode_num_splits
         return decode_metadata
-
-    def advance_step(self,
-                     model_input: "ModelInputForGPUWithSamplingMetadata",
-                     sampled_token_ids: Optional[torch.Tensor],
-                     block_size: int,
-                     num_seqs: int,
-                     num_queries: int,
-                     turn_prefills_into_decodes: bool = False):
-        raise NotImplementedError(
-            "advance_step is not implemented for FlashMLA")
 
 
 class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
@@ -191,8 +178,8 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
                          logits_soft_cap, attn_type,
                          kv_sharing_target_layer_name, **mla_args)
 
-        assert is_flashmla_supported(), \
-            "FlashMLA is not supported on this device"
+        is_supported, reason = is_flashmla_supported()
+        assert is_supported, reason
 
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):

@@ -118,6 +118,8 @@ class PPTestSettings:
         multi_node_only: bool = False,
         load_format: Optional[str] = None,
     ):
+        vllm_major_versions = ["1"] if runner == "pooling" else ["0"]
+
         return PPTestSettings(
             parallel_setups=[
                 ParallelSetup(tp_size=tp_base,
@@ -126,7 +128,7 @@ class PPTestSettings:
                               chunked_prefill=False),
             ],
             distributed_backends=["mp"],
-            vllm_major_versions=["0"],
+            vllm_major_versions=vllm_major_versions,
             runner=runner,
             test_options=PPTestOptions(multi_node_only=multi_node_only,
                                        load_format=load_format),
@@ -154,7 +156,7 @@ TEXT_GENERATION_MODELS = {
     "baichuan-inc/Baichuan-7B": PPTestSettings.fast(),
     "baichuan-inc/Baichuan2-13B-Chat": PPTestSettings.fast(),
     "bigscience/bloomz-1b1": PPTestSettings.fast(),
-    "THUDM/chatglm3-6b": PPTestSettings.fast(),
+    "zai-org/chatglm3-6b": PPTestSettings.fast(),
     "CohereForAI/c4ai-command-r-v01": PPTestSettings.fast(load_format="dummy"),
     "databricks/dbrx-instruct": PPTestSettings.fast(load_format="dummy"),
     "Deci/DeciLM-7B-instruct": PPTestSettings.fast(),
@@ -224,7 +226,7 @@ MULTIMODAL_MODELS = {
     "Salesforce/blip2-opt-6.7b": PPTestSettings.fast(),
     "facebook/chameleon-7b": PPTestSettings.fast(),
     "adept/fuyu-8b": PPTestSettings.fast(),
-    "THUDM/glm-4v-9b": PPTestSettings.fast(),
+    "zai-org/glm-4v-9b": PPTestSettings.fast(),
     "OpenGVLab/InternVL2-1B": PPTestSettings.fast(),
     "llava-hf/llava-1.5-7b-hf": PPTestSettings.fast(),
     "llava-hf/llava-v1.6-mistral-7b-hf": PPTestSettings.fast(),
@@ -233,15 +235,13 @@ MULTIMODAL_MODELS = {
     "openbmb/MiniCPM-Llama3-V-2_5": PPTestSettings.fast(),
     "allenai/Molmo-7B-D-0924": PPTestSettings.fast(),
     "AIDC-AI/Ovis2-1B": PPTestSettings.fast(),
+    "AIDC-AI/Ovis2.5-2B": PPTestSettings.fast(),
     "microsoft/Phi-3.5-vision-instruct": PPTestSettings.fast(),
     "mistralai/Pixtral-12B-2409": PPTestSettings.fast(load_format="dummy"),
     "Qwen/Qwen-VL-Chat": PPTestSettings.fast(),
     "Qwen/Qwen2-Audio-7B-Instruct": PPTestSettings.fast(),
     "Qwen/Qwen2-VL-2B-Instruct": PPTestSettings.fast(),
     "fixie-ai/ultravox-v0_5-llama-3_2-1b": PPTestSettings.fast(),
-    # [Encoder-decoder]
-    # TODO: Implement PP
-    # "meta-llama/Llama-3.2-11B-Vision-Instruct": PPTestSettings.fast(),
 }
 # yapf: enable
 
@@ -293,6 +293,8 @@ def _compare_tp(
     tokenizer_mode = model_info.tokenizer_mode
     hf_overrides = model_info.hf_overrides
     hf_config = get_config(model_id, trust_remote_code)
+    skip_tokenizer_init = model_info.skip_tokenizer_init
+    max_num_seqs = model_info.max_num_seqs
 
     dtype = "float16"
     if hf_config.model_type in _FLOAT16_NOT_SUPPORTED_MODELS:
@@ -346,6 +348,10 @@ def _compare_tp(
         common_args.extend(["--load-format", load_format])
     if hf_overrides:
         common_args.extend(["--hf-overrides", json.dumps(hf_overrides)])
+    if skip_tokenizer_init:
+        common_args.append("--skip-tokenizer-init")
+    if max_num_seqs:
+        common_args.extend(["--max-num-seqs", f"{max_num_seqs}"])
 
     specific_case = tp_size == 2 and pp_size == 2 and chunked_prefill
     testing_ray_compiled_graph = False
