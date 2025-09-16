@@ -34,21 +34,15 @@ template <class Type>
 __inline__ __device__ PackedVec<Type> compute_silu_mul(PackedVec<Type>& vec,
                                                        PackedVec<Type>& vec2) {
   PackedVec<Type> result;
+  using packed_type = typename TypeConverter<Type>::Type;
+
 #pragma unroll
   for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; ++i) {
-    if constexpr (std::is_same_v<Type, half>) {
-      half2 val(0.5f, 0.5f);
-      half2 t0 = __hmul2(vec.elts[i], val);
-      half2 t1 = __hfma2(h2tanh(t0), val, val);
-      half2 t2 = __hmul2(vec.elts[i], t1);
-      result.elts[i] = __hmul2(t2, vec2.elts[i]);
-    } else {
-      __nv_bfloat162 val(0.5f, 0.5f);
-      __nv_bfloat162 t0 = __hmul2(vec.elts[i], val);
-      __nv_bfloat162 t1 = __hfma2(h2tanh(t0), val, val);
-      __nv_bfloat162 t2 = __hmul2(vec.elts[i], t1);
-      result.elts[i] = __hmul2(t2, vec2.elts[i]);
-    }
+    // silu_mul in float16
+    packed_type ONES(1.0f, 1.0f);
+    packed_type silu_vec =
+        __h2div(vec.elts[i], __hadd2(ONES, h2exp(-vec.elts[i])));
+    result.elts[i] = __hmul2(silu_vec, vec2.elts[i]);
   }
   return result;
 }
