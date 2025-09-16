@@ -8,6 +8,7 @@ from torch._ops import OpOverload
 
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey, _normalize_quant_group_shape, kFp8DynamicTensorSym,
     kFp8DynamicTokenSym, kFp8StaticTensorSym)
@@ -100,17 +101,29 @@ class MatcherRMSNorm:  # TODO separate residual and not residual
 
 class MatcherQuant:
 
-    def __init__(self, quant_key: QuantKey):
+    def __init__(self, quant_key: QuantKey, enabled: Optional[bool] = None):
+
         self.quant_key = quant_key
         assert quant_key in QUANT_OPS, \
             f"unsupported quantization scheme {quant_key}"
         self.QUANT_OP = QUANT_OPS[quant_key]
 
-    def forward(
+        assert quant_key.scale2 is None
+        self.quant_fp8 = QuantFP8(quant_key.scale.static,
+                                  quant_key.scale.group_shape)
+
+        if enabled is None:
+            # TODO either pass config to enabled or set it globally
+            #  (global during pass init seems reasonable)
+            enabled = self.quant_fp8.enabled()
+
+        self.forward = self.forward_custom if enabled else self.forward_native
+
+    def forward_custom(
         self,
         input: torch.Tensor,
         scale: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # TODO: why does empty_like produce a permute but
         #  empty via shape doesn't?
         result = torch.empty(input.shape,
@@ -123,7 +136,7 @@ class MatcherQuant:
                                             result=result,
                                             input=input,
                                             scale=scale)
-            return result
+            return result, scale
         else:
             assert scale is None
             scale = self.make_scale(input)
@@ -133,6 +146,13 @@ class MatcherQuant:
                                                    scale=scale,
                                                    scale_ub=None)
             return result, scale
+
+    def forward_native(
+        self,
+        input: torch.Tensor,
+        scale: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.quant_fp8(input, scale)
 
     def make_scale(self, input: torch.Tensor):
         normalized_group_shape = _normalize_quant_group_shape(
@@ -146,9 +166,8 @@ class MatcherQuant:
                            device=input.device,
                            dtype=torch.float32)
 
-    def __call__(
-        self,
-        input: torch.Tensor,
-        scale: Optional[torch.Tensor] = None
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+    def __call__(self,
+                 input: torch.Tensor,
+                 scale: Optional[torch.Tensor] = None
+                 ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.forward(input, scale)
