@@ -100,6 +100,8 @@ def apply_flashinfer_per_tensor_scale_fp8(
     apply_router_weight_on_input: bool,
 ) -> torch.Tensor:
     from flashinfer.fused_moe import RoutingMethodType
+
+    import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: E501, F401
     assert layer.output1_scales_scalar is not None, (
         "Expected output1_scales_scalar to be initialized")
     assert layer.output1_scales_scalar is not None, (
