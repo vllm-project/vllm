@@ -78,40 +78,9 @@ def calculate_diff(
         print("❌ Implementations differ")
 
 
-hidden_sizes = [1, 16, 64, 128, 256, 512, 1024, 2048, 4096]
-batch_sizes = [1, 16, 32, 64, 128]
-group_shapes = [
-    GroupShape.PER_TENSOR,
-    GroupShape.PER_TOKEN,
-    GroupShape(1, 64),
-    GroupShape(1, 128),
-]
-column_major_scales = [True, False]
-
-config_gen = itertools.product(
-    group_shapes,
-    column_major_scales,
-    batch_sizes,
-    hidden_sizes,
-)
-
-# filter out column-major scales for non-group, reverse order
-configs = list(c[::-1] for c in config_gen if (c[0].is_per_group() or not c[1]))
+configs = []
 
 
-@triton.testing.perf_report(
-    triton.testing.Benchmark(
-        x_names=["hidden_size", "batch_size", "col_major", "group_shape"],
-        x_vals=configs,
-        line_arg="provider",
-        line_vals=["torch", "cuda", "triton"],
-        line_names=["Torch (Compiled)", "CUDA", "Triton"],
-        styles=[("blue", "-"), ("green", "-"), ("black", "-")],
-        ylabel="us",
-        plot_name="QuantFP8 performance",
-        args={},
-    )
-)
 def benchmark_quantization(
     batch_size,
     hidden_size,
@@ -173,7 +142,11 @@ def compute_geomean_speedups(
     if groupby_cols is None:
         result = geo_speedup(df).to_frame().T
     else:
-        result = df.groupby(groupby_cols).apply(geo_speedup).reset_index()
+        result = (
+            df.groupby(groupby_cols)
+            .apply(geo_speedup, include_groups=False)
+            .reset_index()
+        )
 
     return result
 
@@ -186,11 +159,77 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dtype", type=str, choices=["half", "bfloat16", "float"], default="half"
     )
+    parser.add_argument(
+        "--hidden-sizes",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Hidden sizes to benchmark (default: 1,16,64,128,256,512,1024,2048,4096)",
+    )
+    parser.add_argument(
+        "--batch-sizes",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Batch sizes to benchmark (default: 1,16,32,64,128)",
+    )
+    parser.add_argument(
+        "--group-sizes",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Group sizes for GroupShape(1,N) to benchmark. "
+        "Use 0 for PER_TENSOR, -1 for PER_TOKEN (default: 0,-1,64,128)",
+    )
+    parser.add_argument(
+        "--no-column-major",
+        action="store_true",
+        help="Disable column-major scales testing",
+    )
 
     args = parser.parse_args()
     assert args
 
     dtype = STR_DTYPE_TO_TORCH_DTYPE[args.dtype]
+
+    hidden_sizes = args.hidden_sizes or [1, 16, 64, 128, 256, 512, 1024, 2048, 4096]
+    batch_sizes = args.batch_sizes or [1, 16, 32, 64, 128]
+
+    if args.group_sizes is not None:
+        group_shapes = []
+        for size in args.group_sizes:
+            if size == 0:
+                group_shapes.append(GroupShape.PER_TENSOR)
+            elif size == -1:
+                group_shapes.append(GroupShape.PER_TOKEN)
+            else:
+                group_shapes.append(GroupShape(1, size))
+    else:
+        group_shapes = [
+            GroupShape.PER_TENSOR,
+            GroupShape.PER_TOKEN,
+            GroupShape(1, 64),
+            GroupShape(1, 128),
+        ]
+
+    column_major_scales = [False] if args.no_column_major else [True, False]
+
+    config_gen = itertools.product(
+        group_shapes,
+        column_major_scales,
+        batch_sizes,
+        hidden_sizes,
+    )
+
+    # filter out column-major scales for non-group, reverse order
+    configs.extend(c[::-1] for c in config_gen if (c[0].is_per_group() or not c[1]))
+
+    print(f"Running {len(configs)} configurations:")
+    print(f"  Hidden sizes: {hidden_sizes}")
+    print(f"  Batch sizes: {batch_sizes}")
+    print(f"  Group shapes: {[str(g) for g in group_shapes]}")
+    print(f"  Column major scales: {column_major_scales}")
+    print()
 
     if args.check:
         for group_shape in group_shapes:
@@ -200,7 +239,21 @@ if __name__ == "__main__":
                 batch_size=4, hidden_size=4096, group_shape=group_shape, dtype=dtype
             )
 
-    df = benchmark_quantization.run(print_data=True, dtype=dtype, return_df=True)
+    benchmark = triton.testing.perf_report(
+        triton.testing.Benchmark(
+            x_names=["hidden_size", "batch_size", "col_major", "group_shape"],
+            x_vals=configs,
+            line_arg="provider",
+            line_vals=["torch", "cuda", "triton"],
+            line_names=["Torch (Compiled)", "CUDA", "Triton"],
+            styles=[("blue", "-"), ("green", "-"), ("black", "-")],
+            ylabel="us",
+            plot_name="QuantFP8 performance",
+            args={},
+        )
+    )(benchmark_quantization)
+
+    df = benchmark.run(print_data=True, dtype=dtype, return_df=True)
 
     # Print geomean speedups
     geo_table_grouped = compute_geomean_speedups(
