@@ -52,7 +52,7 @@ class ECSharedStorageConnector(ECConnectorBase):
 
     def __init__(self, vllm_config: "VllmConfig", role: ECConnectorRole):
         super().__init__(vllm_config=vllm_config, role=role)
-        # req_id -> index -> MMMeta
+        # req_id -> index
         self._mm_datas_need_loads: dict[str, int] = {}
         transfer_config = vllm_config.ec_transfer_config
         self._storage_path = transfer_config.get_from_extra_config("shared_storage_path", "/tmp")

@@ -178,7 +178,7 @@ class ECConnectorBase(ABC):
         request: "Request",
     ) -> list[bool]:
         """
-        Check if encoder cache exit for each mm data of requests
+        Check if encoder cache exists for each mm data of requests
         
         Args:
             request (Request): the request object.
