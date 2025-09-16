@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import ClassVar, Optional
+from typing import ClassVar, Optional, Union
 
 import torch
 
@@ -215,14 +215,19 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
     def _forward_decode(
         self,
-        q_nope: torch.Tensor,
-        q_pe: torch.Tensor,
+        q: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: MLACommonMetadata,
         layer: AttentionLayer,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
+
+        if type(q) is tuple:
+            q_nope, q_pe = q
+        else:
+            q_nope, q_pe = torch.split(
+                q, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
 
         # Adjust workspace size (if necessary)
         self._workspace.ensure_size(attn_metadata, self._num_kv_splits)
