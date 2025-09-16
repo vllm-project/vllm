@@ -9,7 +9,7 @@ with the reasoning parser:
 
 ```bash
 vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
-    --structured-outputs-config.reasoning_parser deepseek_r1
+    --reasoning-parser deepseek_r1
 ```
 
 This example demonstrates how to generate chat completions from reasoning models

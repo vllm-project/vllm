@@ -146,7 +146,7 @@ def server():  # noqa: F811
         "xgrammar",
         "--tool-call-parser",
         "hermes",
-        "--structured-outputs-config.reasoning_parser",
+        "--reasoning-parser",
         "qwen3",
         "--gpu-memory-utilization",
         "0.4"
@@ -229,7 +229,7 @@ def k2_server():  # noqa: F811
         "xgrammar",
         "--tool-call-parser",
         "hermes",
-        "--structured-outputs-config.reasoning_parser",
+        "--reasoning-parser",
         "qwen3",
         "--gpu-memory-utilization",
         "0.4",

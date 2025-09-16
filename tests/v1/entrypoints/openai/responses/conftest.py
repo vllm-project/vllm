@@ -15,7 +15,7 @@ def default_server_args():
         "--max-model-len",
         "8192",
         "--enforce-eager",  # For faster startup.
-        "--structured-outputs-config.reasoning_parser",
+        "--reasoning-parser",
         "deepseek_r1",
     ]
 
