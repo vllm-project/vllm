@@ -182,7 +182,7 @@ class EagleProposer:
         # FIXME: need to consider multiple kv_cache_groups
         ubatch_id = dbo_current_ubatch_id()
         attn_metadata_builder = \
-            self.runner.attn_groups[0][0].get_metadata_builder(ubatch_id)
+            self.runner.attn_groups[0][0].metadata_builders[ubatch_id]
         attn_metadata = attn_metadata_builder.build_for_drafting(
             common_attn_metadata=common_attn_metadata, draft_index=0)
 
@@ -360,7 +360,7 @@ class EagleProposer:
     ) -> list[torch.Tensor]:
         ubatch_id = dbo_current_ubatch_id()
         tree_attn_metadata_builder = \
-            self.runner.attn_groups[0][0].get_metadata_builder(ubatch_id)
+            self.runner.attn_groups[0][0].metadata_builders[ubatch_id]
         assert isinstance(tree_attn_metadata_builder,
                           TreeAttentionMetadataBuilder)
 
