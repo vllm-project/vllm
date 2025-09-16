@@ -8,6 +8,7 @@ class VllmEplbAdaptor:
     def __init__(self, model, **args):
         self.model = model
         self.expert_map_per_layer = dict()
+        self.expert_map_per_layer_cpu = dict()
         self.buffer_tensor_list: list[list[Any]]
         self.expert_param_per_layer = dict()
 
