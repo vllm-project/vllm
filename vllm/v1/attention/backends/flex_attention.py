@@ -62,14 +62,6 @@ def pad_to_multiple(x: torch.Tensor, multiple: int, dim: int):
 class FlexAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
 
-    @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.float16, torch.bfloat16, torch.float32]
-
-    @classmethod
-    def get_supported_head_sizes(cls) -> list[int]:
-        return []
-
     @staticmethod
     def get_name() -> str:
         return "FLEX_ATTENTION"
@@ -98,6 +90,38 @@ class FlexAttentionBackend(AttentionBackend):
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
         return False
+
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        return []
+
+    @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        return [torch.float16, torch.bfloat16, torch.float32]
+
+    @classmethod
+    def get_supported_kv_cache_dtypes(cls) -> list[Optional[str]]:
+        return ["auto", "fp16", "bf16"]
+
+    @classmethod
+    def get_supported_block_sizes(cls) -> list[int]:
+        return []
+
+    @classmethod
+    def is_v1(cls) -> bool:
+        return True
+
+    @classmethod
+    def is_mla(cls) -> bool:
+        return False
+
+    @classmethod
+    def get_min_compute_capability(cls) -> Optional[int]:
+        return None
+
+    @classmethod
+    def get_max_compute_capability(cls) -> Optional[int]:
+        return None
 
 
 #@torch.compile(fullgraph=True, mode="reduce-overhead")
