@@ -11,7 +11,7 @@
 import math
 from collections.abc import Iterable
 from itertools import repeat
-from typing import Callable, Optional, Union
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -519,12 +519,6 @@ class RadioModel(nn.Module):
         x = self.input_conditioner(pixel_values)
         y = self.model(x)
         return self._extract_final(y)
-
-    def make_preprocessor_external(
-            self) -> Callable[[torch.Tensor], torch.Tensor]:
-        ret = self.input_conditioner
-        self.input_conditioner = nn.Identity()
-        return ret
 
     def load_weights(self, weights) -> set[str]:
         loaded_params: set[str] = set()
