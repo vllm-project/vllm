@@ -163,13 +163,15 @@ class XPUPlatform(Platform):
             vllm_config.scheduler_config.max_num_batched_tokens = max(
                 vllm_config.scheduler_config.max_model_len,
                 DEFAULT_MAX_NUM_BATCHED_TOKENS)
+        from vllm.v1.attention.backends.utils import set_kv_cache_layout
 
-        if (envs.VLLM_KV_CACHE_LAYOUT is None
-                or envs.VLLM_KV_CACHE_LAYOUT != "NHD"):
-            os.environ["VLLM_KV_CACHE_LAYOUT"] = "NHD"
-            logger.info(
-                "Setting VLLM_KV_CACHE_LAYOUT to 'NHD' for XPU; "
-                "only NHD layout is supported by XPU attention kernels.")
+        set_kv_cache_layout("NHD")
+        logger.info("Setting VLLM_KV_CACHE_LAYOUT to 'NHD' for XPU; "
+                    "only NHD layout is supported by XPU attention kernels.")
+
+    @classmethod
+    def support_hybrid_kv_cache(cls) -> bool:
+        return True
 
     @classmethod
     def is_pin_memory_available(cls):
