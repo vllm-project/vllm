@@ -127,6 +127,11 @@ class PrefixCachingMetrics:
         if stats.reset:
             self.reset()
 
+        # DO NOT appending empty stats to avoid helpful info get kicked out
+        # due to sliding window.
+        if stats.requests == 0:
+            return
+
         # Update the metrics.
         self.query_queue.append((stats.requests, stats.queries, stats.hits))
         self.aggregated_requests += stats.requests
