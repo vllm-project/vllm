@@ -30,7 +30,7 @@ model_config = {
     ])
 @pytest.mark.parametrize("batch_size", [5])
 @pytest.mark.parametrize("seed", [1])
-@pytest.mark.parametrize("disable_hybrid_kv_cache_manager", [False])
+@pytest.mark.parametrize("disable_hybrid_kv_cache_manager", [True, False])
 def test_sliding_window_retrieval(monkeypatch, model, batch_size, seed,
                                   disable_hybrid_kv_cache_manager):
     """

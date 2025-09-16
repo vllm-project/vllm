@@ -1232,16 +1232,23 @@ def get_kv_cache_configs(vllm_config: VllmConfig,
     return kv_cache_configs
 
 
-class MergedBlockHash:
+class BlockHashListWithBlockSize:
+    """
+    Convert the block hashes under hash_block_size to another target_block_size.
+    Only support scaling up the block size by an integer factor now. Implemented
+    by concatenating the block hashes under hash_block_size to form that of 
+    target_block_size.
+    """
 
-    def __init__(self, block_hashes: list[BlockHash], merge_size: int):
-        assert merge_size > 1
+    def __init__(self, block_hashes: list[BlockHash], hash_block_size: int,
+                 target_block_size: int):
         self.block_hashes = block_hashes
-        self.merge_size = merge_size
+        assert target_block_size % hash_block_size == 0
+        self.scale_factor = target_block_size // hash_block_size
 
     def __len__(self) -> int:
         # how many merged items are available
-        return len(self.block_hashes) // self.merge_size
+        return len(self.block_hashes) // self.scale_factor
 
     # precise return types for mypy
     @overload
@@ -1273,12 +1280,12 @@ class MergedBlockHash:
             yield self._merge_at(i)
 
     def _merge_at(self, idx: int) -> BlockHash:
-        base = idx * self.merge_size
-        end = base + self.merge_size
+        base = idx * self.scale_factor
+        end = base + self.scale_factor
         merged_hash: bytes = self.block_hashes[base]
         for i in range(base + 1, end):
             merged_hash += self.block_hashes[i]
         return BlockHash(merged_hash)
 
 
-BlockHashList = Union[list[BlockHash], MergedBlockHash]
+BlockHashList = Union[list[BlockHash], BlockHashListWithBlockSize]

@@ -10,10 +10,11 @@ from vllm.distributed.kv_events import (MEDIUM_GPU, AllBlocksCleared,
 from vllm.logger import init_logger
 # yapf: disable
 from vllm.v1.core.kv_cache_utils import (BlockHash, BlockHashList,
+                                         BlockHashListWithBlockSize,
                                          BlockHashWithGroupId,
                                          ExternalBlockHash,
                                          FreeKVCacheBlockQueue, KVCacheBlock,
-                                         MergedBlockHash, get_block_hash,
+                                         get_block_hash,
                                          make_block_hash_with_group_id,
                                          maybe_convert_block_hash)
 # yapf: enable
@@ -137,8 +138,9 @@ class BlockPool:
             block_hashes: BlockHashList = request.block_hashes
         else:
             assert block_size % self.hash_block_size == 0
-            block_hashes = MergedBlockHash(request.block_hashes,
-                                           block_size // self.hash_block_size)
+            block_hashes = BlockHashListWithBlockSize(request.block_hashes,
+                                                      self.hash_block_size,
+                                                      block_size)
 
         new_block_hashes = block_hashes[num_cached_blocks:]
         new_hashes: Optional[list[ExternalBlockHash]] = (

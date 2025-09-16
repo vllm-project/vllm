@@ -5,7 +5,8 @@ from typing import Optional
 
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (BlockHash, BlockHashList,
-                                         KVCacheBlock, MergedBlockHash)
+                                         BlockHashListWithBlockSize,
+                                         KVCacheBlock)
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager, FullAttentionManager, get_manager_for_kv_cache_spec)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
@@ -382,9 +383,9 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         if self.full_attention_spec.block_size == self.hash_block_size:
             full_attention_block_hashes: BlockHashList = block_hashes
         else:
-            full_attention_block_hashes = MergedBlockHash(
-                block_hashes,
-                self.hash_block_size // self.full_attention_spec.block_size)
+            full_attention_block_hashes = BlockHashListWithBlockSize(
+                block_hashes, self.hash_block_size,
+                self.full_attention_spec.block_size)
         hit_blocks_full_attn = (
             self.full_attention_manager_cls.find_longest_cache_hit(
                 block_hashes=full_attention_block_hashes,
@@ -402,9 +403,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         if self.other_spec.block_size == self.hash_block_size:
             other_block_hashes: BlockHashList = block_hashes
         else:
-            other_block_hashes = MergedBlockHash(
-                block_hashes,
-                self.other_spec.block_size // self.hash_block_size)
+            other_block_hashes = BlockHashListWithBlockSize(
+                block_hashes, self.hash_block_size, self.other_spec.block_size)
         hit_blocks_other_attn = (
             self.other_attention_cls.find_longest_cache_hit(
                 block_hashes=other_block_hashes,
