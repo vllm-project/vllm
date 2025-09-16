@@ -828,9 +828,6 @@ class OpenAIServingChat(OpenAIServing):
                             history_tool_call_cnt += 1
                             tools_streamed[i] = True
 
-                        # update the previous values for the next iteration
-                        previous_texts[i] = current_text
-
                     # handle streaming deltas for tools with "auto" tool choice
                     # and reasoning parser
                     elif tool_choice_auto and self.reasoning_parser:
