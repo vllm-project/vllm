@@ -858,16 +858,10 @@ class FusedMoEModularKernel(torch.nn.Module):
         if global_num_experts == -1:
             global_num_experts = local_num_experts
 
-        shared_output: torch.Tensor
-
         if not self.prepare_finalize.supports_async():
             # We shouldn't be running an a2a kernel that doesn't
             # support async prepare/finalize
             assert not dbo_enabled()
-
-            # Run shared experts serially with dispatch.
-            if self.shared_experts is not None:
-                shared_output = self.shared_experts(a1)
 
             (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
              _expert_topk_weights) = self.prepare_finalize.prepare(
@@ -895,9 +889,6 @@ class FusedMoEModularKernel(torch.nn.Module):
                 apply_router_weight_on_input,
                 self.fused_experts.quant_config,
             )
-
-            if self.shared_experts is not None:
-                shared_output = self.shared_experts(a1)
 
             # If DBO is being used, register the hook with the ubatch context
             # and call it in dbo_maybe_run_recv_hook instead of passing it to
@@ -949,8 +940,9 @@ class FusedMoEModularKernel(torch.nn.Module):
 
         shared_output: Optional[torch.Tensor] = None
 
-        if (not self.prepare_finalize.supports_async()
-                or self.shared_experts is None):
+        if not self.prepare_finalize.supports_async():
+            assert not dbo_enabled()
+
             self.prepare_finalize.finalize(
                 output,
                 fused_out,
@@ -962,7 +954,7 @@ class FusedMoEModularKernel(torch.nn.Module):
             if self.shared_experts is not None:
                 shared_output = self.shared_experts(a1)
         else:
-            receiver = self.prepare_finalize.finalize_async(
+            recv_hook = self.prepare_finalize.finalize_async(
                 output,
                 fused_out,
                 topk_weights,
@@ -970,9 +962,15 @@ class FusedMoEModularKernel(torch.nn.Module):
                 apply_router_weight_on_input,
                 self.fused_experts.finalize_weight_and_reduce_impl(),
             )
-            assert self.shared_experts is not None
-            shared_output = self.shared_experts(a1)
-            receiver()
+
+            if self.shared_experts is not None:
+                shared_output = self.shared_experts(a1)
+
+            if recv_hook is not None:
+                dbo_register_recv_hook(recv_hook)
+            dbo_yield()
+            if not dbo_enabled():
+                recv_hook()
 
         if self.shared_experts is None:
             return output
