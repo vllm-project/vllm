@@ -8,8 +8,7 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.utils import has_deep_ep, has_deep_gemm, has_pplx
-from vllm.v1.worker.ubatching import dbo_enabled
+from vllm.utils import has_deep_ep, has_pplx
 
 from .base_device_communicator import All2AllManagerBase, Cache
 
@@ -194,9 +193,10 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
         handle: deep_ep.Buffer = self.handle_cache.get_or_create(
             buffer_kwargs, deep_ep.Buffer)
         return handle
-    
+
     def set_num_sms(self, num_sms: int):
         import deep_ep
+
         # Right now the buffers are sized for only what the kernels were
         # created with. So we can only reduce the number of SMS used
         # but not increase it.
