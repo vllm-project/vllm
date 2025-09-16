@@ -63,9 +63,13 @@ class LoggingStatLogger(StatLoggerBase):
         # TODO: Make the interval configurable.
         self.prefix_caching_metrics = PrefixCachingMetrics()
         self.spec_decoding_logging = SpecDecodingLogging()
-        connector_cls = KVConnectorFactory.get_connector_class(
-            self.vllm_config.kv_transfer_config)
-        self.kv_transfer_logging = KVTransferLogging(connector_cls)
+        kv_tranfer_config = self.vllm_config.kv_transfer_config
+        if kv_tranfer_config.kv_connector:
+            connector_cls = KVConnectorFactory.get_connector_class(
+                kv_tranfer_config)
+            self.kv_transfer_logging = KVTransferLogging(connector_cls)
+        else:
+            self.kv_transfer_logging = None
         self.last_prompt_throughput: float = 0.0
         self.last_generation_throughput: float = 0.0
 
@@ -105,6 +109,7 @@ class LoggingStatLogger(StatLoggerBase):
                 self.spec_decoding_logging.observe(
                     scheduler_stats.spec_decoding_stats)
             if kv_transfer_stats := scheduler_stats.kv_transfer_stats:
+                assert self.kv_transfer_logging
                 self.kv_transfer_logging.observe(kv_transfer_stats)
             self.last_scheduler_stats = scheduler_stats
 
