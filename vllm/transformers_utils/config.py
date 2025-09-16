@@ -90,11 +90,6 @@ _AUTO_CONFIG_KWARGS_OVERRIDES: dict[str, dict[str, Any]] = {
     "internvl_chat": {
         "has_no_defaults_at_init": True
     },
-    # transformers regards mllama as is_encoder_decoder=False
-    # vllm needs is_encoder_decoder=True to enable cross-attention
-    "mllama": {
-        "is_encoder_decoder": True
-    },
     "NVLM_D": {
         "has_no_defaults_at_init": True
     },

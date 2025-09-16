@@ -242,9 +242,6 @@ MULTIMODAL_MODELS = {
     "Qwen/Qwen2-Audio-7B-Instruct": PPTestSettings.fast(),
     "Qwen/Qwen2-VL-2B-Instruct": PPTestSettings.fast(),
     "fixie-ai/ultravox-v0_5-llama-3_2-1b": PPTestSettings.fast(),
-    # [Encoder-decoder]
-    # TODO: Implement PP
-    # "meta-llama/Llama-3.2-11B-Vision-Instruct": PPTestSettings.fast(),
 }
 # yapf: enable
 

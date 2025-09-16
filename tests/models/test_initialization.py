@@ -92,10 +92,6 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
             # has cc==8.9 which hasn't supported FA3 yet. Remove this hack when
             # L4 supports FA3.
             m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN_VLLM_V1")
-        if model_arch == "Florence2ForConditionalGeneration":
-            # An encoder-decoder model that's V0-only. Just skip it
-            # since V0 is about to be removed.
-            pytest.skip("Skipping Florence2ForConditionalGeneration")
         if model_arch == "WhisperForConditionalGeneration":
             m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
         LLM(
