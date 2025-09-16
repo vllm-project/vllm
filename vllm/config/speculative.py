@@ -32,7 +32,7 @@ logger = init_logger(__name__)
 SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "medusa",
                             "mlp_speculator", "draft_model", "deepseek_mtp",
                             "ernie_mtp", "qwen3_next_mtp", "mimo_mtp",
-                            "longcat_flash_mtp", "mtp"]
+                            "longcat_flash_mtp", "mtp", "suffix"]
 MTP_MODEL_TYPES = ("deepseek_mtp", "mimo_mtp", "glm4_moe_mtp", "ernie_mtp",
                    "qwen3_next_mtp", "longcat_flash_mtp")
 
@@ -99,6 +99,30 @@ class SpeculativeConfig:
     prompt_lookup_min: Optional[int] = None
     """Minimum size of ngram token window when using Ngram proposer, if
     provided. Defaults to 1."""
+
+    # Suffix decode configuration
+    suffix_cache_max_depth: int = 64
+    """Maximum depth of the suffix trees."""
+    suffix_cache_max_requests: int = 100000
+    """Maximum number of cached requests. When this limit is reached, the
+    least recently used inactive requests are evicted from the cache using
+    FIFO order."""
+    suffix_max_spec_factor: float = 1.0
+    """Factor that dynamically limits speculation based on matched pattern
+    length. The actual max tokens speculated is calculated as:
+    min(num_speculative_tokens,
+        match_length * suffix_max_spec_factor + suffix_max_spec_offset).
+    Higher values allow more aggressive speculation when longer patterns
+    are matched. Example: With factor=1.5 and a 10-token match, up to
+    15 tokens can be speculated."""
+    suffix_max_spec_offset: float = 0.0
+    """Offset added to the dynamic speculation limit calculation.
+    This provides a minimum number of tokens that can be speculated even
+    with short pattern matches. Works in conjunction with
+    suffix_max_spec_factor. Example: With offset=2.0, at least 2 tokens
+    can be speculated even with a 1-token match."""
+    suffix_min_token_prob: float = 0.6
+    """Minimum estimated probability threshold for candidate tokens."""
 
     speculative_token_tree: Optional[str] = None
     """Specifies the tree structure for speculative token generation.
@@ -227,6 +251,8 @@ class SpeculativeConfig:
                     self.quantization = self.target_model_config.quantization
             elif self.method in ("ngram", "[ngram]"):
                 self.model = "ngram"
+            elif self.method == "suffix":
+                self.model = "suffix"
             else:
                 raise ValueError(
                     "num_speculative_tokens was provided but without "
@@ -265,7 +291,30 @@ class SpeculativeConfig:
                 raise ValueError(
                     f"prompt_lookup_min={self.prompt_lookup_min} must "
                     f"be <= prompt_lookup_max={self.prompt_lookup_max}")
-
+        elif self.method == "suffix":
+            # Validate suffix decode parameters
+            if self.suffix_cache_max_depth < 1:
+                raise ValueError(
+                    f"suffix_cache_max_depth={self.suffix_cache_max_depth} "
+                    "must be greater than or equal to 1")
+            if (self.suffix_cache_max_requests is not None
+                    and self.suffix_cache_max_requests < 1):
+                raise ValueError(f"suffix_cache_max_requests="
+                                 f"{self.suffix_cache_max_requests} "
+                                 "must be greater than or equal to 1")
+            if self.suffix_max_spec_factor < 0:
+                raise ValueError(f"suffix_max_spec_factor="
+                                 f"{self.suffix_max_spec_factor} "
+                                 "must be greater than or equal to 0")
+            if self.suffix_max_spec_offset < 0:
+                raise ValueError(f"suffix_max_spec_offset="
+                                 f"{self.suffix_max_spec_offset} "
+                                 "must be greater than or equal to 0")
+            if (self.suffix_min_token_prob < 0
+                    or self.suffix_min_token_prob > 1):
+                raise ValueError(f"suffix_min_token_prob="
+                                 f"{self.suffix_min_token_prob} "
+                                 "must be in range [0, 1]")
             # TODO: current we still need extract vocab_size from target model
             # config, in future, we may try refactor it out, and set
             # draft related config as None here.
@@ -557,6 +606,7 @@ class SpeculativeConfig:
 
     def __repr__(self) -> str:
         method = self.method
-        model = None if method == "ngram" else self.draft_model_config.model
+        model = None if method in ("ngram",
+                                   "suffix") else self.draft_model_config.model
         num_spec_tokens = self.num_speculative_tokens
         return f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=})"

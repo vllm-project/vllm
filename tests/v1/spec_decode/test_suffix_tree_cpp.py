@@ -3,6 +3,7 @@
 """Unit tests for C++ suffix tree implementation."""
 
 import pytest
+
 from vllm.v1.spec_decode.suffix_decode import Candidate, SuffixTree
 
 
