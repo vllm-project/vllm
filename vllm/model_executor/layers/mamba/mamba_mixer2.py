@@ -847,9 +847,10 @@ class MambaMixer2(MambaBase, CustomOp):
                 # at block boundaries: current_first_idx_d > last_state_idx_d
 
                 # copy initial state to new location,
-                # as update kernel works in place
-                if (current_last_idx_d > last_state_idx_d).any():
-                    conv_state[state_indices_tensor_d_output] = conv_state[
+                # as update kernel works in place                
+                #if (current_last_idx_d > last_state_idx_d).any():
+                # (skip IF as it breaks CUDA graphs)
+                conv_state[state_indices_tensor_d_output] = conv_state[
                         state_indices_tensor_d_input]
             else:
                 # Without caching, read and write in-place to the same blocks:

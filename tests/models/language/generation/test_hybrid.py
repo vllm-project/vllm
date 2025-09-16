@@ -53,6 +53,7 @@ FULL_CUDA_GRAPH_MODELS = [
 
 V0_UNSUPPORTED_MODELS = [
     "LiquidAI/LFM2-1.2B",
+    "ibm-granite/granite-4.0-tiny-preview",
 ]
 
 FP32_STATE_MODELS = [

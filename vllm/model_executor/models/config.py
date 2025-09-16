@@ -369,6 +369,13 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             block_size=model_config.max_model_len,
         ).page_size_bytes
 
+        # Cascade attn doesn't work with Mamba:
+        # * enable_prefix_caching = True -> fails
+        # * enable_prefix_caching = False -> cascade attention is triggered, 
+        #   but always terminates early, not raising any exception
+        # Thus, it's more effective to disable the cascade attention logic:
+        model_config.disable_cascade_attn = True
+
         if cache_config.enable_prefix_caching:
             # With prefix caching, select attention block size to 
             # optimize for mamba kernel performance
