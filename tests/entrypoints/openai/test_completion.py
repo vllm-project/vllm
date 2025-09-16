@@ -659,7 +659,7 @@ async def test_structured_outputs_regex_completion(
 @pytest.mark.asyncio
 async def test_structured_outputs_choice_completion(
     client: openai.AsyncOpenAI,
-    sample_choices,
+    sample_structured_outputs_choices,
     is_v1_server: bool,
 ):
     if not is_v1_server:
@@ -671,12 +671,13 @@ async def test_structured_outputs_choice_completion(
         n=2,
         temperature=1.0,
         max_tokens=10,
-        extra_body=dict(structured_outputs=dict(choice=sample_choices)))
+        extra_body=dict(structured_outputs=dict(
+            choice=sample_structured_outputs_choices)))
 
     assert completion.id is not None
     assert len(completion.choices) == 2
     for i in range(2):
-        assert completion.choices[i].text in sample_choices
+        assert completion.choices[i].text in sample_structured_outputs_choices
 
 
 @pytest.mark.asyncio

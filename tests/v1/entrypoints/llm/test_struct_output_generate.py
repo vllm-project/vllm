@@ -100,7 +100,7 @@ def test_structured_output(
     sample_sql_ebnf: str,
     sample_sql_lark: str,
     sample_regex: str,
-    sample_choices: str,
+    sample_structured_outputs_choices: str,
     backend: str,
     tokenizer_mode: str,
     model_name: str,
@@ -356,7 +356,8 @@ def test_structured_output(
     sampling_params = SamplingParams(
         temperature=0.8,
         top_p=0.95,
-        structured_outputs=StructuredOutputsParams(choice=sample_choices))
+        structured_outputs=StructuredOutputsParams(
+            choice=sample_structured_outputs_choices))
 
     outputs = llm.generate(
         ("The best language for type-safe systems programming is "
@@ -372,7 +373,7 @@ def test_structured_output(
         generated_text = output.outputs[0].text
         print(generated_text)
         assert generated_text is not None
-        assert generated_text in sample_choices
+        assert generated_text in sample_structured_outputs_choices
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
     #
