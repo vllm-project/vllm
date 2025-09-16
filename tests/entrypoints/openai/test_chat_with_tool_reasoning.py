@@ -157,6 +157,5 @@ async def test_stop_str_with_reasoning(client: openai.AsyncOpenAI):
         stop="9.8",
     )
 
-    assert response.choices[0].message.reasoning_content.find(
-        "9.8") != -1
+    assert response.choices[0].message.reasoning_content.find("9.8") != -1
     assert response.choices[0].message.content.find("9.8") == -1
