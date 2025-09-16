@@ -5,8 +5,7 @@ import asyncio
 import dataclasses
 import functools
 import os
-import sys
-from argparse import ArgumentParser, Namespace
+from argparse import Namespace
 from typing import Any, Optional, Union
 
 from fastapi import Request
@@ -190,69 +189,6 @@ def _validate_truncation_size(
             tokenization_kwargs["truncation"] = False
 
     return truncate_prompt_tokens
-
-
-def show_filtered_argument_or_group_from_help(parser: ArgumentParser,
-                                              subcommand_name: list[str]):
-
-    # Only handle --help=<keyword> for the current subcommand.
-    # Since subparser_init() runs for all subcommands during CLI setup,
-    # we skip processing if the subcommand name is not in sys.argv.
-    # sys.argv[0] is the program name. The subcommand follows.
-    # e.g., for `vllm bench latency`,
-    # sys.argv is `['vllm', 'bench', 'latency', ...]`
-    # and subcommand_name is "bench latency".
-    if len(sys.argv) <= len(subcommand_name) or sys.argv[
-            1:1 + len(subcommand_name)] != subcommand_name:
-        return
-
-    help = next((arg for arg in sys.argv if arg.startswith('--help=')), None)
-
-    if help is None:
-        return
-
-    formatter = parser._get_formatter()
-    search_keyword = help.split('=', 1)[1].lower()
-    parser.formatter_class.skip_arguments = False
-    json_tip = FlexibleArgumentParser._json_tip
-
-    # Show full help
-    if search_keyword == 'all':
-        parser.epilog = json_tip
-        print(super(type(parser), parser).format_help())
-        sys.exit(0)
-
-    # Add to formatter for whole group
-    for group in parser._action_groups:
-        if group.title and group.title.lower() == search_keyword:
-            formatter.start_section(group.title)
-            formatter.add_text(group.description)
-            formatter.add_arguments(group._group_actions)
-            formatter.end_section()
-            formatter.add_text(json_tip)
-            print(formatter.format_help())
-            sys.exit(0)
-
-    # Add to formatter for single args
-    matched_actions = []
-    for group in parser._action_groups:
-        for action in group._group_actions:
-            # search option name
-            if any(search_keyword in opt.lower()
-                   for opt in action.option_strings):
-                matched_actions.append(action)
-    if matched_actions:
-        formatter.start_section(f"Parameters matching '{search_keyword}'")
-        formatter.add_arguments(matched_actions)
-        formatter.end_section()
-        formatter.add_text(json_tip)
-        print(formatter.format_help())
-        sys.exit(0)
-
-    print(f"No group or parameter matching '{search_keyword}'")
-    print("Use '--help' to see available groups or "
-          "'--help=all' to see all available parameters.")
-    sys.exit(1)
 
 
 def get_max_tokens(max_model_len: int, request: Union[ChatCompletionRequest,
