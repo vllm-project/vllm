@@ -15,7 +15,7 @@ def test_find_longest_matched_ngram_and_propose_tokens():
         max_ngram=2,
         max_model_len=1024,
         k=2)
-    assert result is None or len(result) == 0
+    assert len(result) == 0
 
     tokens = np.array([1, 2, 3, 4, 1, 2, 3])
     np.testing.assert_array_equal(
@@ -80,13 +80,13 @@ def test_ngram_proposer():
     result = ngram_proposer(
         min_n=2, max_n=2,
         k=2).propose(context_token_ids=np.array([1, 2, 3, 4, 5]))
-    assert result is None or len(result) == 0
+    assert len(result) == 0
 
     # No match for 4-gram.
     result = ngram_proposer(
         min_n=4, max_n=4,
         k=2).propose(context_token_ids=np.array([1, 2, 3, 4, 1, 2, 3]))
-    assert result is None or len(result) == 0
+    assert len(result) == 0
 
     # No match for 4-gram but match for 3-gram.
     result = ngram_proposer(
