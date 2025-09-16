@@ -909,8 +909,8 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
             prefix: Optional prefix for parameter names
         
         Raises:
-            AssertionError: If prefix caching is enabled
-            (not supported by Mamba)
+            AssertionError: If prefix caching is enabled 
+                (not supported by Mamba)
         """
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config

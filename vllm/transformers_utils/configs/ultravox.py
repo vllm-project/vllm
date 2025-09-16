@@ -37,16 +37,12 @@ class UltravoxConfig(transformers.PretrainedConfig):
             The initialization value for the layer normalization.
         projector_act (`str`, *optional*, defaults to `"swiglu"`):
             The activation function used by the multimodal projector.
-        text_model_lora_config (`LoraConfigSimplified`, *optional*):
-            The LoRA configuration for finetuning the text model.
-        audio_model_lora_config (`LoraConfigSimplified`, *optional*):
-            The LoRA configuration for finetuning the audio model.
         projector_ln_mid (`bool`, *optional*, defaults to `False`):
             Whether to apply layer normalization at the middle of the
             projector or at the end. Versions v0.4.1 and below
             use `False`, but v0.5 and above use `True`.
     """
-
+    wrapped_model_config: transformers.PretrainedConfig
     model_type = "ultravox"
     audio_token = "<|audio|>"
     is_composition = False
@@ -113,9 +109,8 @@ class UltravoxConfig(transformers.PretrainedConfig):
         return super().__setattr__(key, value)
 
     @property
-    def text_config(self) -> Optional[transformers.PretrainedConfig]:
+    def text_config(self) -> transformers.PretrainedConfig:
         # When Ultravox wraps a multi-modal model (e.g. Gemma), we instantiate
         # the full model, but the text config is the text config of the inner
         # model.
-        return (self.wrapped_model_config.get_text_config()
-                if self.wrapped_model_config else None)
+        return self.wrapped_model_config.get_text_config()

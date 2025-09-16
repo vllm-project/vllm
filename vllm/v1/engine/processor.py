@@ -260,10 +260,10 @@ class Processor:
         else:
             # NOTE: engine_level_backend must be "auto" here, because we have
             # checked supported_backends above.
-            # "auto" is an opt-in to opinionated behavior where we try to
-            # choose a backend based on request contents. This is not the
-            # default as it is less predictable and subject to change
-            # between releases as feature support changes.
+            # In this mode, we set opinionated defaults based on what we think
+            # will satisfy the most use cases without having to worry about
+            # this setting. We include fallback behavior here, but not with any
+            # other setting where a specific backend was specified.
             try:
                 validate_xgrammar_grammar(params)
                 params.guided_decoding.backend = "xgrammar"
@@ -327,8 +327,6 @@ class Processor:
         # TODO(woosuk): Support pooling models.
         self._validate_lora(lora_request)
         self._validate_params(params, lora_request)
-        if trace_headers is not None:
-            raise ValueError("V1 does not support tracing yet.")
 
         data_parallel_size = self.vllm_config.parallel_config.data_parallel_size
         if data_parallel_rank is not None and not (0 <= data_parallel_rank <
@@ -435,6 +433,7 @@ class Processor:
             cache_salt=decoder_inputs.get("cache_salt"),
             priority=priority,
             data_parallel_rank=data_parallel_rank,
+            trace_headers=trace_headers,
         )
 
     def _validate_model_inputs(self,
@@ -499,7 +498,7 @@ class Processor:
                 assert isinstance(mm_processor, EncDecMultiModalProcessor)
 
                 if mm_processor.pad_dummy_encoder_prompt:
-                    return  # Skip encoder length check for Whisper and Donut
+                    return  # Skip encoder length check for Whisper
 
             if model_config.is_multimodal_model:
                 suggestion = (
