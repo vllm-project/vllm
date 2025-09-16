@@ -2792,10 +2792,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # for GQA/MQA.
         max_query_len = self.uniform_decode_query_len if uniform_decode else \
                                                                 num_tokens
-        if allow_microbatching:
-            assert self.uniform_decode_query_len == 1
-            assert uniform_decode is True
-            assert max_query_len == 1
 
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
@@ -3399,24 +3395,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         ) -> list[AttentionGroup]:
             attn_groups: list[AttentionGroup] = []
             for attn_backend, layer_names in attn_backends_map.items():
-                attn_metadata_builders = []
-                attn_metadata_builders.append(attn_backend.get_builder_cls()(
-                    kv_cache_spec,
+                attn_group = AttentionGroup.create_with_metadata_builders(
+                    attn_backend,
                     layer_names,
+                    kv_cache_spec,
                     self.vllm_config,
                     self.device,
-                ))
-                if self.parallel_config.enable_dbo:
-                    attn_metadata_builders.append(
-                        attn_backend.get_builder_cls()(
-                            kv_cache_spec,
-                            layer_names,
-                            self.vllm_config,
-                            self.device,
-                        ))
-                attn_group = AttentionGroup(attn_backend,
-                                            attn_metadata_builders,
-                                            layer_names)
+                    num_metadata_builders=1
+                    if not self.parallel_config.enable_dbo else 2,
+                )
                 attn_groups.append(attn_group)
             return attn_groups
 
