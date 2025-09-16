@@ -139,3 +139,13 @@ async def test_chat_full_of_tool_and_reasoning(client: openai.AsyncOpenAI):
     assert len(tool_calls.choices[0].message.reasoning_content) > 0
     assert tool_calls.choices[0].message.tool_calls[0].function.name == FUNC_NAME
     assert tool_calls.choices[0].message.tool_calls[0].function.arguments == FUNC_ARGS
+
+async def test_stop_str_with_reasoning(client: openai.AsyncOpenAI):
+    response = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "9.11 and 9.8, which is greater?"}],
+        stop="9.8",
+    )
+
+    assert response.choices[0].message.reasoning_content.find("9.8") != -1
+    assert response.choices[0].message.content.find("9.8") == -1

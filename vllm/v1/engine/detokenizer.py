@@ -137,8 +137,8 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
 
         # 2) Evaluate stop strings.
         stop_string = None
-        if self.reasoning_parser and not self.reasoning_parser.is_reasoning_end(
-                input_ids=self.token_ids):
+        if self.stop and self.reasoning_parser and \
+            not self.reasoning_parser.is_reasoning_end(input_ids=self.token_ids):
             return stop_string
         if self.stop and len(self.output_token_ids) > self.min_tokens:
             stop = check_stop_strings(
