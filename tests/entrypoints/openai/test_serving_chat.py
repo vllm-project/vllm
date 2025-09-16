@@ -3,7 +3,8 @@
 
 from __future__ import annotations
 
-import re, json
+import re
+import json
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -340,11 +341,10 @@ async def test_serving_chat_tool_choice_required_streaming():
         if str(chunk) == "data: [DONE]\n\n":
             continue
         content_regex = r"data: (.*?)\n\n"
-        import re, json
         match = re.match(content_regex, str(chunk))
         assert match
-        data: dict = json.loads(match.group(1))
-        assert "error" not in data.keys()
+        data = json.loads(match.group(1))
+        assert "error" not in data
         
 
 @pytest.mark.asyncio
