@@ -108,9 +108,9 @@ class LLMEngine:
         )
 
         # OutputProcessor (convert EngineCoreOutputs --> RequestOutput).
-        self.output_processor = OutputProcessor(
-            self.tokenizer, log_stats=self.log_stats
-        )
+        self.output_processor = OutputProcessor(vllm_config=self.vllm_config,
+                                                tokenizer=self.tokenizer,
+                                                log_stats=self.log_stats)
         if self.observability_config.otlp_traces_endpoint is not None:
             tracer = init_tracer(
                 "vllm.llm_engine", self.observability_config.otlp_traces_endpoint
