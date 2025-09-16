@@ -8,7 +8,7 @@ import dataclasses
 import functools
 import json
 import sys
-from dataclasses import MISSING, dataclass, fields, is_dataclass
+from dataclasses import MISSING, InitVar, dataclass, fields, is_dataclass
 from itertools import permutations
 from typing import (TYPE_CHECKING, Annotated, Any, Callable, Dict, List,
                     Literal, Optional, Type, TypeVar, Union, cast, get_args,
@@ -39,6 +39,7 @@ from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_ray_initialized
+from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.config import get_model_path, is_interleaved
 from vllm.transformers_utils.utils import check_gguf_file
@@ -415,6 +416,7 @@ class EngineArgs:
 
     structured_outputs_config: StructuredOutputsConfig = get_field(
         VllmConfig, "structured_outputs_config")
+    reasoning_parser: InitVar[str] = StructuredOutputsConfig.reasoning_parser
 
     logits_processor_pattern: Optional[
         str] = ModelConfig.logits_processor_pattern
@@ -470,7 +472,8 @@ class EngineArgs:
     kv_sharing_fast_prefill: bool = \
         CacheConfig.kv_sharing_fast_prefill
 
-    def __post_init__(self):
+    def __post_init__(self, reasoning_parser: str):
+        self.structured_outputs_config.reasoning_parser = reasoning_parser
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
         # CompilationConfig object
@@ -609,6 +612,17 @@ class EngineArgs:
         load_group.add_argument('--pt-load-map-location',
                                 **load_kwargs["pt_load_map_location"])
 
+        # Structured outputs arguments
+        structured_outputs_kwargs = get_kwargs(StructuredOutputsConfig)
+        structured_outputs_group = parser.add_argument_group(
+            title="StructuredOutputsConfig",
+            description=StructuredOutputsConfig.__doc__,
+        )
+        structured_outputs_group.add_argument(
+            "--reasoning-parser",
+            # This choice is a special case because it's not static
+            choices=list(ReasoningParserManager.reasoning_parsers),
+            **structured_outputs_kwargs["reasoning_parser"])
         # Parallel arguments
         parallel_kwargs = get_kwargs(ParallelConfig)
         parallel_group = parser.add_argument_group(
