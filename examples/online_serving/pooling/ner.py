@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Adapted from https://huggingface.co/boltuix/NeuroBERT-NER
+
 """
-Example online usage of Pooling API.
+Example online usage of Pooling API for Named Entity Recognition (NER).
 
 Run `vllm serve <model> --runner pooling`
 to start up the server in vLLM. e.g.
@@ -10,7 +12,6 @@ vllm serve boltuix/NeuroBERT-NER
 """
 
 import argparse
-import pprint
 
 import requests
 import torch
@@ -36,32 +37,32 @@ def main(args):
     api_url = f"http://{args.host}:{args.port}/pooling"
     model_name = args.model
 
-
+    # Load tokenizer and config
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     config = AutoConfig.from_pretrained(model_name)
     label_map = config.id2label
 
+    # Input text
     text = "Barack Obama visited Microsoft headquarters in Seattle on January 2025."
-
     prompt = {"model": model_name, "input": text}
+
     pooling_response = post_http_request(prompt=prompt, api_url=api_url)
 
-    outputs = pooling_response.json()["data"]
+    # Run inference
+    output = pooling_response.json()["data"][0]
+    logits = torch.tensor(output['data'])
+    predictions = logits.argmax(dim=-1)
+    inputs = tokenizer(text, return_tensors="pt")
 
-    for output in outputs:
-        logits = torch.tensor(output['data'])
-        predictions = logits.argmax(dim=-1)
+    # Map predictions to labels
+    tokens = tokenizer.convert_ids_to_tokens(inputs["input_ids"][0])
+    labels = [label_map[p.item()] for p in predictions]
+    assert len(tokens) == len(predictions)
 
-        inputs = tokenizer(text, return_tensors="pt")
-
-        # Map predictions to labels
-        tokens = tokenizer.convert_ids_to_tokens(inputs["input_ids"][0])
-        labels = [label_map[p.item()] for p in predictions]
-
-        # Print results
-        for token, label in zip(tokens, labels):
-            if token not in tokenizer.all_special_tokens:
-                print(f"{token:15} → {label}")
+    # Print results
+    for token, label in zip(tokens, labels):
+        if token not in tokenizer.all_special_tokens:
+            print(f"{token:15} → {label}")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Adapted from https://huggingface.co/boltuix/NeuroBERT-NER
 
 from argparse import Namespace
 
@@ -25,13 +26,13 @@ def main(args: Namespace):
     prompts = ["Barack Obama visited Microsoft headquarters in Seattle on January 2025."]
 
     # Create an LLM.
-    # You should pass runner="pooling" for reward models
     llm = LLM(**vars(args))
-
     tokenizer = llm.get_tokenizer()
     label_map = llm.llm_engine.vllm_config.model_config.hf_config.id2label
 
-    outputs = llm.reward(prompts)
+    # Run inference
+    outputs = llm.encode(prompts)
+
     for prompt, output in zip(prompts, outputs):
         logits = output.outputs.data
         predictions = logits.argmax(dim=-1)
