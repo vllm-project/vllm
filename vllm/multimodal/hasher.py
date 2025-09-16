@@ -37,6 +37,8 @@ class MultiModalHasher:
             data = {"mode": obj.mode, "data": np.asarray(obj)}
             if obj.palette is not None:
                 data["palette"] = obj.palette.palette
+                if obj.palette.rawmode is not None:
+                    data["palette_rawmode"] = obj.palette.rawmode
             return cls.iter_item_to_bytes("image", data)
         if isinstance(obj, torch.Tensor):
             tensor_obj: torch.Tensor = obj.cpu()
