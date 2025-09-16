@@ -1709,7 +1709,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 sampling_metadata,
             )
             sampler_output.sampled_token_ids = output_token_ids
-            ic(target_logits.shape, bonus_token_ids.shape)
+            # ic(target_logits.shape, bonus_token_ids.shape)
 
         return sampler_output
 
@@ -1910,8 +1910,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 **model_kwargs,
             )
             et = time.perf_counter()
-            ic(f'target model forward: {et - st}')
-            ic(input_ids.shape, num_input_tokens, batch_descriptor)
+            # ic(f'target model forward: {et - st}')
+            # ic(input_ids.shape, num_input_tokens, batch_descriptor)
 
         with record_function_or_nullcontext("Postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -2102,6 +2102,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 ]
                 num_rejected_tokens_cpu = torch.tensor(num_rejected_tokens,
                                                        dtype=torch.int32)
+                # ic(num_rejected_tokens_cpu)
                 common_attn_metadata, token_indices =\
                     self.drafter.prepare_inputs(
                     common_attn_metadata, num_rejected_tokens_cpu)
@@ -2223,10 +2224,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                                   self.device)
             if hasattr(self, "drafter"):
                 logger.info("Loading drafter model...")
-                st = time.perf_counter()
+                # st = time.perf_counter()
                 self.drafter.load_model(self.model)
-                et = time.perf_counter()
-                ic(f"time to load drafter: {et-st:.2f}")
+                # et = time.perf_counter()
+                # ic(f"time to load drafter: {et-st:.2f}")
             if self.use_aux_hidden_state_outputs:
                 if supports_eagle3(self.model):
                     self.model.set_aux_hidden_state_layers(
@@ -2629,7 +2630,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     num_tokens_across_dp=num_tokens_across_dp,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_descriptor):
-                st = time.perf_counter()
                 outputs = self.model(
                     input_ids=input_ids,
                     positions=positions,
@@ -2637,10 +2637,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     inputs_embeds=inputs_embeds,
                     **model_kwargs,
                 )
-                et = time.perf_counter()
-                # ignore b/c this is dummy run
-                # ic(f'target model forward: {et - st}')
-                # ic(input_ids.shape)
 
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs

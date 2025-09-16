@@ -152,6 +152,8 @@ class EagleProposer:
             dtype=torch.int32,
         ).repeat(max_batch_size, 1)
 
+        self.forward_times = []
+
 
     def propose(
         self,
@@ -228,8 +230,9 @@ class EagleProposer:
                 inputs_embeds=inputs_embeds,
             )
             et = time.perf_counter()
-            ic(f'drafter forward: {et - st}')
-            ic(input_ids.shape, num_input_tokens)
+            self.forward_times.append(et-st)
+            # ic(f'drafter forward: {et - st}')
+            # ic(input_ids.shape, num_input_tokens)
             if self.method in ("deepseek_mtp", "ernie_mtp"):
                 last_hidden_states = ret_hidden_states
                 hidden_states = last_hidden_states
@@ -346,8 +349,9 @@ class EagleProposer:
                     inputs_embeds=inputs_embeds,
                 )
                 et = time.perf_counter()
-                ic(f'drafter forward: {et - st}')
-                ic(input_ids.shape)
+                self.forward_times.append(et-st)
+                # ic(f'drafter forward: {et - st}')
+                # ic(input_ids.shape)
             hidden_states = hidden_states[:batch_size]
             logits = self.model.compute_logits(last_hidden_states[:batch_size],
                                                None)
@@ -505,8 +509,9 @@ class EagleProposer:
                     inputs_embeds=None,
                 )
                 et = time.perf_counter()
-                ic(f'drafter forward: {et - st}')
-                ic(input_ids.shape)
+                self.forward_times.append(et-st)
+                # ic(f'drafter forward: {et - st}')
+                # ic(input_ids.shape)
 
             # Get the output hidden states for the draft tokens.
             draft_hidden_states = hidden_states[:num_tokens].view(

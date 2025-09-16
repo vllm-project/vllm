@@ -168,7 +168,6 @@ def main():
     scheduler_config = llm.llm_engine.vllm_config.scheduler_config
     ic(scheduler_config.max_num_seqs, scheduler_config.max_num_batched_tokens, scheduler_config.max_model_len)
 
-
     sampling_params = SamplingParams(temperature=args.temp, max_tokens=args.output_len)
     if not args.custom_mm_prompts:
         tokenized_prompts = [TokensPrompt(prompt_token_ids=x) for x in prompt_ids]

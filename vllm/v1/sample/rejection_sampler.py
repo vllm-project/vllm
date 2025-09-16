@@ -84,7 +84,7 @@ class RejectionSampler(nn.Module):
             output_token_ids (torch.Tensor):
                 A tensor containing the final output token IDs.
         '''
-        ic(draft_probs.shape if draft_probs else draft_probs)
+        # ic(draft_probs.shape if draft_probs else draft_probs)
         assert metadata.max_spec_len <= MAX_SPEC_LEN
         # [num_tokens, vocab_size]
         # NOTE(woosuk): `target_logits` can be updated in place inside the
@@ -166,7 +166,7 @@ def rejection_sample(
     assert bonus_token_ids.is_contiguous()
     assert target_probs.shape == (num_tokens, vocab_size)
 
-    ic(batch_size, num_tokens, vocab_size)
+    # ic(batch_size, num_tokens, vocab_size)
 
     # Create output buffer.
     output_token_ids = torch.empty(
