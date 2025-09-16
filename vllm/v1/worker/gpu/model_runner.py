@@ -78,7 +78,7 @@ class GPUModelRunner:
         )
         self.sampler = Sampler()
 
-    def load_model(self, eep_scale_up: bool = False) -> None:
+    def load_model(self, *args, **kwargs) -> None:
         time_before_load = time.perf_counter()
         with DeviceMemoryProfiler() as m:
             model_loader = get_model_loader(self.vllm_config.load_config)
@@ -130,6 +130,12 @@ class GPUModelRunner:
             self.compilation_config.static_forward_context,
             self.kv_caches,
         )
+
+    def _dummy_run(self, num_tokens: int, *args, **kwargs) -> None:
+        return None, None
+
+    def _dummy_sampler_run(self, hidden_states: torch.Tensor, *args, **kwargs) -> None:
+        return None
 
     def update_states(self, scheduler_output: SchedulerOutput) -> None:
         for req_id in scheduler_output.preempted_req_ids:
