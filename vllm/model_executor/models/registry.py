@@ -319,7 +319,17 @@ _SUBPROCESS_COMMAND = [
     sys.executable, "-m", "vllm.model_executor.models.registry"
 ]
 
-_PREVIOUSLY_SUPPORTED_MODELS = {"Phi3SmallForCausalLM": "0.9.2"}
+_PREVIOUSLY_SUPPORTED_MODELS = {
+    "Phi3SmallForCausalLM": "0.9.2",
+    # encoder-decoder models except whisper
+    # have been removed for V0 deprecation.
+    "BartModel": "0.10.2",
+    "BartForConditionalGeneration": "0.10.2",
+    "DonutForConditionalGeneration": "0.10.2",
+    "Florence2ForConditionalGeneration": "0.10.2",
+    "MBartForConditionalGeneration": "0.10.2",
+    "MllamaForConditionalGeneration": "0.10.2",
+}
 
 
 @dataclass(frozen=True)
