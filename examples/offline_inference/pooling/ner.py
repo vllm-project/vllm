@@ -23,7 +23,9 @@ def parse_args():
 
 def main(args: Namespace):
     # Sample prompts.
-    prompts = ["Barack Obama visited Microsoft headquarters in Seattle on January 2025."]
+    prompts = [
+        "Barack Obama visited Microsoft headquarters in Seattle on January 2025."
+    ]
 
     # Create an LLM.
     llm = LLM(**vars(args))

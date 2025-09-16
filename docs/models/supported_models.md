@@ -555,6 +555,7 @@ If your model is not in the above list, we will try to automatically convert the
     e.g.: `--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 123, "returned_token_ids": [456, 789]}'`.
 
 #### Token Classification
+
 These models primarily support the [`LLM.encode`](./pooling_models.md#llmencode) API.
 
 | Architecture | Models     | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) | [V1](gh-issue:8779) |

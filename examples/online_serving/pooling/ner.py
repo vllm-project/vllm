@@ -33,7 +33,7 @@ def parse_args():
 
 
 def main(args):
-    from transformers import AutoTokenizer, AutoConfig
+    from transformers import AutoConfig, AutoTokenizer
     api_url = f"http://{args.host}:{args.port}/pooling"
     model_name = args.model
 
