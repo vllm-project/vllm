@@ -12,7 +12,7 @@ from vllm.inputs.preprocess import InputPreprocessor
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.cache import processor_cache_from_config
-from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalUUIDDict
 from vllm.multimodal.processing import EncDecMultiModalProcessor
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
@@ -65,19 +65,27 @@ class Processor:
     ) -> None:
         max_logprobs = self.model_config.max_logprobs
         if max_logprobs == -1:
-            return
+            max_logprobs = self.model_config.get_vocab_size()
+
         # Validate sample logprobs.
-        if params.logprobs and (params.logprobs == -1
-                                or params.logprobs > max_logprobs):
-            raise ValueError(
-                f"Requested sample logprobs of {params.logprobs}, "
-                f"which is greater than max allowed: {max_logprobs}")
+        if params.logprobs:
+            num_logprobs = params.logprobs
+            if num_logprobs == -1:
+                num_logprobs = self.model_config.get_vocab_size()
+            if num_logprobs > max_logprobs:
+                raise ValueError(
+                    f"Requested sample logprobs of {num_logprobs}, "
+                    f"which is is greater than max allowed: {max_logprobs}")
 
         # Validate prompt logprobs.
-        if params.prompt_logprobs and params.prompt_logprobs > max_logprobs:
-            raise ValueError(
-                f"Requested prompt logprobs of {params.prompt_logprobs}, "
-                f"which is greater than max allowed: {max_logprobs}")
+        if params.prompt_logprobs:
+            num_prompt_logprobs = params.prompt_logprobs
+            if num_prompt_logprobs == -1:
+                num_prompt_logprobs = self.model_config.get_vocab_size()
+            if num_prompt_logprobs > max_logprobs:
+                raise ValueError(
+                    f"Requested prompt logprobs of {num_prompt_logprobs}, "
+                    f"which is is greater than max allowed: {max_logprobs}")
 
     def _validate_sampling_params(
         self,
@@ -252,10 +260,10 @@ class Processor:
         else:
             # NOTE: engine_level_backend must be "auto" here, because we have
             # checked supported_backends above.
-            # "auto" is an opt-in to opinionated behavior where we try to
-            # choose a backend based on request contents. This is not the
-            # default as it is less predictable and subject to change
-            # between releases as feature support changes.
+            # In this mode, we set opinionated defaults based on what we think
+            # will satisfy the most use cases without having to worry about
+            # this setting. We include fallback behavior here, but not with any
+            # other setting where a specific backend was specified.
             try:
                 validate_xgrammar_grammar(params)
                 params.guided_decoding.backend = "xgrammar"
@@ -268,11 +276,11 @@ class Processor:
             # Remember that this backend was set automatically
             params.guided_decoding.backend_was_auto = True
 
-    def _maybe_build_mm_hash_overrides(
+    def _maybe_build_mm_uuids(
         self,
         request_id: str,
         prompt: PromptType,
-    ) -> Optional[dict[str, list[str]]]:
+    ) -> Optional[MultiModalUUIDDict]:
         """Build per-item multimodal hash overrides when enabled. In this case,
         multimodal data items are identified by their request id, modality and
         index rather than their content.
@@ -295,13 +303,13 @@ class Processor:
         if not mm_data:
             return None
 
-        overrides: dict[str, list[str]] = {}
+        mm_uuids: MultiModalUUIDDict = {}
         for modality, data in mm_data.items():
             n = len(data) if isinstance(data, list) else 1
-            overrides[modality] = [
+            mm_uuids[modality] = [
                 f"{request_id}-{modality}-{i}" for i in range(n)
             ]
-        return overrides
+        return mm_uuids
 
     def process_inputs(
         self,
@@ -317,11 +325,8 @@ class Processor:
     ) -> tuple[Optional[str], EngineCoreRequest]:
 
         # TODO(woosuk): Support pooling models.
-        # TODO(woosuk): Support encoder-decoder models.
         self._validate_lora(lora_request)
         self._validate_params(params, lora_request)
-        if trace_headers is not None:
-            raise ValueError("V1 does not support tracing yet.")
 
         data_parallel_size = self.vllm_config.parallel_config.data_parallel_size
         if data_parallel_rank is not None and not (0 <= data_parallel_rank <
@@ -343,16 +348,15 @@ class Processor:
         if (self.model_config.multimodal_config and
                 self.model_config.multimodal_config.mm_processor_cache_gb == 0
                 and not self.cache_config.enable_prefix_caching):
-            mm_hash_overrides = self._maybe_build_mm_hash_overrides(
-                request_id, prompt)
+            mm_uuids = self._maybe_build_mm_uuids(request_id, prompt)
         else:
             # Otherwise, use user-provided uuids as multimodal hash overrides
             # if provided.
             self._validate_multi_modal_uuids(prompt)
             if isinstance(prompt, dict):
-                mm_hash_overrides = prompt.get("multi_modal_uuids")
+                mm_uuids = prompt.get("multi_modal_uuids")
             else:
-                mm_hash_overrides = None
+                mm_uuids = None
 
         # Process inputs, which includes:
         # 1. Tokenize text prompt, with LoRA request if one exists.
@@ -362,7 +366,7 @@ class Processor:
             prompt,
             tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
-            mm_hash_overrides=mm_hash_overrides,
+            mm_uuids=mm_uuids,
         )
         from vllm.platforms import current_platform
         current_platform.validate_request(
@@ -376,10 +380,6 @@ class Processor:
         self._validate_model_inputs(processed_inputs, lora_request)
 
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
-
-        # TODO: Impl encoder-decoder
-        if encoder_inputs is not None:
-            raise NotImplementedError
 
         sampling_params = None
         pooling_params = None
@@ -433,6 +433,7 @@ class Processor:
             cache_salt=decoder_inputs.get("cache_salt"),
             priority=priority,
             data_parallel_rank=data_parallel_rank,
+            trace_headers=trace_headers,
         )
 
     def _validate_model_inputs(self,
@@ -497,7 +498,7 @@ class Processor:
                 assert isinstance(mm_processor, EncDecMultiModalProcessor)
 
                 if mm_processor.pad_dummy_encoder_prompt:
-                    return  # Skip encoder length check for Whisper and Donut
+                    return  # Skip encoder length check for Whisper
 
             if model_config.is_multimodal_model:
                 suggestion = (

@@ -10,8 +10,9 @@ from typing import (Any, AsyncGenerator, Callable, Dict, Iterable, List,
 from weakref import ReferenceType
 
 import vllm.envs as envs
-from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, VllmConfig)
+from vllm.config import (DecodingConfig, ModelConfig, ParallelConfig,
+                         SchedulerConfig, VllmConfig)
+from vllm.config.lora import LoRAConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_timeout import asyncio_timeout
@@ -717,7 +718,7 @@ class AsyncLLMEngine(EngineClient):
                 # Stop the execute model loop in parallel workers until there
                 # are more requests to process. This avoids waiting
                 # indefinitely in torch.distributed ops which may otherwise
-                # timeout, and unblocks the RPC thread in the workers so that
+                # time out, and unblocks the RPC thread in the workers so that
                 # they can process any other queued control plane messages,
                 # such as add/remove lora adapters.
                 await engine.engine.stop_remote_worker_execution_loop_async()
