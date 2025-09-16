@@ -47,8 +47,11 @@ class NgramProposer:
         # and not logical cores (hyper-threading).
         # Divide by tp_size to ensure each tensor parallel rank
         # has some threads since all ranks will run this.
-        # Ensure at least 1 thread is used.
-        self.num_numba_thread = max(1, (os.cpu_count() // 2) // tp_size)
+        cpu_count = os.cpu_count()
+        if cpu_count:
+            self.num_numba_thread_available = (cpu_count // 2) // tp_size
+        else:
+            self.num_numba_thread_available = 1
 
         # Trigger Numba JIT compilation for N-gram proposer.
         # This usually takes less than 1 second.
@@ -78,14 +81,25 @@ class NgramProposer:
                 A list where each element is a list of proposed 
                 token IDs for the corresponding request.
         """
-        original_num_numba_threads = get_num_threads()
-        set_num_threads(min(self.num_numba_thread, len(valid_ngram_requests)))
-
         draft_token_ids: list[list[int]] = []
-        batch_propose_numba(valid_ngram_requests, num_tokens_no_spec,
-                            token_ids_cpu, self.min_n, self.max_n,
-                            self.max_model_len, self.k, self.valid_ngram_draft,
-                            self.valid_ngram_num_drafts)
+
+        # Only run batch propose if there are requests needing ngram proposals.
+        # avoid calling numba function with empty list which causes error
+        # ValueError: cannot compute fingerprint of empty list
+        if len(valid_ngram_requests):
+            original_num_numba_threads = get_num_threads()
+            # Ensure we use at least one thread.
+            set_num_threads(
+                max(
+                    1,
+                    min(self.num_numba_thread_available,
+                        len(valid_ngram_requests))))
+            batch_propose_numba(valid_ngram_requests, num_tokens_no_spec,
+                                token_ids_cpu, self.min_n, self.max_n,
+                                self.max_model_len, self.k,
+                                self.valid_ngram_draft,
+                                self.valid_ngram_num_drafts)
+            set_num_threads(original_num_numba_threads)
 
         for i in range(num_requests):
             if i in valid_ngram_requests and \
@@ -95,7 +109,6 @@ class NgramProposer:
             else:
                 draft_token_ids.append([])
 
-        set_num_threads(original_num_numba_threads)
         return draft_token_ids
 
     def propose(
@@ -158,14 +171,16 @@ def batch_propose_numba(valid_ngram_requests: list,
             k=k)
 
         valid_ngram_num_drafts[i] = drafter_output.shape[0]
-        if drafter_output is not None:
+        if len(drafter_output):
             valid_ngram_draft[i, :drafter_output.shape[0]] = drafter_output
 
 
 @jit(nopython=True)
-def _find_longest_matched_ngram_and_propose_tokens(
-        origin_tokens: np.ndarray, min_ngram: int, max_ngram: int,
-        max_model_len: int, k: int) -> Optional[np.ndarray]:
+def _find_longest_matched_ngram_and_propose_tokens(origin_tokens: np.ndarray,
+                                                   min_ngram: int,
+                                                   max_ngram: int,
+                                                   max_model_len: int,
+                                                   k: int) -> np.ndarray:
     """
     Find the longest n-gram which matches the suffix of the given tokens
     whose length is within [min_ngram, max_ngram] (inclusive).
