@@ -14,6 +14,10 @@ import ray
 import torch
 from ray.experimental.tqdm_ray import tqdm
 
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig,
+    _get_config_dtype_str,
+)
 from vllm.model_executor.layers.fused_moe.fused_moe import *
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_config
