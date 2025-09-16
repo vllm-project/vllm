@@ -318,6 +318,9 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
             background=background,
         )
 
+        current_item_id = ""
+        current_content_index = -1
+
         events = []
         current_event_mode = None
         resp_id = None
@@ -328,6 +331,26 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
             if current_event_mode != event.type:
                 current_event_mode = event.type
                 print(f"\n[{event.type}] ", end="", flush=True)
+
+            # verify current_item_id is correct
+            if event.type == "response.output_item.added":
+                assert event.item.id != current_item_id
+                current_item_id = event.item.id
+            elif event.type in [
+                    "response.output_text.delta",
+                    "response.reasoning_text.delta"
+            ]:
+                assert event.item_id == current_item_id
+
+            # verify content_index_id is correct
+            if event.type == "response.content_part.added":
+                assert event.content_index != current_content_index
+                current_content_index = event.content_index
+            elif event.type in [
+                    "response.output_text.delta",
+                    "response.reasoning_text.delta"
+            ]:
+                assert event.content_index == current_content_index
 
             if "text.delta" in event.type:
                 print(event.delta, end="", flush=True)
