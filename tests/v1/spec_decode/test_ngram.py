@@ -9,11 +9,13 @@ from vllm.v1.spec_decode.ngram_proposer import (
 
 def test_find_longest_matched_ngram_and_propose_tokens():
     tokens = np.array([1, 2, 3, 4, 1, 2, 3, 5, 6])
-    assert _find_longest_matched_ngram_and_propose_tokens(origin_tokens=tokens,
-                                                          min_ngram=2,
-                                                          max_ngram=2,
-                                                          max_model_len=1024,
-                                                          k=2) is None
+    result = _find_longest_matched_ngram_and_propose_tokens(
+        origin_tokens=tokens,
+        min_ngram=2,
+        max_ngram=2,
+        max_model_len=1024,
+        k=2)
+    assert result is None or len(result) == 0
 
     tokens = np.array([1, 2, 3, 4, 1, 2, 3])
     np.testing.assert_array_equal(
@@ -78,13 +80,13 @@ def test_ngram_proposer():
     result = ngram_proposer(
         min_n=2, max_n=2,
         k=2).propose(context_token_ids=np.array([1, 2, 3, 4, 5]))
-    assert result is None
+    assert result is None or len(result) == 0
 
     # No match for 4-gram.
     result = ngram_proposer(
         min_n=4, max_n=4,
         k=2).propose(context_token_ids=np.array([1, 2, 3, 4, 1, 2, 3]))
-    assert result is None
+    assert result is None or len(result) == 0
 
     # No match for 4-gram but match for 3-gram.
     result = ngram_proposer(
