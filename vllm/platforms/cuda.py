@@ -76,7 +76,6 @@ BACKEND_PRIORITIES = {
     _Backend.TRITON_MLA:
     4,
 }
-BACKEND_LOW_PRIORITY = 100
 
 
 def with_nvml_context(fn: Callable[_P, _R]) -> Callable[_P, _R]:
@@ -255,21 +254,25 @@ class CudaPlatformBase(Platform):
     @classmethod
     def get_valid_backends(
             cls, head_size, dtype, kv_cache_dtype, block_size, use_v1, use_mla,
-            has_sink) -> tuple[list[_Backend], dict[_Backend, str]]:
-        valid_backends = []
+            has_sink
+    ) -> tuple[list[tuple[_Backend, int]], dict[_Backend, str]]:
+        valid_backends_priorities = []
         invalid_reasons = {}
         device_capability = cls.get_device_capability().to_int()
         for backend in _Backend:
+            if backend not in BACKEND_PRIORITIES:
+                continue
+            priority = BACKEND_PRIORITIES[backend]
             backend_class = backend_to_class(backend)
             maybe_invalid_reason = backend_class.validate_configuration(
                 head_size, dtype, kv_cache_dtype, block_size, use_v1, use_mla,
                 has_sink, device_capability)
             if maybe_invalid_reason is None:
-                valid_backends.append(backend)
+                valid_backends_priorities.append((backend, priority))
             else:
                 invalid_reasons[backend] = maybe_invalid_reason
 
-        return valid_backends, invalid_reasons
+        return valid_backends_priorities, invalid_reasons
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
@@ -295,42 +298,39 @@ class CudaPlatformBase(Platform):
 
         # No selected backend or the selected backend is invalid,
         # so we try finding a valid backend.
-        valid_backends, invalid_reasons = cls.get_valid_backends(
+        valid_backends_priorities, invalid_reasons = cls.get_valid_backends(
             head_size, dtype, kv_cache_dtype, block_size, use_v1, use_mla,
             has_sink)
 
-        if len(valid_backends) == 0:
+        if len(valid_backends_priorities) == 0:
             raise ValueError(
-                f"No valid attention backend for {cls.device_name}, "
-                f"with head_size: {head_size}, dtype: {dtype}, "
-                f"kv_cache_dtype: {kv_cache_dtype}, "
+                f"No valid attention backend from priority list for "
+                f"{cls.device_name} with head_size: {head_size}, "
+                f"dtype: {dtype}, kv_cache_dtype: {kv_cache_dtype}, "
                 f"use_v1: {use_v1}, use_mla: {use_mla}, has_sink: {has_sink}. "
                 f"Reasons: {invalid_reasons}")
 
         # We have found some valid backends. Select the one with the
         # highest priority.
-        logger.info("Valid backends: %s", valid_backends)
+        logger.info("Valid backends: %s",
+                    [b[0].name for b in valid_backends_priorities])
 
         valid_backends_classes_str = [
-            backend_to_class_str(b, use_v1) for b in valid_backends
-        ]
-        valid_backends_classes = [
-            resolve_obj_by_qualname(b) for b in valid_backends_classes_str
-        ]
-        valid_backends_priorities = [
-            BACKEND_PRIORITIES.get(b, BACKEND_LOW_PRIORITY)
-            for b in valid_backends_classes
+            backend_to_class_str(b[0], use_v1)
+            for b in valid_backends_priorities
         ]
         sorted_indices = sorted(range(len(valid_backends_priorities)),
-                                key=lambda i: valid_backends_priorities[i])
+                                key=lambda i: valid_backends_priorities[i][1])
         selected_index = sorted_indices[0]
 
         engine_version = 'V1' if use_v1 else 'V0'
         logger.info("Using %s backend on %s engine.",
-                    valid_backends[selected_index].name, engine_version)
+                    valid_backends_priorities[selected_index][0].name,
+                    engine_version)
 
         # Post-selection modifications
-        if valid_backends[selected_index] == _Backend.FLASHINFER_MLA:
+        if valid_backends_priorities[selected_index][0] == \
+            _Backend.FLASHINFER_MLA:
             from vllm.v1.attention.backends.utils import set_kv_cache_layout
             set_kv_cache_layout("HND")
             logger.info("Using HND KV cache layout for FlashInferMLA.")
