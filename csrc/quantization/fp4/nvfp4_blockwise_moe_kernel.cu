@@ -297,7 +297,15 @@ void run_fp4_blockwise_scaled_group_mm(
 
   // Set the Scheduler info
   cutlass::KernelHardwareInfo hw_info;
+#if defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100
+  using RasterOrderOptions = typename cutlass::gemm::kernel::detail::
+      PersistentTileSchedulerSm100GroupParams<
+          typename ProblemShape::UnderlyingProblemShape>::RasterOrderOptions;
+  typename Gemm::GemmKernel::TileSchedulerArguments scheduler;
+  scheduler.raster_order = RasterOrderOptions::AlongM;
+#else
   typename Gemm::GemmKernel::TileSchedulerArguments scheduler{};
+#endif
   hw_info.device_id = a.get_device();
   static std::unordered_map<int, int> cached_sm_counts;
   if (cached_sm_counts.find(hw_info.device_id) == cached_sm_counts.end()) {
