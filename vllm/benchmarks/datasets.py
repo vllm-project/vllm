@@ -370,6 +370,57 @@ def process_video(video: Any) -> Mapping[str, Any]:
 # Random Dataset Implementation (Synthetic Data)
 # -----------------------------------------------------------------------------
 
+def gen_prompt_decode_to_target_len(
+    tokenizer: PreTrainedTokenizerBase,
+    token_sequence: list[int],
+    target_token_len: int,
+    max_retry: int = 10,
+    add_special_tokens: bool = False,
+) -> tuple[str, list[int]]:
+    """
+    Ensure decoded-then-encoded prompt length matches the target token length.
+
+    This function decodes an initial token sequence to text and re-encodes it
+    , iteratively adjusting the token sequence length to match a target. 
+    This is necessary because some tokenizers do not guarantee a 1:1 mapping 
+    between consecutive tokens and the decoded-then-encoded sequence length.
+    For example, for GPT2Tokenizer:
+    [6880, 6881] -> ['Ġcalls', 'here'] ->
+    [1650, 939, 486] -> ['Ġcall', 'sh', 'ere']
+
+    Returns a tuple of the final prompt string and the adjusted token sequence.
+    """
+    remain_num_try = max_retry
+    while True:
+        prompt = tokenizer.decode(token_sequence)
+        token_sequence = tokenizer.encode(
+            prompt, add_special_tokens=add_special_tokens
+        )
+        if remain_num_try <= 0:
+            if len(token_sequence) != target_token_len:
+                logger.warning(
+                    "Failed to sample a prompt that matches the "
+                    "expected decoded token length, expected %d, got %d",
+                    target_token_len,
+                    len(token_sequence),
+                )
+            break
+        
+        if len(token_sequence) == target_token_len:
+            break
+        elif len(token_sequence) < target_token_len:
+            extra_tokens = np.random.randint(
+                0,
+                tokenizer.vocab_size,
+                size=target_token_len - len(token_sequence),
+            ).tolist()
+            token_sequence = token_sequence + extra_tokens
+        elif len(token_sequence) > target_token_len:
+            token_sequence = token_sequence[:target_token_len]
+
+        remain_num_try -= 1
+
+    return prompt, token_sequence
 
 class RandomDataset(BenchmarkDataset):
     """
@@ -549,14 +600,14 @@ class RandomDataset(BenchmarkDataset):
         token_sequence = prefix_token_ids + inner_seq
 
         # Decode, then re-encode and truncate to preserve token count invariants
-        prompt = tokenizer.decode(token_sequence)
         total_input_len = prefix_len + int(input_len)
-
-        re_encoded_sequence = tokenizer.encode(
-            prompt, add_special_tokens=False)[:total_input_len]
-        prompt = tokenizer.decode(re_encoded_sequence)
-        total_input_len = len(re_encoded_sequence)
-
+        prompt, adjusted_token_sequence = gen_prompt_decode_to_target_len(
+            tokenizer=tokenizer,
+            token_sequence=token_sequence,
+            target_token_len=total_input_len,
+            add_special_tokens=False,
+        )
+        total_input_len = len(adjusted_token_sequence)
         return prompt, total_input_len
 
 
@@ -2687,19 +2738,14 @@ class PrefixRepetitionRandomDataset(BenchmarkDataset):
             # Generate random tokens
             tokens = np.random.randint(
                 0, vocab_size, size=target_length).tolist()
-            text = tokenizer.decode(tokens)
-            re_encoded = tokenizer.encode(text, add_special_tokens=False)
 
-            if len(re_encoded) == target_length:
-                return re_encoded
-            elif len(re_encoded) < target_length:
-                # Recursively generate additional consistent tokens
-                needed = target_length - len(re_encoded)
-                extra_tokens = _generate_exact_length_tokens(needed)
-                return re_encoded + extra_tokens
-            else:
-                # Truncate to target length
-                return re_encoded[:target_length]
+            _, adjusted_tokens = gen_prompt_decode_to_target_len(
+                tokenizer=tokenizer,
+                token_sequence=tokens,
+                target_token_len=target_length,
+                add_special_tokens=False,
+            )
+            return adjusted_tokens
 
         requests = []
         for _ in range(num_prefixes):
