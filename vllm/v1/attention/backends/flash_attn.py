@@ -707,13 +707,14 @@ class FlashAttentionImpl(AttentionImpl):
                 v_descale=v_descale,
             )
         # FA returns LSE in shape [ H, B ] but cp_lse_ag_out_rs wants [ B, H ]
-        context_lse = context_lse.transpose(0, 1)
-        context_attn_out, context_lse = cp_lse_ag_out_rs(
-                                            context_attn_out, 
-                                            context_lse, 
-                                            get_dcp_group(),
-                                            return_lse=True)
-        context_lse = context_lse.transpose(0, 1).contiguous()
+        context_attn_out_cor, context_lse_cor = \
+            cp_lse_ag_out_rs(
+                context_attn_out,
+                context_lse.transpose(0, 1),
+                get_dcp_group(),
+                return_lse=True
+            )
+        context_lse_cor = context_lse_cor.transpose(0, 1).contiguous()
         
         query_attn_out, query_lse = \
             flash_attn_varlen_func(
@@ -736,12 +737,12 @@ class FlashAttentionImpl(AttentionImpl):
                 k_descale=k_descale,
                 v_descale=v_descale,
             )
-        assert context_attn_out.shape == query_attn_out.shape
-        assert context_lse.shape == query_lse.shape
+        assert context_attn_out_cor.shape == query_attn_out.shape
+        assert context_lse_cor.shape == query_lse.shape
         merge_attn_states(
             output,
-            context_attn_out,
-            context_lse,
+            context_attn_out_cor,
+            context_lse_cor,
             query_attn_out, 
             query_lse,
         )
