@@ -86,23 +86,21 @@ class BlockHashToBlockMap:
         if blocks is None:
             # block_hash not found in the cache
             return None
-        elif isinstance(blocks, KVCacheBlock):
+        if isinstance(blocks, KVCacheBlock):
             if blocks.block_id == block_id:
                 return blocks
-            else:
-                # If the single block ID doesn't match, we should put the
-                # block back (it should happen rarely)
-                self._cache[key] = blocks
-                return None
-        elif isinstance(blocks, dict):
+            # If the single block ID doesn't match, we should put the
+            # block back (it should happen rarely)
+            self._cache[key] = blocks
+            return None
+        if isinstance(blocks, dict):
             # Try to pop block_id from the block dict, and if dict still
             # contain blocks, put back to the cache.
             block = blocks.pop(block_id, None)
             if len(blocks) > 0:
                 self._cache[key] = blocks
             return block
-        else:
-            self._unexpected_blocks_type(blocks)
+        self._unexpected_blocks_type(blocks)
         return None
 
     def __len__(self) -> int:
