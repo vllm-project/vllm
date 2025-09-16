@@ -255,7 +255,9 @@ class CudaPlatformBase(Platform):
     ) -> tuple[list[tuple[_Backend, int]], dict[_Backend, str]]:
         valid_backends_priorities = []
         invalid_reasons = {}
-        device_capability = cls.get_device_capability().to_int()
+        device_capability = cls.get_device_capability()
+        if device_capability is not None:
+            device_capability = device_capability.to_int()
         for backend in _Backend:
             if backend not in BACKEND_PRIORITIES:
                 continue
