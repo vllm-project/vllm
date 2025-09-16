@@ -121,14 +121,6 @@ class OpenCVVideoBackend(VideoLoader):
         original_fps = cap.get(cv2.CAP_PROP_FPS)
         duration = total_frames_num / original_fps if original_fps > 0 else 0
 
-        # Use transformers transformers.video_utils.VideoMetadata format
-        metadata = {
-            "total_num_frames": total_frames_num,
-            "fps": original_fps,
-            "duration": duration,
-            "video_backend": "opencv"
-        }
-
         # resample video to target num_frames
         full_read = num_frames == -1 or total_frames_num < num_frames
         if full_read:
@@ -159,6 +151,20 @@ class OpenCVVideoBackend(VideoLoader):
         assert i == num_frames, (f"Expected reading {num_frames} frames, "
                                  f"but only loaded {i} frames from video.")
 
+        # Use transformers transformers.video_utils.VideoMetadata format
+        # NOTE(Isotr0py): For models like Qwen3-VL/GLM4.5V, this metadata
+        # can cause incorrect timestamp calculation without num_frames=-1.
+        metadata = {
+            "total_num_frames": num_frames,
+            "fps": original_fps,
+            "duration": duration,
+            "video_backend": "opencv",
+            "frames_indices": list(range(num_frames)),
+            # extra field used to control hf processor's video
+            # sampling behavior
+            "do_sample_frames": num_frames == total_frames_num,
+        }
+
         return frames, metadata
 
 
@@ -170,7 +176,7 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
         cls,
         data: bytes,
         num_frames: int = -1,
-        requested_fps: int = 2,
+        fps: int = 2,
         max_duration: int = 300,
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
@@ -185,14 +191,6 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
         original_fps = cap.get(cv2.CAP_PROP_FPS)
         duration = total_frames_num / original_fps if original_fps > 0 else 0
 
-        # Use transformers transformers.video_utils.VideoMetadata format
-        metadata = {
-            "total_num_frames": total_frames_num,
-            "fps": original_fps,
-            "duration": duration,
-            "video_backend": "opencv_dynamic"
-        }
-
         # resample video to target num_frames
         max_frame_idx = total_frames_num - 1
         duration = duration or round(max_frame_idx / original_fps) + 1
@@ -201,14 +199,13 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
         # https://github.com/huggingface/transformers/blob/v4.55.4/src/transformers/models/glm4v/video_processing_glm4v.py#L103-L140
         frame_indices: Union[range, list[int]]
         if duration <= max_duration:
-            n = int(math.floor(duration * requested_fps))
+            n = int(math.floor(duration * fps))
             frame_indices = sorted({
-                min(max_frame_idx,
-                    int(math.ceil(i * original_fps / requested_fps)))
+                min(max_frame_idx, int(math.ceil(i * original_fps / fps)))
                 for i in range(n)
             })
         else:
-            num_samples = int(max_duration * requested_fps)
+            num_samples = int(max_duration * fps)
             if num_samples >= total_frames_num:
                 frame_indices = range(total_frames_num)
             else:
@@ -240,6 +237,16 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
         assert i == len(frame_indices), (
             f"Expected reading {len(frame_indices)} frames, "
             f"but only loaded {i} frames from video.")
+
+        # Use transformers transformers.video_utils.VideoMetadata format
+        metadata = {
+            "total_num_frames": total_frames_num,
+            "fps": original_fps,
+            "duration": duration,
+            "video_backend": "opencv_dynamic",
+            "frames_indices": list(frame_indices),
+            "do_sample_frames": False,
+        }
 
         return frames, metadata
 
