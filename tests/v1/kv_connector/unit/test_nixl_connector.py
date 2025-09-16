@@ -19,6 +19,10 @@ import torch
 from vllm import LLM
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVTransferStats)
+from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
+    MultiKVTransferStats)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
     KVConnectorRole, NixlAgentMetadata, NixlConnector, NixlConnectorMetadata,
     NixlConnectorWorker, NixlKVTransferStats)
@@ -538,7 +542,7 @@ def test_kv_transfer_stats(dist_init):
 
     # Verify stats values are recorded
     assert not stats_after_transfer.is_empty()
-    assert stats_after_transfer.num_successful_transfers == 1
+    assert stats_after_transfer.data["num_successful_transfers"] == 1
 
     # Verify stats are reset after retrieval
     stats_after_reset = connector.get_kv_transfer_stats()
@@ -598,7 +602,84 @@ def test_kv_transfer_stats_aggregation():
     kv_transfer_stats = aggregated_output.kv_connector_output.kv_transfer_stats
     assert isinstance(kv_transfer_stats, NixlKVTransferStats)
     # Number of total transfers across all workers.
-    assert kv_transfer_stats.num_successful_transfers == 6
+    assert kv_transfer_stats.data["num_successful_transfers"] == 6
+
+
+def test_multi_kv_transfer_stats_aggregation():
+    """
+    Test MultiKVTransferStats aggregation across TP ranks using
+    KVOutputAggregator (used by MultiprocExecutor).
+    """
+
+    aggregator = KVOutputAggregator(world_size=3)
+
+    from dataclasses import dataclass
+
+    @dataclass
+    class FooKVTransferStats(KVTransferStats):
+
+        def reset(self):
+            self.data = {"num_foo_transfers": 0}
+
+        def record_transfer(self):
+            if "num_foo_transfers" not in self.data:
+                self.data["num_foo_transfers"] = 0
+            self.data["num_foo_transfers"] += 1
+
+        def is_empty(self) -> bool:
+            return self.data["num_foo_transfers"] == 0
+
+        def aggregate(self,
+                      other: "FooKVTransferStats") -> "FooKVTransferStats":
+            if not other.is_empty():
+                self.data["num_foo_transfers"] += other.data[
+                    "num_foo_transfers"]
+            return self
+
+    def make_multi_stats(nixl_count: int,
+                         foo_count: int) -> MultiKVTransferStats:
+        data: dict[str, KVTransferStats] = {}
+        if nixl_count > 0:
+            nixl_stats = NixlKVTransferStats()
+            for _ in range(nixl_count):
+                nixl_stats.record_transfer()
+            data["NixlConnector"] = nixl_stats
+        if foo_count > 0:
+            foo_stats = FooKVTransferStats()
+            for _ in range(foo_count):
+                foo_stats.record_transfer()
+            data["FooConnector"] = foo_stats
+        return MultiKVTransferStats(data=data)
+
+    # Create heterogeneous stats across 3 workers
+    worker_patterns = [(2, 1), (3, 0), (0, 5)]  # (Nixl, Foo)
+
+    worker_outputs: list[ModelRunnerOutput] = []
+    for i, (nixl, foo) in enumerate(worker_patterns):
+        stats = make_multi_stats(nixl, foo)
+        output = ModelRunnerOutput(
+            req_ids=[f"req_{i}"],
+            req_id_to_index={f"req_{i}": 0},
+            sampled_token_ids=[[123]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[None],
+            kv_connector_output=KVConnectorOutput(
+                finished_sending=set([f"req_{i}_send"]) if i < 2 else None,
+                finished_recving=set([f"req_{i}_recv"]) if i > 0 else None,
+                kv_transfer_stats=stats,
+            ),
+        )
+        worker_outputs.append(output)
+
+    aggregated_output = aggregator.aggregate(worker_outputs, output_rank=0)
+    kv_transfer_stats = aggregated_output.kv_connector_output.kv_transfer_stats
+    assert isinstance(kv_transfer_stats, MultiKVTransferStats)
+
+    # Validate per-connector totals across workers
+    assert kv_transfer_stats["NixlConnector"].data[
+        "num_successful_transfers"] == 5
+    assert kv_transfer_stats["FooConnector"].data["num_foo_transfers"] == 6
 
 
 @pytest.mark.parametrize("distributed_executor_backend", ["ray", None])
