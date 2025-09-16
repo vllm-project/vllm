@@ -50,7 +50,6 @@ def test_registry_imports(model_arch):
 @create_new_process_for_each_test()
 @pytest.mark.parametrize("model_arch,is_mm,init_cuda,is_ce", [
     ("LlamaForCausalLM", False, False, False),
-    ("MllamaForConditionalGeneration", True, False, False),
     ("LlavaForConditionalGeneration", True, True, False),
     ("BertForSequenceClassification", False, False, True),
     ("RobertaForSequenceClassification", False, False, True),

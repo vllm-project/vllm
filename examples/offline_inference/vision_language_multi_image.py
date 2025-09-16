@@ -637,26 +637,6 @@ def load_mistral3(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
-def load_mllama(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "meta-llama/Llama-3.2-11B-Vision-Instruct"
-
-    # The configuration below has been confirmed to launch on a single L40 GPU.
-    engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=8192,
-        max_num_seqs=2,
-        limit_mm_per_prompt={"image": len(image_urls)},
-    )
-
-    img_prompt = "Given the first image <|image|> and the second image<|image|>"
-    prompt = f"<|begin_of_text|>{img_prompt}, {question}?"
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=[fetch_image(url) for url in image_urls],
-    )
-
-
 def load_nvlm_d(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "nvidia/NVLM-D-72B"
 
@@ -1253,7 +1233,6 @@ model_example_map = {
     "llava-next": load_llava_next,
     "llava-onevision": load_llava_onevision,
     "mistral3": load_mistral3,
-    "mllama": load_mllama,
     "NVLM_D": load_nvlm_d,
     "ovis": load_ovis,
     "ovis2_5": load_ovis2_5,

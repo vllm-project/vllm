@@ -167,8 +167,6 @@ def _test_processing_correctness(
 # incorrect token ids. So we need use `add_special_tokens=False` here
 # to leave bos_token to be added by the processor.
 _ADD_SPECIAL_TOKENS_OVERRIDES = {
-    "donut": False,
-    "mllama": False,
     "ovis": False,
     "ovis2_5": False,
     "paligemma": False,
@@ -278,9 +276,7 @@ def _test_processing_correctness_one(
     "facebook/chameleon-7b",
     "CohereLabs/command-a-vision-07-2025",
     "deepseek-ai/deepseek-vl2-tiny",
-    "naver-clova-ix/donut-base-finetuned-docvqa",
     "baidu/ERNIE-4.5-VL-28B-A3B-PT",
-    "microsoft/Florence-2-base",
     "adept/fuyu-8b",
     "google/gemma-3-4b-it",
     "google/gemma-3n-E2B-it",
@@ -305,7 +301,6 @@ def _test_processing_correctness_one(
     "llava-hf/llava-v1.6-mistral-7b-hf",
     "llava-hf/LLaVA-NeXT-Video-7B-hf",
     "llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
-    "meta-llama/Llama-3.2-11B-Vision-Instruct",
     "TIGER-Lab/Mantis-8B-siglip-llama3",
     "mispeech/midashenglm-7b",
     "openbmb/MiniCPM-Llama3-V-2_5",
