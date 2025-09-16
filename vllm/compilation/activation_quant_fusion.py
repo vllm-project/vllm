@@ -9,6 +9,7 @@ from torch._inductor.pattern_matcher import (PatternMatcherPass, fwd_only,
                                              register_replacement)
 from torch._ops import OpOverload
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -34,6 +35,45 @@ silu_and_mul_nvfp4_quant_supported = (current_platform.is_cuda() and hasattr(
 if silu_and_mul_nvfp4_quant_supported:
     FUSED_OPS[
         kNvfp4Quant] = torch.ops._C.silu_and_mul_nvfp4_quant.default  # noqa: E501
+
+if current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER:
+    import aiter as rocm_aiter
+    from aiter.ops.triton.activation import act_mul_and_fp8_group_quant
+
+    from vllm.utils import direct_register_custom_op
+    rocm_aiter_fp8_dtype = rocm_aiter.dtypes.fp8
+    rocm_aiter_fp8_quant_group_size = 128
+
+    def _rocm_aiter_act_mul_and_fp8_group_quant_impl(
+        x: torch.Tensor, ) -> tuple[torch.Tensor, torch.Tensor]:
+        return act_mul_and_fp8_group_quant(
+            x,
+            activation="silu",
+            group_size=rocm_aiter_fp8_quant_group_size,
+            dtype_quant=rocm_aiter_fp8_dtype)
+
+    def _rocm_aiter_act_mul_and_fp8_group_quant_fake(
+        x: torch.Tensor, ) -> tuple[torch.Tensor, torch.Tensor]:
+        M, N = x.shape
+        assert N % 2 == 0
+        N_half = N // 2
+        x_fp8 = torch.empty((M, N_half),
+                            dtype=rocm_aiter_fp8_dtype,
+                            device=x.device)
+        out_bs = torch.empty(
+            (M, (N_half + rocm_aiter_fp8_quant_group_size - 1) //
+             rocm_aiter_fp8_quant_group_size),
+            dtype=torch.float32,
+            device=x.device)
+        return x_fp8, out_bs
+
+    direct_register_custom_op(
+        op_name="rocm_aiter_act_mul_and_fp8_group_quant",
+        op_func=_rocm_aiter_act_mul_and_fp8_group_quant_impl,
+        mutates_args=[],
+        fake_impl=_rocm_aiter_act_mul_and_fp8_group_quant_fake,
+        dispatch_key=current_platform.dispatch_key,
+    )
 
 
 class ActivationQuantPattern(ABC):
