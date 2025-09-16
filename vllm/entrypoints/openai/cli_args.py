@@ -269,6 +269,14 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         raise TypeError("Error: --enable-auto-tool-choice requires "
                         "--tool-call-parser")
 
+    # Validate max_server_load
+    if args.max_server_load is not None:
+        if not args.enable_server_load_tracking:
+            raise TypeError("Error: --max-server-load requires "
+                            "--enable-server-load-tracking to be enabled")
+        if not isinstance(args.max_server_load, int) or args.max_server_load <= 0:
+            raise TypeError("Error: --max-server-load must be a positive integer")
+
 
 def create_parser_for_docs() -> FlexibleArgumentParser:
     parser_for_docs = FlexibleArgumentParser(
