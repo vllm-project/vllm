@@ -6,9 +6,9 @@ from dataclasses import MISSING, Field, asdict, dataclass, field
 import pytest
 
 from vllm.compilation.backends import VllmBackend
-from vllm.config import (ModelConfig, PoolerConfig, VllmConfig, get_field,
-                         update_config)
+from vllm.config import ModelConfig, PoolerConfig, VllmConfig, update_config
 from vllm.config.load import LoadConfig
+from vllm.config.utils import get_field
 from vllm.model_executor.layers.pooler import PoolingType
 from vllm.platforms import current_platform
 
