@@ -39,6 +39,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
             use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
             use_torch_symm_mem = envs.VLLM_ALLREDUCE_USE_SYMM_MEM
 
+        if envs.VLLM_USE_UCC:
+            self.ucc_group = torch.distributed.new_group(self.ranks,
+                                                         backend="ucc")
+        else:
+            self.ucc_group = None
+
         self.use_custom_allreduce = use_custom_allreduce
         self.use_torch_symm_mem = use_torch_symm_mem
 
@@ -51,6 +57,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
             QuickAllReduce)
         from vllm.distributed.device_communicators.symm_mem import (
             SymmMemCommunicator)
+        from vllm.distributed.device_communicators.ucc_communicator import (
+            UCCCommunicator)
 
         self.pynccl_comm: Optional[PyNcclCommunicator] = None
         if self.world_size > 1:
@@ -87,6 +95,14 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 # currently be an MI300 series.
                 self.qr_comm = QuickAllReduce(group=self.cpu_group,
                                               device=self.device)
+
+        # Initialize UCC allreduce if available
+        self.ucc_comm: Optional[UCCCommunicator] = None
+        if envs.VLLM_USE_UCC and self.world_size > 1:
+            self.ucc_comm = UCCCommunicator(
+                group=self.ucc_group,
+                device=self.device,
+            )
 
         if self.use_all2all:
             all2all_backend = envs.VLLM_ALL2ALL_BACKEND
@@ -126,14 +142,18 @@ class CudaCommunicator(DeviceCommunicatorBase):
             out = torch.ops.vllm.all_reduce_symmetric_with_copy(input_)
             if out is not None:
                 return out
-        # always try quick reduce first, then custom allreduce,
-        # and then pynccl. (quick reduce just for ROCM MI3*)
         qr_comm = self.qr_comm
         if qr_comm is not None and not qr_comm.disabled and \
             qr_comm.should_quick_allreduce(input_):
             out = qr_comm.quick_all_reduce(input_)
             assert out is not None
             return out
+        ucc_comm = self.ucc_comm
+        if ucc_comm is not None and not ucc_comm.disabled and \
+            ucc_comm.should_use_ucc_allreduce(input_):
+            out = ucc_comm.all_reduce(input_)
+            if out is not None:
+                return out
         ca_comm = self.ca_comm
         if ca_comm is not None and not ca_comm.disabled and \
             ca_comm.should_custom_ar(input_):
@@ -253,6 +273,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.pynccl_comm = None
         if self.ca_comm is not None:
             self.ca_comm = None
+        if self.ucc_comm is not None:
+            self.ucc_comm.close()
+            self.ucc_comm = None
         if self.all2all_manager is not None:
             self.all2all_manager.destroy()
             self.all2all_manager = None
