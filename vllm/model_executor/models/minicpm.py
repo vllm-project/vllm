@@ -377,9 +377,9 @@ class MiniCPMModel(nn.Module):
         self.num_experts = getattr(self.config, "num_experts", 0)
         self._init_layers(prefix, config, cache_config, quant_config)
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        
+
         self.aux_hidden_state_layers = tuple[int, ...]()
-        
+
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], self.config.hidden_size))
@@ -423,21 +423,23 @@ class MiniCPMModel(nn.Module):
         for idx, layer in enumerate(
                 islice(self.layers, self.start_layer, self.end_layer)):
             if idx in self.aux_hidden_state_layers:
-                aux_hidden_states.append(hidden_states + residual if residual is not None else hidden_states)
+                aux_hidden_states.append(
+                    hidden_states +
+                    residual if residual is not None else hidden_states)
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
                 residual,
             )
-            
+
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
                 "residual": residual
             })
-            
+
         hidden_states = self.norm(hidden_states)
-        
+
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states
@@ -583,7 +585,7 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
     def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
         num_layers = len(self.model.layers)
         return (2, num_layers // 2, num_layers - 3)
-    
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -594,7 +596,7 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
                                                         list[torch.Tensor]]]:
         model_output = self.model(input_ids, positions, intermediate_tensors,
                                   inputs_embeds)
-        
+
         if isinstance(model_output, tuple) and len(model_output) == 2:
             # Aux hidden states are present.
             hidden_states, aux_hidden_states = model_output
