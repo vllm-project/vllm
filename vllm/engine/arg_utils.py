@@ -8,7 +8,7 @@ import dataclasses
 import functools
 import json
 import sys
-from dataclasses import MISSING, InitVar, dataclass, fields, is_dataclass
+from dataclasses import MISSING, dataclass, fields, is_dataclass
 from itertools import permutations
 from typing import (TYPE_CHECKING, Annotated, Any, Callable, Dict, List,
                     Literal, Optional, Type, TypeVar, Union, cast, get_args,
@@ -416,7 +416,7 @@ class EngineArgs:
 
     structured_outputs_config: StructuredOutputsConfig = get_field(
         VllmConfig, "structured_outputs_config")
-    reasoning_parser: InitVar[str] = StructuredOutputsConfig.reasoning_parser
+    reasoning_parser: str = StructuredOutputsConfig.reasoning_parser
     # Deprecated guided decoding fields
     guided_decoding_backend: str = None
     guided_decoding_disable_fallback: bool = None
@@ -477,8 +477,7 @@ class EngineArgs:
     kv_sharing_fast_prefill: bool = \
         CacheConfig.kv_sharing_fast_prefill
 
-    def __post_init__(self, reasoning_parser: str):
-        self.structured_outputs_config.reasoning_parser = reasoning_parser
+    def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
         # CompilationConfig object
@@ -1416,6 +1415,11 @@ class EngineArgs:
             self.quantization = self.load_format = "bitsandbytes"
 
         load_config = self.create_load_config()
+
+        # Pass reasoning_parser into StructuredOutputsConfig
+        if self.reasoning_parser:
+            self.structured_outputs_config.reasoning_parser = \
+                self.reasoning_parser
 
         # Forward the deprecated CLI args to the StructuredOutputsConfig
         so_config = self.structured_outputs_config
