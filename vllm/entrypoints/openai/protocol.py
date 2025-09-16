@@ -22,7 +22,6 @@ from openai.types.responses import (ResponseFunctionToolCall,
                                     ResponseInputItemParam, ResponseOutputItem,
                                     ResponsePrompt, ResponseReasoningItem,
                                     ResponseStatus)
-from openai_harmony import Message as HarmonyMessage
 
 # Backward compatibility for OpenAI client versions
 try:  # For older openai versions (< 1.100.0)
@@ -1883,8 +1882,10 @@ class ResponsesResponse(OpenAIBaseModel):
     object: Literal["response"] = "response"
     output: list[ResponseOutputItem]
     # These are populated when enable_response_messages is set to True
-    input_messages: Optional[list[dict[str, Any]]] = None
-    output_messages: Optional[list[dict[str, Any]]] = None
+    # TODO: Currently an issue where content of harmony messages
+    # is not available when these are serialized. Metadata is available
+    input_messages: Optional[list[ChatCompletionMessageParam]] = None
+    output_messages: Optional[list[ChatCompletionMessageParam]] = None
     parallel_tool_calls: bool
     temperature: float
     tool_choice: ToolChoice
@@ -1932,14 +1933,8 @@ class ResponsesResponse(OpenAIBaseModel):
             metadata=request.metadata,
             model=model_name,
             output=output,
-            input_messages=[(message.to_dict() if isinstance(
-                message, HarmonyMessage) else message)
-                            for message in input_messages]
-            if input_messages else None,
-            output_messages=[(message.to_dict() if isinstance(
-                message, HarmonyMessage) else message)
-                             for message in output_messages]
-            if output_messages else None,
+            input_messages=input_messages,
+            output_messages=output_messages,
             parallel_tool_calls=request.parallel_tool_calls,
             temperature=sampling_params.temperature,
             tool_choice=request.tool_choice,
