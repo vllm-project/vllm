@@ -141,7 +141,7 @@ class SamplingParams(
     Set to 0 to disable this."""
     seed: Optional[int] = None
     """Random seed to use for the generation."""
-    stop: Optional[Union[str, list[str]]] = None
+    stop: Optional[Union[str, list[Union[str, list[int]]]]] = None
     """String(s) that stop the generation when they are generated. The returned
     output will not contain the stop strings."""
     stop_token_ids: Optional[list[int]] = None
@@ -428,10 +428,28 @@ class SamplingParams(
         assert isinstance(self.stop, list)
         if any(not stop_str for stop_str in self.stop):
             raise ValueError("stop cannot contain an empty string.")
-        if self.stop and not self.detokenize:
-            raise ValueError(
-                "stop strings are only supported when detokenize is True. "
-                "Set detokenize=True to use stop.")
+        if self.stop:
+            # stop can either be a str, or a list of {str, list[int]}
+            # detokenize=True is required if str or list[str]
+            # detokenize=False is required if list[list[int]]
+            if self.detokenize:
+                stop_is_str = (isinstance(self.stop, str)
+                               or (isinstance(self.stop, list) and all(
+                                   isinstance(stop_str, str)
+                                   for stop_str in self.stop)))
+                if not stop_is_str:
+                    raise ValueError(
+                        "Expected stop to be a str or list[str] of stop words"
+                        f"when detokenize=True, but got {self.stop}")
+            else:
+                stop_is_ids = (isinstance(self.stop, list) and all(
+                    isinstance(stop_tokens, list)
+                    for stop_tokens in self.stop))
+                if not stop_is_ids:
+                    raise ValueError(
+                        "Expected stop to be a list[list[int]] of token ids "
+                        f"when detokenize=False, but got {self.stop}")
+
         if self.best_of != self._real_n and self.output_kind == (
                 RequestOutputKind.DELTA):
             raise ValueError("best_of must equal n to use output_kind=DELTA")

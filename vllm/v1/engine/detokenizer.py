@@ -26,10 +26,61 @@ USE_FAST_DETOKENIZER = version.parse(
 INVALID_PREFIX_ERR_MSG = "Invalid prefix encountered"
 
 
+def build_lps(pattern: list[int]) -> list[int]:
+    lps = [0] * len(pattern)
+    # length of the previous longest prefix suffix
+    prev_lps = 0
+    i = 1
+    while i < len(pattern):
+        if pattern[i] == pattern[prev_lps]:
+            prev_lps += 1
+            lps[i] = prev_lps
+            i += 1
+        else:
+            if prev_lps != 0:
+                prev_lps = lps[prev_lps - 1]
+            else:
+                lps[i] = 0
+                i += 1
+    return lps
+
+
+def find_subarray_kmp(pattern: list[int], token_ids: list[int]):
+    """
+    Knuth-Morris-Pratt algorithm for searching for a sublist
+    within a list of token ids.
+
+    Returns the index of the first occurrence of the pattern
+    or -1 if the pattern is not found.
+    """
+    lps = build_lps(pattern)
+    i = j = 0
+    while i < len(token_ids):
+        if token_ids[i] == pattern[j]:
+            i += 1
+            j += 1
+            if j == len(pattern):
+                # pattern matched, return
+                # start of the pattern
+                return i - j
+        else:
+            # mismatch
+            if j != 0:
+                # use lps to avoid re-checking
+                j = lps[j - 1]
+            else:
+                i += 1
+    # no match found
+    return -1
+
+
 class IncrementalDetokenizer:
 
-    def __init__(self):
+    def __init__(self, request: EngineCoreRequest):
         self.token_ids: list[int] = []
+        params = request.sampling_params
+        assert params is not None
+        self.stop = params.stop
 
     @property
     def output_token_ids(self) -> list[int]:
@@ -38,6 +89,18 @@ class IncrementalDetokenizer:
     def update(self, new_token_ids: list[int],
                stop_terminated: bool) -> Optional[str]:
         self.token_ids.extend(new_token_ids)
+
+        if self.stop:
+            for stop_token_ids in self.stop:
+                match_idx =\
+                    find_subarray_kmp(stop_token_ids,
+                        self.output_token_ids)
+                if match_idx != -1:
+                    # found stop token ids, truncate output
+                    # to not contain the pattern
+                    self.token_ids = self.token_ids[:match_idx]
+                    return str(stop_token_ids)
+
         return None
 
     def get_next_output_text(self, finished: bool, delta: bool) -> str:
@@ -54,7 +117,7 @@ class IncrementalDetokenizer:
 
         if tokenizer is None:
             # No tokenizer => skipping detokenization.
-            return IncrementalDetokenizer()
+            return IncrementalDetokenizer(request)
 
         if USE_FAST_DETOKENIZER and isinstance(tokenizer,
                                                PreTrainedTokenizerFast):
@@ -68,19 +131,18 @@ class IncrementalDetokenizer:
 class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
 
     def __init__(self, request: EngineCoreRequest):
-        super().__init__()
+        super().__init__(request)
 
         # Stop strings
         params = request.sampling_params
         assert params is not None
-        self.stop = stop = params.stop
         self.min_tokens = params.min_tokens
         self.include_stop_str_in_output = params.include_stop_str_in_output
 
         # Number of chars to hold back when stop strings are to be excluded
         # from streamed output.
-        if stop and not self.include_stop_str_in_output:
-            self.stop_buffer_length = max(len(s) for s in stop) - 1
+        if self.stop and not self.include_stop_str_in_output:
+            self.stop_buffer_length = max(len(s) for s in self.stop) - 1
         else:
             self.stop_buffer_length = 0
         self._last_output_text_offset: int = 0
