@@ -155,6 +155,7 @@ def main():
         speculative_config=speculative_config,
         disable_log_stats=False,
         max_model_len=16384,
+        seed=0,
         max_num_seqs=args.batch_size,
         limit_mm_per_prompt={"image": 5},
         disable_chunked_mm_input=True,
