@@ -113,7 +113,7 @@ class RMSNormStaticQuantPattern(RMSNormQuantPattern):
         def pattern(input: torch.Tensor, weight: torch.Tensor,
                     scale: torch.Tensor):
             result_rms = self.rmsnorm_matcher(input, weight)
-            return self.quant_matcher(result_rms, scale)
+            return self.quant_matcher(result_rms, scale)[0]
 
         def replacement(input: torch.Tensor, weight: torch.Tensor,
                         scale: torch.Tensor):
@@ -161,7 +161,7 @@ class FusedAddRMSNormStaticQuantPattern(RMSNormQuantPattern):
                     weight: torch.Tensor, scale: torch.Tensor):
             result_rms, residual = self.rmsnorm_matcher(
                 input, weight, residual)
-            result = self.quant_matcher(result_rms, scale)
+            result, _ = self.quant_matcher(result_rms, scale)
 
             return result, residual
 
