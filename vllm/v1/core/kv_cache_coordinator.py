@@ -4,7 +4,8 @@ from abc import ABC, abstractmethod
 from typing import Optional
 
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import (BlockHash, BlockHashList,
+                                         KVCacheBlock, MergedBlockHash)
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager, FullAttentionManager, get_manager_for_kv_cache_spec)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
@@ -25,13 +26,14 @@ class KVCacheCoordinator(ABC):
         enable_caching: bool,
         enable_kv_cache_events: bool,
         dcp_world_size: int,
+        hash_block_size: int,
     ):
         self.kv_cache_config = kv_cache_config
         self.max_model_len = max_model_len
         self.enable_caching = enable_caching
 
         self.block_pool = BlockPool(kv_cache_config.num_blocks, enable_caching,
-                                    enable_kv_cache_events)
+                                    hash_block_size, enable_kv_cache_events)
 
         # Needs special handling for find_longest_cache_hit if eagle is enabled
         self.use_eagle = use_eagle
@@ -200,13 +202,14 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
 
     def __init__(self, kv_cache_config: KVCacheConfig, max_model_len: int,
                  use_eagle: bool, enable_kv_cache_events: bool,
-                 dcp_world_size: int):
+                 dcp_world_size: int, hash_block_size: int):
         super().__init__(kv_cache_config,
                          max_model_len,
                          use_eagle,
                          False,
                          enable_kv_cache_events,
-                         dcp_world_size=dcp_world_size)
+                         dcp_world_size=dcp_world_size,
+                         hash_block_size=hash_block_size)
         self.num_single_type_manager = len(self.single_type_managers)
 
     def get_num_common_prefix_blocks(self, request_id: str,
@@ -232,15 +235,18 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
 
     def __init__(self, kv_cache_config: KVCacheConfig, max_model_len: int,
                  use_eagle: bool, enable_caching: bool,
-                 enable_kv_cache_events: bool, dcp_world_size: int):
+                 enable_kv_cache_events: bool, dcp_world_size: int,
+                 hash_block_size: int):
         super().__init__(kv_cache_config,
                          max_model_len,
                          use_eagle,
                          enable_caching,
                          enable_kv_cache_events,
-                         dcp_world_size=dcp_world_size)
+                         dcp_world_size=dcp_world_size,
+                         hash_block_size=hash_block_size)
         self.kv_cache_spec = self.kv_cache_config.kv_cache_groups[
             0].kv_cache_spec
+        assert hash_block_size == self.kv_cache_spec.block_size
         self.block_size = self.kv_cache_spec.block_size
         self.dcp_world_size = dcp_world_size
         if dcp_world_size > 1:
@@ -276,13 +282,19 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
     def __init__(self, kv_cache_config: KVCacheConfig, max_model_len: int,
                  use_eagle: bool, enable_caching: bool,
-                 enable_kv_cache_events: bool, dcp_world_size: int):
+                 enable_kv_cache_events: bool, dcp_world_size: int,
+                 hash_block_size: int):
         super().__init__(kv_cache_config,
                          max_model_len,
                          use_eagle,
                          enable_caching,
                          enable_kv_cache_events,
-                         dcp_world_size=dcp_world_size)
+                         dcp_world_size=dcp_world_size,
+                         hash_block_size=hash_block_size)
+        self.hash_block_size = hash_block_size
+        assert all(g.kv_cache_spec.block_size % hash_block_size == 0
+                   for g in kv_cache_config.kv_cache_groups), (
+                       "block_size must be divisible by hash_block_size")
         assert dcp_world_size == 1, "DCP not support hybrid attn now."
         self.verify_and_split_kv_cache_groups()
 
@@ -367,9 +379,15 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 - The number of tokens of the longest cache hit.
         """
         # First, find the longest cache hit for full attention.
+        if self.full_attention_spec.block_size == self.hash_block_size:
+            full_attention_block_hashes: BlockHashList = block_hashes
+        else:
+            full_attention_block_hashes = MergedBlockHash(
+                block_hashes,
+                self.hash_block_size // self.full_attention_spec.block_size)
         hit_blocks_full_attn = (
             self.full_attention_manager_cls.find_longest_cache_hit(
-                block_hashes=block_hashes,
+                block_hashes=full_attention_block_hashes,
                 max_length=max_cache_hit_length,
                 kv_cache_group_ids=self.full_attention_group_ids,
                 block_pool=self.block_pool,
@@ -381,9 +399,15 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
         # Next, find the cache hit for the other attention WITHIN
         # the cache hit of full attention.
+        if self.other_spec.block_size == self.hash_block_size:
+            other_block_hashes: BlockHashList = block_hashes
+        else:
+            other_block_hashes = MergedBlockHash(
+                block_hashes,
+                self.hash_block_size // self.other_spec.block_size)
         hit_blocks_other_attn = (
             self.other_attention_cls.find_longest_cache_hit(
-                block_hashes=block_hashes,
+                block_hashes=other_block_hashes,
                 max_length=hit_length,
                 kv_cache_group_ids=self.other_group_ids,
                 block_pool=self.block_pool,
@@ -417,24 +441,18 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 def get_kv_cache_coordinator(kv_cache_config: KVCacheConfig,
                              max_model_len: int, use_eagle: bool,
                              enable_caching: bool,
-                             enable_kv_cache_events: bool,
-                             dcp_world_size: int) -> KVCacheCoordinator:
+                             enable_kv_cache_events: bool, dcp_world_size: int,
+                             hash_block_size: int) -> KVCacheCoordinator:
     if not enable_caching:
-        return KVCacheCoordinatorNoPrefixCache(kv_cache_config,
-                                               max_model_len,
+        return KVCacheCoordinatorNoPrefixCache(kv_cache_config, max_model_len,
                                                use_eagle,
                                                enable_kv_cache_events,
-                                               dcp_world_size=dcp_world_size)
+                                               dcp_world_size, hash_block_size)
     if len(kv_cache_config.kv_cache_groups) == 1:
-        return UnitaryKVCacheCoordinator(kv_cache_config,
-                                         max_model_len,
-                                         use_eagle,
-                                         enable_caching,
+        return UnitaryKVCacheCoordinator(kv_cache_config, max_model_len,
+                                         use_eagle, enable_caching,
                                          enable_kv_cache_events,
-                                         dcp_world_size=dcp_world_size)
-    return HybridKVCacheCoordinator(kv_cache_config,
-                                    max_model_len,
-                                    use_eagle,
-                                    enable_caching,
-                                    enable_kv_cache_events,
-                                    dcp_world_size=dcp_world_size)
+                                         dcp_world_size, hash_block_size)
+    return HybridKVCacheCoordinator(kv_cache_config, max_model_len, use_eagle,
+                                    enable_caching, enable_kv_cache_events,
+                                    dcp_world_size, hash_block_size)

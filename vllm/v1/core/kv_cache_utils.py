@@ -4,9 +4,9 @@
 
 import os
 from collections import defaultdict, deque
-from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
-from typing import Any, Callable, NewType, Optional, Union
+from collections.abc import Iterable, Iterator, Sequence
+from dataclasses import dataclass, replace
+from typing import Any, Callable, NewType, Optional, Union, overload
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -829,19 +829,46 @@ def _get_kv_cache_groups_uniform_type(
                                        [list(kv_cache_specs.keys())])
 
 
-def is_kv_cache_page_size_uniform(
-        kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
+def unify_kv_cache_spec_page_size(
+        kv_cache_spec: dict[str, KVCacheSpec]) -> dict[str, KVCacheSpec]:
     """
-    Whether all layers in the given KVCacheSpec have the same page size.
+    Unify the page size of the given KVCacheSpec. If the page size of all layers
+    are the same, return the original KVCacheSpec. If not same, unify the page
+    size by reducing the block size of layers with larger page size. Raise 
+    NotImplementedError if failed to unify the page size.
+
     Args:
         kv_cache_spec: The KVCacheSpec of each attention layer in the model
 
     Returns:
-        True if all layers have the same page size, False otherwise.
+        The unified KVCacheSpec.
     """
-
     page_sizes = {layer.page_size_bytes for layer in kv_cache_spec.values()}
-    return len(page_sizes) == 1
+    if len(page_sizes) == 1:
+        # All layers have the same page size, no need to unify.
+        return kv_cache_spec
+
+    min_page_size = min(page_sizes)
+    new_kv_cache_spec = {}
+    for layer_name, layer_spec in kv_cache_spec.items():
+        if layer_spec.page_size_bytes == min_page_size:
+            new_kv_cache_spec[layer_name] = layer_spec
+        else:
+            layer_page_size = layer_spec.page_size_bytes
+            if layer_page_size % min_page_size != 0:
+                raise NotImplementedError(
+                    "The page size of the layer is not divisible by the "
+                    "minimum page size")
+            ratio = layer_page_size // min_page_size
+            if layer_spec.block_size % ratio != 0:
+                raise NotImplementedError(
+                    "Cannot unify the page size of the layer by changing the "
+                    "block size")
+            new_block_size = layer_page_size // min_page_size
+            new_spec = replace(layer_spec, block_size=new_block_size)
+            assert new_spec.page_size_bytes == min_page_size
+            new_kv_cache_spec[layer_name] = new_spec
+    return new_kv_cache_spec
 
 
 def is_kv_cache_type_attention_free(
@@ -1109,19 +1136,21 @@ def get_kv_cache_groups(
         # This returns an empty list to allow for the KVCacheManager to handle
         # attention free models.
         return []
-    elif is_kv_cache_type_uniform(kv_cache_spec):
+
+    if is_kv_cache_type_uniform(kv_cache_spec):
         # KV cache of all layers are the same, which is true for
         # most models. Allocate the same amount of memory for
         # each layer.
         return _get_kv_cache_groups_uniform_type(kv_cache_spec)
-    elif is_kv_cache_page_size_uniform(kv_cache_spec):
-        # Model contains multiple attention types, but KV cache of all layers
-        # have the same physical memory per block per layer. Split the layers
-        # into groups with the same number of layers, and thus same total page
-        # size.
-        return _get_kv_cache_groups_uniform_page_size(kv_cache_spec)
 
-    raise NotImplementedError
+    # As KVCacheManager can only allocate memory of one size, we need to unify
+    # thepage size of the layers.
+    kv_cache_spec = unify_kv_cache_spec_page_size(kv_cache_spec)
+    # Model contains multiple attention types, but KV cache of all layers
+    # have the same physical memory per block per layer. Split the layers
+    # into groups with the same number of layers, and thus same total page
+    # size.
+    return _get_kv_cache_groups_uniform_page_size(kv_cache_spec)
 
 
 def get_kv_cache_configs(vllm_config: VllmConfig,
@@ -1203,5 +1232,59 @@ def get_kv_cache_configs(vllm_config: VllmConfig,
                          for kv_cache_config in kv_cache_configs)
     for kv_cache_config in kv_cache_configs:
         kv_cache_config.num_blocks = min_num_blocks
+    # TODO: remove this print
+    print("kv_cache_configs", kv_cache_configs[0])
 
     return kv_cache_configs
+
+
+class MergedBlockHash:
+
+    def __init__(self, block_hashes: list[BlockHash], merge_size: int):
+        assert merge_size > 1
+        self.block_hashes = block_hashes
+        self.merge_size = merge_size
+
+    def __len__(self) -> int:
+        # how many merged items are available
+        return len(self.block_hashes) // self.merge_size
+
+    # precise return types for mypy
+    @overload
+    def __getitem__(self, idx: int) -> BlockHash:
+        ...
+
+    @overload
+    def __getitem__(self, idx: slice) -> list[BlockHash]:
+        ...
+
+    def __getitem__(self, idx):
+        if isinstance(idx, int):
+            # support negative indices
+            if idx < 0:
+                idx += len(self)
+            if idx < 0 or idx >= len(self):
+                raise IndexError("index out of range")
+            return self._merge_at(idx)
+
+        if isinstance(idx, slice):
+            start, stop, step = idx.indices(len(self))
+            return [self._merge_at(i) for i in range(start, stop, step)]
+
+        raise TypeError(f"Invalid index type: {type(idx)!r}")
+
+    def __iter__(self) -> Iterator[BlockHash]:
+        # makes the whole object an Iterable[BlockHash]
+        for i in range(len(self)):
+            yield self._merge_at(i)
+
+    def _merge_at(self, idx: int) -> BlockHash:
+        merged_hash = bytearray()
+        base = idx * self.merge_size
+        end = base + self.merge_size
+        for i in range(base, end):
+            merged_hash.extend(self.block_hashes[i])
+        return BlockHash(merged_hash)
+
+
+BlockHashList = Union[list[BlockHash], MergedBlockHash]

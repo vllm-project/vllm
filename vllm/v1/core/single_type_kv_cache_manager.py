@@ -6,7 +6,7 @@ from collections import defaultdict
 
 from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import BlockHashList, KVCacheBlock
 from vllm.v1.kv_cache_interface import (ChunkedLocalAttentionSpec,
                                         CrossAttentionSpec, FullAttentionSpec,
                                         KVCacheSpec, MambaSpec,
@@ -193,7 +193,7 @@ class SingleTypeKVCacheManager(ABC):
     @abstractmethod
     def find_longest_cache_hit(
         cls,
-        block_hashes: list[BlockHash],
+        block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
@@ -251,7 +251,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
     @classmethod
     def find_longest_cache_hit(
         cls,
-        block_hashes: list[BlockHash],
+        block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
@@ -312,7 +312,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
     @classmethod
     def find_longest_cache_hit(
         cls,
-        block_hashes: list[BlockHash],
+        block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
@@ -412,7 +412,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
     @classmethod
     def find_longest_cache_hit(
         cls,
-        block_hashes: list[BlockHash],
+        block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
@@ -531,7 +531,7 @@ class MambaManager(SingleTypeKVCacheManager):
     @classmethod
     def find_longest_cache_hit(
         cls,
-        block_hashes: list[BlockHash],
+        block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
@@ -627,7 +627,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
     @classmethod
     def find_longest_cache_hit(
         cls,
-        block_hashes: list[BlockHash],
+        block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
