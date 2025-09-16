@@ -274,8 +274,10 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         if not args.enable_server_load_tracking:
             raise TypeError("Error: --max-server-load requires "
                             "--enable-server-load-tracking to be enabled")
-        if not isinstance(args.max_server_load, int) or args.max_server_load <= 0:
-            raise TypeError("Error: --max-server-load must be a positive integer")
+        if not isinstance(args.max_server_load,
+                          int) or args.max_server_load <= 0:
+            raise TypeError(
+                "Error: --max-server-load must be a positive integer")
 
 
 def create_parser_for_docs() -> FlexibleArgumentParser:

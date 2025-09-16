@@ -109,39 +109,38 @@ def load_aware_call(func):
             raise ValueError(
                 "raw_request required when server load tracking is enabled")
 
-        if not getattr(raw_request.app.state, "enable_server_load_tracking",
-                       False):
+        app_state = raw_request.app.state
+        if not getattr(app_state, "enable_server_load_tracking", False):
             return await func(*args, **kwargs)
 
+        # ensure the counter exists
+        if not hasattr(app_state, "server_load_metrics"):
+            app_state.server_load_metrics = 0
+
         # Check if max load limit is configured and exceeded
-        max_load = getattr(raw_request.app.state, 'max_server_load', None)
+        max_load = getattr(app_state, "max_server_load", None)
         if (max_load is not None
-                and raw_request.app.state.server_load_metrics >= max_load):
+                and app_state.server_load_metrics >= max_load):
             logger.warning(
                 "Server overloaded: current load %s >= max load %s. "
-                "Rejecting request.",
-                raw_request.app.state.server_load_metrics, max_load)
+                "Rejecting request.", app_state.server_load_metrics, max_load)
             return JSONResponse(content={
                 "error": {
                     "type":
                     "server_overloaded",
                     "message":
                     f"Server is currently overloaded. Current load: "
-                    f"{raw_request.app.state.server_load_metrics}, Max load: "
+                    f"{app_state.server_load_metrics}, Max load: "
                     f"{max_load}. Please try again later."
                 }
             },
                                 status_code=503)
 
-        # ensure the counter exists
-        if not hasattr(raw_request.app.state, "server_load_metrics"):
-            raw_request.app.state.server_load_metrics = 0
-
-        raw_request.app.state.server_load_metrics += 1
+        app_state.server_load_metrics += 1
         try:
             response = await func(*args, **kwargs)
         except Exception:
-            raw_request.app.state.server_load_metrics -= 1
+            app_state.server_load_metrics -= 1
             raise
 
         if isinstance(response, (JSONResponse, StreamingResponse)):
@@ -161,7 +160,7 @@ def load_aware_call(func):
                 tasks.add_task(decrement_server_load, raw_request)
                 response.background = tasks
         else:
-            raw_request.app.state.server_load_metrics -= 1
+            app_state.server_load_metrics -= 1
 
         return response
 
