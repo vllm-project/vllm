@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
-
 import numpy as np
 import torch
 
@@ -25,27 +23,42 @@ class BlockTable:
         device: torch.device,
         kernel_block_size: int,
     ):
+        """Manages the mapping between logical and physical memory blocks
+        for KV cache.
+
+        The BlockTable handles the conversion between kv_manager_block_size size
+        (actual memory allocation) and kernel block size (computation
+        granularity). When these sizes differ, it implements a hybrid block
+        system for memory efficiency.
+
+        Args:
+            block_size: kv_manager_block size
+            kernel_block_size: Kernel block size - the granularity at which
+                attention kernels operate during computation.
+            max_num_reqs: Maximum number of concurrent requests supported.
+            max_num_blocks_per_req: Maximum number of blocks per request.
+            max_num_batched_tokens: Maximum number of tokens in a batch.
+            pin_memory: Whether to pin memory for faster GPU transfers.
+            device: Target device for the block table.
+    """
         self.max_num_reqs = max_num_reqs
         self.max_num_batched_tokens = max_num_batched_tokens
         self.pin_memory = pin_memory
         self.device = device
-        self.physical_block_size = block_size
+
         if kernel_block_size == block_size:
-            # No splitting - use physical block size directly
+            # No splitting - use kv_manager_block_size size directly
             self.block_size = block_size
-            self.logical_block_size = block_size
             self.blocks_per_phys_block = 1
             self.use_hybrid_blocks = False
         else:
-            if self.physical_block_size % kernel_block_size != 0:
+            if block_size % kernel_block_size != 0:
                 raise ValueError(
                     f"kernel_block_size {kernel_block_size} must divide "
-                    f"physical block size {self.physical_block_size} evenly")
+                    f"kv_manager_block_size size {block_size} evenly")
 
             self.block_size = kernel_block_size
-            self.logical_block_size = kernel_block_size
-            self.blocks_per_phys_block = (self.physical_block_size //
-                                          self.logical_block_size)
+            self.blocks_per_phys_block = (block_size // kernel_block_size)
             if self.blocks_per_phys_block > 1:
                 self.use_hybrid_blocks = True
             else:
@@ -144,13 +157,11 @@ class BlockTable:
             # for block_table_indices calculation.
             virtual_block_size = self.block_size * self.dcp_world_size
 
-            # IMPORTANT: In hybrid mode, positions are in logical block space,
-            # but we need to map them to the correct logical block table indices
             logical_block_idx = positions // virtual_block_size
 
             # Account for the expanded logical table
             # (always needed with unified tensor)
-            # Each physical block is split into multiple logical blocks
+            # Each kv_manager_block_size is split into multiple logical blocks
             # The logical table has been expanded to accommodate this
             block_table_indices = (req_indices * self.max_num_blocks_per_req +
                                    logical_block_idx)
@@ -168,14 +179,7 @@ class BlockTable:
             self.slot_mapping_np[:req_indices.shape[0]] = np.where(
                 mask, slot_mapping, -1)
         else:
-            # IMPORTANT: In hybrid mode, positions are in logical block space,
-            # but we need to map them to the correct logical block table indices
             logical_block_idx = positions // self.block_size
-
-            # Account for the expanded logical table
-            # (always needed with unified tensor)
-            # Each physical block is split into multiple logical blocks
-            # The logical table has been expanded to accommodate this
             block_table_indices = (req_indices * self.max_num_blocks_per_req +
                                    logical_block_idx)
 
@@ -198,12 +202,25 @@ class BlockTable:
         self.block_table_cpu.fill_(0)
 
     def _convert_physical_to_logical_blocks(
-            self, physical_blocks: np.ndarray) -> np.ndarray:
-        """Convert physical block IDs to logical block IDs."""
-        if not self.use_hybrid_blocks:
-            return physical_blocks
+            self, kv_manager_block_size: np.ndarray) -> np.ndarray:
+        """Convert kv_manager_block_size IDs to logical block IDs.
 
-        logical_blocks = physical_blocks.reshape(
+        Example:
+            # kv_manager_block_size: 32 tokens,
+            # Kernel block size: 16 tokens
+            # blocks_per_phys_block = 2
+            >>> kv_manager_block_size = np.array([0, 1, 2])
+            >>> Result: [0, 1, 2, 3, 4, 5]
+
+            # Each kv_manager_block_size maps to 2 logical blocks:
+            # kv_manager_block_size 0 → Logical blocks [0, 1]
+            # kv_manager_block_size 1 → Logical blocks [2, 3]
+            # kv_manager_block_size 2 → Logical blocks [4, 5]
+        """
+        if not self.use_hybrid_blocks:
+            return kv_manager_block_size
+
+        logical_blocks = kv_manager_block_size.reshape(
             -1, 1) * self.blocks_per_phys_block + self._bias_array
 
         return logical_blocks.reshape(-1)
@@ -231,8 +248,8 @@ class MultiGroupBlockTable:
                  pin_memory: bool,
                  device: torch.device,
                  block_sizes: list[int],
-                 num_speculative_tokens: int = 0,
-                 kernel_block_sizes: Optional[list[int]] = None) -> None:
+                 kernel_block_sizes: list[int],
+                 num_speculative_tokens: int = 0) -> None:
         # Note(hc): each dcp rank only store
         # (max_model_len//dcp_world_size) tokens in kvcache,
         # so the block_size which used for calc max_num_blocks_per_req
@@ -244,12 +261,10 @@ class MultiGroupBlockTable:
             dcp_world_size = 1
 
         if kernel_block_sizes is None:
-            # Use physical block size by default
+            # Use kv_manager_block_size size by default
             kernel_block_sizes = block_sizes
-        # Ensure kernel_block_sizes matches block_sizes length
-        elif len(kernel_block_sizes) == 1 and len(block_sizes) > 1:
-            kernel_block_sizes = kernel_block_sizes * len(block_sizes)
-        elif len(kernel_block_sizes) != len(block_sizes):
+
+        if len(kernel_block_sizes) != len(block_sizes):
             raise ValueError(
                 f"kernel_block_sizes length ({len(kernel_block_sizes)}) "
                 f"must match block_sizes length ({len(block_sizes)})")

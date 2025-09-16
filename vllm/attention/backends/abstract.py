@@ -312,9 +312,8 @@ class AttentionImpl(ABC, Generic[T]):
 
     @staticmethod
     def get_supported_block_size() -> list[Union[int, MultipleOf]]:
-        # [16] is a placeholder: the actual block size will be determined
-        # by config.block_size at runtime.
-        return [MultipleOf(16)]
+        # TODO: implement this function for all backends.
+        return [MultipleOf(1)]
 
     @abstractmethod
     def forward(
