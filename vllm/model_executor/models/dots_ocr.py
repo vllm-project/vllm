@@ -7,7 +7,6 @@ from typing import Literal, Optional, TypedDict, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange
 from torch.nn import LayerNorm
 from transformers.modeling_utils import PreTrainedModel
 from transformers.models.qwen2_vl import Qwen2VLProcessor
@@ -31,7 +30,6 @@ from vllm.multimodal.inputs import MultiModalDataDict
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.dotsocr import (DotsOCRConfig,
                                                      DotsVisionConfig)
-from vllm.attention.layer import MultiHeadAttention
 
 
 class DotsOCRImagePixelInputs(TypedDict):
@@ -202,7 +200,6 @@ class PatchMerger(nn.Module):
         return x
 
 
-# TODO: Use vLLM internal layers
 class VisionSdpaAttention(nn.Module):
 
     def __init__(self,
@@ -213,18 +210,32 @@ class VisionSdpaAttention(nn.Module):
         super().__init__()
         self.num_heads = num_heads
         self.head_size = dim // num_heads
-        self.scale = self.head_size**-0.5
-
-        # vLLM MultiHeadAttention
-        self.attn = MultiHeadAttention(
-            num_heads=num_heads,
-            head_size=self.head_size,
-            scale=self.scale,
-        )
 
         self.qkv = nn.Linear(dim, dim * 3, bias=bias)
         self.proj = nn.Linear(dim, dim, bias=bias)
         self.config = config
+
+        self._flash_attn_fn = None
+        self._flash_attn_checked = False
+
+    def _get_flash_attn(self):
+        if not self._flash_attn_checked:
+            self._flash_attn_checked = True
+            try:
+                from aiter import flash_attn_varlen_func as _flash_attn
+                self._flash_attn_fn = _flash_attn
+            except Exception:
+                try:
+                    from flash_attn import flash_attn_varlen_func as _flash_attn
+                    self._flash_attn_fn = _flash_attn
+                except Exception:
+                    try:
+                        from vllm.attention.utils.fa_utils import \
+                            flash_attn_varlen_func as _flash_attn
+                        self._flash_attn_fn = _flash_attn
+                    except Exception:
+                        self._flash_attn_fn = None
+        return self._flash_attn_fn
 
     def forward(
         self,
@@ -234,48 +245,59 @@ class VisionSdpaAttention(nn.Module):
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
         qkv = self.qkv(hidden_states)
-        q, k, v = (
-            qkv.reshape(seq_length, 3, self.num_heads, -1)
-            .permute(1, 0, 2, 3)
-            .unbind(0)
-        )
+        qkv = qkv.reshape(seq_length, 3, self.num_heads, self.head_size)
+        q, k, v = qkv.unbind(dim=1)
 
-        q = apply_rotary_pos_emb_vision(q.unsqueeze(0),
-                                        rotary_pos_emb).squeeze(0)
-        k = apply_rotary_pos_emb_vision(k.unsqueeze(0),
-                                        rotary_pos_emb).squeeze(0)
+        if rotary_pos_emb is not None:
+            q = apply_rotary_pos_emb_vision(q.unsqueeze(0),
+                                            rotary_pos_emb).squeeze(0)
+            k = apply_rotary_pos_emb_vision(k.unsqueeze(0),
+                                            rotary_pos_emb).squeeze(0)
 
-        q = q.reshape(1, seq_length, -1)
-        k = k.reshape(1, seq_length, -1)
-        v = v.reshape(1, seq_length, -1)
+        flash_attn = self._get_flash_attn()
+        use_flash = (flash_attn is not None and
+                     hidden_states.device.type in {"cuda", "xpu"})
 
-        attn_output = self.attn(q, k, v)
-        attn_output = attn_output.squeeze(0)
+        if use_flash:
+            cu = cu_seqlens.to(hidden_states.device, non_blocking=True)
+            max_seqlen = (cu[1:] - cu[:-1]).max().item()
+            attn_output = flash_attn(
+                q.contiguous(),
+                k.contiguous(),
+                v.contiguous(),
+                cu_seqlens_q=cu,
+                cu_seqlens_k=cu,
+                max_seqlen_q=max_seqlen,
+                max_seqlen_k=max_seqlen,
+                dropout_p=0.0,
+                causal=False,
+            )
+        else:
+            boundaries = cu_seqlens
+            if boundaries.device.type != "cpu":
+                boundaries = boundaries.cpu()
+            boundaries = boundaries.tolist()
 
-        # # Rearrange to batch-first format for processing
-        # q, k, v = (rearrange(x, "s h d -> 1 s h d") for x in (q, k, v))
+            outputs = []
+            for i in range(1, len(boundaries)):
+                start_idx = int(boundaries[i - 1])
+                end_idx = int(boundaries[i])
+                if start_idx == end_idx:
+                    continue
+                q_i = q[start_idx:end_idx].permute(1, 0, 2).unsqueeze(0)
+                k_i = k[start_idx:end_idx].permute(1, 0, 2).unsqueeze(0)
+                v_i = v[start_idx:end_idx].permute(1, 0, 2).unsqueeze(0)
+                output_i = F.scaled_dot_product_attention(q_i,
+                                                          k_i,
+                                                          v_i,
+                                                          dropout_p=0.0)
+                output_i = output_i.squeeze(0).permute(1, 0, 2)
+                outputs.append(output_i)
 
-        # # Execute attention entry by entry for speed & less VRAM
-        # outputs = []
-        # for i in range(1, len(cu_seqlens)):
-        #     start_idx = cu_seqlens[i - 1]
-        #     end_idx = cu_seqlens[i]
-        #     q_i = q[:, start_idx:end_idx]
-        #     k_i = k[:, start_idx:end_idx]
-        #     v_i = v[:, start_idx:end_idx]
-        #     q_i, k_i, v_i = (rearrange(x, "b s h d -> b h s d")
-        #                      for x in [q_i, k_i, v_i])
-        #     output_i = F.scaled_dot_product_attention(q_i,
-        #                                               k_i,
-        #                                               v_i,
-        #                                               dropout_p=0.0)
-        #     output_i = rearrange(output_i, "b h s d -> b s h d")
-        #     outputs.append(output_i)
-        # attn_output = torch.cat(outputs, dim=1)
+            attn_output = torch.cat(outputs, dim=0) if outputs else q.new_zeros(
+                (0, self.num_heads, self.head_size))
 
-        # # Convert back to sequence-first format and reshape
-        # attn_output = rearrange(attn_output, "1 s h d -> s (h d)")
-
+        attn_output = attn_output.reshape(seq_length, -1)
         attn_output = self.proj(attn_output)
         return attn_output
 
