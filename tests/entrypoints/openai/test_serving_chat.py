@@ -3,9 +3,9 @@
 
 from __future__ import annotations
 
-import re
-import json
 import asyncio
+import json
+import re
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
@@ -271,6 +271,7 @@ def test_async_serving_chat_init():
     serving_completion = asyncio.run(_async_serving_chat_init())
     assert serving_completion.chat_template == CHAT_TEMPLATE
 
+
 @pytest.mark.asyncio
 async def test_serving_chat_tool_choice_required_streaming():
     tools = [{
@@ -308,8 +309,6 @@ async def test_serving_chat_tool_choice_required_streaming():
         },
     ]
 
-
-
     mock_engine = MagicMock(spec=MQLLMEngineClient)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
@@ -324,7 +323,7 @@ async def test_serving_chat_tool_choice_required_streaming():
                                      chat_template=CHAT_TEMPLATE,
                                      chat_template_content_format="auto",
                                      request_logger=None)
-    
+
     req = ChatCompletionRequest(
         model=MODEL_NAME,
         messages=messages,
@@ -333,7 +332,7 @@ async def test_serving_chat_tool_choice_required_streaming():
         tool_choice="required",
         guided_decoding_backend="outlines",
     )
-    
+
     resp = await serving_chat.create_chat_completion(req)
 
     # Collect all response chunks for verification
@@ -345,7 +344,7 @@ async def test_serving_chat_tool_choice_required_streaming():
         assert match
         data = json.loads(match.group(1))
         assert "error" not in data
-        
+
 
 @pytest.mark.asyncio
 async def test_serving_chat_should_set_correct_max_tokens():
