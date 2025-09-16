@@ -204,28 +204,6 @@ def run_ernie45_vl(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
-# Florence2
-def run_florence2(questions: list[str], modality: str) -> ModelRequestData:
-    assert modality == "image"
-
-    engine_args = EngineArgs(
-        model="microsoft/Florence-2-large",
-        tokenizer="Isotr0py/Florence-2-tokenizer",
-        max_model_len=4096,
-        max_num_seqs=2,
-        trust_remote_code=True,
-        dtype="bfloat16",
-        limit_mm_per_prompt={modality: 1},
-    )
-
-    prompts = ["<MORE_DETAILED_CAPTION>" for _ in questions]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
-
-
 # Fuyu
 def run_fuyu(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -1008,44 +986,6 @@ def run_mistral3(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
-# LLama 3.2
-def run_mllama(questions: list[str], modality: str) -> ModelRequestData:
-    assert modality == "image"
-
-    model_name = "meta-llama/Llama-3.2-11B-Vision-Instruct"
-
-    # Note: The default setting of max_num_seqs (256) and
-    # max_model_len (131072) for this model may cause OOM.
-    # You may lower either to run this example on lower-end GPUs.
-
-    # The configuration below has been confirmed to launch on a single L40 GPU.
-    engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=8192,
-        max_num_seqs=2,
-        limit_mm_per_prompt={modality: 1},
-    )
-
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    messages = [
-        [
-            {
-                "role": "user",
-                "content": [{"type": "image"}, {"type": "text", "text": question}],
-            }
-        ]
-        for question in questions
-    ]
-    prompts = tokenizer.apply_chat_template(
-        messages, add_generation_prompt=True, tokenize=False
-    )
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
-
-
 # Molmo
 def run_molmo(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -1665,7 +1605,6 @@ model_example_map = {
     "command_a_vision": run_command_a_vision,
     "deepseek_vl_v2": run_deepseek_vl2,
     "ernie45_vl": run_ernie45_vl,
-    "florence2": run_florence2,
     "fuyu": run_fuyu,
     "gemma3": run_gemma3,
     "gemma3n": run_gemma3n,
@@ -1691,7 +1630,6 @@ model_example_map = {
     "minicpmv": run_minicpmv,
     "minimax_vl_01": run_minimax_vl_01,
     "mistral3": run_mistral3,
-    "mllama": run_mllama,
     "molmo": run_molmo,
     "nemotron_vl": run_nemotron_vl,
     "NVLM_D": run_nvlm_d,

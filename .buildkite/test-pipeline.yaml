@@ -549,15 +549,6 @@ steps:
   commands: # LMEval+Transcription WER check
   - pytest -s entrypoints/openai/correctness/
 
-- label: Encoder Decoder tests # 12min
-  timeout_in_minutes: 20
-  mirror_hardwares: [amdexperimental]
-  source_file_dependencies:
-  - vllm/
-  - tests/encoder_decoder
-  commands:
-    - pytest -v -s encoder_decoder
-
 - label: OpenAI-Compatible Tool Use # 23 min
   timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental]
