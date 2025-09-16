@@ -1474,7 +1474,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 quant_type_id=scalar_types.float4_e2m1f.id,
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
-                expert_map=expert_map)
+                expert_map=expert_map,
+                workspace=layer.workspace)
 
         if self.fused_experts is not None:
             assert self.allow_flashinfer and \

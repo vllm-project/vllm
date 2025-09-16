@@ -1103,7 +1103,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 quant_type_id=scalar_types.float8_e4m3fn.id,
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
-                expert_map=expert_map)
+                expert_map=expert_map,
+                workspace=layer.workspace)
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
             assert self.block_quant is None
             assert (not renormalize and custom_routing_function is not None)
