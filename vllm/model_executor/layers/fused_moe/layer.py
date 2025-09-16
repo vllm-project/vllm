@@ -718,7 +718,11 @@ def determine_expert_map(
     # Create a tensor of size num_experts filled with -1
     expert_map = torch.full((global_num_experts, ), -1, dtype=torch.int32)
     # Create an expert map for the local experts
-    if expert_placement_strategy == "round_robin":
+    if expert_placement_strategy == "linear":
+        start_idx = ep_rank * base_experts + min(ep_rank, remainder)
+        expert_map[start_idx:start_idx + local_num_experts] = torch.arange(
+            0, local_num_experts, dtype=torch.int32)
+    elif expert_placement_strategy == "round_robin":
         local_log_experts = torch.arange(ep_rank,
                                          global_num_experts,
                                          ep_size,
@@ -727,10 +731,6 @@ def determine_expert_map(
         expert_map[local_log_experts] = torch.arange(0,
                                                      local_num_experts,
                                                      dtype=torch.int32)
-    elif expert_placement_strategy == "linear":
-        start_idx = ep_rank * base_experts + min(ep_rank, remainder)
-        expert_map[start_idx:start_idx + local_num_experts] = torch.arange(
-            0, local_num_experts, dtype=torch.int32)
     else:
         raise ValueError("Unsupported expert placement strategy "
                          f"'{expert_placement_strategy}', expected one of "
