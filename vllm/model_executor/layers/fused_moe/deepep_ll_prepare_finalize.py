@@ -132,6 +132,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         a2a_idx = dbo_current_ubatch_id()
 
+        a2a_idx = dbo_current_ubatch_id()
+
         if self.use_fp8_dispatch:
             assert hidden_size % 128 == 0, \
             "DeepEP kernels quantize the inputs in blocks of shape 128"

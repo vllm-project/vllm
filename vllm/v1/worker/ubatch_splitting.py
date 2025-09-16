@@ -84,8 +84,9 @@ def get_dp_padding_ubatch(
     # Sanity Check that the existing padding isn't giving us an empty second
     # ubatch. Abort if so
     if is_second_ubatch_empty(num_tokens_unpadded, num_tokens_padded):
-        logger.debug("Aborting ubatching %s %s", num_tokens_unpadded,
-                     num_tokens_padded)
+        logger.debug(
+            "Empty second µbatch detected: unpadded tokens: %s, padded "
+            "tokens: %s", num_tokens_unpadded, num_tokens_padded)
         should_ubatch = False
 
     # Note that we compute the number of padded tokens per ubatch
@@ -173,6 +174,7 @@ def ubatch_split(
         should_attempt_ubatching,
         vllm_config,
     )
+
     if not should_ubatch:
         return (None, None)
 

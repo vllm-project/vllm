@@ -529,6 +529,9 @@ class FusedMoEModularKernel(torch.nn.Module):
     layer due to any layer specific state that may be used by the component
     objects.
     """
+    fused_out_buffer = SharedResizableBuffer()
+    workspace13_buffer = SharedResizableBuffer()
+    workspace2_buffer = SharedResizableBuffer()
 
     class SharedBuffers:
 
@@ -839,6 +842,8 @@ class FusedMoEModularKernel(torch.nn.Module):
         if not self.prepare_finalize.supports_async():
             # We shouldn't be running an a2a kernel that doesn't
             # support async prepare/finalize
+            # TODO(lucas): enable in follow-up
+            assert not dbo_enabled()
 
             # Run shared experts serially with dispatch.
             if self.shared_experts is not None:
@@ -883,6 +888,9 @@ class FusedMoEModularKernel(torch.nn.Module):
 
             if hook is not None:
                 if dbo_enabled():
+                    # If DBO is being used, register the hook with the ubatch
+                    # context and call it in dbo_maybe_run_recv_hook instead of
+                    #  passing it to the receiver.
                     dbo_register_recv_hook(hook)
                     dbo_yield()
                 else:

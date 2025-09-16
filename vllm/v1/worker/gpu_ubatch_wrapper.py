@@ -75,6 +75,8 @@ class UBatchWrapper:
         self.comm_stream = torch.cuda.Stream(device=device)
         self.ready_barrier = threading.Barrier(3)
 
+        self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
+
         self.cudagraphs: dict[int, CUDAGraphMetaData] = {}
 
         self.cudagraph_wrapper = None
@@ -83,7 +85,6 @@ class UBatchWrapper:
             self.cudagraph_wrapper = CUDAGraphWrapper(
                 runnable, vllm_config, runtime_mode=runtime_mode)
             self.graph_pool = current_platform.get_global_graph_pool()
-        self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
 
         set_comm_sms = lambda sms: None
         if vllm_config.parallel_config.enable_expert_parallel:
@@ -272,7 +273,8 @@ class UBatchWrapper:
     def _slice_model_inputs(self, tokens_slice: slice, input_ids, positions,
                             inputs_embeds, intermediate_tensors):
         sliced_input_ids = input_ids[tokens_slice]
-        # if we are using mrope
+        # if we are using mrope. Mrope adds an additional dimension to the
+        # positions tensor
         if positions.ndim == 2:
             sliced_positions = positions[:, tokens_slice]
         else:
@@ -327,7 +329,6 @@ class UBatchWrapper:
                 dp_metadata=dp_metadata,
                 batch_descriptor=batch_descriptor,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE)
-
             with self.sm_control:
                 return self._capture_ubatches(ubatch_metadata, self.model)
         elif num_tokens in self.cudagraphs:
