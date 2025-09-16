@@ -25,6 +25,7 @@ if is_flash_attn_varlen_func_available():
                                                reshape_and_cache_flash)
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
 from vllm.utils import cdiv
 from vllm.v1.attention.backends.utils import (AttentionCGSupport,
@@ -32,7 +33,6 @@ from vllm.v1.attention.backends.utils import (AttentionCGSupport,
                                               CommonAttentionMetadata,
                                               get_kv_cache_layout)
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.distributed.parallel_state import get_dcp_group
 
 logger = init_logger(__name__)
 
@@ -327,13 +327,12 @@ class FlashAttentionMetadataBuilder(
             dcp_context_kv_lens = dcp_context_kv_lens_cpu.to(self.device)
             max_dcp_context_kv_len = dcp_context_kv_lens.max().item()
 
-            scheduler_metadata = schedule(
-                batch_size=num_reqs,
-                cu_query_lens=query_start_loc,
-                max_query_len=max_query_len,
-                seqlens=dcp_context_kv_lens,
-                max_seq_len=max_dcp_context_kv_len,
-                causal=False)
+            scheduler_metadata = schedule(batch_size=num_reqs,
+                                          cu_query_lens=query_start_loc,
+                                          max_query_len=max_query_len,
+                                          seqlens=dcp_context_kv_lens,
+                                          max_seq_len=max_dcp_context_kv_len,
+                                          causal=False)
         elif use_cascade:
             cu_prefix_query_lens = torch.tensor([0, num_actual_tokens],
                                                 dtype=torch.int32,
@@ -649,7 +648,7 @@ class FlashAttentionImpl(AttentionImpl):
         cu_seqlens_q = attn_metadata.query_start_loc
         max_seqlen_q = attn_metadata.max_query_len
         block_table = attn_metadata.block_table
-        
+
         query_across_dcp = get_dcp_group().all_gather(query, dim=1)
         context_attn_out, context_lse = \
             flash_attn_varlen_func(
@@ -683,7 +682,7 @@ class FlashAttentionImpl(AttentionImpl):
                 return_lse=True
             )
         context_lse_cor = context_lse_cor.transpose(0, 1).contiguous()
-        
+
         query_attn_out, query_lse = \
             flash_attn_varlen_func(
                 q=query,
@@ -711,7 +710,7 @@ class FlashAttentionImpl(AttentionImpl):
             output,
             context_attn_out_cor,
             context_lse_cor,
-            query_attn_out, 
+            query_attn_out,
             query_lse,
         )
 
