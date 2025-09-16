@@ -160,21 +160,19 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                                                 return_recv_hook=True)
         self.handles[a2a_idx] = handle
 
-        return (hook, lambda: self._receiver(expert_x, expert_num_tokens,
-                                             quant_config.a1_scale, a1.dtype,
-                                             quant_config))
+        return (
+            hook,
+            lambda: self._receiver(expert_x, expert_num_tokens, quant_config.
+                                   a1_scale, a1.dtype, quant_config))
 
     def _receiver(
         self,
-        hook: Callable,
         expert_x: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
         expert_num_tokens: torch.Tensor,
         a1_scale: Optional[torch.Tensor],
         a1_dtype: torch.dtype,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
-        hook()
-
         expert_x, expert_x_scale = self._do_quant(expert_x, a1_dtype,
                                                   quant_config)
 
