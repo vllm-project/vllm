@@ -841,7 +841,7 @@ def unify_kv_cache_spec_page_size(
         kv_cache_spec: The KVCacheSpec of each attention layer in the model
 
     Returns:
-        The unified KVCacheSpec.
+        The updated KVCacheSpec with the same page_size_bytes.
     """
     page_sizes = {layer.page_size_bytes for layer in kv_cache_spec.values()}
     if len(page_sizes) == 1:
