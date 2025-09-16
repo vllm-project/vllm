@@ -601,13 +601,18 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         video_processor = self.get_video_processor()
         merge_size = video_processor.merge_size
         indices = metadata["frames_indices"]
+
+        # metadata["fps"] refers to the true fps of the input video.
         video_fps = metadata["fps"]
         if do_sample_frames is None:
             do_sample_frames = metadata.get("do_sample_frames", False)
 
-        # if frames is sampled in HF processor, we need to re-calculate the
-        # indices from original metadata.
+        # If video frames are sampled in HF processor (instead of vLLM
+        # video loader), we need to re-calculate the indices from original
+        # metadata.
         if do_sample_frames:
+            # here video_fps is the fps of the sampled video, and
+            # metadata["fps"] refers to the fps of the original video.
             video_fps = sampled_fps if sampled_fps else video_processor.fps
             total_num_frames = metadata["total_num_frames"]
             num_frames = int(total_num_frames / metadata["fps"] * video_fps)
@@ -713,7 +718,8 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo]
                 # used to calculate the timestamps. Make sure that
                 # do_sample_frames in mm_kwargs is false for presampled videos.
 
-                # don't update mm_kwargs inplace, otherwise hash is incorrect
+                # NOTE: a copy of is created to update do_sample_frames,
+                # otherwise mm_hash for the object will be incorrect.
                 video_mm_kwargs = dict(**mm_kwargs)
                 if "do_sample_frames" not in video_mm_kwargs:
                     # qwen_vl_utils already has "do_sample_frames" in
@@ -855,6 +861,9 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo]
                 target=hf_processor.image_token,
                 replacement=get_image_replacement_qwen3vl,
             ),
+
+            # NOTE: We match string on purpose since searching sequence of
+            # token ids takes more time.
             PromptReplacement(
                 modality="video",
                 target="<|vision_start|><|video_pad|><|vision_end|>",
