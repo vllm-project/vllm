@@ -1337,6 +1337,17 @@ class ModelConfig:
 
             if self.use_async_output_proc:
                 self.use_async_output_proc = False
+        
+        decode_context_parallel_size = \
+            parallel_config.decode_context_parallel_size
+        if decode_context_parallel_size > 1 and not self.use_mla:
+            total_num_kv_heads = self.get_total_num_kv_heads()
+            max_dcp_size = tensor_parallel_size // total_num_kv_heads
+            assert decode_context_parallel_size <= max_dcp_size, (
+                f"decode context parallel size must less than or equal to "
+                f"(tensor parallel size {tensor_parallel_size} // total "
+                f"num kv heads {total_num_kv_heads}) = {max_dcp_size}, " 
+                f"but got {decode_context_parallel_size}")
 
     def get_sliding_window(self) -> Optional[int]:
         """Get the sliding window size from the HF text config if present."""
