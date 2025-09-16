@@ -816,3 +816,29 @@ def test_simple_mrope_vision_model_spatial_merge(spatial_merge_size: int):
 
     assert output.shape[0] == expected_output_patches
     assert output.shape[1] == vision_model.out_hidden_size
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("video_url", TEST_VIDEO_URLS)
+@pytest.mark.parametrize("num_frames", [-1, 32, 1800])
+async def test_allowed_media_domains(video_url: str, num_frames: int):
+    connector = MediaConnector(
+        media_io_kwargs={"video": {
+            "num_frames": num_frames,
+        }},
+        allowed_media_domains=[
+            "www.bogotobogo.com",
+            "github.com",
+        ])
+
+    video_sync, metadata_sync = connector.fetch_video(video_url)
+    video_async, metadata_async = await connector.fetch_video_async(video_url)
+    assert np.array_equal(video_sync, video_async)
+    assert metadata_sync == metadata_async
+
+    disallowed_url = "https://upload.wikimedia.org/wikipedia/commons/4/47/PNG_transparency_demonstration_1.png"
+    with pytest.raises(ValueError):
+        _, _ = connector.fetch_video(disallowed_url)
+
+    with pytest.raises(ValueError):
+        _, _ = await connector.fetch_video_async(disallowed_url)
