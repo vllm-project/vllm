@@ -301,7 +301,6 @@ def _test_processing_correctness_one(
     "llava-hf/llava-v1.6-mistral-7b-hf",
     "llava-hf/LLaVA-NeXT-Video-7B-hf",
     "llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
-    "meta-llama/Llama-3.2-11B-Vision-Instruct",
     "TIGER-Lab/Mantis-8B-siglip-llama3",
     "mispeech/midashenglm-7b",
     "openbmb/MiniCPM-Llama3-V-2_5",
