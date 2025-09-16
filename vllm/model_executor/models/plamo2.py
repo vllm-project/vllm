@@ -289,9 +289,9 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
             has_initial_states_p = mamba2_metadata.has_initial_states_p
             prep_initial_states = mamba2_metadata.prep_initial_states
             chunk_size = mamba2_metadata.chunk_size
-            seq_idx_p = mamba2_metadata.seq_idx
-            chunk_indices_p = mamba2_metadata.chunk_indices
-            chunk_offsets_p = mamba2_metadata.chunk_offsets
+            seq_idx_p = mamba2_metadata.seq_idx_p
+            chunk_indices_p = mamba2_metadata.chunk_indices_p
+            chunk_offsets_p = mamba2_metadata.chunk_offsets_p
             query_start_loc_p = mamba2_metadata.query_start_loc_p
 
         # 1. Gated MLP's linear projection
