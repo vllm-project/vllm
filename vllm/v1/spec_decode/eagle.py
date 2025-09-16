@@ -30,6 +30,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)
 
@@ -191,9 +192,11 @@ class EagleProposer:
         assert self.runner is not None
 
         # FIXME: need to consider multiple kv_cache_groups
-        attn_metadata = self.runner.attn_groups[0][0].metadata_builder\
-            .build_for_drafting(common_attn_metadata=common_attn_metadata,
-                                draft_index=0)
+        ubatch_id = dbo_current_ubatch_id()
+        attn_metadata_builder = \
+            self.runner.attn_groups[0][0].metadata_builders[ubatch_id]
+        attn_metadata = attn_metadata_builder.build_for_drafting(
+            common_attn_metadata=common_attn_metadata, draft_index=0)
 
         # At this moment, we assume all eagle layers belong to the same KV
         # cache group, thus using the same attention metadata.
@@ -534,8 +537,9 @@ class EagleProposer:
         hidden_states: torch.Tensor,
         common_attn_metadata: CommonAttentionMetadata,
     ) -> list[torch.Tensor]:
+        ubatch_id = dbo_current_ubatch_id()
         tree_attn_metadata_builder = \
-            self.runner.attn_groups[0][0].metadata_builder
+            self.runner.attn_groups[0][0].metadata_builders[ubatch_id]
         assert isinstance(tree_attn_metadata_builder,
                           TreeAttentionMetadataBuilder)
 

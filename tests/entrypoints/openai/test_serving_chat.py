@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 import pytest
 import pytest_asyncio
 
-from vllm.config import MultiModalConfig
+from vllm.config.multimodal import MultiModalConfig
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
