@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+
 import openai
 import pytest
 import pytest_asyncio
 
 from vllm.assets.audio import AudioAsset
 from vllm.multimodal.utils import encode_audio_base64, fetch_audio
+
+from ....utils import RemoteOpenAIServer
 
 MODEL_NAME = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
 TEST_AUDIO_URLS = [
@@ -16,9 +20,28 @@ TEST_AUDIO_URLS = [
 MAXIMUM_AUDIOS = 2
 
 
+@pytest.fixture(scope="module")
+def server():
+    args = [
+        "--dtype",
+        "float32",
+        "--max-model-len",
+        "2048",
+        "--max-num-seqs",
+        "5",
+        "--enforce-eager",
+        "--trust-remote-code",
+        "--limit-mm-per-prompt",
+        json.dumps({"audio": MAXIMUM_AUDIOS}),
+    ]
+
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+        yield remote_server
+
+
 @pytest_asyncio.fixture
-async def client(audio_server):
-    async with audio_server.get_async_client() as async_client:
+async def client(server):
+    async with server.get_async_client() as async_client:
         yield async_client
 
 
