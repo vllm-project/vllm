@@ -28,6 +28,8 @@ def server(monkeypatch_module: pytest.MonkeyPatch):
 
     with monkeypatch_module.context() as m:
         m.setenv("VLLM_ENABLE_RESPONSES_API_STORE", "1")
+        # This is necessary to test with code_interpreter on the demo server
+        m.setenv("PYTHON_EXECUTION_BACKEND", "dangerously_use_uv")
         with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
             yield remote_server
 
@@ -357,11 +359,16 @@ async def test_web_search(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.skip(reason="Code interpreter tool is not available in CI yet.")
 async def test_code_interpreter(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
-        input="Multiply 64548*15151 using builtin python interpreter.",
+        # TODO: Ideally should be able to set max tool calls
+        # to prevent multi-turn, but it is not currently supported
+        # would speed up the test
+        input=("What's the first 4 digits after the decimal point of "
+               "cube root of `19910212 * 20250910`? "
+               "Show only the digits. The python interpreter is not stateful "
+               "and you must print to see the output."),
         tools=[{
             "type": "code_interpreter",
             "container": {
@@ -371,15 +378,21 @@ async def test_code_interpreter(client: OpenAI, model_name: str):
     )
     assert response is not None
     assert response.status == "completed"
+    assert response.usage.output_tokens_details.tool_output_tokens > 0
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.skip(reason="Code interpreter tool is not available in CI yet.")
 async def test_mcp_tool(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
-        input="Please multiply 123 and 456 using the available python tool.",
+        # TODO: Ideally should be able to set max tool calls
+        # to prevent multi-turn, but it is not currently supported
+        # would speed up the test
+        input=("What's the first 4 digits after the decimal point of "
+               "cube root of `19910212 * 20250910`? "
+               "Show only the digits. The python interpreter is not stateful "
+               "and you must print to see the output."),
         tools=[{
             "type": "mcp",
             "server_label": "code_interpreter",
@@ -389,6 +402,7 @@ async def test_mcp_tool(client: OpenAI, model_name: str):
     )
     assert response is not None
     assert response.status == "completed"
+    assert response.usage.output_tokens_details.tool_output_tokens > 0
 
 
 def get_weather(latitude, longitude):
