@@ -6,7 +6,7 @@ from dataclasses import field
 from typing import TYPE_CHECKING, Any, Literal, Optional, Union
 
 import torch
-from pydantic import TypeAdapter, model_validator
+from pydantic import model_validator
 from pydantic.dataclasses import dataclass
 from torch.distributed import ProcessGroup, ReduceOp
 from typing_extensions import Self
@@ -29,6 +29,7 @@ else:
 
 logger = init_logger(__name__)
 
+ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 
 
@@ -55,13 +56,6 @@ class EPLBConfig:
     Log the balancedness each step of expert parallelism.
     This is turned off by default since it will cause communication overhead.
     """
-
-    @classmethod
-    def from_cli(cls, cli_value: str) -> "EPLBConfig":
-        """Parse the CLI value for the compilation config.
-        -O1, -O2, -O3, etc. is handled in FlexibleArgumentParser.
-        """
-        return TypeAdapter(EPLBConfig).validate_json(cli_value)
 
 
 @config
@@ -94,7 +88,7 @@ class ParallelConfig:
     data_parallel_external_lb: bool = False
     """Whether to use "external" DP LB mode. Applies only to online serving
     and when data_parallel_size > 0. This is useful for a "one-pod-per-rank"
-    wide-EP setup in Kuberentes. Set implicitly when --data-parallel-rank
+    wide-EP setup in Kubernetes. Set implicitly when --data-parallel-rank
     is provided explicitly to vllm serve."""
     data_parallel_hybrid_lb: bool = False
     """Whether to use "hybrid" DP LB mode. Applies only to online serving
@@ -109,6 +103,15 @@ class ParallelConfig:
     """Enable expert parallelism load balancing for MoE layers."""
     eplb_config: EPLBConfig = field(default_factory=EPLBConfig)
     """Expert parallelism configuration."""
+    expert_placement_strategy: ExpertPlacementStrategy = "linear"
+    """The expert placement strategy for MoE layers:\n
+    - "linear": Experts are placed in a contiguous manner. For example, with 4
+      experts and 2 ranks, rank 0 will have experts [0, 1] and rank 1 will have
+      experts [2, 3].\n
+    - "round_robin": Experts are placed in a round-robin manner. For example,
+      with 4 experts and 2 ranks, rank 0 will have experts [0, 2] and rank 1
+      will have experts [1, 3]. This strategy can help improve load balancing
+      for grouped expert models with no redundant experts."""
     num_redundant_experts: Optional[int] = None
     """`num_redundant_experts` is deprecated and has been replaced with
     `eplb_config.num_redundant_experts`. This will be removed in v0.12.0.
@@ -176,6 +179,11 @@ class ParallelConfig:
     """List of open port auto-queried for data parallel messaging.
     Set to be private as it's not intended to be configured by users.
     """
+
+    decode_context_parallel_size: int = 1
+    """Number of decode context parallel groups, because the world size does
+    not change by dcp, it simply reuse the GPUs of TP group, and tp_size
+    needs to be divisible by dcp_size."""
 
     @property
     def world_size_across_dp(self) -> int:
@@ -370,8 +378,10 @@ class ParallelConfig:
         else:
             if self.eplb_config.num_redundant_experts != 0:
                 raise ValueError(
-                    "num_redundant_experts should be used with EPLB."
-                    f"{self.eplb_config.num_redundant_experts}.")
+                    "num_redundant_experts is set to "
+                    f"{self.eplb_config.num_redundant_experts} but EPLB is not "
+                    "enabled. Either enable EPLB or unset "
+                    "num_redundant_experts.")
         if self.distributed_executor_backend is None and self.world_size > 1:
             # We use multiprocessing by default if world_size fits on the
             # current node and we aren't in a ray placement group.
@@ -379,10 +389,7 @@ class ParallelConfig:
             from vllm.executor import ray_utils
             backend: DistributedExecutorBackend = "mp"
             ray_found = ray_utils.ray_is_available()
-            if current_platform.is_neuron():
-                # neuron uses single process to control multiple devices
-                backend = "uni"
-            elif current_platform.is_tpu() and envs.VLLM_XLA_USE_SPMD:
+            if current_platform.is_tpu() and envs.VLLM_XLA_USE_SPMD:
                 backend = "uni"
             elif (current_platform.is_cuda()
                   and cuda_device_count_stateless() < self.world_size):
