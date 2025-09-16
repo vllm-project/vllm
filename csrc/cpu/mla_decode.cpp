@@ -1,5 +1,6 @@
 #include "cpu_types.hpp"
 #include <float.h>
+#include <omp.h>
 
 namespace {
 template <typename scalar_t>
