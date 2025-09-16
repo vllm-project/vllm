@@ -6,7 +6,7 @@ import torch
 
 from tests.v1.attention.test_attention_backends import BATCH_SPECS
 from tests.v1.attention.utils import create_common_attn_metadata
-from vllm.v1.attention.backends.utils import (UbatchSlice,
+from vllm.v1.attention.backends.utils import (UBatchSlice,
                                               _make_metadata_with_slice,
                                               slice_query_start_locs,
                                               split_attn_metadata)
@@ -106,7 +106,7 @@ def mixed_small_metadata():
 def test_make_metadata_with_slice_decode_batch(small_decode_metadata):
     """Test slicing decode batch metadata"""
     # Split first request only
-    ubatch_slice = UbatchSlice(slice(0, 1), slice(0, 1))
+    ubatch_slice = UBatchSlice(slice(0, 1), slice(0, 1))
 
     result = _make_metadata_with_slice(ubatch_slice, small_decode_metadata)
 
@@ -120,7 +120,7 @@ def test_make_metadata_with_slice_decode_batch(small_decode_metadata):
 
 def test_make_metadata_with_slice_mixed_batch(mixed_small_metadata):
     """Test slicing mixed batch metadata"""
-    ubatch_slice = UbatchSlice(slice(1, 3),
+    ubatch_slice = UBatchSlice(slice(1, 3),
                                slice(1, 7))  # Requests 1-3, tokens 1-7
 
     result = _make_metadata_with_slice(ubatch_slice, mixed_small_metadata)
@@ -137,8 +137,8 @@ def test_split_attn_metadata_decode_batch(large_decode_metadata):
     num_tokens = large_decode_metadata.num_reqs
     mid_point = num_tokens // 2
     ubatch_slices = [
-        UbatchSlice(slice(0, mid_point), slice(0, mid_point)),
-        UbatchSlice(slice(mid_point, num_tokens), slice(mid_point,
+        UBatchSlice(slice(0, mid_point), slice(0, mid_point)),
+        UBatchSlice(slice(mid_point, num_tokens), slice(mid_point,
                                                         num_tokens)),
     ]
 

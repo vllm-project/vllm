@@ -251,9 +251,4 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         logger.debug("DeepEP all2all args %s", buffer_kwargs)
         handle: deep_ep.Buffer = self.handle_cache.get_or_create(
             buffer_kwargs, deep_ep.Buffer)
-        # It is dangerous to set num sms outside this function. num_sms is not
-        # a part of the hash-key that identifies this object. If we are in a
-        # situation where we make objects with different num_sms, the hash key
-        # in get_or_create must be updated.
-        handle.set_num_sms(self.num_sms)
         return handle
