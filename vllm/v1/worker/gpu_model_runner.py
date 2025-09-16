@@ -1857,9 +1857,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # separate storage from the original `logits` tensor. Therefore,
             # it is safe to update `target_logits` in place.
             target_logits = logits[spec_decode_metadata.target_logits_indices]
+
+            draft_probs = self._collect_draft_probs(spec_decode_metadata)
             output_token_ids = self.rejection_sampler(
                 spec_decode_metadata,
-                None,  # draft_probs
+                draft_probs,
                 target_logits,
                 bonus_token_ids,
                 sampling_metadata,
@@ -2152,16 +2154,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.speculative_config:
             assert spec_decode_common_attn_metadata is not None
             with record_function_or_nullcontext("Draft"):
-                self._draft_token_ids = self.propose_draft_token_ids(
-                    scheduler_output,
-                    valid_sampled_token_ids,
-                    self.input_batch.sampling_metadata,
-                    hidden_states,
-                    sample_hidden_states,
-                    aux_hidden_states,
-                    spec_decode_metadata,
-                    spec_decode_common_attn_metadata,
-                )
+                (self._draft_token_ids,
+                 draft_probs) = self.propose_draft_token_ids(
+                     scheduler_output,
+                     valid_sampled_token_ids,
+                     self.input_batch.sampling_metadata,
+                     hidden_states,
+                     sample_hidden_states,
+                     aux_hidden_states,
+                     spec_decode_metadata,
+                     spec_decode_common_attn_metadata,
+                 )
+            self._store_draft_probs(draft_probs)
 
         with record_function_or_nullcontext("EPLB"):
             self.eplb_step()
@@ -2187,6 +2191,52 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             async_output_copy_stream=self.async_output_copy_stream,
         )
 
+    def _store_draft_probs(self, draft_probs: Optional[torch.Tensor]) -> None:
+        """Store the draft probs for future use, usually the next step.
+        
+        Args:
+            draft_probs: [num_reqs, num_draft_tokens, vocab_size].  
+                It is assumed that draft_probs are in the same order as the
+                requests in the input batch.
+        """
+        if draft_probs is None:
+            return
+        for i, spec_prob in enumerate(draft_probs):
+            req_id = self.input_batch.req_ids[i]
+            self.requests[req_id].draft_probs = spec_prob
+
+    def _collect_draft_probs(
+            self, spec_decode_metadata: SpecDecodeMetadata
+    ) -> Optional[torch.Tensor]:
+        """Collect the draft probs for the requests in the current input batch.
+
+        Args:
+            spec_decode_metadata: The metadata for speculative decoding for
+                the current step.
+
+        Returns:
+            draft_probs: None if no draft probs are available.
+                Otherwise, a packed sequence of draft probs with shape
+                [total_num_draft_tokens, vocab_size].
+        """
+        draft_probs_list: list[torch.Tensor] = []
+        has_draft_probs: list[bool] = []
+        for i, req_id in enumerate(self.input_batch.req_ids):
+            draft_length = spec_decode_metadata.num_draft_tokens[i]
+            if draft_length > 0:
+                draft_probs = self.requests[req_id].draft_probs
+                has_draft_probs.append(draft_probs is not None)
+                if draft_probs is not None:
+                    # <= since not every draft token is necessarily scheduled
+                    assert draft_length <= draft_probs.shape[0]
+                    draft_probs_list.append(draft_probs[:draft_length])
+        assert all(has_draft_probs) or not any(has_draft_probs), (
+            "Some requests have draft logits while others do not.")
+
+        draft_probs = (torch.cat(draft_probs_list, dim=0)
+                       if len(draft_probs_list) > 0 else None)
+        return draft_probs
+
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         if self._draft_token_ids is None:
             return None
@@ -2208,12 +2258,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         aux_hidden_states: Optional[torch.Tensor],
         spec_decode_metadata: Optional[SpecDecodeMetadata],
         common_attn_metadata: CommonAttentionMetadata,
-    ) -> Union[list[list[int]], torch.Tensor]:
+    ) -> tuple[Union[list[list[int]], torch.Tensor], Optional[torch.Tensor]]:
+        """Generate the draft for the next step.
+        
+        Returns:
+            draft_token_ids: [num_requests, num_draft_tokens]
+            draft_probs (optional): [num_requests, num_draft_tokens, vocab_size]
+        """
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if self.speculative_config.method == "ngram":
             assert isinstance(self.drafter, NgramProposer)
             draft_token_ids = self.propose_ngram_draft_token_ids(
                 sampled_token_ids)
+            draft_probs = None
         elif self.speculative_config.method == "medusa":
             assert isinstance(self.drafter, MedusaProposer)
             if sample_hidden_states.shape[0] == len(sampled_token_ids):
@@ -2234,6 +2291,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 target_hidden_states=hidden_states,
                 sampling_metadata=sampling_metadata,
             )
+            draft_probs = None
         elif self.speculative_config.use_eagle():
             assert isinstance(self.drafter, EagleProposer)
             # TODO(woosuk): Refactor the loop.
@@ -2293,7 +2351,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 mm_embeds = self._gather_mm_embeddings(scheduler_output,
                                                        shift_computed_tokens=1)
 
-            draft_token_ids = self.drafter.propose(
+            draft_token_ids, draft_probs = self.drafter.propose(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
                 target_hidden_states=target_hidden_states,
@@ -2302,7 +2360,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 common_attn_metadata=common_attn_metadata,
                 mm_embeds=mm_embeds,
             )
-        return draft_token_ids
+        else:
+            raise ValueError(f"Unsupported speculative decoding method: "
+                             f"{self.speculative_config.method}")
+        return draft_token_ids, draft_probs
 
     def propose_ngram_draft_token_ids(
         self,
@@ -2907,10 +2968,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 draft_token_ids, self.device)
 
             num_tokens = sum(len(ids) for ids in draft_token_ids)
-            # draft_probs = torch.randn(
-            #     num_tokens, logits.shape[-1], device=self.device,
-            #     dtype=logits.dtype)
-            draft_probs = None
+            draft_probs = torch.randn(num_tokens,
+                                      logits.shape[-1],
+                                      device=self.device,
+                                      dtype=logits.dtype)
             target_logits = torch.randn(num_tokens,
                                         logits.shape[-1],
                                         device=self.device,
@@ -2918,7 +2979,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # NOTE(woosuk): Here, we should use int32 because the sampler uses
             # int32 for bonus_token_ids. If the dtype mismatches, re-compilation
             # will occur at runtime.
-            bonus_token_ids = torch.zeros(num_reqs,
+            bonus_token_ids = torch.zeros((num_reqs, 1),
                                           device=self.device,
                                           dtype=torch.int32)
             self.rejection_sampler(

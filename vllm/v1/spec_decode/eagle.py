@@ -54,8 +54,10 @@ class EagleProposer:
     ):
         self.vllm_config = vllm_config
         self.speculative_config = vllm_config.speculative_config
+        assert self.speculative_config is not None
         self.draft_model_config = self.speculative_config.draft_model_config
         self.method = self.speculative_config.method
+        self.enable_draft_probs = self.speculative_config.enable_draft_probs
 
         self.runner = runner
         self.dtype = vllm_config.model_config.dtype
@@ -158,7 +160,14 @@ class EagleProposer:
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
         mm_embeds: Optional[list[torch.Tensor]] = None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Execute the draft model to generate draft tokens.
+
+        Returns:
+            draft_token_ids: [batch_size, num_spec_tokens]
+            draft_probs (optional): [batch_size, num_spec_tokens,
+                vocab_size]
+        """
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
         last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
@@ -238,14 +247,19 @@ class EagleProposer:
                 common_attn_metadata=common_attn_metadata,
             )
             # [batch_size, num_tree_tokens]
-            return torch.cat(draft_token_ids_list, dim=1)
+            return torch.cat(draft_token_ids_list, dim=1), None
 
-        draft_token_ids = logits.argmax(dim=-1)
+        draft_token_ids, draft_probs = self._compute_probs_and_sample(
+            logits, sampling_metadata)
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1:
-            # [batch_size, 1]
-            return draft_token_ids.view(-1, 1)
+            return (
+                # [batch_size, 1]
+                draft_token_ids.view(-1, 1),
+                # [batch_size, 1, vocab_size]
+                draft_probs.unsqueeze(1) if draft_probs is not None else None,
+            )
 
         # TODO: Currently, MTP module released by deepseek only has
         # one layer. Adapt this code to support multiple layers once
@@ -253,7 +267,10 @@ class EagleProposer:
         assert isinstance(attn_metadata, self.allowed_attn_types)
 
         # Generate the remaining draft tokens.
+        # Each tensor in the list has shape [batch_size].
         draft_token_ids_list = [draft_token_ids]
+        # Each tensor in the list has shape [batch_size, vocab_size].
+        draft_probs_list: list[Optional[torch.Tensor]] = [draft_probs]
 
         if self.use_cuda_graph and \
                 batch_size <= self.cudagraph_batch_sizes[-1]:
@@ -337,12 +354,25 @@ class EagleProposer:
             hidden_states = hidden_states[:batch_size]
             logits = self.model.compute_logits(last_hidden_states[:batch_size],
                                                None)
-            draft_token_ids = logits.argmax(dim=-1)
+            # TODO(wenlong): get more than one token for tree attention
+            draft_token_ids, draft_probs = self._compute_probs_and_sample(
+                logits, sampling_metadata)
             draft_token_ids_list.append(draft_token_ids)
+            draft_probs_list.append(draft_probs)
 
-        # [batch_size, num_speculative_tokens]
-        draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
-        return draft_token_ids
+        if any(draft_probs is None for draft_probs in draft_probs_list):
+            draft_probs_final = None
+        else:
+            assert all(draft_probs is not None
+                       for draft_probs in draft_probs_list)
+            draft_probs_final = torch.stack(draft_probs_list, dim=1)
+
+        return (
+            # [batch_size, num_spec_tokens]
+            torch.stack(draft_token_ids_list, dim=1),
+            # [batch_size, num_spec_tokens, vocab_size]
+            draft_probs_final,
+        )
 
     def propose_tree(
         self,
@@ -611,7 +641,7 @@ class EagleProposer:
 
     def load_model(self, target_model: nn.Module) -> None:
         draft_model_config = \
-            self.vllm_config.speculative_config.draft_model_config
+            self.speculative_config.draft_model_config
         target_attn_layer_names = set(
             get_layers_from_vllm_config(self.vllm_config, Attention).keys())
 
@@ -651,7 +681,7 @@ class EagleProposer:
         # share lm_head with the target model if needed
         # some model definition do not define lm_head explicitly
         # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
-        if self.vllm_config.speculative_config.method != "eagle3" and \
+        if self.speculative_config.method != "eagle3" and \
                 hasattr(target_language_model, "lm_head"):
             logger.info("Loading EAGLE LM head weights from the target model.")
             self.model.lm_head = target_language_model.lm_head
@@ -670,12 +700,19 @@ class EagleProposer:
                 input_ids = self.input_ids[:num_tokens]
                 inputs_embeds = None
 
-            self.model(
+            ret_hidden_states = self.model(
                 input_ids=input_ids,
                 positions=self.positions[:num_tokens],
                 hidden_states=self.hidden_states[:num_tokens],
                 inputs_embeds=inputs_embeds,
             )
+            if self.method == "deepseek_mtp":
+                last_hidden_states = ret_hidden_states
+            else:
+                last_hidden_states, hidden_states = ret_hidden_states
+        logits = self.model.compute_logits(last_hidden_states, None)
+        temperature = torch.ones(num_tokens, device=logits.device)
+        _mixed_sample(logits, temperature)
 
     def validate_same_kv_cache_group(self,
                                      kv_cache_config: KVCacheConfig) -> None:
@@ -696,26 +733,34 @@ class EagleProposer:
             ])
         ) == 1, "All eagle layers should belong to the same kv cache group"
 
+    # FIXME(woosuk): The logic here is duplicated with the main sampling code.
+    # We should refactor this to reuse the same sampling implementation.
+    def _compute_probs_and_sample(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        if not self.enable_draft_probs:
+            return logits.argmax(dim=-1), None
+        elif sampling_metadata.all_greedy:
+            # For greedy requests, draft_probs is not used in rejection
+            # sampling. Therefore, we can just return the logits.
+            # We cannot return None because other future steps might
+            # contain requests that are not greedy.
+            probs = logits
+            next_token_ids = logits.argmax(dim=-1)
+            return next_token_ids, probs
+        return _mixed_sample(logits, sampling_metadata.temperature)
 
-# NOTE(woosuk): Currently, the below code is not used and we always use argmax
-# to sample the draft tokens. We will use this after we find a way to manage
-# the draft prob tensor.
-# Refer to https://github.com/vllm-project/vllm/pull/16899 for the details.
-# FIXME(woosuk): The logic here is duplicated with the main sampling code.
-# We should refactor this to reuse the same sampling implementation.
-def compute_probs_and_sample_next_token(
-    logits: torch.Tensor,
-    sampling_metadata: SamplingMetadata,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if sampling_metadata.all_greedy:
-        # For greedy requests, draft_probs is not used in rejection sampling.
-        # Therefore, we can just return the logits.
-        probs = logits
-        next_token_ids = logits.argmax(dim=-1)
-        return next_token_ids, probs
 
-    is_greedy = sampling_metadata.temperature == -1
-    temperature = torch.where(is_greedy, 1.0, sampling_metadata.temperature)
+@torch.compile(dynamic=True,
+               backend=current_platform.simple_compile_backend,
+               mode="max-autotune-no-cudagraphs")
+def _mixed_sample(
+        logits: torch.Tensor,
+        temperature: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    is_greedy = temperature == -1
+    temperature = torch.where(is_greedy, 1.0, temperature)
     logits.div_(temperature.view(-1, 1))
     probs = logits.softmax(dim=-1, dtype=torch.float32)
 
@@ -727,14 +772,8 @@ def compute_probs_and_sample_next_token(
     # TODO(woosuk): Consider seeds.
     q = torch.empty_like(probs)
     q.exponential_()
+    q[is_greedy, :] = 1.0
     # NOTE(woosuk): We shouldn't use `probs.div_(q)` because the draft_probs
     # will be used later for rejection sampling.
     next_token_ids = probs.div(q).argmax(dim=-1).view(-1)
-    if not sampling_metadata.all_random:
-        greedy_token_ids = probs.argmax(dim=-1)
-        next_token_ids = torch.where(
-            is_greedy,
-            greedy_token_ids,
-            next_token_ids,
-        )
     return next_token_ids, probs
