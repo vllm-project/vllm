@@ -63,7 +63,7 @@ class FlashMLABackend(MLACommonBackend):
 
     @classmethod
     def get_max_compute_capability(cls) -> Optional[int]:
-        return 99
+        return 109
 
 
 @dataclass
