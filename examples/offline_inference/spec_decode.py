@@ -56,7 +56,7 @@ def parse_args():
         "--method",
         type=str,
         default="eagle",
-        choices=["ngram", "eagle", "eagle3", "mtp", "None"],
+        choices=["ngram", "eagle", "eagle3", "mtp"],
     )
     parser.add_argument("--num-spec-tokens", type=int, default=2)
     parser.add_argument("--spec-token-tree", type=str, default=None)
@@ -114,9 +114,10 @@ def main():
         spec_token_tree_str = str(sorted(spec_token_tree, key=lambda t: (len(t), t)))
         print(spec_token_tree_str)
 
-    # vanilla inference
-    if args.method == "None":
+    # vanilla inference if num_spec_tokens == 0
+    if args.num_spec_tokens == 0:
         speculative_config = None
+        print('No speculative decoding here because `args.num_spec_tokens == 0`.')
     elif args.method == "eagle":
         eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B" if args.eagle_dir is None else args.eagle_dir
         speculative_config = {
