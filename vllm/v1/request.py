@@ -91,14 +91,13 @@ class Request:
         ) if self.prompt_token_ids is not None else [0
                                                      ] * self.num_prompt_tokens
         self.num_output_placeholders = 0  # Used in async scheduling.
-        self.spec_token_ids: Optional[list[int]] = None
+        self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
         self.cache_salt: Optional[str] = cache_salt
 
         # Multi-modal related
-        self.mm_features: Optional[list[MultiModalFeatureSpec]] = mm_features
-        self.num_encoder_inputs = len(
-            self.mm_features) if self.mm_features else 0
+        self.mm_features = mm_features or []
+        self.num_encoder_inputs = len(self.mm_features)
         self.has_encoder_inputs = self.num_encoder_inputs > 0
 
         # Read-only views
@@ -172,8 +171,7 @@ class Request:
 
     @property
     def num_tokens_with_spec(self) -> int:
-        return len(self._all_token_ids) + (len(self.spec_token_ids)
-                                           if self.spec_token_ids else 0)
+        return len(self._all_token_ids) + len(self.spec_token_ids)
 
     @property
     def num_output_tokens(self) -> int:
@@ -186,8 +184,7 @@ class Request:
         return RequestStatus.get_finished_reason(self.status)
 
     def get_num_encoder_tokens(self, input_id: int) -> int:
-        assert self.mm_features is not None and input_id < len(
-            self.mm_features)
+        assert input_id < len(self.mm_features)
         num_tokens = self.mm_features[input_id].mm_position.length
         return num_tokens
 

@@ -1084,8 +1084,7 @@ class Scheduler(SchedulerInterface):
             # Add newly generated spec token ids to the request.
             if not spec_token_ids:
                 # NOTE(woosuk): request.spec_token_ids should be updated.
-                if request.spec_token_ids:
-                    request.spec_token_ids.clear()
+                request.spec_token_ids.clear()
             elif self.structured_output_manager.should_advance(request):
                 metadata = request.structured_output_request
                 request.spec_token_ids = metadata.grammar.validate_tokens(  # type: ignore[union-attr]

@@ -86,8 +86,6 @@ class EncoderCacheManager:
         Returns:
             True if the encoder output for this input is already cached
         """
-        if request.mm_features is None:
-            return False
         mm_hash = request.mm_features[input_id].identifier
         # Not cached at all
         if mm_hash not in self.cached:
@@ -168,7 +166,7 @@ class EncoderCacheManager:
         Note:
             This method assumes can_allocate() returned True for the same input.
         """
-        assert request.mm_features is not None
+
         mm_hash = request.mm_features[input_id].identifier
         request_id = request.request_id
         if mm_hash not in self.cached:
@@ -193,8 +191,6 @@ class EncoderCacheManager:
         in `freeable`); for such entries, freeing for this request will be a
         no-op.
         """
-        if request.mm_features is None:
-            return set()
         return {
             input_id
             for input_id in range(len(request.mm_features))
@@ -211,7 +207,6 @@ class EncoderCacheManager:
         The entry is NOT physically freed until capacity is needed (e.g., by
         `can_allocate`).
         """
-        assert request.mm_features is not None
         req_id = request.request_id
         mm_hash = request.mm_features[input_id].identifier
         # The mm_hash not in cache or the req_id set is empty

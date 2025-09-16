@@ -58,8 +58,6 @@ class CachedRequestState:
     @deprecated("`mm_inputs` is superseded by `mm_kwargs` and will be "
                 "removed in v0.13. Please use `mm_kwargs` instead.")
     def mm_inputs(self) -> list[MultiModalKwargsItems]:
-        if self.mm_features is None:
-            return []
         return [
             MultiModalKwargsItems.from_seq([f.data]) for f in self.mm_features
             if f.data is not None

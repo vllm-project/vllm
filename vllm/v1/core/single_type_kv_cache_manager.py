@@ -563,7 +563,7 @@ class MambaManager(SingleTypeKVCacheManager):
 
     def get_num_blocks_to_allocate(
             self, request_id: str, num_tokens: int,
-            new_computed_blocks: list[KVCacheBlock]) -> int:
+            new_computed_blocks: Optional[list[KVCacheBlock]]) -> int:
         """
         Get the number of blocks needed to be allocated for the request.
 
@@ -583,7 +583,8 @@ class MambaManager(SingleTypeKVCacheManager):
             num_tokens += (self.kv_cache_spec.block_size *
                            self.kv_cache_spec.num_speculative_blocks)
         num_required_blocks = cdiv(num_tokens, self.block_size)
-        num_new_blocks = (num_required_blocks - len(new_computed_blocks) -
+        num_new_blocks = (num_required_blocks -
+                          len(new_computed_blocks or []) -
                           len(self.req_to_blocks[request_id]))
         # If a computed block of a request is an eviction candidate (in the
         # free queue and ref_cnt == 0), it will be changed from a free block
@@ -591,7 +592,7 @@ class MambaManager(SingleTypeKVCacheManager):
         # it as needed to be allocated.
         num_evictable_computed_blocks = sum(
             blk.ref_cnt == 0 and not blk.is_null
-            for blk in new_computed_blocks)
+            for blk in new_computed_blocks or [])
         return num_new_blocks + num_evictable_computed_blocks
 
     def allocate_new_blocks(self, request_id: str,
