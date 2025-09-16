@@ -276,9 +276,6 @@ class Qwen3_VisionTransformer(nn.Module):
         self.config = vision_config
         self.out_hidden_size = (vision_config.out_hidden_size *
                                 (1 + len(self.deepstack_visual_indexes)))
-        # For DP utils expecting 2D merge kernel info
-        self.merge_kernel_size = (self.spatial_merge_size,
-                                  self.spatial_merge_size)
 
         self.patch_embed = Qwen3_VisionPatchEmbed(
             patch_size=self.patch_size,
