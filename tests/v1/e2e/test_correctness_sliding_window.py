@@ -25,7 +25,7 @@ model_config = {
 @pytest.mark.parametrize(
     "model",
     [
-        # "bigcode/starcoder2-3b",  # sliding window only
+        "bigcode/starcoder2-3b",  # sliding window only
         "google/gemma-3-1b-it",  # sliding window + full attention
     ])
 @pytest.mark.parametrize("batch_size", [5])
