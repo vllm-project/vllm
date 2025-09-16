@@ -1027,8 +1027,14 @@ def print_metrics(
     if verbose:
         metrics["requests_each_step"] = requests_each_step
 
+    def serialize_safe(obj):
+        try:
+            return str(obj)
+        except Exception:
+            return None
+
     with open(filename, "w") as f:
-        json.dump(metrics, f, indent=4)
+        json.dump(metrics, f, indent=4, default=serialize_safe)
 
     all_requests_output = [req.to_dict() for req in requests]
     assert filename.endswith(".json")
