@@ -170,6 +170,10 @@ class XPUPlatform(Platform):
                     "only NHD layout is supported by XPU attention kernels.")
 
     @classmethod
+    def support_hybrid_kv_cache(cls) -> bool:
+        return True
+
+    @classmethod
     def is_pin_memory_available(cls):
         return True
 
