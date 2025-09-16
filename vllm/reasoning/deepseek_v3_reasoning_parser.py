@@ -25,9 +25,8 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
         super().__init__(tokenizer)
 
         thinking = bool(kwargs.pop("thinking", False))
-        separate_reasoning = bool(kwargs.pop("separate_reasoning", True))
 
-        if thinking and separate_reasoning:
+        if thinking:
             self._parser = DeepSeekR1ReasoningParser(tokenizer)
         else:
             self._parser = IdentityReasoningParser(tokenizer)

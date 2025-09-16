@@ -19,17 +19,15 @@ def tokenizer():
 
 
 @pytest.mark.parametrize(
-    "thinking,separate_reasoning,expected_parser_type",
+    "thinking,expected_parser_type",
     [
-        (True, True, DeepSeekR1ReasoningParser),
-        (False, True, IdentityReasoningParser),
-        (True, False, IdentityReasoningParser),
-        (False, False, IdentityReasoningParser),
+        (True, DeepSeekR1ReasoningParser),
+        (False, IdentityReasoningParser),
     ],
 )
-def test_parser_selection(tokenizer, thinking, separate_reasoning, expected_parser_type):
+def test_parser_selection(tokenizer, thinking, expected_parser_type):
     parser = DeepSeekV3ReasoningParser(
-        tokenizer, thinking=thinking, separate_reasoning=separate_reasoning
+        tokenizer, thinking=thinking
     )
     assert isinstance(parser._parser, expected_parser_type)
 
