@@ -4,7 +4,7 @@
 from abc import abstractmethod
 from collections.abc import Iterable
 from enum import Enum
-from typing import Callable, Literal, Optional, Union, overload
+from typing import Callable, Literal, Optional, Union, get_args, overload
 
 import torch
 import torch.nn.functional as F
@@ -12,6 +12,7 @@ from torch.nn.parameter import UninitializedParameter
 
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config
+from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.distributed import (get_dp_group, get_ep_group,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
@@ -675,8 +676,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
 
 def determine_expert_map(
-        ep_size: int, ep_rank: int,
-        global_num_experts: int) -> tuple[int, Optional[torch.Tensor]]:
+    ep_size: int,
+    ep_rank: int,
+    global_num_experts: int,
+    expert_placement_strategy: ExpertPlacementStrategy = "linear",
+) -> tuple[int, Optional[torch.Tensor]]:
     """
         Calculates how many experts should be assigned to each rank for EP and
         creates a mapping from global to local expert index. Experts are
@@ -684,8 +688,11 @@ def determine_expert_map(
         last rank.
 
         Args:
-            ep_size (int): The size of the expert parallel group
-            global_num_experts (int): The total number of experts in the model.
+            ep_size: The size of the expert parallel group
+            ep_rank: The rank of the current process in the expert parallel
+                group
+            global_num_experts: The total number of experts in the model.
+            expert_placement_strategy: The expert placement strategy.
 
         Returns:
             tuple[int, Optional[torch.Tensor]]: A tuple containing:
@@ -711,9 +718,23 @@ def determine_expert_map(
     # Create a tensor of size num_experts filled with -1
     expert_map = torch.full((global_num_experts, ), -1, dtype=torch.int32)
     # Create an expert map for the local experts
-    start_idx = ep_rank * base_experts + min(ep_rank, remainder)
-    expert_map[start_idx:start_idx + local_num_experts] = torch.arange(
-        0, local_num_experts, dtype=torch.int32)
+    if expert_placement_strategy == "linear":
+        start_idx = ep_rank * base_experts + min(ep_rank, remainder)
+        expert_map[start_idx:start_idx + local_num_experts] = torch.arange(
+            0, local_num_experts, dtype=torch.int32)
+    elif expert_placement_strategy == "round_robin":
+        local_log_experts = torch.arange(ep_rank,
+                                         global_num_experts,
+                                         ep_size,
+                                         dtype=torch.int32)
+
+        expert_map[local_log_experts] = torch.arange(0,
+                                                     local_num_experts,
+                                                     dtype=torch.int32)
+    else:
+        raise ValueError("Unsupported expert placement strategy "
+                         f"'{expert_placement_strategy}', expected one of "
+                         f"{get_args(ExpertPlacementStrategy)}")
     return (local_num_experts, expert_map)
 
 
@@ -846,15 +867,36 @@ class FusedMoE(CustomOp):
             else:
                 assert num_redundant_experts == 0, \
                     "Redundant experts are only supported with EPLB."
+
+            expert_placement_strategy = (
+                vllm_config.parallel_config.expert_placement_strategy)
+            if expert_placement_strategy == "round_robin":
+                # TODO(Bruce): will support round robin expert placement with
+                # EPLB enabled in the future.
+                round_robin_supported = ((num_expert_group is not None
+                                          and num_expert_group > 1)
+                                         and num_redundant_experts == 0
+                                         and not self.enable_eplb)
+
+                if not round_robin_supported:
+                    logger.warning(
+                        "Round-robin expert placement is only supported for "
+                        "models with multiple expert groups and no redundant "
+                        "experts. Falling back to linear expert placement.")
+                    expert_placement_strategy = "linear"
+
             self.local_num_experts, self.expert_map = determine_expert_map(
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
-                global_num_experts=self.global_num_experts)
+                global_num_experts=self.global_num_experts,
+                expert_placement_strategy=expert_placement_strategy,
+            )
             logger.info_once(
-                "[EP Rank %s/%s] Expert parallelism is enabled. Local/global"
+                "[EP Rank %s/%s] Expert parallelism is enabled. Expert "
+                "placement strategy: %s. Local/global"
                 " number of experts: %s/%s. Experts local to global index map:"
-                " %s.", self.ep_rank, self.ep_size, self.local_num_experts,
-                self.global_num_experts,
+                " %s.", self.ep_rank, self.ep_size, expert_placement_strategy,
+                self.local_num_experts, self.global_num_experts,
                 get_compressed_expert_map(self.expert_map))
         else:
             self.local_num_experts, self.expert_map = (self.global_num_experts,
