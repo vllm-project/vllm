@@ -12,6 +12,12 @@ python examples/online_serving/pooling/cohere_rerank_client.py
 python examples/online_serving/pooling/jinaai_rerank_client.py
 ```
 
+## Named Entity Recognition (NER) usage
+
+```bash
+python examples/online_serving/pooling/ner.py
+```
+
 ## Openai chat embedding for multimodal usage
 
 ```bash
@@ -40,10 +46,4 @@ python examples/online_serving/pooling/openai_embedding_matryoshka_fy.py
 
 ```bash
 python examples/online_serving/pooling/openai_pooling_client.py
-```
-
-## Named Entity Recognition (NER) usage
-
-```bash
-python examples/online_serving/pooling/ner.py
 ```
