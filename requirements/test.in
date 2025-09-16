@@ -24,7 +24,6 @@ soundfile # required for audio tests
 jiwer # required for audio tests
 tblib # for pickling test exceptions
 timm >=1.0.17 # required for internvl and gemma3n-mm test
---extra-index-url https://download.pytorch.org/whl/test/cu128
 torch==2.9.0
 torchaudio==2.9.0
 torchvision==0.24.0
