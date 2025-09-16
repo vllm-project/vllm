@@ -36,6 +36,7 @@ def create_scheduler(
     num_speculative_tokens: Optional[int] = None,
     skip_tokenizer_init: bool = False,
     async_scheduling: bool = False,
+    global_cache_hit_threshold: float = 0.0,
 ) -> Union[Scheduler, AsyncScheduler]:
     '''Create scheduler under test.
 
@@ -60,6 +61,7 @@ def create_scheduler(
         disable_chunked_mm_input=disable_chunked_mm_input,
         enable_chunked_prefill=True,
         async_scheduling=async_scheduling,
+        global_cache_hit_threshold=global_cache_hit_threshold,
     )
     model_config = ModelConfig(
         model=model,
@@ -128,12 +130,13 @@ def create_requests(
     prompt_logprobs: Optional[int] = None,
     same_prompt: bool = False,
     block_size: int = 16,
+    cache_hit_thresholds: Optional[list[Optional[float]]] = None,
 ) -> list[Request]:
     global _none_hash_initialized
     if not _none_hash_initialized:
         init_none_hash(sha256)
         _none_hash_initialized = True
-
+    assert len(cache_hit_thresholds) == num_requests
     block_hasher = get_request_block_hasher(block_size, sha256)
     sampling_params = SamplingParams(ignore_eos=False,
                                      max_tokens=max_tokens,
@@ -157,6 +160,11 @@ def create_requests(
 
         prompt_token_ids = ([0] * num_tokens if same_prompt else [i] *
                             num_tokens)
+        if cache_hit_thresholds is not None \
+            and cache_hit_thresholds[i] is not None:
+            sampling_params.extra_args = { \
+                "cache_hit_threshold": cache_hit_thresholds[i]
+            }
         request = Request(
             request_id=f"{i}",
             prompt_token_ids=prompt_token_ids,
