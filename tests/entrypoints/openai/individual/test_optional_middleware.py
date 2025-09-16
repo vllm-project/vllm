@@ -10,28 +10,37 @@ from http import HTTPStatus
 import pytest
 import requests
 
-from ....utils import RemoteOpenAIServer
+from ...utils import RemoteOpenAIServer
 
 # Use a small embeddings model for faster startup and smaller memory footprint.
 # Since we are not testing any chat functionality,
 # using a chat capable model is overkill.
-MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "intfloat/multilingual-e5-small"
 
 
 @pytest.fixture(scope="module")
-def server(request: pytest.FixtureRequest, embedding_server):
+def server(request: pytest.FixtureRequest):
     passed_params = []
     if hasattr(request, "param"):
         passed_params = request.param
     if isinstance(passed_params, str):
         passed_params = [passed_params]
 
-    if passed_params:
-        args = ["--enforce-eager", *passed_params]
-        with RemoteOpenAIServer(MODEL_NAME, args) as custom_server:
-            yield custom_server
-    else:
-        yield embedding_server
+    args = [
+        "--runner",
+        "pooling",
+        # use half precision for speed and memory savings in CI environment
+        "--dtype",
+        "float16",
+        "--max-model-len",
+        "512",
+        "--enforce-eager",
+        "--max-num-seqs",
+        "2",
+        *passed_params
+    ]
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+        yield remote_server
 
 
 @pytest.mark.asyncio

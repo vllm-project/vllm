@@ -299,7 +299,11 @@ def _get_running_metrics_from_api(server: RemoteOpenAIServer):
     # Verify running and waiting requests counts and KV cache usage are zero
     running_requests, waiting_requests, kv_cache_usage = None, None, None
 
+<<<<<<< HEAD:tests/entrypoints/openai/individual_tests/test_metrics.py
     kv_cache_usage_metric = "vllm:kv_cache_usage_perc"
+=======
+    kv_cache_usage_metric = ("vllm:kv_cache_usage_perc")
+>>>>>>> a7c0b4142 (Refactor entrypoint tests):tests/entrypoints/openai/individual/test_metrics.py
 
     for family in text_string_to_metric_families(response.text):
         if family.name == "vllm:num_requests_running":
