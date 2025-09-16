@@ -300,8 +300,16 @@ class SamplingParams(
         if self.seed == -1:
             self.seed = None
 
-        if self.stop is not None and isinstance(self.stop, str):
+        if self.stop is None:
+            self.stop = []
+        elif isinstance(self.stop, str):
             self.stop = [self.stop]
+
+        if self.stop_token_ids is None:
+            self.stop_token_ids = []
+
+        if self.bad_words is None:
+            self.bad_words = []
 
         if self.logprobs is True:
             self.logprobs = 1
@@ -324,8 +332,7 @@ class SamplingParams(
             self._verify_greedy_sampling()
 
         # eos_token_id is added to this by the engine
-        if self.stop_token_ids:
-            self._all_stop_token_ids.update(self.stop_token_ids)
+        self._all_stop_token_ids.update(self.stop_token_ids)
 
     def _verify_args(self) -> None:
         if not isinstance(self.n, int):
@@ -394,16 +401,13 @@ class SamplingParams(
             raise ValueError(
                 f"truncate_prompt_tokens must be an integer >= 1 or -1, "
                 f"got {self.truncate_prompt_tokens}")
-        if self.stop_token_ids is not None:
-            assert isinstance(self.stop_token_ids, list)
-            if not all(
-                    isinstance(st_id, int) for st_id in self.stop_token_ids):
-                raise ValueError("stop_token_ids must contain only integers, "
-                                 f"got {self.stop_token_ids}.")
-        if self.stop is not None:
-            assert isinstance(self.stop, list)
-            if any(not stop_str for stop_str in self.stop):
-                raise ValueError("stop cannot contain an empty string.")
+        assert isinstance(self.stop_token_ids, list)
+        if not all(isinstance(st_id, int) for st_id in self.stop_token_ids):
+            raise ValueError(f"stop_token_ids must contain only integers, "
+                             f"got {self.stop_token_ids}.")
+        assert isinstance(self.stop, list)
+        if any(not stop_str for stop_str in self.stop):
+            raise ValueError("stop cannot contain an empty string.")
         if self.stop and not self.detokenize:
             raise ValueError(
                 "stop strings are only supported when detokenize is True. "
@@ -440,8 +444,7 @@ class SamplingParams(
             if eos_ids:
                 self._all_stop_token_ids.update(eos_ids)
                 if not self.ignore_eos:
-                    if self.stop_token_ids:
-                        eos_ids.update(self.stop_token_ids)
+                    eos_ids.update(self.stop_token_ids)
                     self.stop_token_ids = list(eos_ids)
 
     def update_from_tokenizer(self, tokenizer: AnyTokenizer) -> None:

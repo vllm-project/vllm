@@ -14,11 +14,10 @@ from vllm.multimodal.inputs import (MultiModalFeatureSpec,
                                     MultiModalKwargsItem, PlaceholderRange)
 from vllm.sampling_params import SamplingParams
 from vllm.utils import sha256, sha256_cbor
-from vllm.v1.core.block_pool import BlockHashToBlockMap, BlockPool
+from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheManager, Request
-from vllm.v1.core.kv_cache_utils import (BlockHash, BlockHashWithGroupId,
-                                         KVCacheBlock, get_block_hash,
-                                         get_group_id,
+from vllm.v1.core.kv_cache_utils import (BlockHash, KVCacheBlock,
+                                         get_block_hash, get_group_id,
                                          get_request_block_hasher,
                                          hash_block_tokens, init_none_hash,
                                          make_block_hash_with_group_id)
@@ -310,14 +309,14 @@ def test_prefill_hybrid_model():
     manager.free(req1)
 
     cached_block_hash_to_block_bak = copy.copy(
-        manager.block_pool.cached_block_hash_to_block._cache)
+        manager.block_pool.cached_block_hash_to_block)
 
     def test_partial_request_hit(request_id: str, hash_to_evict: list[bytes],
                                  expect_hit_length: int):
         req = make_request(request_id, common_token_ids + unique_token_ids,
                            block_size, sha256)
         for hash_with_group_id in hash_to_evict:
-            manager.block_pool.cached_block_hash_to_block._cache.pop(
+            manager.block_pool.cached_block_hash_to_block.pop(
                 hash_with_group_id)
         computed_blocks, num_computed_tokens = manager.get_computed_blocks(req)
         assert len(req.block_hashes) == 3
@@ -325,7 +324,7 @@ def test_prefill_hybrid_model():
         for block_per_group in computed_blocks.blocks:
             assert len(block_per_group) == num_computed_tokens // block_size
         for hash_with_group_id in hash_to_evict:
-            manager.block_pool.cached_block_hash_to_block._cache[
+            manager.block_pool.cached_block_hash_to_block[
                 hash_with_group_id] = cached_block_hash_to_block_bak[
                     hash_with_group_id]
         manager.free(req)
@@ -1169,11 +1168,10 @@ def test_maybe_evict_cached_block():
     # Manually add all blocks to cached_blocks
     for block, block_hash in zip(pool.blocks, block_hashes):
         block.block_hash = block_hash
-        pool.cached_block_hash_to_block._cache[block_hash][
-            block.block_id] = block
+        pool.cached_block_hash_to_block[block_hash][block.block_id] = block
 
     block0, block1, block2, block3 = pool.blocks
-    assert pool.cached_block_hash_to_block._cache == {
+    assert pool.cached_block_hash_to_block == {
         block_hash0: {
             block0.block_id: block0,
             block3.block_id: block3
@@ -1187,7 +1185,7 @@ def test_maybe_evict_cached_block():
     }
     # Evict block1
     pool._maybe_evict_cached_block(block1)
-    assert pool.cached_block_hash_to_block._cache == {
+    assert pool.cached_block_hash_to_block == {
         block_hash0: {
             block0.block_id: block0,
             block3.block_id: block3
@@ -1199,7 +1197,7 @@ def test_maybe_evict_cached_block():
     # Evict block0: block_hash0 entry should NOT be removed, as block3
     # also use the same hash
     pool._maybe_evict_cached_block(block0)
-    assert pool.cached_block_hash_to_block._cache == {
+    assert pool.cached_block_hash_to_block == {
         block_hash0: {
             block3.block_id: block3
         },
@@ -1209,10 +1207,10 @@ def test_maybe_evict_cached_block():
     }
     # Evict block2
     pool._maybe_evict_cached_block(block2)
-    assert pool.cached_block_hash_to_block._cache == {block_hash0: {3: block3}}
+    assert pool.cached_block_hash_to_block == {block_hash0: {3: block3}}
     # Evict block3
     pool._maybe_evict_cached_block(block3)
-    assert pool.cached_block_hash_to_block._cache == {}
+    assert pool.cached_block_hash_to_block == {}
 
 
 @pytest.mark.parametrize("blocks_to_cache", [2, 3, 10])
@@ -1376,7 +1374,7 @@ def test_eagle_with_sliding_window():
     # Evict the first block in the request
     assert manager.block_pool.get_cached_block(
         block_hash_first_block, kv_cache_group_ids=[0]) is not None
-    manager.block_pool.cached_block_hash_to_block._cache.pop(
+    manager.block_pool.cached_block_hash_to_block.pop(
         make_block_hash_with_group_id(block_hash_first_block, 0))
 
     # New request
@@ -1388,78 +1386,3 @@ def test_eagle_with_sliding_window():
     # there will be no matched prefix.
     assert len(computed_blocks.blocks[0]) == 0
     assert num_tokens == 0
-
-
-def test_block_lookup_cache_single_block_per_key():
-    cache = BlockHashToBlockMap()
-    key0 = BlockHashWithGroupId(b"hash0")
-    key1 = BlockHashWithGroupId(b"hash1")
-    key2 = BlockHashWithGroupId(b"hash2")
-    block0 = KVCacheBlock(0)
-    block1 = KVCacheBlock(1)
-
-    assert cache.get_one_block(key0) is None
-    assert cache.get_one_block(key1) is None
-    assert cache.get_one_block(key2) is None
-    # key0 inserted
-    cache.insert(key0, block0)
-    assert cache.get_one_block(key0) is block0
-    assert cache.get_one_block(key1) is None
-    assert cache.get_one_block(key2) is None
-    # key1 inserted
-    cache.insert(key1, block1)
-    assert cache.get_one_block(key0) is block0
-    assert cache.get_one_block(key1) is block1
-    assert cache.get_one_block(key2) is None
-    # No block poped due to block_id mismatch
-    assert cache.pop(key0, 100) is None
-    assert cache.get_one_block(key0) is block0
-    assert cache.get_one_block(key1) is block1
-    assert cache.get_one_block(key2) is None
-    # block poped with (key0, block ID 0)
-    assert cache.pop(key0, 0) is block0
-    assert cache.get_one_block(key0) is None
-    assert cache.get_one_block(key1) is block1
-    assert cache.get_one_block(key2) is None
-    # No block poped due to block_id mismatch
-    assert cache.pop(key0, 1) is None
-    assert cache.get_one_block(key0) is None
-    assert cache.get_one_block(key1) is block1
-    assert cache.get_one_block(key2) is None
-    # block poped with (key1, block ID 1)
-    assert cache.pop(key1, 1) is block1
-    assert cache.get_one_block(key0) is None
-    assert cache.get_one_block(key1) is None
-    assert cache.get_one_block(key2) is None
-
-
-def test_block_lookup_cache_multi_blocks_per_key():
-    cache = BlockHashToBlockMap()
-    key0 = BlockHashWithGroupId(b"hash0")
-    key1 = BlockHashWithGroupId(b"hash1")
-    block00 = KVCacheBlock(0)
-    block01 = KVCacheBlock(1)
-    block10 = KVCacheBlock(10)
-    block11 = KVCacheBlock(11)
-
-    assert cache.get_one_block(key0) is None
-    assert cache.get_one_block(key1) is None
-
-    cache.insert(key0, block00)
-    cache.insert(key0, block01)
-    cache.insert(key1, block10)
-    cache.insert(key1, block11)
-
-    assert cache.get_one_block(key0) is block00
-    assert cache.pop(key0, 0) is block00
-    assert cache.get_one_block(key0) is block01
-    assert cache.pop(key0, 1) is block01
-    assert cache.get_one_block(key0) is None
-    assert cache.pop(key0, 2) is None
-
-    assert cache.get_one_block(key1) is block10
-    assert cache.pop(key1, 10) is block10
-    assert cache.get_one_block(key1) is block11
-    assert cache.pop(key1, 11) is block11
-    assert cache.get_one_block(key1) is None
-    assert cache.pop(key1, 12) is None
