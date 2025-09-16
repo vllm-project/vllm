@@ -147,6 +147,10 @@ class TokenformerModelManager(AdapterModelManager):
         model_state_dict = self.model.state_dict()
         tokenformers = self._registered_adapters[adapter_id].tokenformers
 
+        # Debug: Check if gate_up_proj exists before modification
+        gate_up_keys = [k for k in model_state_dict.keys() if 'gate_up_proj' in k]
+        logger.info(f"DEBUG: gate_up_proj keys before modification: {gate_up_keys}")
+
         for key, value in self.orig_lm_head.items():
             logger.info(f"Loading original lm head {key} from adapter {adapter_id}")
             model_state_dict[key] = value
@@ -155,12 +159,29 @@ class TokenformerModelManager(AdapterModelManager):
             logger.info(f"Loading {key} from adapter {adapter_id}")
             model_state_dict[key] = value
 
+        # Debug: Check if gate_up_proj still exists after modification
+        gate_up_keys_after = [k for k in model_state_dict.keys() if 'gate_up_proj' in k]
+        logger.info(f"DEBUG: gate_up_proj keys after modification: {gate_up_keys_after}")
+
         load_result = self.model.load_state_dict(model_state_dict, strict=False)
 
         if len(load_result.unexpected_keys) > 0:
             logger.warning(
                 f"Unexpected keys in state dict: {load_result.unexpected_keys}"
             )
+        
+        if len(load_result.missing_keys) > 0:
+            logger.warning(
+                f"Missing keys in state dict: {load_result.missing_keys}"
+            )
+        
+        # Debug: Verify gate_up_proj is accessible in the loaded model
+        try:
+            for name, param in self.model.named_parameters():
+                if 'gate_up_proj' in name:
+                    logger.info(f"DEBUG: Found parameter {name} with shape {param.shape}")
+        except Exception as e:
+            logger.error(f"DEBUG: Error accessing model parameters: {e}")
 
         self._active_adapter = adapter_id
 

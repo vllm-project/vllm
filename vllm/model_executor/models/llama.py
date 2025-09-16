@@ -90,7 +90,21 @@ class LlamaMLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
-        x, _ = self.gate_up_proj(x)
+        try:
+            x, _ = self.gate_up_proj(x)
+        except (KeyError, AttributeError, RuntimeError) as e:
+            print(f"DEBUG: Error in LlamaMLP.forward: {type(e).__name__}: {e}")
+            print(f"DEBUG: Available attributes: {list(self.__dict__.keys())}")
+            print(f"DEBUG: gate_up_proj exists: {hasattr(self, 'gate_up_proj')}")
+            if hasattr(self, 'gate_up_proj'):
+                print(f"DEBUG: gate_up_proj type: {type(self.gate_up_proj)}")
+                # Try to access parameters to see what's failing
+                try:
+                    params = list(self.gate_up_proj.named_parameters())
+                    print(f"DEBUG: gate_up_proj parameters: {[p[0] for p in params]}")
+                except Exception as param_e:
+                    print(f"DEBUG: Error accessing gate_up_proj parameters: {param_e}")
+            raise
         x = self.act_fn(x)
         x, _ = self.down_proj(x)
         return x
@@ -464,7 +478,6 @@ class LlamaModel(nn.Module):
 
 
 class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3, SupportsTokenformer):
-
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"]
@@ -550,10 +563,10 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3, Supp
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
-    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+    def set_aux_hidden_state_layers(self, layers: tuple[int]) -> None:
         self.model.aux_hidden_state_layers = layers
 
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int]:
         num_layers = len(self.model.layers)
         return (2, num_layers // 2, num_layers - 3)
 
