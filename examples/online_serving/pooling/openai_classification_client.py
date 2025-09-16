@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Example Python client for classification API using vLLM API server
+NOTE:
+    start a supported classification model server with `vllm serve`, e.g.
+    vllm serve jason9693/Qwen2.5-1.5B-apeach
+"""
 
 import argparse
 import pprint

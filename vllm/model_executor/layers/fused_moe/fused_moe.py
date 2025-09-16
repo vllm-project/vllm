@@ -720,7 +720,10 @@ def get_moe_configs(
                 logger.info("Using configuration from %s for MoE layer.",
                             config_file_path)
                 # If a configuration has been found, return it
-                return {int(key): val for key, val in json.load(f).items()}
+                tuned_config = json.load(f)
+                # Delete triton_version from tuned_config
+                tuned_config.pop("triton_version", None)
+                return {int(key): val for key, val in tuned_config.items()}
 
     # If no optimized configuration is available, we will use the default
     # configuration

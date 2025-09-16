@@ -149,7 +149,7 @@ class KVConnectorBase_V1(ABC):
 
     @abstractmethod
     def start_load_kv(self, forward_context: "ForwardContext",
-                      **kwargs) -> None:
+                      **kwargs: Any) -> None:
         """
         Start loading the KV cache from the connector to vLLM's paged
         KV buffer. This is called from the forward context before the
@@ -182,7 +182,8 @@ class KVConnectorBase_V1(ABC):
 
     @abstractmethod
     def save_kv_layer(self, layer_name: str, kv_layer: torch.Tensor,
-                      attn_metadata: "AttentionMetadata", **kwargs) -> None:
+                      attn_metadata: "AttentionMetadata",
+                      **kwargs: Any) -> None:
         """
         Start saving a layer of KV cache from vLLM's paged buffer 
         to the connector. This is called from within attention layer to
@@ -353,4 +354,15 @@ class KVConnectorBase_V1(ABC):
         if cls is KVConnectorBase_V1:
             raise TypeError("get_required_kvcache_layout should not be called "
                             "on the abstract base class")
+        return None
+
+    def get_finished_count(self) -> Optional[int]:
+        """
+        Get the count of requests expected to complete send/receive operations
+        via this connector.
+
+        Returns:
+            int: expected sending or receiving completion count.
+        """
+
         return None

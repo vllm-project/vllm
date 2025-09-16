@@ -13,7 +13,7 @@ logger = init_logger(__name__)
 try:
     import intel_extension_for_pytorch as ipex
 except ImportError as e:
-    logger.warning("Import error msg: %s", e.msg)
+    logger.debug("Import error msg: %s", e.msg)
 
 
 class ipex_ops:
@@ -147,17 +147,6 @@ class ipex_ops:
         ipex.llm.functional.rotary_embedding_batched(positions, query, key,
                                                      head_size, cos_sin_cache,
                                                      is_neox, rot_dim)
-
-    @staticmethod
-    def batched_rotary_embedding(positions: torch.Tensor, query: torch.Tensor,
-                                 key: torch.Tensor, head_size: int,
-                                 cos_sin_cache: torch.Tensor, is_neox: bool,
-                                 rot_dim: int,
-                                 cos_sin_cache_offsets: torch.Tensor) -> None:
-        ipex.llm.functional.rotary_embedding_batched(positions, query, key,
-                                                     head_size, cos_sin_cache,
-                                                     is_neox, rot_dim,
-                                                     cos_sin_cache_offsets)
 
     @staticmethod
     def rms_norm(input: torch.Tensor, weight: torch.Tensor,

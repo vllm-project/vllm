@@ -232,6 +232,9 @@ EXPECTED_METRICS_V1 = [
     "vllm:gpu_cache_usage_perc",
     "vllm:gpu_prefix_cache_queries",
     "vllm:gpu_prefix_cache_hits",
+    "vllm:kv_cache_usage_perc",
+    "vllm:prefix_cache_queries",
+    "vllm:prefix_cache_hits",
     "vllm:num_preemptions_total",
     "vllm:prompt_tokens_total",
     "vllm:generation_tokens_total",
@@ -277,6 +280,9 @@ EXPECTED_METRICS_V1 = [
 ]
 
 HIDDEN_DEPRECATED_METRICS: list[str] = [
+    "vllm:gpu_cache_usage_perc",
+    "vllm:gpu_prefix_cache_queries",
+    "vllm:gpu_prefix_cache_hits",
     "vllm:time_per_output_token_seconds_sum",
     "vllm:time_per_output_token_seconds_bucket",
     "vllm:time_per_output_token_seconds_count",
@@ -307,7 +313,7 @@ async def test_abort_metrics_reset(server: RemoteOpenAIServer,
                                    client: openai.AsyncClient, use_v1: bool):
 
     running_requests, waiting_requests, kv_cache_usage = (
-        _get_running_metrics_from_api(server))
+        _get_running_metrics_from_api(server, use_v1))
 
     # Expect no running requests or kvcache usage
     assert running_requests == 0
@@ -330,7 +336,7 @@ async def test_abort_metrics_reset(server: RemoteOpenAIServer,
 
     # Check that we have running requests
     running_requests, waiting_requests, kv_cache_usage = (
-        _get_running_metrics_from_api(server))
+        _get_running_metrics_from_api(server, use_v1))
 
     # Expect running requests and kvcache usage
     assert running_requests > 0
@@ -349,7 +355,7 @@ async def test_abort_metrics_reset(server: RemoteOpenAIServer,
 
     # Verify running and waiting requests counts and KV cache usage are zero
     running_requests_after, waiting_requests_after, kv_cache_usage_after = (
-        _get_running_metrics_from_api(server))
+        _get_running_metrics_from_api(server, use_v1))
 
     assert running_requests_after == 0,\
         (f"Expected 0 running requests after abort, got "
@@ -362,7 +368,7 @@ async def test_abort_metrics_reset(server: RemoteOpenAIServer,
          f"{kv_cache_usage_after}")
 
 
-def _get_running_metrics_from_api(server: RemoteOpenAIServer):
+def _get_running_metrics_from_api(server: RemoteOpenAIServer, use_v1: bool):
     """Return (running_count, waiting_count, kv_cache_usage)"""
 
     response = requests.get(server.url_for("metrics"))
@@ -370,6 +376,9 @@ def _get_running_metrics_from_api(server: RemoteOpenAIServer):
 
     # Verify running and waiting requests counts and KV cache usage are zero
     running_requests, waiting_requests, kv_cache_usage = None, None, None
+
+    kv_cache_usage_metric = ("vllm:kv_cache_usage_perc"
+                             if use_v1 else "vllm:gpu_cache_usage_perc")
 
     for family in text_string_to_metric_families(response.text):
         if family.name == "vllm:num_requests_running":
@@ -382,9 +391,9 @@ def _get_running_metrics_from_api(server: RemoteOpenAIServer):
                 if sample.name == "vllm:num_requests_waiting":
                     waiting_requests = sample.value
                     break
-        elif family.name == "vllm:gpu_cache_usage_perc":
+        elif family.name == kv_cache_usage_metric:
             for sample in family.samples:
-                if sample.name == "vllm:gpu_cache_usage_perc":
+                if sample.name == kv_cache_usage_metric:
                     kv_cache_usage = sample.value
                     break
 

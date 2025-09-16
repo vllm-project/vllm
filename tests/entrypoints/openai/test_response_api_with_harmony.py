@@ -76,6 +76,20 @@ async def test_basic_with_reasoning_effort(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_max_tokens(client: OpenAI, model_name: str):
+    response = await client.responses.create(
+        model=model_name,
+        input="What is the first paragraph of Moby Dick?",
+        reasoning={"effort": "low"},
+        max_output_tokens=30,
+    )
+    assert response is not None
+    assert response.status == "incomplete"
+    assert response.incomplete_details.reason == "max_output_tokens"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_chat(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,

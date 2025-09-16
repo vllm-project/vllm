@@ -2082,6 +2082,7 @@ async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
         return await task(*args, **kwargs)
 
 
+@lru_cache
 def supports_kw(
     callable: Callable[..., object],
     kw_name: str,

@@ -13,6 +13,10 @@ cmake_minimum_required(VERSION 3.26)
 # cmake --install . --component _C
 project(vllm_extensions LANGUAGES CXX)
 
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+
 # CUDA by default, can be overridden by using -DVLLM_TARGET_DEVICE=... (used by setup.py)
 set(VLLM_TARGET_DEVICE "cuda" CACHE STRING "Target device backend for vLLM")
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
@@ -777,6 +781,17 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       message(STATUS "Not building W4A8 kernels as no compatible archs "
                      "found in CUDA target architectures")
     endif()
+  endif()
+
+  # Hadacore kernels
+  cuda_archs_loose_intersection(HADACORE_ARCHS "8.0;8.9;9.0" "${CUDA_ARCHS}")
+  if(HADACORE_ARCHS)
+    set(SRCS "csrc/quantization/hadamard/hadacore/hadamard_transform_cuda.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${HADACORE_ARCHS}")
+    list(APPEND VLLM_EXT_SRC "${SRCS}")
+    message(STATUS "Building hadacore")
   endif()
 
 # if CUDA endif
