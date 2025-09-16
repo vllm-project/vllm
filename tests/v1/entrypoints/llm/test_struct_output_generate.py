@@ -583,7 +583,7 @@ def test_structured_output_with_reasoning_matrices(
         max_num_seqs=16,
         structured_outputs_config=dict(backend=backend,
                                        disable_any_whitespace=backend
-                                       not in {"xgrammar", "guidance"},
+                                       in {"xgrammar", "guidance"},
                                        reasoning_parser=reasoning_parser),
         tokenizer_mode=tokenizer_mode,
         speculative_config=speculative_config,
@@ -763,7 +763,8 @@ def test_structured_output_batched_with_non_structured_outputs_requests(
         max_model_len=1024,
         structured_outputs_config=StructuredOutputsConfig(
             backend=backend,
-            disable_any_whitespace=(backend in {"xgrammar", "guidance"})),
+            disable_any_whitespace=backend in {"xgrammar", "guidance"},
+        ),
     )
 
     structured_outputs_prompt = (
