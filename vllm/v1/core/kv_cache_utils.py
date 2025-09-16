@@ -1247,10 +1247,8 @@ class BlockHashListWithBlockSize:
         self.scale_factor = target_block_size // hash_block_size
 
     def __len__(self) -> int:
-        # how many merged items are available
         return len(self.block_hashes) // self.scale_factor
 
-    # precise return types for mypy
     @overload
     def __getitem__(self, idx: int) -> BlockHash:
         ...
@@ -1261,25 +1259,19 @@ class BlockHashListWithBlockSize:
 
     def __getitem__(self, idx):
         if isinstance(idx, int):
-            # support negative indices
-            if idx < 0:
-                idx += len(self)
-            if idx < 0 or idx >= len(self):
-                raise IndexError("index out of range")
-            return self._merge_at(idx)
+            return self._get_value_at(idx)
 
         if isinstance(idx, slice):
             start, stop, step = idx.indices(len(self))
-            return [self._merge_at(i) for i in range(start, stop, step)]
+            return [self._get_value_at(i) for i in range(start, stop, step)]
 
         raise TypeError(f"Invalid index type: {type(idx)!r}")
 
     def __iter__(self) -> Iterator[BlockHash]:
-        # makes the whole object an Iterable[BlockHash]
         for i in range(len(self)):
-            yield self._merge_at(i)
+            yield self._get_value_at(i)
 
-    def _merge_at(self, idx: int) -> BlockHash:
+    def _get_value_at(self, idx: int) -> BlockHash:
         base = idx * self.scale_factor
         end = base + self.scale_factor
         merged_hash: bytes = self.block_hashes[base]
