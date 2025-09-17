@@ -183,6 +183,7 @@ static inline bool nvfp4_sm120_debug_enabled() {
   return enabled;
 }
 
+template <typename OutType>
 static inline void run_fp4_blockwise_scaled_group_mm_sm120(
     torch::Tensor& output, const torch::Tensor& a, const torch::Tensor& b,
     const torch::Tensor& a_blockscale, const torch::Tensor& b_blockscales,
@@ -216,7 +217,7 @@ static inline void run_fp4_blockwise_scaled_group_mm_sm120(
 
   struct MMA1SMConfig {
     using MmaTileShape = Shape<_128, _128, _128>;
-    using KernelSchedule = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong;
+    using KernelSchedule = cutlass::gemm::KernelScheduleAuto;
     using EpilogueSchedule = cutlass::epilogue::collective::EpilogueScheduleAuto;
   };
 
@@ -224,15 +225,14 @@ static inline void run_fp4_blockwise_scaled_group_mm_sm120(
       typename cutlass::epilogue::collective::CollectiveBuilder<
           ArchTag, EpilogueOperatorClass, typename MMA1SMConfig::MmaTileShape,
           ClusterShape, cutlass::epilogue::collective::EpilogueTileAuto,
-          ElementAccumulator, ElementAccumulator, void, LayoutC*, AlignmentC,
+          ElementAccumulator, ElementAccumulator, ElementC, LayoutC*, AlignmentC,
           ElementD, LayoutD, AlignmentD,
           typename MMA1SMConfig::EpilogueSchedule>::CollectiveOp;
 
   using CollectiveMainloop =
       typename cutlass::gemm::collective::CollectiveBuilder<
-          ArchTag, MainloopOperatorClass, ElementA,
-          cute::tuple<LayoutA*, LayoutSFA*>, AlignmentA, ElementB,
-          cute::tuple<LayoutB*, LayoutSFB*>, AlignmentB, ElementAccumulator,
+          ArchTag, MainloopOperatorClass, ElementA, LayoutA*, AlignmentA,
+          ElementB, LayoutB*, AlignmentB, ElementAccumulator,
           typename MMA1SMConfig::MmaTileShape, ClusterShape,
           cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
               sizeof(typename CollectiveEpilogue::SharedStorage))>,
