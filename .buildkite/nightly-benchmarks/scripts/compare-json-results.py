@@ -198,6 +198,25 @@ def split_json_by_tp_pp(
 
     return saved_paths
 
+def _add_limit_line(fig, y_value, label):
+    # Visible dashed line + annotation
+    fig.add_hline(
+        y=y_value,
+        line_dash="dash",
+        line_color="red" if "ttft" in label.lower() else "blue",
+        annotation_text=f"{label}: {y_value} ms",
+        annotation_position="top left",
+    )
+    # Optional: add a legend item (as a transparent helper trace)
+    if plot and plotly_found:
+        import plotly.graph_objects as go
+        fig.add_trace(go.Scatter(
+            x=[None], y=[None],
+            mode="lines",
+            line=dict(dash="dash",
+                  color="red" if "ttft" in label.lower() else "blue"),
+            name=f"{label}"
+        ))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -220,6 +239,12 @@ if __name__ == "__main__":
         default="# of max concurrency.",
         help="column name to use as X Axis in comparison graph",
     )
+    parser.add_argument("--ttft-max-ms", type=float, default=5000.0,
+                    help="Reference limit for TTFT plots (ms)")
+    parser.add_argument("--tpot-max-ms", type=float, default=150.0,
+                    help="Reference limit for TPOT plots (ms)")
+
+
     args = parser.parse_args()
 
     drop_column = "P99"
@@ -308,6 +333,13 @@ if __name__ == "__main__":
                             title=title,
                             markers=True,
                         )
+
+                        # ---- Add threshold lines based on metric name ----
+                        if i == 1:
+                            _add_limit_line(fig, args.ttft_max_ms, "TTFT limit")
+                        if i == 2:
+                            _add_limit_line(fig, args.tpot_max_ms, "TPOT limit")
+
                         # Export to HTML
                         text_file.write(fig.to_html(full_html=True, include_plotlyjs="cdn"))
                         sub_text_file.write(fig.to_html(full_html=True, include_plotlyjs="cdn"))
