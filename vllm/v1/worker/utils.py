@@ -130,8 +130,16 @@ class MultiModalBudget:
 @dataclass
 class AttentionGroup:
     backend: type[AttentionBackend]
-    metadata_builder: AttentionMetadataBuilder
+    metadata_builders: list[AttentionMetadataBuilder]
     layer_names: list[str]
+
+    def get_metadata_builder(self,
+                             ubatch_id: Optional[int] = None
+                             ) -> AttentionMetadataBuilder:
+        if ubatch_id is None:
+            return self.metadata_builders[0]
+        assert len(self.metadata_builders) > ubatch_id
+        return self.metadata_builders[ubatch_id]
 
 
 def sanity_check_mm_encoder_outputs(
