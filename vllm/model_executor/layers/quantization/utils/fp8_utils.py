@@ -185,23 +185,6 @@ direct_register_custom_op(
 )
 
 
-def dispatch_w8a8_blockscale_func(
-    use_cutlass: bool, use_aiter_and_is_supported: bool
-) -> Callable[[
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        list[int],
-        torch.dtype,
-], torch.Tensor]:
-    if use_cutlass:
-        return cutlass_scaled_mm
-    if (use_aiter_and_is_supported):
-        return torch.ops.vllm.rocm_aiter_gemm_w8a8_blockscale
-    return w8a8_block_fp8_matmul
-
-
 # TODO fix ROCm->Triton custom path:
 #  https://github.com/vllm-project/vllm/issues/14397
 class W8A8BlockFp8LinearOp:
