@@ -196,11 +196,6 @@ class TokenformerSurgeon(ABC):
         if not self._is_mlp_layer(name):
             return
 
-        # Check if layer is already wrapped to avoid double-wrapping
-        if isinstance(layer, TokenformerMLPAdapter):
-            logger.debug(f"Layer {name} is already wrapped with TokenformerMLPAdapter, skipping")
-            return
-
         logger.info(f"Wrapping layer {name} with TokenformerMLPAdaptor")
 
         if hasattr(self.model, "config"):

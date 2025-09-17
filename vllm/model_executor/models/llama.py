@@ -90,21 +90,7 @@ class LlamaMLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
-        try:
-            x, _ = self.gate_up_proj(x)
-        except (KeyError, AttributeError, RuntimeError) as e:
-            print(f"DEBUG: Error in LlamaMLP.forward: {type(e).__name__}: {e}")
-            print(f"DEBUG: Available attributes: {list(self.__dict__.keys())}")
-            print(f"DEBUG: gate_up_proj exists: {hasattr(self, 'gate_up_proj')}")
-            if hasattr(self, 'gate_up_proj'):
-                print(f"DEBUG: gate_up_proj type: {type(self.gate_up_proj)}")
-                # Try to access parameters to see what's failing
-                try:
-                    params = list(self.gate_up_proj.named_parameters())
-                    print(f"DEBUG: gate_up_proj parameters: {[p[0] for p in params]}")
-                except Exception as param_e:
-                    print(f"DEBUG: Error accessing gate_up_proj parameters: {param_e}")
-            raise
+        x, _ = self.gate_up_proj(x)
         x = self.act_fn(x)
         x, _ = self.down_proj(x)
         return x
