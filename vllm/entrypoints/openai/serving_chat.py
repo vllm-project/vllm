@@ -418,7 +418,7 @@ class OpenAIServingChat(OpenAIServing):
                 if not function_name_returned:
                     # get partly generated arguments from the latest tool call
                     param_match = re.search(r'.*"parameters":\s*(.*)',
-                                            current_text)
+                                            current_text, re.DOTALL)
                     arguments = param_match.group(1) if param_match else ""
                     arguments, _ = OpenAIServingChat._filter_delta_text(
                         arguments, previous_text)
