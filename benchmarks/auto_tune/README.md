@@ -170,7 +170,7 @@ The `batch_auto_tune.sh` script allows you to run multiple `auto_tune.sh` experi
     ```
 
     - `<path_to_json_file>`: **Required.** Path to your JSON configuration file.
-    - `[gcs_upload_path]`: **Optional.** A GCS path (e.g., `gs://my-bucket/benchmark-results`) where the detailed results and profiles for each run will be uploaded.
+    - `[gcs_upload_path]`: **Optional.** A GCS path (e.g., `gs://my-bucket/benchmark-results`) where the detailed results and profiles for each run will be uploaded. If this is empty, the results will be available on the local filesystem (see the log for `RESULT_FILE=/path/to/results/file.txt`).
 
 ### Configuration File
 
