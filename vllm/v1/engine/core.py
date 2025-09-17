@@ -194,18 +194,18 @@ class EngineCore:
 
         assert len(kv_cache_specs) == len(available_gpu_memory)
 
-        kv_cache_configs = get_kv_cache_configs(vllm_config, kv_cache_specs,
-                                                available_gpu_memory)
+        scheduler_kv_cache_config, kv_cache_configs = get_kv_cache_configs(
+            vllm_config, kv_cache_specs, available_gpu_memory)
+        print("kv_cache_configs", kv_cache_configs[0])
 
-        # All workers have the same kv_cache_config except layer names, so use
-        # an arbitrary one to initialize the scheduler.
         assert all([
             cfg.num_blocks == kv_cache_configs[0].num_blocks
             for cfg in kv_cache_configs
         ])
-        num_gpu_blocks = kv_cache_configs[0].num_blocks
+        assert scheduler_kv_cache_config.num_blocks == kv_cache_configs[
+            0].num_blocks
+        num_gpu_blocks = scheduler_kv_cache_config.num_blocks
         num_cpu_blocks = 0
-        scheduler_kv_cache_config = kv_cache_configs[0]
 
         # Initialize kv cache and warmup the execution
         self.model_executor.initialize_from_config(kv_cache_configs)
