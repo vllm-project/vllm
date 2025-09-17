@@ -39,8 +39,6 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /vllm/v1/kv_cache_interface.py @heheda12345
 /vllm/v1/offloading @ApostaC
 
-
-
 # Test ownership
 /.buildkite/lm-eval-harness @mgoin @simon-mo
 /tests/async_engine @njhill @robertgshaw2-redhat @simon-mo
@@ -64,7 +62,6 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /tests/v1/kv_connector/nixl_integration @NickLucche 
 /tests/v1/kv_connector @ApostaC
 /tests/v1/offloading @ApostaC
-
 
 # Docs
 /docs @hmellor
