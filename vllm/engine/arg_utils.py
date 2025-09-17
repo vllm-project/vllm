@@ -27,12 +27,15 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          DistributedExecutorBackend, EPLBConfig,
                          GuidedDecodingBackend, HfOverrides, KVEventsConfig,
                          KVTransferConfig, LoadConfig, LogprobsMode,
-                         LoRAConfig, MambaDType, MMCacheType, MMEncoderTPMode,
-                         ModelConfig, ModelDType, ModelImpl, MultiModalConfig,
-                         ObservabilityConfig, ParallelConfig, PoolerConfig,
-                         PrefixCachingHashAlgo, RunnerOption, SchedulerConfig,
-                         SchedulerPolicy, SpeculativeConfig, TaskOption,
-                         TokenizerMode, VllmConfig, get_attr_docs, get_field)
+                         LoRAConfig, MambaDType, MMEncoderTPMode, ModelConfig,
+                         ModelDType, ModelImpl, ObservabilityConfig,
+                         ParallelConfig, PoolerConfig, PrefixCachingHashAlgo,
+                         RunnerOption, SchedulerConfig, SchedulerPolicy,
+                         SpeculativeConfig, TaskOption, TokenizerMode,
+                         VllmConfig, get_attr_docs)
+from vllm.config.multimodal import MMCacheType, MultiModalConfig
+from vllm.config.parallel import ExpertPlacementStrategy
+from vllm.config.utils import get_field
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
@@ -324,8 +327,13 @@ class EngineArgs:
     data_parallel_hybrid_lb: bool = False
     data_parallel_backend: str = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
+    enable_dbo: bool = ParallelConfig.enable_dbo
+    dbo_decode_token_threshold: int = \
+        ParallelConfig.dbo_decode_token_threshold
     eplb_config: EPLBConfig = get_field(ParallelConfig, "eplb_config")
     enable_eplb: bool = ParallelConfig.enable_eplb
+    expert_placement_strategy: ExpertPlacementStrategy = \
+        ParallelConfig.expert_placement_strategy
     num_redundant_experts: int = EPLBConfig.num_redundant_experts
     eplb_window_size: int = EPLBConfig.window_size
     eplb_step_interval: int = EPLBConfig.step_interval
@@ -690,10 +698,18 @@ class EngineArgs:
         parallel_group.add_argument(
             "--enable-expert-parallel",
             **parallel_kwargs["enable_expert_parallel"])
+        parallel_group.add_argument("--enable-dbo",
+                                    **parallel_kwargs["enable_dbo"])
+        parallel_group.add_argument(
+            "--dbo-decode-token-threshold",
+            **parallel_kwargs["dbo_decode_token_threshold"])
         parallel_group.add_argument("--enable-eplb",
                                     **parallel_kwargs["enable_eplb"])
         parallel_group.add_argument("--eplb-config",
                                     **parallel_kwargs["eplb_config"])
+        parallel_group.add_argument(
+            "--expert-placement-strategy",
+            **parallel_kwargs["expert_placement_strategy"])
         parallel_group.add_argument(
             "--num-redundant-experts",
             type=int,
@@ -1296,11 +1312,8 @@ class EngineArgs:
             # Async scheduling does not work with the uniprocess backend.
             if self.distributed_executor_backend is None:
                 self.distributed_executor_backend = "mp"
-                logger.info("Using mp-based distributed executor backend "
-                            "for async scheduling.")
-            if self.distributed_executor_backend == "uni":
-                raise ValueError("Async scheduling is not supported with "
-                                 "uni-process backend.")
+                logger.info("Defaulting to mp-based distributed executor "
+                            "backend for async scheduling.")
             if self.pipeline_parallel_size > 1:
                 raise ValueError("Async scheduling is not supported with "
                                  "pipeline-parallel-size > 1.")
@@ -1334,8 +1347,11 @@ class EngineArgs:
             data_parallel_backend=self.data_parallel_backend,
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
             enable_expert_parallel=self.enable_expert_parallel,
+            enable_dbo=self.enable_dbo,
+            dbo_decode_token_threshold=self.dbo_decode_token_threshold,
             enable_eplb=self.enable_eplb,
             eplb_config=self.eplb_config,
+            expert_placement_strategy=self.expert_placement_strategy,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
             ray_workers_use_nsight=self.ray_workers_use_nsight,
