@@ -528,7 +528,7 @@ class OpenAIServingChat(OpenAIServing):
         try:
             if self.reasoning_parser:
                 reasoning_parser = self.reasoning_parser(tokenizer, 
-                                                         **(request.chat_template_kwargs or {}))
+                    **(request.chat_template_kwargs or {}))
         except RuntimeError as e:
             logger.exception("Error in reasoning parser creation.")
             data = self.create_streaming_error_response(str(e))
@@ -1232,7 +1232,7 @@ class OpenAIServingChat(OpenAIServing):
             if self.reasoning_parser:
                 try:
                     reasoning_parser = self.reasoning_parser(tokenizer, 
-                                                             **(request.chat_template_kwargs or {}))
+                        **(request.chat_template_kwargs or {}))
                 except RuntimeError as e:
                     logger.exception("Error in reasoning parser creation.")
                     return self.create_error_response(str(e))
