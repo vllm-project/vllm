@@ -50,3 +50,5 @@ cbor2 # Required for cross-language serialization of hashable objects
 setproctitle # Used to set process names for better debugging and monitoring
 openai-harmony >= 0.0.3  # Required for gpt-oss
 model-signing >= 1.0.1
+betterproto == 2.0.0b6  # Explicitly enumerate the pre-release module so it gets installed
+sigstore == 3.6.2
