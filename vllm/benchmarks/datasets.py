@@ -414,7 +414,7 @@ def gen_prompt_decode_to_target_len(
                 tokenizer.vocab_size,
                 size=target_token_len - len(token_sequence),
             ).tolist()
-            token_sequence = token_sequence + extra_tokens
+            token_sequence.extend(extra_tokens)
         elif len(token_sequence) > target_token_len:
             token_sequence = token_sequence[:target_token_len]
 
