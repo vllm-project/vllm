@@ -217,7 +217,7 @@ static inline void run_fp4_blockwise_scaled_group_mm_sm120(
 
   struct MMA1SMConfig {
     using MmaTileShape = Shape<_128, _128, _128>;
-    using KernelSchedule = cutlass::gemm::KernelScheduleAuto;
+    using KernelSchedule = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong;
     using EpilogueSchedule = cutlass::epilogue::collective::EpilogueScheduleAuto;
   };
 
