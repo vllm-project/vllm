@@ -43,33 +43,33 @@ class MultiKVConnectorStats(KVConnectorStats):
     """
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
-        for connector_id, xfer_stats in other.data.items():
+        for connector_id, stats in other.data.items():
             if connector_id not in self.data:
-                self[connector_id] = xfer_stats
+                self[connector_id] = stats
             else:
-                assert isinstance(xfer_stats, type(self.data[connector_id]))
-                self[connector_id] = self[connector_id].aggregate(xfer_stats)
+                assert isinstance(stats, type(self.data[connector_id]))
+                self[connector_id] = self[connector_id].aggregate(stats)
         return self
 
     def reset(self):
-        for xfer_stats in self.data.values():
-            xfer_stats.reset()
+        for stats in self.data.values():
+            stats.reset()
 
     def reduce(self) -> dict[str, Any]:
         # TODO (NickLucche) Adjust for logging on separate lines
         return {
-            connector_id: xfer_stats.reduce()
-            for connector_id, xfer_stats in self.data.items()
+            connector_id: stats.reduce()
+            for connector_id, stats in self.data.items()
         }
 
     def is_empty(self) -> bool:
-        return all(xfer_stats.is_empty() for xfer_stats in self.data.values())
+        return all(stats.is_empty() for stats in self.data.values())
 
     def __getitem__(self, connector_id: str) -> KVConnectorStats:
         return self.data[connector_id]
 
-    def __setitem__(self, connector_id: str, xfer_stats: KVConnectorStats):
-        self.data[connector_id] = xfer_stats
+    def __setitem__(self, connector_id: str, stats: KVConnectorStats):
+        self.data[connector_id] = stats
 
 
 class MultiConnector(KVConnectorBase_V1):
@@ -315,14 +315,14 @@ class MultiConnector(KVConnectorBase_V1):
             else MultiKVConnectorStats()
 
     def get_kv_connector_stats(self) -> Optional[MultiKVConnectorStats]:
-        # Group xfer stats by connector type.
-        xfer_stats_by_connector: Optional[MultiKVConnectorStats] = None
+        # Group connector stats by connector type.
+        stats_by_connector: Optional[MultiKVConnectorStats] = None
         for c in self._connectors:
-            xfer_stats = c.get_kv_connector_stats()
-            if xfer_stats is None:
+            stats = c.get_kv_connector_stats()
+            if stats is None:
                 continue
-            if xfer_stats_by_connector is None:
+            if stats_by_connector is None:
                 # Lazy init to allow optional return value.
-                xfer_stats_by_connector = MultiKVConnectorStats()
-            xfer_stats_by_connector[c.__class__.__name__] = xfer_stats
-        return xfer_stats_by_connector
+                stats_by_connector = MultiKVConnectorStats()
+            stats_by_connector[c.__class__.__name__] = stats
+        return stats_by_connector

@@ -47,7 +47,7 @@ class KVConnectorStats:
         raise NotImplementedError
 
 
-class KVTransferLogging:
+class KVConnectorLogging:
 
     def __init__(self, kv_tranfer_config: KVTransferConfig):
         # This should be called on frontend process.
