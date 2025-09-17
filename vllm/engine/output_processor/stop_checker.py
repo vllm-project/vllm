@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, cast
 
 from vllm.lora.request import LoRARequest
 from vllm.reasoning import ReasoningParser
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import Sequence, SequenceStatus
+from vllm.utils import find_subarray_kmp
 
 
 class StopChecker:
@@ -78,16 +79,36 @@ class StopChecker:
             return
 
         # Check if any stop strings are matched.
-        stop = self.check_stop_strings(
-            seq.output_text, new_char_count, sampling_params.stop,
-            sampling_params.include_stop_str_in_output)
-        if stop is not None:
-            stop_str, truncate_to = stop
-            if truncate_to != -1:
-                seq.output_text = seq.output_text[:truncate_to]
-            seq.status = SequenceStatus.FINISHED_STOPPED
-            seq.stop_reason = stop_str
-            return
+        stop_criteria = sampling_params.stop
+        assert isinstance(stop_criteria, list)
+        if stop_criteria:
+            if isinstance(stop_criteria[0], str):
+                stop_criteria = cast(list[str], stop_criteria)
+                stop = self.check_stop_strings(
+                    seq.output_text, new_char_count, stop_criteria,
+                    sampling_params.include_stop_str_in_output)
+                if stop is not None:
+                    stop_str, truncate_to = stop
+                    if truncate_to != -1:
+                        seq.output_text = seq.output_text[:truncate_to]
+                    seq.status = SequenceStatus.FINISHED_STOPPED
+                    seq.stop_reason = stop_str
+                    return
+            else:
+                assert isinstance(stop_criteria[0], list)
+                stop_criteria = cast(list[list[int]], stop_criteria)
+                for stop_token_ids in stop_criteria:
+                    match_idx =\
+                        find_subarray_kmp(stop_token_ids,
+                            list(seq.data.output_token_ids))
+                    if match_idx != -1:
+                        if not sampling_params.include_stop_str_in_output:
+                            # found stop token ids, truncate output
+                            seq.data.output_token_ids =\
+                                seq.data.output_token_ids[:match_idx]
+                        seq.status = SequenceStatus.FINISHED_STOPPED
+                        seq.stop_reason = str(stop_token_ids)
+                        return
 
         # Check if the sequence has reached max_model_len.
         if seq.get_len() >= self._get_max_model_len(lora_req):

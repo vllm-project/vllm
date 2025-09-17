@@ -13,6 +13,7 @@ from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
 from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
+from vllm.utils import find_subarray_kmp
 from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)
@@ -26,54 +27,6 @@ USE_FAST_DETOKENIZER = version.parse(
 INVALID_PREFIX_ERR_MSG = "Invalid prefix encountered"
 
 
-def build_lps(pattern: list[int]) -> list[int]:
-    lps = [0] * len(pattern)
-    # length of the previous longest prefix suffix
-    prev_lps = 0
-    i = 1
-    while i < len(pattern):
-        if pattern[i] == pattern[prev_lps]:
-            prev_lps += 1
-            lps[i] = prev_lps
-            i += 1
-        else:
-            if prev_lps != 0:
-                prev_lps = lps[prev_lps - 1]
-            else:
-                lps[i] = 0
-                i += 1
-    return lps
-
-
-def find_subarray_kmp(pattern: list[int], token_ids: list[int]):
-    """
-    Knuth-Morris-Pratt algorithm for searching for a sublist
-    within a list of token ids.
-
-    Returns the index of the first occurrence of the pattern
-    or -1 if the pattern is not found.
-    """
-    lps = build_lps(pattern)
-    i = j = 0
-    while i < len(token_ids):
-        if token_ids[i] == pattern[j]:
-            i += 1
-            j += 1
-            if j == len(pattern):
-                # pattern matched, return
-                # start of the pattern
-                return i - j
-        else:
-            # mismatch
-            if j != 0:
-                # use lps to avoid re-checking
-                j = lps[j - 1]
-            else:
-                i += 1
-    # no match found
-    return -1
-
-
 class IncrementalDetokenizer:
 
     def __init__(self, request: EngineCoreRequest):
@@ -81,6 +34,7 @@ class IncrementalDetokenizer:
         params = request.sampling_params
         assert params is not None
         self.stop = params.stop
+        self.include_stop_str_in_output = params.include_stop_str_in_output
 
     @property
     def output_token_ids(self) -> list[int]:
@@ -96,9 +50,9 @@ class IncrementalDetokenizer:
                     find_subarray_kmp(stop_token_ids,
                         self.output_token_ids)
                 if match_idx != -1:
-                    # found stop token ids, truncate output
-                    # to not contain the pattern
-                    self.token_ids = self.token_ids[:match_idx]
+                    if not self.include_stop_str_in_output:
+                        # found stop token ids, truncate output
+                        self.token_ids = self.token_ids[:match_idx]
                     return str(stop_token_ids)
 
         return None
@@ -137,7 +91,6 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         params = request.sampling_params
         assert params is not None
         self.min_tokens = params.min_tokens
-        self.include_stop_str_in_output = params.include_stop_str_in_output
 
         # Number of chars to hold back when stop strings are to be excluded
         # from streamed output.
