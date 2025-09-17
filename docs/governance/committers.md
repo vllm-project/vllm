@@ -22,6 +22,7 @@ Sorted alphabetically by GitHub handle:
 - [@22quinn](https://github.com/22quinn): RL API
 - [@aarnphm](https://github.com/aarnphm): Structured output
 - [@alexm-redhat](https://github.com/alexm-redhat): Performance
+- [@ApostaC](https://github.com/ApostaC): Connectors, offloading
 - [@benchislett](https://github.com/benchislett): Engine core and spec decode
 - [@bigPYJ1151](https://github.com/bigPYJ1151): Intel CPU/XPU integration
 - [@chaunceyjiang](https://github.com/chaunceyjiang): Tool use and reasoning parser
@@ -50,6 +51,7 @@ Sorted alphabetically by GitHub handle:
 - [@tlrmchlsmth](https://github.com/tlrmchlsmth): Kernels and performance
 - [@yaochengji](https://github.com/yaochengji): TPU integration
 - [@yewentao256](https://github.com/yewentao256): Kernels and performance
+- [@yeqcharlotte](https://github.com/yeqcharlotte): Benchmark, Llama models
 - [@Yikun](https://github.com/Yikun): Pluggable hardware interface
 - [@ywang96](https://github.com/ywang96): Multimodality, benchmarks
 - [@zou3519](https://github.com/zou3519): Compilation
@@ -85,7 +87,7 @@ If you have PRs touching the area, please ping the area owner for review.
 - ModelRunner, Executor, Worker: the abstractions for engine wrapping model implementation
     - @WoosukKwon, @tlrmchlsmth, @heheda12345, @LucasWilkinson
 - KV Connector: Connector interface and implementation for KV cache offload and transfer
-    - @robertgshaw2-redhat, @njhill, @KuntaiDu, @NickLucche
+    - @robertgshaw2-redhat, @njhill, @KuntaiDu, @NickLucche, @ApostaC
 - Distributed, Parallelism, Process Management: Process launchers managing each worker, and assign them to the right DP/TP/PP/EP ranks
     - @youkaichao, @njhill, @WoosukKwon, @ruisearch42
 - Collectives: the usage of nccl and other communication libraries/kernels
