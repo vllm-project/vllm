@@ -486,7 +486,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         for (int n = 0; n < N; n++) {
           for (int i = 0; i < YTILE; i++) {
             scalar_t out = __float2s<scalar_t>(sum[n][i]);
-            C[m + i + n * M] = BIAS ? out + BIAS[(m + i) % Bx] : out;
+            C[m + i + n * M] =
+                BIAS ? out + BIAS[(m + i) % Bx + (n % By) * M] : out;
           }
         }
       }
@@ -531,7 +532,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         for (int n = 0; n < N; n++) {
           for (int i = 0; i < YTILE; i++) {
             scalar_t out = __float2bfloat16(sum4[n][i][0]);
-            C[m + i + n * M] = BIAS ? out + BIAS[(m + i) % Bx] : out;
+            C[m + i + n * M] =
+                BIAS ? out + BIAS[(m + i) % Bx + (n % By) * M] : out;
           }
         }
       }
@@ -778,7 +780,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           for (int i = 0; i < YTILE; i++) {
             if (commitColumn[i]) {
               scalar_t out = __float2s<scalar_t>(sum[n][i]);
-              C[m + i + n * M] = BIAS ? out + BIAS[(m + i) % Bx] : out;
+              C[m + i + n * M] =
+                  BIAS ? out + BIAS[(m + i) % Bx + (n % By) * M] : out;
             }
           }
         }
@@ -826,7 +829,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           for (int i = 0; i < YTILE; i++) {
             if (commitColumn[i]) {
               scalar_t out = __float2bfloat16(sum4[n][i][0]);
-              C[m + i + n * M] = BIAS ? out + BIAS[(m + i) % Bx] : out;
+              C[m + i + n * M] =
+                  BIAS ? out + BIAS[(m + i) % Bx + (n % By) * M] : out;
             }
           }
         }
@@ -1137,7 +1141,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           for (int i = 0; i < YTILE; i++) {
             if (commitColumn[i]) {
               scalar_t out = __float2s<scalar_t>(sum[n][i]);
-              C[m + i + n * M] = BIAS ? out + BIAS[(m + i) % Bx] : out;
+              C[m + i + n * M] =
+                  BIAS ? out + BIAS[(m + i) % Bx + (n % By) * M] : out;
             }
           }
         }
@@ -1181,7 +1186,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           for (int i = 0; i < YTILE; i++) {
             if (commitColumn[i]) {
               scalar_t out = __float2bfloat16(sum4[n][i][0]);
-              C[m + i + n * M] = BIAS ? out + BIAS[(m + i) % Bx] : out;
+              C[m + i + n * M] =
+                  BIAS ? out + BIAS[(m + i) % Bx + (n % By) * M] : out;
             }
           }
         }
@@ -1250,8 +1256,13 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
   auto K_in = in_a.size(1);
   auto N_in = in_b.size(0);
   auto Bx_in =
-      (in_bias.has_value() && in_bias->numel() > 0) ? in_bias->size(0) : 0;
-  auto By_in = 1;
+      (in_bias.has_value() && in_bias->numel() > 0)
+          ? (in_bias->sizes().size() == 2) ? in_bias->size(1) : in_bias->size(0)
+          : 1;
+  auto By_in = (in_bias.has_value() && in_bias->numel() > 0 &&
+                in_bias->sizes().size() == 2)
+                   ? in_bias->size(0)
+                   : 1;
 
   TORCH_CHECK(in_a.dtype() == in_b.dtype());
   TORCH_CHECK(K_in % 8 == 0, "k % 8 == 0");
@@ -1693,8 +1704,13 @@ void wvSplitKQ(const at::Tensor& in_a, const at::Tensor& in_b,
   auto N_in = in_b.size(0);
   auto Kp_in = in_a.stride(0);
   auto Bx_in =
-      (in_bias.has_value() && in_bias->numel() > 0) ? in_bias->size(0) : 0;
-  auto By_in = 1;
+      (in_bias.has_value() && in_bias->numel() > 0)
+          ? (in_bias->sizes().size() == 2) ? in_bias->size(1) : in_bias->size(0)
+          : 1;
+  auto By_in = (in_bias.has_value() && in_bias->numel() > 0 &&
+                in_bias->sizes().size() == 2)
+                   ? in_bias->size(0)
+                   : 1;
 
   TORCH_CHECK(K_in % 16 == 0, "k % 16 == 0");
   TORCH_CHECK(in_a.dtype() == in_b.dtype() && in_a.dtype() == kFp8Type);
