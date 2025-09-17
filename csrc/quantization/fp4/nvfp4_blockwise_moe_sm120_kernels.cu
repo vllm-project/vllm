@@ -216,18 +216,16 @@ static inline void run_fp4_blockwise_scaled_group_mm_sm120(
 
   struct MMA1SMConfig {
     using MmaTileShape = Shape<_128, _128, _128>;
-    using KernelSchedule =
-        cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpongBlockScaledSm120;
-    using EpilogueSchedule =
-        cutlass::epilogue::collective::EpilogueScheduleAuto;
+    using KernelSchedule = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong;
+    using EpilogueSchedule = cutlass::epilogue::collective::EpilogueScheduleAuto;
   };
 
   using CollectiveEpilogue =
       typename cutlass::epilogue::collective::CollectiveBuilder<
           ArchTag, EpilogueOperatorClass, typename MMA1SMConfig::MmaTileShape,
-          ClusterShape, Shape<_128, _64>, ElementAccumulator,
-          ElementAccumulator, ElementC, LayoutC*, AlignmentC, ElementD,
-          LayoutD, AlignmentD,
+          ClusterShape, cutlass::epilogue::collective::EpilogueTileAuto,
+          ElementAccumulator, ElementAccumulator, ElementC, LayoutC*, AlignmentC,
+          ElementD, LayoutD, AlignmentD,
           typename MMA1SMConfig::EpilogueSchedule>::CollectiveOp;
 
   using CollectiveMainloop =
@@ -300,7 +298,7 @@ static inline void run_fp4_blockwise_scaled_group_mm_sm120(
         cutlass::KernelHardwareInfo::query_device_multiprocessor_count(
             hw_info.device_id);
   }
-  hw_info.sm_count = min(cached_sm_counts[hw_info.device_id], INT_MAX);
+  hw_info.sm_count = std::min(cached_sm_counts[hw_info.device_id], INT_MAX);
 
   typename GemmKernel::MainloopArguments mainloop_args{
       static_cast<const ElementType**>(a_ptrs.data_ptr()),
