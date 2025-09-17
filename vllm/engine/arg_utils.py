@@ -576,6 +576,8 @@ class EngineArgs:
                                  **model_kwargs["hf_overrides"])
         model_group.add_argument("--override-pooler-config",
                                  **model_kwargs["override_pooler_config"])
+        model_group.add_argument("--override-multi-cascade-config",
+                                 **model_kwargs["override_multi_cascade_config"])
         model_group.add_argument("--logits-processor-pattern",
                                  **model_kwargs["logits_processor_pattern"])
         model_group.add_argument("--generation-config",

@@ -2661,16 +2661,18 @@ class PoolerConfig:
                                usedforsecurity=False).hexdigest()
         return hash_str
 
+
 @config
-class KVAlignedGroupingConfig(str, enum.Enum):
+@dataclass
+class KVAlignedGroupingConfig:
     """Methods for grouping requests for multi-cascade
     attention."""
 
-    LEAF_PASS = "leaf_pass"
+    LEAF_PASS: str = "leaf_pass"
     """Only group requests if their latest KVCacheBlock 
     is the same."""
 
-    FULL_PASS = "full_pass"
+    FULL_PASS: str = "full_pass"
     """Group requests even if they share a partially 
     common prefix. Takes longer than leaf_pass but results
     in larger groups."""
