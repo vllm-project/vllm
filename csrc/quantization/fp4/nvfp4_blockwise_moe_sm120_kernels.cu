@@ -243,6 +243,9 @@ static inline void run_fp4_blockwise_scaled_group_mm_sm120(
               sizeof(typename CollectiveEpilogue::SharedStorage))>,
           typename MMA1SMConfig::KernelSchedule>::CollectiveOp;
 
+  using PtrElemA = typename CollectiveMainloop::ElementA;
+  using PtrElemB = typename CollectiveMainloop::ElementB;
+
   using GemmKernel =
       cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloop,
                                            CollectiveEpilogue>;
@@ -342,9 +345,9 @@ static inline void run_fp4_blockwise_scaled_group_mm_sm120(
   hw_info.sm_count = std::min(cached_sm_counts[hw_info.device_id], INT_MAX);
 
   typename GemmKernel::MainloopArguments mainloop_args{
-      reinterpret_cast<const ElementA**>(a_ptrs.data_ptr()),
+      reinterpret_cast<const PtrElemA**>(a_ptrs.data_ptr()),
       reinterpret_cast<StrideAParam>(a_strides_buf.data_ptr()),
-      reinterpret_cast<const ElementB**>(b_ptrs.data_ptr()),
+      reinterpret_cast<const PtrElemB**>(b_ptrs.data_ptr()),
       reinterpret_cast<StrideBParam>(b_strides_buf.data_ptr()),
       reinterpret_cast<const ElementSFType**>(a_scales_ptrs.data_ptr()),
       reinterpret_cast<LayoutSFAArg>(layout_sfa.data_ptr()),
