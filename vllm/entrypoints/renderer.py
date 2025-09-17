@@ -383,7 +383,7 @@ class CompletionRenderer(BaseRenderer):
         """Create validated EngineTokensPrompt."""
         if max_length is not None and len(token_ids) > max_length:
             raise ValueError(
-                f"This maximum context length is {max_length} tokens. "
+                f"This model's maximum context length is {max_length} tokens. "
                 f"However, your request has {len(token_ids)} input tokens. "
                 "Please reduce the length of the input messages.")
 
