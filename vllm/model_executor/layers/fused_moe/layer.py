@@ -26,6 +26,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat, FusedMoEModularKernel,
     FusedMoEPermuteExpertsUnpermute, FusedMoEPrepareAndFinalize)
+from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     is_rocm_aiter_moe_enabled)
 from vllm.model_executor.layers.fused_moe.routing_simulator import (
@@ -264,12 +265,20 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
         self.has_bias = self.moe.has_bias
+        self.flashinfer_cutlass_moe_enabled = has_flashinfer_cutlass_fused_moe()
         self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
         if self.rocm_aiter_moe_enabled:
             from .rocm_aiter_fused_moe import rocm_aiter_fused_experts
             self.rocm_aiter_fused_experts = rocm_aiter_fused_experts
         else:
             self.rocm_aiter_fused_experts = None  # type: ignore
+        
+        if self.flashinfer_cutlass_moe_enabled:
+            logger.info_once("Enabling FlashInfer CUTLASS MoE for UnquantizedFusedMoEMethod")
+            from .flashinfer_cutlass_moe import flashinfer_cutlass_moe
+            self.flashinfer_cutlass_moe = flashinfer_cutlass_moe
+        else:
+            self.flashinfer_cutlass_moe = None  # type: ignore
 
     def select_gemm_impl(
         self,
@@ -335,6 +344,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             num_pad = 256 // weight.element_size()
             weight = F.pad(weight, (0, num_pad), "constant", 0)[..., :-num_pad]
             torch.cuda.empty_cache()
+
+        # Pad the weight for flashinfer cutlass moe
+        if self.flashinfer_cutlass_moe_enabled:
+            num_pad = 128 // weight.element_size()
+            weight = F.pad(weight, (0, num_pad), "constant", 0)[..., :-num_pad]
+            torch.cuda.empty_cache()
+
         return weight
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

@@ -22,7 +22,7 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def __init__(
         self,
         use_dp: bool,
-        a1_gscale: Optional[torch.Tensor],
+        a1_gscale: Optional[torch.Tensor] = None,
         num_dispatchers: int = 1,
     ):
         super().__init__()

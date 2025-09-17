@@ -44,16 +44,16 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(
         self,
-        g1_alphas: torch.Tensor,
-        g2_alphas: torch.Tensor,
-        a1_gscale: torch.Tensor,
-        a2_gscale: torch.Tensor,
         out_dtype: torch.dtype,
         quant_dtype: Union[torch.dtype, str, None],
         ep_rank: int = 0,
         ep_size: int = 1,
         tp_rank: int = 0,
         tp_size: int = 1,
+        g1_alphas: Optional[torch.Tensor] = None,
+        g2_alphas: Optional[torch.Tensor] = None,
+        a1_gscale: Optional[torch.Tensor] = None,
+        a2_gscale: Optional[torch.Tensor] = None,
     ):
         super().__init__(
             FusedMoEQuantConfig(
@@ -61,8 +61,8 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 per_act_token_quant=False,
                 block_shape=None,
             ))
-        assert quant_dtype in ("nvfp4", torch.float8_e4m3fn), (
-            "Only nvfp4,fp8 quantization are currently supported.")
+        assert quant_dtype in ("nvfp4", torch.float8_e4m3fn, None), (
+            "Only nvfp4, fp8, bfloat16 and float16 quantization are currently supported.")
         self.ep_rank = ep_rank
         self.ep_size = ep_size
         self.tp_rank = tp_rank
@@ -122,8 +122,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         """
         aq_m, aq_n = aq.shape
         workspace2 = ()
-        output_shape = (aq_m, aq_n * 2) if self.quant_dtype != \
-            torch.float8_e4m3fn else (aq_m, aq_n)
+        output_shape = (aq_m, aq_n * 2) if self.quant_dtype == "nvfp4" else (aq_m, aq_n)
         workspace_dtype = a.dtype
         workspace1 = output_shape
         # The workspace is determined by `aq`, since it comes after any
@@ -152,6 +151,9 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: Optional[bool],
     ):
+    
+
+
         if self.quant_dtype == torch.float8_e4m3fn:
             quant_scales = [
                 self.g1_alphas, self.a2_gscale, self.g2_alphas, self.a1_gscale
@@ -160,7 +162,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             a1q_scale = None  # not passing input_sf in fp8
             fc1_expert_weights = w1
             fc2_expert_weights = w2
-        else:
+        elif self.quant_dtype == "nvfp4":
             # Ensure w1_scale and w2_scale are not None before calling view
             assert w1_scale is not None and w2_scale is not None, (
                 "w1_scale and w2_scale must not "
@@ -178,6 +180,12 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             # FlashInfer API requires weight to be long for nvfp4
             fc1_expert_weights = w1.view(torch.long)
             fc2_expert_weights = w2.view(torch.long)
+        else:
+            logger.info("DMOSS::: FlashInferExperts apply quant_dtype == None")
+            quant_scales = None
+            a1q_scale = None
+            fc1_expert_weights = w1
+            fc2_expert_weights = w2
 
         _ = flashinfer_cutlass_fused_moe(
             input=hidden_states,
@@ -239,5 +247,38 @@ def flashinfer_cutlass_moe_fp4(
         expert_map=expert_map,
         w1_scale=w1_scale,
         w2_scale=w2_scale,
+        apply_router_weight_on_input=apply_router_weight_on_input,
+    )
+
+
+def flashinfer_cutlass_moe(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    inplace: bool = False,
+    activation: str = "silu",
+    global_num_experts: int = -1,
+    expert_map: Optional[torch.Tensor] = None,
+    apply_router_weight_on_input: bool = False,
+) -> torch.Tensor:
+    fused_experts = mk.FusedMoEModularKernel(
+        FlashInferCutlassMoEPrepareAndFinalize(use_dp=False),
+        FlashInferExperts(
+            out_dtype=hidden_states.dtype,
+            quant_dtype=None,
+        ))
+
+    return fused_experts(
+        hidden_states=hidden_states,
+        w1=w1,
+        w2=w2,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        inplace=inplace,
+        activation=activation,
+        global_num_experts=global_num_experts,
+        expert_map=expert_map,
         apply_router_weight_on_input=apply_router_weight_on_input,
     )
