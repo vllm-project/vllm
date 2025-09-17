@@ -375,7 +375,9 @@ class OPTForCausalLM(nn.Module, SupportsPP):
             self.lm_head = self.model.decoder.embed_tokens
         else:
             self.lm_head = ParallelLMHead(config.vocab_size,
-                                          config.word_embed_proj_dim)
+                                          config.word_embed_proj_dim,
+                                          prefix=maybe_prefix(
+                                              prefix, "lm_head"))
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)

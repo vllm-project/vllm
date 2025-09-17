@@ -539,6 +539,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
             config.text_config.hidden_size,
             org_num_embeddings=self.language_model.org_vocab_size,
             quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "lm_head"),
         )
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,

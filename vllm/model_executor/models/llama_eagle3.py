@@ -220,7 +220,7 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             self.config.hidden_size,
             org_num_embeddings=self.config.draft_vocab_size,
             padding_size=(DEFAULT_VOCAB_PADDING_SIZE),
-            prefix="")
+            prefix=maybe_prefix(prefix, "lm_head"))
         self.logits_processor = LogitsProcessor(self.config.draft_vocab_size,
                                                 scale=logit_scale)
         self.draft_id_to_target_id = nn.Parameter(

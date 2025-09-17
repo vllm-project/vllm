@@ -199,7 +199,8 @@ class EagleDeepseekV3ForCausalLM(DeepseekV3ForCausalLM):
 
         self.lm_head = ParallelLMHead(self.config.vocab_size,
                                       self.config.hidden_size,
-                                      quant_config=quant_config)
+                                      quant_config=quant_config,
+                                      prefix=maybe_prefix(prefix, "lm_head"))
 
         logit_scale = getattr(self.config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.config.vocab_size,

@@ -960,6 +960,7 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.lm_head = ParallelLMHead(
             self.unpadded_vocab_size,
             config.hidden_size,
+            prefix=maybe_prefix(prefix, "lm_head"),
         )
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
