@@ -837,7 +837,7 @@ class ModelConfig:
             return
 
         if is_runai_obj_uri(model):
-            object_storage_model = ObjectStorageModel()
+            object_storage_model = ObjectStorageModel(model)
             object_storage_model.pull_files(
                 model, allow_pattern=["*.model", "*.py", "*.json"])
             self.model_weights = model
@@ -856,7 +856,7 @@ class ModelConfig:
 
         # Only download tokenizer if needed and not already handled
         if is_runai_obj_uri(tokenizer):
-            object_storage_tokenizer = ObjectStorageModel()
+            object_storage_tokenizer = ObjectStorageModel(tokenizer)
             object_storage_tokenizer.pull_files(model,
                                                 ignore_pattern=[
                                                     "*.pt", "*.safetensors",
