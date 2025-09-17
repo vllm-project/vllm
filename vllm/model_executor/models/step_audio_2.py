@@ -192,6 +192,7 @@ class StepAudio2ProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"audio": None}
 
+
     def get_hf_processor(self, **kwargs):
         """Get the HuggingFace processor for Step-Audio2."""
         from vllm.transformers_utils.processors.step_audio2 import StepAudio2Processor
@@ -204,6 +205,109 @@ class StepAudio2ProcessingInfo(BaseProcessingInfo):
             config=config,
             **kwargs
         )
+
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        """Calculate maximum tokens per audio item for profiling."""
+        processor = self.get_hf_processor()
+        # Maximum audio length: 29 seconds at 16kHz
+        max_audio_length = int(16000 * 29)
+        dummy_audio = np.zeros(max_audio_length, dtype=np.float32)
+        dummy_mels = processor.preprocess_audio(dummy_audio)
+        # Get the full replacement token sequence including start/end tokens
+        _, token_ids = processor._get_audio_repl(dummy_mels.shape[0])
+        return {"audio": len(token_ids)}
+
+    def get_num_mm_tokens(self, mm_data: MultiModalDataDict) -> int:
+        """Calculate actual token count for given audio data."""
+        if len(mm_data) != 1 or "audio" not in mm_data:
+            raise ValueError(
+                "mm_data must contain exactly one key 'audio' for Step-Audio2")
+
+        audio_data = mm_data["audio"]
+        if not isinstance(audio_data, (list, tuple)):
+            audio_data = [audio_data]
+
+        processor = self.get_hf_processor()
+        total_tokens = 0
+
+        for audio in audio_data:
+            # Handle different audio data formats
+            if isinstance(audio, tuple) and len(audio) == 2:
+                audio_array, sample_rate = audio
+                # Resample to 16kHz if needed
+                if sample_rate != 16000 and hasattr(audio_array, '__len__'):
+                    # Calculate resampled length
+                    resampled_length = int(len(audio_array) * 16000 / sample_rate)
+                    audio_array = np.zeros(resampled_length, dtype=np.float32)
+            else:
+                # Assume it's already a numpy array at 16kHz
+                audio_array = audio
+
+            # Process audio to mel-spectrogram
+            audio_mels = processor.preprocess_audio(audio_array)
+            # Get the full replacement token sequence
+            _, token_ids = processor._get_audio_repl(audio_mels.shape[0])
+            total_tokens += len(token_ids)
+
+        return total_tokens
+
+    def check_valid_mm(
+        self,
+        mm_data: MultiModalDataDict,
+        token_ids=None
+    ) -> bool:
+        """Validate audio data and check duration limits."""
+        if len(mm_data) != 1 or "audio" not in mm_data:
+            raise ValueError(
+                "mm_data must contain exactly one key 'audio' for Step-Audio2")
+
+        audio_data = mm_data["audio"]
+        if not isinstance(audio_data, (list, tuple)):
+            audio_data = [audio_data]
+
+        # Check each audio item for duration limits
+        for audio in audio_data:
+            if isinstance(audio, tuple) and len(audio) == 2:
+                audio_array, sample_rate = audio
+                if hasattr(audio_array, '__len__') and sample_rate > 0:
+                    duration = len(audio_array) / sample_rate
+                    if duration > 29.98:
+                        raise ValueError(
+                            f"Audio duration {duration:.2f}s exceeds maximum "
+                            f"allowed duration of 29.98s")
+            else:
+                # For raw arrays, assume 16kHz sample rate
+                if hasattr(audio, '__len__'):
+                    duration = len(audio) / 16000
+                    if duration > 29.98:
+                        raise ValueError(
+                            f"Audio duration {duration:.2f}s exceeds maximum "
+                            f"allowed duration of 29.98s")
+
+        # Validate token count consistency if token_ids are provided
+        if token_ids is not None:
+            tokenizer = self.get_tokenizer()
+            audio_token_id = tokenizer.get_vocab().get("<audio_patch>", AUDIO_PATCH_TOKEN_ID)
+
+            # Count audio placeholder tokens in token_ids
+            placeholder_token_count = sum(
+                1 for token_id in token_ids if token_id == audio_token_id
+            )
+
+            # Expected placeholder count should match audio items
+            expected_placeholder_count = len(audio_data)
+
+            if placeholder_token_count != expected_placeholder_count:
+                raise ValueError(
+                    f"Mismatch between multimodal placeholder tokens in prompt "
+                    f"({placeholder_token_count}) and mm_data count "
+                    f"({expected_placeholder_count})")
+
+        return True
 
 
 class StepAudio2DummyInputsBuilder(BaseDummyInputsBuilder[StepAudio2ProcessingInfo]):
