@@ -24,9 +24,9 @@ from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.transformers_utils.detokenizer_utils import (
     convert_ids_list_to_tokens)
 from vllm.utils import (CacheInfo, FlexibleArgumentParser, LRUCache,
-                        MemorySnapshot, PlaceholderModule, bind_kv_cache,
-                        build_lps, common_broadcastable_dtype, current_stream,
-                        deprecate_kwargs, find_subarray_kmp, get_open_port,
+                        MemorySnapshot, PlaceholderModule, StoreBoolean,
+                        bind_kv_cache, common_broadcastable_dtype,
+                        current_stream, deprecate_kwargs, get_open_port,
                         get_tcp_uri, is_lossless_cast, join_host_port,
                         make_zmq_path, make_zmq_socket, memory_profiling,
                         merge_async_iterators, sha256, split_host_port,
@@ -1032,29 +1032,3 @@ def test_load_config_file(tmp_path):
     # Assert that the processed arguments match the expected output
     assert processed_args == expected_args
     os.remove(str(config_file_path))
-
-
-def test_kmp_lps_array():
-    assert build_lps([]) == []
-    assert build_lps([1]) == [0]
-    assert build_lps([1, 1, 1]) == [0, 1, 2]
-    assert build_lps([1, 2, 3, 4]) == [0, 0, 0, 0]
-    assert build_lps([1, 2, 1, 2, 3]) == [0, 0, 1, 2, 0]
-
-
-def test_find_subarray_kmp():
-    X = [1, 2, 3, 4, 1, 2, 3, 5, 6]
-    assert find_subarray_kmp([4, 1, 2], X) == 3
-    assert find_subarray_kmp([4, 1], X) == 3
-    assert find_subarray_kmp([4, 1, 3], X) == -1
-    assert find_subarray_kmp([10], X) == -1
-    assert find_subarray_kmp([10, 4], X) == -1
-    assert find_subarray_kmp([1, 2, 3], X) == 0
-    assert find_subarray_kmp([1, 2, 3, 4, 1, 2, 3, 5, 6], X) == 0
-    assert find_subarray_kmp([3, 2, 1], X) == -1
-    assert find_subarray_kmp([1, 3, 5], X) == -1
-    assert find_subarray_kmp([5, 6], X) == 7
-    assert find_subarray_kmp([6], X) == 8
-    assert find_subarray_kmp([7], X) == -1
-    assert find_subarray_kmp([1, 2, 4, 6], X) == -1
-    assert find_subarray_kmp([2, 3, 5], X) == 5

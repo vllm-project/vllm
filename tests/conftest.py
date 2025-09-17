@@ -988,7 +988,7 @@ class VllmRunner:
         images: Optional[PromptImageInput] = None,
         audios: Optional[PromptAudioInput] = None,
         videos: Optional[PromptVideoInput] = None,
-        stop_token_ids: Optional[list[int]] = None,
+        stop_token_ids: Optional[list[Union[int, list[int]]]] = None,
         stop: Optional[list[str]] = None,
         **kwargs: Any,
     ) -> Union[list[TokensTextLogprobs],

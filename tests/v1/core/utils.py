@@ -124,7 +124,7 @@ def create_requests(
     num_tokens: int = 10,
     mm_positions: Optional[list[list[PlaceholderRange]]] = None,
     max_tokens: int = 16,
-    stop_token_ids: Optional[list[int]] = None,
+    stop_token_ids: Optional[list[Union[int, list[int]]]] = None,
     prompt_logprobs: Optional[int] = None,
     same_prompt: bool = False,
     block_size: int = 16,

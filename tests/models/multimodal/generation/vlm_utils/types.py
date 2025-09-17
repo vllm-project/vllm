@@ -114,7 +114,8 @@ class VLMTestInfo(NamedTuple):
     vllm_runner_kwargs: Optional[dict[str, Any]] = None
 
     # Optional callable which gets a list of token IDs from the model tokenizer
-    get_stop_token_ids: Optional[Callable[[AnyTokenizer], list[int]]] = None
+    get_stop_token_ids: Optional[Callable[[AnyTokenizer],
+                                          list[Union[int, list[int]]]]] = None
     # Optional list of strings to stop generation, useful when stop tokens are
     # not special tokens in the tokenizer
     stop_str: Optional[list[str]] = None

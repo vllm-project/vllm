@@ -14,8 +14,9 @@ MAX_TOKENS = 200
 def _test_stopping(llm: LLM,
                    expected_output: str,
                    expected_reason: Any,
-                   stop: Optional[list[Union[str, list[int]]]] = None,
-                   stop_token_ids: Optional[list[int]] = None,
+                   stop: Optional[list[str]] = None,
+                   stop_token_ids: Optional[list[Union[int,
+                                                       list[int]]]] = None,
                    include_in_output: bool = False,
                    detokenize: bool = True) -> None:
     output = llm.generate(
@@ -74,30 +75,6 @@ def _stop_multi_tokens(llm):
         expected_reason="group of peo")
 
 
-def _stop_multi_tokens_as_ids(llm):
-    """
-    [2318, 310, 2305] => "group of people"
-    [3273] => "short"
-    """
-    _test_stopping(
-        llm,
-        stop=[[2318, 310, 2305], [3273]],
-        include_in_output=False,
-        detokenize=False,  # required to pass list[list[int]] to stop 
-        # note that expected output doesn't contain a trailing space
-        expected_output="VLLM is a 100% volunteer organization. We are a",
-        expected_reason="[2318, 310, 2305]")
-
-    _test_stopping(
-        llm,
-        stop=[[2318, 310, 2305], [3273]],
-        include_in_output=True,
-        detokenize=False,  # required to pass list[list[int]] to stop
-        expected_output=
-        "VLLM is a 100% volunteer organization. We are a group of people",
-        expected_reason="[2318, 310, 2305]")
-
-
 def _stop_partial_token(llm):
     _test_stopping(llm,
                    stop=["gani"],
@@ -128,6 +105,22 @@ def _stop_token_id(llm):
                    expected_reason=13013)
 
 
+def _stop_token_id_multi(llm):
+    # token id 13013 => " organization"
+
+    _test_stopping(llm,
+                   stop_token_ids=[[13013]],
+                   include_in_output=False,
+                   expected_output="VLLM is a 100% volunteer",
+                   expected_reason="[13013]")
+
+    _test_stopping(llm,
+                   stop_token_ids=[[13013]],
+                   include_in_output=True,
+                   expected_output="VLLM is a 100% volunteer organization",
+                   expected_reason="[13013]")
+
+
 @pytest.mark.skip_global_cleanup
 def test_stop_strings():
     # If V0, must set enforce_eager=False since we use
@@ -145,15 +138,12 @@ def test_stop_strings():
 
     if envs.VLLM_USE_V1:
         _stop_multi_tokens(llm)
-        _stop_multi_tokens_as_ids(llm)
     else:
         _set_async_mode(llm, True)
         _stop_multi_tokens(llm)
-        _stop_multi_tokens_as_ids(llm)
 
         _set_async_mode(llm, False)
         _stop_multi_tokens(llm)
-        _stop_multi_tokens_as_ids(llm)
 
     if envs.VLLM_USE_V1:
         _stop_partial_token(llm)
@@ -165,9 +155,8 @@ def test_stop_strings():
         _stop_partial_token(llm)
 
     if envs.VLLM_USE_V1:
-        # FIXME: this does not respect include_in_output=False
-        # _stop_token_id(llm)
-        pass
+        _stop_token_id(llm)
+        _stop_token_id_multi(llm)
     else:
         _set_async_mode(llm, True)
         _stop_token_id(llm)
