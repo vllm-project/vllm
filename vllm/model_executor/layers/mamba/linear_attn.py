@@ -225,8 +225,8 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
                                         self.tp_heads:(self.tp_rank + 1) *
                                         self.tp_heads].contiguous()
 
-        self.use_v1 = envs.VLLM_USE_V1
-        if self.use_v1:
+        self.vllm_use_v1 = envs.VLLM_USE_V1
+        if self.vllm_use_v1:
             compilation_config = get_current_vllm_config().compilation_config
             if prefix in compilation_config.static_forward_context:
                 raise ValueError(f"Duplicate layer name: {prefix}")
@@ -270,7 +270,7 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
             if _prefill_idx >= len(state_indices_tensor):
                 break
             # prefills are packed at end of batch in V1
-            offset = attn_metadata.num_decode_tokens if self.use_v1 else 0
+            offset = attn_metadata.num_decode_tokens if self.vllm_use_v1 else 0
             _start = attn_metadata.query_start_loc[offset + _prefill_idx]
             _end = attn_metadata.query_start_loc[offset + _prefill_idx + 1]
             slot_id = state_indices_tensor[offset + _prefill_idx]
@@ -292,7 +292,7 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
             hidden_decode = self._decode_infer(q, k, v, kv_cache,
                                                state_indices_tensor,
                                                attn_metadata)
-            if self.use_v1:
+            if self.vllm_use_v1:
                 hidden.insert(0, hidden_decode)
             else:
                 hidden.append(hidden_decode)
@@ -305,7 +305,7 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
 
     def _decode_infer(self, q, k, v, kv_cache, state_indices_tensor,
                       attn_metadata):
-        if not self.use_v1:
+        if not self.vllm_use_v1:
             q = q[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
             k = k[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
             v = v[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
@@ -323,7 +323,7 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
     def forward(self, hidden_states: torch.Tensor, output: torch.Tensor,
                 positions: torch.Tensor,
                 kv_caches: MinimaxCacheParams) -> None:
-        if not self.use_v1:
+        if not self.vllm_use_v1:
             self._forward(hidden_states, output, positions, kv_caches)
         else:
             torch.ops.vllm.linear_attention(
@@ -338,7 +338,7 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
                  kv_caches: Optional[MinimaxCacheParams]) -> None:
         forward_context = get_forward_context()
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
-        if self.use_v1 and attn_metadata is not None:
+        if self.vllm_use_v1 and attn_metadata is not None:
             assert isinstance(attn_metadata, dict)
             attn_metadata = attn_metadata[self.prefix]
             assert isinstance(attn_metadata, LinearAttentionMetadata)
@@ -352,7 +352,7 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
         qkvact = torch.nn.functional.silu(qkv32)
         qkvact = qkvact.view((qkv.shape[0], self.tp_heads, -1))
         q, k, v = torch.split(qkvact, [self.head_dim] * 3, dim=-1)
-        if self.use_v1:
+        if self.vllm_use_v1:
             if attn_metadata is not None:
                 kv_cache = self.kv_cache[forward_context.virtual_engine][0]
                 state_indices_tensor = attn_metadata.state_indices_tensor

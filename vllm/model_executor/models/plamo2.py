@@ -195,8 +195,9 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
                               eps=self.config.rms_norm_eps)
 
         self.chunk_size = self.config.mamba_chunk_size
+        self.use_vllm_v1 = envs.VLLM_USE_V1
 
-        if envs.VLLM_USE_V1:
+        if self.use_vllm_v1:
             compilation_config = get_current_vllm_config().compilation_config
             if prefix in compilation_config.static_forward_context:
                 raise ValueError(f"Duplicate layer name: {prefix}")
@@ -243,7 +244,7 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
         mamba2_metadata: Mamba2Metadata,
         **kwargs,
     ):
-        if not envs.VLLM_USE_V1:
+        if not self.use_vllm_v1:
             CustomOp.forward(self, hidden_states, output, mamba_cache_params,
                              mamba2_metadata)
         else:
@@ -268,7 +269,7 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
         # modes; they are computed at top-level model forward since they
         # stay the same and reused for all mamba layers in the same iteration
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
-        if envs.VLLM_USE_V1:
+        if self.use_vllm_v1:
             if attn_metadata is not None:
                 assert isinstance(attn_metadata, dict)
                 attn_metadata = attn_metadata[self.prefix]
@@ -301,7 +302,7 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
         conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0),
                                                self.conv1d.weight.size(2))
 
-        if envs.VLLM_USE_V1 and attn_metadata is None:
+        if self.use_vllm_v1 and attn_metadata is None:
             # V1 profile run
             hidden_states = (hidden_states.transpose(0, 1).clone().transpose(
                 0, 1)).contiguous()
@@ -318,7 +319,7 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
         # NOTE: V0 put prefill before decode, v1 puts decode before prefill
         # Separate prefill and decode by splitting varlen input
         # Split along token dimension
-        if envs.VLLM_USE_V1:
+        if self.use_vllm_v1:
             hidden_states_d, hidden_states_p = torch.split(
                 hidden_states[:num_actual_tokens],
                 [num_decodes, num_prefill_tokens],
@@ -365,7 +366,7 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
-        if envs.VLLM_USE_V1:
+        if self.use_vllm_v1:
             preallocated_ssm_out_d, preallocated_ssm_out_p = torch.split(
                 preallocated_ssm_out,
                 [num_decodes, num_prefill_tokens],
@@ -838,6 +839,7 @@ class Plamo2Model(torch.nn.Module):
         self.layers = Plamo2Decoder(vllm_config=vllm_config,
                                     prefix=f"{prefix}.layers")
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.use_vllm_v1 = envs.VLLM_USE_V1
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -861,7 +863,7 @@ class Plamo2Model(torch.nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        if not envs.VLLM_USE_V1:
+        if not self.use_vllm_v1:
             attn_metadata: AttentionMetadata = get_forward_context(
             ).attn_metadata
             mamba2_metadata = prepare_mamba2_metadata(
@@ -945,7 +947,7 @@ class Plamo2ForCausalLM(torch.nn.Module, HasInnerState, SupportsPP, IsHybrid):
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs):
-        if not envs.VLLM_USE_V1:
+        if not self.use_vllm_v1:
             if self.mamba_cache is None:
                 num_mamba_layers = (
                     self.model_config.get_num_layers_by_block_type(

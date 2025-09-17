@@ -458,6 +458,8 @@ class FalconH1Model(nn.Module):
         else:
             self.final_layernorm = PPMissingLayer()
 
+        self.use_vllm_v1 = envs.VLLM_USE_V1
+
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -475,7 +477,7 @@ class FalconH1Model(nn.Module):
         # chunked prefill
         attn_metadata = get_forward_context().attn_metadata
 
-        if not envs.VLLM_USE_V1:
+        if not self.use_vllm_v1:
             mamba2_metadata = prepare_mamba2_metadata(
                 chunk_size=self.config.mamba_chunk_size,
                 attn_metadata=attn_metadata,
@@ -625,6 +627,8 @@ class FalconH1ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
+        self.use_vllm_v1 = self.model.use_vllm_v1
+
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
 
@@ -638,7 +642,7 @@ class FalconH1ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
     ):
 
         mamba_cache_params = None
-        if not envs.VLLM_USE_V1:
+        if not self.use_vllm_v1:
             if self.mamba_cache is None:
                 mamba_state_shape = \
                     self.get_mamba_state_shape_from_config(

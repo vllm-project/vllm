@@ -149,8 +149,8 @@ class MambaMixer(MambaBase, CustomOp):
             has_weight=rms_norm_has_weight,
         ) if use_rms_norm else None
 
-        self.use_v1 = envs.VLLM_USE_V1
-        if self.use_v1:
+        self.vllm_use_v1 = envs.VLLM_USE_V1
+        if self.vllm_use_v1:
             compilation_config = get_current_vllm_config().compilation_config
             if prefix in compilation_config.static_forward_context:
                 raise ValueError(f"Duplicate layer name: {prefix}")
@@ -191,7 +191,7 @@ class MambaMixer(MambaBase, CustomOp):
                 hidden_states: torch.Tensor,
                 output: torch.Tensor,
                 mamba_cache_params: Optional[MambaCacheParams] = None):
-        if not self.use_v1:
+        if not self.vllm_use_v1:
             CustomOp.forward(self, hidden_states, output, mamba_cache_params)
         else:
             torch.ops.vllm.mamba_mixer(
@@ -235,7 +235,7 @@ class MambaMixer(MambaBase, CustomOp):
         forward_context: ForwardContext = get_forward_context()
         attn_metadata = forward_context.attn_metadata
 
-        if self.use_v1:
+        if self.vllm_use_v1:
             if attn_metadata is not None:
                 assert isinstance(attn_metadata, dict)
                 attn_metadata = attn_metadata[self.prefix]
@@ -268,7 +268,7 @@ class MambaMixer(MambaBase, CustomOp):
         conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0),
                                                self.conv1d.weight.size(2))
 
-        if self.use_v1 and attn_metadata is None:
+        if self.vllm_use_v1 and attn_metadata is None:
             # V1 profile run
             hidden_states_BC = hidden_states_BC.contiguous()
             return self.out_proj(hidden_states_BC.transpose(-2, -1))[0]
@@ -292,7 +292,7 @@ class MambaMixer(MambaBase, CustomOp):
             num_prefills,
             num_decodes,
             num_padded_decodes,
-            self.use_v1,
+            self.vllm_use_v1,
         )
         hidden_states_BC_p = prefill_decode_split.hidden_states_BC_p
         hidden_states_BC_d = prefill_decode_split.hidden_states_BC_d
@@ -370,7 +370,7 @@ class MambaMixer(MambaBase, CustomOp):
                                    out=scan_outputs_d)
             scan_outputs_d = scan_outputs_d.transpose(0, 1)
 
-            if self.use_v1:
+            if self.vllm_use_v1:
                 ssm_outputs.insert(0, scan_outputs_d)
             else:
                 ssm_outputs.append(scan_outputs_d)
