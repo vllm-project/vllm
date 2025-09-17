@@ -11,7 +11,6 @@ from typing_extensions import Self
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.utils import cdiv, get_dtype_size
 
 logger = init_logger(__name__)
@@ -230,8 +229,8 @@ class CrossAttentionSpec(AttentionSpec):
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         # For cross-attention, we need to cache encoder states
         # Get encoder length (e.g., 1500 for Whisper).
-        max_encoder_len = MULTIMODAL_REGISTRY.\
-            get_encdec_max_encoder_len(vllm_config.model_config)
+        max_encoder_len = vllm_config.scheduler_config.\
+            max_num_encoder_input_tokens
         return cdiv(max_encoder_len, self.block_size) * self.page_size_bytes
 
 
