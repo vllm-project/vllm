@@ -2714,13 +2714,6 @@ class VllmConfig:
                 True
         if self.compilation_config.pass_config.enable_sequence_parallelism:
             self.compilation_config.custom_ops.append("+rms_norm")
-        if envs.VLLM_USE_FLASHINFER_ROPE:
-            self.compilation_config.custom_ops.append("+rotary_embedding")
-        # Enable rope custom op by default if nothing is specified
-        # if not any(op in ["-rotary_embedding", "none"]
-        #            for op in self.compilation_config.custom_ops):
-        #     self.compilation_config.custom_ops.append("+rotary_embedding")
-        #     print(f"Compilation config: {self.compilation_config.custom_ops}")
 
         if current_platform.is_cuda_alike() or current_platform.is_xpu():
             # if cudagraph_mode is not explicitly set by users, set default
