@@ -22,8 +22,7 @@
 {{ system_message }}
 {%- endif %}
 {%- if tools %}
-
-In addition to plain text responses, you can chose to call one or more of the provided functions.
+In addition to plain text responses, you can choose to call one or more of the provided functions.
 
 Use the following rule to decide when to call a function:
   * if the response can be generated from your internal knowledge (e.g., as in the case of queries like "What is the capital of Poland?"), do so
@@ -33,7 +32,7 @@ If you decide to call functions:
   * prefix function calls with <|tool_call|> marker
   * all function calls should be generated in a single JSON list formatted as <|tool_call|>[{"name": [function name], "arguments": [function arguments as JSON]}, ...]<|/tool_call|>
   * follow the provided JSON schema. Do not hallucinate arguments or values. Do to blindly copy values from the provided samples
-  * respect the argument type formatting. E.g., if the type if number and format is float, write value 7 as 7.0
+  * respect the argument type formatting. E.g., if the type is number and format is float, write value 7 as 7.0
   * make sure you pick the right functions that match the user intent
 
 

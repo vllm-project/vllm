@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from concurrent.futures import Future
-from typing import Callable, Optional, Union
+from typing import Any, Callable, Optional, Union
 
 import torch
 import torch.distributed as dist
@@ -14,6 +14,7 @@ from vllm.executor.uniproc_executor import (  # noqa
 from vllm.executor.uniproc_executor import (  # noqa
     UniProcExecutor as UniProcExecutorV0)
 from vllm.utils import resolve_obj_by_qualname
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 
@@ -81,20 +82,31 @@ class Executor(ExecutorBase):
         pass
 
     def determine_available_memory(self) -> list[int]:  # in bytes
-        output = self.collective_rpc("determine_available_memory")
-        return output
+        return self.collective_rpc("determine_available_memory")
 
     def get_kv_cache_specs(self) -> list[dict[str, KVCacheSpec]]:
-        output = self.collective_rpc("get_kv_cache_spec")
-        return output
+        return self.collective_rpc("get_kv_cache_spec")
+
+    def collective_rpc(self,
+                       method: Union[str, Callable],
+                       timeout: Optional[float] = None,
+                       args: tuple = (),
+                       kwargs: Optional[dict] = None,
+                       non_block: bool = False) -> list[Any]:
+        raise NotImplementedError
 
     def execute_model(
         self,
-        scheduler_output,
+        scheduler_output: SchedulerOutput,
+        non_block: bool = False,
     ) -> Union[ModelRunnerOutput, Future[ModelRunnerOutput]]:
         output = self.collective_rpc("execute_model",
-                                     args=(scheduler_output, ))
+                                     args=(scheduler_output, ),
+                                     non_block=non_block)
         return output[0]
+
+    def execute_dummy_batch(self) -> None:
+        self.collective_rpc("execute_dummy_batch")
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         output = self.collective_rpc("take_draft_token_ids")

@@ -17,6 +17,47 @@ from tqdm.asyncio import tqdm
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
 
+class StreamedResponseHandler:
+    """Handles streaming HTTP responses by accumulating chunks until complete
+    messages are available."""
+
+    def __init__(self):
+        self.buffer = ""
+
+    def add_chunk(self, chunk_bytes: bytes) -> list[str]:
+        """Add a chunk of bytes to the buffer and return any complete
+        messages."""
+        chunk_str = chunk_bytes.decode("utf-8")
+        self.buffer += chunk_str
+
+        messages = []
+
+        # Split by double newlines (SSE message separator)
+        while "\n\n" in self.buffer:
+            message, self.buffer = self.buffer.split("\n\n", 1)
+            message = message.strip()
+            if message:
+                messages.append(message)
+
+        # if self.buffer is not empty, check if it is a complete message
+        # by removing data: prefix and check if it is a valid JSON
+        if self.buffer.startswith("data: "):
+            message_content = self.buffer.removeprefix("data: ").strip()
+            if message_content == "[DONE]":
+                messages.append(self.buffer.strip())
+                self.buffer = ""
+            elif message_content:
+                try:
+                    json.loads(message_content)
+                    messages.append(self.buffer.strip())
+                    self.buffer = ""
+                except json.JSONDecodeError:
+                    # Incomplete JSON, wait for more chunks.
+                    pass
+
+        return messages
+
+
 @dataclass
 class RequestFuncInput:
     """The input for the request function."""
@@ -27,6 +68,7 @@ class RequestFuncInput:
     model: str
     model_name: Optional[str] = None
     logprobs: Optional[int] = None
+    extra_headers: Optional[dict] = None
     extra_body: Optional[dict] = None
     multi_modal_content: Optional[Union[dict, list[dict]]] = None
     ignore_eos: bool = False
@@ -88,6 +130,8 @@ async def async_request_openai_completions(
     headers = {
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"
     }
+    if request_func_input.extra_headers:
+        headers |= request_func_input.extra_headers
     if request_func_input.request_id:
         headers["x-request-id"] = request_func_input.request_id
 
@@ -102,46 +146,50 @@ async def async_request_openai_completions(
                                 headers=headers) as response:
             if response.status == 200:
                 first_chunk_received = False
-                async for chunk_bytes in response.content:
+                handler = StreamedResponseHandler()
+
+                async for chunk_bytes in response.content.iter_any():
                     chunk_bytes = chunk_bytes.strip()
                     if not chunk_bytes:
                         continue
-                    chunk_bytes = chunk_bytes.decode("utf-8")
-                    # NOTE: SSE comments (often used as pings) start with
-                    # a colon. These are not JSON data payload and should
-                    # be skipped.
-                    if chunk_bytes.startswith(":"):
-                        continue
 
-                    chunk = chunk_bytes.removeprefix("data: ")
+                    messages = handler.add_chunk(chunk_bytes)
+                    for message in messages:
+                        # NOTE: SSE comments (often used as pings) start with
+                        # a colon. These are not JSON data payload and should
+                        # be skipped.
+                        if message.startswith(":"):
+                            continue
 
-                    if chunk != "[DONE]":
-                        data = json.loads(chunk)
+                        chunk = message.removeprefix("data: ")
 
-                        # NOTE: Some completion API might have a last
-                        # usage summary response without a token so we
-                        # want to check a token was generated
-                        if choices := data.get("choices"):
-                            # Note that text could be empty here
-                            # e.g. for special tokens
-                            text = choices[0].get("text")
-                            timestamp = time.perf_counter()
-                            # First token
-                            if not first_chunk_received:
-                                first_chunk_received = True
-                                ttft = time.perf_counter() - st
-                                output.ttft = ttft
+                        if chunk != "[DONE]":
+                            data = json.loads(chunk)
 
-                            # Decoding phase
-                            else:
-                                output.itl.append(timestamp -
-                                                  most_recent_timestamp)
+                            # NOTE: Some completion API might have a last
+                            # usage summary response without a token so we
+                            # want to check a token was generated
+                            if choices := data.get("choices"):
+                                # Note that text could be empty here
+                                # e.g. for special tokens
+                                text = choices[0].get("text")
+                                timestamp = time.perf_counter()
+                                # First token
+                                if not first_chunk_received:
+                                    first_chunk_received = True
+                                    ttft = time.perf_counter() - st
+                                    output.ttft = ttft
 
-                            most_recent_timestamp = timestamp
-                            generated_text += text or ""
-                        elif usage := data.get("usage"):
-                            output.output_tokens = usage.get(
-                                "completion_tokens")
+                                # Decoding phase
+                                else:
+                                    output.itl.append(timestamp -
+                                                    most_recent_timestamp)
+
+                                most_recent_timestamp = timestamp
+                                generated_text += text or ""
+                            elif usage := data.get("usage"):
+                                output.output_tokens = usage.get(
+                                    "completion_tokens")
                 if first_chunk_received:
                     output.success = True
                 else:
@@ -213,6 +261,8 @@ async def async_request_openai_chat_completions(
         "Content-Type": "application/json",
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
     }
+    if request_func_input.extra_headers:
+        headers |= request_func_input.extra_headers
     if request_func_input.request_id:
         headers["x-request-id"] = request_func_input.request_id
 
@@ -227,41 +277,44 @@ async def async_request_openai_chat_completions(
         async with session.post(url=api_url, json=payload,
                                 headers=headers) as response:
             if response.status == 200:
-                async for chunk_bytes in response.content:
+                handler = StreamedResponseHandler()
+                async for chunk_bytes in response.content.iter_any():
                     chunk_bytes = chunk_bytes.strip()
                     if not chunk_bytes:
                         continue
-                    chunk_bytes = chunk_bytes.decode("utf-8")
-                    # NOTE: SSE comments (often used as pings) start with
-                    # a colon. These are not JSON data payload and should
-                    # be skipped.
-                    if chunk_bytes.startswith(":"):
-                        continue
 
-                    chunk = chunk_bytes.removeprefix("data: ")
+                    messages = handler.add_chunk(chunk_bytes)
+                    for message in messages:
+                        # NOTE: SSE comments (often used as pings) start with
+                        # a colon. These are not JSON data payload and should
+                        # be skipped.
+                        if message.startswith(":"):
+                            continue
 
-                    if chunk != "[DONE]":
-                        timestamp = time.perf_counter()
-                        data = json.loads(chunk)
+                        chunk = message.removeprefix("data: ")
 
-                        if choices := data.get("choices"):
-                            content = choices[0]["delta"].get("content")
-                            # First token
-                            if ttft == 0.0:
-                                ttft = timestamp - st
-                                output.ttft = ttft
+                        if chunk != "[DONE]":
+                            timestamp = time.perf_counter()
+                            data = json.loads(chunk)
 
-                            # Decoding phase
-                            else:
-                                output.itl.append(timestamp -
-                                                  most_recent_timestamp)
+                            if choices := data.get("choices"):
+                                content = choices[0]["delta"].get("content")
+                                # First token
+                                if ttft == 0.0:
+                                    ttft = timestamp - st
+                                    output.ttft = ttft
 
-                            generated_text += content or ""
-                        elif usage := data.get("usage"):
-                            output.output_tokens = usage.get(
-                                "completion_tokens")
+                                # Decoding phase
+                                else:
+                                    output.itl.append(timestamp -
+                                                    most_recent_timestamp)
 
-                        most_recent_timestamp = timestamp
+                                generated_text += content or ""
+                            elif usage := data.get("usage"):
+                                output.output_tokens = usage.get(
+                                    "completion_tokens")
+
+                            most_recent_timestamp = timestamp
 
                 output.generated_text = generated_text
                 output.success = True
@@ -316,6 +369,8 @@ async def async_request_openai_audio(
     headers = {
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
     }
+    if request_func_input.extra_headers:
+        headers |= request_func_input.extra_headers
     if request_func_input.request_id:
         headers["x-request-id"] = request_func_input.request_id
 
@@ -347,36 +402,40 @@ async def async_request_openai_audio(
                                     data=form,
                                     headers=headers) as response:
                 if response.status == 200:
-                    async for chunk_bytes in response.content:
+                    handler = StreamedResponseHandler()
+
+                    async for chunk_bytes in response.content.iter_any():
                         chunk_bytes = chunk_bytes.strip()
                         if not chunk_bytes:
                             continue
 
-                        chunk = chunk_bytes.decode("utf-8").removeprefix(
-                            "data: ")
-                        if chunk != "[DONE]":
-                            timestamp = time.perf_counter()
-                            data = json.loads(chunk)
+                        messages = handler.add_chunk(chunk_bytes)
+                        for message in messages:
+                            chunk = message.decode("utf-8").removeprefix(
+                                "data: ")
+                            if chunk != "[DONE]":
+                                timestamp = time.perf_counter()
+                                data = json.loads(chunk)
 
-                            if choices := data.get("choices"):
-                                content = choices[0]["delta"].get(
-                                    "content")
-                                # First token
-                                if ttft == 0.0:
-                                    ttft = timestamp - st
-                                    output.ttft = ttft
+                                if choices := data.get("choices"):
+                                    content = choices[0]["delta"].get(
+                                        "content")
+                                    # First token
+                                    if ttft == 0.0:
+                                        ttft = timestamp - st
+                                        output.ttft = ttft
 
-                                # Decoding phase
-                                else:
-                                    output.itl.append(
-                                        timestamp - most_recent_timestamp)
+                                    # Decoding phase
+                                    else:
+                                        output.itl.append(
+                                            timestamp - most_recent_timestamp)
 
-                                generated_text += content or ""
-                            elif usage := data.get("usage"):
-                                output.output_tokens = usage.get(
-                                    "completion_tokens")
+                                    generated_text += content or ""
+                                elif usage := data.get("usage"):
+                                    output.output_tokens = usage.get(
+                                        "completion_tokens")
 
-                            most_recent_timestamp = timestamp
+                                most_recent_timestamp = timestamp
 
                     output.generated_text = generated_text
                     output.success = True

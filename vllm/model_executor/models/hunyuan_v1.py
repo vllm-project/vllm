@@ -56,9 +56,9 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsLoRA
+from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
-                    make_layers)
+                    make_layers, maybe_prefix)
 
 
 def _is_moe(config: PretrainedConfig) -> bool:
@@ -841,7 +841,7 @@ class HunYuanModel(nn.Module):
         return loaded_params
 
 
-class HunYuanV1Base(nn.Module, SupportsLoRA):
+class HunYuanV1Base(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -871,6 +871,7 @@ class HunYuanV1Base(nn.Module, SupportsLoRA):
                 org_num_embeddings=config.vocab_size,
                 padding_size=DEFAULT_VOCAB_PADDING_SIZE,
                 quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
             )
             if config.tie_word_embeddings:
                 self.lm_head.weight = self.model.embed_tokens.weight

@@ -31,34 +31,33 @@ def is_deep_gemm_supported() -> bool:
 
 
 @functools.cache
-def is_blackwell_deep_gemm_e8m0_used() -> bool:
+def is_deep_gemm_e8m0_used() -> bool:
     """Return ``True`` if vLLM is configured to use DeepGEMM "
-    "E8M0 scale on a Blackwell-class GPU.
+    "E8M0 scale on a Hopper or Blackwell-class GPU.
     """
     if not is_deep_gemm_supported():
         logger.debug_once(
             "DeepGEMM E8M0 disabled: DeepGEMM not supported on this system.")
         return False
 
-    if not envs.VLLM_USE_DEEP_GEMM_E8M0:
-        logger.debug_once("DeepGEMM E8M0 disabled: VLLM_USE_DEEP_GEMM_E8M0=0.")
-        return False
-
     _lazy_init()
 
     if _fp8_gemm_nt_impl is None:
-        logger.debug_once(
-            "DeepGEMM E8M0 disabled: _fp8_gemm_nt_impl not found")
+        logger.info_once("DeepGEMM E8M0 disabled: _fp8_gemm_nt_impl not found")
         return False
 
-    enabled = (current_platform.is_cuda()
-               and current_platform.has_device_capability(100))
-    if enabled:
-        logger.debug_once("DeepGEMM E8M0 enabled on Blackwell GPU.")
-    else:
-        logger.debug_once(
-            "DeepGEMM E8M0 disabled: not running on Blackwell GPU.")
-    return enabled
+    if current_platform.is_device_capability(100) and \
+            envs.VLLM_USE_DEEP_GEMM_E8M0:
+        logger.info_once("DeepGEMM E8M0 enabled on Blackwell GPU.")
+        return True
+
+    if current_platform.is_device_capability(90) and \
+            envs.VLLM_USE_DEEP_GEMM_E8M0_HOPPER:
+        logger.info_once("DeepGEMM E8M0 enabled on Hopper GPU.")
+        return True
+
+    logger.info_once("DeepGEMM E8M0 disabled on current configuration.")
+    return False
 
 
 def _missing(*_: Any, **__: Any) -> NoReturn:
@@ -66,23 +65,6 @@ def _missing(*_: Any, **__: Any) -> NoReturn:
     raise RuntimeError(
         "DeepGEMM backend is not available. Please install the `deep_gemm` "
         "package to enable FP8 kernels.")
-
-
-def _resolve_symbol(module, new: str, old: str) -> Callable[..., Any] | None:
-    """Return the *new* symbol if it exists, otherwise the *old* one."""
-    if hasattr(module, new):
-        return getattr(module, new)
-    if hasattr(module, old):
-        # TODO(wentao): deprecate old symbol in the future.
-        logger.warning_once(
-            "Found legacy DeepGEMM symbol `%s`. Please upgrade the `deep_gemm` "
-            "package so that `%s` is available. Support for the legacy symbol "
-            "will be removed in a future vLLM release.",
-            old,
-            new,
-        )
-        return getattr(module, old)
-    return None
 
 
 _fp8_gemm_nt_impl: Callable[..., Any] | None = None
@@ -110,34 +92,27 @@ def _lazy_init() -> None:
 
     _dg = importlib.import_module("deep_gemm")
 
-    _fp8_gemm_nt_impl = _resolve_symbol(_dg, "fp8_gemm_nt",
-                                        "gemm_fp8_fp8_bf16_nt")
-    _grouped_impl = _resolve_symbol(
-        _dg, "m_grouped_fp8_gemm_nt_contiguous",
-        "m_grouped_gemm_fp8_fp8_bf16_nt_contiguous")
-    _grouped_masked_impl = _resolve_symbol(
-        _dg, "fp8_m_grouped_gemm_nt_masked",
-        "m_grouped_gemm_fp8_fp8_bf16_nt_masked")
+    _fp8_gemm_nt_impl = getattr(_dg, "fp8_gemm_nt", None)
+    _grouped_impl = getattr(_dg, "m_grouped_fp8_gemm_nt_contiguous", None)
+    _grouped_masked_impl = getattr(_dg, "fp8_m_grouped_gemm_nt_masked", None)
 
 
 def fp8_gemm_nt(*args, **kwargs):
     _lazy_init()
     if _fp8_gemm_nt_impl is None:
         return _missing(*args, **kwargs)
-    return _fp8_gemm_nt_impl(
-        *args,
-        disable_ue8m0_cast=not is_blackwell_deep_gemm_e8m0_used(),
-        **kwargs)
+    return _fp8_gemm_nt_impl(*args,
+                             disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
+                             **kwargs)
 
 
 def m_grouped_fp8_gemm_nt_contiguous(*args, **kwargs):
     _lazy_init()
     if _grouped_impl is None:
         return _missing(*args, **kwargs)
-    return _grouped_impl(
-        *args,
-        disable_ue8m0_cast=not is_blackwell_deep_gemm_e8m0_used(),
-        **kwargs)
+    return _grouped_impl(*args,
+                         disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
+                         **kwargs)
 
 
 def fp8_m_grouped_gemm_nt_masked(*args, **kwargs):
@@ -145,9 +120,7 @@ def fp8_m_grouped_gemm_nt_masked(*args, **kwargs):
     if _grouped_masked_impl is None:
         return _missing(*args, **kwargs)
     return _grouped_masked_impl(
-        *args,
-        disable_ue8m0_cast=not is_blackwell_deep_gemm_e8m0_used(),
-        **kwargs)
+        *args, disable_ue8m0_cast=not is_deep_gemm_e8m0_used(), **kwargs)
 
 
 def _ceil_to_ue8m0(x: torch.Tensor):
@@ -211,7 +184,7 @@ __all__ = [
     "m_grouped_fp8_gemm_nt_contiguous",
     "fp8_m_grouped_gemm_nt_masked",
     "per_block_cast_to_fp8",
-    "is_blackwell_deep_gemm_e8m0_used",
+    "is_deep_gemm_e8m0_used",
     "is_deep_gemm_supported",
     "should_use_deepgemm_for_fp8_linear",
 ]

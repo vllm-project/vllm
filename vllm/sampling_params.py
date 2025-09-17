@@ -165,7 +165,8 @@ class SamplingParams(
     the sampled token, so there may be up to `logprobs+1` elements in the
     response. When set to -1, return all `vocab_size` log probabilities."""
     prompt_logprobs: Optional[int] = None
-    """Number of log probabilities to return per prompt token."""
+    """Number of log probabilities to return per prompt token.
+    When set to -1, return all `vocab_size` log probabilities."""
     # NOTE: This parameter is only exposed at the engine level for now.
     # It is not exposed in the OpenAI API server, as the OpenAI API does
     # not support returning only a list of token IDs.
@@ -182,7 +183,8 @@ class SamplingParams(
     optionally prompt tokens as a first argument."""
     include_stop_str_in_output: bool = False
     """Whether to include the stop strings in output text."""
-    truncate_prompt_tokens: Optional[Annotated[int, msgspec.Meta(ge=1)]] = None
+    truncate_prompt_tokens: Optional[Annotated[int,
+                                               msgspec.Meta(ge=-1)]] = None
     """If set to -1, will use the truncation size supported by the model. If
     set to an integer k, will use only the last k tokens from the prompt
     (i.e., left truncation). If set to `None`, truncation is disabled."""
@@ -241,7 +243,8 @@ class SamplingParams(
         spaces_between_special_tokens: bool = True,
         logits_processors: Optional[list[LogitsProcessor]] = None,
         truncate_prompt_tokens: Optional[Annotated[int,
-                                                   msgspec.Meta(ge=1)]] = None,
+                                                   msgspec.Meta(
+                                                       ge=-1)]] = None,
         output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE,
         guided_decoding: Optional[GuidedDecodingParams] = None,
         logit_bias: Optional[Union[dict[int, float], dict[str, float]]] = None,
@@ -407,13 +410,17 @@ class SamplingParams(
                 and self.logprobs < 0):
             raise ValueError(
                 f"logprobs must be non-negative or -1, got {self.logprobs}.")
-        if self.prompt_logprobs is not None and self.prompt_logprobs < 0:
-            raise ValueError(f"prompt_logprobs must be non-negative, got "
-                             f"{self.prompt_logprobs}.")
+        if (self.prompt_logprobs is not None and self.prompt_logprobs != -1
+                and self.prompt_logprobs < 0):
+            raise ValueError(
+                f"prompt_logprobs must be non-negative or -1, got "
+                f"{self.prompt_logprobs}.")
         if (self.truncate_prompt_tokens is not None
-                and self.truncate_prompt_tokens < 1):
-            raise ValueError(f"truncate_prompt_tokens must be >= 1, "
-                             f"got {self.truncate_prompt_tokens}")
+                and (self.truncate_prompt_tokens == 0
+                     or self.truncate_prompt_tokens < -1)):
+            raise ValueError(
+                f"truncate_prompt_tokens must be an integer >= 1 or -1, "
+                f"got {self.truncate_prompt_tokens}")
         assert isinstance(self.stop_token_ids, list)
         if not all(isinstance(st_id, int) for st_id in self.stop_token_ids):
             raise ValueError(f"stop_token_ids must contain only integers, "
