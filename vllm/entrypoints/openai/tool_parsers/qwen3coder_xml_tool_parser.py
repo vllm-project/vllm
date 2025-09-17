@@ -34,7 +34,7 @@ class StreamingXMLToolCallParser:
         self.reset_streaming_state()
 
         # Tool configuration information
-        self.tools: list[ChatCompletionToolsParam] | None = None
+        self.tools: Union[list[ChatCompletionToolsParam], None] = None
         self.tool_call_start_token: str = '<tool_call>'
         self.tool_call_end_token: str = '</tool_call>'
         self.function_start_token: str = '<function='
@@ -839,7 +839,7 @@ class StreamingXMLToolCallParser:
         self.parser.EndElementHandler = self._end_element
         self.parser.CharacterDataHandler = self._char_data
 
-    def set_tools(self, tools: list[ChatCompletionToolsParam] | None):
+    def set_tools(self, tools: Union[list[ChatCompletionToolsParam], None]):
         """Set tool configuration information"""
         self.tools = tools
 
