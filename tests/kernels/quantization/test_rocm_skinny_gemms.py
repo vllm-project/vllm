@@ -92,6 +92,25 @@ def test_rocm_wvsplitk_kernel(n, k, m, dtype, seed):
     assert torch.allclose(out, ref_out, rtol=0.01)
 
 
+@pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.skipif(not current_platform.is_rocm(),
+                    reason="only test for rocm")
+def test_rocm_wvsplitk_biased_kernel(n, k, m, dtype, seed):
+    torch.manual_seed(seed)
+    cu_count = current_platform.get_cu_count()
+
+    A = torch.rand(n, k, dtype=dtype, device="cuda")
+    B = torch.rand(m, k, dtype=dtype, device="cuda")
+    BIAS = torch.rand(m, dtype=dtype, device="cuda")
+
+    ref_out = torch.matmul(A, B.t()) + BIAS
+    out = ops.wvSplitK(B, A, cu_count, BIAS)
+
+    assert torch.allclose(out, ref_out, rtol=0.01)
+
+
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK_FP8)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
