@@ -37,6 +37,7 @@ th {
 | RandomMultiModal (Image/Video) | 🟡 | 🚧 | `synthetic` |
 | Prefix Repetition | ✅ | ✅ | `synthetic` |
 | HuggingFace-VisionArena | ✅ | ✅ | `lmarena-ai/VisionArena-Chat` |
+| HuggingFace-MMVU | ✅ | ✅ | `yale-nlp/MMVU` |
 | HuggingFace-InstructCoder | ✅ | ✅ | `likaixin/InstructCoder` |
 | HuggingFace-AIMO | ✅ | ✅ | `AI-MO/aimo-validation-aime`, `AI-MO/NuminaMath-1.5`, `AI-MO/NuminaMath-CoT` |
 | HuggingFace-Other | ✅ | ✅ | `lmms-lab/LLaVA-OneVision-Data`, `Aeala/ShareGPT_Vicuna_unfiltered` |
