@@ -11,13 +11,13 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
                                                   FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig, fp8_w8a8_moe_quant_config,
+    mxfp4_w4a4_moe_quant_config)
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     is_rocm_aiter_moe_enabled)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_moe_fp8_layer_for_marlin)
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEQuantConfig, fp8_w8a8_moe_quant_config,
-    mxfp4_w4a4_moe_quant_config)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     OCP_MX_BLOCK_SIZE)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -558,8 +558,8 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
             topk_ids=topk_ids,
             inplace=True,
             activation=activation,
-            apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
+            apply_router_weight_on_input=apply_router_weight_on_input,
             expert_map=expert_map,
             quant_config=self.moe_quant_config,
         )
