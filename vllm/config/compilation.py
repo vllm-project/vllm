@@ -624,3 +624,15 @@ class CompilationConfig:
     def splitting_ops_contain_attention(self) -> bool:
         return self.splitting_ops is not None and all(
             op in self.splitting_ops for op in self._attention_ops)
+
+    def is_attention_compiled_piecewise(self) -> bool:
+        use_fx_graph_piecewise_compilation = (
+            self.level == CompilationLevel.PIECEWISE
+            and self.splitting_ops_contain_attention())
+
+        use_inductor_piecewise_compilation = (
+            self.use_inductor_graph_partition
+            and not self.splitting_ops_contain_attention())
+
+        return use_fx_graph_piecewise_compilation or \
+            use_inductor_piecewise_compilation
