@@ -715,7 +715,9 @@ class ModelConfig:
             is_pooling_model=self.runner_type == "pooling",
             revision=self.revision,
         )
-
+        self._head_dtype = _get_head_dtype(config=self.hf_config,
+                                           dtype=self.dtype,
+                                           runner_type=self.runner_type)
         # Interleaved attention is not supported by some backends in V0
         if (not self.disable_sliding_window
                 and is_interleaved(self.hf_text_config)
@@ -1722,24 +1724,7 @@ class ModelConfig:
         you can use --hf-overrides '{"head_dtype": "model"}' to disable it.
         """
 
-        head_dtype = _get_head_dtype(config=self.hf_config,
-                                     dtype=self.dtype,
-                                     runner_type=self.runner_type)
-
-        if self.runner_type != "pooling" and head_dtype != self.dtype:
-            logger.warning_once(
-                "`head_dtype` currently only supports pooling models."
-                "fallback to model dtype [%s].", self.dtype)
-            return self.dtype
-
-        if head_dtype not in current_platform.supported_dtypes:
-            logger.warning_once(
-                "The current platform does not support [%s] head dtype, "
-                "fallback to model dtype [%s].", head_dtype, self.dtype)
-            return self.dtype
-
-        logger.debug_once("head dtype: %s", head_dtype)
-        return head_dtype
+        return self._head_dtype
 
     def get_and_verify_max_len(self, max_model_len: int):
         # Consider max_model_len in tokenizer_config only when
@@ -2082,27 +2067,44 @@ def _get_and_verify_dtype(
 
 def _get_head_dtype(config: PretrainedConfig, dtype: torch.dtype,
                     runner_type: str) -> torch.dtype:
-    head_dtype: Optional[Union[str,
-                               torch.dtype]] = getattr(config, "head_dtype",
-                                                       None)
 
-    if head_dtype == "model":
-        return dtype
-    elif isinstance(head_dtype, str):
-        head_dtype = head_dtype.lower()
-        if head_dtype not in _STR_DTYPE_TO_TORCH_DTYPE:
-            raise ValueError(f"Unknown dtype: {head_dtype!r}")
-        return _STR_DTYPE_TO_TORCH_DTYPE[head_dtype]
-    elif isinstance(head_dtype, torch.dtype):
-        return head_dtype
-    elif head_dtype is None:
-        if torch.float32 not in current_platform.supported_dtypes:
+    def _resolve_head_dtype():
+        head_dtype: Optional[Union[str, torch.dtype]] = getattr(
+            config, "head_dtype", None)
+        if head_dtype == "model":
             return dtype
-        if runner_type == "pooling":
-            return torch.float32
+        elif isinstance(head_dtype, str):
+            head_dtype = head_dtype.lower()
+            if head_dtype not in _STR_DTYPE_TO_TORCH_DTYPE:
+                raise ValueError(f"Unknown dtype: {head_dtype!r}")
+            return _STR_DTYPE_TO_TORCH_DTYPE[head_dtype]
+        elif isinstance(head_dtype, torch.dtype):
+            return head_dtype
+        elif head_dtype is None:
+            if torch.float32 not in current_platform.supported_dtypes:
+                return dtype
+            if runner_type == "pooling":
+                return torch.float32
+            return dtype
+        else:
+            raise ValueError(f"Unknown dtype: {head_dtype}")
+
+    head_dtype = _resolve_head_dtype()
+
+    if runner_type != "pooling" and head_dtype != dtype:
+        logger.warning_once(
+            "`head_dtype` currently only supports pooling models."
+            "fallback to model dtype [%s].", dtype)
         return dtype
-    else:
-        raise ValueError(f"Unknown dtype: {head_dtype}")
+
+    if head_dtype not in current_platform.supported_dtypes:
+        logger.warning_once(
+            "The current platform does not support [%s] head dtype, "
+            "fallback to model dtype [%s].", head_dtype, dtype)
+        return dtype
+
+    logger.debug_once("head dtype: %s", head_dtype)
+    return head_dtype
 
 
 def _get_and_verify_max_len(
@@ -2654,6 +2656,12 @@ class VllmConfig:
         if self.lora_config is not None:
             self.lora_config.verify_with_cache_config(self.cache_config)
             self.lora_config.verify_with_model_config(self.model_config)
+            if self.model_config._head_dtype != self.model_config.dtype:
+                self.model_config._head_dtype = self.model_config.dtype
+                logger.warning_once(
+                    "Does not support [%s] head dtype when Lora is enabled, "
+                    "fallback to model dtype [%s].",
+                    self.model_config._head_dtype, self.model_config.dtype)
 
         if self.quant_config is None and self.model_config is not None:
             self.quant_config = VllmConfig._get_quantization_config(
