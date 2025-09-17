@@ -973,6 +973,29 @@ def process_fp8_weight_block_strategy(
     return weight, weight_scale
 
 
+def maybe_post_process_fp8_weight_block(layer: torch.nn.Module,
+                                        cutlass_block_fp8_supported: bool):
+    assert layer.weight_block_size is not None
+
+    from vllm.utils.deep_gemm import (is_deep_gemm_e8m0_used,
+                                      should_use_deepgemm_for_fp8_linear)
+
+    # On Blackwell or Hopper, if E8M0 for DeepGemm is used, we need to
+    # requantize the weight and input to the specific scale
+    # at the same time.
+    if is_deep_gemm_e8m0_used():
+        block_sz = tuple(layer.weight_block_size)
+        requant_weight_ue8m0_inplace(layer.weight.data,
+                                     layer.weight_scale.data, block_sz)
+    # SM90 Block FP8 CUTLASS requires row-major weight scales
+    elif (current_platform.is_device_capability(90)
+          and cutlass_block_fp8_supported
+          and not should_use_deepgemm_for_fp8_linear(torch.bfloat16,
+                                                     layer.weight)):
+        layer.weight_scale = torch.nn.Parameter(
+            layer.weight_scale.data.T.contiguous(), requires_grad=False)
+
+
 def apply_fp8_block_linear(layer: torch.nn.Module, input: torch.Tensor,
                            bias: Optional[torch.Tensor],
                            cutlass_block_fp8_supported: bool,

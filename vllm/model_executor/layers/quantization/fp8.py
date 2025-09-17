@@ -32,8 +32,8 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     apply_fp8_block_linear, check_aiter_fp8_linear_support,
     create_fp8_input_scale, create_fp8_scale_parameter,
     create_fp8_weight_parameter, get_col_major_tma_aligned_tensor,
-    process_fp8_weight_block_strategy, process_fp8_weight_tensor_strategy,
-    requant_weight_ue8m0_inplace, should_use_deepgemm_for_fp8_linear,
+    maybe_post_process_fp8_weight_block, process_fp8_weight_block_strategy,
+    process_fp8_weight_tensor_strategy, requant_weight_ue8m0_inplace,
     validate_fp8_block_shape)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear, prepare_fp8_layer_for_marlin,
@@ -376,22 +376,8 @@ class Fp8LinearMethod(LinearMethodBase):
             return
 
         if self.block_quant:
-            # On Blackwell or Hopper, if E8M0 for DeepGemm is used, we need to
-            # requantize the weight and input to the specific scale
-            # at the same time.
-            if is_deep_gemm_e8m0_used():
-                assert layer.weight_block_size is not None
-                block_sz = tuple(layer.weight_block_size)
-                requant_weight_ue8m0_inplace(layer.weight.data,
-                                             layer.weight_scale.data, block_sz)
-            # SM90 Block FP8 CUTLASS requires row-major weight scales
-            elif (current_platform.is_device_capability(90)
-                  and self.cutlass_block_fp8_supported
-                  and not should_use_deepgemm_for_fp8_linear(
-                      torch.bfloat16, layer.weight)):
-                layer.weight_scale = Parameter(
-                    layer.weight_scale.data.T.contiguous(),
-                    requires_grad=False)
+            maybe_post_process_fp8_weight_block(
+                layer, self.cutlass_block_fp8_supported)
 
     def apply(self,
               layer: torch.nn.Module,
