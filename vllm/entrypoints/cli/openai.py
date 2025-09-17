@@ -80,8 +80,9 @@ def chat(system_prompt: str | None, model_name: str, client: OpenAI) -> None:
             break
         conversation.append({"role": "user", "content": input_message})
 
-        stream = client.chat.completions.create(
-            model=model_name, messages=conversation, stream=True)
+        stream = client.chat.completions.create(model=model_name,
+                                                messages=conversation,
+                                                stream=True)
         output = _print_chat_stream(stream)
         conversation.append({"role": "assistant", "content": output})
 
@@ -126,8 +127,9 @@ class ChatCommand(CLISubcommand):
         if args.quick:
             conversation.append({"role": "user", "content": args.quick})
 
-            stream = client.chat.completions.create(
-                model=model_name, messages=conversation, stream=True)
+            stream = client.chat.completions.create(model=model_name,
+                                                    messages=conversation,
+                                                    stream=True)
             output = _print_chat_stream(stream)
             conversation.append({"role": "assistant", "content": output})
             return
@@ -140,8 +142,9 @@ class ChatCommand(CLISubcommand):
                 break
             conversation.append({"role": "user", "content": input_message})
 
-            stream = client.chat.completions.create(
-                model=model_name, messages=conversation, stream=True)
+            stream = client.chat.completions.create(model=model_name,
+                                                    messages=conversation,
+                                                    stream=True)
             output = _print_chat_stream(stream)
             conversation.append({"role": "assistant", "content": output})
 
