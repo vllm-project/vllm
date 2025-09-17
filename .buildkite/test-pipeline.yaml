@@ -47,7 +47,6 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/mq_llm_engine
-  - tests/async_engine
   - tests/test_inputs.py
   - tests/test_outputs.py
   - tests/multimodal
@@ -58,7 +57,6 @@ steps:
   commands:
   - python3 standalone_tests/lazy_imports.py
   - pytest -v -s mq_llm_engine # MQLLMEngine
-  - pytest -v -s async_engine # AsyncLLMEngine
   - pytest -v -s test_inputs.py
   - pytest -v -s test_outputs.py
   - pytest -v -s multimodal
