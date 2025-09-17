@@ -59,7 +59,7 @@ class BlockTable:
 
             self.block_size = kernel_block_size
             self.blocks_per_phys_block = (block_size // kernel_block_size)
-            self.use_hybrid_blocks = False
+            self.use_hybrid_blocks = True
 
         self.max_num_blocks_per_req = max_num_blocks_per_req * \
                                         self.blocks_per_phys_block
