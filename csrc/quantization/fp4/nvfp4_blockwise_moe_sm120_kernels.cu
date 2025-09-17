@@ -27,6 +27,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cassert>
+#include <type_traits>
 
 #include "cute/tensor.hpp"
 #include "cutlass/tensor_ref.h"
@@ -251,6 +252,10 @@ static inline void run_fp4_blockwise_scaled_group_mm_sm120(
   using StrideBParam = typename Gemm::GemmKernel::StrideB*;
   using StrideCParam = typename Gemm::GemmKernel::StrideC*;
   using StrideDParam = typename Gemm::GemmKernel::StrideD*;
+  using HostStrideA = std::remove_pointer_t<typename Gemm::GemmKernel::StrideA>;
+  using HostStrideB = std::remove_pointer_t<typename Gemm::GemmKernel::StrideB>;
+  using HostStrideC = std::remove_pointer_t<typename Gemm::GemmKernel::StrideC>;
+  using HostStrideD = std::remove_pointer_t<typename Gemm::GemmKernel::StrideD>;
 
   using InternalLayoutSFA =
       typename Gemm::GemmKernel::CollectiveMainloop::InternalLayoutSFA;
@@ -279,27 +284,23 @@ static inline void run_fp4_blockwise_scaled_group_mm_sm120(
   torch::Tensor layout_sfb = torch::empty({num_experts, (long)sizeof(InternalLayoutSFB)}, options_byte);
   auto problem_sizes_cpu = problem_sizes.to(torch::kCPU).contiguous();
   auto ps_ptr = problem_sizes_cpu.data_ptr<int32_t>();
-  std::vector<typename Gemm::GemmKernel::StrideA> host_strideA(num_experts);
-  std::vector<typename Gemm::GemmKernel::StrideB> host_strideB(num_experts);
-  std::vector<typename Gemm::GemmKernel::StrideC> host_strideC(num_experts);
-  std::vector<typename Gemm::GemmKernel::StrideD> host_strideD(num_experts);
+  std::vector<HostStrideA> host_strideA(num_experts);
+  std::vector<HostStrideB> host_strideB(num_experts);
+  std::vector<HostStrideC> host_strideC(num_experts);
+  std::vector<HostStrideD> host_strideD(num_experts);
   for (int i = 0; i < num_experts; ++i) {
     int Mi = ps_ptr[3 * i + 0];
     int Ni = ps_ptr[3 * i + 1];
     int Ki = ps_ptr[3 * i + 2];
-    host_strideA[i] = cutlass::make_cute_packed_stride(
-        typename Gemm::GemmKernel::StrideA{}, {Mi, Ki, 1});
-    host_strideB[i] = cutlass::make_cute_packed_stride(
-        typename Gemm::GemmKernel::StrideB{}, {Ni, Ki, 1});
-    host_strideC[i] = cutlass::make_cute_packed_stride(
-        typename Gemm::GemmKernel::StrideC{}, {Mi, Ni, 1});
-    host_strideD[i] = cutlass::make_cute_packed_stride(
-        typename Gemm::GemmKernel::StrideD{}, {Mi, Ni, 1});
+    host_strideA[i] = cutlass::make_cute_packed_stride(HostStrideA{}, {Mi, Ki, 1});
+    host_strideB[i] = cutlass::make_cute_packed_stride(HostStrideB{}, {Ni, Ki, 1});
+    host_strideC[i] = cutlass::make_cute_packed_stride(HostStrideC{}, {Mi, Ni, 1});
+    host_strideD[i] = cutlass::make_cute_packed_stride(HostStrideD{}, {Mi, Ni, 1});
   }
-  torch::Tensor a_strides_buf = torch::empty({num_experts, (long)sizeof(host_strideA[0])}, options_byte);
-  torch::Tensor b_strides_buf = torch::empty({num_experts, (long)sizeof(host_strideB[0])}, options_byte);
-  torch::Tensor c_strides_buf = torch::empty({num_experts, (long)sizeof(host_strideC[0])}, options_byte);
-  torch::Tensor d_strides_buf = torch::empty({num_experts, (long)sizeof(host_strideD[0])}, options_byte);
+  torch::Tensor a_strides_buf = torch::empty({num_experts, (long)sizeof(HostStrideA)}, options_byte);
+  torch::Tensor b_strides_buf = torch::empty({num_experts, (long)sizeof(HostStrideB)}, options_byte);
+  torch::Tensor c_strides_buf = torch::empty({num_experts, (long)sizeof(HostStrideC)}, options_byte);
+  torch::Tensor d_strides_buf = torch::empty({num_experts, (long)sizeof(HostStrideD)}, options_byte);
   cudaMemcpyAsync(a_strides_buf.data_ptr(), host_strideA.data(), host_strideA.size() * sizeof(host_strideA[0]), cudaMemcpyHostToDevice, at::cuda::getCurrentCUDAStream());
   cudaMemcpyAsync(b_strides_buf.data_ptr(), host_strideB.data(), host_strideB.size() * sizeof(host_strideB[0]), cudaMemcpyHostToDevice, at::cuda::getCurrentCUDAStream());
   cudaMemcpyAsync(c_strides_buf.data_ptr(), host_strideC.data(), host_strideC.size() * sizeof(host_strideC[0]), cudaMemcpyHostToDevice, at::cuda::getCurrentCUDAStream());
@@ -324,11 +325,8 @@ static inline void run_fp4_blockwise_scaled_group_mm_sm120(
                  "[nvfp4-sm120] preparing grouped GEMM: num_experts=%d M=%d N=%d K=%d out_dtype=%d\n",
                  num_experts, M, N, K, static_cast<int>(output.scalar_type()));
     std::fprintf(stderr,
-                 "[nvfp4-sm120] type sizes: StrideA=%zu StrideB=%zu StrideC=%zu StrideD=%zu LayoutSFA=%zu LayoutSFB=%zu\n",
-                 sizeof(typename Gemm::GemmKernel::StrideA),
-                 sizeof(typename Gemm::GemmKernel::StrideB),
-                 sizeof(typename Gemm::GemmKernel::StrideC),
-                 sizeof(typename Gemm::GemmKernel::StrideD),
+                 "[nvfp4-sm120] type sizes: HostStrideA=%zu HostStrideB=%zu HostStrideC=%zu HostStrideD=%zu HostLayoutSFA=%zu HostLayoutSFB=%zu\n",
+                 sizeof(HostStrideA), sizeof(HostStrideB), sizeof(HostStrideC), sizeof(HostStrideD),
                  sizeof(InternalLayoutSFA), sizeof(InternalLayoutSFB));
   }
 
@@ -344,9 +342,9 @@ static inline void run_fp4_blockwise_scaled_group_mm_sm120(
   hw_info.sm_count = std::min(cached_sm_counts[hw_info.device_id], INT_MAX);
 
   typename GemmKernel::MainloopArguments mainloop_args{
-      reinterpret_cast<const ElementA**>(a_ptrs.data_ptr()),
+      reinterpret_cast<ElementA**>(a_ptrs.data_ptr()),
       reinterpret_cast<StrideAParam>(a_strides_buf.data_ptr()),
-      reinterpret_cast<const ElementB**>(b_ptrs.data_ptr()),
+      reinterpret_cast<ElementB**>(b_ptrs.data_ptr()),
       reinterpret_cast<StrideBParam>(b_strides_buf.data_ptr()),
       reinterpret_cast<const ElementSFType**>(a_scales_ptrs.data_ptr()),
       reinterpret_cast<LayoutSFAArg>(layout_sfa.data_ptr()),
