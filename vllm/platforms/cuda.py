@@ -199,8 +199,6 @@ class CudaPlatformBase(Platform):
                 "compatible. Set the all_to_all backend to deepep_low_latency "
                 "to use those kernels instead.")
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            if model_config is not None:
-                model_config.enforce_eager = True
 
     @classmethod
     def get_current_memory_usage(cls,
