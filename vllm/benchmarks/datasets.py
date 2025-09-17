@@ -104,9 +104,9 @@ class BenchmarkDataset(ABC):
 
         Args:
             dataset_path (Optional[str]): Path to the dataset. If None, it
-            indicates that a default or random dataset might be used.
+                indicates that a default or random dataset might be used.
             random_seed (int): Seed value for reproducible shuffling or
-            sampling. Defaults to DEFAULT_SEED.
+                sampling. Defaults to DEFAULT_SEED.
         """
         self.dataset_path = dataset_path
         # Set the random seed, ensuring that a None value is replaced with the
@@ -200,8 +200,7 @@ class BenchmarkDataset(ABC):
             tokenizer (PreTrainedTokenizerBase): The tokenizer to be used
                 for processing the dataset's text.
             num_requests (int): The number of sample requests to generate.
-            request_id_prefix (str) The prefix of request_id.
-
+            request_id_prefix (str): The prefix of request_id.
 
         Returns:
             list[SampleRequest]: A list of sample requests generated from the
@@ -224,7 +223,8 @@ class BenchmarkDataset(ABC):
             requests (List[SampleRequest]): The current list of sampled
                 requests.
             num_requests (int): The target number of requests.
-            request_id_prefix (str) The prefix of the request ids.
+            request_id_prefix (str): The prefix applied to generated request
+                identifiers.
 
         """
         if no_oversample:
