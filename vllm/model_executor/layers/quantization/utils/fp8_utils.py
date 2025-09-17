@@ -148,6 +148,40 @@ direct_register_custom_op(
 )
 
 
+def _w8a8_block_fp8_matmul_func(
+    qx: torch.Tensor,
+    weight: torch.Tensor,
+    x_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+    block_size: list[int],
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    return w8a8_block_fp8_matmul(qx, weight, x_scale, weight_scale, block_size,
+                                 output_dtype)
+
+
+def _w8a8_block_fp8_matmul_func_fake(
+    qx: torch.Tensor,
+    weight: torch.Tensor,
+    x_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+    block_size: list[int],
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    return torch.empty((qx.size(0), weight.size(0)),
+                       dtype=output_dtype,
+                       device=qx.device)
+
+
+direct_register_custom_op(
+    "w8a8_block_fp8_matmul_func",
+    _w8a8_block_fp8_matmul_func,
+    mutates_args=[],
+    fake_impl=_w8a8_block_fp8_matmul_func_fake,
+    dispatch_key="CUDA",
+)
+
+
 def dispatch_w8a8_blockscale_func(
     use_cutlass: bool, use_aiter_and_is_supported: bool
 ) -> Callable[[
@@ -280,8 +314,8 @@ class W8A8BlockFp8LinearOp:
                                                      block_size[1],
                                                      column_major_scales=False,
                                                      use_ue8m0=False)
-        return w8a8_block_fp8_matmul(q_input, weight, x_scale, weight_scale,
-                                     block_size, input_2d.dtype)
+        return torch.ops.vllm.w8a8_block_fp8_matmul_func(
+            q_input, weight, x_scale, weight_scale, block_size, input_2d.dtype)
 
     def _dispatch_w8a8_blockscale_op(
         self,
