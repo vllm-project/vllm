@@ -28,7 +28,7 @@ def compute_retained_tokens_count(video_size_thw: torch.LongTensor,
     Returns:
         The number of retained tokens.
     """
-    T, H, W = video_size_thw
+    T, H, W = map(int, video_size_thw)
     min_num_tokens = (H // spatial_merge_size) * (W // spatial_merge_size)
     evs_num_tokens = int(T * min_num_tokens * (1 - q))
     return max(min_num_tokens, evs_num_tokens)
