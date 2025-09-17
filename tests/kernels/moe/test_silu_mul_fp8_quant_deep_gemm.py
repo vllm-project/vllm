@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
-    silu_mul_fp8_quant_deep_gemm_cuda)
+    silu_mul_fp8_quant_deep_gemm_cuda, silu_v1)
 from vllm.platforms import current_platform
 from vllm.utils import cdiv
 
@@ -43,6 +43,7 @@ def test_silu_mul_fp8_quant_deep_gemm(E, T, H, fp8_type):
     ) * 0 + T
 
     # Run the Triton kernel
+    y_q, y_s = silu_v1(y, tokens_per_expert, group_size=group_size)
     y_q, y_s = silu_mul_fp8_quant_deep_gemm_cuda(y,
                                                  tokens_per_expert,
                                                  group_size=group_size)
