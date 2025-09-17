@@ -177,6 +177,18 @@ def triton_mrope(
     return q, k
 
 
+def apply_interleaved_rope(x: torch.Tensor,
+                           mrope_section: list[int]) -> torch.Tensor:
+    """Apply interleaved MRoPE to 3D rotary embeddings.
+    Reorganizes frequency layout from chunked [TTT...HHH...WWW] to
+    interleaved [THTHWHTHW...TT], preserving frequency continuity.
+    """
+    x_t = x[0].clone()
+    x_t[..., 1:mrope_section[1] * 3:3] = x[1, ..., 1:mrope_section[1] * 3:3]
+    x_t[..., 2:mrope_section[2] * 3:3] = x[2, ..., 2:mrope_section[2] * 3:3]
+    return x_t
+
+
 class MRotaryEmbedding(RotaryEmbedding):
     """Rotary Embedding with Multimodal Sections."""
 
@@ -189,6 +201,7 @@ class MRotaryEmbedding(RotaryEmbedding):
         is_neox_style: bool,
         dtype: torch.dtype,
         mrope_section: Optional[list[int]] = None,
+        mrope_interleaved: Optional[bool] = False,
     ) -> None:
         # In Qwen2.5-VL, the maximum index value is related to the duration of
         # the input video. We enlarge max_position_embeddings to 4 times to get
@@ -198,6 +211,7 @@ class MRotaryEmbedding(RotaryEmbedding):
                          base, is_neox_style, dtype)
 
         self.mrope_section = mrope_section
+        self.mrope_interleaved = mrope_interleaved
         if self.mrope_section:
             assert sum(self.mrope_section) == rotary_dim // 2
 
@@ -225,17 +239,20 @@ class MRotaryEmbedding(RotaryEmbedding):
         cos, sin = cos_sin.chunk(2, dim=-1)
         if positions.ndim == 2:
             assert self.mrope_section
-
-            cos = torch.cat([
-                m[i]
-                for i, m in enumerate(cos.split(self.mrope_section, dim=-1))
-            ],
-                            dim=-1)
-            sin = torch.cat([
-                m[i]
-                for i, m in enumerate(sin.split(self.mrope_section, dim=-1))
-            ],
-                            dim=-1)
+            if self.mrope_interleaved:
+                cos = apply_interleaved_rope(cos, self.mrope_section)
+                sin = apply_interleaved_rope(sin, self.mrope_section)
+            else:
+                cos = torch.cat([
+                    m[i] for i, m in enumerate(
+                        cos.split(self.mrope_section, dim=-1))
+                ],
+                                dim=-1)
+                sin = torch.cat([
+                    m[i] for i, m in enumerate(
+                        sin.split(self.mrope_section, dim=-1))
+                ],
+                                dim=-1)
 
         query_shape = query.shape
         query = query.view(num_tokens, -1, self.head_size)
@@ -264,6 +281,10 @@ class MRotaryEmbedding(RotaryEmbedding):
 
         assert positions.ndim == 1 or positions.ndim == 2
         assert key is not None
+
+        if self.mrope_interleaved:
+            # TODO: add triton implementation to support mrope-interleaved
+            return self.forward_native(positions, query, key)
 
         num_tokens = positions.shape[-1]
         cos_sin = self.cos_sin_cache[positions]
@@ -381,6 +402,15 @@ class MRotaryEmbedding(RotaryEmbedding):
             )
         elif hf_config.model_type in ["glm4v", "glm4v_moe"]:
             return cls._glm4v_get_input_positions_tensor(
+                input_tokens=input_tokens,
+                hf_config=hf_config,
+                image_grid_thw=image_grid_thw,
+                video_grid_thw=video_grid_thw,
+                context_len=context_len,
+                seq_len=seq_len,
+            )
+        elif hf_config.model_type in ["qwen3_vl", "qwen3_vl_moe"]:
+            return cls._qwen3vl_get_input_positions_tensor(
                 input_tokens=input_tokens,
                 hf_config=hf_config,
                 image_grid_thw=image_grid_thw,
@@ -524,6 +554,98 @@ class MRotaryEmbedding(RotaryEmbedding):
         llm_positions = llm_positions[:, context_len:seq_len]
         mrope_position_delta = (llm_positions.max() + 1 -
                                 len(input_tokens)).item()
+        return llm_positions, mrope_position_delta
+
+    @classmethod
+    def _qwen3vl_get_input_positions_tensor(
+        cls,
+        input_tokens: list[int],
+        hf_config: PretrainedConfig,
+        image_grid_thw: Union[list[list[int]], torch.Tensor],
+        video_grid_thw: Union[list[list[int]], torch.Tensor],
+        context_len: int = 0,
+        seq_len: Optional[int] = None,
+    ) -> tuple[torch.Tensor, int]:
+        """Get mrope input positions and delta value."""
+
+        video_grid_thw = [[1, h, w] for t, h, w in video_grid_thw
+                          for _ in range(t)]
+
+        image_token_id = hf_config.image_token_id
+        video_token_id = hf_config.video_token_id
+        vision_start_token_id = hf_config.vision_start_token_id
+        spatial_merge_size = hf_config.vision_config.spatial_merge_size
+
+        input_tokens_tensor = torch.tensor(input_tokens)
+        vision_start_indices = torch.argwhere(
+            input_tokens_tensor == vision_start_token_id).squeeze(1)
+        vision_tokens = input_tokens_tensor[vision_start_indices + 1]
+        image_nums = (vision_tokens == image_token_id).sum()
+        video_nums = (vision_tokens == video_token_id).sum()
+        llm_pos_ids_list: list = []
+
+        st = 0
+        remain_images, remain_videos = image_nums, video_nums
+
+        image_index, video_index = 0, 0
+        for _ in range(image_nums + video_nums):
+            if image_token_id in input_tokens and remain_images > 0:
+                ed_image = input_tokens.index(image_token_id, st)
+            else:
+                ed_image = len(input_tokens) + 1
+            if video_token_id in input_tokens and remain_videos > 0:
+                ed_video = input_tokens.index(video_token_id, st)
+            else:
+                ed_video = len(input_tokens) + 1
+            if ed_image < ed_video:
+                t, h, w = (
+                    image_grid_thw[image_index][0],
+                    image_grid_thw[image_index][1],
+                    image_grid_thw[image_index][2],
+                )
+                image_index += 1
+                remain_images -= 1
+                ed = ed_image
+            else:
+                t, h, w = (
+                    video_grid_thw[video_index][0],
+                    video_grid_thw[video_index][1],
+                    video_grid_thw[video_index][2],
+                )
+                video_index += 1
+                remain_videos -= 1
+                ed = ed_video
+
+            llm_grid_t, llm_grid_h, llm_grid_w = \
+                t, h // spatial_merge_size, w // spatial_merge_size
+            text_len = ed - st
+
+            st_idx = llm_pos_ids_list[-1].max() + 1 if len(
+                llm_pos_ids_list) > 0 else 0
+            llm_pos_ids_list.append(
+                torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
+
+            t_index = torch.arange(llm_grid_t).view(-1, 1).expand(
+                -1, llm_grid_h * llm_grid_w).flatten()
+            h_index = torch.arange(llm_grid_h).view(1, -1, 1).expand(
+                llm_grid_t, -1, llm_grid_w).flatten()
+            w_index = torch.arange(llm_grid_w).view(1, 1, -1).expand(
+                llm_grid_t, llm_grid_h, -1).flatten()
+            llm_pos_ids_list.append(
+                torch.stack([t_index, h_index, w_index]) + text_len + st_idx)
+            st = ed + llm_grid_t * llm_grid_h * llm_grid_w
+
+        if st < len(input_tokens):
+            st_idx = llm_pos_ids_list[-1].max() + 1 if len(
+                llm_pos_ids_list) > 0 else 0
+            text_len = len(input_tokens) - st
+            llm_pos_ids_list.append(
+                torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
+
+        llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
+        mrope_position_delta = (llm_positions.max() + 1 -
+                                len(input_tokens)).item()
+        llm_positions = llm_positions[:, context_len:seq_len]
         return llm_positions, mrope_position_delta
 
     @classmethod
