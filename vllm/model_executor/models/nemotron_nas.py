@@ -159,7 +159,9 @@ class DeciLMDecoderLayer(nn.Module):
                 prefix=f"{prefix}.self_attn",
             )
             self.input_layernorm = RMSNorm(config.hidden_size,
-                                           eps=config.rms_norm_eps)
+                                           eps=config.rms_norm_eps,
+                                           prefix=maybe_prefix(
+                                               prefix, "input_layernorm"))
 
         if not self._is_no_op_ffn:
             ffn_mult = block_config.ffn.ffn_mult
@@ -175,7 +177,10 @@ class DeciLMDecoderLayer(nn.Module):
                 prefix=f"{prefix}.mlp",
             )
             self.post_attention_layernorm = RMSNorm(config.hidden_size,
-                                                    eps=config.rms_norm_eps)
+                                                    eps=config.rms_norm_eps,
+                                                    prefix=maybe_prefix(
+                                                        prefix,
+                                                        "post_layernorm"))
 
     def forward(
         self,

@@ -278,8 +278,12 @@ class ExaoneDecoderLayer(nn.Module):
             bias=getattr(config, "mlp_bias", False),
             prefix=f"{prefix}.mlp",
         )
-        self.ln_1 = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
-        self.ln_2 = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
+        self.ln_1 = RMSNorm(config.hidden_size,
+                            eps=config.layer_norm_epsilon,
+                            prefix=maybe_prefix(prefix, "input_layernorm"))
+        self.ln_2 = RMSNorm(config.hidden_size,
+                            eps=config.layer_norm_epsilon,
+                            prefix=maybe_prefix(prefix, "post_layernorm"))
 
     def forward(
         self,

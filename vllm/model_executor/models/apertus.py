@@ -288,9 +288,13 @@ class ApertusDecoderLayer(nn.Module):
             prefix=f"{prefix}.mlp",
         )
         self.attention_layernorm = RMSNorm(config.hidden_size,
-                                           eps=config.rms_norm_eps)
+                                           eps=config.rms_norm_eps,
+                                           prefix=maybe_prefix(
+                                               prefix, "input_layernorm"))
         self.feedforward_layernorm = RMSNorm(config.hidden_size,
-                                             eps=config.rms_norm_eps)
+                                             eps=config.rms_norm_eps,
+                                             prefix=maybe_prefix(
+                                                 prefix, "post_layernorm"))
 
     def forward(
         self,

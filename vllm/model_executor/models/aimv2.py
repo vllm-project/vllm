@@ -22,6 +22,8 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.transformers_utils.configs.ovis import AIMv2Config
 
+from .utils import maybe_prefix
+
 
 class AIMv2SwiGLUFFN(nn.Module):
 
@@ -147,11 +149,15 @@ class AIMv2Block(nn.Module):
         self.attn = AIMv2Attention(config,
                                    quant_config=quant_config,
                                    prefix=f"{prefix}.attn")
-        self.norm_1 = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm_1 = RMSNorm(config.hidden_size,
+                              eps=config.rms_norm_eps,
+                              prefix=maybe_prefix(prefix, "input_layernorm"))
         self.mlp = AIMv2SwiGLUFFN(config,
                                   quant_config=quant_config,
                                   prefix=f"{prefix}.mlp")
-        self.norm_2 = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm_2 = RMSNorm(config.hidden_size,
+                              eps=config.rms_norm_eps,
+                              prefix=maybe_prefix(prefix, "post_layernorm"))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x + self.attn(self.norm_1.forward_native(x))

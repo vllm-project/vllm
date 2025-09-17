@@ -337,14 +337,19 @@ class BailingMoeBlock(nn.Module):
         hidden_size = config.hidden_size
         intermediate_size = config.intermediate_size
 
-        self.input_layernorm = RMSNorm(hidden_size, eps=config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(hidden_size,
+                                       eps=config.rms_norm_eps,
+                                       prefix=maybe_prefix(
+                                           prefix, "input_layernorm"))
         self.attention = BailingAttention(config,
                                           cache_config,
                                           quant_config,
                                           prefix=f"{prefix}.attention")
 
         self.post_attention_layernorm = RMSNorm(hidden_size,
-                                                eps=config.rms_norm_eps)
+                                                eps=config.rms_norm_eps,
+                                                prefix=maybe_prefix(
+                                                    prefix, "post_layernorm"))
 
         # Choose MLP class based on the number of experts and layer index
         if layer_idx < config.first_k_dense_replace:

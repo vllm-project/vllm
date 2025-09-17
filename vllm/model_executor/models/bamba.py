@@ -214,9 +214,13 @@ class BambaAttentionDecoderLayer(nn.Module):
 
         self.feed_forward = BambaMLP(config, quant_config=quant_config)
         self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
+                                       eps=config.rms_norm_eps,
+                                       prefix=maybe_prefix(
+                                           prefix, "input_layernorm"))
         self.pre_ff_layernorm = RMSNorm(config.hidden_size,
-                                        eps=config.rms_norm_eps)
+                                        eps=config.rms_norm_eps,
+                                        prefix=maybe_prefix(
+                                            prefix, "post_layernorm"))
 
     def self_attention(
         self,

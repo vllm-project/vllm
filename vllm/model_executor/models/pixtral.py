@@ -1129,14 +1129,19 @@ class PixtralHFTransformerBlock(nn.Module):
     ) -> None:
         super().__init__()
 
-        self.attention_norm = RMSNorm(config.hidden_size, eps=1e-5)
+        self.attention_norm = RMSNorm(config.hidden_size,
+                                      eps=1e-5,
+                                      prefix=maybe_prefix(
+                                          prefix, "input_layernorm"))
         self.attention = PixtralHFAttention(config,
                                             quant_config=quant_config,
                                             prefix=f"{prefix}.attention")
         self.feed_forward = PixtralHFMLP(config,
                                          quant_config=quant_config,
                                          prefix=f"{prefix}.feed_forward")
-        self.ffn_norm = RMSNorm(config.hidden_size, eps=1e-5)
+        self.ffn_norm = RMSNorm(config.hidden_size,
+                                eps=1e-5,
+                                prefix=maybe_prefix(prefix, "post_layernorm"))
 
     def forward(
         self,

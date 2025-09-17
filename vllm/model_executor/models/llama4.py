@@ -42,7 +42,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 
 from .llama import LlamaForCausalLM, LlamaMLP, LlamaModel
 from .utils import (AutoWeightsLoader, extract_layer_index, fast_topk,
-                    is_pp_missing_parameter)
+                    is_pp_missing_parameter, maybe_prefix)
 
 
 class Llama4MoE(nn.Module):
@@ -305,9 +305,13 @@ class Llama4DecoderLayer(nn.Module):
                 prefix=f"{prefix}.feed_forward",
             )
         self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
+                                       eps=config.rms_norm_eps,
+                                       prefix=maybe_prefix(
+                                           prefix, "input_layernorm"))
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
-                                                eps=config.rms_norm_eps)
+                                                eps=config.rms_norm_eps,
+                                                prefix=maybe_prefix(
+                                                    prefix, "post_layernorm"))
 
     def forward(
         self,

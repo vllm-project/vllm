@@ -238,8 +238,14 @@ class OlmoeDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=1e-5)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=1e-5)
+        self.input_layernorm = RMSNorm(config.hidden_size,
+                                       eps=1e-5,
+                                       prefix=maybe_prefix(
+                                           prefix, "input_layernorm"))
+        self.post_attention_layernorm = RMSNorm(config.hidden_size,
+                                                eps=1e-5,
+                                                prefix=maybe_prefix(
+                                                    prefix, "post_layernorm"))
 
     def forward(
         self,

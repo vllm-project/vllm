@@ -190,8 +190,11 @@ class GLMBlock(nn.Module):
 
         layer_norm_func = RMSNorm if config.rmsnorm else LayerNorm
         # Layernorm on the input data.
-        self.input_layernorm = layer_norm_func(config.hidden_size,
-                                               eps=config.layernorm_epsilon)
+        self.input_layernorm = layer_norm_func(
+            config.hidden_size,
+            eps=config.layernorm_epsilon,
+            prefix=maybe_prefix(prefix, "input_layernorm")
+            if config.rmsnorm else None)
 
         # Self attention.
         self.self_attention = GLMAttention(config,
@@ -202,7 +205,10 @@ class GLMBlock(nn.Module):
 
         # Layernorm on the attention output
         self.post_attention_layernorm = layer_norm_func(
-            config.hidden_size, eps=config.layernorm_epsilon)
+            config.hidden_size,
+            eps=config.layernorm_epsilon,
+            prefix=maybe_prefix(prefix, "post_layernorm")
+            if config.rmsnorm else None)
 
         # MLP
         self.mlp = GLMMLP(config, quant_config, prefix=f"{prefix}.mlp")

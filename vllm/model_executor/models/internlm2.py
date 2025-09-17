@@ -220,8 +220,12 @@ class InternLMDecoderLayer(nn.Module):
             prefix=f"{prefix}.feed_forward",
         )
         self.attention_norm = RMSNorm(config.hidden_size,
-                                      eps=config.rms_norm_eps)
-        self.ffn_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+                                      eps=config.rms_norm_eps,
+                                      prefix=maybe_prefix(
+                                          prefix, "input_layernorm"))
+        self.ffn_norm = RMSNorm(config.hidden_size,
+                                eps=config.rms_norm_eps,
+                                prefix=maybe_prefix(prefix, "post_layernorm"))
 
     def forward(
         self,

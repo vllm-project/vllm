@@ -233,9 +233,13 @@ class JambaAttentionDecoderLayer(nn.Module):
                 prefix=f"{prefix}.feed_forward",
             )
         self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
+                                       eps=config.rms_norm_eps,
+                                       prefix=maybe_prefix(
+                                           prefix, "input_layernorm"))
         self.pre_ff_layernorm = RMSNorm(config.hidden_size,
-                                        eps=config.rms_norm_eps)
+                                        eps=config.rms_norm_eps,
+                                        prefix=maybe_prefix(
+                                            prefix, "post_layernorm"))
 
     def self_attention(
         self,
