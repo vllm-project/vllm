@@ -33,9 +33,8 @@ INVALID_PREFIX_ERR_MSG = "Invalid prefix encountered"
 
 class IncrementalDetokenizer:
 
-    def __init__(self, vllm_config: VllmConfig):
+    def __init__(self):
         self.token_ids: list[int] = []
-        self.vllm_config = vllm_config
 
     @property
     def output_token_ids(self) -> list[int]:
@@ -75,8 +74,9 @@ class IncrementalDetokenizer:
 
 class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
 
-    def __init__(self, vllm_config: VllmConfig, request: EngineCoreRequest):
-        super().__init__(vllm_config=vllm_config)
+    def __init__(self, vllm_config: VllmConfig, tokenizer: AnyTokenizer,
+                 request: EngineCoreRequest):
+        super().__init__()
 
         # Stop strings
         params = request.sampling_params
@@ -97,8 +97,9 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         self.output_text = ""
         self.reasoning_parser: Optional[ReasoningParser] = None
         if vllm_config.decoding_config.reasoning_backend:
-            self.reasoning_parser = ReasoningParserManager.get_reasoning_parser(
+            reasoning_parser = ReasoningParserManager.get_reasoning_parser(
                 vllm_config.decoding_config.reasoning_backend)
+            self.reasoning_parser = reasoning_parser(tokenizer)
 
     def update(self, new_token_ids: list[int], stop_terminated: bool) -> Optional[str]:
         """
@@ -137,10 +138,10 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
 
         # 2) Evaluate stop strings.
         stop_string = None
-        if self.stop and self.reasoning_parser and \
-            not self.reasoning_parser.is_reasoning_end(self.token_ids):
-            return stop_string
         if self.stop and len(self.output_token_ids) > self.min_tokens:
+            if (rp := self.reasoning_parser) and not rp.is_reasoning_end(
+                    self.token_ids):
+                return None
             stop = check_stop_strings(
                 output_text=self.output_text,
                 new_char_count=len(self.output_text) - stop_check_offset,
@@ -183,7 +184,9 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
     def __init__(self, vllm_config: VllmConfig,
                  tokenizer: PreTrainedTokenizerFast,
                  request: EngineCoreRequest):
-        super().__init__(vllm_config=vllm_config, request=request)
+        super().__init__(vllm_config=vllm_config,
+                         tokenizer=tokenizer._tokenizer,
+                         request=request)
 
         sampling_params = request.sampling_params
         assert sampling_params is not None
@@ -193,8 +196,6 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
         self.stream = DecodeStream(skip_special_tokens=self.skip_special_tokens)
 
         self.tokenizer: Tokenizer = tokenizer._tokenizer
-        if self.reasoning_parser:
-            self.reasoning_parser = self.reasoning_parser(self.tokenizer)
         # Find a safe place to start.
         prompt_token_ids = request.prompt_token_ids or []
         prompt_suffix = prompt_token_ids
@@ -275,11 +276,11 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
 
     def __init__(self, vllm_config: VllmConfig, tokenizer: AnyTokenizer,
                  request: EngineCoreRequest):
-        super().__init__(vllm_config=vllm_config, request=request)
+        super().__init__(vllm_config=vllm_config,
+                         tokenizer=tokenizer,
+                         request=request)
 
         self.tokenizer = tokenizer
-        if self.reasoning_parser:
-            self.reasoning_parser = self.reasoning_parser(self.tokenizer)
         params = request.sampling_params
         assert params is not None
 
