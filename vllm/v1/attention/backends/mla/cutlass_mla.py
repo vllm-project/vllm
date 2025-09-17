@@ -207,13 +207,10 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         if H < MAX_HEADS:
             out = out[:, :H]
+            if self.need_to_return_lse_for_decode:
+                lse = lse[:, :H].contiguous()
 
-        if self.need_to_return_lse_for_decode:
-            returned_lse = lse[:, :H].contiguous() if H < MAX_HEADS else lse
-        else:
-            returned_lse = lse
-
-        return out, returned_lse
+        return out, lse
 
     def _forward_decode(
         self,
