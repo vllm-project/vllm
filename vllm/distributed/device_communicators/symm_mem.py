@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from typing import Optional, Union
 
 import torch
@@ -79,6 +80,11 @@ class SymmMemCommunicator:
         else:
             self.max_size = SYMM_MEM_ALL_REDUCE_MAX_SIZES[
                 self.device_capability][self.world_size]
+
+        # allow overlapping devices in case of data parallel
+        # if torch symm mem can not initialize multicast ptr will be 0
+        if self.world_size < dist.get_world_size():
+            os.environ["TORCH_SYMM_MEM_ALLOW_OVERLAPPING_DEVICES"] = "1"
 
         self.buffer = torch_symm_mem.empty(
             self.max_size // self.dtype.itemsize,

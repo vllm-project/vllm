@@ -34,8 +34,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # ep does not use pynccl
         use_pynccl = "ep" not in unique_name
 
+        use_torch_symm_mem = ("ep" not in unique_name
+                              and envs.VLLM_ALLREDUCE_USE_SYMM_MEM)
+
         self.use_pynccl = use_pynccl
         self.use_custom_allreduce = use_custom_allreduce
+        self.use_torch_symm_mem = use_torch_symm_mem
 
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
@@ -57,7 +61,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.ca_comm: Optional[CustomAllreduce] = None
         self.qr_comm: Optional[QuickAllReduce] = None
         self.symm_mem_comm: Optional[SymmMemCommunicator] = None
-        if envs.VLLM_ALLREDUCE_USE_SYMM_MEM and current_platform.is_cuda():
+        if use_torch_symm_mem and current_platform.is_cuda():
             self.symm_mem_comm = SymmMemCommunicator(
                 group=self.cpu_group,
                 device=self.device,
