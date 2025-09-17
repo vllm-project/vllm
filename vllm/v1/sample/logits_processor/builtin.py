@@ -259,6 +259,18 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
 
         self.pin_memory = is_pin_memory
         self.device = device
+        # Per-request state tracking for thinking token management
+        # Key: request_index, Value: state dict containing:
+        # "in_think": bool - currently in thinking mode
+        # "in_end": bool - currently forcing end tokens output
+        # "check_count_down": int - steps remaining until next think
+        #                            start/end token parsing
+        # "think_count": int - number of thinking tokens generated
+        # "end_count": int - number of end tokens forced so far
+        # "thinking_token_budget": int - max allowed thinking tokens
+        # "output_tok_ids": list[int] - generated output tokens
+        # "prev_output_length": int - previous output length for
+        #                               incremental processing
         self._state: dict[int, dict[str, Any]] = {}
 
         # Preallocate reusable tensors
