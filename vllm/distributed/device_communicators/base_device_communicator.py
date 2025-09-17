@@ -63,6 +63,9 @@ class All2AllManagerBase:
     def set_num_sms(self, num_sms: int):
         pass
 
+    def max_sms_used(self) -> Optional[int]:
+        return None  # None means it could use the whole GPU
+
     def dispatch(self, hidden_states: torch.Tensor,
                  router_logits: torch.Tensor):
         raise NotImplementedError
