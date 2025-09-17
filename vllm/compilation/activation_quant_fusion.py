@@ -84,7 +84,7 @@ if current_platform.is_rocm(
     class AiterSiluMulFp8BlockQuantPattern:
 
         def __init__(self):
-            pass
+            self.FP8_DTYPE = current_platform.fp8_dtype()
 
         def register(self, pm_pass: PatternMatcherPass):
 
@@ -94,31 +94,28 @@ if current_platform.is_rocm(
                 at1 = auto_functionalized(SILU_MUL_OP,
                                           result=result_silu_mul,
                                           input=input)
-                at2 = auto_functionalized(BLOCK_LINEAR_OP,
-                                          input=at1[1],
-                                          weight=linear_weight,
-                                          weight_scale=linear_weight_scale,
-                                          block_size=[128, 128],
-                                          use_aiter_and_is_supported=True)
+                at2 = BLOCK_LINEAR_OP(at1[1], linear_weight, [128, 128],
+                                      linear_weight_scale, None, None, False,
+                                      True)
                 return at2[1]
 
             def replacement(input: torch.Tensor, result_silu_mul: torch.Tensor,
                             linear_weight: torch.Tensor,
                             linear_weight_scale: torch.Tensor):
-                at1 = auto_functionalized(FUSED_SILU_MUL_QUANT_OP, x=input)
-                at2 = auto_functionalized(AITER_BLOCK_LINEAR_OP,
-                                          A=at1[1],
-                                          B=linear_weight,
-                                          As=at1[2],
-                                          Bs=linear_weight_scale,
-                                          block_size=[128, 128],
-                                          output_dtype=input.dtype())
+                at1 = FUSED_SILU_MUL_QUANT_OP(x=input)
+                at2 = AITER_BLOCK_LINEAR_OP(A=at1[1],
+                                            B=linear_weight,
+                                            As=at1[2],
+                                            Bs=linear_weight_scale,
+                                            block_size=[128, 128],
+                                            output_dtype=input.dtype())
                 return at2[1]
 
             inputs = [
                 empty_bf16(5, 4),  # input
                 empty_bf16(5, 4),  # result_silu_mul
-                empty_bf16(2, 5),  # linear_weight
+                # linear_weight
+                torch.empty((2, 5), device="cuda", dtype=self.FP8_DTYPE),
                 empty_fp32(1, 1)  # linear_weight_scale
             ]
 
