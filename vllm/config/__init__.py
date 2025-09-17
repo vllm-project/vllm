@@ -845,7 +845,8 @@ class ModelConfig:
                 object_storage_model.pull_files(model,
                                                 ignore_pattern=[
                                                     "*.pt", "*.safetensors",
-                                                    "*.bin", "*.tensors"
+                                                    "*.bin", "*.tensors",
+                                                    "*.pth"
                                                 ])
                 self.tokenizer = object_storage_model.dir
                 return
@@ -853,9 +854,12 @@ class ModelConfig:
         # Only download tokenizer if needed and not already handled
         if is_runai_obj_uri(tokenizer):
             object_storage_tokenizer = ObjectStorageModel()
-            object_storage_tokenizer.pull_files(
-                model,
-                ignore_pattern=["*.pt", "*.safetensors", "*.bin", "*.tensors"])
+            object_storage_tokenizer.pull_files(model,
+                                                ignore_pattern=[
+                                                    "*.pt", "*.safetensors",
+                                                    "*.bin", "*.tensors",
+                                                    "*.pth"
+                                                ])
             self.tokenizer = object_storage_tokenizer.dir
 
     def _get_encoder_config(self):
