@@ -161,16 +161,16 @@ The `batch_auto_tune.sh` script allows you to run multiple `auto_tune.sh` experi
 
 ### How to Run
 
-1.  **Create a JSON configuration file**: Create a file (e.g., `runs_config.json`) containing an array of JSON objects. Each object defines the parameters for a single `auto_tune.sh` run.
+1. **Create a JSON configuration file**: Create a file (e.g., `runs_config.json`) containing an array of JSON objects. Each object defines the parameters for a single `auto_tune.sh` run.
 
-2.  **Execute the script**:
+2. **Execute the script**:
 
     ```bash
     bash batch_auto_tune.sh <path_to_json_file> [gcs_upload_path]
     ```
 
-    -   `<path_to_json_file>`: **Required.** Path to your JSON configuration file.
-    -   `[gcs_upload_path]`: **Optional.** A GCS path (e.g., `gs://my-bucket/benchmark-results`) where the detailed results and profiles for each run will be uploaded.
+    - `<path_to_json_file>`: **Required.** Path to your JSON configuration file.
+    - `[gcs_upload_path]`: **Optional.** A GCS path (e.g., `gs://my-bucket/benchmark-results`) where the detailed results and profiles for each run will be uploaded.
 
 ### Configuration File
 
@@ -210,9 +210,9 @@ Here is an example `runs_config.json` with two benchmark configurations:
 
 The script modifies the input JSON file in place, adding the results of each run to the corresponding object. The following fields are added:
 
--   `run_id`: A unique identifier for the run, derived from the timestamp.
--   `status`: The outcome of the run (`SUCCESS`, `FAILURE`, or `WARNING_NO_RESULT_FILE`).
--   `results`: The content of the `result.txt` file from the `auto_tune.sh` run.
--   `gcs_results`: The GCS URL where the run's artifacts are stored (if a GCS path was provided).
+- `run_id`: A unique identifier for the run, derived from the timestamp.
+- `status`: The outcome of the run (`SUCCESS`, `FAILURE`, or `WARNING_NO_RESULT_FILE`).
+- `results`: The content of the `result.txt` file from the `auto_tune.sh` run.
+- `gcs_results`: The GCS URL where the run's artifacts are stored (if a GCS path was provided).
 
 A summary of successful and failed runs is also printed to the console upon completion.
