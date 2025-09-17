@@ -143,7 +143,8 @@ class Qwen3ReasoningParser(ReasoningParser):
             full_content = self.model_tokenizer.decode(input_ids)
             parts = full_content.partition(self.think_end_token)
             content = parts[2] if parts[2] else parts[0]
-            return self.model_tokenizer.encode(content)
+            return self.model_tokenizer.encode(content,
+                                               add_special_tokens=False)
 
     def _prompt_contains_start_token(self) -> bool:
         if not self.cached_prompt_tokens:
