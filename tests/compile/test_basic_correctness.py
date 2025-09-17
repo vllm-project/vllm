@@ -102,8 +102,8 @@ def test_compile_correctness(
     tp_size = test_setting.tp_size
     attn_backend = test_setting.attn_backend
     method = test_setting.method
-    if cuda_device_count_stateless() != pp_size * tp_size:
-        pytest.skip(f"Need exactly {pp_size}*{tp_size} CUDA gpus but got "
+    if cuda_device_count_stateless() < pp_size * tp_size:
+        pytest.skip(f"Need at least {pp_size}*{tp_size} CUDA gpus but got "
                     f"{cuda_device_count_stateless()}")
 
     with monkeypatch.context() as m:
