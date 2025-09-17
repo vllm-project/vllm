@@ -751,7 +751,7 @@ class OpenAIServingChat(OpenAIServing):
                     elif tool_choice_function_name:
                         if (self.reasoning_parser and not reasoning_end_arr[i]
                                 and not reasoning_parser.is_reasoning_end(
-                                    previous_token_ids)):
+                                    previous_token_ids, False)):
                             assert reasoning_parser is not None
                             delta_message = (
                                 reasoning_parser.
@@ -770,10 +770,10 @@ class OpenAIServingChat(OpenAIServing):
                             # set reasoning status to end.
                             # Only keep 'content', remove 'reasoning_content'.
                             if reasoning_parser.is_reasoning_end(
-                                    as_list(output.token_ids)) or (
+                                    as_list(output.token_ids), False) or (
                                         res.prompt_token_ids
                                         and reasoning_parser.is_reasoning_end(
-                                            res.prompt_token_ids)):
+                                            res.prompt_token_ids, True)):
                                 reasoning_end_arr[i] = True
                                 if delta_message and delta_message.content:
                                     # This need to be added to next `delta_text`
@@ -860,7 +860,7 @@ class OpenAIServingChat(OpenAIServing):
                             # to 'reasoning_content'.
                             if res.prompt_token_ids and \
                                 reasoning_parser.is_reasoning_end(
-                                    res.prompt_token_ids):
+                                    res.prompt_token_ids, True):
                                 reasoning_end_arr[i] = True
                                 current_token_ids = output_token_ids
                                 if delta_message and delta_message.content:
@@ -873,7 +873,7 @@ class OpenAIServingChat(OpenAIServing):
                             # Remove the text and token ids related
                             # to 'reasoning_content'.
                             if reasoning_parser.is_reasoning_end(
-                                    output_token_ids):
+                                    output_token_ids, False):
                                 reasoning_end_arr[i] = True
                                 current_token_ids =  \
                                     reasoning_parser.extract_content_ids(

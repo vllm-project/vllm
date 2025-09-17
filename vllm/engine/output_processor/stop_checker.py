@@ -65,7 +65,7 @@ class StopChecker:
 
         # Skip stop string/token checks if in reasoning content generation
         if self.reasoner is not None and \
-            not self.reasoner.is_reasoning_end(seq.get_token_ids()):
+            not self.reasoner.is_reasoning_end(seq.get_token_ids(), True):
             return
 
         # Check if a stop token was encountered.

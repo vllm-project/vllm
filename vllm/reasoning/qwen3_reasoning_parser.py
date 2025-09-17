@@ -66,6 +66,7 @@ class Qwen3ReasoningParser(ReasoningParser):
         ]
 
         self.buffered_delta_text = ""
+        self.cached_prompt = ""
 
     # Very simple idea: when encountering tokens like <, think, >,
     # <, /, think, >, store them in a buffer.
@@ -96,16 +97,49 @@ class Qwen3ReasoningParser(ReasoningParser):
             else:
                 return delta_text
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        start, _ = find_subsequence(self.think_end_token_ids, input_ids)
-        return start != -1
+    def _get_decoded(self, input_ids: list[int], is_prompt: bool) -> str:
+        if is_prompt:
+            if not self.cached_prompt:
+                self.cached_prompt = self.model_tokenizer.decode(input_ids)
+            return self.cached_prompt
+        self.cached_outputs.extend(input_ids)
+        return self.model_tokenizer.decode(self.cached_outputs)
+
+    def is_reasoning_end(self, input_ids: list[int], is_prompt: bool) -> bool:
+
+        end_idx, _ = find_subsequence(self.think_end_token_ids, input_ids)
+        if end_idx != -1:
+            inputs = ""
+            thinking_disabled = True
+        else:
+            inputs = self._get_decoded(input_ids, is_prompt)
+            thinking_disabled = self.think_end_token in inputs
+
+        if is_prompt:
+            start_idx, _ = find_subsequence(self.think_start_token_ids,
+                                            input_ids)
+            if start_idx != -1:
+                thinking_enabled = True
+            else:
+                inputs = inputs or self._get_decoded(input_ids, is_prompt)
+                thinking_enabled = self.think_start_token in inputs
+
+            if thinking_enabled:
+                return thinking_disabled
+            return True
+        return thinking_disabled
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """
         Extract the content after the end tokens
         """
         _, end = find_subsequence(self.think_end_token_ids, input_ids)
-        return input_ids[end:]
+        if end != -1:
+            return input_ids[end:]
+        else:
+            full_content = self.model_tokenizer.decode(input_ids)
+            parts = full_content.partition(self.think_end_token)
+            return parts[2] if parts[2] else parts[0]
 
     def _prompt_ends_with_start_token(self,
                                       request: ChatCompletionRequest) -> bool:
@@ -186,7 +220,8 @@ class Qwen3ReasoningParser(ReasoningParser):
             return DeltaMessage(content=delta_text)
 
     def extract_reasoning_content(
-            self, model_output: str, request: ChatCompletionRequest
+            self, model_output: str, prompt_token_ids: list[int],
+            request: ChatCompletionRequest
     ) -> tuple[Optional[str], Optional[str]]:
         """
         Extract reasoning content from the model output.
@@ -198,6 +233,7 @@ class Qwen3ReasoningParser(ReasoningParser):
         Returns:
             tuple[Optional[str], Optional[str]]: reasoning content and content
         """
+
         # Check if the model output contains the <think> and </think> tokens.
         if ((self.think_start_token not in model_output
              and not self._prompt_ends_with_start_token(request))

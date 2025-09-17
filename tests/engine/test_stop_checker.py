@@ -21,7 +21,7 @@ class MockReasoningParser(ReasoningParser):
         super().__init__(tokenizer)
         self.reasoning_active = reasoning_active
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: list[int], is_prompt: bool) -> bool:
         return not self.reasoning_active
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:

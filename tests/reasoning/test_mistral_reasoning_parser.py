@@ -328,7 +328,7 @@ def test_mistral_reasoning(
     assert content == param_dict["content"]
 
     # Test is_reasoning_end
-    is_reasoning_end = parser.is_reasoning_end(output_tokens)
+    is_reasoning_end = parser.is_reasoning_end(output_tokens, False)
     assert is_reasoning_end == param_dict["is_reasoning_end"]
 
     # Test extract_content

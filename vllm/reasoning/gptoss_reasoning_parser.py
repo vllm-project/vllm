@@ -29,7 +29,7 @@ class GptOssReasoningParser(ReasoningParser):
         self.reasoning_end_token_ids = self.model_tokenizer.encode(
             "<|start|>assistant<|channel|>final<|message|>")
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: list[int], is_prompt: bool) -> bool:
         end_token_ids = self.reasoning_end_token_ids
         assert len(end_token_ids) > 0, "reasoning_end_token_ids is empty"
         # Check if the end sequence is present in the input_ids.

@@ -44,7 +44,7 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
                 "Glm4MoeModel reasoning parser could not locate "
                 "think start/end tokens in the tokenizer!")
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: list[int], is_prompt: bool) -> bool:
         return self.think_end_token_id in input_ids
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:

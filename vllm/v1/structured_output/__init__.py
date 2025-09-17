@@ -261,7 +261,8 @@ class StructuredOutputManager:
             assert request.structured_output_request is not None
             if request.structured_output_request.reasoning_ended is None:
                 request.structured_output_request.reasoning_ended = \
-                    self.reasoner.is_reasoning_end(request.prompt_token_ids)
+                    self.reasoner.is_reasoning_end(
+                        request.prompt_token_ids, True)
             return request.structured_output_request.reasoning_ended
         return True
 
@@ -283,7 +284,7 @@ class StructuredOutputManager:
                 return True
 
             # Check if reasoning ends in *this* step
-            if self.reasoner.is_reasoning_end(request.all_token_ids):
+            if self.reasoner.is_reasoning_end(request.all_token_ids, True):
                 # Reasoning just ended, so we shouldn't advance til
                 # next pass
                 structured_req.reasoning_ended = True

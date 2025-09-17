@@ -44,7 +44,7 @@ class ReasoningParser:
         return self.model_tokenizer.get_vocab()
 
     @abstractmethod
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: list[int], is_prompt: bool) -> bool:
         """
         Check if the reasoning content ends in the input_ids.
 
@@ -53,7 +53,9 @@ class ReasoningParser:
 
         Parameters:
         input_ids: list[int]
-            The input_ids of the model output.
+            The input_ids of the model prompt or output.
+        is_prompt: bool
+            Flag indicating whether input is a prompt or not
 
         Returns:
         bool
