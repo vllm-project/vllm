@@ -12,7 +12,7 @@ inline torch::Tensor mm(const torch::Tensor& a, const torch::Tensor& packed_w,
 
 enum ActivationKind : int64_t {
   SwiGLU_Gu = 0,  // act = SiLU(g) * u
-  SwiGLU_Ug = 1,  // act = SiLU(u) * g
+  SwiGLUOAI = 1,  // act = SiLU(u) * g
   SiLU = 2        // SiLU
 };
 
@@ -111,12 +111,14 @@ torch::Tensor dynamic_4bit_int_moe_cpu(
       auto g_part = y13.narrow(/*dim=*/1, /*start=*/0, /*length=*/I);
       auto u_part = y13.narrow(/*dim=*/1, /*start=*/I, /*length=*/I);
 
-      // We Intentionally Club Gate and Up projection for  4 bit MOE
-      // In this case SiLU becomes SwigLU_GU
-      // GptOSS uses Reversed Swiglu even if we concatanate Gate and Up
       torch::Tensor act;
-      if (activation_kind == ActivationKind::SwiGLU_Ug) {  // SwiGLU_UG
-        act = at::silu(u_part).mul(g_part);
+      if (activation_kind == ActivationKind::SwiGLUOAI) {  // SwiGLUOAI
+        constexpr double kAlpha = 1.702;                   // GPT-OSS default
+        constexpr double kLimit = 7.0;                     // GPT-OSS default
+        auto gate_c = at::clamp_max(g_part, kLimit);
+        auto up_c = at::clamp(u_part, -kLimit, kLimit);
+        auto glu = gate_c.mul(at::sigmoid(gate_c.mul(kAlpha)));
+        act = up_c.add(1.0).mul(glu);
       } else {  // SiLU , SwiGLU_GU, vLLM maps silu to SiluAndMul()
         act = at::silu(g_part).mul(u_part);
       }
