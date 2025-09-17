@@ -171,7 +171,8 @@ class BenchmarkDataset(ABC):
                 If `None`, LoRA is not used.
 
         Returns:
-            A new [LoRARequest][] (or `None` if not applicable).
+            A new [`LoRARequest`][vllm.lora.request.LoRARequest]
+            (or `None` if not applicable).
         """
         if max_loras is None or lora_path is None:
             return None
