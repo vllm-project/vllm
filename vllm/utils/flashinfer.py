@@ -35,6 +35,14 @@ FLASHINFER_CUBINS_REPOSITORY = os.environ.get(
 _AUTOTUNE_KERNELS_WILL_BE_USED: bool = False
 
 
+@functools.cache
+def has_flashinfer() -> bool:
+    """Return ``True`` if FlashInfer is available."""
+    # Use find_spec to check if the module exists without importing it
+    # This avoids potential CUDA initialization side effects
+    return importlib.util.find_spec("flashinfer") is not None
+
+
 def register_flashinfer_kernel_autotune(reason: str) -> None:
     """Mark that FlashInfer autotune-able kernels will be used.
 
@@ -51,14 +59,6 @@ def register_flashinfer_kernel_autotune(reason: str) -> None:
 def flashinfer_autotune_needed() -> bool:
     """Return True if any FlashInfer autotune-able kernel is registered."""
     return _AUTOTUNE_KERNELS_WILL_BE_USED
-
-
-@functools.cache
-def has_flashinfer() -> bool:
-    """Return ``True`` if FlashInfer is available."""
-    # Use find_spec to check if the module exists without importing it
-    # This avoids potential CUDA initialization side effects
-    return importlib.util.find_spec("flashinfer") is not None
 
 
 def _missing(*_: Any, **__: Any) -> NoReturn:
