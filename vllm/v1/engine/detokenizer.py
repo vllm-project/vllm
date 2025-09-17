@@ -58,7 +58,7 @@ class IncrementalDetokenizer:
 
         if tokenizer is None:
             # No tokenizer => skipping detokenization.
-            return IncrementalDetokenizer(vllm_config=vllm_config)
+            return IncrementalDetokenizer()
 
         if USE_FAST_DETOKENIZER and isinstance(tokenizer, PreTrainedTokenizerFast):
             # Fast tokenizer => use tokenizers library DecodeStream.
