@@ -25,7 +25,8 @@ from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
 from vllm.v1.core.sched.request_queue import (SchedulingPolicy,
                                               create_request_queue)
-from vllm.v1.core.sched.utils import check_stop, remove_all, add_token_and_check_stop
+from vllm.v1.core.sched.utils import (add_token_and_check_stop, check_stop,
+                                      remove_all)
 from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
                             EngineCoreOutputs)
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -1025,7 +1026,8 @@ class Scheduler(SchedulerInterface):
         # Append generated tokens and check for stop. Note that if
         # a request is still being prefilled, we expect the model runner
         # to return empty token ids for the request.
-        stopped, num_new = add_token_and_check_stop(new_token_ids, request, self.max_model_len)
+        stopped, num_new = add_token_and_check_stop(new_token_ids, request, 
+                                                    self.max_model_len)
         if stopped:
             del new_token_ids[num_new:]  # Trim new tokens if needed.
         return new_token_ids, stopped
