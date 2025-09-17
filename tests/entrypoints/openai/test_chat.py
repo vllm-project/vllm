@@ -670,10 +670,23 @@ async def test_named_tool_use(client: openai.AsyncOpenAI, sample_json_schema,
     }, {
         "role":
         "user",
-        "content":
-        f"Give an example JSON for an employee profile that "
-        f"fits this schema: {sample_json_schema}"
+        "content": ("Give an example JSON for an employee "
+                    "profile using the specified tool.")
     }]
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "dummy_function_name",
+            "description": "This is a dummy function",
+            "parameters": sample_json_schema
+        }
+    }]
+    tool_choice = {
+        "type": "function",
+        "function": {
+            "name": "dummy_function_name"
+        }
+    }
 
     # non-streaming
 
@@ -681,20 +694,8 @@ async def test_named_tool_use(client: openai.AsyncOpenAI, sample_json_schema,
         model=MODEL_NAME,
         messages=messages,
         max_completion_tokens=1000,
-        tools=[{
-            "type": "function",
-            "function": {
-                "name": "dummy_function_name",
-                "description": "This is a dummy function",
-                "parameters": sample_json_schema
-            }
-        }],
-        tool_choice={
-            "type": "function",
-            "function": {
-                "name": "dummy_function_name"
-            }
-        },
+        tools=tools,
+        tool_choice=tool_choice,
     )
     message = chat_completion.choices[0].message
     assert len(message.content) == 0
@@ -712,25 +713,12 @@ async def test_named_tool_use(client: openai.AsyncOpenAI, sample_json_schema,
 
     # streaming
 
-    stream = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=messages,
-        max_completion_tokens=1000,
-        tools=[{
-            "type": "function",
-            "function": {
-                "name": "dummy_function_name",
-                "description": "This is a dummy function",
-                "parameters": sample_json_schema
-            }
-        }],
-        tool_choice={
-            "type": "function",
-            "function": {
-                "name": "dummy_function_name"
-            }
-        },
-        stream=True)
+    stream = await client.chat.completions.create(model=MODEL_NAME,
+                                                  messages=messages,
+                                                  max_completion_tokens=1000,
+                                                  tools=tools,
+                                                  tool_choice=tool_choice,
+                                                  stream=True)
 
     output = []
     finish_reason_count = 0
