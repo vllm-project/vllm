@@ -100,7 +100,7 @@ class StopChecker:
                 for stop_token_ids in stop_criteria:
                     match_idx =\
                         find_subarray_kmp(stop_token_ids,
-                            list(seq.data.output_token_ids))
+                            seq.data.output_token_ids)
                     if match_idx != -1:
                         if not sampling_params.include_stop_str_in_output:
                             # found stop token ids, truncate output

@@ -3445,7 +3445,7 @@ def decorate_logs(process_name: Optional[str] = None) -> None:
     _add_prefix(sys.stderr, process_name, pid)
 
 
-def build_lps(pattern: list[int]) -> list[int]:
+def build_lps(pattern: Sequence[int]) -> Sequence[int]:
     lps = [0] * len(pattern)
     # length of the previous longest prefix suffix
     prev_lps = 0
@@ -3464,7 +3464,7 @@ def build_lps(pattern: list[int]) -> list[int]:
     return lps
 
 
-def find_subarray_kmp(pattern: list[int], token_ids: list[int]):
+def find_subarray_kmp(pattern: Sequence[int], token_ids: Sequence[int]) -> int:
     """
     Knuth-Morris-Pratt algorithm for searching for a sublist
     within a list of token ids.
