@@ -127,8 +127,7 @@ class OpenAIServingCompletion(OpenAIServing):
             if self.model_config.skip_tokenizer_init:
                 tokenizer = None
             else:
-                tokenizer = await self.engine_client.get_tokenizer(lora_request
-                                                                   )
+                tokenizer = await self.engine_client.get_tokenizer()
             renderer = self._get_renderer(tokenizer)
 
             engine_prompts = await renderer.render_prompt_and_embeds(
@@ -232,7 +231,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
         result_generator = merge_async_iterators(*generators)
 
-        model_name = self._get_model_name(request.model, lora_request)
+        model_name = self.models.model_name(lora_request)
         num_prompts = len(engine_prompts)
 
         # Similar to the OpenAI API, when n != best_of, we do not stream the

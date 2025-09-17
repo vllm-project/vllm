@@ -192,7 +192,8 @@ class Platform:
             return device_id
 
     @classmethod
-    def get_vit_attn_backend(cls, support_fa: bool = False) -> _Backend:
+    def get_vit_attn_backend(cls, head_size: int,
+                             dtype: torch.dtype) -> _Backend:
         return _Backend.TORCH_SDPA
 
     @classmethod
@@ -585,6 +586,13 @@ class Platform:
         Check if the dtype is supported by the current platform.
         """
         raise NotImplementedError
+
+    @classmethod
+    def support_hybrid_kv_cache(cls) -> bool:
+        """
+        Returns if the hybrid kv cache is supported by the current platform.
+        """
+        return False
 
 
 class UnspecifiedPlatform(Platform):

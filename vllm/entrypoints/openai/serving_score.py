@@ -269,7 +269,7 @@ class ServingScores(OpenAIServing):
     ) -> Union[list[PoolingRequestOutput], ErrorResponse]:
         lora_request = self._maybe_get_adapters(request)
 
-        tokenizer = await self.engine_client.get_tokenizer(lora_request)
+        tokenizer = await self.engine_client.get_tokenizer()
 
         truncate_prompt_tokens = getattr(request, "truncate_prompt_tokens",
                                          None)
@@ -353,7 +353,7 @@ class ServingScores(OpenAIServing):
                 final_res_batch,
                 request_id,
                 created_time,
-                self._get_model_name(request.model),
+                self.models.model_name(),
             )
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
@@ -399,7 +399,7 @@ class ServingScores(OpenAIServing):
             return self.request_output_to_rerank_response(
                 final_res_batch,
                 request_id,
-                self._get_model_name(request.model),
+                self.models.model_name(),
                 documents,
                 top_n,
             )

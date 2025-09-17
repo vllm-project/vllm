@@ -7,6 +7,7 @@ import pytest
 import torch
 from datasets import load_dataset
 
+import tests.ci_envs as ci_envs
 from tests.models.utils import (GenerateModelInfo,
                                 TokensTextLogprobsPromptLogprobs)
 from vllm.logprobs import Logprob
@@ -26,18 +27,25 @@ def wikitext_ppl_test(hf_runner,
 
     # A model family has many models with the same architecture,
     # and we don't need to test each one.
-    if not model_info.enable_test:
+    if not ci_envs.VLLM_CI_NO_SKIP and not model_info.enable_test:
         pytest.skip("Skipping test.")
 
     dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
 
     # Allow vllm to test using the given dtype, such as float32
     vllm_extra_kwargs = vllm_extra_kwargs or {}
-    vllm_extra_kwargs["dtype"] = model_info.dtype
+    vllm_extra_kwargs["dtype"] = ci_envs.VLLM_CI_DTYPE or model_info.dtype
 
     # Allow vllm to test using hf_overrides
     if model_info.hf_overrides is not None:
         vllm_extra_kwargs["hf_overrides"] = model_info.hf_overrides
+
+    # Allow changing the head dtype used by vllm in tests
+    if ci_envs.VLLM_CI_HEAD_DTYPE is not None:
+        if "hf_overrides" not in vllm_extra_kwargs:
+            vllm_extra_kwargs["hf_overrides"] = {}
+        vllm_extra_kwargs["hf_overrides"][
+            "head_dtype"] = ci_envs.VLLM_CI_HEAD_DTYPE
 
     with vllm_runner(model_info.name,
                      gpu_memory_utilization=0.7,
@@ -46,7 +54,7 @@ def wikitext_ppl_test(hf_runner,
                      enforce_eager=True,
                      **vllm_extra_kwargs) as vllm_model:
         # Use max_num_seqs=1 to avoid OOM,
-        # and batch different requests together.
+        # and avoid batch different requests together.
 
         model_config = vllm_model.llm.llm_engine.model_config
 
@@ -91,12 +99,13 @@ def wikitext_ppl_test(hf_runner,
             n_tokens += len(token_log_probs)
         vllm_ppl = float(torch.exp(nll_sum / n_tokens))
         vllm_dtype = model_config.dtype
+        head_dtype = model_config.head_dtype
 
     # Accelerate ppl test by setting Transformers ppl score to a constant
     if model_info.hf_ppl is None:
         with hf_runner(
                 model_info.name,
-                dtype=model_info.hf_dtype,
+                dtype=ci_envs.VLLM_CI_HF_DTYPE or model_info.hf_dtype,
         ) as hf_model:
             nll_sum = torch.tensor(0., dtype=torch.float32, device="cpu")
             n_tokens = 0
@@ -121,7 +130,7 @@ def wikitext_ppl_test(hf_runner,
 
     differ = (vllm_ppl - hf_ppl) / hf_ppl
     print("Model:", model_info.name)
-    print("VLLM:", vllm_dtype, vllm_ppl)
+    print("VLLM:", f"dtype:{vllm_dtype}", f"head_dtype:{head_dtype}", vllm_ppl)
     print("Transformers:", hf_dtype, hf_ppl)
     print("Difference (%):", differ * 100)
 
