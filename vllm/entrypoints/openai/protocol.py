@@ -439,7 +439,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     model: Optional[str] = None
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[dict[str, float]] = None
-    logprobs: Optional[bool] = False
+    logprobs: Union[Optional[bool], Optional[int]] = False
     top_logprobs: Optional[int] = 0
     max_tokens: Optional[int] = Field(
         default=None,
