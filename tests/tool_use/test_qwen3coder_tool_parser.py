@@ -806,3 +806,50 @@ TX
     parsed_args = json.loads(full_args)
     assert parsed_args["city"] == "Dallas"
     assert parsed_args["state"] == "TX"
+
+
+def test_extract_tool_calls_complex_type_with_single_quote(
+        qwen3_tool_parser_parametrized):
+    """Test parameter type conversion based on tool schema"""
+    tools = [
+        ChatCompletionToolsParam(type="function",
+                                 function={
+                                     "name": "test_types",
+                                     "parameters": {
+                                         "type": "object",
+                                         "properties": {
+                                             "int_param": {
+                                                 "type": "integer"
+                                             },
+                                             "float_param": {
+                                                 "type": "float"
+                                             },
+                                             "bool_param": {
+                                                 "type": "boolean"
+                                             },
+                                             "str_param": {
+                                                 "type": "string"
+                                             },
+                                             "obj_param": {
+                                                 "type": "object"
+                                             }
+                                         }
+                                     }
+                                 })
+    ]
+
+    model_output = '''<tool_call>
+<function=test_types>
+<parameter=obj_param>
+{'key': 'value'}
+</parameter>
+</function>
+</tool_call>'''
+
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+    extracted_tool_calls = qwen3_tool_parser_parametrized.extract_tool_calls(
+        model_output, request=request)
+
+    print(extracted_tool_calls)
+    args = json.loads(extracted_tool_calls.tool_calls[0].function.arguments)
+    assert args["obj_param"] == {"key": "value"}
