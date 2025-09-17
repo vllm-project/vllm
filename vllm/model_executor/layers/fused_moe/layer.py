@@ -902,6 +902,7 @@ class FusedMoE(CustomOp):
         else:
             self.local_num_experts, self.expert_map = (self.global_num_experts,
                                                        None)
+        self._update_expert_map_in_cpu()
 
         self.top_k = top_k
 
@@ -1064,6 +1065,10 @@ class FusedMoE(CustomOp):
     def use_flashinfer_cutlass_kernels(self):
         return self.moe_config.use_flashinfer_cutlass_kernels
 
+    def _update_expert_map_in_cpu(self):
+        self.expert_map_in_cpu = (self.expert_map.cpu()
+                                  if self.expert_map is not None else None)
+
     def update_expert_map(self):
         # ep_size and ep_rank should already be updated
         assert self.expert_map is not None
@@ -1072,6 +1077,7 @@ class FusedMoE(CustomOp):
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
                 global_num_experts=self.global_num_experts)
+        self._update_expert_map_in_cpu()
 
     def _load_per_tensor_weight_scale(self, shard_id: str,
                                       param: torch.nn.Parameter,
@@ -1210,7 +1216,7 @@ class FusedMoE(CustomOp):
     def _map_global_expert_id_to_local_expert_id(self, expert_id: int) -> int:
         if self.expert_map is None:
             return expert_id
-        return self.expert_map[expert_id].item()
+        return self.expert_map_in_cpu[expert_id].item()
 
     @overload
     def weight_loader(self, param: torch.nn.Parameter,
