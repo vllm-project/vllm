@@ -280,9 +280,8 @@ class W8A8BlockFp8LinearOp:
                                                      block_size[1],
                                                      column_major_scales=False,
                                                      use_ue8m0=False)
-        return w8a8_block_fp8_matmul(q_input, weight, x_scale,
-                                     weight_scale.t(), block_size,
-                                     input_2d.dtype)
+        return w8a8_block_fp8_matmul(q_input, weight, x_scale, weight_scale,
+                                     block_size, input_2d.dtype)
 
     def _dispatch_w8a8_blockscale_op(
         self,
