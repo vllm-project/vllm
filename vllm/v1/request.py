@@ -65,6 +65,7 @@ class Request:
             self.max_tokens = 1
         elif sampling_params is not None:
             # Generative models.
+            raise Exception(f"{sampling_params.max_tokens=}")
             assert sampling_params.max_tokens is not None
             self.max_tokens = sampling_params.max_tokens
             if sampling_params.guided_decoding is not None:
