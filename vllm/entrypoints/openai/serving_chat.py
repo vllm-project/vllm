@@ -1041,9 +1041,14 @@ class OpenAIServingChat(OpenAIServing):
                             ])
 
                         # Send the finish response for each request.n only once
-                        if auto_tools_called or tools_streamed[i] or (
-                                self.use_harmony
-                                and harmony_tools_streamed[i]):
+                        # OpenAI's behavior:
+                        # When stream=true and a tool is called,
+                        # finish_reason is "tool_calls" for auto and required
+                        # tool choices, but is "stop" for named tool calls.
+                        if auto_tools_called or (
+                                tools_streamed[i]
+                                and not tool_choice_function_name
+                        ) or (self.use_harmony and harmony_tools_streamed[i]):
                             finish_reason_ = "tool_calls"
                         else:
                             finish_reason_ = output.finish_reason \
