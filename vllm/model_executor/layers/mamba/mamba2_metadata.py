@@ -46,8 +46,8 @@ class Mamba2Metadata:
     """
     nums_dict: Optional[dict] = None
     cu_seqlen: Optional[int] = None
-    batch_ptr: Optional[torch.tensor] = None
-    token_chunk_offset_ptr: Optional[torch.tensor] = None
+    batch_ptr: Optional[torch.Tensor] = None
+    token_chunk_offset_ptr: Optional[torch.Tensor] = None
 
 
 def get_platform_metadata_classes() -> tuple[type[AttentionMetadata], ...]:
