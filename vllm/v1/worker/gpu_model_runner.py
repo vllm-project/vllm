@@ -105,9 +105,7 @@ def save_stats(forward_time, input_ids_shape):
     import pathlib
     outputs_dir = pathlib.Path("outputs/")
     latest_dir = max([d for d in outputs_dir.iterdir() if d.is_dir()], key=lambda x: x.name, default=None)
-    target_path = latest_dir / "target.csv"
-    target_path.touch()
-    with open(target_path, 'a') as f:
+    with open(latest_dir / "target.csv", 'a') as f:
         print(f"{forward_time},{input_ids_shape}", file=f)
 
 # Wrapper for ModelRunnerOutput to support overlapped execution.

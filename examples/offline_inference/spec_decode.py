@@ -20,6 +20,8 @@ except ImportError:
 from datetime import datetime
 outputs_dir = pathlib.Path("outputs/") / datetime.now().strftime("%Y%m%d_%H%M%S")
 outputs_dir.mkdir(parents=True, exist_ok=True)
+(outputs_dir / "drafter.csv").touch()
+(outputs_dir / "target.csv").touch()
 
 def read_stats(path):
     forward_times, shapes = [], []
@@ -271,7 +273,7 @@ def main():
     target_forward_times, _ = read_stats(outputs_dir / "target.csv")
     drafter_forward_time = sum(drafter_forward_times)
     target_forward_time = sum(target_forward_times)
-    forward_ratio = drafter_forward_time / target_forward_time
+    forward_ratio = drafter_forward_time / target_forward_time if target_forward_time > 0 else 0
 
     stats = {
         "input_tokens": input_tokens, "output_tokens": output_tokens,
