@@ -75,6 +75,7 @@ if TYPE_CHECKING:
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
     VLLM_USE_PRECOMPILED: bool = False
+    VLLM_AUTO_USE_PRECOMPILED: bool = True
     VLLM_DOCKER_BUILD_CONTEXT: bool = False
     VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL: bool = False
     VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: bool = False
@@ -317,6 +318,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_PRECOMPILED":
     lambda: os.environ.get("VLLM_USE_PRECOMPILED", "").strip().lower() in
     ("1", "true") or bool(os.environ.get("VLLM_PRECOMPILED_WHEEL_LOCATION")),
+
+    # If set to false, disables automatic use of precompiled wheels for git installs
+    "VLLM_AUTO_USE_PRECOMPILED":
+    lambda: os.environ.get("VLLM_AUTO_USE_PRECOMPILED", "1").strip().lower() in
+    ("1", "true"),
 
     # Used to mark that setup.py is running in a Docker build context,
     # in order to force the use of precompiled binaries.
