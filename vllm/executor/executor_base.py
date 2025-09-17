@@ -236,7 +236,10 @@ class ExecutorBase(ABC):
         self.collective_rpc("shutdown")
 
     def __del__(self):
-        self.shutdown()
+        try:
+            self.shutdown()
+        except TypeError:
+            pass
 
     async def execute_model_async(
             self,
