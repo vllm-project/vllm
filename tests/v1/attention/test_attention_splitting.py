@@ -197,7 +197,6 @@ def test_prefill_split_across_ubatches_param(seq_lens, query_lens, split_point,
     assert second_meta.num_reqs == expected_second_reqs
 
     # Identify which request is split and how many tokens are in the first chunk
-    import numpy as np
     split_req_idx = int(np.searchsorted(qsl_np, split_point, side="right") - 1)
     tokens_in_first_chunk = split_point - int(qsl_np[split_req_idx])
     orig_q_lens = (common.query_start_loc_cpu[1:] -
