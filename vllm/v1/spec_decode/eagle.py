@@ -12,9 +12,8 @@ import torch.nn as nn
 from vllm.attention.layer import Attention
 from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config)
-from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_pp_group
-from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
@@ -46,20 +45,18 @@ class EagleAttentionMetadata(Protocol):
     slot_mapping: torch.Tensor
 
 
-class SpecDecodeProposer:
+class SpecDecodeBaseProposer:
 
     def __init__(
         self,
         vllm_config: VllmConfig,
         device: torch.device,
-        pass_hidden_states_to_model: bool,
         runner=None,
     ):
         self.vllm_config = vllm_config
         self.speculative_config = vllm_config.speculative_config
         self.draft_model_config = self.speculative_config.draft_model_config
         self.method = self.speculative_config.method
-        self.pass_hidden_states_to_model = pass_hidden_states_to_model
 
         self.runner = runner
         self.dtype = vllm_config.model_config.dtype
@@ -70,20 +67,9 @@ class SpecDecodeProposer:
         self.max_num_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens)
         self.token_arange_np = np.arange(self.max_num_tokens)
-        # We need to get the hidden size from the draft model config because
-        # the draft model's hidden size can be different from the target model's
-        # hidden size (e.g., Llama 3.3 70B).
-        self.hidden_size = self.draft_model_config.get_hidden_size()
 
         self.is_multimodal_model = vllm_config.model_config \
             .is_multimodal_model
-
-        if self.is_multimodal_model and self.method == "draft_model":
-            raise NotImplementedError("Speculative Decoding with draft models "
-                                      "does not support multimodal models yet")
-        if self.draft_model_config.uses_mrope and self.method == "draft_model":
-            raise NotImplementedError("Speculative Decoding with draft models "
-                                      "does not support M-RoPE yet")
 
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE and
@@ -99,19 +85,34 @@ class SpecDecodeProposer:
         self.positions = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int64,
                                      device=device)
+
+        self.max_batch_size = vllm_config.scheduler_config.max_num_seqs
+        self.arange = torch.arange(
+            # We need +1 here because the arange is used to set query_start_loc,
+            # which has one more element than batch_size.
+            self.max_batch_size + 1,
+            device=device,
+            dtype=torch.int32,
+        )
+
+
+class EagleProposer(SpecDecodeBaseProposer):
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        runner=None,
+    ):
+        super().__init__(vllm_config, device, runner)
+        # We need to get the hidden size from the draft model config because
+        # the draft model's hidden size can be different from the target model's
+        # hidden size (e.g., Llama 3.3 70B).
+        self.hidden_size = self.draft_model_config.get_hidden_size()
         self.hidden_states = torch.zeros(
             (self.max_num_tokens, self.hidden_size),
             dtype=self.dtype,
             device=device)
-
-        max_batch_size = vllm_config.scheduler_config.max_num_seqs
-        self.arange = torch.arange(
-            # We need +1 here because the arange is used to set query_start_loc,
-            # which has one more element than batch_size.
-            max_batch_size + 1,
-            device=device,
-            dtype=torch.int32,
-        )
 
         self.inputs_embeds = torch.zeros(
             (self.max_num_tokens, self.hidden_size),
@@ -154,7 +155,7 @@ class SpecDecodeProposer:
             len(self.tree_choices) + 1,
             device=device,
             dtype=torch.int32,
-        ).repeat(max_batch_size, 1)
+        ).repeat(self.max_batch_size, 1)
 
     def propose(
         self,
@@ -168,8 +169,6 @@ class SpecDecodeProposer:
         next_token_ids: torch.Tensor,
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
-        cudagraph_runtime_mode: CUDAGraphMode,
-        batch_descriptor: BatchDescriptor,
         mm_embeds: Optional[list[torch.Tensor]] = None,
     ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
@@ -182,22 +181,16 @@ class SpecDecodeProposer:
                 target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
 
-        if self.method == "draft_model":
-            # Use full input ids, no shifting needed
-            self.input_ids[:num_tokens] = target_token_ids
-        else:
-            # Shift the input ids by one token.
-            # E.g., [a1, b1, b2, c1, c2, c3] -> [b1, b2, c1, c2, c3, c3]
-            self.input_ids[:num_tokens - 1] = target_token_ids[1:]
-            # Replace the last token with the next token.
-            # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
-            self.input_ids[last_token_indices] = next_token_ids
+        # Shift the input ids by one token.
+        # E.g., [a1, b1, b2, c1, c2, c3] -> [b1, b2, c1, c2, c3, c3]
+        self.input_ids[:num_tokens - 1] = target_token_ids[1:]
+        # Replace the last token with the next token.
+        # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
+        self.input_ids[last_token_indices] = next_token_ids
 
         assert self.runner is not None
 
         # FIXME: need to consider multiple kv_cache_groups
-        assert len(self.runner.attn_groups) == 1
-        assert len(self.runner.attn_groups[0]) == 1
         ubatch_id = dbo_current_ubatch_id()
         attn_metadata_builder = \
             self.runner.attn_groups[0][0].metadata_builders[ubatch_id]
@@ -216,9 +209,7 @@ class SpecDecodeProposer:
             num_input_tokens = num_tokens
         # copy inputs to buffer for cudagraph
         self.positions[:num_tokens] = target_positions
-        if self.pass_hidden_states_to_model:
-            self.hidden_states[:num_tokens] = target_hidden_states
-
+        self.hidden_states[:num_tokens] = target_hidden_states
         if self.is_multimodal_model:
             input_ids = self.input_ids[:num_tokens]
             inputs_embeds = self.model.get_input_embeddings(
@@ -232,24 +223,16 @@ class SpecDecodeProposer:
             inputs_embeds = None
             input_ids = self.input_ids[:num_input_tokens]
 
-        model_kwargs = {
-            "input_ids": input_ids,
-            "positions": self.positions[:num_input_tokens],
-        }
-        if self.pass_hidden_states_to_model:
-            model_kwargs[
-                "hidden_states"] = self.hidden_states[:num_input_tokens]
-        if self.is_multimodal_model:
-            model_kwargs["inputs_embeds"] = inputs_embeds
-
         with set_forward_context(per_layer_attn_metadata,
                                  self.vllm_config,
-                                 num_tokens=num_input_tokens,
-                                 cudagraph_runtime_mode=cudagraph_runtime_mode,
-                                 batch_descriptor=batch_descriptor):
-            ret_hidden_states = self.model(**model_kwargs)
-            if self.method in ("draft_model", "deepseek_mtp", "ernie_mtp",
-                               "qwen3_next_mtp"):
+                                 num_tokens=num_input_tokens):
+            ret_hidden_states = self.model(
+                input_ids=input_ids,
+                positions=self.positions[:num_input_tokens],
+                hidden_states=self.hidden_states[:num_input_tokens],
+                inputs_embeds=inputs_embeds,
+            )
+            if self.method in ("deepseek_mtp", "ernie_mtp", "qwen3_next_mtp"):
                 last_hidden_states = ret_hidden_states
                 hidden_states = last_hidden_states
             else:
@@ -271,22 +254,10 @@ class SpecDecodeProposer:
             # [batch_size, num_tree_tokens]
             return torch.cat(draft_token_ids_list, dim=1)
 
-        if self.method == "draft_model":
-            # Reuse the next_token_ids to avoid a potential rejection
-            draft_token_ids = next_token_ids
-        else:
-            draft_token_ids = logits.argmax(dim=-1)
-
-        if self.method == "draft_model":
-            # The draft model runs one forward pass to prefill
-            # the target_token_ids, and another forward pass for decoding
-            # based on the next_token_ids. I.e. it needs 1 more forward pass.
-            n_forward_passes = self.num_speculative_tokens + 1
-        else:
-            n_forward_passes = self.num_speculative_tokens
+        draft_token_ids = logits.argmax(dim=-1)
 
         # Early exit if there is only one draft token to be generated.
-        if n_forward_passes == 1:
+        if self.num_speculative_tokens == 1:
             # [batch_size, 1]
             return draft_token_ids.view(-1, 1)
 
@@ -306,7 +277,7 @@ class SpecDecodeProposer:
         attn_metadata.num_actual_tokens = batch_size
         attn_metadata.max_query_len = 1
         attn_metadata.query_start_loc = self.arange[:batch_size + 1]
-        for _ in range(n_forward_passes - 1):
+        for _ in range(self.num_speculative_tokens - 1):
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.
@@ -352,7 +323,6 @@ class SpecDecodeProposer:
             self.input_ids[:batch_size] = input_ids
             self.positions[:batch_size] = clamped_positions
             self.hidden_states[:batch_size] = hidden_states
-
             if self.is_multimodal_model:
                 inputs_embeds = self.model.get_input_embeddings(input_ids)
                 self.inputs_embeds[:batch_size] = inputs_embeds
@@ -362,46 +332,27 @@ class SpecDecodeProposer:
                 inputs_embeds = None
                 input_ids = self.input_ids[:input_batch_size]
 
-            model_kwargs = {
-                "input_ids": input_ids,
-                "positions": self.positions[:input_batch_size],
-            }
-            if self.pass_hidden_states_to_model:
-                model_kwargs[
-                    "hidden_states"] = self.hidden_states[:input_batch_size]
-            if self.is_multimodal_model:
-                model_kwargs["inputs_embeds"] = inputs_embeds
-
-            batch_descriptor = BatchDescriptor(num_tokens=input_batch_size,
-                                               uniform_decode=True)
-            cudagraph_runtime_mode, batch_descriptor = \
-                self.runner.cudagraph_dispatcher.dispatch(batch_descriptor)
-
             # Run the model.
-            with set_forward_context(
-                    per_layer_attn_metadata,
-                    self.vllm_config,
-                    num_tokens=input_batch_size,
-                    cudagraph_runtime_mode=cudagraph_runtime_mode,
-                    batch_descriptor=batch_descriptor):
-                ret_hidden_states = self.model(**model_kwargs)
-            if self.method in ("draft_model", "deepseek_mtp", "ernie_mtp",
-                               "qwen3_next_mtp"):
-                last_hidden_states = ret_hidden_states
-                hidden_states = ret_hidden_states
-            else:
-                last_hidden_states, hidden_states = ret_hidden_states
+            with set_forward_context(per_layer_attn_metadata,
+                                     self.vllm_config,
+                                     num_tokens=input_batch_size):
+                ret_hidden_states = self.model(
+                    input_ids=input_ids,
+                    positions=self.positions[:input_batch_size],
+                    hidden_states=self.hidden_states[:input_batch_size],
+                    inputs_embeds=inputs_embeds,
+                )
+                if self.method in ("deepseek_mtp", "ernie_mtp",
+                                   "qwen3_next_mtp"):
+                    last_hidden_states = ret_hidden_states
+                    hidden_states = ret_hidden_states
+                else:
+                    last_hidden_states, hidden_states = ret_hidden_states
             hidden_states = hidden_states[:batch_size]
-
             logits = self.model.compute_logits(last_hidden_states[:batch_size],
                                                None)
             draft_token_ids = logits.argmax(dim=-1)
             draft_token_ids_list.append(draft_token_ids)
-
-        if self.method == "draft_model":
-            # the first draft_token_ids are identical to next_token_ids, so
-            # they don't need to be returned as proposed tokens
-            draft_token_ids_list = draft_token_ids_list[1:]
 
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
@@ -583,95 +534,11 @@ class SpecDecodeProposer:
         # [batch_size]
         num_rejected_tokens: torch.Tensor
     ) -> tuple[CommonAttentionMetadata, torch.Tensor]:
-        """
-        This function is used to prepare the inputs for the spec decode.
-        It updates to the common_attn_metadata to account for the rejected
-        tokens (and newly sampled tokens). It also returns the token indices
-        of the tokens that should be fed to the speculator.
-        """
-        # E.g.
-        #  common_attn_metadata.query_start_loc{_cpu}:
-        #       [0, q1, q1 + q2, q1 + q2 + q3]
-        #  common_attn_metadata.seq_lens{_cpu}: [s1, s2, s3]
-        #  num_rejected_tokens: [n1, n2, n3]
-        # This function computes the intermediate values:
-        #  num_tokens_per_req: [q1 - n1, q2 - n2, q3 - n3]
-        # And returns:
-        #  common_attn_metadata.query_start_loc{_cpu}:
-        #       [0, q1 - n1, q1 + q2 - n1 - n2, q1 + q2 + q3 - n1 - n2 - n3]
-        #  common_attn_metadata.seq_lens{_cpu}:
-        #       [s1 - n1 + 1, s2 - n2 + 1, s3 - n3 + 1]
-        #  token_indices: [0, 1, ..., q1 - n1 - 1,
-        #                 q1, q1 + 1, ..., q1 + q2 - n2 - 1,
-        #                 q1 + q2, q1 + q2 + 1, ..., q1 + q2 + q3 - n3 - 1]
-
-        device = common_attn_metadata.query_start_loc.device
-        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-        new_seq_lens_cpu = common_attn_metadata.seq_lens_cpu \
-            - num_rejected_tokens
-
-        # [0, q1, q1 + q2, q1 + q2 + q3] -> [q1, q2, q3]
-        new_query_len_per_req = (query_start_loc_cpu[1:] -
-                                 query_start_loc_cpu[:-1])
-        # [q1, q2, q3] -> [q1 - n1, q2 - n2, q3 - n3]
-        new_num_tokens_per_req = new_query_len_per_req - num_rejected_tokens
-        new_num_tokens_per_req_np = new_num_tokens_per_req.numpy()
-
-        # [q1 - n1, q2 - n2, q3 - n3] ->
-        # [0, q1 - n1, q1 + q2 - n1 - n2, q1 + q2 + q3 - n1 - n2 - n3]
-        new_query_start_loc_cpu = torch.zeros(
-            query_start_loc_cpu.shape,
-            dtype=torch.int32,
-            pin_memory=is_pin_memory_available())
-        new_query_start_loc_np = new_query_start_loc_cpu.numpy()
-        np.cumsum(new_num_tokens_per_req_np, out=new_query_start_loc_np[1:])
-
-        total_num_tokens = new_query_start_loc_np[-1]
-        # Example assuming num_tokens_per_req_np = [2, 4, 3]
-        # this implies that `new_query_start_locs` is:
-        # [0, 2, 6, 9] ->
-        # [0, 0, 2, 2, 2, 2, 6, 6, 6]
-        #  _r1_  ____r2____  ___r3__
-        new_query_start_locs_expanded = np.repeat(new_query_start_loc_np[:-1],
-                                                  new_num_tokens_per_req_np)
-        # [0, 1, 2, 3, 4, 5, 6, 7, 8] ->
-        # [0, 1, 0, 1, 2, 3, 0, 1, 2]
-        #  _r1_  ____r2____  ___r3__
-        token_offests = self.token_arange_np[:total_num_tokens] \
-            - new_query_start_locs_expanded
-
-        # Expand starting positions to match token pattern
-        # [0, q1, q1 + q2] ->
-        # [0, 0, q1, q1, q1, q1, q1 + q2, q1 + q2, q1 + q2]
-        #  _r1_  _____r2_______  ___________r3____________
-        old_query_start_locs_expanded = np.repeat(
-            query_start_loc_cpu[:-1].numpy(), new_num_tokens_per_req_np)
-        # Final token indices are:
-        # [0, 1,                                // req 1
-        #  q1 + 0, q1 + 1, q1 + 2, q1 + 3,       // req 2
-        #  q1 + q2 + 0, q1 + q2 + 1, q1 + q2 + 2] // req 3
-        token_indices_np = token_offests + old_query_start_locs_expanded
-        token_indices = torch.from_numpy(token_indices_np).to(
-            device, non_blocking=True)
-
-        spec_common_attn_metadata = CommonAttentionMetadata(
-            query_start_loc=new_query_start_loc_cpu.to(device,
-                                                       non_blocking=True),
-            seq_lens=new_seq_lens_cpu.to(device, non_blocking=True),
-            query_start_loc_cpu=new_query_start_loc_cpu,
-            seq_lens_cpu=new_seq_lens_cpu,
-            num_computed_tokens_cpu=common_attn_metadata.
-            num_computed_tokens_cpu,
-            num_reqs=common_attn_metadata.num_reqs,
-            num_actual_tokens=total_num_tokens,
-            max_query_len=new_query_len_per_req.max().item(),
-            max_seq_len=new_seq_lens_cpu.max().item(),
-            block_table_tensor=common_attn_metadata.block_table_tensor,
-            slot_mapping=common_attn_metadata.slot_mapping[token_indices],
-            causal=True,
+        return drafter_prepare_inputs(
+            self.token_arange_np,
+            common_attn_metadata,
+            num_rejected_tokens,
         )
-
-        return spec_common_attn_metadata, token_indices
 
     def load_model(self, target_model: nn.Module) -> None:
         draft_model_config = \
@@ -680,26 +547,15 @@ class SpecDecodeProposer:
             get_layers_from_vllm_config(self.vllm_config, Attention).keys())
 
         from vllm.compilation.backends import set_model_tag
-
-        if self.vllm_config.speculative_config.uses_draft_model():
-            with set_model_tag("draft_model"):
-                vllm_config_draft = replace(self.vllm_config,
-                                            model_config=draft_model_config)
-                self.model = get_model(vllm_config=vllm_config_draft,
-                                       model_config=draft_model_config,
-                                       prefix="draft_model")
-        else:
-            with set_model_tag("eagle_head"):
-                self.model = get_model(vllm_config=self.vllm_config,
-                                       model_config=draft_model_config)
+        with set_model_tag("eagle_head"):
+            self.model = get_model(vllm_config=self.vllm_config,
+                                   model_config=draft_model_config)
 
         draft_attn_layer_names = (
             get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
             target_attn_layer_names)
 
         self.attn_layer_names = list(draft_attn_layer_names)
-        if self.vllm_config.speculative_config.uses_draft_model():
-            return
 
         if supports_multimodal(target_model):
             # handle multimodality
@@ -735,11 +591,9 @@ class SpecDecodeProposer:
     def dummy_run(
         self,
         num_tokens: int,
-        forward_ctx_kwargs: dict,
     ) -> None:
-        with set_forward_context(vllm_config=self.vllm_config,
-                                 num_tokens=num_tokens,
-                                 **forward_ctx_kwargs):
+        with set_forward_context(None, self.vllm_config,
+                                 num_tokens=num_tokens):
             if self.is_multimodal_model:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds[:num_tokens]
@@ -747,16 +601,12 @@ class SpecDecodeProposer:
                 input_ids = self.input_ids[:num_tokens]
                 inputs_embeds = None
 
-            model_kwargs = {
-                "input_ids": input_ids,
-                "positions": self.positions[:num_tokens],
-            }
-            if self.pass_hidden_states_to_model:
-                model_kwargs["hidden_states"] = self.hidden_states[:num_tokens]
-            if self.is_multimodal_model:
-                model_kwargs["inputs_embeds"] = inputs_embeds
-
-            self.model(**model_kwargs)
+            self.model(
+                input_ids=input_ids,
+                positions=self.positions[:num_tokens],
+                hidden_states=self.hidden_states[:num_tokens],
+                inputs_embeds=inputs_embeds,
+            )
 
     def validate_same_kv_cache_group(self,
                                      kv_cache_config: KVCacheConfig) -> None:
@@ -776,30 +626,6 @@ class SpecDecodeProposer:
                 for layer_name in self.attn_layer_names
             ])
         ) == 1, "All eagle layers should belong to the same kv cache group"
-
-
-class EagleProposer(SpecDecodeProposer):
-
-    def __init__(self,
-                 vllm_config: VllmConfig,
-                 device: torch.device,
-                 runner=None):
-        super().__init__(vllm_config=vllm_config,
-                         device=device,
-                         runner=runner,
-                         pass_hidden_states_to_model=True)
-
-
-class DraftModelProposer(SpecDecodeProposer):
-
-    def __init__(self,
-                 vllm_config: VllmConfig,
-                 device: torch.device,
-                 runner=None):
-        super().__init__(vllm_config=vllm_config,
-                         device=device,
-                         runner=runner,
-                         pass_hidden_states_to_model=False)
 
 
 # NOTE(woosuk): Currently, the below code is not used and we always use argmax
@@ -843,3 +669,97 @@ def compute_probs_and_sample_next_token(
             next_token_ids,
         )
     return next_token_ids, probs
+
+
+def drafter_prepare_inputs(
+    token_arange_np: np.ndarray,
+    common_attn_metadata: CommonAttentionMetadata,
+    # [batch_size]
+    num_rejected_tokens: torch.Tensor
+) -> tuple[CommonAttentionMetadata, torch.Tensor]:
+    """
+    This function is used to prepare the inputs for the spec decode.
+    It updates to the common_attn_metadata to account for the rejected
+    tokens (and newly sampled tokens). It also returns the token indices
+    of the tokens that should be fed to the speculator.
+    """
+    # E.g.
+    #  common_attn_metadata.query_start_loc{_cpu}:
+    #       [0, q1, q1 + q2, q1 + q2 + q3]
+    #  common_attn_metadata.seq_lens{_cpu}: [s1, s2, s3]
+    #  num_rejected_tokens: [n1, n2, n3]
+    # This function computes the intermediate values:
+    #  num_tokens_per_req: [q1 - n1, q2 - n2, q3 - n3]
+    # And returns:
+    #  common_attn_metadata.query_start_loc{_cpu}:
+    #       [0, q1 - n1, q1 + q2 - n1 - n2, q1 + q2 + q3 - n1 - n2 - n3]
+    #  common_attn_metadata.seq_lens{_cpu}:
+    #       [s1 - n1 + 1, s2 - n2 + 1, s3 - n3 + 1]
+    #  token_indices: [0, 1, ..., q1 - n1 - 1,
+    #                 q1, q1 + 1, ..., q1 + q2 - n2 - 1,
+    #                 q1 + q2, q1 + q2 + 1, ..., q1 + q2 + q3 - n3 - 1]
+
+    device = common_attn_metadata.query_start_loc.device
+    query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+    new_seq_lens_cpu = common_attn_metadata.seq_lens_cpu \
+        - num_rejected_tokens
+
+    # [0, q1, q1 + q2, q1 + q2 + q3] -> [q1, q2, q3]
+    new_query_len_per_req = (query_start_loc_cpu[1:] -
+                             query_start_loc_cpu[:-1])
+    # [q1, q2, q3] -> [q1 - n1, q2 - n2, q3 - n3]
+    new_num_tokens_per_req = new_query_len_per_req - num_rejected_tokens
+    new_num_tokens_per_req_np = new_num_tokens_per_req.numpy()
+
+    # [q1 - n1, q2 - n2, q3 - n3] ->
+    # [0, q1 - n1, q1 + q2 - n1 - n2, q1 + q2 + q3 - n1 - n2 - n3]
+    new_query_start_loc_cpu = torch.zeros(query_start_loc_cpu.shape,
+                                          dtype=torch.int32,
+                                          pin_memory=is_pin_memory_available())
+    new_query_start_loc_np = new_query_start_loc_cpu.numpy()
+    np.cumsum(new_num_tokens_per_req_np, out=new_query_start_loc_np[1:])
+
+    total_num_tokens = new_query_start_loc_np[-1]
+    # Example assuming num_tokens_per_req_np = [2, 4, 3]
+    # this implies that `new_query_start_locs` is:
+    # [0, 2, 6, 9] ->
+    # [0, 0, 2, 2, 2, 2, 6, 6, 6]
+    #  _r1_  ____r2____  ___r3__
+    new_query_start_locs_expanded = np.repeat(new_query_start_loc_np[:-1],
+                                              new_num_tokens_per_req_np)
+    # [0, 1, 2, 3, 4, 5, 6, 7, 8] ->
+    # [0, 1, 0, 1, 2, 3, 0, 1, 2]
+    #  _r1_  ____r2____  ___r3__
+    token_offests = token_arange_np[:total_num_tokens] \
+        - new_query_start_locs_expanded
+
+    # Expand starting positions to match token pattern
+    # [0, q1, q1 + q2] ->
+    # [0, 0, q1, q1, q1, q1, q1 + q2, q1 + q2, q1 + q2]
+    #  _r1_  _____r2_______  ___________r3____________
+    old_query_start_locs_expanded = np.repeat(query_start_loc_cpu[:-1].numpy(),
+                                              new_num_tokens_per_req_np)
+    # Final token indices are:
+    # [0, 1,                                // req 1
+    #  q1 + 0, q1 + 1, q1 + 2, q1 + 3,       // req 2
+    #  q1 + q2 + 0, q1 + q2 + 1, q1 + q2 + 2] // req 3
+    token_indices_np = token_offests + old_query_start_locs_expanded
+    token_indices = torch.from_numpy(token_indices_np).to(device,
+                                                          non_blocking=True)
+
+    spec_common_attn_metadata = CommonAttentionMetadata(
+        query_start_loc=new_query_start_loc_cpu.to(device, non_blocking=True),
+        seq_lens=new_seq_lens_cpu.to(device, non_blocking=True),
+        query_start_loc_cpu=new_query_start_loc_cpu,
+        seq_lens_cpu=new_seq_lens_cpu,
+        num_computed_tokens_cpu=common_attn_metadata.num_computed_tokens_cpu,
+        num_reqs=common_attn_metadata.num_reqs,
+        num_actual_tokens=total_num_tokens,
+        max_query_len=new_query_len_per_req.max().item(),
+        max_seq_len=new_seq_lens_cpu.max().item(),
+        block_table_tensor=common_attn_metadata.block_table_tensor,
+        slot_mapping=common_attn_metadata.slot_mapping[token_indices],
+        causal=True,
+    )
+
+    return spec_common_attn_metadata, token_indices
