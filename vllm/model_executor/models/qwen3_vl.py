@@ -273,6 +273,11 @@ class Qwen3_VisionTransformer(nn.Module):
         self.deepstack_visual_indexes = vision_config.deepstack_visual_indexes
         self.use_data_parallel = use_data_parallel
 
+        # NOTE: This is used for creating empty tensor for all_gather for
+        # DP ViT. Here out_hidden_size is enlarged due to deepstack
+        self.out_hidden_size = (vision_config.out_hidden_size *
+                                (1 + len(self.deepstack_visual_indexes)))
+
         self.patch_embed = Qwen3_VisionPatchEmbed(
             patch_size=self.patch_size,
             temporal_patch_size=self.temporal_patch_size,
