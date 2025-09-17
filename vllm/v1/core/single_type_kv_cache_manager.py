@@ -573,6 +573,7 @@ class MambaManager(SingleTypeKVCacheManager):
 
     def get_num_common_prefix_blocks(self, request_id: str,
                                      num_running_requests: int) -> int:
+        assert isinstance(self.kv_cache_spec, MambaSpec)
         if self.kv_cache_spec.cache_strategy == "disabled":
             return 0
 

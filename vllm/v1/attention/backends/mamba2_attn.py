@@ -14,7 +14,7 @@ from vllm.v1.attention.backends.mamba_attn import (
     BaseMambaAttentionMetadataBuilder)
 from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
                                               split_decodes_and_prefills)
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
 
 def _query_start_loc_to_chunk_indices_offsets(
@@ -148,12 +148,13 @@ class Mamba2AttentionMetadata:
 class Mamba2AttentionMetadataBuilder(
         BaseMambaAttentionMetadataBuilder[Mamba2AttentionMetadata]):
 
-    def __init__(self, kv_cache_spec: MambaSpec, layer_names: list[str],
+    def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.chunk_size = vllm_config.model_config.get_mamba_chunk_size()
         assert self.chunk_size is not None, (
             "chunk_size needs to be set in the model config for Mamba2 models")
+        assert isinstance(kv_cache_spec, MambaSpec)
         if kv_cache_spec.cache_strategy == "all":
             self.state_indices_tensor = torch.empty(
                 (self.decode_cudagraph_max_bs,
@@ -204,7 +205,7 @@ class Mamba2AttentionMetadataBuilder(
         prep_initial_states = False
         cu_chunk_seqlen_p = None
         last_chunk_p = None
-
+        assert isinstance(self.kv_cache_spec, MambaSpec)
         if self.kv_cache_spec.cache_strategy == "disabled":
             # Always return just a single block per each request:
             state_indices_tensor = common_attn_metadata.block_table_tensor[:,
