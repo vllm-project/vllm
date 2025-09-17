@@ -6,9 +6,11 @@ from typing import Optional
 import torch
 
 from vllm.model_executor.layers.fused_moe.utils import (
-    moe_kernel_quantize_input, per_token_group_quant_fp8)
+    moe_kernel_quantize_input)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     calculate_tile_tokens_dim)
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8)
 from vllm.utils import direct_register_custom_op
 
 
