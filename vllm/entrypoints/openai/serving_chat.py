@@ -1041,10 +1041,10 @@ class OpenAIServingChat(OpenAIServing):
                             ])
 
                         # Send the finish response for each request.n only once
-                        # OpenAI's behavior:
-                        # When stream=true and a tool is called,
-                        # finish_reason is "tool_calls" for auto and required
-                        # tool choices, but is "stop" for named tool calls.
+                        # In OpenAI's API, when a tool is called, the
+                        # finish_reason is:
+                        # "tool_calls" for "auto" or "required" tool calls,
+                        # and "stop" for named tool calls.
                         if auto_tools_called or (
                                 tools_streamed[i]
                                 and not tool_choice_function_name
@@ -1331,9 +1331,6 @@ class OpenAIServingChat(OpenAIServing):
 
                 tool_call_info = tool_parser.extract_tool_calls(
                     content if content is not None else "", request=request)
-                # In the OpenAI API the finish_reason is "tools_called"
-                # if the tool choice is auto and the model produced a tool
-                # call. The same is not true for named function calls
                 auto_tools_called = tool_call_info.tools_called
                 if tool_call_info.tools_called:
                     message = ChatMessage(role=role,
@@ -1364,11 +1361,9 @@ class OpenAIServingChat(OpenAIServing):
                 message = ChatMessage(role=role,
                                       reasoning_content=reasoning_content,
                                       content=content)
-
-            # According to the OpenAI API, the finish_reason is typically set
-            # to "tool_calls" when a tool is invoked. However, for named tool
-            # calls, # the finish_reason is instead set to "stop" as an
-            # exception to this rule.
+            # In OpenAI's API, when a tool is called, the finish_reason is:
+            # "tool_calls" for "auto" or "required" tool calls,
+            # and "stop" for named tool calls.
             is_finish_reason_tool_calls = auto_tools_called or (
                 request.tool_choice and request.tool_choice == "required"
                 and output.finish_reason == "stop")
