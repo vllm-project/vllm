@@ -218,6 +218,30 @@ def _add_limit_line(fig, y_value, label):
             name=f"{label}"
         ))
 
+
+def _find_concurrency_col(df: pd.DataFrame) -> str:
+    for c in ["# of max concurrency.", "# of max concurrency", "Max Concurrency",
+              "max_concurrency", "Concurrency"]:
+        if c in df.columns:
+            return c
+    # Fallback: guess an integer-like column (harmless if unused)
+    for c in df.columns:
+        if df[c].dtype.kind in "iu" and df[c].nunique() > 1 and df[c].min() >= 1:
+            return c
+    return "# of max concurrency."
+
+def _highlight_threshold(df: pd.DataFrame, threshold: float) -> "pd.io.formats.style.Styler":
+    """Highlight numeric per-configuration columns with value <= threshold."""
+    conc_col = _find_concurrency_col(df)
+    key_cols = [c for c in ["Model", "Dataset Name", "Input Len", "Output Len", conc_col] if c in df.columns]
+    conf_cols = [c for c in df.columns if c not in key_cols and not str(c).startswith("Ratio")]
+    conf_cols = [c for c in conf_cols if pd.api.types.is_numeric_dtype(df[c])]
+    return df.style.map(
+        lambda v: "background-color:#e6ffe6;font-weight:bold;" if pd.notna(v) and v <= threshold else "",
+        subset=conf_cols
+    )
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -305,7 +329,18 @@ if __name__ == "__main__":
             for name, group in output_groups:
                 group_name = ",".join(map(str, name)).replace(",", "_").replace("/","-")
                 group_html_name = "perf_comparison_" + group_name + ".html"
-                html = group.to_html()
+
+
+                metric_name = str(data_cols_to_compare[i]).lower()
+                if "tok/s" in metric_name:
+                    html = group.to_html()
+                elif "ttft" in metric_name:
+                    styler = _highlight_threshold(group, args.ttft_max_ms)
+                    html = styler.to_html(table_attributes='border="1" class="dataframe"')
+                elif "tpot" in metric_name or "median" in metric_name:
+                    styler = _highlight_threshold(group, args.tpot_max_ms)
+                    html = styler.to_html(table_attributes='border="1" class="dataframe"')
+                
                 text_file.write(html_msgs_for_data_cols[i])
                 text_file.write(html)
                 with open(group_html_name, "a") as sub_text_file:
@@ -335,9 +370,9 @@ if __name__ == "__main__":
                         )
 
                         # ---- Add threshold lines based on metric name ----
-                        if i == 1:
+                        if "ttft" in metric_name:
                             _add_limit_line(fig, args.ttft_max_ms, "TTFT limit")
-                        if i == 2:
+                        elif "tpot" in metric_name or "median" in metric_name:
                             _add_limit_line(fig, args.tpot_max_ms, "TPOT limit")
 
                         # Export to HTML
