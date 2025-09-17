@@ -1025,16 +1025,9 @@ class Scheduler(SchedulerInterface):
         # Append generated tokens and check for stop. Note that if
         # a request is still being prefilled, we expect the model runner
         # to return empty token ids for the request.
-        stopped = False
-        for num_new, output_token_id in enumerate(new_token_ids, 1):
-            request.append_output_token_ids(output_token_id)
-
-            # Check for stop and update request state.
-            # This must be called before we make the EngineCoreOutput.
-            stopped = check_stop(request, self.max_model_len)
-            if stopped:
-                del new_token_ids[num_new:]  # Trim new tokens if needed.
-                break
+        stopped, num_new = add_token_and_check_stop(new_token_ids, request, self.max_model_len)
+        if stopped:
+            del new_token_ids[num_new:]  # Trim new tokens if needed.
         return new_token_ids, stopped
 
     def _free_encoder_inputs(self, request: Request) -> None:
