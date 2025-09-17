@@ -36,18 +36,18 @@ class BatchUpdateBuilder:
 
     _removed: list[RemovedRequest]
     _is_removed_sorted: bool
-    moved: list[MovedRequest]
     added: list[AddedRequest]
+    moved: list[MovedRequest]
 
     def __init__(
         self,
         removed: Optional[list[RemovedRequest]] = None,
-        moved: Optional[list[MovedRequest]] = None,
         added: Optional[list[AddedRequest]] = None,
+        moved: Optional[list[MovedRequest]] = None,
     ) -> None:
         self._removed = removed or []
-        self.moved = moved or []
         self.added = added or []
+        self.moved = moved or []
         self._is_removed_sorted = False
 
         # Used to track changes in the pooling case
@@ -107,8 +107,8 @@ class BatchUpdateBuilder:
         """Returns True if there were any changes to the batch."""
         self._is_removed_sorted = False
         self._removed.clear()
-        self.moved.clear()
         self.added.clear()
+        self.moved.clear()
         batch_changed = self.batch_changed
         self.batch_changed = False
         return batch_changed
