@@ -46,7 +46,6 @@ steps:
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - vllm/
-  - tests/mq_llm_engine
   - tests/async_engine
   - tests/test_inputs.py
   - tests/test_outputs.py
@@ -57,7 +56,6 @@ steps:
   - tests/transformers_utils
   commands:
   - python3 standalone_tests/lazy_imports.py
-  - pytest -v -s mq_llm_engine # MQLLMEngine
   - pytest -v -s async_engine # AsyncLLMEngine
   - pytest -v -s test_inputs.py
   - pytest -v -s test_outputs.py
@@ -821,6 +819,20 @@ steps:
     - pytest -v -s tests/kernels/moe/test_flashinfer.py
     - pytest -v -s tests/compile/test_silu_mul_quant_fusion.py
 
+- label: GPT-OSS Eval (Blackwell)
+  timeout_in_minutes: 60
+  working_dir: "/vllm-workspace/"
+  gpu: b200
+  # optional: true
+  source_file_dependencies:
+  - tests/evals/gpt_oss
+  - vllm/model_executor/models/gpt_oss.py
+  - vllm/model_executor/layers/quantization/mxfp4.py
+  - vllm/v1/attention/backends/flashinfer.py
+  commands:
+    - uv pip install --system 'gpt-oss[eval]==0.0.5'
+    - pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py --model openai/gpt-oss-20b --metric 0.58 --server-args '--tensor-parallel-size 2'
+
 #####  1 GPU test  #####
 #####  multi gpus test  #####
 
@@ -946,7 +958,6 @@ steps:
   commands:
   - pytest -v -s distributed/test_pp_cudagraph.py
   - pytest -v -s distributed/test_pipeline_parallel.py
-  # - pytest -v -s distributed/test_context_parallel.py # TODO: enable it on Hopper runners or add triton MLA support
 
 - label: LoRA TP Test (Distributed) # 17 min
   timeout_in_minutes: 30
@@ -1020,9 +1031,21 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
 
-- label: Qwen MoE EP Test # optional
+##### H200 test #####
+- label: Distrubted Tests (H200) # optional
   gpu: h200
   optional: true
+  working_dir: "/vllm-workspace/"
   num_gpus: 2
   commands:
-    - CUDA_VISIBLE_DEVICES=1,2 VLLM_ALL2ALL_BACKEND=deepep_high_throughput VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 /vllm-workspace/examples/offline_inference/data_parallel.py --model Qwen/Qwen1.5-MoE-A2.7B --tp-size=1  --dp-size=2 --max-model-len 2048
+    - pytest -v -s tests/distributed/test_context_parallel.py
+    - CUDA_VISIBLE_DEVICES=1,2 VLLM_ALL2ALL_BACKEND=deepep_high_throughput VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model Qwen/Qwen1.5-MoE-A2.7B --tp-size=1  --dp-size=2 --max-model-len 2048
+
+##### B200 test #####
+- label: Distributed Tests (B200) # optional
+  gpu: b200
+  optional: true
+  working_dir: "/vllm-workspace/"
+  num_gpus: 2
+  commands:
+    - pytest -v -s tests/distributed/test_context_parallel.py
