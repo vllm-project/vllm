@@ -54,7 +54,6 @@ MODELS_TO_TEST = [
     MRoPETestInfo(model_name="Qwen/Qwen2.5-VL-72B-Instruct"),
     MRoPETestInfo(
         model_name="Qwen/Qwen3-VL-4B-Instruct",
-        atol=1.3e-2,
         marks=[
             pytest.mark.skipif(
                 Version(TRANSFORMERS_BASE_VERSION) < Version("4.57.0"),
@@ -63,7 +62,6 @@ MODELS_TO_TEST = [
         ]),
     MRoPETestInfo(
         model_name="Qwen/Qwen3-VL-30B-A3B-Instruct",
-        atol=2.5e-1,
         marks=[
             pytest.mark.skipif(
                 Version(TRANSFORMERS_BASE_VERSION) < Version("4.57.0"),
