@@ -146,8 +146,8 @@ def _triton_interleaved_mrope_forward(
     k_ptr = k_ptr + pid * (n_kh * hd)
 
     # ####################################################################
-    # get the cos(mθ_{i...d/2}) and sin(mθ_{i...d/2}) for token position
-    # m of this program instance
+    # get the cos(mθ_{i...d, step=2}) and sin(mθ_{i...d, step=2})
+    # for token position m of this program instance
     # ####################################################################
     # Note: cos and sin now have shape (3, num_tokens, head_dim // 2)
 
