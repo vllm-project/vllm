@@ -25,7 +25,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp, KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
-    KVTransferStats)
+    KVConnectorStats)
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
     get_tp_group)
@@ -208,17 +208,17 @@ class NixlConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
 
-    def get_kv_transfer_stats(self) -> Optional[KVTransferStats]:
+    def get_kv_connector_stats(self) -> Optional[KVConnectorStats]:
         assert self.connector_worker is not None
-        return self.connector_worker.get_kv_transfer_stats()
+        return self.connector_worker.get_kv_connector_stats()
 
     @classmethod
-    def build_kv_transfer_stats(
+    def build_kv_connector_stats(
             cls,
             data: Optional[dict[str,
-                                Any]] = None) -> Optional[KVTransferStats]:
-        return NixlKVTransferStats(data=data) if data is not None \
-            else NixlKVTransferStats()
+                                Any]] = None) -> Optional[KVConnectorStats]:
+        return NixlKVConnectorStats(data=data) if data is not None \
+            else NixlKVConnectorStats()
 
     def start_load_kv(self, forward_context: "ForwardContext",
                       **kwargs) -> None:
@@ -565,7 +565,7 @@ class NixlConnectorWorker:
         # With heterogeneous TP, P must wait for all assigned D TP workers to
         # finish reading before safely freeing the blocks.
         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
-        self.xfer_stats = NixlKVTransferStats()
+        self.xfer_stats = NixlKVConnectorStats()
 
     def __del__(self):
         """Cleanup background threads on destruction."""
@@ -1314,7 +1314,7 @@ class NixlConnectorWorker:
             block_len = self.block_len
         return block_len
 
-    def get_kv_transfer_stats(self) -> Optional[KVTransferStats]:
+    def get_kv_connector_stats(self) -> Optional[KVConnectorStats]:
         """
         Get the KV transfer stats for the connector.
         """
@@ -1344,7 +1344,7 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
 
 
 @dataclass
-class NixlKVTransferStats(KVTransferStats):
+class NixlKVConnectorStats(KVConnectorStats):
     """Container for transfer performance metrics"""
 
     def __post_init__(self):
@@ -1358,7 +1358,7 @@ class NixlKVTransferStats(KVTransferStats):
         # TODO: record actual transfer stats when available
         self.data["num_successful_transfers"] += 1
 
-    def clone_and_reset(self) -> "NixlKVTransferStats":
+    def clone_and_reset(self) -> "NixlKVConnectorStats":
         old = copy.copy(self)
         self.reset()
         return old
@@ -1366,11 +1366,7 @@ class NixlKVTransferStats(KVTransferStats):
     def is_empty(self) -> bool:
         return self.data["num_successful_transfers"] == 0
 
-    def aggregate(self, other: KVTransferStats) -> KVTransferStats:
-        if self == EMPTY_NIXL_KV_TRANSFER_STATS:
-            # Make sure EMPTY_KV_TRANSFER_STATS is not mutated. This should also
-            # always be semantically correct, as EMPTY | other => other.
-            return other
+    def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
         if not other.is_empty():
             self.data["num_successful_transfers"] += other.data[
                 "num_successful_transfers"]
@@ -1381,6 +1377,3 @@ class NixlKVTransferStats(KVTransferStats):
         return {
             "num_successful_transfers": self.data["num_successful_transfers"]
         }
-
-
-EMPTY_NIXL_KV_TRANSFER_STATS = NixlKVTransferStats()

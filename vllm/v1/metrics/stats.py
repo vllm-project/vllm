@@ -43,7 +43,7 @@ class SchedulerStats:
         default_factory=PrefixCacheStats)
 
     spec_decoding_stats: Optional[SpecDecodingStats] = None
-    kv_transfer_stats: Optional[dict[str, Any]] = None
+    kv_connector_stats: Optional[dict[str, Any]] = None
 
     num_corrupted_reqs: int = 0
 

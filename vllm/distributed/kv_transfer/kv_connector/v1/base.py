@@ -50,7 +50,7 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.distributed.kv_events import KVCacheEvent
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
-        KVTransferStats)
+        KVConnectorStats)
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
@@ -370,18 +370,18 @@ class KVConnectorBase_V1(ABC):
         return None
 
     @classmethod
-    def build_kv_transfer_stats(
+    def build_kv_connector_stats(
             cls,
             data: Optional[dict[str,
-                                Any]] = None) -> Optional["KVTransferStats"]:
+                                Any]] = None) -> Optional["KVConnectorStats"]:
         """
         KVConnectorStats resolution method. This method allows dynamically 
-        registered connectors to return their own KVTransferStats object,
+        registered connectors to return their own KVConnectorStats object,
         which can implement custom aggregation logic on the data dict.
         """
         return None
 
-    def get_kv_transfer_stats(self) -> Optional["KVTransferStats"]:
+    def get_kv_connector_stats(self) -> Optional["KVConnectorStats"]:
         """
         Get the KV transfer stats for the connector collected during the last 
         interval.

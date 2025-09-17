@@ -142,7 +142,7 @@ class KVOutputAggregator:
 
         finished_sending = set[str]()
         finished_recving = set[str]()
-        aggregated_kv_transfer_stats = None
+        aggregated_kv_connector_stats = None
         for model_runner_output in outputs:
             output = model_runner_output.kv_connector_output
             if not output:
@@ -152,18 +152,18 @@ class KVOutputAggregator:
             update_finished_set(output.finished_recving,
                                 self._recv_remaining_count, finished_recving)
 
-            # Aggregate kv_transfer_stats from all workers.
-            if aggregated_kv_transfer_stats is None:
-                # Use the first worker's kv_transfer_stats as accumulator.
-                aggregated_kv_transfer_stats = output.kv_transfer_stats
-            elif kv_transfer_stats := output.kv_transfer_stats:
-                if aggregated_kv_transfer_stats is None:
-                    aggregated_kv_transfer_stats = kv_transfer_stats
+            # Aggregate kv_connector_stats from all workers.
+            if aggregated_kv_connector_stats is None:
+                # Use the first worker's kv_connector_stats as accumulator.
+                aggregated_kv_connector_stats = output.kv_connector_stats
+            elif kv_connector_stats := output.kv_connector_stats:
+                if aggregated_kv_connector_stats is None:
+                    aggregated_kv_connector_stats = kv_connector_stats
                 else:
-                    assert isinstance(aggregated_kv_transfer_stats,
-                                      type(kv_transfer_stats))
-                    aggregated_kv_transfer_stats = \
-                        aggregated_kv_transfer_stats.aggregate(kv_transfer_stats)
+                    assert isinstance(aggregated_kv_connector_stats,
+                                      type(kv_connector_stats))
+                    aggregated_kv_connector_stats = \
+                        aggregated_kv_connector_stats.aggregate(kv_connector_stats)
 
         # select output of the worker specified by output_rank
         output = outputs[output_rank]
@@ -171,7 +171,7 @@ class KVOutputAggregator:
         output.kv_connector_output = KVConnectorOutput(
             finished_sending=finished_sending or None,
             finished_recving=finished_recving or None,
-            kv_transfer_stats=aggregated_kv_transfer_stats or None,
+            kv_connector_stats=aggregated_kv_connector_stats or None,
         )
 
         return output

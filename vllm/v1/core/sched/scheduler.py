@@ -16,7 +16,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import (
 from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
                                                           KVConnectorRole)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
-    KVTransferStats)
+    KVConnectorStats)
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
@@ -876,8 +876,8 @@ class Scheduler(SchedulerInterface):
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: Optional[SpecDecodingStats] = None
-        kv_transfer_stats = (kv_connector_output.kv_transfer_stats
-                             if kv_connector_output else None)
+        kv_connector_stats = (kv_connector_output.kv_connector_stats
+                              if kv_connector_output else None)
 
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
@@ -1014,7 +1014,7 @@ class Scheduler(SchedulerInterface):
             finished_req_ids.clear()
 
         if (stats := self.make_stats(spec_decoding_stats,
-                                     kv_transfer_stats)) is not None:
+                                     kv_connector_stats)) is not None:
             # Return stats to only one of the front-ends.
             if (eco := next(iter(engine_core_outputs.values()), None)) is None:
                 # We must return the stats even if there are no request
@@ -1179,7 +1179,7 @@ class Scheduler(SchedulerInterface):
     def make_stats(
         self,
         spec_decoding_stats: Optional[SpecDecodingStats] = None,
-        kv_transfer_stats: Optional[KVTransferStats] = None,
+        kv_connector_stats: Optional[KVConnectorStats] = None,
     ) -> Optional[SchedulerStats]:
         if not self.log_stats:
             return None
@@ -1192,8 +1192,8 @@ class Scheduler(SchedulerInterface):
                               spec_decoding_stats=spec_decoding_stats,
                               num_corrupted_reqs=sum(req.is_output_corrupted
                                                      for req in self.running),
-                              kv_transfer_stats=kv_transfer_stats.data
-                              if kv_transfer_stats else None)
+                              kv_connector_stats=kv_connector_stats.data
+                              if kv_connector_stats else None)
 
     def make_spec_decoding_stats(
         self,

@@ -14,11 +14,12 @@ logger = init_logger(__name__)
 
 
 @dataclass
-class KVTransferStats:
+class KVConnectorStats:
     """
-    Base class for KV Transfer Stats, a container for transfer performance 
-    metrics. All sub-classes need to be serializable as stats are sent
-    from worker to logger process.
+    Base class for KV Connector Stats, a container for transfer performance 
+    metrics or otherwise important telemetry from the connector. 
+    All sub-classes need to be serializable as stats are sent from worker to
+    logger process.
     """
     data: dict[str, Any] = field(default_factory=dict)
 
@@ -26,9 +27,9 @@ class KVTransferStats:
         """Reset the stats, clear the state."""
         raise NotImplementedError
 
-    def aggregate(self, other: "KVTransferStats") -> "KVTransferStats":
+    def aggregate(self, other: "KVConnectorStats") -> "KVConnectorStats":
         """
-        Aggregate stats with another `KVTransferStats` object.
+        Aggregate stats with another `KVConnectorStats` object.
         """
         raise NotImplementedError
 
@@ -58,7 +59,7 @@ class KVTransferLogging:
         self.reset()
 
     def reset(self):
-        self.transfer_stats_accumulator: Optional[KVTransferStats] = None
+        self.transfer_stats_accumulator: Optional[KVConnectorStats] = None
 
     def observe(self, transfer_stats_data: dict[str, Any]):
         # Should not be called when a KVConnector is not configured.
@@ -67,13 +68,13 @@ class KVTransferLogging:
         # Note that this is not the same as the logging interval.
         # We expect transfer_stats_data to be aggregated across all workers and
         # consist of observations from a single connector or a MultiConnector.
-        transfer_stats = self.connector_cls.build_kv_transfer_stats(
+        transfer_stats = self.connector_cls.build_kv_connector_stats(
             transfer_stats_data)
         if transfer_stats is None:
             logger.warning_once(
                 "The connector %s is collecting stats but "
                 "does not implement the "
-                "`build_kv_transfer_stats` method. "
+                "`build_kv_connector_stats` method. "
                 "Stats will not be logged.", self.connector_cls)
             return
 
@@ -97,6 +98,3 @@ class KVTransferLogging:
 
             # Reset metrics for next interval
             self.reset()
-
-
-EMPTY_KV_TRANSFER_STATS = KVTransferStats()

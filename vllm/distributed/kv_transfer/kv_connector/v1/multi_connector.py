@@ -14,7 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import (
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
-    KVTransferStats)
+    KVConnectorStats)
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
@@ -36,13 +36,13 @@ class MultiKVConnectorMetadata(KVConnectorMetadata):
 
 
 @dataclass
-class MultiKVTransferStats(KVTransferStats):
+class MultiKVConnectorStats(KVConnectorStats):
     """
-    Maintain a dict of KVTransferStats objects, one for each connector.
+    Maintain a dict of KVConnectorStats objects, one for each connector.
     This is used to aggregate the stats from all connectors separately.
     """
 
-    def aggregate(self, other: KVTransferStats) -> KVTransferStats:
+    def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
         for connector_id, xfer_stats in other.data.items():
             if connector_id not in self.data:
                 self[connector_id] = xfer_stats
@@ -65,10 +65,10 @@ class MultiKVTransferStats(KVTransferStats):
     def is_empty(self) -> bool:
         return all(xfer_stats.is_empty() for xfer_stats in self.data.values())
 
-    def __getitem__(self, connector_id: str) -> KVTransferStats:
+    def __getitem__(self, connector_id: str) -> KVConnectorStats:
         return self.data[connector_id]
 
-    def __setitem__(self, connector_id: str, xfer_stats: KVTransferStats):
+    def __setitem__(self, connector_id: str, xfer_stats: KVConnectorStats):
         self.data[connector_id] = xfer_stats
 
 
@@ -307,22 +307,22 @@ class MultiConnector(KVConnectorBase_V1):
         return next(iter(layouts), None)
 
     @classmethod
-    def build_kv_transfer_stats(
+    def build_kv_connector_stats(
             cls,
             data: Optional[dict[str,
-                                Any]] = None) -> Optional[KVTransferStats]:
-        return MultiKVTransferStats(data=data) if data is not None \
-            else MultiKVTransferStats()
+                                Any]] = None) -> Optional[KVConnectorStats]:
+        return MultiKVConnectorStats(data=data) if data is not None \
+            else MultiKVConnectorStats()
 
-    def get_kv_transfer_stats(self) -> Optional[MultiKVTransferStats]:
+    def get_kv_connector_stats(self) -> Optional[MultiKVConnectorStats]:
         # Group xfer stats by connector type.
-        xfer_stats_by_connector: Optional[MultiKVTransferStats] = None
+        xfer_stats_by_connector: Optional[MultiKVConnectorStats] = None
         for c in self._connectors:
-            xfer_stats = c.get_kv_transfer_stats()
+            xfer_stats = c.get_kv_connector_stats()
             if xfer_stats is None:
                 continue
             if xfer_stats_by_connector is None:
                 # Lazy init to allow optional return value.
-                xfer_stats_by_connector = MultiKVTransferStats()
+                xfer_stats_by_connector = MultiKVConnectorStats()
             xfer_stats_by_connector[c.__class__.__name__] = xfer_stats
         return xfer_stats_by_connector

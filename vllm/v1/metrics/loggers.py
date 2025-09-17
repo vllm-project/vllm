@@ -101,8 +101,8 @@ class LoggingStatLogger(StatLoggerBase):
             if scheduler_stats.spec_decoding_stats is not None:
                 self.spec_decoding_logging.observe(
                     scheduler_stats.spec_decoding_stats)
-            if kv_transfer_stats := scheduler_stats.kv_transfer_stats:
-                self.kv_transfer_logging.observe(kv_transfer_stats)
+            if kv_connector_stats := scheduler_stats.kv_connector_stats:
+                self.kv_transfer_logging.observe(kv_connector_stats)
             self.last_scheduler_stats = scheduler_stats
 
     def log(self):
