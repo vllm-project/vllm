@@ -687,7 +687,7 @@ async def benchmark(
         print("{:<40} {:<10.2f}".format(
             "Peak output token throughput (tok/s):",
             metrics.max_output_tokens_per_s))
-        print("{:<40} {:<10.2f}".format("Peak concurrent requests (req/s):",
+        print("{:<40} {:<10.2f}".format("Peak concurrent requests:",
                                         metrics.max_concurrent_requests))
     print("{:<40} {:<10.2f}".format("Total Token throughput (tok/s):",
                                     metrics.total_token_throughput))
