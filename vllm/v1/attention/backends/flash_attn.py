@@ -317,7 +317,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                     batch_size=batch_size,
                     max_seqlen_q=max_query_len,
                     max_seqlen_k=max_seq_len,
-                    num_heads_q=self.num_heads_q,
+                    num_heads_q=self.num_heads_q * self.dcp_world_size,
                     num_heads_kv=self.num_heads_kv,
                     headdim=self.headdim,
                     cache_seqlens=seqlens,
