@@ -25,7 +25,7 @@ MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 
 
 @pytest.fixture(scope="module")
-def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files):
+def default_server_args(zephyr_lora_files):
     return [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -39,7 +39,6 @@ def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files):
         "--enable-lora",
         "--lora-modules",
         f"zephyr-lora={zephyr_lora_files}",
-        f"zephyr-lora2={zephyr_lora_added_tokens_files}",
         "--max-lora-rank",
         "64",
         "--max-cpu-loras",
@@ -85,7 +84,7 @@ async def client(server):
 @pytest.mark.parametrize(
     # first test base model, then test loras
     "model_name",
-    [MODEL_NAME, "zephyr-lora", "zephyr-lora2"],
+    [MODEL_NAME, "zephyr-lora"],
 )
 async def test_single_completion(client: openai.AsyncOpenAI, model_name: str):
     completion = await client.completions.create(model=model_name,
@@ -114,20 +113,6 @@ async def test_single_completion(client: openai.AsyncOpenAI, model_name: str):
 
 
 @pytest.mark.asyncio
-async def test_added_lora_tokens(client: openai.AsyncOpenAI):
-    # test using token IDs
-    completion = await client.completions.create(
-        model="zephyr-lora2",
-        prompt=[0, 0, 32000, 32001, 32002],
-        echo=True,
-        max_tokens=5,
-        temperature=0.0,
-    )
-    # Added tokens should appear in tokenized prompt
-    assert completion.choices[0].text.startswith("<unk><unk>vllm1vllm2vllm3")
-
-
-@pytest.mark.asyncio
 async def test_added_lora_tokens_base_model(client: openai.AsyncOpenAI):
     # test using token IDs
     with pytest.raises(openai.BadRequestError, match="out of vocabulary"):
@@ -145,7 +130,7 @@ async def test_added_lora_tokens_base_model(client: openai.AsyncOpenAI):
 @pytest.mark.parametrize(
     # first test base model, then test loras
     "model_name",
-    [MODEL_NAME, "zephyr-lora", "zephyr-lora2"],
+    [MODEL_NAME, "zephyr-lora"],
 )
 async def test_no_logprobs(client: openai.AsyncOpenAI, model_name: str):
     # test using token IDs
@@ -713,7 +698,7 @@ async def test_structured_outputs_grammar(client: openai.AsyncOpenAI,
 @pytest.mark.parametrize(
     # first test base model, then test loras
     "model_name",
-    [MODEL_NAME, "zephyr-lora", "zephyr-lora2"],
+    [MODEL_NAME, "zephyr-lora"],
 )
 @pytest.mark.parametrize("logprobs_arg", [1, 0])
 async def test_echo_logprob_completion(client: openai.AsyncOpenAI,
