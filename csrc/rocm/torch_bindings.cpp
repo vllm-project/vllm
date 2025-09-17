@@ -22,13 +22,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
 
   // Custom gemm op for skinny matrix-matrix multiplication
   rocm_ops.def(
-      "wvSplitK(Tensor in_a, Tensor in_b, Tensor in_bias, int CuCount) -> "
+      "wvSplitK(Tensor in_a, Tensor in_b, Tensor? in_bias, int CuCount) -> "
       "Tensor");
   rocm_ops.impl("wvSplitK", torch::kCUDA, &wvSplitK);
 
   // wvSplitK for fp8
   rocm_ops.def(
-      "wvSplitKQ(Tensor in_a, Tensor in_b, Tensor in_bias, Tensor! out_c, "
+      "wvSplitKQ(Tensor in_a, Tensor in_b, Tensor? in_bias, Tensor! out_c, "
       "Tensor scale_a, "
       "          Tensor scale_b, int CuCount) -> ()");
   rocm_ops.impl("wvSplitKQ", torch::kCUDA, &wvSplitKQ);

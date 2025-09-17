@@ -1243,12 +1243,14 @@ int mindiv(int N, int div1, int div2) {
   return rtn;
 }
 
-torch::Tensor wvSplitK(at::Tensor& in_a, at::Tensor& in_b, at::Tensor& in_bias,
+torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
+                       const c10::optional<at::Tensor>& in_bias,
                        const int64_t CuCount) {
   auto M_in = in_a.size(0);
   auto K_in = in_a.size(1);
   auto N_in = in_b.size(0);
-  auto Bx_in = in_bias.defined() ? in_bias.size(0) : 0;
+  auto Bx_in =
+      (in_bias.has_value() && in_bias->numel() > 0) ? in_bias->size(0) : 0;
   auto By_in = 1;
 
   TORCH_CHECK(in_a.dtype() == in_b.dtype());
@@ -1293,8 +1295,9 @@ torch::Tensor wvSplitK(at::Tensor& in_a, at::Tensor& in_b, at::Tensor& in_bias,
     fptype* af4 = reinterpret_cast<fptype*>(in_a.data_ptr());
     const fptype* bf4 = reinterpret_cast<const fptype*>(in_b.data_ptr());
     const fptype* biasf4 =
-        in_bias.defined() ? reinterpret_cast<const fptype*>(in_bias.data_ptr())
-                          : nullptr;
+        (in_bias.has_value() && in_bias->numel() > 0)
+            ? reinterpret_cast<const fptype*>(in_bias->data_ptr())
+            : nullptr;
     fptype* c = reinterpret_cast<fptype*>(out_c.data_ptr());
     switch (N_in) {
       case 1:
@@ -1678,8 +1681,9 @@ __global__ void wvSplitKQ_hf_(const int K, const int Kp, const int M,
 }
 #endif  // defined(__HIP__MI3XX__) TODO: Add NAVI support
 
-void wvSplitKQ(at::Tensor& in_a, at::Tensor& in_b, at::Tensor& in_bias,
-               at::Tensor& out_c, at::Tensor& scale_a, at::Tensor& scale_b,
+void wvSplitKQ(const at::Tensor& in_a, const at::Tensor& in_b,
+               const c10::optional<at::Tensor>& in_bias, at::Tensor& out_c,
+               const at::Tensor& scale_a, const at::Tensor& scale_b,
                const int64_t CuCount) {
   static c10::ScalarType kFp8Type = is_fp8_ocp()
                                         ? c10::ScalarType::Float8_e4m3fn
@@ -1688,7 +1692,8 @@ void wvSplitKQ(at::Tensor& in_a, at::Tensor& in_b, at::Tensor& in_bias,
   auto K_in = in_a.size(1);
   auto N_in = in_b.size(0);
   auto Kp_in = in_a.stride(0);
-  auto Bx_in = in_bias.defined() ? in_bias.size(0) : 0;
+  auto Bx_in =
+      (in_bias.has_value() && in_bias->numel() > 0) ? in_bias->size(0) : 0;
   auto By_in = 1;
 
   TORCH_CHECK(K_in % 16 == 0, "k % 16 == 0");
@@ -1728,7 +1733,9 @@ void wvSplitKQ(at::Tensor& in_a, at::Tensor& in_b, at::Tensor& in_bias,
     VLLM_DISPATCH_FP8_TYPES(in_a.scalar_type(), "wvSplitKQ", [&] {
       auto a_ptr = in_a.data_ptr<fp8_t>();
       auto b_ptr = in_b.data_ptr<fp8_t>();
-      auto bias_ptr = in_bias.defined() ? in_bias.data_ptr<fp8_t>() : nullptr;
+      auto bias_ptr = (in_bias.has_value() && in_bias->numel() > 0)
+                          ? in_bias->data_ptr<fp8_t>()
+                          : nullptr;
       switch (N_in) {
         case 1:
           WVSPLITKQ(16, 2, 2, 2, 2, 2, 2, 1)
