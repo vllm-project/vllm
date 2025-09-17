@@ -1064,7 +1064,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             expert_load_view=expert_load_view,
             logical_to_physical_map=logical_to_physical_map,
             logical_replica_count=logical_replica_count,
-        )
+            fused_experts_method=self.fused_experts)
 
         if self.rocm_aiter_moe_enabled:
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
@@ -1124,6 +1124,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     global_num_experts=global_num_experts,
                     expert_map=expert_map,
                     apply_router_weight_on_input=apply_router_weight_on_input,
+                    expert_load_view=expert_load_view,
                 )
             else:
                 return flashinfer_cutlass_moe_fp8(
