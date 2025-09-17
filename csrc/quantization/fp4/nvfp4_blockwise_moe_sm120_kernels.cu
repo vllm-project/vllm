@@ -349,9 +349,9 @@ static inline void run_fp4_blockwise_scaled_group_mm_sm120(
       reinterpret_cast<const ElementB**>(b_ptrs.data_ptr()),
       reinterpret_cast<StrideBParam>(b_strides_buf.data_ptr()),
       reinterpret_cast<const ElementSFType**>(a_scales_ptrs.data_ptr()),
-      reinterpret_cast<LayoutSFAArg*>(layout_sfa.data_ptr()),
+      reinterpret_cast<LayoutSFAArg>(layout_sfa.data_ptr()),
       reinterpret_cast<const ElementSFType**>(b_scales_ptrs.data_ptr()),
-      reinterpret_cast<LayoutSFBArg*>(layout_sfb.data_ptr())};
+      reinterpret_cast<LayoutSFBArg>(layout_sfb.data_ptr())};
 
   typename GemmKernel::EpilogueArguments epilogue_args{
       {},  // epilogue.thread
