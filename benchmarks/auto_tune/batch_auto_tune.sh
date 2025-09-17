@@ -102,7 +102,7 @@ for i in $(seq 0 $(($num_runs - 1))); do
   echo "--------------------------------------------------"
 
   # Save intermediate progress back to the file
-  echo "$json_content" > "$INPUT_JSON"
+  echo "$json_content" > "$INPUT_JSON.tmp" && mv "$INPUT_JSON.tmp" "$INPUT_JSON"
 
 done
 
