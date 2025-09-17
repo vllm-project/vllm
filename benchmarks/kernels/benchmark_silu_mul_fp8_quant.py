@@ -409,9 +409,9 @@ def create_combined_plot(all_results):
 outer_dim = 7168
 configs = [
     # DeepSeekV3 Configs
-    # (8, 1024, 7168),
+    (8, 1024, 7168),
     # DeepSeekV3 Configs
-    # (32, 1024, 7168),
+    (32, 1024, 7168),
     # DeepSeekV3 Configs
     (256, 1024, 7168),
 ]

@@ -68,6 +68,15 @@ def silu_v1(
         1,
         min(max_empirical_parallelism, 2**int(log2(min(num_parallel_tokens,
                                                        T)))))
+
+    # Insert fake work to match silu v2. Shoud be removed eventually.
+    expert_offsets_ = tokens_per_expert.cumsum(dim=0)
+    expert_offsets = torch.zeros(E + 1,
+                                 device=tokens_per_expert.device,
+                                 dtype=expert_offsets_.dtype)
+    expert_offsets[1:] = expert_offsets_
+    _ = expert_offsets[-1]
+
     torch.ops._C.silu_v1_cuda(y, tokens_per_expert, y_q, y_s, group_size,
                               use_ue8m0, num_parallel_tokens)
 

@@ -272,13 +272,17 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   // Each warp will get space to store its hidden dim for gate and up.
   __int128_t* s_hidden_load = smem_128 + warp_id * (2 * 128 / 8) * NUM_STAGES;
 
+  Idx_t expert_id{}, old_expert_id{}, expert_offset{};
+
   for (int64_t token_id = tokens_lower + warp_id; token_id < tokens_upper;
        token_id += NUM_WARPS) {
-    __syncthreads();
+    expert_id =
+        __search<int64_t>(expert_id + lane_id, E, expert_offsets, token_id);
 
-    Idx_t expert_id = __search<int64_t>(lane_id, E, expert_offsets, token_id);
-    // We can do a shuffle down sync here.
-    __int64_t expert_offset = expert_offsets[expert_id];
+    if (expert_id != old_expert_id) {
+      expert_offset = expert_offsets[expert_id];
+    }
+    old_expert_id = expert_id;
 
     const Idx_t base_ys = expert_id * stride_ys_e;
     const __int128_t* input_128_ptr =
@@ -807,7 +811,7 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
   static constexpr int GROUP_SIZE = 128;
 
   static constexpr int THREAD_COUNT = 256;
-  static constexpr int UPPER_BLOCK_COUNT = 1024 * 16;  // Hopper
+  static constexpr int UPPER_BLOCK_COUNT = 1024 * 32;  // Hopper
   static constexpr int WARP_COUNT = THREAD_COUNT / 32;
 
   int64_t BLOCK_COUNT =
@@ -815,7 +819,7 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
 
   static constexpr int NUM_WARPS = THREAD_COUNT / WARP_SIZE;
 
-  static constexpr int NUM_STAGES = (24000 / (128 * 2 * NUM_WARPS * 2)) - 1;
+  static constexpr int NUM_STAGES = (24000 / (128 * 2 * NUM_WARPS * 2));
 
   static constexpr int max_shared_mem_bytes =
       128 * 2 * NUM_STAGES * NUM_WARPS * 2;  // 2 bytes
