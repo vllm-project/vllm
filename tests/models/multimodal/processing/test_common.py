@@ -31,13 +31,45 @@ def glm4_1v_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
     """
     # Ensure video metadata is included
     if "video" in mm_data:
+        # GLM4.1V doesn't support multiple videos
         video = mm_data["video"]
+        num_frames = len(video)
         mm_data["video"] = (video, {
-            "total_num_frames": len(video),
-            "fps": len(video),
+            "total_num_frames": num_frames,
+            "fps": num_frames,
             "duration": 1,
-            "video_backend": "opencv"
+            "frames_indices": [i for i in range(num_frames)],
+            "video_backend": "opencv",
+            "do_sample_frames": True,
         })
+    return mm_data
+
+
+def qwen3_vl_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
+    """
+    Patch the multimodal data for Qwen3-VL model.
+    """
+
+    def create_metadata(frames: np.ndarray):
+        num_frames = len(frames)
+        return {
+            "total_num_frames": num_frames,
+            "fps": 2.0,
+            "duration": num_frames / 2.0,
+            "video_backend": "opencv",
+            "frames_indices": list(range(num_frames)),
+            "do_sample_frames": True,
+        }
+
+    # Ensure video metadata is included
+    if "video" in mm_data:
+        video = mm_data["video"]
+        if isinstance(video, list):
+            # multiple videos
+            mm_data["video"] = [(vid, create_metadata(vid)) for vid in video]
+        else:
+            # single video
+            mm_data["video"] = (video, create_metadata(video))
     return mm_data
 
 
@@ -66,7 +98,9 @@ def _test_processing_correctness(
         hf_overrides=model_info.hf_overrides,
         # Ensure that the cache can fit all of the data
         mm_processor_cache_gb=2048,
-    )
+        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        enforce_eager=model_info.enforce_eager,
+        dtype=model_info.dtype)
 
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
     factories = MULTIMODAL_REGISTRY._processor_factories[model_cls]
@@ -162,8 +196,6 @@ def _test_processing_correctness(
 # incorrect token ids. So we need use `add_special_tokens=False` here
 # to leave bos_token to be added by the processor.
 _ADD_SPECIAL_TOKENS_OVERRIDES = {
-    "donut": False,
-    "mllama": False,
     "ovis": False,
     "ovis2_5": False,
     "paligemma": False,
@@ -179,8 +211,10 @@ _IGNORE_MM_KEYS = {
 }
 
 MM_DATA_PATCHES = {
-    # GLM4.1V requires video metadata to be included in the input
+    # GLM4.1V and Qwen3-VL requires video metadata to be included in the input
     "glm4v": glm4_1v_patch_mm_data,
+    "qwen3_vl": qwen3_vl_patch_mm_data,
+    "qwen3_vl_moe": qwen3_vl_patch_mm_data,
 }
 
 
@@ -273,9 +307,7 @@ def _test_processing_correctness_one(
     "facebook/chameleon-7b",
     "CohereLabs/command-a-vision-07-2025",
     "deepseek-ai/deepseek-vl2-tiny",
-    "naver-clova-ix/donut-base-finetuned-docvqa",
     "baidu/ERNIE-4.5-VL-28B-A3B-PT",
-    "microsoft/Florence-2-base",
     "adept/fuyu-8b",
     "google/gemma-3-4b-it",
     "google/gemma-3n-E2B-it",
@@ -293,14 +325,15 @@ def _test_processing_correctness_one(
     "OpenGVLab/InternVL3_5-GPT-OSS-20B-A4B-Preview",
     "OpenGVLab/InternVL3_5-30B-A3B",
     "Kwai-Keye/Keye-VL-8B-Preview",
+    "Kwai-Keye/Keye-VL-1_5-8B",
     "moonshotai/Kimi-VL-A3B-Instruct",
     "meta-llama/Llama-4-Scout-17B-16E-Instruct",
     "llava-hf/llava-1.5-7b-hf",
     "llava-hf/llava-v1.6-mistral-7b-hf",
     "llava-hf/LLaVA-NeXT-Video-7B-hf",
     "llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
-    "meta-llama/Llama-3.2-11B-Vision-Instruct",
     "TIGER-Lab/Mantis-8B-siglip-llama3",
+    "mispeech/midashenglm-7b",
     "openbmb/MiniCPM-Llama3-V-2_5",
     "openbmb/MiniCPM-o-2_6",
     "openbmb/MiniCPM-V-2_6",
@@ -324,6 +357,8 @@ def _test_processing_correctness_one(
     "Qwen/Qwen2.5-VL-3B-Instruct",
     "Qwen/Qwen2-Audio-7B-Instruct",
     "Qwen/Qwen2.5-Omni-3B",
+    "Qwen/Qwen3-VL-4B-Instruct",
+    "Qwen/Qwen3-VL-30B-A3B-Instruct",
     "YannQi/R-4B",
     "Skywork/Skywork-R1V-38B",
     "HuggingFaceTB/SmolVLM2-2.2B-Instruct",

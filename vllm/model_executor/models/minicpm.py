@@ -25,6 +25,7 @@
 """Inference-only MiniCPM model compatible with HuggingFace weights."""
 import math
 from collections.abc import Iterable
+from itertools import islice
 from typing import Any, Optional, Union
 
 import torch
@@ -414,7 +415,7 @@ class MiniCPMModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in self.layers[self.start_layer:self.end_layer]:
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
@@ -546,6 +547,7 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             # compatibility
             if not lora_config else lora_config.lora_vocab_padding_size,
             quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "lm_head"),
         )
         if config.tie_word_embeddings:
             self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)

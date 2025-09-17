@@ -32,9 +32,11 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP)
 from vllm.model_executor.layers.fused_moe.utils import (
-    _resize_cache, moe_kernel_quantize_input, per_token_group_quant_fp8)
+    _resize_cache, moe_kernel_quantize_input)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     calculate_tile_tokens_dim)
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     dequant_mxfp4)
 from vllm.platforms import current_platform
@@ -534,7 +536,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
     EM = sorted_token_ids.size(0)
     if A.size(0) < config["BLOCK_SIZE_M"]:
         # optimize for small batch_size.
-        # We assume that top_ids of each token is unique, so
+        # We assume that top_ids of each token is unique,
         # so num_valid_experts <= batch_size <= BLOCK_SIZE_M,
         # and we can skip some invalid blocks.
         EM = min(sorted_token_ids.size(0),
@@ -720,7 +722,10 @@ def get_moe_configs(
                 logger.info("Using configuration from %s for MoE layer.",
                             config_file_path)
                 # If a configuration has been found, return it
-                return {int(key): val for key, val in json.load(f).items()}
+                tuned_config = json.load(f)
+                # Delete triton_version from tuned_config
+                tuned_config.pop("triton_version", None)
+                return {int(key): val for key, val in tuned_config.items()}
 
     # If no optimized configuration is available, we will use the default
     # configuration
@@ -1011,7 +1016,8 @@ def grouped_topk(
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 
-    topk_weights = topk_weights * routed_scaling_factor
+    if routed_scaling_factor != 1.0:
+        topk_weights = topk_weights * routed_scaling_factor
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
 
@@ -1790,8 +1796,8 @@ def fused_moe(
         Defaults to False.
     - global_num_experts (int): The total number of experts in the global
         expert space.
-    - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices 
-        from the global expert space to the local expert space of the expert 
+    - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
+        from the global expert space to the local expert space of the expert
         parallel shard.
     - w1_scale (Optional[torch.Tensor]): Optional scale to be used for
         w1.

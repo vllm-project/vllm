@@ -24,9 +24,9 @@ from vllm.model_executor.layers.pooler import (ClassifierPooler,
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
-from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import PoolingTask
+from vllm.v1.pool.metadata import PoolingMetadata
 
 from .interfaces import SupportsCrossEncoding, SupportsQuant
 from .interfaces_base import default_pooling_type
@@ -562,7 +562,9 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
         self.bert = BertPoolingModel(vllm_config=vllm_config,
                                      prefix=maybe_prefix(prefix, "bert"),
                                      embedding_class=BertEmbedding)
-        self.classifier = nn.Linear(config.hidden_size, config.num_labels)
+        self.classifier = nn.Linear(config.hidden_size,
+                                    config.num_labels,
+                                    dtype=vllm_config.model_config.head_dtype)
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
