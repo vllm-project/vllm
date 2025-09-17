@@ -183,7 +183,7 @@ Here is an example `runs_config.json` with two benchmark configurations:
   {
     "base": "/home/user",
     "model": "meta-llama/Llama-3.1-8B-Instruct",
-    "system": "TPU",
+    "system": "TPU", # OR GPU
     "tp": 8,
     "input_len": 128,
     "output_len": 2048,
@@ -194,7 +194,7 @@ Here is an example `runs_config.json` with two benchmark configurations:
   {
     "base": "/home/user",
     "model": "meta-llama/Llama-3.1-70B-Instruct",
-    "system": "TPU",
+    "system": "TPU", # OR GPU
     "tp": 8,
     "input_len": 4000,
     "output_len": 16,
