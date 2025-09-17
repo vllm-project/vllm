@@ -1513,9 +1513,7 @@ class EngineArgs:
 
         # No Concurrent Partial Prefills so far.
         if (self.max_num_partial_prefills
-                != SchedulerConfig.max_num_partial_prefills
-                or self.max_long_partial_prefills
-                != SchedulerConfig.max_long_partial_prefills):
+                != SchedulerConfig.max_num_partial_prefills):
             _raise_or_fallback(feature_name="Concurrent Partial Prefill",
                                recommend_to_remove=False)
             return False

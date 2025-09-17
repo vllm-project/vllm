@@ -7,9 +7,10 @@ import itertools
 import time
 from collections import defaultdict
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any, Optional, Union
 
-from vllm.config import VllmConfig
+from vllm.config import SchedulerConfig, VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
@@ -36,6 +37,58 @@ from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class LongPartialPrefillMetadata:
+    enable_lpp: bool
+
+    # The number of prompts longer than the `long_prefill_token_threshold`
+    # that will be prefilled concurrently.
+    cur_long_prefills: int
+    long_prefills: set
+
+    scheduler_config: SchedulerConfig
+
+    @classmethod
+    def from_queues(
+        cls,
+        scheduler_config: SchedulerConfig,
+    ) -> LongPartialPrefillMetadata:
+        enable_lpp = (scheduler_config.long_prefill_token_threshold > 0 and
+                      scheduler_config.max_long_partial_prefills is not None)
+
+        return LongPartialPrefillMetadata(
+            enable_lpp=enable_lpp,
+            cur_long_prefills=0,
+            long_prefills=set(),
+            scheduler_config=scheduler_config,
+        )
+
+    def can_schedule(self, request: Request, num_new_tokens: int) -> bool:
+        if not self.enable_lpp:
+            return True
+
+        if (num_new_tokens
+                <= self.scheduler_config.long_prefill_token_threshold):
+            return True
+
+        can_schedule = (self.cur_long_prefills
+                        < self.scheduler_config.max_long_partial_prefills)
+
+        if can_schedule:
+            self.long_prefills.add(request.request_id)
+            self.cur_long_prefills += 1
+
+        return can_schedule
+
+    def revoke(self, request: Request) -> None:
+        if not self.enable_lpp:
+            return
+
+        if request.request_id in self.long_prefills:
+            self.long_prefills.remove(request.request_id)
+            self.cur_long_prefills -= 1
 
 
 class Scheduler(SchedulerInterface):
@@ -200,6 +253,8 @@ class Scheduler(SchedulerInterface):
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
 
+        lppm = LongPartialPrefillMetadata.from_queues(self.scheduler_config)
+
         # For logging.
         scheduled_timestamp = time.monotonic()
 
@@ -211,6 +266,11 @@ class Scheduler(SchedulerInterface):
             num_new_tokens = (request.num_tokens_with_spec +
                               request.num_output_placeholders -
                               request.num_computed_tokens)
+
+            if not lppm.can_schedule(request, num_new_tokens):
+                req_index += 1
+                continue
+
             if (0 < self.scheduler_config.long_prefill_token_threshold <
                     num_new_tokens):
                 num_new_tokens = (
@@ -247,6 +307,7 @@ class Scheduler(SchedulerInterface):
                 # we do not strictly follow the FCFS scheduling policy and
                 # allow the lower-priority requests to be scheduled.
                 req_index += 1
+                lppm.revoke(request)
                 continue
 
             while True:
@@ -275,6 +336,7 @@ class Scheduler(SchedulerInterface):
                     if self.log_stats:
                         preempted_req.record_event(
                             EngineCoreEventType.PREEMPTED, scheduled_timestamp)
+                    lppm.revoke(preempted_req)
 
                     self.waiting.prepend_request(preempted_req)
                     preempted_reqs.append(preempted_req)
@@ -419,6 +481,12 @@ class Scheduler(SchedulerInterface):
                     # `request.num_prompt_tokens` to consider the resumed
                     # requests, which have output tokens.
                     num_new_tokens = request.num_tokens - num_computed_tokens
+
+                    if not lppm.can_schedule(request, num_new_tokens):
+                        self.waiting.pop_request()
+                        skipped_waiting_requests.prepend_request(request)
+                        continue
+
                     if (0 < self.scheduler_config.long_prefill_token_threshold
                             < num_new_tokens):
                         num_new_tokens = (
@@ -430,6 +498,7 @@ class Scheduler(SchedulerInterface):
                         num_new_tokens > token_budget:
                         self.waiting.pop_request()
                         skipped_waiting_requests.prepend_request(request)
+                        lppm.revoke(request)
                         continue
 
                     num_new_tokens = min(num_new_tokens, token_budget)
@@ -503,6 +572,7 @@ class Scheduler(SchedulerInterface):
                     # into the WAITING_FOR_REMOTE_KV state.
                     skipped_waiting_requests.prepend_request(request)
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+                    lppm.revoke(request)
                     continue
 
                 req_index += 1
