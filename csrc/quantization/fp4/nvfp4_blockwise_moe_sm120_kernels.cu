@@ -26,6 +26,7 @@
 #include <climits>
 #include <cstdio>
 #include <cstdlib>
+#include <cassert>
 
 #include "cute/tensor.hpp"
 #include "cutlass/tensor_ref.h"
@@ -172,7 +173,6 @@ static inline void run_get_group_gemm_starts_sm120(
   }
 }
 
-template <typename OutType>
 static inline bool nvfp4_sm120_debug_enabled() {
   static int inited = 0;
   static bool enabled = false;
