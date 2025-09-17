@@ -689,10 +689,6 @@ def unified_attention(
     assert causal, "Only causal attention is supported"
     assert q_descale is None, "Q scales not supported"
 
-    block_size = v.shape[1]
-    assert q.element_size() >= 2 or block_size >= 32, \
-        "Block size must be at least 32 for fp8"
-
     if sinks is not None:
         assert sinks.shape[0] == q.shape[1], \
         "Sinks must be num_query_heads size"
@@ -724,6 +720,9 @@ def unified_attention(
 
     TILE_SIZE_PREFILL = 32
     TILE_SIZE_DECODE = 32
+
+    assert q.element_size() >= 2 or (TILE_SIZE_PREFILL >= 32 and TILE_SIZE_DECODE >= 32), \
+        "tile size must be at least 32 for fp8"
 
     # if batch contains a prefill
     if max_seqlen_q > 1 or total_num_q_blocks * num_kv_heads > 128:
