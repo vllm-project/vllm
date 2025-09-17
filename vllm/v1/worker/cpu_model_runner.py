@@ -89,7 +89,7 @@ class CPUModelRunner(GPUModelRunner):
                 assert isinstance(device_tensor, torch.Tensor)
                 setattr(obj, device_attr_name, cpu_tensor)
 
-        for k, v in vars(self).items():
+        for v in vars(self).values():
             if isinstance(v, CpuGpuBuffer):
                 v.gpu = v.cpu
 
@@ -98,9 +98,9 @@ class CPUModelRunner(GPUModelRunner):
                 replace_tensor(self.input_batch, k, k[:-11])
 
         for block_table in self.input_batch.block_table.block_tables:
-            for k, v in vars(block_table).items():
-                if k.endswith("_cpu") and isinstance(v, torch.Tensor):
-                    replace_tensor(block_table, k, k[:-4])
+            for v in vars(block_table).values():
+                if isinstance(v, CpuGpuBuffer):
+                    v.gpu = v.cpu
 
     def load_model(self, eep_scale_up: bool = False) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)

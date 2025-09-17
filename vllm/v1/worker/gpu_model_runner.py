@@ -427,9 +427,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                      *size: Union[int, torch.SymInt],
                      dtype: torch.dtype,
                      numpy: bool = True) -> CpuGpuBuffer:
-        # Bfloat16 torch tensors cannot be directly cast to a numpy array, so
-        # if a bfloat16 buffer is needed without a corresponding numpy array,
-        # don't bother instantiating the numpy array.
         return CpuGpuBuffer(*size,
                             dtype=dtype,
                             device=self.device,
@@ -1062,13 +1059,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_common_prefix_blocks = 0
             else:
                 blk_table = self.input_batch.block_table[kv_cache_group_id]
-                blk_table_tensor = blk_table.get_device_tensor()[:num_reqs]
-                slot_mapping = blk_table.slot_mapping[:
-                                                      total_num_scheduled_tokens]
+                blk_table_tensor = blk_table.get_device_tensor(num_reqs)
+                slot_mapping = blk_table.slot_mapping.gpu[:
+                                                          total_num_scheduled_tokens]
 
                 # Fill unused with -1. Needed for reshape_and_cache in full cuda
                 # graph mode.
-                blk_table.slot_mapping[total_num_scheduled_tokens:].fill_(-1)
+                blk_table.slot_mapping.gpu[total_num_scheduled_tokens:].fill_(
+                    -1)
                 num_common_prefix_blocks = (
                     scheduler_output.
                     num_common_prefix_blocks[kv_cache_group_id])
@@ -2903,10 +2901,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     num_actual_tokens=num_tokens,
                     max_query_len=max_query_len,
                     max_seq_len=self.max_model_len,
-                    block_table_tensor=self.input_batch.block_table[
-                        kv_cache_group_id].get_device_tensor()[:num_reqs],
-                    slot_mapping=self.input_batch.
-                    block_table[kv_cache_group_id].slot_mapping[:num_tokens],
+                    block_table_tensor=self.input_batch.
+                    block_table[kv_cache_group_id].get_device_tensor(num_reqs),
+                    slot_mapping=self.input_batch.block_table[
+                        kv_cache_group_id].slot_mapping.gpu[:num_tokens],
                     causal=True)
                 for attn_group in self.attn_groups[kv_cache_group_id]:
                     if ubatch_slices is not None:
@@ -3265,8 +3263,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     uniform_decode=False)
 
-            # Capture full cudagraph for uniform decode batches if we have
-            # dont already have full mixed prefill-decode cudagraphs
+            # Capture full cudagraph for uniform decode batches if we
+            # don't already have full mixed prefill-decode cudagraphs.
             if cudagraph_mode.decode_mode() == CUDAGraphMode.FULL and \
                 cudagraph_mode.separate_routine():
                 max_num_tokens = self.scheduler_config.max_num_seqs * \
