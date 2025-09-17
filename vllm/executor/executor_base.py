@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import contextlib
 import time
 from abc import ABC, abstractmethod
 from functools import cached_property
@@ -236,10 +237,8 @@ class ExecutorBase(ABC):
         self.collective_rpc("shutdown")
 
     def __del__(self):
-        try:
+        with contextlib.suppress(TypeError, AttributeError):
             self.shutdown()
-        except (TypeError, AttributeError):
-            pass
 
     async def execute_model_async(
             self,
