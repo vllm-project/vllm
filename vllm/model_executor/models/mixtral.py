@@ -305,7 +305,7 @@ class MixtralModel(nn.Module):
         )
 
         self.enable_eplb = parallel_config.enable_eplb
-        self.num_redundant_experts = parallel_config.num_redundant_experts
+        self.num_redundant_experts = parallel_config.eplb_config.num_redundant_experts
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
