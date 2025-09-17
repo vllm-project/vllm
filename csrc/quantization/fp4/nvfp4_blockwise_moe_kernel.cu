@@ -217,12 +217,12 @@ void run_fp4_blockwise_scaled_group_mm(
   struct MMA1SMConfig {
     using MmaTileShape = Shape<_128, _128, _128>;
 #if defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120
-    using KernelSchedule = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong;
+    using KernelSchedule = cutlass::gemm::KernelTmaWarpSpecializedPingpongNvf4Sm120;
 #else
     using KernelSchedule = cutlass::gemm::KernelPtrArrayTmaWarpSpecialized1SmNvf4Sm100;
 #endif
 #if defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120
-    using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
+    using EpilogueSchedule = cutlass::epilogue::collective::EpilogueScheduleAuto;
 #else
     using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecialized1Sm;
 #endif
