@@ -582,7 +582,7 @@ def test_structured_output_with_reasoning_matrices(
         reasoning_parser=reasoning_parser,
         speculative_config=speculative_config,
     )
-    tokenizer = llm.get_tokenizer(None)
+    tokenizer = llm.get_tokenizer()
     reasoner = ReasoningParserManager.get_reasoning_parser(reasoning_parser)(
         tokenizer=tokenizer)
 

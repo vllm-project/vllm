@@ -10,18 +10,13 @@ from vllm.sequence import (VLLM_INVALID_TOKEN_ID, SamplingParams, Sequence,
 from .detokenizer_utils import (convert_prompt_ids_to_tokens,
                                 detokenize_incrementally)
 from .tokenizer import AnyTokenizer
-from .tokenizer_group import TokenizerGroup
 
 
 class Detokenizer:
     """Provides methods to decode the output of a model into text."""
 
-    def __init__(self, tokenizer_group: TokenizerGroup):
-        self.tokenizer_group = tokenizer_group
-
-    def get_tokenizer_for_seq(self, sequence: Sequence) -> AnyTokenizer:
-        """Returns the HF tokenizer to use for a given sequence."""
-        return self.tokenizer_group.get_lora_tokenizer(sequence.lora_request)
+    def __init__(self, tokenizer: AnyTokenizer):
+        self.tokenizer = tokenizer
 
     def decode_prompt_logprobs_inplace(self, seq_group: SequenceGroup,
                                        prompt_logprobs: list[Optional[dict[
@@ -32,9 +27,9 @@ class Detokenizer:
         Args:
             seq_group: The sequence group to decode.
             prompt_logprobs: The logprobs to decode.
-            position_offset: Offset of the first index of the logprobs 
+            position_offset: Offset of the first index of the logprobs
                 relative to the start of the sequence (for chunked prefill).
-        
+
         Returns:
             The prompt logprobs with the decoded tokens.
         """
@@ -46,7 +41,6 @@ class Detokenizer:
         # Only prompt, without the generated token.
         all_token_ids = seq.get_token_ids()
         prompt_token_ids = all_token_ids[:-1]
-        tokenizer = self.get_tokenizer_for_seq(seq)
         prefix_offset = 0
         read_offset = 0
         next_iter_prefix_offset = 0
@@ -70,7 +64,7 @@ class Detokenizer:
                         prompt_token_ids[:token_position] + [token_id])
                     (new_tokens, new_text, new_prefix_offset,
                      new_read_offset) = detokenize_incrementally(
-                         tokenizer=tokenizer,
+                         tokenizer=self.tokenizer,
                          all_input_ids=prompt_token_ids_with_token,
                          prev_tokens=prev_tokens,
                          prefix_offset=prefix_offset,
@@ -111,7 +105,6 @@ class Detokenizer:
         """
         all_input_ids = seq.get_token_ids()
         token_id_generated_this_iteration = all_input_ids[-1]
-        tokenizer = self.get_tokenizer_for_seq(seq)
 
         # Convert prompt token IDs to tokens if necessary.
         # Do it here so that we don't have to repeat this
@@ -119,14 +112,14 @@ class Detokenizer:
         if seq.tokens is None:
             (seq.tokens, seq.prefix_offset,
              seq.read_offset) = convert_prompt_ids_to_tokens(
-                 tokenizer=tokenizer,
+                 tokenizer=self.tokenizer,
                  prompt_ids=all_input_ids[:-1],
                  skip_special_tokens=prms.skip_special_tokens,
              )
 
         (new_tokens, new_decoded_token_text, prefix_offset,
          read_offset) = detokenize_incrementally(
-             tokenizer=tokenizer,
+             tokenizer=self.tokenizer,
              all_input_ids=all_input_ids,
              prev_tokens=seq.tokens,
              prefix_offset=seq.prefix_offset,
@@ -150,7 +143,7 @@ class Detokenizer:
                         and token_id != VLLM_INVALID_TOKEN_ID):
                     all_input_ids_with_logprob = previous_tokens + [token_id]
                     (_, new_text, _, _) = detokenize_incrementally(
-                        tokenizer=tokenizer,
+                        tokenizer=self.tokenizer,
                         all_input_ids=all_input_ids_with_logprob,
                         prev_tokens=seq.tokens,
                         prefix_offset=seq.prefix_offset,
