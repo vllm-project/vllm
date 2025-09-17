@@ -181,7 +181,6 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             fc1_expert_weights = w1.view(torch.long)
             fc2_expert_weights = w2.view(torch.long)
         else:
-            logger.info("DMOSS::: FlashInferExperts apply quant_dtype == None")
             quant_scales = None
             a1q_scale = None
             fc1_expert_weights = w1
