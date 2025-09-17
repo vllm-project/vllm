@@ -40,10 +40,6 @@ class TritonMLABackend(MLACommonBackend):
         return False
 
     @classmethod
-    def is_mla(cls) -> bool:
-        return True
-
-    @classmethod
     def get_min_compute_capability(cls) -> Optional[int]:
         return None
 

@@ -42,10 +42,6 @@ class FlashAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
 
     @staticmethod
-    def get_supported_head_sizes() -> List[int]:
-        return [32, 64, 96, 128, 160, 192, 224, 256]
-
-    @staticmethod
     def get_name() -> str:
         return "FLASH_ATTN"
 
@@ -98,6 +94,50 @@ class FlashAttentionBackend(AttentionBackend):
         value_caches = [kv_cache[1] for kv_cache in kv_caches]
 
         ops.copy_blocks(key_caches, value_caches, src_to_dists)
+
+    @classmethod
+    def get_supported_head_sizes(cls) -> List[int]:
+        return [32, 64, 96, 128, 160, 192, 224, 256]
+
+    @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    @classmethod
+    def get_supported_kv_cache_dtypes(cls) -> list[Optional[str]]:
+        return ["auto", "fp16", "bf16", "fp8", "fp8_e4m3"]
+
+    @classmethod
+    def supports_block_size(cls, block_size: int) -> bool:
+        return block_size % 16 == 0
+
+    @classmethod
+    def is_v1(cls) -> bool:
+        return False
+
+    @classmethod
+    def is_mla(cls) -> bool:
+        return False
+
+    @classmethod
+    def get_min_compute_capability(cls) -> Optional[int]:
+        return 80
+
+    @classmethod
+    def get_max_compute_capability(cls) -> Optional[int]:
+        return None
+
+    @classmethod
+    def supports_combination(cls, head_size: int, dtype: torch.dtype,
+                             kv_cache_dtype: Optional[str], block_size: int,
+                             use_v1: bool, use_mla: bool, has_sink: bool,
+                             device_capability: int) -> bool:
+        if has_sink and device_capability < 90:
+            return False
+        if kv_cache_dtype is not None \
+           and kv_cache_dtype.startswith("fp8"):
+            return flash_attn_supports_fp8()
+        return True
 
 
 @dataclass
