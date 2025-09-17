@@ -37,13 +37,37 @@ class XPUPlatform(Platform):
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool, use_mla: bool,
                              has_sink: bool) -> str:
-        if selected_backend is not None and selected_backend != _Backend.IPEX:
-            logger.info("Cannot use %s backend on XPU.", selected_backend)
         use_v1 = envs.VLLM_USE_V1
         if not use_v1:
             raise ValueError("XPU backend only supports V1.")
+        TRITON_ATTN_VLLM_V1 = "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"  # noqa: E501
+        FLASH_ATTN_V1 = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"  # noqa: E501
+        if selected_backend == _Backend.TRITON_ATTN_VLLM_V1:
+            logger.info_once("Using Triton backend on V1 engine.")
+            return TRITON_ATTN_VLLM_V1
+        elif selected_backend == _Backend.FLASH_ATTN:
+            logger.info_once("Using Flash Attention backend on V1 engine.")
+            return FLASH_ATTN_V1
+        elif selected_backend:
+            raise ValueError(
+                f"Invalid attention backend for {cls.device_name}, "
+                f"with use_v1: {use_v1} use_mla: {use_mla}")
+
         logger.info("Using Flash Attention backend on V1 engine.")
         return "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
+
+    @classmethod
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
+                                    model_config: "ModelConfig") -> bool:
+        """
+        Check if the kv_cache_dtype is supported.
+        XPU only support fp8 kv cache with triton backend.
+        """
+        if envs.is_set("VLLM_ATTENTION_BACKEND") and \
+            envs.VLLM_ATTENTION_BACKEND == "TRITON_ATTN_VLLM_V1":
+            return kv_cache_dtype in ["fp8_e4m3", "fp8_e5m2", "fp8"]
+
+        return False
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
@@ -139,6 +163,15 @@ class XPUPlatform(Platform):
             vllm_config.scheduler_config.max_num_batched_tokens = max(
                 vllm_config.scheduler_config.max_model_len,
                 DEFAULT_MAX_NUM_BATCHED_TOKENS)
+        from vllm.v1.attention.backends.utils import set_kv_cache_layout
+
+        set_kv_cache_layout("NHD")
+        logger.info("Setting VLLM_KV_CACHE_LAYOUT to 'NHD' for XPU; "
+                    "only NHD layout is supported by XPU attention kernels.")
+
+    @classmethod
+    def support_hybrid_kv_cache(cls) -> bool:
+        return True
 
     @classmethod
     def is_pin_memory_available(cls):
@@ -186,3 +219,27 @@ class XPUPlatform(Platform):
     @classmethod
     def opaque_attention_op(cls) -> bool:
         return True
+
+    @classmethod
+    def insert_blocks_to_device(
+        cls,
+        src_cache: torch.Tensor,
+        dst_cache: torch.Tensor,
+        src_block_indices: torch.Tensor,
+        dst_block_indices: torch.Tensor,
+    ) -> None:
+        """Copy blocks from src_cache to dst_cache on XPU."""
+        _src_cache = src_cache[:, src_block_indices]
+        dst_cache[:, dst_block_indices] = _src_cache.to(dst_cache.device)
+
+    @classmethod
+    def swap_out_blocks_to_host(
+        cls,
+        src_cache: torch.Tensor,
+        dst_cache: torch.Tensor,
+        src_block_indices: torch.Tensor,
+        dst_block_indices: torch.Tensor,
+    ) -> None:
+        """Copy blocks from XPU to host (CPU)."""
+        _src_cache = src_cache[:, src_block_indices]
+        dst_cache[:, dst_block_indices] = _src_cache.cpu()

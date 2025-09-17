@@ -12,9 +12,10 @@ from tests.v1.attention.utils import (BatchSpec, _Backend,
                                       create_common_attn_metadata,
                                       create_standard_kv_cache_spec,
                                       get_attention_backend)
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
+from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, SpeculativeConfig,
                          VllmConfig)
+from vllm.config.load import LoadConfig
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.v1.spec_decode.eagle import EagleProposer
@@ -364,7 +365,9 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
     # Mock runner for attention metadata building
     proposer.runner = mock.MagicMock()
     proposer.runner.attn_groups.append([mock.MagicMock()])
-    proposer.runner.attn_groups[0][0].metadata_builder = attn_metadata_builder
+    proposer.runner.attn_groups[0][0].metadata_builders = [
+        attn_metadata_builder
+    ]
 
     result = proposer.propose(target_token_ids=target_token_ids,
                               target_positions=target_positions,
@@ -488,7 +491,9 @@ def test_propose_tree(spec_token_tree):
     # Mock runner for attention metadata building.
     proposer.runner = mock.MagicMock()
     proposer.runner.attn_groups.append([mock.MagicMock()])
-    proposer.runner.attn_groups[0][0].metadata_builder = attn_metadata_builder
+    proposer.runner.attn_groups[0][0].metadata_builders = [
+        attn_metadata_builder
+    ]
 
     # Setup inputs for the proposer.
     target_token_ids = torch.randint(0,

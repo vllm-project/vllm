@@ -10,8 +10,9 @@ from typing import (Any, AsyncGenerator, Callable, Dict, Iterable, List,
 from weakref import ReferenceType
 
 import vllm.envs as envs
-from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, VllmConfig)
+from vllm.config import (DecodingConfig, ModelConfig, ParallelConfig,
+                         SchedulerConfig, VllmConfig)
+from vllm.config.lora import LoRAConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_timeout import asyncio_timeout
@@ -389,11 +390,8 @@ class _AsyncLLMEngine(LLMEngine):
         """Stop the remote worker execution loop."""
         await self.model_executor.stop_remote_worker_execution_loop_async()
 
-    async def get_tokenizer_async(self,
-                                  lora_request: Optional[LoRARequest] = None
-                                  ) -> AnyTokenizer:
-        return await (
-            self.get_tokenizer_group().get_lora_tokenizer_async(lora_request))
+    async def get_tokenizer_async(self) -> AnyTokenizer:
+        return self.get_tokenizer()
 
     async def add_request_async(
         self,
@@ -434,7 +432,6 @@ class _AsyncLLMEngine(LLMEngine):
 
         processed_inputs = await self.input_preprocessor.preprocess_async(
             prompt,
-            lora_request=lora_request,
             tokenization_kwargs=tokenization_kwargs,
         )
 
@@ -613,11 +610,8 @@ class AsyncLLMEngine(EngineClient):
     async def get_input_preprocessor(self) -> InputPreprocessor:
         return self.engine.input_preprocessor
 
-    async def get_tokenizer(
-        self,
-        lora_request: Optional[LoRARequest] = None,
-    ) -> AnyTokenizer:
-        return await self.engine.get_tokenizer_async(lora_request)
+    async def get_tokenizer(self) -> AnyTokenizer:
+        return self.engine.get_tokenizer()
 
     def start_background_loop(self) -> None:
         """Start the background loop."""
@@ -717,7 +711,7 @@ class AsyncLLMEngine(EngineClient):
                 # Stop the execute model loop in parallel workers until there
                 # are more requests to process. This avoids waiting
                 # indefinitely in torch.distributed ops which may otherwise
-                # timeout, and unblocks the RPC thread in the workers so that
+                # time out, and unblocks the RPC thread in the workers so that
                 # they can process any other queued control plane messages,
                 # such as add/remove lora adapters.
                 await engine.engine.stop_remote_worker_execution_loop_async()

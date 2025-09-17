@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 import torch
 import torch.nn.functional as F
@@ -30,7 +30,8 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     register_moe_scaling_factors, rotate_flashinfer_fp8_moe_weights,
     select_cutlass_fp8_gemm_impl, swap_w13_to_w31)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    get_col_major_tma_aligned_tensor, requant_weight_ue8m0_inplace)
+    get_col_major_tma_aligned_tensor, requant_weight_ue8m0_inplace,
+    should_use_deepgemm_for_fp8_linear)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear, prepare_fp8_layer_for_marlin,
     prepare_moe_fp8_layer_for_marlin)
@@ -270,7 +271,8 @@ class Fp8LinearMethod(LinearMethodBase):
         layer.weight_block_size = None
 
         if self.block_quant:
-            tp_size = get_tensor_model_parallel_world_size()
+            tp_size = getattr(layer, "tp_size",
+                              get_tensor_model_parallel_world_size())
             assert self.quant_config.weight_block_size is not None
             layer.weight_block_size = self.quant_config.weight_block_size
             block_n, block_k = (
@@ -448,10 +450,10 @@ class Fp8LinearMethod(LinearMethodBase):
             # Activations not quantized for marlin.
             del layer.input_scale
 
-        # On B200, if E8M0 for DeepGemm is used, we need to
+        # On Blackwell or Hopper, if E8M0 for DeepGemm is used, we need to
         # requantize the weight and input to the specific scale
         # at the same time.
-        if is_deep_gemm_e8m0_used():
+        if is_deep_gemm_e8m0_used() and self.block_quant:
             assert layer.weight_block_size is not None
             block_sz = tuple(layer.weight_block_size)
             requant_weight_ue8m0_inplace(
@@ -460,6 +462,15 @@ class Fp8LinearMethod(LinearMethodBase):
                     layer, "weight_scale_inv") else layer.weight_scale.data,
                 block_sz,
             )
+
+        # SM90 Block FP8 CUTLASS requires row-major weight scales
+        if (self.block_quant and current_platform.is_device_capability(90)
+                and self.cutlass_block_fp8_supported
+                and not should_use_deepgemm_for_fp8_linear(
+                    torch.bfloat16, layer.weight)):
+            layer.weight_scale_inv = Parameter(
+                layer.weight_scale_inv.data.T.contiguous(),
+                requires_grad=False)
 
     def apply(self,
               layer: torch.nn.Module,
@@ -756,16 +767,15 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 layer.w2_weight = torch.nn.Parameter(shuffled_w2,
                                                      requires_grad=False)
 
-            # DeepGemm scales need to be transposed and aligned.  We try to do
+            # DeepGemm scales need to be transposed and aligned. We try to do
             # it ahead of time for performance reasons.
             if self.allow_deep_gemm and not is_deep_gemm_e8m0_used():
-                # Lazy import to avoid CUDA initialization problems.
                 if _is_col_major(layer.w13_weight_scale_inv):
                     layer.w13_weight_scale_inv = \
-                        get_col_major_tma_aligned_tensor(layer.w13_weight_scale_inv).contiguous()
+                        get_col_major_tma_aligned_tensor(layer.w13_weight_scale_inv)
                 if _is_col_major(layer.w2_weight_scale_inv):
                     layer.w2_weight_scale_inv = \
-                        get_col_major_tma_aligned_tensor(layer.w2_weight_scale_inv).contiguous()
+                        get_col_major_tma_aligned_tensor(layer.w2_weight_scale_inv)
 
         # If checkpoint is fp16, quantize in place.
         elif not self.quant_config.is_checkpoint_fp8_serialized:
@@ -895,7 +905,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             del layer.w13_input_scale
             del layer.w2_input_scale
 
-        if is_deep_gemm_e8m0_used():
+        if is_deep_gemm_e8m0_used() and self.block_quant:
             assert layer.weight_block_size is not None
             # Re-quantise the expert weights so their scales are UE8M0.
             block_sz = tuple(layer.weight_block_size)
@@ -913,10 +923,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             # Ensure column-major TMA alignment expected by DeepGEMM.
             if _is_col_major(layer.w13_weight_scale_inv):
                 layer.w13_weight_scale_inv = get_col_major_tma_aligned_tensor(
-                    layer.w13_weight_scale_inv).contiguous()
+                    layer.w13_weight_scale_inv)
             if _is_col_major(layer.w2_weight_scale_inv):
                 layer.w2_weight_scale_inv = get_col_major_tma_aligned_tensor(
-                    layer.w2_weight_scale_inv).contiguous()
+                    layer.w2_weight_scale_inv)
 
     def select_gemm_impl(
         self,
@@ -988,7 +998,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         if enable_eplb:
             assert expert_load_view is not None
             assert logical_to_physical_map is not None
@@ -1093,7 +1103,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 quant_type_id=scalar_types.float8_e4m3fn.id,
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
-                expert_map=expert_map)
+                expert_map=expert_map,
+                workspace=layer.workspace)
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
             assert self.block_quant is None
             assert (not renormalize and custom_routing_function is not None)
