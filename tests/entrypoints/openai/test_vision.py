@@ -16,11 +16,11 @@ MODEL_NAME = "microsoft/Phi-3.5-vision-instruct"
 MAXIMUM_IMAGES = 2
 
 # Test different image extensions (JPG/PNG) and formats (gray/RGB/RGBA)
-TEST_IMAGE_URLS = [
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/f/fa/Grayscale_8bits_palette_sample_image.png",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/9/91/Venn_diagram_rgb.svg/1280px-Venn_diagram_rgb.svg.png",
-    "https://upload.wikimedia.org/wikipedia/commons/0/0b/RGBA_comp.png",
+TEST_IMAGE_ASSETS = [
+    "2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg",  # "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+    "Grayscale_8bits_palette_sample_image.png",  # "https://upload.wikimedia.org/wikipedia/commons/f/fa/Grayscale_8bits_palette_sample_image.png",
+    "1280px-Venn_diagram_rgb.svg.png",  # "https://upload.wikimedia.org/wikipedia/commons/thumb/9/91/Venn_diagram_rgb.svg/1280px-Venn_diagram_rgb.svg.png",
+    "RGBA_comp.png",  # "https://upload.wikimedia.org/wikipedia/commons/0/0b/RGBA_comp.png",
 ]
 
 EXPECTED_MM_BEAM_SEARCH_RES = [
@@ -34,11 +34,11 @@ EXPECTED_MM_BEAM_SEARCH_RES = [
     ],
     [
         "The image shows a Venn diagram with three over",
-        "The image shows a Venn diagram with three intersect",
+        "This image shows a Venn diagram with three over",
     ],
     [
         "This image displays a gradient of colors ranging from",
-        "The image displays a gradient of colors ranging from",
+        "This image displays a gradient of colors forming a spectrum",
     ],
 ]
 
@@ -69,10 +69,11 @@ async def client(server):
 
 
 @pytest.fixture(scope="session")
-def base64_encoded_image() -> dict[str, str]:
+def base64_encoded_image(local_asset_server) -> dict[str, str]:
     return {
-        image_url: encode_image_base64(fetch_image(image_url))
-        for image_url in TEST_IMAGE_URLS
+        image_asset:
+        encode_image_base64(local_asset_server.get_image_asset(image_asset))
+        for image_asset in TEST_IMAGE_ASSETS
     }
 
 
@@ -97,7 +98,7 @@ def get_hf_prompt_tokens(model_name, content, image_url):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
+@pytest.mark.parametrize("image_url", TEST_IMAGE_ASSETS, indirect=True)
 async def test_single_chat_session_image(client: openai.AsyncOpenAI,
                                          model_name: str, image_url: str):
     content_text = "What's in this image?"
@@ -157,7 +158,7 @@ async def test_single_chat_session_image(client: openai.AsyncOpenAI,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
+@pytest.mark.parametrize("image_url", TEST_IMAGE_ASSETS, indirect=True)
 async def test_error_on_invalid_image_url_type(client: openai.AsyncOpenAI,
                                                model_name: str,
                                                image_url: str):
@@ -187,7 +188,7 @@ async def test_error_on_invalid_image_url_type(client: openai.AsyncOpenAI,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
+@pytest.mark.parametrize("image_url", TEST_IMAGE_ASSETS, indirect=True)
 async def test_single_chat_session_image_beamsearch(client: openai.AsyncOpenAI,
                                                     model_name: str,
                                                     image_url: str):
@@ -223,10 +224,11 @@ async def test_single_chat_session_image_beamsearch(client: openai.AsyncOpenAI,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
+@pytest.mark.parametrize("raw_image_url", TEST_IMAGE_ASSETS)
+@pytest.mark.parametrize("image_url", TEST_IMAGE_ASSETS, indirect=True)
 async def test_single_chat_session_image_base64encoded(
-        client: openai.AsyncOpenAI, model_name: str, image_url: str,
-        base64_encoded_image: dict[str, str]):
+        client: openai.AsyncOpenAI, model_name: str, raw_image_url: str,
+        image_url: str, base64_encoded_image: dict[str, str]):
 
     content_text = "What's in this image?"
     messages = [{
@@ -237,7 +239,7 @@ async def test_single_chat_session_image_base64encoded(
                 "type": "image_url",
                 "image_url": {
                     "url":
-                    f"data:image/jpeg;base64,{base64_encoded_image[image_url]}"
+                    f"data:image/jpeg;base64,{base64_encoded_image[raw_image_url]}"
                 }
             },
             {
@@ -287,12 +289,12 @@ async def test_single_chat_session_image_base64encoded(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize("image_idx", list(range(len(TEST_IMAGE_URLS))))
+@pytest.mark.parametrize("image_idx", list(range(len(TEST_IMAGE_ASSETS))))
 async def test_single_chat_session_image_base64encoded_beamsearch(
         client: openai.AsyncOpenAI, model_name: str, image_idx: int,
         base64_encoded_image: dict[str, str]):
     # NOTE: This test also validates that we pass MM data through beam search
-    image_url = TEST_IMAGE_URLS[image_idx]
+    raw_image_url = TEST_IMAGE_ASSETS[image_idx]
     expected_res = EXPECTED_MM_BEAM_SEARCH_RES[image_idx]
 
     messages = [{
@@ -303,7 +305,7 @@ async def test_single_chat_session_image_base64encoded_beamsearch(
                 "type": "image_url",
                 "image_url": {
                     "url":
-                    f"data:image/jpeg;base64,{base64_encoded_image[image_url]}"
+                    f"data:image/jpeg;base64,{base64_encoded_image[raw_image_url]}"
                 }
             },
             {
@@ -326,7 +328,7 @@ async def test_single_chat_session_image_base64encoded_beamsearch(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
+@pytest.mark.parametrize("image_url", TEST_IMAGE_ASSETS, indirect=True)
 async def test_chat_streaming_image(client: openai.AsyncOpenAI,
                                     model_name: str, image_url: str):
     messages = [{
@@ -385,7 +387,8 @@ async def test_chat_streaming_image(client: openai.AsyncOpenAI,
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize(
     "image_urls",
-    [TEST_IMAGE_URLS[:i] for i in range(2, len(TEST_IMAGE_URLS))])
+    [TEST_IMAGE_ASSETS[:i] for i in range(2, len(TEST_IMAGE_ASSETS))],
+    indirect=True)
 async def test_multi_image_input(client: openai.AsyncOpenAI, model_name: str,
                                  image_urls: list[str]):
 
@@ -433,3 +436,197 @@ async def test_multi_image_input(client: openai.AsyncOpenAI, model_name: str,
         )
         message = chat_completion.choices[0].message
         assert message.content is not None and len(message.content) >= 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize(
+    "image_urls",
+    [TEST_IMAGE_ASSETS[:i] for i in range(2, len(TEST_IMAGE_ASSETS))],
+    indirect=True)
+async def test_completions_with_image(
+    client: openai.AsyncOpenAI,
+    model_name: str,
+    image_urls: list[str],
+):
+    for image_url in image_urls:
+        chat_completion = await client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant."
+                },
+                {
+                    "role":
+                    "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Describe this image.",
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": image_url,
+                            }
+                        },
+                    ],
+                },
+            ],
+            model=model_name,
+        )
+        assert chat_completion.choices[0].message.content is not None
+        assert isinstance(chat_completion.choices[0].message.content, str)
+        assert len(chat_completion.choices[0].message.content) > 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize(
+    "image_urls",
+    [TEST_IMAGE_ASSETS[:i] for i in range(2, len(TEST_IMAGE_ASSETS))],
+    indirect=True)
+async def test_completions_with_image_with_uuid(
+    client: openai.AsyncOpenAI,
+    model_name: str,
+    image_urls: list[str],
+):
+    for image_url in image_urls:
+        chat_completion = await client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant."
+                },
+                {
+                    "role":
+                    "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Describe this image.",
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": image_url,
+                            },
+                            "uuid": image_url
+                        },
+                    ],
+                },
+            ],
+            model=model_name,
+        )
+        assert chat_completion.choices[0].message.content is not None
+        assert isinstance(chat_completion.choices[0].message.content, str)
+        assert len(chat_completion.choices[0].message.content) > 0
+
+        # Second request, with empty image but the same uuid.
+        chat_completion_with_empty_image = await client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant."
+                },
+                {
+                    "role":
+                    "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Describe this image.",
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {},
+                            "uuid": image_url
+                        },
+                    ],
+                },
+            ],
+            model=model_name,
+        )
+        assert chat_completion_with_empty_image.choices[
+            0].message.content is not None
+        assert isinstance(
+            chat_completion_with_empty_image.choices[0].message.content, str)
+        assert len(
+            chat_completion_with_empty_image.choices[0].message.content) > 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_completions_with_empty_image_with_uuid_without_cache_hit(
+    client: openai.AsyncOpenAI,
+    model_name: str,
+):
+    with pytest.raises(openai.BadRequestError):
+        _ = await client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant."
+                },
+                {
+                    "role":
+                    "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Describe this image.",
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {},
+                            "uuid": "uuid_not_previously_seen"
+                        },
+                    ],
+                },
+            ],
+            model=model_name,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize(
+    "image_urls",
+    [TEST_IMAGE_ASSETS[:i] for i in range(2, len(TEST_IMAGE_ASSETS))],
+    indirect=True)
+async def test_completions_with_image_with_incorrect_uuid_format(
+    client: openai.AsyncOpenAI,
+    model_name: str,
+    image_urls: list[str],
+):
+    for image_url in image_urls:
+        chat_completion = await client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant."
+                },
+                {
+                    "role":
+                    "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Describe this image.",
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": image_url,
+                                "incorrect_uuid_key": image_url,
+                            },
+                            "also_incorrect_uuid_key": image_url,
+                        },
+                    ],
+                },
+            ],
+            model=model_name,
+        )
+        assert chat_completion.choices[0].message.content is not None
+        assert isinstance(chat_completion.choices[0].message.content, str)
+        assert len(chat_completion.choices[0].message.content) > 0

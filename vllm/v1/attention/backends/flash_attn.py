@@ -167,7 +167,7 @@ class FlashAttentionMetadataBuilder(
     # work for mixed prefill-decode and uniform-decode. But for non-spec decodes
     # the graphs would not work for mixed prefill-decode; sorta the inverse
     # of UNIFORM_SINGLE_TOKEN_DECODE.
-    # Theres probably a better way to describe this using `AttentionCGSupport`
+    # There's probably a better way to describe this using `AttentionCGSupport`
     # but for now just set it to `UNIFORM_BATCH` to get use to drop down
     # to FULL_AND_PIECEWISE.
     # TODO(luka, lucas): audit FA2 as part of:
@@ -177,12 +177,11 @@ class FlashAttentionMetadataBuilder(
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
-        self.vllm_config = vllm_config
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.model_config = vllm_config.model_config
         self.parallel_config = vllm_config.parallel_config
         self.cache_config = vllm_config.cache_config
         self.compilation_config = vllm_config.compilation_config
-        self.device = device
 
         self.num_heads_q = self.model_config.get_num_attention_heads(
             self.parallel_config)

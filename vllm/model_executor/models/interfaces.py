@@ -700,8 +700,10 @@ class SupportsTranscription(Protocol):
     def get_generation_prompt(cls, audio: np.ndarray,
                               stt_config: SpeechToTextConfig,
                               model_config: ModelConfig,
-                              language: Optional[str], task_type: str,
-                              request_prompt: str) -> PromptType:
+                              language: Optional[str],
+                              task_type: Literal["transcribe", "translate"],
+                              request_prompt: str,
+                              to_language: Optional[str]) -> PromptType:
         """Get the prompt for the ASR model.
         The model has control over the construction, as long as it
         returns a valid PromptType."""
@@ -821,7 +823,7 @@ class SupportsEagle3(Protocol):
         
         Args:
             layers: Tuple of layer indices that should output auxiliary
-              hidden states.
+                hidden states.
         """
         ...
 

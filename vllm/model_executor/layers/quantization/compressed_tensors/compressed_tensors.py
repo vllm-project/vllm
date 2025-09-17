@@ -63,7 +63,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         sparsity_ignore_list: list[str],
         kv_cache_scheme: Optional[dict[str, Any]] = None,
         config: Optional[dict[str, Any]] = None,
-        transform_config: Optional[TransformConfig] = None,
+        transform_config: Optional[dict[str, Any]] = None,
     ):
         super().__init__()
         self.ignore = ignore
@@ -75,7 +75,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         self.sparsity_ignore_list = sparsity_ignore_list
         self.config = config
 
-        if transform_config is not None:
+        if transform_config:
             self.transform_config = TransformConfig.model_validate(
                 transform_config)
         else:
@@ -129,7 +129,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             # choose transform method
             if any((input_tfms, output_tfms)):
                 return CompressedTensorsLinearTransformMethod.from_schemes(
-                    quant_method, input_tfms, output_tfms)
+                    quant_method, quant_scheme, input_tfms, output_tfms)
 
             else:
                 return quant_method
