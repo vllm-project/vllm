@@ -12,13 +12,13 @@ from unittest.mock import MagicMock
 import pytest
 import pytest_asyncio
 
-from vllm.config import MultiModalConfig
-from vllm.engine.multiprocessing.client import MQLLMEngineClient
+from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_models import (BaseModelPath,
                                                     OpenAIServingModels)
 from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.v1.engine.async_llm import AsyncLLM
 
 from ...utils import RemoteOpenAIServer
 
@@ -36,21 +36,41 @@ def monkeypatch_module():
     mpatch.undo()
 
 
+@pytest.fixture(scope="module",
+                params=[True, False],
+                ids=["with_tool_parser", "without_tool_parser"])
+def with_tool_parser(request) -> bool:
+    return request.param
+
+
 @pytest.fixture(scope="module")
-def gptoss_server(monkeypatch_module: pytest.MonkeyPatch):
-    with monkeypatch_module.context() as m:
-        m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN_VLLM_V1")
-        args = [
-            "--enforce-eager",
-            "--max-model-len",
-            "8192",
+def default_server_args(with_tool_parser: bool):
+    args = [
+        # use half precision for speed and memory savings in CI environment
+        "--enforce-eager",
+        "--max-model-len",
+        "4096",
+        "--reasoning-parser",
+        "openai_gptoss",
+        "--gpu-memory-utilization",
+        "0.8",
+    ]
+    if with_tool_parser:
+        args.extend([
             "--tool-call-parser",
             "openai",
-            "--reasoning-parser",
-            "openai_gptoss",
             "--enable-auto-tool-choice",
-        ]
-        with RemoteOpenAIServer(GPT_OSS_MODEL_NAME, args) as remote_server:
+        ])
+    return args
+
+
+@pytest.fixture(scope="module")
+def gptoss_server(monkeypatch_module: pytest.MonkeyPatch,
+                  default_server_args: list[str]):
+    with monkeypatch_module.context() as m:
+        m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN_VLLM_V1")
+        with RemoteOpenAIServer(GPT_OSS_MODEL_NAME,
+                                default_server_args) as remote_server:
             yield remote_server
 
 
@@ -61,7 +81,8 @@ async def gptoss_client(gptoss_server):
 
 
 @pytest.mark.asyncio
-async def test_gpt_oss_chat_tool_call_streaming(gptoss_client: OpenAI):
+async def test_gpt_oss_chat_tool_call_streaming(gptoss_client: OpenAI,
+                                                with_tool_parser: bool):
     tools = [{
         "type": "function",
         "function": {
@@ -94,10 +115,14 @@ async def test_gpt_oss_chat_tool_call_streaming(gptoss_client: OpenAI):
     ]
 
     stream = await gptoss_client.chat.completions.create(
-        model=GPT_OSS_MODEL_NAME, messages=messages, tools=tools, stream=True)
+        model=GPT_OSS_MODEL_NAME,
+        messages=messages,
+        tools=tools if with_tool_parser else None,
+        stream=True)
 
     name = None
     args_buf = ""
+    content_buf = ""
     async for chunk in stream:
         delta = chunk.choices[0].delta
         if delta.tool_calls:
@@ -106,13 +131,22 @@ async def test_gpt_oss_chat_tool_call_streaming(gptoss_client: OpenAI):
                 name = tc.function.name
             if tc.function and tc.function.arguments:
                 args_buf += tc.function.arguments
-
-    assert name is not None
-    assert len(args_buf) > 0
+        if getattr(delta, "content", None):
+            content_buf += delta.content
+    if with_tool_parser:
+        assert name is not None
+        assert len(args_buf) > 0
+    else:
+        assert name is None
+        assert len(args_buf) == 0
+        assert len(content_buf) > 0
 
 
 @pytest.mark.asyncio
-async def test_gpt_oss_multi_turn_chat(gptoss_client: OpenAI):
+async def test_gpt_oss_multi_turn_chat(gptoss_client: OpenAI,
+                                       with_tool_parser: bool):
+    if not with_tool_parser:
+        pytest.skip("skip non-tool for multi-turn tests")
     tools = [{
         "type": "function",
         "function": {
@@ -144,7 +178,7 @@ async def test_gpt_oss_multi_turn_chat(gptoss_client: OpenAI):
         },
         {
             "role": "user",
-            "content": "What is the weather in Dallas, TX?"
+            "content": "What is the weather in Dallas, TX with celsius?"
         },
     ]
 
@@ -175,12 +209,16 @@ async def test_gpt_oss_multi_turn_chat(gptoss_client: OpenAI):
     )
     second_msg = second.choices[0].message
     assert (second_msg.content is not None and len(second_msg.content) > 0) or \
-        (second_msg.tool_calls is not None and len(second_msg.tool_calls) > 0)  # noqa: E501
+        (second_msg.tool_calls is not None and len(second_msg.tool_calls) > 0)
 
 
 MODEL_NAME = "openai-community/gpt2"
+MODEL_NAME_SHORT = "gpt2"
 CHAT_TEMPLATE = "Dummy chat template for testing {}"
-BASE_MODEL_PATHS = [BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME)]
+BASE_MODEL_PATHS = [
+    BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME),
+    BaseModelPath(name=MODEL_NAME_SHORT, model_path=MODEL_NAME_SHORT)
+]
 
 
 @dataclass
@@ -237,8 +275,44 @@ def test_async_serving_chat_init():
 
 
 @pytest.mark.asyncio
+async def test_serving_chat_returns_correct_model_name():
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
+    mock_engine.errored = False
+
+    models = OpenAIServingModels(engine_client=mock_engine,
+                                 base_model_paths=BASE_MODEL_PATHS,
+                                 model_config=MockModelConfig())
+    serving_chat = OpenAIServingChat(mock_engine,
+                                     MockModelConfig(),
+                                     models,
+                                     response_role="assistant",
+                                     chat_template=CHAT_TEMPLATE,
+                                     chat_template_content_format="auto",
+                                     request_logger=None)
+    messages = [{"role": "user", "content": "what is 1+1?"}]
+
+    async def return_model_name(*args):
+        return args[3]
+
+    serving_chat.chat_completion_full_generator = return_model_name
+
+    # Test that full name is returned when short name is requested
+    req = ChatCompletionRequest(model=MODEL_NAME_SHORT, messages=messages)
+    assert await serving_chat.create_chat_completion(req) == MODEL_NAME
+
+    # Test that full name is returned when empty string is specified
+    req = ChatCompletionRequest(model="", messages=messages)
+    assert await serving_chat.create_chat_completion(req) == MODEL_NAME
+
+    # Test that full name is returned when no model is specified
+    req = ChatCompletionRequest(messages=messages)
+    assert await serving_chat.create_chat_completion(req) == MODEL_NAME
+
+
+@pytest.mark.asyncio
 async def test_serving_chat_should_set_correct_max_tokens():
-    mock_engine = MagicMock(spec=MQLLMEngineClient)
+    mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
 
@@ -281,7 +355,7 @@ async def test_serving_chat_should_set_correct_max_tokens():
     }
 
     # Reinitialize the engine with new settings
-    mock_engine = MagicMock(spec=MQLLMEngineClient)
+    mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
 
@@ -336,7 +410,7 @@ async def test_serving_chat_should_set_correct_max_tokens():
     }
 
     # Reinitialize the engine with new settings
-    mock_engine = MagicMock(spec=MQLLMEngineClient)
+    mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
 
@@ -393,7 +467,7 @@ async def test_serving_chat_could_load_correct_generation_config():
         "repetition_penalty": 1.05
     }
 
-    mock_engine = MagicMock(spec=MQLLMEngineClient)
+    mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
 
@@ -449,7 +523,7 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
     mock_model_config = MockModelConfig()
     mock_model_config.hf_config.model_type = model_type
 
-    mock_engine = MagicMock(spec=MQLLMEngineClient)
+    mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
 

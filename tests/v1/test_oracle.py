@@ -9,23 +9,7 @@ from vllm import LLM
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 
-UNSUPPORTED_MODELS_V1 = [
-    "openai/whisper-large-v3",  # transcription
-    "facebook/bart-large-cnn",  # encoder decoder
-]
-
 MODEL = "meta-llama/Llama-3.2-1B-Instruct"
-
-
-@pytest.mark.parametrize("model", UNSUPPORTED_MODELS_V1)
-def test_reject_unsupported_models(monkeypatch, model):
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
-        args = AsyncEngineArgs(model=model)
-
-        with pytest.raises(NotImplementedError):
-            _ = args.create_engine_config()
-        m.delenv("VLLM_USE_V1")
 
 
 def test_reject_bad_config(monkeypatch):
@@ -76,12 +60,6 @@ def test_enable_by_default_fallback(monkeypatch):
             enforce_eager=True,
         ).create_engine_config()
         assert envs.VLLM_USE_V1
-        m.delenv("VLLM_USE_V1")
-
-        # Should fall back to V0 for supported model.
-        _ = AsyncEngineArgs(
-            model=UNSUPPORTED_MODELS_V1[0]).create_engine_config()
-        assert not envs.VLLM_USE_V1
         m.delenv("VLLM_USE_V1")
 
 

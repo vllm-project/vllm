@@ -6,7 +6,7 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from typing import TYPE_CHECKING, Callable, Final, Optional, Union
+from typing import Callable, Final, Optional, Union
 
 import jinja2
 import partial_json_parser
@@ -186,9 +186,9 @@ class OpenAIServingChat(OpenAIServing):
             lora_request = self._maybe_get_adapters(
                 request, supports_default_mm_loras=True)
 
-            model_name = self._get_model_name(request.model, lora_request)
+            model_name = self.models.model_name(lora_request)
 
-            tokenizer = await self.engine_client.get_tokenizer(lora_request)
+            tokenizer = await self.engine_client.get_tokenizer()
 
             tool_parser = self.tool_parser
 
@@ -418,7 +418,7 @@ class OpenAIServingChat(OpenAIServing):
                 if not function_name_returned:
                     # get partly generated arguments from the latest tool call
                     param_match = re.search(r'.*"parameters":\s*(.*)',
-                                            current_text)
+                                            current_text, re.DOTALL)
                     arguments = param_match.group(1) if param_match else ""
                     arguments, _ = OpenAIServingChat._filter_delta_text(
                         arguments, previous_text)
@@ -828,9 +828,6 @@ class OpenAIServingChat(OpenAIServing):
                             history_tool_call_cnt += 1
                             tools_streamed[i] = True
 
-                        # update the previous values for the next iteration
-                        previous_texts[i] = current_text
-
                     # handle streaming deltas for tools with "auto" tool choice
                     # and reasoning parser
                     elif tool_choice_auto and self.reasoning_parser:
@@ -1174,6 +1171,7 @@ class OpenAIServingChat(OpenAIServing):
         for output in final_res.outputs:
             token_ids = output.token_ids
             out_logprobs = output.logprobs
+            tool_call_info = None
 
             if request.logprobs and request.top_logprobs is not None:
                 assert out_logprobs is not None, "Did not output logprobs"
@@ -1188,32 +1186,42 @@ class OpenAIServingChat(OpenAIServing):
                 logprobs = None
 
             if self.use_harmony:
-                if TYPE_CHECKING:
-                    assert self.tool_parser is not None
-                tool_parser = self.tool_parser(tokenizer)
-                # NOTE: We use token_ids for openai tool parser
-                tool_call_info = tool_parser.extract_tool_calls(
-                    "",
-                    request=request,
-                    token_ids=token_ids,  # type: ignore
-                )
-                reasoning_content, content = None, tool_call_info.content
-                if request.include_reasoning:
+                if self.tool_parser is not None:
+                    tool_parser = self.tool_parser(tokenizer)
+                    # NOTE: We use token_ids for openai tool parser
+                    tool_call_info = tool_parser.extract_tool_calls(
+                        "",
+                        request=request,
+                        token_ids=token_ids,  # type: ignore
+                    )
+                    reasoning_content, content = None, tool_call_info.content
+                    if request.include_reasoning:
+                        reasoning_content, content, _ = parse_chat_output(
+                            token_ids)
+                    message = ChatMessage(
+                        role=role,
+                        reasoning_content=reasoning_content,
+                        content=content,
+                        tool_calls=tool_call_info.tool_calls,
+                    )
+                else:
                     reasoning_content, content, _ = parse_chat_output(
                         token_ids)
-                message = ChatMessage(
-                    role=role,
-                    reasoning_content=reasoning_content,
-                    content=content,
-                    tool_calls=tool_call_info.tool_calls,
-                )
+                    if not request.include_reasoning:
+                        reasoning_content = None
+                    message = ChatMessage(
+                        role=role,
+                        reasoning_content=reasoning_content,
+                        content=content,
+                    )
 
                 choice_data = ChatCompletionResponseChoice(
                     index=output.index,
                     message=message,
                     logprobs=logprobs,
-                    finish_reason="tool_calls"
-                    if tool_call_info.tools_called else
+                    finish_reason="tool_calls" if
+                    (tool_call_info is not None
+                     and tool_call_info.tools_called) else
                     output.finish_reason if output.finish_reason else "stop",
                     stop_reason=output.stop_reason,
                 )
