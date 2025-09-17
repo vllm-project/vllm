@@ -191,6 +191,7 @@ class CudaPlatformBase(Platform):
         compilation_config = vllm_config.compilation_config
         if (envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
                 and parallel_config.data_parallel_size > 1
+                and compilation_config.cudagraph_mode is not None
                 and compilation_config.cudagraph_mode.has_full_cudagraphs()):
             logger.info(
                 "Data Parallel with DeepEP high-throughput: using PIECEWISE "
