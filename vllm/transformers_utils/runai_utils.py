@@ -65,7 +65,9 @@ class ObjectStorageModel:
         dir_name = os.path.join(
             tempfile.gettempdir(),
             hashlib.sha256(str(url).encode()).hexdigest()[:8])
-        os.makedirs(dir_name, exist_ok=True)
+        if os.path.exists(dir_name):
+            shutil.rmtree(dir_name)
+        os.makedirs(dir_name)
         self.dir = dir_name
 
     def __del__(self):
