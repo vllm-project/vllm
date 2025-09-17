@@ -509,6 +509,15 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 expert_map=expert_map,
                 activation=activation,
                 apply_router_weight_on_input=apply_router_weight_on_input)
+        elif self.flashinfer_cutlass_moe_enabled:
+            return self.flashinfer_cutlass_moe(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=activation,
+                apply_router_weight_on_input=apply_router_weight_on_input)
         elif self.fused_experts is not None:
             if self.has_bias:
                 raise ValueError(
