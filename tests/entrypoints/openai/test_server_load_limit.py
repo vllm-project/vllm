@@ -26,6 +26,7 @@ class TestServerLoadLimit:
         mock_request.app.state.enable_server_load_tracking = True
         mock_request.app.state.max_server_load = 10
         mock_request.app.state.server_load_metrics = 15  # Exceeds limit
+        mock_request.app.state.server_overload_rejections_since_last_log = 0
 
         response = await dummy_handler(raw_request=mock_request)
 
@@ -53,6 +54,7 @@ class TestServerLoadLimit:
         mock_request.app.state.enable_server_load_tracking = True
         mock_request.app.state.max_server_load = 10
         mock_request.app.state.server_load_metrics = 10  # At limit
+        mock_request.app.state.server_overload_rejections_since_last_log = 0
 
         response = await dummy_handler(raw_request=mock_request)
 
@@ -72,6 +74,7 @@ class TestServerLoadLimit:
         mock_request.app.state.enable_server_load_tracking = True
         mock_request.app.state.max_server_load = 10
         mock_request.app.state.server_load_metrics = 5  # Under limit
+        mock_request.app.state.server_overload_rejections_since_last_log = 0
 
         response = await dummy_handler(raw_request=mock_request)
 
@@ -91,6 +94,7 @@ class TestServerLoadLimit:
         mock_request.app.state.enable_server_load_tracking = True
         mock_request.app.state.max_server_load = None  # No limit
         mock_request.app.state.server_load_metrics = 100  # High load
+        mock_request.app.state.server_overload_rejections_since_last_log = 0
 
         response = await dummy_handler(raw_request=mock_request)
 
@@ -110,6 +114,7 @@ class TestServerLoadLimit:
         mock_request.app.state.enable_server_load_tracking = False
         mock_request.app.state.max_server_load = 5
         mock_request.app.state.server_load_metrics = 100  # High load
+        mock_request.app.state.server_overload_rejections_since_last_log = 0
 
         response = await dummy_handler(raw_request=mock_request)
 
@@ -129,6 +134,7 @@ class TestServerLoadLimit:
         mock_request.app.state.enable_server_load_tracking = True
         mock_request.app.state.max_server_load = 10
         mock_request.app.state.server_load_metrics = 5
+        mock_request.app.state.server_overload_rejections_since_last_log = 0
 
         # Should raise the original exception
         with pytest.raises(ValueError, match="Test exception"):
@@ -152,6 +158,7 @@ class TestServerLoadLimit:
         mock_request.app.state.enable_server_load_tracking = True
         mock_request.app.state.max_server_load = 10
         mock_request.app.state.server_load_metrics = 5
+        mock_request.app.state.server_overload_rejections_since_last_log = 0
 
         response = await dummy_handler(raw_request=mock_request)
 
@@ -170,6 +177,7 @@ class TestServerLoadLimit:
         mock_request.app.state.enable_server_load_tracking = True
         mock_request.app.state.max_server_load = 0
         mock_request.app.state.server_load_metrics = 0
+        mock_request.app.state.server_overload_rejections_since_last_log = 0
 
         response = await dummy_handler(raw_request=mock_request)
 

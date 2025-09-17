@@ -8,6 +8,7 @@ import functools
 import os
 import subprocess
 import sys
+import time
 from typing import Any, Optional, Union
 
 from fastapi import Request
@@ -98,6 +99,39 @@ def decrement_server_load(request: Request):
     request.app.state.server_load_metrics -= 1
 
 
+def _flush_pending_overload_warnings(app_state):
+    """Flush pending aggregated overload warnings if interval elapsed."""
+    now = time.monotonic()
+    pending = getattr(app_state, "server_overload_rejections_since_last_log",
+                      0)
+    if pending > 0:
+        last_log_time = getattr(app_state, "server_overload_last_log_time",
+                                now)
+        log_interval = getattr(app_state, "server_overload_log_interval", 60.0)
+        if (now - last_log_time) >= log_interval:
+            max_load_snapshot = getattr(app_state, "max_server_load", None)
+            try:
+                logger.warning(
+                    "Server overloaded: current load %s >= max load %s. "
+                    "Rejected %d requests since last log.",
+                    app_state.server_load_metrics, max_load_snapshot, pending)
+            except Exception:
+                logger.exception("Failed to log server overload warning")
+            else:
+                app_state.server_overload_rejections_since_last_log = 0
+                app_state.server_overload_last_log_time = now
+
+
+def _aggregate_rejection_stats(app_state):
+    """Aggregate rejections since last log."""
+    now = time.monotonic()
+    if not hasattr(app_state, "server_overload_last_log_time"):
+        app_state.server_overload_last_log_time = now
+    if not hasattr(app_state, "server_overload_rejections_since_last_log"):
+        app_state.server_overload_rejections_since_last_log = 0
+    app_state.server_overload_rejections_since_last_log += 1
+
+
 def load_aware_call(func):
 
     @functools.wraps(func)
@@ -117,13 +151,13 @@ def load_aware_call(func):
         if not hasattr(app_state, "server_load_metrics"):
             app_state.server_load_metrics = 0
 
-        # Check if max load limit is configured and exceeded
+        # Flush pending aggregated overload warnings if interval elapsed.
+        _flush_pending_overload_warnings(app_state)
+
         max_load = getattr(app_state, "max_server_load", None)
-        if (max_load is not None
-                and app_state.server_load_metrics >= max_load):
-            logger.warning(
-                "Server overloaded: current load %s >= max load %s. "
-                "Rejecting request.", app_state.server_load_metrics, max_load)
+        if max_load is not None and app_state.server_load_metrics >= max_load:
+            # Aggregate rejections since last log
+            _aggregate_rejection_stats(app_state)
             return JSONResponse(content={
                 "error": {
                     "type":
@@ -131,7 +165,8 @@ def load_aware_call(func):
                     "message":
                     f"Server is currently overloaded. Current load: "
                     f"{app_state.server_load_metrics}, Max load: "
-                    f"{max_load}. Please try again later."
+                    f"{getattr(app_state, 'max_server_load', None)}. "
+                    "Please try again later."
                 }
             },
                                 status_code=503)
