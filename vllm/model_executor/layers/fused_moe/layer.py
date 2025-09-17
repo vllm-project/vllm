@@ -345,12 +345,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             weight = F.pad(weight, (0, num_pad), "constant", 0)[..., :-num_pad]
             torch.cuda.empty_cache()
 
-        # Pad the weight for flashinfer cutlass moe
-        if self.flashinfer_cutlass_moe_enabled:
-            num_pad = 128 // weight.element_size()
-            weight = F.pad(weight, (0, num_pad), "constant", 0)[..., :-num_pad]
-            torch.cuda.empty_cache()
-
         return weight
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -369,6 +363,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
             layer.w13_weight.data = shuffled_w13
             layer.w2_weight.data = shuffled_w2
+
+        if self.flashinfer_cutlass_moe_enabled:
+            # Swap halves to arrange as [w3; w1] (kernel expectation)
+            w1_w, w3_w = torch.chunk(layer.w13_weight.data, 2, dim=1)
+            w13_weight_swapped = torch.cat([w3_w, w1_w], dim=1)
+            layer.w13_weight.data = w13_weight_swapped
 
         if current_platform.is_xpu():
             import intel_extension_for_pytorch as ipex
