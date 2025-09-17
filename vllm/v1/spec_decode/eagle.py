@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ast
 import copy
-import os
 import time
 from dataclasses import replace
 from importlib.util import find_spec
