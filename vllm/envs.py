@@ -1415,7 +1415,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: bool(int(os.getenv("VLLM_GPT_OSS_USE_CONTAINER_TOOL", "0"))),
 
     # Allows vllm to use the dummy browser tool
-    "VLLM_GPT_OSS_USE_DUMMY_BROWSER_TOOL": 
+    "VLLM_GPT_OSS_USE_DUMMY_BROWSER_TOOL":
     lambda: bool(int(os.getenv("VLLM_GPT_OSS_USE_DUMMY_BROWSER_TOOL", "0"))),
 
     # Allows harmony instructions to be injected on system messages
