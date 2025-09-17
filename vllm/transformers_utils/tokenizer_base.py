@@ -61,6 +61,11 @@ class TokenizerBase(ABC):
     def max_token_id(self) -> int:
         raise NotImplementedError()
 
+    @property
+    @abstractmethod
+    def truncation_side(self) -> str:
+        raise NotImplementedError()
+
     def __len__(self) -> int:
         return self.vocab_size
 
