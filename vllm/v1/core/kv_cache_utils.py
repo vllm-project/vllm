@@ -1192,7 +1192,7 @@ def get_kv_cache_configs(vllm_config: VllmConfig,
                          kv_cache_specs: list[dict[str, KVCacheSpec]],
                          available_memory: list[int]) -> list[KVCacheConfig]:
     """
-    Generates the KV cache configuration   s for a model. 
+    Generates the KV cache configurations for a model. 
     Since we use a shared centralized controller for all workers, we need the
     `kv_cache_config` to be consistent across all workers to make sure
     the KV cache allocation can be applied to all workers. However, different
