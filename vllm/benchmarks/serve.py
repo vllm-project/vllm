@@ -397,6 +397,8 @@ def calculate_metrics(
                      concurrent_requests_per_second,
                      title="Concurrent requests per second")
             fig.show()
+        else:
+            print("tip: install termplotlib and gnuplot to plot the metrics")
 
     metrics = BenchmarkMetrics(
         completed=completed,
