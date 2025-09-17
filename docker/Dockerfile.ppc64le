@@ -128,7 +128,7 @@ FROM base-builder AS arrow-builder
 
 ARG MAX_JOBS
 ARG PYARROW_PARALLEL
-ARG PYARROW_VERSION=19.0.1
+ARG PYARROW_VERSION=21.0.0
 RUN --mount=type=cache,target=/root/.cache/uv \
     source /opt/rh/gcc-toolset-13/enable && \
     git clone --recursive https://github.com/apache/arrow.git -b apache-arrow-${PYARROW_VERSION} && \
