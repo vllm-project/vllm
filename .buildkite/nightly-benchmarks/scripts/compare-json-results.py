@@ -263,7 +263,7 @@ if __name__ == "__main__":
         default="# of max concurrency.",
         help="column name to use as X Axis in comparison graph",
     )
-    parser.add_argument("--ttft-max-ms", type=float, default=5000.0,
+    parser.add_argument("--ttft-max-ms", type=float, default=3000.0,
                     help="Reference limit for TTFT plots (ms)")
     parser.add_argument("--tpot-max-ms", type=float, default=150.0,
                     help="Reference limit for TPOT plots (ms)")
