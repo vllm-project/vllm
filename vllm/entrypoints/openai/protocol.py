@@ -640,23 +640,32 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if prompt_logprobs is None and self.echo:
             prompt_logprobs = self.top_logprobs
 
-        if self.structured_outputs is not None:
-            if self.response_format is not None:
-                if self.response_format.type == "json_object":
+        if ((response_format := self.response_format) is not None or
+            (tool_json := self._get_json_schema_from_tool()) is not None):
+            # If structured outputs wasn't already enabled,
+            # we must enable it for these features to work
+            if self.structured_outputs is None:
+                self.structured_outputs = StructuredOutputsParams()
+
+            # Set structured output params for response format
+            if response_format is not None:
+                if response_format.type == "json_object":
                     self.structured_outputs.json_object = True
-                elif self.response_format.type == "json_schema":
-                    json_schema = self.response_format.json_schema
+                elif response_format.type == "json_schema":
+                    json_schema = response_format.json_schema
                     assert json_schema is not None
                     self.structured_outputs.json = json_schema.json_schema
-                elif self.response_format.type == "structural_tag":
-                    structural_tag = self.response_format
+                elif response_format.type == "structural_tag":
+                    structural_tag = response_format
                     assert structural_tag is not None and isinstance(
                         structural_tag, StructuralTagResponseFormat)
                     s_tag_obj = structural_tag.model_dump(by_alias=True)
                     self.structured_outputs.structural_tag = json.dumps(
                         s_tag_obj)
-            if structured_outputs_json := self._get_json_schema_from_tool():
-                self.structured_outputs.json = structured_outputs_json
+
+            # Set structured output params for tool calling
+            if tool_json is not None:
+                self.structured_outputs.json = tool_json
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
