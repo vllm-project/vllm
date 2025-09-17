@@ -68,6 +68,7 @@ def check_stop(request: Request,
         return True
     return False
 
+
 def add_token_and_check_stop(token_ids: list[int], request: Request,
                              max_model_len: int):
     remain_len = min(max_model_len - request.num_tokens,
