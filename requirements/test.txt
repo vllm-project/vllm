@@ -1108,8 +1108,6 @@ torch==2.9.0+cu128
     #   torchvision
     #   vector-quantize-pytorch
     #   vocos
-torchao==0.13.0+cu128
-    # via -r requirements/test.in
 torchaudio==2.9.0+cu128
     # via
     #   -r requirements/test.in
