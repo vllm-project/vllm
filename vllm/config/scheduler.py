@@ -84,6 +84,9 @@ class SchedulerConfig:
     is_multimodal_model: bool = False
     """True if the model is multimodal."""
 
+    is_encoder_decoder: bool = False
+    """True if the model is an encoder-decoder model."""
+
     # TODO (ywang96): Make this configurable.
     max_num_encoder_input_tokens: int = field(init=False)
     """Multimodal encoder compute budget, only used in V1.
@@ -167,6 +170,16 @@ class SchedulerConfig:
 
         if self.max_num_seqs is None:
             self.max_num_seqs = 128
+
+        if self.is_encoder_decoder:
+            # Chunked prefill should be disabled for encoder-decoder models.
+            self.disable_chunked_mm_input = True
+            self.chunked_prefill_enabled = False
+            self.enable_chunked_prefill = False
+            self.long_prefill_token_threshold = 0
+            logger.info(
+                "Encoder-decoder models do not support chunked prefill nor"
+                " prefix caching; disabling both.")
 
         if self.max_num_batched_tokens is None:
             if self.enable_chunked_prefill:
