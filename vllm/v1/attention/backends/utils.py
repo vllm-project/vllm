@@ -781,8 +781,8 @@ KV_SHARING_FAST_PREFILL_METADATA_FIELDS = [
 ]
 
 def reorder_batch_to_group_common_prefixes(
-    input_batch: InputBatch,
-    scheduler_output: SchedulerOutput
+    input_batch: "InputBatch",
+    scheduler_output: "SchedulerOutput"
 ):
     kv_prefix_aligned_groups = scheduler_output.kv_prefix_aligned_groups
     if kv_prefix_aligned_groups:
