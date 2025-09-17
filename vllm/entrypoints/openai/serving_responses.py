@@ -10,7 +10,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from contextlib import AsyncExitStack
 from copy import copy
 from http import HTTPStatus
-from typing import Callable, Final, Optional, Union
+from typing import Callable, Final, Optional, TypeVar, Union
 
 import jinja2
 import openai.types.responses as openai_responses_types
@@ -27,7 +27,7 @@ from openai.types.responses import (ResponseCreatedEvent,
                                     ResponseReasoningItem,
                                     ResponseReasoningTextDeltaEvent,
                                     ResponseReasoningTextDoneEvent,
-                                    response_text_delta_event)
+                                    ResponseStatus, response_text_delta_event)
 from openai.types.responses.response_output_text import (Logprob,
                                                          LogprobTopLogprob)
 # yapf: enable
@@ -44,8 +44,9 @@ from vllm.entrypoints.context import (ConversationContext, HarmonyContext,
                                       SimpleContext, StreamingHarmonyContext)
 from vllm.entrypoints.harmony_utils import (
     get_developer_message, get_stop_tokens_for_assistant_actions,
-    get_system_message, get_user_message, parse_output_message,
-    parse_remaining_state, parse_response_input, render_for_completion)
+    get_system_message, get_user_message, has_custom_tools,
+    parse_output_message, parse_remaining_state, parse_response_input,
+    render_for_completion)
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -174,7 +175,8 @@ class OpenAIServingResponses(OpenAIServing):
         # HACK(wuhang): This is a hack. We should use a better store.
         # FIXME: If enable_store=True, this may cause a memory leak since we
         # never remove events from the store.
-        self.event_store: dict[str, tuple[deque[str], asyncio.Event]] = {}
+        self.event_store: dict[str, tuple[deque[BaseModel],
+                                          asyncio.Event]] = {}
 
         self.background_tasks: dict[str, asyncio.Task] = {}
 
@@ -184,7 +186,8 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         request: ResponsesRequest,
         raw_request: Optional[Request] = None,
-    ) -> Union[AsyncGenerator[str, None], ResponsesResponse, ErrorResponse]:
+    ) -> Union[AsyncGenerator[BaseModel, None], ResponsesResponse,
+               ErrorResponse]:
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
@@ -236,7 +239,7 @@ class OpenAIServingResponses(OpenAIServing):
 
         try:
             lora_request = self._maybe_get_adapters(request)
-            model_name = self._get_model_name(request.model, lora_request)
+            model_name = self.models.model_name(lora_request)
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
             if self.use_harmony:
@@ -266,6 +269,8 @@ class OpenAIServingResponses(OpenAIServing):
                 builtin_tool_list.append("browser")
             if self.tool_server.has_tool("python"):
                 builtin_tool_list.append("python")
+            if self.tool_server.has_tool("container"):
+                builtin_tool_list.append("container")
 
         if self.tool_server is not None:
             available_tools = builtin_tool_list
@@ -448,7 +453,8 @@ class OpenAIServingResponses(OpenAIServing):
 
         async with AsyncExitStack() as exit_stack:
             try:
-                await context.init_tool_sessions(self.tool_server, exit_stack)
+                await context.init_tool_sessions(self.tool_server, exit_stack,
+                                                 request.request_id)
                 async for _ in result_generator:
                     pass
             except asyncio.CancelledError:
@@ -457,10 +463,22 @@ class OpenAIServingResponses(OpenAIServing):
                 # TODO: Use a vllm-specific Validation Error
                 return self.create_error_response(str(e))
 
+        # NOTE: Implementation of stauts is still WIP, but for now
+        # we guarantee that if the status is not "completed", it is accurate.
+        # "completed" is implemented as the "catch-all" for now.
+        status: ResponseStatus = "completed"
+
         if self.use_harmony:
             assert isinstance(context, HarmonyContext)
             output = self._make_response_output_items_with_harmony(context)
             num_tool_output_tokens = context.num_tool_output_tokens
+            if len(output) > 0:
+                if context.finish_reason == "length":
+                    status = "incomplete"
+                elif context.finish_reason == "abort":
+                    status = "cancelled"
+            else:
+                status = "incomplete"
         else:
             assert isinstance(context, SimpleContext)
             final_res = context.last_output
@@ -497,7 +515,7 @@ class OpenAIServingResponses(OpenAIServing):
             model_name=model_name,
             created_time=created_time,
             output=output,
-            status="completed",
+            status=status,
             usage=usage,
         )
 
@@ -654,7 +672,7 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         context: HarmonyContext,
     ) -> list[ResponseOutputItem]:
-        output_items = []
+        output_items: list[ResponseOutputItem] = []
         num_init_messages = context.num_init_messages
         for msg in context.messages[num_init_messages:]:
             output_items.extend(parse_output_message(msg))
@@ -710,13 +728,21 @@ class OpenAIServingResponses(OpenAIServing):
             # New conversation.
             reasoning_effort = (request.reasoning.effort
                                 if request.reasoning else None)
+            # Temporary: OpenAI types doesn't have container tool
+            # so we used MCP to cover that, up for change
             tool_types = [tool.type for tool in request.tools]
+            if envs.VLLM_GPT_OSS_USE_CONTAINER_TOOL:
+                tool_types.append("container")
             enable_browser = ("web_search_preview" in tool_types
                               and self.tool_server is not None
                               and self.tool_server.has_tool("browser"))
             enable_code_interpreter = ("code_interpreter" in tool_types
                                        and self.tool_server is not None
                                        and self.tool_server.has_tool("python"))
+            enable_container = ("container" in tool_types
+                                and self.tool_server is not None
+                                and self.tool_server.has_tool("container"))
+            with_custom_tools = has_custom_tools(tool_types)
             sys_msg = get_system_message(
                 reasoning_effort=reasoning_effort,
                 browser_description=self.tool_server.get_tool_description(
@@ -725,11 +751,17 @@ class OpenAIServingResponses(OpenAIServing):
                 python_description=self.tool_server.get_tool_description(
                     "python") if enable_code_interpreter
                 and self.tool_server is not None else None,
+                container_description=self.tool_server.get_tool_description(
+                    "container")
+                if enable_container and self.tool_server is not None else None,
+                instructions=request.instructions,
+                with_custom_tools=with_custom_tools,
             )
             messages.append(sys_msg)
-            dev_msg = get_developer_message(request.instructions,
-                                            request.tools)
-            messages.append(dev_msg)
+            if with_custom_tools:
+                dev_msg = get_developer_message(
+                    instructions=request.instructions, tools=request.tools)
+                messages.append(dev_msg)
         else:
             # Continue the previous conversation.
             # FIXME(woosuk): Currently, request params like reasoning and
@@ -782,7 +814,7 @@ class OpenAIServingResponses(OpenAIServing):
         *args,
         **kwargs,
     ):
-        event_deque: deque[str] = deque()
+        event_deque: deque[BaseModel] = deque()
         new_event_signal = asyncio.Event()
         self.event_store[request.request_id] = (event_deque, new_event_signal)
         response = None
@@ -797,8 +829,6 @@ class OpenAIServingResponses(OpenAIServing):
                              request.request_id)
             response = self.create_error_response(str(e))
         finally:
-            # Mark as finished with a special marker
-            event_deque.append("__STREAM_END__")
             new_event_signal.set()
 
         if response is not None and isinstance(response, ErrorResponse):
@@ -837,7 +867,7 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         response_id: str,
         starting_after: Optional[int] = None,
-    ):
+    ) -> AsyncGenerator[BaseModel, None]:
         if response_id not in self.event_store:
             raise ValueError(f"Unknown response_id: {response_id}")
 
@@ -851,9 +881,9 @@ class OpenAIServingResponses(OpenAIServing):
             # Yield existing events from start_index
             while current_index < len(event_deque):
                 event = event_deque[current_index]
-                if event == "__STREAM_END__":
-                    return
                 yield event
+                if getattr(event, 'type', 'unknown') == "response.completed":
+                    return
                 current_index += 1
 
             await new_event_signal.wait()
@@ -863,7 +893,8 @@ class OpenAIServingResponses(OpenAIServing):
         response_id: str,
         starting_after: Optional[int],
         stream: Optional[bool],
-    ) -> Union[ErrorResponse, ResponsesResponse]:
+    ) -> Union[ErrorResponse, ResponsesResponse, AsyncGenerator[BaseModel,
+                                                                None]]:
         if not response_id.startswith("resp_"):
             return self._make_invalid_id_error(response_id)
 
@@ -946,8 +977,9 @@ class OpenAIServingResponses(OpenAIServing):
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
         created_time: int,
-        _send_event: Callable[[BaseModel], str],
-    ) -> AsyncGenerator[str, None]:
+        _increment_sequence_number_and_return: Callable[[BaseModel],
+                                                        BaseModel],
+    ) -> AsyncGenerator[BaseModel, None]:
         current_content_index = 0
         current_output_index = 0
         current_item_id = ""
@@ -984,7 +1016,7 @@ class OpenAIServingResponses(OpenAIServing):
                 if not first_delta_sent:
                     current_item_id = str(uuid.uuid4())
                     if delta_message.reasoning_content:
-                        yield _send_event(
+                        yield _increment_sequence_number_and_return(
                             openai_responses_types.
                             ResponseOutputItemAddedEvent(
                                 type="response.output_item.added",
@@ -999,7 +1031,7 @@ class OpenAIServingResponses(OpenAIServing):
                                 ),
                             ))
                     else:
-                        yield _send_event(
+                        yield _increment_sequence_number_and_return(
                             openai_responses_types.
                             ResponseOutputItemAddedEvent(
                                 type="response.output_item.added",
@@ -1014,7 +1046,7 @@ class OpenAIServingResponses(OpenAIServing):
                                     status="in_progress",
                                 ),
                             ))
-                    yield _send_event(
+                    yield _increment_sequence_number_and_return(
                         openai_responses_types.ResponseContentPartAddedEvent(
                             type="response.content_part.added",
                             sequence_number=-1,
@@ -1042,7 +1074,7 @@ class OpenAIServingResponses(OpenAIServing):
                     reason_content = ''.join(
                         pm.reasoning_content for pm in previous_delta_messages
                         if pm.reasoning_content is not None)
-                    yield _send_event(
+                    yield _increment_sequence_number_and_return(
                         ResponseReasoningTextDoneEvent(
                             type="response.reasoning_text.done",
                             item_id=current_item_id,
@@ -1064,14 +1096,14 @@ class OpenAIServingResponses(OpenAIServing):
                         id=current_item_id,
                         summary=[],
                     )
-                    yield _send_event(
+                    yield _increment_sequence_number_and_return(
                         ResponseOutputItemDoneEvent(
                             type="response.output_item.done",
                             sequence_number=-1,
                             output_index=current_output_index,
                             item=reasoning_item,
                         ))
-                    yield _send_event(
+                    yield _increment_sequence_number_and_return(
                         openai_responses_types.ResponseOutputItemAddedEvent(
                             type="response.output_item.added",
                             sequence_number=-1,
@@ -1086,7 +1118,7 @@ class OpenAIServingResponses(OpenAIServing):
                         ))
                     current_output_index += 1
                     current_item_id = str(uuid.uuid4())
-                    yield _send_event(
+                    yield _increment_sequence_number_and_return(
                         openai_responses_types.ResponseContentPartAddedEvent(
                             type="response.content_part.added",
                             sequence_number=-1,
@@ -1105,7 +1137,7 @@ class OpenAIServingResponses(OpenAIServing):
                     previous_delta_messages = []
 
                 if delta_message.reasoning_content is not None:
-                    yield _send_event(
+                    yield _increment_sequence_number_and_return(
                         ResponseReasoningTextDeltaEvent(
                             type="response.reasoning_text.delta",
                             sequence_number=-1,
@@ -1115,7 +1147,7 @@ class OpenAIServingResponses(OpenAIServing):
                             delta=delta_message.reasoning_content,
                         ))
                 elif delta_message.content is not None:
-                    yield _send_event(
+                    yield _increment_sequence_number_and_return(
                         openai_responses_types.ResponseTextDeltaEvent(
                             type="response.output_text.delta",
                             sequence_number=-1,
@@ -1138,7 +1170,7 @@ class OpenAIServingResponses(OpenAIServing):
                 reason_content = ''.join(pm.reasoning_content
                                          for pm in previous_delta_messages
                                          if pm.reasoning_content is not None)
-                yield _send_event(
+                yield _increment_sequence_number_and_return(
                     ResponseReasoningTextDoneEvent(
                         type="response.reasoning_text.done",
                         item_id=current_item_id,
@@ -1160,7 +1192,7 @@ class OpenAIServingResponses(OpenAIServing):
                     id=current_item_id,
                     summary=[],
                 )
-                yield _send_event(
+                yield _increment_sequence_number_and_return(
                     ResponseOutputItemDoneEvent(
                         type="response.output_item.done",
                         sequence_number=-1,
@@ -1171,7 +1203,7 @@ class OpenAIServingResponses(OpenAIServing):
                 final_content = ''.join(pm.content
                                         for pm in previous_delta_messages
                                         if pm.content is not None)
-                yield _send_event(
+                yield _increment_sequence_number_and_return(
                     openai_responses_types.ResponseTextDoneEvent(
                         type="response.output_text.done",
                         sequence_number=-1,
@@ -1187,7 +1219,7 @@ class OpenAIServingResponses(OpenAIServing):
                     type="output_text",
                     annotations=[],
                 )
-                yield _send_event(
+                yield _increment_sequence_number_and_return(
                     openai_responses_types.ResponseContentPartDoneEvent(
                         type="response.content_part.done",
                         sequence_number=-1,
@@ -1207,7 +1239,7 @@ class OpenAIServingResponses(OpenAIServing):
                     id=current_item_id,
                     summary=[],
                 )
-                yield _send_event(
+                yield _increment_sequence_number_and_return(
                     ResponseOutputItemDoneEvent(
                         type="response.output_item.done",
                         sequence_number=-1,
@@ -1225,11 +1257,12 @@ class OpenAIServingResponses(OpenAIServing):
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
         created_time: int,
-        _send_event: Callable[[BaseModel], str],
-    ) -> AsyncGenerator[str, None]:
-        current_content_index = 0  # FIXME: this number is never changed
+        _increment_sequence_number_and_return: Callable[[BaseModel],
+                                                        BaseModel],
+    ) -> AsyncGenerator[BaseModel, None]:
+        current_content_index = -1
         current_output_index = 0
-        current_item_id = ""  # FIXME: this number is never changed
+        current_item_id: str = ""
         sent_output_item_added = False
 
         async for ctx in result_generator:
@@ -1258,7 +1291,7 @@ class OpenAIServingResponses(OpenAIServing):
                             id=current_item_id,
                             summary=[],
                         )
-                        yield _send_event(
+                        yield _increment_sequence_number_and_return(
                             ResponseReasoningTextDoneEvent(
                                 type="response.reasoning_text.done",
                                 item_id=current_item_id,
@@ -1267,7 +1300,7 @@ class OpenAIServingResponses(OpenAIServing):
                                 content_index=current_content_index,
                                 text=previous_item.content[0].text,
                             ))
-                        yield _send_event(
+                        yield _increment_sequence_number_and_return(
                             ResponseOutputItemDoneEvent(
                                 type="response.output_item.done",
                                 sequence_number=-1,
@@ -1280,7 +1313,7 @@ class OpenAIServingResponses(OpenAIServing):
                             text=previous_item.content[0].text,
                             annotations=[],
                         )
-                        yield _send_event(
+                        yield _increment_sequence_number_and_return(
                             openai_responses_types.ResponseTextDoneEvent(
                                 type="response.output_text.done",
                                 sequence_number=-1,
@@ -1290,7 +1323,7 @@ class OpenAIServingResponses(OpenAIServing):
                                 logprobs=[],
                                 item_id=current_item_id,
                             ))
-                        yield _send_event(
+                        yield _increment_sequence_number_and_return(
                             openai_responses_types.
                             ResponseContentPartDoneEvent(
                                 type="response.content_part.done",
@@ -1300,7 +1333,7 @@ class OpenAIServingResponses(OpenAIServing):
                                 content_index=current_content_index,
                                 part=text_content,
                             ))
-                        yield _send_event(
+                        yield _increment_sequence_number_and_return(
                             openai_responses_types.ResponseOutputItemDoneEvent(
                                 type="response.output_item.done",
                                 sequence_number=-1,
@@ -1314,12 +1347,14 @@ class OpenAIServingResponses(OpenAIServing):
                                 ),
                             ))
 
+            # stream the output of a harmony message
             if ctx.parser.last_content_delta:
                 if (ctx.parser.current_channel == "final"
                         and ctx.parser.current_recipient is None):
                     if not sent_output_item_added:
                         sent_output_item_added = True
-                        yield _send_event(
+                        current_item_id = f"msg_{random_uuid()}"
+                        yield _increment_sequence_number_and_return(
                             openai_responses_types.
                             ResponseOutputItemAddedEvent(
                                 type="response.output_item.added",
@@ -1334,7 +1369,8 @@ class OpenAIServingResponses(OpenAIServing):
                                     status="in_progress",
                                 ),
                             ))
-                        yield _send_event(
+                        current_content_index += 1
+                        yield _increment_sequence_number_and_return(
                             openai_responses_types.
                             ResponseContentPartAddedEvent(
                                 type="response.content_part.added",
@@ -1349,7 +1385,7 @@ class OpenAIServingResponses(OpenAIServing):
                                     logprobs=[],
                                 ),
                             ))
-                    yield _send_event(
+                    yield _increment_sequence_number_and_return(
                         openai_responses_types.ResponseTextDeltaEvent(
                             type="response.output_text.delta",
                             sequence_number=-1,
@@ -1364,7 +1400,8 @@ class OpenAIServingResponses(OpenAIServing):
                       and ctx.parser.current_recipient is None):
                     if not sent_output_item_added:
                         sent_output_item_added = True
-                        yield _send_event(
+                        current_item_id = f"msg_{random_uuid()}"
+                        yield _increment_sequence_number_and_return(
                             openai_responses_types.
                             ResponseOutputItemAddedEvent(
                                 type="response.output_item.added",
@@ -1378,7 +1415,8 @@ class OpenAIServingResponses(OpenAIServing):
                                     status="in_progress",
                                 ),
                             ))
-                        yield _send_event(
+                        current_content_index += 1
+                        yield _increment_sequence_number_and_return(
                             openai_responses_types.
                             ResponseContentPartAddedEvent(
                                 type="response.content_part.added",
@@ -1393,7 +1431,7 @@ class OpenAIServingResponses(OpenAIServing):
                                     logprobs=[],
                                 ),
                             ))
-                    yield _send_event(
+                    yield _increment_sequence_number_and_return(
                         ResponseReasoningTextDeltaEvent(
                             type="response.reasoning_text.delta",
                             item_id=current_item_id,
@@ -1410,7 +1448,8 @@ class OpenAIServingResponses(OpenAIServing):
                       ) and ctx.parser.current_recipient == "python":
                     if not sent_output_item_added:
                         sent_output_item_added = True
-                        yield _send_event(
+                        current_item_id = f"tool_{random_uuid()}"
+                        yield _increment_sequence_number_and_return(
                             openai_responses_types.
                             ResponseOutputItemAddedEvent(
                                 type="response.output_item.added",
@@ -1426,7 +1465,7 @@ class OpenAIServingResponses(OpenAIServing):
                                     status="in_progress",
                                 ),
                             ))
-                        yield _send_event(
+                        yield _increment_sequence_number_and_return(
                             openai_responses_types.
                             ResponseCodeInterpreterCallInProgressEvent(
                                 type=
@@ -1435,7 +1474,7 @@ class OpenAIServingResponses(OpenAIServing):
                                 output_index=current_output_index,
                                 item_id=current_item_id,
                             ))
-                    yield _send_event(
+                    yield _increment_sequence_number_and_return(
                         openai_responses_types.
                         ResponseCodeInterpreterCallCodeDeltaEvent(
                             type="response.code_interpreter_call_code.delta",
@@ -1444,6 +1483,8 @@ class OpenAIServingResponses(OpenAIServing):
                             item_id=current_item_id,
                             delta=ctx.parser.last_content_delta,
                         ))
+
+            # stream tool call outputs
             if ctx.is_assistant_action_turn() and len(ctx.parser.messages) > 0:
                 previous_item = ctx.parser.messages[-1]
                 if (self.tool_server is not None
@@ -1480,7 +1521,8 @@ class OpenAIServingResponses(OpenAIServing):
                         raise ValueError(
                             f"Unknown function name: {function_name}")
 
-                    yield _send_event(
+                    current_item_id = f"tool_{random_uuid()}"
+                    yield _increment_sequence_number_and_return(
                         openai_responses_types.ResponseOutputItemAddedEvent(
                             type="response.output_item.added",
                             sequence_number=-1,
@@ -1495,7 +1537,7 @@ class OpenAIServingResponses(OpenAIServing):
                                 status="in_progress",
                             ),
                         ))
-                    yield _send_event(
+                    yield _increment_sequence_number_and_return(
                         openai_responses_types.
                         ResponseWebSearchCallInProgressEvent(
                             type="response.web_search_call.in_progress",
@@ -1503,7 +1545,7 @@ class OpenAIServingResponses(OpenAIServing):
                             output_index=current_output_index,
                             item_id=current_item_id,
                         ))
-                    yield _send_event(
+                    yield _increment_sequence_number_and_return(
                         openai_responses_types.
                         ResponseWebSearchCallSearchingEvent(
                             type="response.web_search_call.searching",
@@ -1513,7 +1555,7 @@ class OpenAIServingResponses(OpenAIServing):
                         ))
 
                     # enqueue
-                    yield _send_event(
+                    yield _increment_sequence_number_and_return(
                         openai_responses_types.
                         ResponseWebSearchCallCompletedEvent(
                             type="response.web_search_call.completed",
@@ -1521,7 +1563,7 @@ class OpenAIServingResponses(OpenAIServing):
                             output_index=current_output_index,
                             item_id=current_item_id,
                         ))
-                    yield _send_event(
+                    yield _increment_sequence_number_and_return(
                         openai_responses_types.ResponseOutputItemDoneEvent(
                             type="response.output_item.done",
                             sequence_number=-1,
@@ -1539,7 +1581,7 @@ class OpenAIServingResponses(OpenAIServing):
                         and self.tool_server.has_tool("python")
                         and previous_item.recipient is not None
                         and previous_item.recipient.startswith("python")):
-                    yield _send_event(
+                    yield _increment_sequence_number_and_return(
                         openai_responses_types.
                         ResponseCodeInterpreterCallCodeDoneEvent(
                             type="response.code_interpreter_call_code.done",
@@ -1548,7 +1590,7 @@ class OpenAIServingResponses(OpenAIServing):
                             item_id=current_item_id,
                             code=previous_item.content[0].text,
                         ))
-                    yield _send_event(
+                    yield _increment_sequence_number_and_return(
                         openai_responses_types.
                         ResponseCodeInterpreterCallInterpretingEvent(
                             type="response.code_interpreter_call.interpreting",
@@ -1556,7 +1598,7 @@ class OpenAIServingResponses(OpenAIServing):
                             output_index=current_output_index,
                             item_id=current_item_id,
                         ))
-                    yield _send_event(
+                    yield _increment_sequence_number_and_return(
                         openai_responses_types.
                         ResponseCodeInterpreterCallCompletedEvent(
                             type="response.code_interpreter_call.completed",
@@ -1564,7 +1606,7 @@ class OpenAIServingResponses(OpenAIServing):
                             output_index=current_output_index,
                             item_id=current_item_id,
                         ))
-                    yield _send_event(
+                    yield _increment_sequence_number_and_return(
                         openai_responses_types.ResponseOutputItemDoneEvent(
                             type="response.output_item.done",
                             sequence_number=-1,
@@ -1591,7 +1633,7 @@ class OpenAIServingResponses(OpenAIServing):
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
         created_time: Optional[int] = None,
-    ) -> AsyncGenerator[str, None]:
+    ) -> AsyncGenerator[BaseModel, None]:
         # TODO:
         # 1. Handle disconnect
 
@@ -1599,21 +1641,21 @@ class OpenAIServingResponses(OpenAIServing):
 
         sequence_number = 0
 
-        def _send_event(event: BaseModel):
+        T = TypeVar("T", bound=BaseModel)
+
+        def _increment_sequence_number_and_return(event: T) -> T:
             nonlocal sequence_number
             # Set sequence_number if the event has this attribute
             if hasattr(event, 'sequence_number'):
                 event.sequence_number = sequence_number
             sequence_number += 1
-            # Get event type from the event's type field if it exists
-            event_type = getattr(event, 'type', 'unknown')
-            return (f"event: {event_type}\n"
-                    f"data: {event.model_dump_json(indent=None)}\n\n")
+            return event
 
         async with AsyncExitStack() as exit_stack:
             processer = None
             if self.use_harmony:
-                await context.init_tool_sessions(self.tool_server, exit_stack)
+                await context.init_tool_sessions(self.tool_server, exit_stack,
+                                                 request.request_id)
                 processer = self._process_harmony_streaming_events
             else:
                 processer = self._process_simple_streaming_events
@@ -1627,24 +1669,23 @@ class OpenAIServingResponses(OpenAIServing):
                 status="in_progress",
                 usage=None,
             ).model_dump()
-            yield _send_event(
+            yield _increment_sequence_number_and_return(
                 ResponseCreatedEvent(
                     type="response.created",
                     sequence_number=-1,
                     response=initial_response,
                 ))
-            yield _send_event(
+            yield _increment_sequence_number_and_return(
                 ResponseInProgressEvent(
                     type="response.in_progress",
                     sequence_number=-1,
                     response=initial_response,
                 ))
 
-            async for event_data in processer(request, sampling_params,
-                                              result_generator, context,
-                                              model_name, tokenizer,
-                                              request_metadata, created_time,
-                                              _send_event):
+            async for event_data in processer(
+                    request, sampling_params, result_generator, context,
+                    model_name, tokenizer, request_metadata, created_time,
+                    _increment_sequence_number_and_return):
                 yield event_data
 
             async def empty_async_generator():
@@ -1663,7 +1704,7 @@ class OpenAIServingResponses(OpenAIServing):
                 request_metadata,
                 created_time=created_time,
             )
-            yield _send_event(
+            yield _increment_sequence_number_and_return(
                 openai_responses_types.ResponseCompletedEvent(
                     type="response.completed",
                     sequence_number=-1,

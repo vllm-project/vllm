@@ -27,6 +27,7 @@ from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)
 
@@ -179,9 +180,11 @@ class EagleProposer:
         assert self.runner is not None
 
         # FIXME: need to consider multiple kv_cache_groups
-        attn_metadata = self.runner.attn_groups[0][0].metadata_builder\
-            .build_for_drafting(common_attn_metadata=common_attn_metadata,
-                                draft_index=0)
+        ubatch_id = dbo_current_ubatch_id()
+        attn_metadata_builder = \
+            self.runner.attn_groups[0][0].metadata_builders[ubatch_id]
+        attn_metadata = attn_metadata_builder.build_for_drafting(
+            common_attn_metadata=common_attn_metadata, draft_index=0)
 
         # At this moment, we assume all eagle layers belong to the same KV
         # cache group, thus using the same attention metadata.
@@ -218,7 +221,7 @@ class EagleProposer:
                 hidden_states=self.hidden_states[:num_input_tokens],
                 inputs_embeds=inputs_embeds,
             )
-            if self.method in ("deepseek_mtp", "ernie_mtp"):
+            if self.method in ("deepseek_mtp", "ernie_mtp", "qwen3_next_mtp"):
                 last_hidden_states = ret_hidden_states
                 hidden_states = last_hidden_states
             else:
@@ -322,12 +325,18 @@ class EagleProposer:
             with set_forward_context(per_layer_attn_metadata,
                                      self.vllm_config,
                                      num_tokens=input_batch_size):
-                last_hidden_states, hidden_states = self.model(
+                ret_hidden_states = self.model(
                     input_ids=input_ids,
                     positions=self.positions[:input_batch_size],
                     hidden_states=self.hidden_states[:input_batch_size],
                     inputs_embeds=inputs_embeds,
                 )
+                if self.method in ("deepseek_mtp", "ernie_mtp",
+                                   "qwen3_next_mtp"):
+                    last_hidden_states = ret_hidden_states
+                    hidden_states = ret_hidden_states
+                else:
+                    last_hidden_states, hidden_states = ret_hidden_states
             hidden_states = hidden_states[:batch_size]
             logits = self.model.compute_logits(last_hidden_states[:batch_size],
                                                None)
@@ -349,8 +358,9 @@ class EagleProposer:
         hidden_states: torch.Tensor,
         common_attn_metadata: CommonAttentionMetadata,
     ) -> list[torch.Tensor]:
+        ubatch_id = dbo_current_ubatch_id()
         tree_attn_metadata_builder = \
-            self.runner.attn_groups[0][0].metadata_builder
+            self.runner.attn_groups[0][0].metadata_builders[ubatch_id]
         assert isinstance(tree_attn_metadata_builder,
                           TreeAttentionMetadataBuilder)
 
