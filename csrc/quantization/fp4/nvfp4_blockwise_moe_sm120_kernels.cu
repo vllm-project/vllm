@@ -248,10 +248,10 @@ static inline void run_fp4_blockwise_scaled_group_mm_sm120(
                                            CollectiveEpilogue>;
   using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
 
-  using StrideAParam = typename Gemm::GemmKernel::StrideA*;
-  using StrideBParam = typename Gemm::GemmKernel::StrideB*;
-  using StrideCParam = typename Gemm::GemmKernel::StrideC*;
-  using StrideDParam = typename Gemm::GemmKernel::StrideD*;
+  using StrideAParam = typename Gemm::GemmKernel::StrideA;
+  using StrideBParam = typename Gemm::GemmKernel::StrideB;
+  using StrideCParam = typename Gemm::GemmKernel::StrideC;
+  using StrideDParam = typename Gemm::GemmKernel::StrideD;
   using HostStrideA = std::remove_pointer_t<typename Gemm::GemmKernel::StrideA>;
   using HostStrideB = std::remove_pointer_t<typename Gemm::GemmKernel::StrideB>;
   using HostStrideC = std::remove_pointer_t<typename Gemm::GemmKernel::StrideC>;
@@ -342,9 +342,9 @@ static inline void run_fp4_blockwise_scaled_group_mm_sm120(
   hw_info.sm_count = std::min(cached_sm_counts[hw_info.device_id], INT_MAX);
 
   typename GemmKernel::MainloopArguments mainloop_args{
-      reinterpret_cast<ElementA**>(a_ptrs.data_ptr()),
+      reinterpret_cast<const ElementA**>(a_ptrs.data_ptr()),
       reinterpret_cast<StrideAParam>(a_strides_buf.data_ptr()),
-      reinterpret_cast<ElementB**>(b_ptrs.data_ptr()),
+      reinterpret_cast<const ElementB**>(b_ptrs.data_ptr()),
       reinterpret_cast<StrideBParam>(b_strides_buf.data_ptr()),
       reinterpret_cast<const ElementSFType**>(a_scales_ptrs.data_ptr()),
       reinterpret_cast<LayoutSFAArg>(layout_sfa.data_ptr()),
