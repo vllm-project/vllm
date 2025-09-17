@@ -1,14 +1,59 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import time
+from typing import Optional
+
 import pytest
 import torch
 
+from vllm.inputs import embeds_inputs, token_inputs
+from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.sampling_params import SamplingParams
 from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
-                           SequenceData, SequenceOutput)
+                           Sequence, SequenceData, SequenceGroup,
+                           SequenceOutput)
 
-from .core.utils import create_dummy_prompt
+
+def create_dummy_prompt(
+    request_id: str,
+    prompt_length: int = -1,
+    block_size: Optional[int] = None,
+    lora_request: Optional[LoRARequest] = None,
+    prompt_tokens: Optional[list[int]] = None,
+    prompt_embeds: Optional[torch.Tensor] = None,
+    min_tokens: int = 0,
+    max_tokens: int = 16,
+) -> tuple[Sequence, SequenceGroup]:
+    if not block_size:
+        block_size = prompt_length
+
+    if prompt_tokens is None:
+        # Create dummy prompt sequence with tokens 0...block_size-1
+        # and prompt "0 ... block_size".
+        prompt_tokens = list(range(prompt_length))
+
+    prompt_str = " ".join([str(t) for t in prompt_tokens])
+    inputs = token_inputs(
+        prompt_token_ids=prompt_tokens,
+        prompt=prompt_str) if prompt_embeds is None else embeds_inputs(
+            prompt_embeds=prompt_embeds)
+    prompt = Sequence(
+        int(request_id),
+        inputs=inputs,
+        block_size=block_size,
+    )
+    seq_group = SequenceGroup(
+        request_id=request_id,
+        seqs=[prompt],
+        arrival_time=time.time(),
+        sampling_params=SamplingParams(max_tokens=max_tokens,
+                                       min_tokens=min_tokens),
+        lora_request=lora_request,
+    )
+
+    return prompt, seq_group
 
 
 @pytest.fixture
