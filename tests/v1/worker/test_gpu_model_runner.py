@@ -867,8 +867,7 @@ def test_hybrid_block_table_initialization():
     assert block_table.use_hybrid_blocks is True
     assert block_table.block_size == kernel_block_sizes[0]
     assert block_table.blocks_per_phys_block == (
-        block_size // kernel_block_sizes[0]
-    )  # Changed to use first element
+        block_size // kernel_block_sizes[0])  # Changed to use first element
 
     # Test block table conversion logic
     # One physical block should map to multiple logical blocks
@@ -912,11 +911,10 @@ def test_input_batch_with_kernel_block_sizes():
                              kernel_block_sizes=kernel_block_sizes)
 
     # Verify that block tables were created with kernel block sizes
-    assert len(
-        input_batch.block_table.block_tables) == len(block_sizes)
+    assert len(input_batch.block_table.block_tables) == len(block_sizes)
 
-    for i, (phys_size, kernel_size) in enumerate(
-            zip(block_sizes, kernel_block_sizes)):
+    for i, (phys_size,
+            kernel_size) in enumerate(zip(block_sizes, kernel_block_sizes)):
         block_table = input_batch.block_table.block_tables[i]
         if phys_size != kernel_size:
             assert block_table.use_hybrid_blocks is True
