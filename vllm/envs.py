@@ -1223,9 +1223,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_CUDNN_PREFILL":
     lambda: bool(int(os.getenv("VLLM_USE_CUDNN_PREFILL", "0"))),
 
-    # If set to 1, use the TRTLLM attention backend in flashinfer.
+    # If set to 1/True, use the TRTLLM attention backend in flashinfer.
+    # If set to 0/False, use the default attention backend in flashinfer.
+    # If not set, auto-detect the attention backend in flashinfer.
     "VLLM_USE_TRTLLM_ATTENTION":
-    lambda: os.getenv("VLLM_USE_TRTLLM_ATTENTION", None),
+    lambda: (None if "VLLM_USE_TRTLLM_ATTENTION" not in os.environ else
+             os.environ["VLLM_USE_TRTLLM_ATTENTION"].lower() in ("1", "true")),
 
     # If set to 1, when we use fp8 kv, we do not quantize Q to fp8
     "VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION":
