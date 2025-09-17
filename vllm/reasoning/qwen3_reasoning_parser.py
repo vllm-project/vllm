@@ -67,6 +67,7 @@ class Qwen3ReasoningParser(ReasoningParser):
 
         self.buffered_delta_text = ""
         self.cached_prompt = ""
+        self.cached_outputs = []
 
     # Very simple idea: when encountering tokens like <, think, >,
     # <, /, think, >, store them in a buffer.
