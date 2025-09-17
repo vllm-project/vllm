@@ -98,7 +98,10 @@ if current_platform.is_rocm():
         aiter_per1x128_quant = get_hip_quant(rocm_aiter.QuantType.per_1x128)
 
 
-def _padded_cutlass(
+# TODO: ideally, we would like to wrap only the padding computation
+# and unwrap the rest. This should be possible after solving
+# https://github.com/vllm-project/vllm/issues/25080
+def _padded_cutlass_scaled_mm(
     qx: torch.Tensor,
     weight: torch.Tensor,
     x_scale: torch.Tensor,
@@ -126,7 +129,7 @@ def _padded_cutlass(
     return output[0:qx.shape[0], ...]
 
 
-def _padded_cutlass_fake(
+def _padded_cutlass_scaled_mm_fake(
     qx: torch.Tensor,
     weight: torch.Tensor,
     x_scale: torch.Tensor,
@@ -140,10 +143,10 @@ def _padded_cutlass_fake(
 
 
 direct_register_custom_op(
-    "padded_cutlass",
-    _padded_cutlass,
+    "padded_cutlass_scaled_mm",
+    _padded_cutlass_scaled_mm,
     mutates_args=[],
-    fake_impl=_padded_cutlass_fake,
+    fake_impl=_padded_cutlass_scaled_mm_fake,
     dispatch_key="CUDA",
 )
 
@@ -283,9 +286,9 @@ class W8A8BlockFp8LinearOp:
                                                      column_major_scales=True,
                                                      use_ue8m0=False)
         if self.is_hopper:
-            output = torch.ops.vllm.padded_cutlass(q_input, weight, x_scale,
-                                                   weight_scale, block_size,
-                                                   input_2d.dtype)
+            output = torch.ops.vllm.padded_cutlass_scaled_mm(
+                q_input, weight, x_scale, weight_scale, block_size,
+                input_2d.dtype)
         else:
             output = cutlass_scaled_mm(q_input, weight, x_scale, weight_scale,
                                        block_size, input_2d.dtype, False)
