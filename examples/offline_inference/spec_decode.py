@@ -3,6 +3,7 @@
 import ast
 import json
 import pathlib
+import itertools
 
 from transformers import AutoTokenizer
 
@@ -86,6 +87,8 @@ def parse_args():
     )
     parser.add_argument("--num-spec-tokens", type=int, default=2)
     parser.add_argument("--spec-token-tree", type=str, default=None)
+    parser.add_argument("--spec-token-tree-depth", type=int, default=None)
+    parser.add_argument("--spec-token-tree-branching", type=int, default=None)
     parser.add_argument("--prompt-lookup-max", type=int, default=5)
     parser.add_argument("--prompt-lookup-min", type=int, default=2)
     parser.add_argument("--tp", type=int, default=1)
@@ -104,7 +107,6 @@ def parse_args():
     parser.add_argument("--draft-vocab-frequency-keep-threshold", type=str, default=None)
     parser.add_argument("--compilation-config", type=str, default="")
     return parser.parse_args()
-
 
 def main():
     args = parse_args()
@@ -133,12 +135,26 @@ def main():
     else:
         prompts = get_custom_mm_prompts(args.num_prompts)
 
-    spec_token_tree_str = None
     if args.spec_token_tree is not None:
+        assert args.spec_token_tree_depth is None and args.spec_token_tree_branching is None, \
+            "If using spec_token_tree, cannot also use spec token tree depth+branching"
         spec_token_tree = ast.literal_eval(args.spec_token_tree)
         assert args.num_spec_tokens == len(spec_token_tree), f'expected `len(spec_token_tree) == num_spec_tokens` but got {len(spec_token_tree)=} and {args.num_spec_tokens=}'
         spec_token_tree_str = str(sorted(spec_token_tree, key=lambda t: (len(t), t)))
-        print(spec_token_tree_str)
+    elif args.spec_token_tree_depth is not None and args.spec_token_tree_branching is not None:
+        assert args.spec_token_tree is None, "If using spec token tree depth+branching, cannot also use spec_token_tree"
+        spec_token_tree = []
+        depth, branching = args.spec_token_tree_depth, args.spec_token_tree_branching
+        for d in range(1, depth + 1):
+            for path in itertools.product(range(branching), repeat=d):
+                spec_token_tree.append(path)
+        # override num_spec_tokens
+        args.num_spec_tokens = len(spec_token_tree)
+        print(f'Overriding num_spec_tokens to be {args.num_spec_tokens}')
+        spec_token_tree_str = str(sorted(spec_token_tree, key=lambda t: (len(t), t)))
+    else:
+        spec_token_tree_str = None
+    print(spec_token_tree_str)
 
     # vanilla inference if num_spec_tokens == 0
     if args.num_spec_tokens == 0:
