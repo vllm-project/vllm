@@ -12,7 +12,6 @@ import pytest
 import torch
 
 from vllm import LLM, envs
-from vllm.platforms import current_platform
 from vllm.v1.engine.llm_engine import LLMEngine as LLMEngineV1
 
 from ..conftest import HfRunner, VllmRunner
@@ -63,6 +62,8 @@ def _fix_prompt_embed_outputs(
 @pytest.mark.parametrize("backend", ["FLASH_ATTN"])
 @pytest.mark.parametrize("max_tokens", [5])
 @pytest.mark.parametrize("enforce_eager", [False])
+@pytest.mark.parametrize("async_scheduling", [True, False])
+@pytest.mark.parametrize("model_executor", ["uni", "mp"])
 @pytest.mark.parametrize("enable_prompt_embeds", [True, False])
 def test_models(
     monkeypatch: pytest.MonkeyPatch,
@@ -71,6 +72,8 @@ def test_models(
     backend: str,
     max_tokens: int,
     enforce_eager: bool,
+    async_scheduling: bool,
+    model_executor: str,
     enable_prompt_embeds: bool,
 ) -> None:
 
@@ -78,11 +81,13 @@ def test_models(
             "VLLM_USE_V1") and envs.VLLM_USE_V1:
         pytest.skip("enable_prompt_embeds is not supported in v1.")
 
-    if backend == "FLASHINFER" and current_platform.is_rocm():
-        pytest.skip("Flashinfer does not support ROCm/HIP.")
+    if not envs.VLLM_USE_V1:
+        if async_scheduling:
+            pytest.skip("async_scheduling only supported in v1.")
+        if model_executor != "uni":
+            pytest.skip("only test uniproc executor for v0.")
 
-    if backend in ("XFORMERS",
-                   "FLASHINFER") and model == "google/gemma-2-2b-it":
+    if backend == "XFORMERS" and model == "google/gemma-2-2b-it":
         pytest.skip(
             f"{backend} does not support gemma2 with full context length.")
 
@@ -103,11 +108,15 @@ def test_models(
                     prompt_embeds = hf_model.get_prompt_embeddings(
                         example_prompts)
 
-        with VllmRunner(model,
-                        max_model_len=8192,
-                        enforce_eager=enforce_eager,
-                        enable_prompt_embeds=enable_prompt_embeds,
-                        gpu_memory_utilization=0.7) as vllm_model:
+        with VllmRunner(
+                model,
+                max_model_len=8192,
+                enforce_eager=enforce_eager,
+                enable_prompt_embeds=enable_prompt_embeds,
+                gpu_memory_utilization=0.7,
+                async_scheduling=async_scheduling,
+                distributed_executor_backend=model_executor,
+        ) as vllm_model:
             if enable_prompt_embeds:
                 vllm_outputs = vllm_model.generate_greedy(
                     prompt_embeds, max_tokens)
@@ -141,8 +150,6 @@ def test_models(
         ("meta-llama/Llama-3.2-1B-Instruct", "mp", "", "L4", {}),
         ("distilbert/distilgpt2", "ray", "", "A100", {}),
         ("distilbert/distilgpt2", "mp", "", "A100", {}),
-        ("distilbert/distilgpt2", "mp", "FLASHINFER", "A100", {}),
-        ("meta-llama/Meta-Llama-3-8B", "ray", "FLASHINFER", "A100", {}),
     ])
 @pytest.mark.parametrize("enable_prompt_embeds", [True, False])
 def test_models_distributed(
