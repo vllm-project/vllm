@@ -44,6 +44,7 @@ model_tp_dict = {
     "Qwen/Qwen2-VL-72B-Instruct": [1, 2],
     "Qwen/Qwen2.5-VL-72B-Instruct": [1, 2],
     "Qwen/Qwen3-VL-4B-Instruct": [1, 2],
+    "Qwen/Qwen3-VL-30B-A3B-Instruct": [1, 2],
     "zai-org/GLM-4.1V-9B-Thinking": [1, 2],
 }
 
@@ -119,6 +120,7 @@ def test_mrope(model_name, tp_size, dtype, atol, rtol, num_tokens):
     unroll_model_tp_dict({
         "Qwen/Qwen2-VL-7B-Instruct": [1, 2],
         "Qwen/Qwen3-VL-4B-Instruct": [1, 2],
+        "Qwen/Qwen3-VL-30B-A3B-Instruct": [1, 2],
         "zai-org/GLM-4.1V-9B-Thinking": [1, 2]
     }))
 @pytest.mark.parametrize("dtype, atol, rtol", dtype_atol_rtol_list)
