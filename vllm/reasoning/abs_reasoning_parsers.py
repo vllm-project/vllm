@@ -78,6 +78,7 @@ class ReasoningParser:
     def extract_reasoning_content(
         self,
         model_output: str,
+        prompt_token_ids: list[int],
         request: Union[ChatCompletionRequest, ResponsesRequest],
     ) -> tuple[Optional[str], Optional[str]]:
         """

@@ -313,10 +313,6 @@ class OpenAIServingChat(OpenAIServing):
 
         assert len(generators) == 1
         result_generator, = generators
-        prompt = request_prompts[0]
-        if request.vllm_xargs is None:
-            request.vllm_xargs = {}
-        request.vllm_xargs["rendered_prompt"] = prompt
 
         # Streaming response
         if request.stream:
@@ -817,6 +813,7 @@ class OpenAIServingChat(OpenAIServing):
                             _, content = \
                                 reasoning_parser.extract_reasoning_content(
                                     current_text,
+                                    res.prompt_token_ids,
                                     request
                                 )
                         else:
@@ -1245,7 +1242,9 @@ class OpenAIServingChat(OpenAIServing):
                 # tool calls are extracted exclusively from the content.
                 reasoning_content, content = (
                     reasoning_parser.extract_reasoning_content(
-                        output.text, request=request))
+                        output.text,
+                        final_res.prompt_token_ids,
+                        request=request))
                 if not request.include_reasoning:
                     reasoning_content = None
             else:

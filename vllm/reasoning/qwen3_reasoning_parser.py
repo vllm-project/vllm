@@ -66,6 +66,7 @@ class Qwen3ReasoningParser(ReasoningParser):
         ]
 
         self.buffered_delta_text = ""
+        self.cached_prompt_tokens = []
         self.cached_prompt = ""
         self.cached_outputs = []
 
@@ -100,6 +101,7 @@ class Qwen3ReasoningParser(ReasoningParser):
 
     def _get_decoded(self, input_ids: list[int], is_prompt: bool) -> str:
         if is_prompt:
+            self.cached_prompt_tokens = input_ids
             if not self.cached_prompt:
                 self.cached_prompt = self.model_tokenizer.decode(input_ids)
             return self.cached_prompt
@@ -143,12 +145,15 @@ class Qwen3ReasoningParser(ReasoningParser):
             content = parts[2] if parts[2] else parts[0]
             return self.model_tokenizer.encode(content)
 
-    def _prompt_ends_with_start_token(self,
-                                      request: ChatCompletionRequest) -> bool:
-        if request.vllm_xargs is not None:
-            prompt = request.vllm_xargs.get("rendered_prompt", "").strip()
-            return prompt.endswith(self.think_start_token)
-        return False
+    def _prompt_contains_start_token(self) -> bool:
+        assert len(self.cached_prompt_tokens) > 0
+
+        start_idx, _ = find_subsequence(self.think_start_token_ids,
+                                        self.cached_prompt_tokens)
+        if start_idx != -1:
+            return True
+        inputs = self._get_decoded(self.cached_prompt_tokens, True)
+        return self.think_start_token in inputs
 
     def extract_reasoning_content_streaming(
         self,
@@ -185,7 +190,7 @@ class Qwen3ReasoningParser(ReasoningParser):
             return None
 
         if self.think_start_token in previous_text or \
-            self._prompt_ends_with_start_token(request):
+            self._prompt_contains_start_token():
             if self.think_end_token in delta_text:
                 # <think> in previous, </think> in delta,
                 # extract reasoning content
@@ -236,9 +241,11 @@ class Qwen3ReasoningParser(ReasoningParser):
             tuple[Optional[str], Optional[str]]: reasoning content and content
         """
 
+        self.cached_prompt_tokens = prompt_token_ids
+
         # Check if the model output contains the <think> and </think> tokens.
         if ((self.think_start_token not in model_output
-             and not self._prompt_ends_with_start_token(request))
+             and not self._prompt_contains_start_token())
                 or self.think_end_token not in model_output):
             return None, model_output
         # Check if the <think> is present in the model output, remove it

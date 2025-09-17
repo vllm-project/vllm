@@ -81,6 +81,7 @@ class GptOssReasoningParser(ReasoningParser):
     def extract_reasoning_content(
         self,
         model_output: str,
+        prompt_token_ids: list[int],
         request: ChatCompletionRequest,
     ) -> tuple[Optional[str], Optional[str]]:
         raise NotImplementedError(

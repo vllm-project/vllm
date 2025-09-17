@@ -296,6 +296,7 @@ class OpenAIServingResponses(OpenAIServing):
                         context = HarmonyContext(messages, available_tools)
                 else:
                     context = SimpleContext()
+                context.set_prompt(request_prompts[i])
                 generator = self._generate_with_builtin_tools(
                     request_id=request.request_id,
                     request_prompt=request_prompts[i],
@@ -600,6 +601,7 @@ class OpenAIServingResponses(OpenAIServing):
         request: ResponsesRequest,
         final_output: CompletionOutput,
         tokenizer: AnyTokenizer,
+        context: ConversationContext,
     ) -> list[ResponseOutputItem]:
         if self.reasoning_parser:
             try:
@@ -609,8 +611,8 @@ class OpenAIServingResponses(OpenAIServing):
                 raise e
 
             reasoning_content, content = (
-                reasoning_parser.extract_reasoning_content(final_output.text,
-                                                           request=request))
+                reasoning_parser.extract_reasoning_content(
+                    final_output.text, context.get_prompt(), request=request))
         else:
             reasoning_content = None
             content = final_output.text
