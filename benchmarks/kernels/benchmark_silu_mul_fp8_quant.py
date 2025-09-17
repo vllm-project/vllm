@@ -198,14 +198,16 @@ def benchmark(
         y = torch.rand((E, T, 2 * H), dtype=torch.bfloat16, device="cuda").contiguous()
 
         if gen_strategy == "uniform":
-            r = torch.rand(size=(E,), device="cuda")
-            r /= r.sum()
-            r *= total_tokens
-            tokens_per_expert = r.int()
-            tokens_per_expert = torch.minimum(
-                tokens_per_expert,
-                torch.ones((E,), device=r.device, dtype=torch.int) * T,
-            )
+
+            def generate_expert_loads(n_e, total_tokens, ratio, device="cuda"):
+                mean = total_tokens // n_e
+                min_max = mean // ratio
+                e = torch.ones(size=(E,), dtype=torch.int64, device=device) * mean
+                e[0] = min_max
+                e[1:] += int((min_max - mean) // (n_e - 1))
+                return e
+
+            tokens_per_expert = generate_expert_loads(E, total_tokens, 0.7, "cuda")
         elif gen_strategy == "max_t":
             tokens_per_expert = torch.empty(size=(E,), dtype=torch.int32, device="cuda")
             tokens_per_expert.fill_(total_tokens / E)
@@ -443,15 +445,10 @@ for id, strategy in enumerate(strategies):
     all_ratios = []
 
     for E, T, H in configs:
-        total_tokens_config = [
-            8 * E,
-            16 * E,
-            32 * E,
-            64 * E,
-            128 * E,
-            256 * E,
-            512 * E,
-        ]
+        total_tokens_config = []
+        for i in [8, 16, 32, 64, 128, 256, 512]:
+            if i <= T:
+                total_tokens_config.append(i * E)
         config_x_axis.append(total_tokens_config)
 
         cuda_results = []
@@ -463,7 +460,7 @@ for id, strategy in enumerate(strategies):
             config_labels.append(config_label)
 
             # CUDA kernel results
-            time_ms_cuda, gflops, gbps, perc = benchmark(
+            time_ms_silu_v2, gflops, gbps, perc = benchmark(
                 silu_mul_fp8_quant_deep_gemm_cuda,
                 E,
                 T,
@@ -473,10 +470,10 @@ for id, strategy in enumerate(strategies):
                 num_warmups=num_warmups,
                 gen_strategy=strategy,
             )
-            cuda_results.append((time_ms_cuda, gflops, gbps, perc))
+            cuda_results.append((time_ms_silu_v2, gflops, gbps, perc))
 
             # Baseline results
-            time_ms_triton, gflops, gbps, perc = benchmark(
+            time_ms_silu_v1, gflops, gbps, perc = benchmark(
                 silu_v1,
                 E,
                 T,
@@ -486,8 +483,8 @@ for id, strategy in enumerate(strategies):
                 num_warmups=num_warmups,
                 gen_strategy=strategy,
             )
-            baseline_results.append((time_ms_triton, gflops, gbps, perc))
-            ratios.append(time_ms_triton / time_ms_cuda)
+            baseline_results.append((time_ms_silu_v1, gflops, gbps, perc))
+            ratios.append(time_ms_silu_v1 / time_ms_silu_v2)
 
             print(f"Completed: {config_label}")
         all_cuda_results.append(cuda_results)

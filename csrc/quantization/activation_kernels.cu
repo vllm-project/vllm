@@ -213,8 +213,8 @@ __device__ __forceinline__ int __search(int idx, int n,
   }
 }
 
-template <typename fp8_type, int THREADS, int BLOCK_COUNT, typename Idx_t,
-          bool USE_UE8M0, int GROUP_SIZE = 128, int NUM_STAGES = 3>
+template <typename fp8_type, int THREADS, typename Idx_t, bool USE_UE8M0,
+          int GROUP_SIZE = 128, int NUM_STAGES = 3>
 __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     const __nv_bfloat16* __restrict__ _input, fp8_type* __restrict__ _y_q,
     float* __restrict__ _y_s, const int64_t* __restrict__ expert_offsets,
@@ -243,7 +243,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   // expert_counts[i], with the size of chunk being
   // (n_tokens / NUM_PARALLEL_TOKENS) + residual, instead of
   // updiv(n_tokens, NUM_PARALLEL_TOKENS) for better scheduling.
-  if (total_tokens < BLOCK_COUNT) {
+  if (total_tokens < gridDim.x) {
     // Specialize this, but can be likely fused.
 
     if (blockIdx.x >= total_tokens) {
@@ -253,8 +253,8 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     tokens_lower = blockIdx.x;
     tokens_upper = blockIdx.x + 1;
   } else {
-    auto chunk_size = total_tokens / BLOCK_COUNT;
-    auto residual = total_tokens - chunk_size * BLOCK_COUNT;
+    auto chunk_size = total_tokens / gridDim.x;
+    auto residual = total_tokens - chunk_size * gridDim.x;
     auto calc_id = [&](int32_t id) {
       if (id < residual) {
         return min(total_tokens, id * (chunk_size + 1));
@@ -806,28 +806,31 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
 
   static constexpr int GROUP_SIZE = 128;
 
-  static constexpr int NUM_STAGES = 5;
-
-  static constexpr int SMS = 2048 * 8;  // Hopper
   static constexpr int THREAD_COUNT = 256;
-  static constexpr int BLOCK_COUNT = SMS;
+  static constexpr int UPPER_BLOCK_COUNT = 1024 * 16;  // Hopper
+  static constexpr int WARP_COUNT = THREAD_COUNT / 32;
+
+  int64_t BLOCK_COUNT =
+      min((int64_t)UPPER_BLOCK_COUNT, total_tokens / WARP_COUNT);
 
   static constexpr int NUM_WARPS = THREAD_COUNT / WARP_SIZE;
+
+  static constexpr int NUM_STAGES = (24000 / (128 * 2 * NUM_WARPS * 2)) - 1;
 
   static constexpr int max_shared_mem_bytes =
       128 * 2 * NUM_STAGES * NUM_WARPS * 2;  // 2 bytes
 
   dim3 grid(BLOCK_COUNT), block(THREAD_COUNT);
 
-#define KERNEL_FN                                                             \
-  vllm::silu_mul_fp8_quant_deep_gemm_kernel<                                  \
-      fp8_t, THREAD_COUNT, BLOCK_COUNT, Idx_t, false, GROUP_SIZE, NUM_STAGES> \
-      <<<grid, block, max_shared_mem_bytes, stream>>>(                        \
-          reinterpret_cast<__nv_bfloat16*>(input.data_ptr()),                 \
-          (fp8_t*)y_q.data_ptr(), y_s.data_ptr<float>(),                      \
-          reinterpret_cast<int64_t*>(counts.data_ptr()), total_tokens, E, T,  \
-          H, stride_i_e, stride_i_t, stride_i_h, stride_yq_e, stride_yq_t,    \
-          stride_yq_h, stride_ys_e, stride_ys_t, stride_ys_g,                 \
+#define KERNEL_FN                                                              \
+  vllm::silu_mul_fp8_quant_deep_gemm_kernel<fp8_t, THREAD_COUNT, Idx_t, false, \
+                                            GROUP_SIZE, NUM_STAGES>            \
+      <<<grid, block, max_shared_mem_bytes, stream>>>(                         \
+          reinterpret_cast<__nv_bfloat16*>(input.data_ptr()),                  \
+          (fp8_t*)y_q.data_ptr(), y_s.data_ptr<float>(),                       \
+          reinterpret_cast<int64_t*>(counts.data_ptr()), total_tokens, E, T,   \
+          H, stride_i_e, stride_i_t, stride_i_h, stride_yq_e, stride_yq_t,     \
+          stride_yq_h, stride_ys_e, stride_ys_t, stride_ys_g,                  \
           stride_counts_e);
 
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
