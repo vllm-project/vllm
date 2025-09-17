@@ -364,7 +364,6 @@ class Fp8LinearOp:
             if has_flashinfer() and current_platform.has_device_capability(
                     100):
                 self.preferred_backend = "flashinfer"
-                # Dense GEMM will use FlashInfer; register for autotune warmup
                 register_flashinfer_kernel_autotune(
                     reason="FP8 dense GEMM (Fp8LinearOp)")
             else:
