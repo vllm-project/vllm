@@ -237,6 +237,12 @@ class KVConnectorBase_V1(ABC):
         """
         return None
 
+    def get_kv_connector_stats(self) -> Optional["KVConnectorStats"]:
+        """
+        Get the KV connector stats collected during the last interval.
+        """
+        return None
+
     # ==============================
     # Scheduler-side methods
     # ==============================
@@ -378,12 +384,5 @@ class KVConnectorBase_V1(ABC):
         KVConnectorStats resolution method. This method allows dynamically 
         registered connectors to return their own KVConnectorStats object,
         which can implement custom aggregation logic on the data dict.
-        """
-        return None
-
-    def get_kv_connector_stats(self) -> Optional["KVConnectorStats"]:
-        """
-        Get the KV transfer stats for the connector collected during the last 
-        interval.
         """
         return None
