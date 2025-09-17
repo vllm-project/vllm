@@ -522,6 +522,7 @@ class OpenAIServingChat(OpenAIServing):
             reasoning_end_arr = [False] * num_choices
         else:
             all_previous_token_ids = None
+            reasoning_end_arr = None
 
         try:
             if self.reasoning_parser:
@@ -807,7 +808,8 @@ class OpenAIServingChat(OpenAIServing):
                         fn_name_returned = function_name_returned[i]
                         output_token_ids = as_list(output.token_ids)
 
-                        if not reasoning_end_arr[i] and \
+                        if self.reasoning_parser is not None and \
+                                not reasoning_end_arr[i] and \
                                 res.prompt_token_ids and \
                                 reasoning_parser.is_reasoning_end(res.prompt_token_ids):
                             reasoning_end_arr[i] = True
@@ -830,16 +832,11 @@ class OpenAIServingChat(OpenAIServing):
                                     current_text = delta_message.content
                                     delta_message.content = None
                                 else:
+                                    #reasoning ended
                                     current_text = ""
                         else:
-                            if self.reasoning_parser:
-                                _, content = \
-                                    reasoning_parser.extract_reasoning_content(
-                                        current_text,
-                                        request
-                                    )
-                            else:
-                                content = current_text
+                            #either finished reasoning or no reasoning at all
+                            content = current_text
 
                             delta_message, function_name_returned[i] = (
                                 self.extract_tool_call_required_streaming(
@@ -853,9 +850,6 @@ class OpenAIServingChat(OpenAIServing):
                                     is not None):
                                 history_tool_call_cnt += 1
                                 tools_streamed[i] = True
-
-                        # update the previous values for the next iteration
-                        previous_texts[i] = current_text
 
                     # handle streaming deltas for tools with "auto" tool choice
                     # and reasoning parser
