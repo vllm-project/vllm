@@ -12,7 +12,6 @@ from tests.v1.engine.utils import (NUM_PROMPT_LOGPROBS_UNDER_TEST,
                                    generate_dummy_prompt_logprobs_tensors,
                                    generate_dummy_sample_logprobs)
 from vllm.engine.arg_utils import EngineArgs
-from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 
 from ...distributed.conftest import publisher_config, random_port  # noqa: F401
 
@@ -24,7 +23,7 @@ EngineCorePromptLogprobsType = tuple[torch.Tensor, torch.Tensor]
 
 def _build_test_vectors_no_logprobs() -> DummyOutputProcessorTestVectors:
     """Generate output processor dummy test vectors, without logprobs
-    
+
     Returns:
       DummyOutputProcessorTestVectors instance with no logprobs
     """
@@ -48,9 +47,6 @@ def _build_test_vectors_no_logprobs() -> DummyOutputProcessorTestVectors:
     ]
     return DummyOutputProcessorTestVectors(
         tokenizer=tokenizer,
-        tokenizer_group=init_tokenizer_from_configs(
-            vllm_config.model_config, vllm_config.scheduler_config,
-            vllm_config.lora_config),
         vllm_config=vllm_config,
         full_tokens=[tokenizer(text).input_ids for text in FULL_STRINGS],
         prompt_tokens=prompt_tokens,
@@ -68,7 +64,7 @@ def _build_test_vectors_no_logprobs() -> DummyOutputProcessorTestVectors:
 @pytest.fixture
 def dummy_test_vectors() -> DummyOutputProcessorTestVectors:
     """Generate output processor dummy test vectors, with logprobs
-    
+
     Returns:
       DummyOutputProcessorTestVectors instance with logprobs
     """

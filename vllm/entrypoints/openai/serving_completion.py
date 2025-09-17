@@ -127,8 +127,7 @@ class OpenAIServingCompletion(OpenAIServing):
             if self.model_config.skip_tokenizer_init:
                 tokenizer = None
             else:
-                tokenizer = await self.engine_client.get_tokenizer(lora_request
-                                                                   )
+                tokenizer = await self.engine_client.get_tokenizer()
             renderer = self._get_renderer(tokenizer)
 
             engine_prompts = await renderer.render_prompt_and_embeds(
