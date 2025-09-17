@@ -39,7 +39,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.mamba_cache import MambaCacheParams
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils import cdiv, direct_register_custom_op
+from vllm.utils import direct_register_custom_op
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 
 # Added by the IBM Team, 2024
@@ -630,45 +630,25 @@ class MambaMixer2(MambaBase, CustomOp):
                                  if has_prefill else None)
 
         if envs.VLLM_USE_V1 and cache_enabled:
-            # Additional variables used by caching logic:
-            seq_lens_pending = (
-                torch.roll(attn_metadata.query_start_loc, -1, -1) -
-                attn_metadata.query_start_loc)[:-1]
-            seq_lens_completed = (attn_metadata.seq_lens - seq_lens_pending)
-            last_computed_token_block_offset = \
-                seq_lens_completed % mamba_block_size
-
-            # Indices: last_computed <= current_first <= current_last
-            # Cases:
-            #  last_computed == current_first  if last state was partially
-            #                                  computed and needs to be updated
-            #  current_first == current_last   if no block crossing occurs, and
-            #                                  only one state will be stored
-            # 0th based indexing leads to "-1" -> e.g. 16 computed -> state[15]:
-            current_last_token_block_idx = cdiv(
-                seq_lens_completed + seq_lens_pending, mamba_block_size) - 1
-            current_first_token_block_idx = cdiv(seq_lens_completed + 1,
-                                                 mamba_block_size) - 1
-            last_computed_token_block_idx = cdiv(seq_lens_completed,
-                                                 mamba_block_size) - 1
-            # -1 in case it's non-computed and causes later issues with indexing
-            last_computed_token_block_idx = \
-                last_computed_token_block_idx.clamp(min=0)
-
             # Split decodes and prefills:
             seq_lens_completed_d, seq_lens_completed_p = torch.split(
-                seq_lens_completed, [num_decodes, num_prefills], dim=0)
+                attn_metadata.seq_lens_completed, [num_decodes, num_prefills],
+                dim=0)
             last_state_idx_d, last_state_idx_p = torch.split(
-                last_computed_token_block_idx, [num_decodes, num_prefills],
+                attn_metadata.last_computed_token_block_idx,
+                [num_decodes, num_prefills],
                 dim=0)
             last_computed_offset_d, last_computed_offset_p = torch.split(
-                last_computed_token_block_offset, [num_decodes, num_prefills],
+                attn_metadata.last_computed_token_block_offset,
+                [num_decodes, num_prefills],
                 dim=0)
             current_first_idx_d, current_first_idx_p = torch.split(
-                current_first_token_block_idx, [num_decodes, num_prefills],
+                attn_metadata.current_first_token_block_idx,
+                [num_decodes, num_prefills],
                 dim=0)
             current_last_idx_d, current_last_idx_p = torch.split(
-                current_last_token_block_idx, [num_decodes, num_prefills],
+                attn_metadata.current_last_token_block_idx,
+                [num_decodes, num_prefills],
                 dim=0)
 
         # Preallocate output tensor to avoid memcpy cost for merging prefill
@@ -848,6 +828,8 @@ class MambaMixer2(MambaBase, CustomOp):
                     # e.g. 256 // 256 -> 1 completed --> store chunk[2] (skip 2)
                     # e.g. 10 // 256 -> 0 completed --> store chunk[3] (skip 3)
                     chunk_stride = mamba_block_size // chunk_size
+                    last_computed_token_block_offset = \
+                        attn_metadata.last_computed_token_block_offset
                     first_aligned_chunk = chunk_stride - 1 \
                       - last_computed_token_block_offset[seq_idx] // chunk_size
                     from_where = states[
