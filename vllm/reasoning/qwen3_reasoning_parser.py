@@ -140,7 +140,8 @@ class Qwen3ReasoningParser(ReasoningParser):
         else:
             full_content = self.model_tokenizer.decode(input_ids)
             parts = full_content.partition(self.think_end_token)
-            return parts[2] if parts[2] else parts[0]
+            content = parts[2] if parts[2] else parts[0]
+            return self.model_tokenizer.encode(content)
 
     def _prompt_ends_with_start_token(self,
                                       request: ChatCompletionRequest) -> bool:
