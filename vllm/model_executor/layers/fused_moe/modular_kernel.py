@@ -966,8 +966,8 @@ class FusedMoEModularKernel(torch.nn.Module):
             if self.shared_experts is not None:
                 shared_output = self.shared_experts(a1)
 
-            if recv_hook is not None:
-                dbo_register_recv_hook(recv_hook)
+            assert recv_hook is not None
+            dbo_register_recv_hook(recv_hook)
             dbo_yield()
             if not dbo_enabled():
                 recv_hook()
