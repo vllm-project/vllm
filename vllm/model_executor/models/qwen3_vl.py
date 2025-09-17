@@ -272,10 +272,6 @@ class Qwen3_VisionTransformer(nn.Module):
         self.temporal_patch_size = vision_config.temporal_patch_size
         self.deepstack_visual_indexes = vision_config.deepstack_visual_indexes
         self.use_data_parallel = use_data_parallel
-        # Expose config and merged output dim for DP utils compatibility
-        self.config = vision_config
-        self.out_hidden_size = (vision_config.out_hidden_size *
-                                (1 + len(self.deepstack_visual_indexes)))
 
         self.patch_embed = Qwen3_VisionPatchEmbed(
             patch_size=self.patch_size,
