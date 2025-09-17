@@ -388,6 +388,7 @@ class EngineArgs:
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
     io_processor_plugin: Optional[str] = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
+    video_pruning_rate: float = MultiModalConfig.video_pruning_rate
     # LoRA fields
     enable_lora: bool = False
     enable_lora_bias: bool = LoRAConfig.bias_enabled
@@ -466,8 +467,6 @@ class EngineArgs:
 
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
     pt_load_map_location: str = LoadConfig.pt_load_map_location
-
-    video_pruning_rate: float = MultiModalConfig.video_pruning_rate
 
     # DEPRECATED
     enable_multimodal_encoder_data_parallel: bool = False
