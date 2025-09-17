@@ -46,6 +46,7 @@ class AdapterLRUCache(LRUCache[int, T]):
         self.deactivate_fn(key)
         return super()._on_remove(key, value)
 
+
 _GLOBAL_LORA_ID = 0
 
 
@@ -365,7 +366,7 @@ class LoRAModelManager:
         )
 
         self.supported_lora_modules = get_supported_lora_modules(self.model)
-        assert self.supported_lora_modules, "No supported LoRA modules found in"\
+        assert self.supported_lora_modules, "No supported LoRA modules found in"
         f" {self.model.__class__.__name__}."
 
         self.packed_modules_mapping = get_packed_modules_mapping(self.model)

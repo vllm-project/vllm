@@ -167,8 +167,7 @@ class WorkerLoRAManager:
         existing_adapters = self.list_adapters()
         models_map = {
             adapter_request.adapter_id: adapter_request
-            for adapter_request in adapter_requests
-            if adapter_request
+            for adapter_request in adapter_requests if adapter_request
         }
         if len(models_map) > self._adapter_manager.adapter_slots:
             raise RuntimeError(
