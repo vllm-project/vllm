@@ -48,9 +48,6 @@ def _triton_mrope_forward(
     # ####################################################################
     # Note: cos and sin now have shape (3, num_tokens, head_dim // 2)
 
-    t_end = mrope_section_t
-    h_end = t_end + mrope_section_h
-
     # Updated stride calculation for half head_dim
     half_rd = rd // 2
     t_cos = cos + pid * half_rd
@@ -67,7 +64,9 @@ def _triton_mrope_forward(
         h_mask = (cos_offsets % 3) == 1
         w_mask = (cos_offsets % 3) == 2
     else:
-        t_mask = cos_offsets < t_end
+        t_end = mrope_section_t
+        h_end = t_end + mrope_section_h
+        t_mask = cos_offsets < mrope_section_t
         h_mask = (t_end <= cos_offsets) & (cos_offsets < h_end)
         w_mask = (h_end <= cos_offsets) & (cos_offsets < half_rd)
 
