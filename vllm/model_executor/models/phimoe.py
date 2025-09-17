@@ -453,7 +453,6 @@ class PhiMoEModel(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
 
         # No additional vocabulary support for LoRA
         self.vocab_size = config.vocab_size

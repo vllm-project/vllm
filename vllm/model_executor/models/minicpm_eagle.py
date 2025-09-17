@@ -145,7 +145,6 @@ class EagleMiniCPMModel(nn.Module):
         config = vllm_config.speculative_config.draft_model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
 
         self.config = config
         self.cache_config = cache_config

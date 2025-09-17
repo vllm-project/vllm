@@ -324,7 +324,6 @@ class GraniteMoeHybridModel(nn.Module):
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
 
         self.config = config
         # No additional vocabulary support for LoRA
