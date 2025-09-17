@@ -123,6 +123,110 @@ def _triton_qwen2vl_mrope_forward(
     tl.store(k_ptr + second_half_k_offsets, new_k_tile_2, mask=second_k_mask)
 
 
+@triton.jit
+def _triton_interleaved_mrope_forward(
+    q_ptr,
+    k_ptr,
+    cos,
+    sin,
+    num_tokens,
+    n_qh: tl.constexpr,
+    n_kh: tl.constexpr,
+    hd: tl.constexpr,
+    rd: tl.constexpr,
+    pad_n_qh: tl.constexpr,
+    pad_n_kh: tl.constexpr,
+    pad_hd: tl.constexpr,
+    mrope_section_t: tl.constexpr,
+    mrope_section_h: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    # locate start address
+    q_ptr = q_ptr + pid * (n_qh * hd)
+    k_ptr = k_ptr + pid * (n_kh * hd)
+
+    # ####################################################################
+    # get the cos(mθ_{i...d/2}) and sin(mθ_{i...d/2}) for token position
+    # m of this program instance
+    # ####################################################################
+    # Note: cos and sin now have shape (3, num_tokens, head_dim // 2)
+
+    t_end = mrope_section_t
+    h_end = t_end + mrope_section_h
+
+    # Updated stride calculation for half head_dim
+    half_rd = rd // 2
+    t_cos = cos + pid * half_rd
+    h_cos = t_cos + num_tokens * half_rd
+    w_cos = h_cos + num_tokens * half_rd
+    t_sin = sin + pid * half_rd
+    h_sin = t_sin + num_tokens * half_rd
+    w_sin = h_sin + num_tokens * half_rd
+
+    # Updated offsets for half head_dim
+    cos_offsets = tl.arange(0, pad_hd // 2) * 2
+    t_mask = cos_offsets < t_end
+    h_mask = (t_end <= cos_offsets) & (cos_offsets < h_end)
+    w_mask = (h_end <= cos_offsets) & (cos_offsets < half_rd)
+
+    t_cos_row = tl.load(t_cos + cos_offsets, mask=t_mask, other=0)
+    h_cos_row = tl.load(h_cos + cos_offsets, mask=h_mask, other=0)
+    w_cos_row = tl.load(w_cos + cos_offsets, mask=w_mask, other=0)
+    t_sin_row = tl.load(t_sin + cos_offsets, mask=t_mask, other=0)
+    h_sin_row = tl.load(h_sin + cos_offsets, mask=h_mask, other=0)
+    w_sin_row = tl.load(w_sin + cos_offsets, mask=w_mask, other=0)
+
+    cos_row = t_cos_row + h_cos_row + w_cos_row
+    sin_row = t_sin_row + h_sin_row + w_sin_row
+
+    # ####################################################################
+    # Load the left and right half of q and k for the current
+    # program instance (i.e. for the current token) separately
+    # ####################################################################
+    # left half of the head
+    first_half_q_offsets = tl.arange(0, pad_n_qh)[:, None] * hd + tl.arange(
+        0, pad_hd // 2)[None, :]
+    first_half_k_offsets = tl.arange(0, pad_n_kh)[:, None] * hd + tl.arange(
+        0, pad_hd // 2)[None, :]
+    first_q_mask = (tl.arange(0, pad_n_qh)[:, None] < n_qh) & (tl.arange(
+        0, pad_hd // 2)[None, :] < rd // 2)
+    first_k_mask = (tl.arange(0, pad_n_kh)[:, None] < n_kh) & (tl.arange(
+        0, pad_hd // 2)[None, :] < rd // 2)
+
+    q_tile_1 = tl.load(q_ptr + first_half_q_offsets,
+                       mask=first_q_mask,
+                       other=0).to(sin_row.dtype)
+    k_tile_1 = tl.load(k_ptr + first_half_k_offsets,
+                       mask=first_k_mask,
+                       other=0).to(sin_row.dtype)
+
+    # right half of the head
+    second_half_q_offsets = first_half_q_offsets + (rd // 2)
+    second_half_k_offsets = first_half_k_offsets + (rd // 2)
+    second_q_mask = first_q_mask
+    second_k_mask = first_k_mask
+
+    q_tile_2 = tl.load(q_ptr + second_half_q_offsets,
+                       mask=second_q_mask,
+                       other=0).to(sin_row.dtype)
+    k_tile_2 = tl.load(k_ptr + second_half_k_offsets,
+                       mask=second_k_mask,
+                       other=0).to(sin_row.dtype)
+
+    # y = [x1, x2] * [cos, cos] + [-x2, x1] * [sin, sin]
+    # Since cos and sin are now half-size,
+    # we use the same cos_row and sin_row for both halves
+    new_q_tile_1 = q_tile_1 * cos_row - q_tile_2 * sin_row
+    tl.store(q_ptr + first_half_q_offsets, new_q_tile_1, mask=first_q_mask)
+    new_q_tile_2 = q_tile_2 * cos_row + q_tile_1 * sin_row
+    tl.store(q_ptr + second_half_q_offsets, new_q_tile_2, mask=second_q_mask)
+
+    new_k_tile_1 = k_tile_1 * cos_row - k_tile_2 * sin_row
+    tl.store(k_ptr + first_half_k_offsets, new_k_tile_1, mask=first_k_mask)
+    new_k_tile_2 = k_tile_2 * cos_row + k_tile_1 * sin_row
+    tl.store(k_ptr + second_half_k_offsets, new_k_tile_2, mask=second_k_mask)
+
+
 def triton_mrope(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -131,6 +235,7 @@ def triton_mrope(
     mrope_section: list[int],
     head_size: int,
     rotary_dim: int,
+    mrope_interleaved: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Qwen2VL mrope kernel.
 
@@ -158,7 +263,9 @@ def triton_mrope(
     cos = cos.contiguous()
     sin = sin.contiguous()
 
-    _triton_qwen2vl_mrope_forward[(n_row, )](
+    kernel = (_triton_interleaved_mrope_forward
+              if mrope_interleaved else _triton_qwen2vl_mrope_forward)
+    kernel[(n_row, )](
         q,
         k,
         cos,
@@ -201,7 +308,7 @@ class MRotaryEmbedding(RotaryEmbedding):
         is_neox_style: bool,
         dtype: torch.dtype,
         mrope_section: Optional[list[int]] = None,
-        mrope_interleaved: Optional[bool] = False,
+        mrope_interleaved: bool = False,
     ) -> None:
         # In Qwen2.5-VL, the maximum index value is related to the duration of
         # the input video. We enlarge max_position_embeddings to 4 times to get
@@ -282,10 +389,6 @@ class MRotaryEmbedding(RotaryEmbedding):
         assert positions.ndim == 1 or positions.ndim == 2
         assert key is not None
 
-        if self.mrope_interleaved:
-            # TODO: add triton implementation to support mrope-interleaved
-            return self.forward_native(positions, query, key)
-
         num_tokens = positions.shape[-1]
         cos_sin = self.cos_sin_cache[positions]
         cos, sin = cos_sin.chunk(2, dim=-1)
@@ -302,6 +405,7 @@ class MRotaryEmbedding(RotaryEmbedding):
                 self.mrope_section,
                 self.head_size,
                 self.rotary_dim,
+                self.mrope_interleaved,
             )
 
             return q.reshape(query_shape), k.reshape(key_shape)
