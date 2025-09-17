@@ -37,6 +37,7 @@ class TorchCompileWrapperWithCustomDispatcher:
 
         vllm_config = get_current_vllm_config()
         self.vllm_config = vllm_config
+        self.backend = None
         if compiled_callable is None:
             # default compilation settings
             # compiling the forward method
@@ -52,7 +53,7 @@ class TorchCompileWrapperWithCustomDispatcher:
                 fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
                 backend=backend,
                 options=options)
-
+            self.backend = backend
         self.compiled_callable = compiled_callable
         self.original_code_object = self.__class__.forward.__code__
         self.compiled_codes: list[CodeType] = []
