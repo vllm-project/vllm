@@ -3,6 +3,7 @@
 
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
+from itertools import islice
 from typing import Annotated, Any, Literal, Optional, Union
 
 import torch
@@ -914,7 +915,7 @@ class ChameleonModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        for layer in self.layers[self.start_layer:self.end_layer]:
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
@@ -959,6 +960,7 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.lm_head = ParallelLMHead(
             self.unpadded_vocab_size,
             config.hidden_size,
+            prefix=maybe_prefix(prefix, "lm_head"),
         )
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight

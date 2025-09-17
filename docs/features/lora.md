@@ -52,7 +52,7 @@ Check out <gh-file:examples/offline_inference/multilora_inference.py> for an exa
 ## Serving LoRA Adapters
 
 LoRA adapted models can also be served with the Open-AI compatible vLLM server. To do so, we use
-`--lora-modules {name}={path} {name}={path}` to specify each LoRA module when we kickoff the server:
+`--lora-modules {name}={path} {name}={path}` to specify each LoRA module when we kick off the server:
 
 ```bash
 vllm serve meta-llama/Llama-2-7b-hf \

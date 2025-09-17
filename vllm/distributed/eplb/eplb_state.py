@@ -337,11 +337,12 @@ class EplbState:
         Args:
             model (MixtureOfExperts): The MoE model.
             is_dummy (bool): If `True`, this is a dummy step and the load
-              metrics recorded in this forward pass will not count. Defaults
-              to `False`.
+                metrics recorded in this forward pass will not count.
+                Defaults to `False`.
             is_profile (bool): If `True`, perform a dummy rearrangement
-              with maximum communication cost. This is used in `profile_run`
-              to reserve enough memory for the communication buffer.
+                with maximum communication cost. This is used in
+                `profile_run` to reserve enough memory
+                for the communication buffer.
             log_stats (bool): If `True`, log the expert load metrics.
 
         # Stats
@@ -409,12 +410,14 @@ class EplbState:
             self.expert_rearrangement_step = 0
             self.rearrange(model)
 
-    def rearrange(self,
-                  model: MixtureOfExperts,
-                  is_profile: bool = False,
-                  execute_shuffle: bool = True,
-                  global_expert_load: Optional[torch.Tensor] = None,
-                  rank_mapping: Optional[dict[int, int]] = None) -> None:
+    def rearrange(
+        self,
+        model: MixtureOfExperts,
+        is_profile: bool = False,
+        execute_shuffle: bool = True,
+        global_expert_load: Optional[torch.Tensor] = None,
+        rank_mapping: Optional[dict[int,
+                                    int]] = None) -> Optional[torch.Tensor]:
         """
         Rearrange the experts according to the current load.
         """
@@ -548,6 +551,7 @@ class EplbState:
                 " (profile) " if is_profile else " ",
                 time_end - time_start,
             )
+        return None
 
     @staticmethod
     def recv_state() -> tuple[torch.Tensor, torch.Tensor]:

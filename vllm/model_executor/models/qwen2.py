@@ -25,6 +25,7 @@
 # limitations under the License.
 """Inference-only Qwen2 model compatible with HuggingFace weights."""
 from collections.abc import Iterable
+from itertools import islice
 from typing import Any, Optional, Union
 
 import torch
@@ -284,7 +285,7 @@ class Qwen2Model(nn.Module):
                  decoder_layer_type: type[nn.Module] = Qwen2DecoderLayer):
         super().__init__()
 
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_config.get_text_config()
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
@@ -358,7 +359,7 @@ class Qwen2Model(nn.Module):
 
         aux_hidden_states = []
         for idx, layer in enumerate(
-                self.layers[self.start_layer:self.end_layer]):
+                islice(self.layers, self.start_layer, self.end_layer)):
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states + residual)
             hidden_states, residual = layer(positions, hidden_states, residual)
