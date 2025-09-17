@@ -115,7 +115,6 @@ follow_imports = "silent"
 # move the directory here and remove it from tools/mypy.sh
 files = [
     "vllm/*.py",
-    "vllm/adapter_commons",
     "vllm/assets",
     "vllm/entrypoints",
     "vllm/core",
