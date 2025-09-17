@@ -4,6 +4,7 @@ import ast
 import json
 import uuid
 from collections.abc import Sequence
+from contextlib import suppress
 from typing import Any, Optional, Union
 from xml.parsers.expat import ParserCreate
 
@@ -1003,11 +1004,9 @@ class StreamingXMLToolCallParser:
         Each tool_call is treated as a separate XML document, 
         so we need to reset the parser after each tool_call.
         """
-        try:
-            # End current XML document
+
+        with suppress(Exception):
             self.parser.Parse('', True)
-        except Exception:
-            pass
 
         # recreate XML parser
         self.parser = ParserCreate()
@@ -1099,8 +1098,8 @@ class Qwen3CoderXMLToolParser(ToolParser):
         # to correctly output tool_call field
         if not delta_text and delta_token_ids:
             open_calls = current_text.count(
-                self.tool_call_start_token) - current_text.count(
-                    self.tool_call_end_token)
+                self.parser.tool_call_start_token) - current_text.count(
+                    self.parser.tool_call_end_token)
             if open_calls == 0 and self.parser.tool_call_index > 0:
                 # If current_call_id is None, use last_completed_call_id
                 call_id = self.parser.current_call_id or \
