@@ -207,7 +207,7 @@ class MambaSpec(KVCacheSpec):
             return self.page_size_padded
         return page_size
 
-    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:        
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         if self.cache_strategy == "last":
             # Keeps the last full block and one non-full block state:
             return 2 * self.page_size_bytes

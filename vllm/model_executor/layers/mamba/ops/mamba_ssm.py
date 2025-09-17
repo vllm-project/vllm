@@ -111,7 +111,7 @@ def _selective_scan_update_kernel(
         dst_state_batch_indices_ptr += pid_b
         dst_state_batch_idx = tl.load(dst_state_batch_indices_ptr).to(tl.int64)
         dst_state_ptr = state_ptr + (dst_state_batch_idx * stride_state_batch +
-                      pid_h * stride_state_head)
+                                     pid_h * stride_state_head)
         state_batch_indices_ptr += pid_b
         state_batch_idx = tl.load(state_batch_indices_ptr).to(tl.int64)
         state_ptr += (state_batch_idx * stride_state_batch +
@@ -138,7 +138,7 @@ def _selective_scan_update_kernel(
     state_ptrs = state_ptr + (offs_m[:, None] * stride_state_dim +
                               offs_n[None, :] * stride_state_dstate)
     dst_state_ptrs = dst_state_ptr + (offs_m[:, None] * stride_state_dim +
-                              offs_n[None, :] * stride_state_dstate)
+                                      offs_n[None, :] * stride_state_dstate)
     x_ptrs = x_ptr + offs_m * stride_x_dim
     dt_ptrs = dt_ptr + offs_m * stride_dt_dim
     if HAS_DT_BIAS:

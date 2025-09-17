@@ -371,13 +371,13 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
 
         # Cascade attn doesn't work with Mamba:
         # * enable_prefix_caching = True -> fails
-        # * enable_prefix_caching = False -> cascade attention is triggered, 
+        # * enable_prefix_caching = False -> cascade attention is triggered,
         #   but always terminates early, not raising any exception
         # Thus, it's more effective to disable the cascade attention logic:
         model_config.disable_cascade_attn = True
 
         if cache_config.enable_prefix_caching:
-            # With prefix caching, select attention block size to 
+            # With prefix caching, select attention block size to
             # optimize for mamba kernel performance
 
             # mamba SSD kernel uses a chunk_size, e.g. 256
@@ -404,7 +404,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             # that would work (note: FA is currently not compatible
             # with mamba layers, use FlashInfer instead).
             attn_block_size = 16 * cdiv(mamba_page_size,
-                                        16 * attn_page_size_1_token)            
+                                        16 * attn_page_size_1_token)
 
         # override attention block size if either (a) the
         # user has not set it or (b) the user has set it

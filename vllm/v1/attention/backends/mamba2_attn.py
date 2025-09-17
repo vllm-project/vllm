@@ -15,7 +15,7 @@ from vllm.v1.attention.backends.mamba_attn import (
 from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
                                               split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
-from vllm.utils import cdiv
+
 
 def _query_start_loc_to_chunk_indices_offsets(
         query_start_loc: torch.Tensor, chunk_size: int,
@@ -139,6 +139,7 @@ class Mamba2AttentionMetadata:
     token_chunk_offset_ptr: Optional[torch.tensor] = None
     cache_spec: Optional[MambaSpec] = None
 
+
 class Mamba2AttentionMetadataBuilder(
         BaseMambaAttentionMetadataBuilder[Mamba2AttentionMetadata]):
 
@@ -150,8 +151,8 @@ class Mamba2AttentionMetadataBuilder(
             "chunk_size needs to be set in the model config for Mamba2 models")
         if kv_cache_spec.cache_strategy == "all":
             self.state_indices_tensor = torch.empty(
-                (self.decode_cudagraph_max_bs, 
-                 cdiv(vllm_config.model_config.max_model_len, 
+                (self.decode_cudagraph_max_bs,
+                 cdiv(vllm_config.model_config.max_model_len,
                       kv_cache_spec.block_size)),
                 dtype=torch.int32,
                 device=device,
