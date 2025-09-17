@@ -36,13 +36,13 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.layers.mamba.mamba2_metadata import update_metadata
 from vllm.model_executor.layers.mamba.mamba_mixer2 import (
     mamba_v2_sharded_weight_loader)
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator, MambaStateShapeCalculator)
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_update)
-from vllm.model_executor.layers.mamba.mamba2_metadata import update_metadata
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.gptq import GPTQConfig
 from vllm.model_executor.layers.quantization.gptq_marlin import (
@@ -476,8 +476,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         if attn_metadata.num_prefills > 0:
             mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
             if conv_metadata.cu_seqlen is None:
-                conv_metadata = update_metadata(mixed_qkv_non_spec_T, 
-                                                non_spec_query_start_loc, 
+                conv_metadata = update_metadata(mixed_qkv_non_spec_T,
+                                                non_spec_query_start_loc,
                                                 conv_metadata)
             # - "cache_indices" updates the conv_state cache in positions
             #   pointed to by "mamba_cache_params.state_indices_tensor"
