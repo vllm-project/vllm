@@ -67,23 +67,6 @@ def _missing(*_: Any, **__: Any) -> NoReturn:
         "package to enable FP8 kernels.")
 
 
-def _resolve_symbol(module, new: str, old: str) -> Callable[..., Any] | None:
-    """Return the *new* symbol if it exists, otherwise the *old* one."""
-    if hasattr(module, new):
-        return getattr(module, new)
-    if hasattr(module, old):
-        # TODO(wentao): deprecate old symbol in the future.
-        logger.warning_once(
-            "Found legacy DeepGEMM symbol `%s`. Please upgrade the `deep_gemm` "
-            "package so that `%s` is available. Support for the legacy symbol "
-            "will be removed in a future vLLM release.",
-            old,
-            new,
-        )
-        return getattr(module, old)
-    return None
-
-
 _fp8_gemm_nt_impl: Callable[..., Any] | None = None
 _grouped_impl: Callable[..., Any] | None = None
 _grouped_masked_impl: Callable[..., Any] | None = None
@@ -109,14 +92,9 @@ def _lazy_init() -> None:
 
     _dg = importlib.import_module("deep_gemm")
 
-    _fp8_gemm_nt_impl = _resolve_symbol(_dg, "fp8_gemm_nt",
-                                        "gemm_fp8_fp8_bf16_nt")
-    _grouped_impl = _resolve_symbol(
-        _dg, "m_grouped_fp8_gemm_nt_contiguous",
-        "m_grouped_gemm_fp8_fp8_bf16_nt_contiguous")
-    _grouped_masked_impl = _resolve_symbol(
-        _dg, "fp8_m_grouped_gemm_nt_masked",
-        "m_grouped_gemm_fp8_fp8_bf16_nt_masked")
+    _fp8_gemm_nt_impl = getattr(_dg, "fp8_gemm_nt", None)
+    _grouped_impl = getattr(_dg, "m_grouped_fp8_gemm_nt_contiguous", None)
+    _grouped_masked_impl = getattr(_dg, "fp8_m_grouped_gemm_nt_masked", None)
 
 
 def fp8_gemm_nt(*args, **kwargs):
