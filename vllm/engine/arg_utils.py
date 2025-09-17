@@ -1399,6 +1399,7 @@ class EngineArgs:
             enable_chunked_prefill=self.enable_chunked_prefill,
             disable_chunked_mm_input=self.disable_chunked_mm_input,
             is_multimodal_model=model_config.is_multimodal_model,
+            is_encoder_decoder=model_config.is_encoder_decoder,
             preemption_mode=self.preemption_mode,
             send_delta_data=(envs.VLLM_USE_RAY_SPMD_WORKER
                              and parallel_config.use_ray),
