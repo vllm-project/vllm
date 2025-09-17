@@ -83,7 +83,7 @@ from .vision import get_vit_attn_backend
 logger = init_logger(__name__)
 
 # For profile run
-_MAX_FRAMES_PER_VIDEO = 16
+_MAX_FRAMES_PER_VIDEO = 600
 
 # === Vision Inputs === #
 

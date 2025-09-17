@@ -156,7 +156,7 @@ class OpenCVVideoBackend(VideoLoader):
         # can cause incorrect timestamp calculation without num_frames=-1.
         metadata = {
             "total_num_frames": num_frames,
-            "fps": original_fps,
+            "fps": num_frames / duration,
             "duration": duration,
             "video_backend": "opencv",
             "frames_indices": list(range(num_frames)),

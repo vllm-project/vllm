@@ -557,6 +557,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                           max_model_len=4096),
     "Qwen2_5OmniModel": _HfExamplesInfo("Qwen/Qwen2.5-Omni-3B"),
     "Qwen2_5OmniForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2.5-Omni-7B-AWQ"),  # noqa: E501
+    "Qwen3VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen3-VL-4B-Instruct", # noqa: E501
+                                                        max_model_len=4096,
+                                                        min_transformers_version="4.57"),  # noqa: E501
+    "Qwen3VLMoeForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen3-VL-30B-A3B-Instruct", # noqa: E501
+                                                        max_model_len=4096,
+                                                        min_transformers_version="4.57"),
     "RForConditionalGeneration": _HfExamplesInfo("YannQi/R-4B",
                                                  trust_remote_code=True),
     "SkyworkR1VChatModel": _HfExamplesInfo("Skywork/Skywork-R1V-38B",
