@@ -19,7 +19,6 @@ from vllm.config import (CompilationConfig, ModelDType, TokenizerMode,
                          is_init_field)
 from vllm.engine.arg_utils import (ConvertOption, EngineArgs, HfOverrides,
                                    PoolerConfig, RunnerOption)
-from vllm.engine.llm_engine import LLMEngine
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          ChatTemplateContentFormatOption,
                                          apply_hf_chat_template,
@@ -54,6 +53,7 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                get_cached_tokenizer)
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, Device, as_iter, is_list_of
+from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
 if TYPE_CHECKING:
@@ -1449,8 +1449,6 @@ class LLM:
         Note:
             This method is only available with the V1 LLM engine.
         """
-        from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
-        assert isinstance(self.llm_engine, V1LLMEngine)
         return self.llm_engine.get_metrics()
 
     def _validate_and_add_requests(
