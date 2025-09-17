@@ -61,8 +61,10 @@ def _triton_mrope_forward(
     # Updated offsets for half head_dim
     cos_offsets = tl.arange(0, pad_hd // 2)
     if is_interleaved:
-        h_mask = ((cos_offsets % 3) == 1) & (cos_offsets <= 3 * mrope_section_h)
-        w_mask = ((cos_offsets % 3) == 2) & (cos_offsets <= 3 * mrope_section_w)
+        h_mask = (((cos_offsets % 3) == 1) &
+                  (cos_offsets <= 3 * mrope_section_h))
+        w_mask = (((cos_offsets % 3) == 2) &
+                  (cos_offsets <= 3 * mrope_section_w))
         t_mask = ~(h_mask | w_mask)
     else:
         t_end = mrope_section_t
