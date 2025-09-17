@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import random
-
 import numpy as np
 import pytest
 import torch
@@ -17,7 +15,7 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils import GiB_bytes, update_environment_variables
 from vllm.v1.core.kv_cache_utils import (estimate_max_model_len,
-                                         get_kv_cache_config)
+                                         get_kv_cache_configs)
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
@@ -62,6 +60,9 @@ def initialize_kv_cache(runner: GPUModelRunner):
         pin_memory=runner.pin_memory,
         vocab_size=runner.model_config.get_vocab_size(),
         block_sizes=[
+            kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
+        ],
+        kernel_block_sizes=[
             kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
         ],
     )
@@ -120,9 +121,7 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
             NewRequestData(
                 req_id=req_id,
                 prompt_token_ids=[1, 2, 3],
-                mm_kwargs=[],
-                mm_hashes=[],
-                mm_positions=[],
+                mm_features=[],
                 sampling_params=SamplingParams(),
                 pooling_params=None,
                 block_ids=([0], ),
@@ -169,7 +168,7 @@ def _is_req_state_block_table_match(model_runner, req_id: str) -> bool:
             req_state.block_ids[0]):
         return False
     num_blocks = block_table.num_blocks_per_row[req_index]
-    return (block_table.block_table_np[req_index, :num_blocks] ==
+    return (block_table.block_table.np[req_index, :num_blocks] ==
             req_state.block_ids[0]).all()
 
 
@@ -409,29 +408,30 @@ def test_kv_cache_stride_order(monkeypatch, model_runner):
         model_runner.model_config.get_head_size()
     ]
     # TODO mla test
-    default_stride = list(range(5))
+    default_stride = tuple(range(5))
     # Permutation that gets you back to expected kv shape
-    rnd_stride = tuple(random.sample(default_stride, len(default_stride)))
+    for test_stride in ((1, 4, 0, 2, 3), (0, 1, 2, 3, 4)):
 
-    def rnd_stride_order():
-        return rnd_stride
+        def rnd_stride_order(test_stride=test_stride):
+            return test_stride
 
-    # Patch the attention backend class and re-trigger the KV cache creation.
-    for attn_group in model_runner._attn_group_iterator():
-        attn_backend = attn_group.backend
-        monkeypatch.setattr(attn_backend, "get_kv_cache_stride_order",
-                            rnd_stride_order)
+        # Patch the attention backend class and re-trigger the KV cache creation
+        for attn_group in model_runner._attn_group_iterator():
+            attn_backend = attn_group.backend
+            monkeypatch.setattr(attn_backend, "get_kv_cache_stride_order",
+                                rnd_stride_order)
 
-    model_runner.attn_groups = []
-    model_runner.initialize_kv_cache(model_runner.kv_cache_config)
+        model_runner.attn_groups = []
+        model_runner.kv_caches = []
+        model_runner.initialize_kv_cache(model_runner.kv_cache_config)
 
-    # Shape is unchanged, but layout may differ
-    kv_cache_shape = model_runner.kv_caches[0].shape
-    assert list(kv_cache_shape) == expected_kv_cache_shape
-    if default_stride == rnd_stride:
-        assert all(kv.is_contiguous() for kv in model_runner.kv_caches)
-    else:
-        assert all(not kv.is_contiguous() for kv in model_runner.kv_caches)
+        # Shape is unchanged, but layout may differ
+        kv_cache_shape = model_runner.kv_caches[0].shape
+        assert list(kv_cache_shape) == expected_kv_cache_shape
+        if default_stride == test_stride:
+            assert all(kv.is_contiguous() for kv in model_runner.kv_caches)
+        else:
+            assert all(not kv.is_contiguous() for kv in model_runner.kv_caches)
 
 
 def test_update_config(model_runner):
@@ -588,8 +588,8 @@ def test_init_kv_cache_without_kv_sharing():
     available_memory = 20 * GiB_bytes
     # page size for layer 0's kv_cache_spec is 32KB
     num_expected_blocks = 327680  # 20GB / 32KB / 2 (num layers)
-    kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec,
-                                          available_memory)
+    kv_cache_config = get_kv_cache_configs(vllm_config, [kv_cache_spec],
+                                           [available_memory])[0]
     assert kv_cache_config.num_blocks == num_expected_blocks
     assert len(kv_cache_config.kv_cache_tensors) == 2
     assert kv_cache_config.kv_cache_tensors[0].size == available_memory // 2
@@ -660,8 +660,8 @@ def test_init_kv_cache_with_kv_sharing_valid():
     # with KV sharing, we can allocate (available_mem//page_size//1) blocks
     # which is twice as many as without KV sharing
     num_expected_blocks = 655360  # 20GB / 32KB
-    kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec,
-                                          available_memory)
+    kv_cache_config = get_kv_cache_configs(vllm_config, [kv_cache_spec],
+                                           [available_memory])[0]
     assert kv_cache_config.num_blocks == num_expected_blocks
     assert len(kv_cache_config.kv_cache_tensors) == 1
     # Each layer now has twice the available memory for KV cache
@@ -791,8 +791,8 @@ def test_hybrid_attention_mamba_tensor_shapes(monkeypatch):
         kv_cache_spec = runner.get_kv_cache_spec()
 
         available_memory = 5 * GiB_bytes
-        kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec,
-                                              available_memory)
+        kv_cache_config = get_kv_cache_configs(vllm_config, [kv_cache_spec],
+                                               [available_memory])[0]
         runner.initialize_kv_cache(kv_cache_config)
 
         # random partition of blocks
@@ -849,13 +849,13 @@ def test_hybrid_block_table_initialization():
     from vllm.v1.worker.block_table import BlockTable
 
     # Test configuration: physical block size = 32, kernel block size = 16
-    physical_block_size = 32
+    block_size = 32
     kernel_block_sizes = [16]
     max_num_reqs = 10
     max_num_blocks_per_req = 20
     max_num_batched_tokens = 512
 
-    block_table = BlockTable(block_size=physical_block_size,
+    block_table = BlockTable(block_size=block_size,
                              max_num_reqs=max_num_reqs,
                              max_num_blocks_per_req=max_num_blocks_per_req,
                              max_num_batched_tokens=max_num_batched_tokens,
@@ -865,11 +865,9 @@ def test_hybrid_block_table_initialization():
 
     # Verify hybrid block configuration
     assert block_table.use_hybrid_blocks is True
-    assert block_table.physical_block_size == physical_block_size
-    assert block_table.logical_block_size == kernel_block_sizes[
-        0]  # Changed to use first element
+    assert block_table.block_size == kernel_block_sizes[0]
     assert block_table.blocks_per_phys_block == (
-        physical_block_size // kernel_block_sizes[0]
+        block_size // kernel_block_sizes[0]
     )  # Changed to use first element
 
     # Test block table conversion logic
@@ -887,7 +885,7 @@ def test_hybrid_block_table_initialization():
     assert block_table.num_blocks_per_row[req_index] == len(
         expected_logical_blocks)
     assert np.array_equal(
-        block_table.block_table_np[req_index, :len(expected_logical_blocks)],
+        block_table.block_table.np[req_index, :len(expected_logical_blocks)],
         expected_logical_blocks)
 
 
@@ -901,7 +899,7 @@ def test_input_batch_with_kernel_block_sizes():
     vocab_size = 50272
 
     # Test with different kernel block sizes
-    physical_block_sizes = [32, 64]
+    block_sizes = [32, 64]
     kernel_block_sizes = [16, 32]
 
     input_batch = InputBatch(max_num_reqs=max_num_reqs,
@@ -910,24 +908,22 @@ def test_input_batch_with_kernel_block_sizes():
                              device=device,
                              pin_memory=pin_memory,
                              vocab_size=vocab_size,
-                             block_sizes=physical_block_sizes,
+                             block_sizes=block_sizes,
                              kernel_block_sizes=kernel_block_sizes)
 
     # Verify that block tables were created with kernel block sizes
     assert len(
-        input_batch.block_table.block_tables) == len(physical_block_sizes)
+        input_batch.block_table.block_tables) == len(block_sizes)
 
     for i, (phys_size, kernel_size) in enumerate(
-            zip(physical_block_sizes, kernel_block_sizes)):
+            zip(block_sizes, kernel_block_sizes)):
         block_table = input_batch.block_table.block_tables[i]
         if phys_size != kernel_size:
             assert block_table.use_hybrid_blocks is True
-            assert block_table.physical_block_size == phys_size
-            assert block_table.logical_block_size == kernel_size
+            assert block_table.block_size == kernel_size
         else:
             assert block_table.use_hybrid_blocks is False
-            assert block_table.physical_block_size == phys_size
-            assert block_table.logical_block_size == phys_size
+            assert block_table.block_size == kernel_size
 
 
 def test_hybrid_cache_integration(model_runner, dist_init):
@@ -984,9 +980,8 @@ def test_hybrid_cache_integration(model_runner, dist_init):
 
     # Verify hybrid block table configuration
     block_table = runner.input_batch.block_table.block_tables[0]
-    assert block_table.physical_block_size == (
+    assert block_table.block_size == (
         kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size)
-    assert block_table.logical_block_size == 16
 
     # Test request processing with hybrid blocks
     req_id = "hybrid_req_0"

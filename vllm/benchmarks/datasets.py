@@ -11,6 +11,7 @@ generation. Supported dataset types include:
   - HuggingFace
   - VisionArena
 """
+import argparse
 import ast
 import base64
 import io
@@ -334,7 +335,7 @@ def process_image(image: Any) -> Mapping[str, Any]:
 
     if isinstance(image, str):
         image_url = (image if image.startswith(
-            ("http://", "file://")) else f"file://{image}")
+            ("http://", "https://", "file://")) else f"file://{image}")
         return {"type": "image_url", "image_url": {"url": image_url}}
 
     raise ValueError(f"Invalid image input {image}. Must be a PIL.Image.Image"
@@ -369,7 +370,7 @@ def process_video(video: Any) -> Mapping[str, Any]:
 
     if isinstance(video, str):
         video_url = (video if video.startswith(
-            ("http://", "file://")) else f"file://{video}")
+            ("http://", "https://", "file://")) else f"file://{video}")
         return {"type": "video_url", "video_url": {"url": video_url}}
 
     raise ValueError(
@@ -551,7 +552,7 @@ class RandomDataset(BenchmarkDataset):
         [6880, 6881] -> ['Ġcalls', 'here'] ->
         [1650, 939, 486] -> ['Ġcall', 'sh', 'ere']
         To avoid uncontrolled change of the prompt length,
-        the encoded sequence is truncated before being decode again.
+        the encoded sequence is truncated before being decoded again.
         """
         # Build the inner sequence by sampling sequentially from the vocab
         inner_seq = ((offset + index + np.arange(input_len)) 
@@ -1019,6 +1020,25 @@ class ShareGPTDataset(BenchmarkDataset):
         return samples
 
 
+class _ValidateDatasetArgs(argparse.Action):
+    """Argparse action to validate dataset name and path compatibility."""
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, values)
+        
+        # Get current values of both dataset_name and dataset_path
+        dataset_name = getattr(namespace, 'dataset_name', 'random')
+        dataset_path = getattr(namespace, 'dataset_path', None)
+        
+        # Validate the combination
+        if dataset_name == "random" and dataset_path is not None:
+            parser.error(
+                "Cannot use 'random' dataset with --dataset-path. "
+                "Please specify the appropriate --dataset-name (e.g., "
+                "'sharegpt', 'custom', 'sonnet') for your dataset file: "
+                f"{dataset_path}"
+            )
+
+
 def add_dataset_parser(parser: FlexibleArgumentParser):
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
@@ -1031,6 +1051,7 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         "--dataset-name",
         type=str,
         default="random",
+        action=_ValidateDatasetArgs,
         choices=[
             "sharegpt", "burstgpt", "sonnet", "random", "random-mm", "hf", 
             "custom", "prefix_repetition", "spec_bench"
@@ -1046,6 +1067,7 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         "--dataset-path",
         type=str,
         default=None,
+        action=_ValidateDatasetArgs,
         help="Path to the sharegpt/sonnet dataset. "
         "Or the huggingface dataset ID if using HF dataset.",
     )
@@ -1382,6 +1404,13 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
         ):
             dataset_class = VisionArenaDataset
             args.hf_split = "train"
+            args.hf_subset = None
+        elif (
+            args.dataset_path in MMVUDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in MMVUDataset.SUPPORTED_DATASET_PATHS
+        ):
+            dataset_class = MMVUDataset
+            args.hf_split = "validation"
             args.hf_subset = None
         elif (
             args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS
@@ -2027,6 +2056,61 @@ class VisionArenaDataset(HuggingFaceDataset):
                     request_id=request_id_prefix + str(i),
                 ))
         self.maybe_oversample_requests(sampled_requests, num_requests, 
+                                       request_id_prefix, no_oversample)
+        return sampled_requests
+
+
+class MMVUDataset(HuggingFaceDataset):
+    """
+    MMVU Dataset.
+    https://huggingface.co/datasets/yale-nlp/MMVU
+    """
+
+    DEFAULT_OUTPUT_LEN = 128
+    SUPPORTED_DATASET_PATHS = {
+        "yale-nlp/MMVU":
+        lambda x: x["question"] + " " + (
+            " ".join(f"{k}.{v}" for k, v in x["choices"].items())
+        ),
+    }
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        output_len: Optional[int] = None,
+        enable_multimodal_chat: bool = False,
+        request_id_prefix: str = "",
+        no_oversample: bool = False,
+        **kwargs,
+    ) -> list:
+        output_len = (output_len
+                      if output_len is not None else self.DEFAULT_OUTPUT_LEN)
+        sampled_requests = []
+        for i, item in enumerate(self.data):
+            if len(sampled_requests) >= num_requests:
+                break
+            parser_fn = self.SUPPORTED_DATASET_PATHS.get(self.hf_name)
+            if parser_fn is None:
+                raise ValueError(f"Unsupported dataset path: {self.hf_name}")
+            prompt = parser_fn(item)
+            mm_content = process_video(item["video"])
+            prompt_len = len(tokenizer(prompt).input_ids)
+            if enable_multimodal_chat:
+                # Note: when chat is enabled the request prompt_len is no longer
+                # accurate and we will be using request output to count the
+                # actual prompt len
+                prompt = self.apply_multimodal_chat_transformation(
+                    prompt, mm_content)
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                    multi_modal_data=mm_content,
+                    request_id=request_id_prefix + str(i),
+                ))
+        self.maybe_oversample_requests(sampled_requests, num_requests,
                                        request_id_prefix, no_oversample)
         return sampled_requests
 

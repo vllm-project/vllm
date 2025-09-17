@@ -58,7 +58,7 @@ class Evictor(ABC):
 
 class BlockMetaData:
     """Data structure for storing key data describe cached block, so that
-    evitor could use to make its decision which one to choose for eviction
+    evictor could use to make its decision which one to choose for eviction
 
     Here we use physical block id as the dict key, as there maybe several
     blocks with the same content hash, but their physical id is unique.

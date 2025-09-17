@@ -186,7 +186,7 @@ class OpenAIServingChat(OpenAIServing):
             lora_request = self._maybe_get_adapters(
                 request, supports_default_mm_loras=True)
 
-            model_name = self._get_model_name(request.model, lora_request)
+            model_name = self.models.model_name(lora_request)
 
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
@@ -827,9 +827,6 @@ class OpenAIServingChat(OpenAIServing):
                                 delta_message.tool_calls[0].id is not None):
                             history_tool_call_cnt += 1
                             tools_streamed[i] = True
-
-                        # update the previous values for the next iteration
-                        previous_texts[i] = current_text
 
                     # handle streaming deltas for tools with "auto" tool choice
                     # and reasoning parser

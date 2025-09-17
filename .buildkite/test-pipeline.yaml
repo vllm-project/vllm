@@ -46,7 +46,6 @@ steps:
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - vllm/
-  - tests/mq_llm_engine
   - tests/async_engine
   - tests/test_inputs.py
   - tests/test_outputs.py
@@ -54,15 +53,16 @@ steps:
   - tests/utils_
   - tests/worker
   - tests/standalone_tests/lazy_imports.py
+  - tests/transformers_utils
   commands:
   - python3 standalone_tests/lazy_imports.py
-  - pytest -v -s mq_llm_engine # MQLLMEngine
   - pytest -v -s async_engine # AsyncLLMEngine
   - pytest -v -s test_inputs.py
   - pytest -v -s test_outputs.py
   - pytest -v -s multimodal
   - pytest -v -s utils_ # Utils
   - pytest -v -s worker # Worker
+  - pytest -v -s transformers_utils # transformers_utils
 
 - label: Python-only Installation Test # 10min
   timeout_in_minutes: 20
@@ -111,7 +111,7 @@ steps:
   - tests/entrypoints/
   commands:
   - pytest -v -s entrypoints/openai/tool_parsers
-  - pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/openai --ignore=entrypoints/offline_mode --ignore=entrypoints/test_chat_utils.py
+  - pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/openai --ignore=entrypoints/offline_mode --ignore=entrypoints/test_chat_utils.py  --ignore=entrypoints/pooling
 
 - label: Entrypoints Integration Test (LLM) # 30min
   timeout_in_minutes: 40
@@ -145,6 +145,19 @@ steps:
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/openai/test_collective_rpc.py # PYTHONPATH is needed to import custom Worker extension
   - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/test_oot_registration.py --ignore=entrypoints/openai/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/test_collective_rpc.py --ignore=entrypoints/openai/tool_parsers/
   - pytest -v -s entrypoints/test_chat_utils.py
+
+- label: Entrypoints Integration Test (Pooling)
+  timeout_in_minutes: 50
+  mirror_hardwares: [amdexperimental]
+  working_dir: "/vllm-workspace/tests"
+  fast_check: true
+  torch_nightly: true
+  source_file_dependencies:
+  - vllm/
+  - tests/entrypoints/pooling
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s entrypoints/pooling
 
 - label: Distributed Tests (4 GPUs) # 35min
   timeout_in_minutes: 50
@@ -216,7 +229,7 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/metrics
-  - tests/tracing
+  - tests/v1/tracing
   commands:
   - pytest -v -s metrics
   - "pip install \
@@ -379,6 +392,7 @@ steps:
     - pytest -v -s compile/test_async_tp.py
     - pytest -v -s compile/test_fusion_all_reduce.py
     - pytest -v -s compile/test_decorator.py
+    - pytest -v -s compile/test_noop_elimination.py
 
 - label: PyTorch Fullgraph Smoke Test # 15min
   timeout_in_minutes: 30
@@ -533,15 +547,6 @@ steps:
   commands: # LMEval+Transcription WER check
   - pytest -s entrypoints/openai/correctness/
 
-- label: Encoder Decoder tests # 12min
-  timeout_in_minutes: 20
-  mirror_hardwares: [amdexperimental]
-  source_file_dependencies:
-  - vllm/
-  - tests/encoder_decoder
-  commands:
-    - pytest -v -s encoder_decoder
-
 - label: OpenAI-Compatible Tool Use # 23 min
   timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental]
@@ -556,33 +561,82 @@ steps:
 
 #####  models test  #####
 
-- label: Basic Models Test # 57min
-  timeout_in_minutes: 75
+- label: Basic Models Tests (Initialization)
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
   - vllm/
-  - tests/models
+  - tests/models/test_initialization.py
   commands:
-    - pytest -v -s models/test_transformers.py
-    - pytest -v -s models/test_registry.py
-    - pytest -v -s models/test_utils.py
-    - pytest -v -s models/test_vision.py
-    - pytest -v -s models/test_initialization.py
+    # Run a subset of model initialization tests
+    - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
 
-- label: Language Models Test (Standard) # 35min
+- label: Basic Models Tests (Extra Initialization) %N
   timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental]
+  torch_nightly: true
+  source_file_dependencies:
+  - vllm/model_executor/models/
+  - tests/models/test_initialization.py
+  commands:
+    # Only when vLLM model source is modified - test initialization of a large
+    # subset of supported models (the complement of the small subset in the above
+    # test.) Also run if model initialization test file is modified
+    - pytest -v -s models/test_initialization.py \
+             -k 'not test_can_initialize_small_subset' \
+             --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT \
+             --shard-id=$$BUILDKITE_PARALLEL_JOB
+  parallelism: 2
+
+- label: Basic Models Tests (Other)
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental]
+  torch_nightly: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/test_transformers.py
+  - tests/models/test_registry.py
+  - tests/models/test_utils.py
+  - tests/models/test_vision.py
+  commands:
+    - pytest -v -s models/test_transformers.py \
+                   models/test_registry.py \
+                   models/test_utils.py \
+                   models/test_vision.py
+
+- label: Language Models Tests (Standard)
+  timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/language
   commands:
+    # Test standard language models, excluding a subset of slow tests
     - pip freeze | grep -E 'torch'
-    - pytest -v -s models/language -m core_model
+    - pytest -v -s models/language -m 'core_model and (not slow_test)'
 
-- label: Language Models Test (Hybrid) # 35 min
+- label: Language Models Tests (Extra Standard) %N
   timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental]
+  torch_nightly: true
+  source_file_dependencies:
+  - vllm/model_executor/models/
+  - tests/models/language/pooling/test_embedding.py
+  - tests/models/language/generation/test_common.py
+  - tests/models/language/pooling/test_classification.py
+  commands:
+    # Shard slow subset of standard language models tests. Only run when model
+    # source is modified, or when specified test files are modified
+    - pip freeze | grep -E 'torch'
+    - pytest -v -s models/language -m 'core_model and slow_test' \
+             --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT \
+             --shard-id=$$BUILDKITE_PARALLEL_JOB
+  parallelism: 2
+
+- label: Language Models Tests (Hybrid) %N
+  timeout_in_minutes: 75
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
@@ -593,7 +647,12 @@ steps:
     # Note: also needed to run plamo2 model in vLLM
     - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.2.5'
     - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
-    - pytest -v -s models/language/generation -m hybrid_model
+    # Shard hybrid language model tests
+    - pytest -v -s models/language/generation \
+                   -m hybrid_model \
+                   --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT \
+                   --shard-id=$$BUILDKITE_PARALLEL_JOB
+  parallelism: 2
 
 - label: Language Models Test (Extended Generation) # 80min
   timeout_in_minutes: 110
@@ -626,6 +685,16 @@ steps:
   - tests/models/language/pooling
   commands:
     - pytest -v -s models/language/pooling -m 'not core_model'
+
+- label: Language Models Test (MTEB)
+  timeout_in_minutes: 110
+  mirror_hardwares: [amdexperimental]
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/language/pooling_mteb_test
+  commands:
+    - pytest -v -s models/language/pooling_mteb_test
 
 - label: Multi-Modal Processor Test # 44min
   timeout_in_minutes: 60
@@ -750,6 +819,20 @@ steps:
     - pytest -v -s tests/kernels/moe/test_flashinfer.py
     - pytest -v -s tests/compile/test_silu_mul_quant_fusion.py
 
+- label: GPT-OSS Eval (Blackwell)
+  timeout_in_minutes: 60
+  working_dir: "/vllm-workspace/"
+  gpu: b200
+  # optional: true
+  source_file_dependencies:
+  - tests/evals/gpt_oss
+  - vllm/model_executor/models/gpt_oss.py
+  - vllm/model_executor/layers/quantization/mxfp4.py
+  - vllm/v1/attention/backends/flashinfer.py
+  commands:
+    - uv pip install --system 'gpt-oss[eval]==0.0.5'
+    - pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py --model openai/gpt-oss-20b --metric 0.58 --server-args '--tensor-parallel-size 2'
+
 #####  1 GPU test  #####
 #####  multi gpus test  #####
 
@@ -764,6 +847,8 @@ steps:
   commands:
   - pytest -v -s distributed/test_comm_ops.py
   - pytest -v -s distributed/test_shm_broadcast.py
+  - pytest -v -s distributed/test_shm_buffer.py
+  - pytest -v -s distributed/test_shm_storage.py
 
 - label: 2 Node Tests (4 GPUs in total) # 16min
   timeout_in_minutes: 30
@@ -822,8 +907,8 @@ steps:
   # Avoid importing model tests that cause CUDA reinitialization error
   - pytest models/test_transformers.py -v -s -m 'distributed(num_gpus=2)'
   - pytest models/language -v -s -m 'distributed(num_gpus=2)'
-  - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py 
-  - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)' 
+  - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py
+  - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)'
   # test sequence parallel
   - pytest -v -s distributed/test_sequence_parallel.py
   # this test fails consistently.
@@ -873,7 +958,6 @@ steps:
   commands:
   - pytest -v -s distributed/test_pp_cudagraph.py
   - pytest -v -s distributed/test_pipeline_parallel.py
-  # - pytest -v -s distributed/test_context_parallel.py # TODO: enable it on Hopper runners or add triton MLA support
 
 - label: LoRA TP Test (Distributed) # 17 min
   timeout_in_minutes: 30
@@ -947,9 +1031,21 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
 
-- label: Qwen MoE EP Test # optional
+##### H200 test #####
+- label: Distrubted Tests (H200) # optional
   gpu: h200
   optional: true
+  working_dir: "/vllm-workspace/"
   num_gpus: 2
   commands:
-    - CUDA_VISIBLE_DEVICES=1,2 VLLM_ALL2ALL_BACKEND=deepep_high_throughput VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 /vllm-workspace/examples/offline_inference/data_parallel.py --model Qwen/Qwen1.5-MoE-A2.7B --tp-size=1  --dp-size=2 --max-model-len 2048
+    - pytest -v -s tests/distributed/test_context_parallel.py
+    - CUDA_VISIBLE_DEVICES=1,2 VLLM_ALL2ALL_BACKEND=deepep_high_throughput VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model Qwen/Qwen1.5-MoE-A2.7B --tp-size=1  --dp-size=2 --max-model-len 2048
+
+##### B200 test #####
+- label: Distributed Tests (B200) # optional
+  gpu: b200
+  optional: true
+  working_dir: "/vllm-workspace/"
+  num_gpus: 2
+  commands:
+    - pytest -v -s tests/distributed/test_context_parallel.py
