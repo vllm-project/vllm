@@ -237,17 +237,15 @@ class RequestState:
         else:
             prompt_logprobs = self.logprobs_processor.prompt_logprobs
 
-        return RequestOutput(
-            request_id=request_id,
-            prompt=self.prompt,
-            prompt_token_ids=self.prompt_token_ids,
-            prompt_logprobs=prompt_logprobs,
-            outputs=cast(list[CompletionOutput], outputs),
-            finished=finished,
-            kv_transfer_params=kv_transfer_params,
-            num_cached_tokens=self.num_cached_tokens,
-            metrics=self.stats
-        )
+        return RequestOutput(request_id=request_id,
+                             prompt=self.prompt,
+                             prompt_token_ids=self.prompt_token_ids,
+                             prompt_logprobs=prompt_logprobs,
+                             outputs=cast(list[CompletionOutput], outputs),
+                             finished=finished,
+                             kv_transfer_params=kv_transfer_params,
+                             num_cached_tokens=self.num_cached_tokens,
+                             metrics=self.stats)
 
     def _new_completion_output(
         self,
