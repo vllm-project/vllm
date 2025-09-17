@@ -156,10 +156,10 @@ static inline void run_get_group_gemm_starts_sm120(
   auto stream = at::cuda::getCurrentCUDAStream(a_tensors.device().index());
 
   TORCH_CHECK(out_tensors.size(1) == N,
-              "Output tensor shape doesn't match expected shape");
+              "Output tensor shape mismatch: out_tensors.size(1)=", out_tensors.size(1),
+              " expected N=", N);
   TORCH_CHECK(K / 2 == b_tensors.size(2),
-              "b_tensors(dim = 2) and a_tensors(dim = 1) trailing"
-              " dimension must match");
+              "Trailing dim mismatch: K/2=", K / 2, " b_tensors.size(2)=", b_tensors.size(2));
   if (false) {
   }
   __CALL_GET_STARTS_KERNEL_BLOCKSCALE_SM120(
@@ -173,7 +173,7 @@ static inline void run_get_group_gemm_starts_sm120(
       cutlass::float_ue4m3_t, torch::kFloat16, half, LayoutSFA, LayoutSFB,
       ScaleConfig)
   else {
-    TORCH_CHECK(false, "Invalid output type (must be float16 or bfloat16)");
+    TORCH_CHECK(false, "Invalid output type (must be float16 or bfloat16). got=", static_cast<int>(out_tensors.scalar_type()));
   }
 }
 
@@ -304,6 +304,11 @@ static inline void run_fp4_blockwise_scaled_group_mm_sm120(
   cudaMemcpyAsync(b_strides_buf.data_ptr(), host_strideB.data(), host_strideB.size() * sizeof(host_strideB[0]), cudaMemcpyHostToDevice, at::cuda::getCurrentCUDAStream());
   cudaMemcpyAsync(c_strides_buf.data_ptr(), host_strideC.data(), host_strideC.size() * sizeof(host_strideC[0]), cudaMemcpyHostToDevice, at::cuda::getCurrentCUDAStream());
   cudaMemcpyAsync(d_strides_buf.data_ptr(), host_strideD.data(), host_strideD.size() * sizeof(host_strideD[0]), cudaMemcpyHostToDevice, at::cuda::getCurrentCUDAStream());
+  if (nvfp4_sm120_debug_enabled()) {
+    std::fprintf(stderr,
+                 "[nvfp4-sm120] stride buf sizes: A=%zu B=%zu C=%zu D=%zu bytes each\n",
+                 sizeof(host_strideA[0]), sizeof(host_strideB[0]), sizeof(host_strideC[0]), sizeof(host_strideD[0]));
+  }
 
   run_get_group_gemm_starts_sm120<InternalLayoutSFA, InternalLayoutSFB, ScaleConfig>(
       a_ptrs, b_ptrs, out_ptrs, a_scales_ptrs, b_scales_ptrs, alpha_ptrs,
@@ -318,6 +323,13 @@ static inline void run_fp4_blockwise_scaled_group_mm_sm120(
     std::fprintf(stderr,
                  "[nvfp4-sm120] preparing grouped GEMM: num_experts=%d M=%d N=%d K=%d out_dtype=%d\n",
                  num_experts, M, N, K, static_cast<int>(output.scalar_type()));
+    std::fprintf(stderr,
+                 "[nvfp4-sm120] type sizes: StrideA=%zu StrideB=%zu StrideC=%zu StrideD=%zu LayoutSFA=%zu LayoutSFB=%zu\n",
+                 sizeof(typename Gemm::GemmKernel::StrideA),
+                 sizeof(typename Gemm::GemmKernel::StrideB),
+                 sizeof(typename Gemm::GemmKernel::StrideC),
+                 sizeof(typename Gemm::GemmKernel::StrideD),
+                 sizeof(InternalLayoutSFA), sizeof(InternalLayoutSFB));
   }
 
   cutlass::KernelHardwareInfo hw_info;
@@ -361,6 +373,9 @@ static inline void run_fp4_blockwise_scaled_group_mm_sm120(
       scheduler};
 
   size_t workspace_size = Gemm::get_workspace_size(args);
+  if (nvfp4_sm120_debug_enabled()) {
+    std::fprintf(stderr, "[nvfp4-sm120] workspace_size=%zu bytes\n", workspace_size);
+  }
   auto const workspace_options =
       torch::TensorOptions().dtype(torch::kUInt8).device(a.device());
   torch::Tensor workspace;
@@ -378,7 +393,9 @@ static inline void run_fp4_blockwise_scaled_group_mm_sm120(
                  static_cast<int>(can_implement_status));
   }
   TORCH_CHECK(can_implement_status == cutlass::Status::kSuccess,
-              "Failed to implement GEMM (SM120 NVFP4 MoE)");
+              "Failed to implement GEMM (SM120 NVFP4 MoE). status=", static_cast<int>(can_implement_status),
+              " M=", M, " N=", N, " K=", K, " num_experts=", num_experts,
+              " out_dtype=", static_cast<int>(output.scalar_type()));
 
   auto status = gemm_op.initialize(args, workspace_ptr);
   if (nvfp4_sm120_debug_enabled()) {
@@ -387,7 +404,8 @@ static inline void run_fp4_blockwise_scaled_group_mm_sm120(
                  static_cast<int>(status));
   }
   TORCH_CHECK(status == cutlass::Status::kSuccess,
-              "Failed to initialize GEMM (SM120 NVFP4 MoE)");
+              "Failed to initialize GEMM (SM120 NVFP4 MoE). status=", static_cast<int>(status),
+              " workspace_size=", workspace_size);
 
   status = gemm_op.run(args, workspace_ptr, stream);
   if (nvfp4_sm120_debug_enabled()) {
@@ -395,7 +413,7 @@ static inline void run_fp4_blockwise_scaled_group_mm_sm120(
                  static_cast<int>(status));
   }
   TORCH_CHECK(status == cutlass::Status::kSuccess,
-              "Failed to run GEMM (SM120 NVFP4 MoE)");
+              "Failed to run GEMM (SM120 NVFP4 MoE). status=", static_cast<int>(status));
 
   if (nvfp4_sm120_debug_enabled()) {
     cudaError_t errSync = cudaDeviceSynchronize();
