@@ -46,7 +46,6 @@ steps:
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - vllm/
-  - tests/mq_llm_engine
   - tests/async_engine
   - tests/test_inputs.py
   - tests/test_outputs.py
@@ -57,7 +56,6 @@ steps:
   - tests/transformers_utils
   commands:
   - python3 standalone_tests/lazy_imports.py
-  - pytest -v -s mq_llm_engine # MQLLMEngine
   - pytest -v -s async_engine # AsyncLLMEngine
   - pytest -v -s test_inputs.py
   - pytest -v -s test_outputs.py
@@ -92,17 +90,6 @@ steps:
   - pytest -v -s basic_correctness/test_basic_correctness.py
   - pytest -v -s basic_correctness/test_cpu_offload.py
   - VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py
-
-- label: Core Test # 22min
-  timeout_in_minutes: 35
-  mirror_hardwares: [amdexperimental]
-  fast_check: true
-  source_file_dependencies:
-  - vllm/core
-  - vllm/distributed
-  - tests/core
-  commands:
-  - pytest -v -s core
 
 - label: Entrypoints Unit Tests # 5min
   timeout_in_minutes: 10
@@ -820,6 +807,20 @@ steps:
     - pytest -v -s tests/compile/test_fusion_attn.py::test_attention_quant_pattern
     - pytest -v -s tests/kernels/moe/test_flashinfer.py
     - pytest -v -s tests/compile/test_silu_mul_quant_fusion.py
+
+- label: GPT-OSS Eval (Blackwell)
+  timeout_in_minutes: 60
+  working_dir: "/vllm-workspace/"
+  gpu: b200
+  # optional: true
+  source_file_dependencies:
+  - tests/evals/gpt_oss
+  - vllm/model_executor/models/gpt_oss.py
+  - vllm/model_executor/layers/quantization/mxfp4.py
+  - vllm/v1/attention/backends/flashinfer.py
+  commands:
+    - uv pip install --system 'gpt-oss[eval]==0.0.5'
+    - pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py --model openai/gpt-oss-20b --metric 0.58 --server-args '--tensor-parallel-size 2'
 
 #####  1 GPU test  #####
 #####  multi gpus test  #####
