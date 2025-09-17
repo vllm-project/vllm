@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from torch.nn.parameter import UninitializedParameter
 
 import vllm.envs as envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
 from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.distributed import (get_dp_group, get_ep_group,
@@ -27,8 +28,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat, FusedMoEModularKernel,
     FusedMoEPermuteExpertsUnpermute, FusedMoEPrepareAndFinalize)
-from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-    is_rocm_aiter_moe_enabled)
 from vllm.model_executor.layers.fused_moe.routing_simulator import (
     RoutingSimulator)
 from vllm.model_executor.layers.quantization.base_config import (
@@ -54,7 +53,7 @@ else:
     fused_experts = None  # type: ignore
     FusedMoEPermuteExpertsUnpermute = None  # type: ignore
     FusedMoEPrepareAndFinalize = None  # type: ignore
-if is_rocm_aiter_moe_enabled():
+if rocm_aiter_ops.is_fused_moe_enabled():
     from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
         rocm_aiter_grouped_topk as grouped_topk)
 elif current_platform.is_cpu():
@@ -266,7 +265,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
         self.has_bias = self.moe.has_bias
-        self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
+        self.rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
         if self.rocm_aiter_moe_enabled:
             from .rocm_aiter_fused_moe import rocm_aiter_fused_experts
             self.rocm_aiter_fused_experts = rocm_aiter_fused_experts

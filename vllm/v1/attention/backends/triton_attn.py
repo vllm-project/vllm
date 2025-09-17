@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with PagedAttention and Triton prefix prefill."""
 from dataclasses import dataclass
-from functools import cache
 from typing import ClassVar, Optional
 
 import torch
 
 from vllm import envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.ops.chunked_prefill_paged_decode import (
@@ -193,15 +193,6 @@ class TritonAttentionBackend(AttentionBackend):
         return TritonAttentionMetadataBuilder
 
 
-@cache
-def use_aiter_unified_attention() -> bool:
-    """Check if aiter unified attention should be used."""
-    # VLLM_ROCM_USE_AITER_MHA needs to set to 0 as well as it is set
-    # to 1 as default
-    return envs.VLLM_ROCM_USE_AITER \
-        and envs.VLLM_USE_AITER_UNIFIED_ATTENTION
-
-
 class TritonAttentionImpl(AttentionImpl):
 
     def fused_output_quant_supported(self, quant_key: QuantKey):
@@ -256,7 +247,7 @@ class TritonAttentionImpl(AttentionImpl):
         if not self.force_prefill_decode_attn:
             # If not using prefill decode attention, we use the Triton
             # unified attention implementation.
-            if use_aiter_unified_attention():
+            if rocm_aiter_ops.is_triton_unified_attn_enabled():
                 logger.info_once(
                     "Using aiter unified attention for TritonAttentionImpl")
                 from aiter.ops.triton.unified_attention import (

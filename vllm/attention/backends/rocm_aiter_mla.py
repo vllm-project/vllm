@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Optional, Type, Union
 
 import torch
 
-import vllm.envs as envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.attention.backends.mla.common import (MLACommonBackend,
                                                 MLACommonImpl,
                                                 MLACommonMetadata,
@@ -16,16 +16,25 @@ from vllm.attention.backends.mla.common import (MLACommonBackend,
 from vllm.attention.backends.utils import (compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
-from vllm.attention.ops.rocm_aiter_mla import (aiter_mla_decode_fwd,
-                                               get_aiter_mla_metadata)
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUBuilder
 
 
-def is_aiter_mla_enabled() -> bool:
-    return envs.VLLM_ROCM_USE_AITER \
-        and envs.VLLM_ROCM_USE_AITER_MLA
+def get_aiter_mla_metadata(max_batch_size: int, block_size: int,
+                           max_block_per_batch: int,
+                           device: torch.device) -> tuple[torch.Tensor, ...]:
+    paged_kv_indices = torch.zeros(max_batch_size * max_block_per_batch,
+                                   dtype=torch.int32,
+                                   device=device)
+    paged_kv_indptr = torch.zeros(max_batch_size + 1,
+                                  dtype=torch.int32,
+                                  device=device)
+    paged_kv_last_page_lens = torch.full((max_batch_size, ),
+                                         block_size,
+                                         dtype=torch.int32)
+    qo_indptr = torch.zeros(max_batch_size + 1, dtype=torch.int, device=device)
+    return paged_kv_indices, paged_kv_indptr, paged_kv_last_page_lens, qo_indptr
 
 
 class AiterMLABackend(MLACommonBackend):
@@ -400,11 +409,11 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         kv_buffer = kv_c_and_k_pe_cache.unsqueeze(2)
 
-        aiter_mla_decode_fwd(q, kv_buffer, o, self.scale,
-                             attn_metadata.qo_indptr,
-                             attn_metadata.max_query_len,
-                             attn_metadata.paged_kv_indptr,
-                             attn_metadata.paged_kv_indices,
-                             attn_metadata.paged_kv_last_page_lens)
+        rocm_aiter_ops.mla_decode_fwd(q, kv_buffer, o, self.scale,
+                                      attn_metadata.qo_indptr,
+                                      attn_metadata.max_query_len,
+                                      attn_metadata.paged_kv_indptr,
+                                      attn_metadata.paged_kv_indices,
+                                      attn_metadata.paged_kv_last_page_lens)
 
         return self._v_up_proj(o)
