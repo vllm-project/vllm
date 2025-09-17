@@ -119,9 +119,9 @@ def test_symm_mem_allreduce(monkeypatch: pytest.MonkeyPatch, tp_size,
     except queue.Empty:
         val = None
     finally:
+        cleanup_dist_env_and_memory()
         if val is not None:
             pytest.skip(val)
-        cleanup_dist_env_and_memory()
 
 
 @pytest.mark.skipif(
