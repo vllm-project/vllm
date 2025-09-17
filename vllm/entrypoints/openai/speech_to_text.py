@@ -312,7 +312,7 @@ class OpenAISpeechToText(OpenAIServing):
                         segments: list[Union[
                             TranslationSegment,
                             TranscriptionSegment]] = self._get_verbose_segments(
-                                cast(tuple, op.outputs[0].token_ids),
+                                tuple(op.outputs[0].token_ids),
                                 segment_class=segment_class,
                                 start_time=idx * 30)
 
