@@ -224,14 +224,15 @@ static inline void run_fp4_blockwise_scaled_group_mm_sm120(
       typename cutlass::epilogue::collective::CollectiveBuilder<
           ArchTag, EpilogueOperatorClass, typename MMA1SMConfig::MmaTileShape,
           ClusterShape, cutlass::epilogue::collective::EpilogueTileAuto,
-          ElementAccumulator, ElementAccumulator, ElementC, LayoutC*, AlignmentC,
+          ElementAccumulator, ElementAccumulator, void, LayoutC*, AlignmentC,
           ElementD, LayoutD, AlignmentD,
           typename MMA1SMConfig::EpilogueSchedule>::CollectiveOp;
 
   using CollectiveMainloop =
       typename cutlass::gemm::collective::CollectiveBuilder<
-          ArchTag, MainloopOperatorClass, ElementA, LayoutA*, AlignmentA,
-          ElementB, LayoutB*, AlignmentB, ElementAccumulator,
+          ArchTag, MainloopOperatorClass, ElementA,
+          cute::tuple<LayoutA*, LayoutSFA*>, AlignmentA, ElementB,
+          cute::tuple<LayoutB*, LayoutSFB*>, AlignmentB, ElementAccumulator,
           typename MMA1SMConfig::MmaTileShape, ClusterShape,
           cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
               sizeof(typename CollectiveEpilogue::SharedStorage))>,
