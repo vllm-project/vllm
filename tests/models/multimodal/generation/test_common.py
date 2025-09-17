@@ -10,7 +10,7 @@ from pathlib import PosixPath
 
 import pytest
 from transformers import (AutoModel, AutoModelForImageTextToText,
-                          AutoModelForTextToWaveform, AutoModelForVision2Seq)
+                          AutoModelForTextToWaveform)
 
 from vllm.platforms import current_platform
 from vllm.utils import identity
@@ -137,7 +137,7 @@ VLM_TEST_SETTINGS = {
         video_idx_to_prompt=lambda idx: "<|vision_start|><|video_pad|><|vision_end|>", # noqa: E501
         max_model_len=4096,
         max_num_seqs=2,
-        auto_cls=AutoModelForVision2Seq,
+        auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
@@ -502,7 +502,7 @@ VLM_TEST_SETTINGS = {
         num_video_frames=16,
         max_model_len=16384,
         hf_model_kwargs=model_utils.llava_onevision_hf_model_kwargs("llava-hf/llava-onevision-qwen2-0.5b-ov-hf"),   # noqa: E501
-        auto_cls=AutoModelForVision2Seq,
+        auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.llava_onevision_vllm_to_hf_output,
         custom_test_opts=[CustomTestOptions(
             inputs=custom_inputs.multi_video_multi_aspect_ratio_inputs(
@@ -518,7 +518,7 @@ VLM_TEST_SETTINGS = {
         num_video_frames=16,
         max_model_len=4096,
         max_num_seqs=2,
-        auto_cls=AutoModelForVision2Seq,
+        auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.llava_video_vllm_to_hf_output,
     ),
     "mantis": VLMTestInfo(
@@ -680,7 +680,7 @@ VLM_TEST_SETTINGS = {
         multi_image_prompt="Picture 1: <vlm_image>\nPicture 2: <vlm_image>\nDescribe these two images with one paragraph respectively.",    # noqa: E501
         max_model_len=4096,
         max_num_seqs=2,
-        auto_cls=AutoModelForVision2Seq,
+        auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[pytest.mark.cpu_model],
@@ -784,7 +784,7 @@ VLM_TEST_SETTINGS = {
         test_type=VLMTestType.CUSTOM_INPUTS,
         max_model_len=16384,
         max_num_seqs=2,
-        auto_cls=AutoModelForVision2Seq,
+        auto_cls=AutoModelForImageTextToText,
         hf_model_kwargs=model_utils.llava_onevision_hf_model_kwargs("llava-hf/llava-onevision-qwen2-0.5b-ov-hf"),   # noqa: E501
         vllm_output_post_proc=model_utils.llava_onevision_vllm_to_hf_output,
         custom_test_opts=[CustomTestOptions(
@@ -800,7 +800,7 @@ VLM_TEST_SETTINGS = {
         test_type=VLMTestType.CUSTOM_INPUTS,
         max_model_len=4096,
         max_num_seqs=2,
-        auto_cls=AutoModelForVision2Seq,
+        auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
         custom_test_opts=[CustomTestOptions(
             inputs=custom_inputs.windows_attention_image_qwen2_5_vl(),
