@@ -34,13 +34,47 @@ class StreamingXMLToolCallParser:
         self.reset_streaming_state()
 
         # Tool configuration information
-        self.tools = []
+        self.tools: list[ChatCompletionToolsParam] | None = None
         self.tool_call_start_token: str = '<tool_call>'
         self.tool_call_end_token: str = '</tool_call>'
         self.function_start_token: str = '<function='
         self.function_end_token: str = '</function>'
         self.parameter_start_token: str = '<parameter='
         self.parameter_end_token: str = '</parameter>'
+
+    def reset_streaming_state(self):
+        """Reset streaming parsing state"""
+
+        self.deltas = []
+        # state for streaming
+        self.tool_call_index = 0
+        self.current_call_id = None
+        self.last_completed_call_id = None
+        self.current_function_name = None
+        self.current_function_open = False
+        self.parameters = {}
+        self.current_param_name = None
+        self.current_param_value = ''
+        self.current_param_value_converted = ''
+        self.current_param_is_first = False
+        self.should_emit_end_newline = False
+        self.start_quote_emitted = False
+
+        self.streaming_buffer = ''
+        self.last_processed_pos = 0
+
+        self.text_content_buffer = ''
+
+        # state for preprocessing and deferred parsing
+        self._pre_inside_parameter = False
+        self._pre_param_buffer = ""
+        self._pre_current_param_name = None
+        self.defer_current_parameter = False
+        self.deferred_param_raw_value = ""
+
+        # recreate parser
+        self.parser = ParserCreate()
+        self.setup_parser()
 
     def parse_single_streaming_chunks(self, xml_chunk: str) -> DeltaMessage:
         """
@@ -99,8 +133,8 @@ class StreamingXMLToolCallParser:
                         if self.current_function_name:
                             self._end_element('function')
                         self._end_element('tool_call')
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Error with fallback parsing: %s", e)
             # Merge newly generated deltas into single response
             result_delta = self._merge_new_deltas_to_single_response(
                 initial_delta_count)
@@ -201,8 +235,8 @@ class StreamingXMLToolCallParser:
                 self.parser.Parse(preprocessed_element, False)
                 found_any = True
 
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Error when parsing XML elements: %s", e)
 
             # Update processed position
             self.last_processed_pos = end_pos
@@ -328,8 +362,8 @@ class StreamingXMLToolCallParser:
             return new_deltas[0]
 
         # Merge multiple new deltas
-        merged_tool_calls = []
-        merged_content = ''
+        merged_tool_calls: list[DeltaToolCall] = []
+        merged_content: str = ''
 
         for delta in new_deltas:
             if delta.content:
@@ -344,7 +378,7 @@ class StreamingXMLToolCallParser:
                             existing_call = existing
                             break
 
-                    if existing_call:
+                    if existing_call and existing_call.function:
                         # Merge to existing tool_call
                         if tool_call.function and tool_call.function.name:
                             existing_call.function.name = \
@@ -805,7 +839,7 @@ class StreamingXMLToolCallParser:
         self.parser.EndElementHandler = self._end_element
         self.parser.CharacterDataHandler = self._char_data
 
-    def set_tools(self, tools: list[ChatCompletionToolsParam]):
+    def set_tools(self, tools: list[ChatCompletionToolsParam] | None):
         """Set tool configuration information"""
         self.tools = tools
 
@@ -917,7 +951,7 @@ class StreamingXMLToolCallParser:
               or param_type.startswith('short')
               or param_type.startswith('unsigned')):
             try:
-                param_value = int(param_value)
+                return int(param_value)
             except (ValueError, TypeError):
                 logger.warning(
                     "Parsed value '%s' of parameter '%s' is not an integer "
@@ -925,8 +959,8 @@ class StreamingXMLToolCallParser:
             return param_value
         elif param_type.startswith('num') or param_type.startswith('float'):
             try:
-                float_param_value = float(param_value)
-                param_value = float_param_value if float_param_value - int(
+                float_param_value: float = float(param_value)
+                return float_param_value if float_param_value - int(
                     float_param_value) != 0 else int(float_param_value)
             except (ValueError, TypeError):
                 logger.warning(
@@ -963,41 +997,6 @@ class StreamingXMLToolCallParser:
                 return json.dumps(converted_value, ensure_ascii=False)
             else:
                 return converted_value
-
-    def reset_streaming_state(self):
-        """Reset streaming parsing state"""
-
-        self.deltas = []
-        # state for streaming
-        self.call_id_counter = 0
-        self.tool_call_index = 0
-        self.current_call_id = None
-        self.last_completed_call_id = None
-        self.current_function_name = None
-        self.current_function_open = False
-        self.parameters = {}
-        self.current_param_name = None
-        self.current_param_value = ''
-        self.current_param_value_converted = ''
-        self.current_param_is_first = False
-        self.should_emit_end_newline = False
-        self.start_quote_emitted = False
-
-        self.streaming_buffer = ''
-        self.last_processed_pos = 0
-
-        self.text_content_buffer = ''
-
-        # state for preprocessing and deferred parsing
-        self._pre_inside_parameter = False
-        self._pre_param_buffer = ""
-        self._pre_current_param_name = None
-        self.defer_current_parameter = False
-        self.deferred_param_raw_value = ""
-
-        # recreate parser
-        self.parser = ParserCreate()
-        self.setup_parser()
 
     def _reset_xml_parser_after_tool_call(self):
         """
@@ -1062,15 +1061,16 @@ class Qwen3CoderXMLToolParser(ToolParser):
         else:
             tool_calls = []
             for tool_call in result.tool_calls:
-                tool_calls.append(
-                    ToolCall(
-                        id=tool_call.id,
-                        type=tool_call.type,
-                        function=FunctionCall(
-                            name=tool_call.function.name,
-                            arguments=tool_call.function.arguments,
-                        ),
-                    ))
+                if tool_call.function:
+                    tool_calls.append(
+                        ToolCall(
+                            id=tool_call.id,
+                            type=tool_call.type,
+                            function=FunctionCall(
+                                name=tool_call.function.name,
+                                arguments=tool_call.function.arguments,
+                            ),
+                        ))
             return ExtractedToolCallInformation(
                 tool_calls=tool_calls,
                 tools_called=len(tool_calls) > 0,
