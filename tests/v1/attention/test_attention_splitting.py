@@ -167,9 +167,10 @@ def test_split_attn_metadata_decode_batch(large_decode_metadata):
         ([32, 40], [8, 8], 4, 1, 2),
     ],
 )
-def test_prefill_split_across_ubatches_param(seq_lens, query_lens, split_point,
-                                             expected_first_reqs,
-                                             expected_second_reqs):
+def test_prefill_split_across_ubatches(seq_lens, query_lens, split_point,
+                                       expected_first_reqs,
+                                       expected_second_reqs):
+    """Test splitting a prefill across ubatches"""
     import numpy as np
 
     device = torch.device("cpu")
