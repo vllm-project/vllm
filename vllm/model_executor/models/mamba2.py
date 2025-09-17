@@ -164,9 +164,7 @@ class Mamba2Model(nn.Module):
             # v1 get mamba2_metadata from forward_context
             mamba2_metadata = None
 
-        for i in range(len(self.layers)):
-            layer = self.layers[i]
-
+        for i, layer in enumerate(self.layers):
             hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,
@@ -280,6 +278,7 @@ class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
             # We need bigger padding if using lora for kernel
             # compatibility
             if not lora_config else lora_config.lora_vocab_padding_size,
+            prefix=maybe_prefix(prefix, "lm_head"),
         )
         if config.tie_word_embeddings:
             self.lm_head = self.lm_head.tie_weights(self.backbone.embeddings)

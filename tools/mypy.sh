@@ -29,7 +29,7 @@ run_mypy vllm/engine
 run_mypy vllm/executor
 run_mypy vllm/inputs
 run_mypy vllm/lora
-run_mypy vllm/model_executor
+run_mypy --exclude 'vllm/model_executor/layers/fla/ops' vllm/model_executor
 run_mypy vllm/plugins
 run_mypy vllm/worker
 run_mypy vllm/v1

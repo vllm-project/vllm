@@ -76,6 +76,7 @@ g_sm100_workspace = SM100Workspace(128 * 1024 * 1024)  # 128MB
 
 
 class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
+    can_return_lse_for_decode: bool = True
 
     def __init__(
             self,
@@ -108,10 +109,6 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
                                       "are not implemented for "
                                       "CutlassMLAImpl")
 
-        if is_quantized_kv_cache(self.kv_cache_dtype):
-            raise NotImplementedError(
-                "CutlassMLA V1 with FP8 KV cache not yet supported")
-
         self._use_old_cutlass_mla = False
         force_old_cutlass = os.environ.get("FORCE_OLD_CUTLASS_MLA", None)
         if force_old_cutlass:
@@ -142,7 +139,7 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
         workspace: torch.Tensor,
         sm_scale: float,
         num_kv_splits: int,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         assert (q_nope.ndim == 3
                 ), f"q_nope must be a 3D tensor, but got {q_nope.ndim}"
         assert (
@@ -182,11 +179,10 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 > 0), f"block num must be greater than 0, got {block_num}"
         assert block_num % (128 / PAGE_SIZE) == 0
 
-        # TODO(kaixih@nvidia): support fp8
         assert q_nope.dtype in (
-            torch.float16,
-            torch.bfloat16,
-        ), f"q_nope.dtype needs to be fp16 or bf16 but got {q_nope.dtype}."
+            torch.float16, torch.bfloat16, torch.float8_e4m3fn), (
+                f"q_nope.dtype needs to be fp16 or bf16 or e4m3 but got "
+                f"{q_nope.dtype}.")
         assert q_nope.dtype == q_pe.dtype == kv_c_and_k_pe_cache.dtype
         assert (
             seq_lens.dtype == torch.int32
@@ -195,10 +191,16 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
             page_table.dtype == torch.int32
         ), f"page_table.dtype needs to be int32 but got {page_table.dtype}."
 
-        out = q_nope.new_empty((B_q, MAX_HEADS, D_latent))
+        dtype = (torch.bfloat16 if is_quantized_kv_cache(self.kv_cache_dtype)
+                 else q_nope.dtype)
+        out = q_nope.new_empty((B_q, MAX_HEADS, D_latent), dtype=dtype)
+        lse = (torch.empty(
+            (B_q, MAX_HEADS), dtype=torch.float32, device=q_nope.device)
+               if self.need_to_return_lse_for_decode else torch.Tensor())
 
         ops.sm100_cutlass_mla_decode(
             out,
+            lse,
             q_nope,
             q_pe,
             kv_c_and_k_pe_cache,
@@ -208,7 +210,14 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
             sm_scale,
             num_kv_splits,
         )
-        return out[:, :H].contiguous()
+
+        if H < MAX_HEADS:
+            # Extract the subsets of the outputs
+            returned_lse = lse[:, :H].contiguous(
+            ) if self.need_to_return_lse_for_decode else lse
+            out = out[:, :H]
+
+        return out, returned_lse
 
     def _sm100_forward_decode(
         self,
@@ -216,29 +225,26 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
         q_pe: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: MLACommonMetadata,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
-
-        if self.kv_cache_dtype.startswith("fp8"):
-            raise NotImplementedError("FP8 Cutlass MLA not yet supported")
 
         # Adjust workspace size (if necessary)
         self._workspace.ensure_size(attn_metadata, self._num_kv_splits)
 
         # Run MLA
-        # Clone q_nope and q_pe to make sure strides computation is correct.
-        # TODO: Check if we really need it
-        q_nope = q_nope.clone()
-        q_pe = q_pe.clone()
+        o, lse = self._sm100_cutlass_mla_decode(
+            q_nope,
+            q_pe,
+            kv_c_and_k_pe_cache,
+            attn_metadata.decode.seq_lens,
+            attn_metadata.decode.block_table,
+            self._workspace.get_buf(),
+            self.scale,
+            self._num_kv_splits,
+        )
 
-        o = self._sm100_cutlass_mla_decode(q_nope, q_pe, kv_c_and_k_pe_cache,
-                                           attn_metadata.decode.seq_lens,
-                                           attn_metadata.decode.block_table,
-                                           self._workspace.get_buf(),
-                                           self.scale, self._num_kv_splits)
-
-        return self._v_up_proj(o)
+        return o, (lse if self.need_to_return_lse_for_decode else None)
 
     # TODO: Currently we leave it here only for backup in case something is
     #       wrong with the new SM100 CUTLASS MLA kernel
@@ -252,8 +258,9 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
 
-        if self.kv_cache_dtype.startswith("fp8"):
-            raise NotImplementedError("FP8 Cutlass MLA not yet supported")
+        if is_quantized_kv_cache(self.kv_cache_dtype):
+            raise NotImplementedError(
+                "FP8 Cutlass MLA not supported with FORCE_OLD_CUTLASS_MLA")
 
         B = q_nope.shape[0]
 
@@ -270,21 +277,25 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
                                attn_metadata.decode.seq_lens,
                                attn_metadata.decode.block_table, self.scale)
 
-        return self._v_up_proj(o)
+        return o
 
     def _forward_decode(
         self,
-        q_nope: torch.Tensor,
-        q_pe: torch.Tensor,
+        q: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: MLACommonMetadata,
         layer: AttentionLayer,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        if type(q) is tuple:
+            q_nope, q_pe = q
+        else:
+            q_nope, q_pe = torch.split(
+                q, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         if self._use_old_cutlass_mla:
             # TODO: Remove the old cutlass MLA kernel after more extensive
             #       testing
             return self._old_forward_decode(q_nope, q_pe, kv_c_and_k_pe_cache,
-                                            attn_metadata)
+                                            attn_metadata), None
 
         return self._sm100_forward_decode(q_nope, q_pe, kv_c_and_k_pe_cache,
                                           attn_metadata)

@@ -22,6 +22,7 @@
 
 import math
 from collections.abc import Iterable
+from itertools import islice
 from typing import Optional, Union
 
 import torch
@@ -389,7 +390,7 @@ class FalconModel(nn.Module):
                 hidden_states = self.get_input_embeddings(input_ids)
         else:
             hidden_states = intermediate_tensors["hidden_states"]
-        for layer in self.h[self.start_layer:self.end_layer]:
+        for layer in islice(self.h, self.start_layer, self.end_layer):
             hidden_states = layer(positions, hidden_states)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
@@ -472,6 +473,7 @@ class FalconForCausalLM(nn.Module, SupportsPP):
                 config.vocab_size,
                 config.hidden_size,
                 quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
             )
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
