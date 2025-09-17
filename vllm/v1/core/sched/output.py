@@ -6,7 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
-from vllm import bc_linter_include
+from vllm._bc_linter import bc_linter_include
 
 if TYPE_CHECKING:
     import numpy as np
