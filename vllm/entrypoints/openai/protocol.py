@@ -822,13 +822,17 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @classmethod
     def check_logprobs(cls, data):
         if (prompt_logprobs := data.get("prompt_logprobs")) is not None:
-            if data.get("stream") and prompt_logprobs > 0:
+            if data.get("stream") and (prompt_logprobs > 0
+                                       or prompt_logprobs == -1):
                 raise ValueError(
                     "`prompt_logprobs` are not available when `stream=True`.")
 
-            if prompt_logprobs < 0:
-                raise ValueError("`prompt_logprobs` must be a positive value.")
-
+            if prompt_logprobs < 0 and prompt_logprobs != -1:
+                raise ValueError(
+                    "`prompt_logprobs` must be a positive value or -1.")
+            if prompt_logprobs == -1 and not envs.VLLM_USE_V1:
+                raise ValueError("`prompt_logprobs=-1` is only supported with "
+                                 "vLLM engine V1.")
         if (top_logprobs := data.get("top_logprobs")) is not None:
             if top_logprobs < 0:
                 raise ValueError("`top_logprobs` must be a positive value.")
@@ -1246,13 +1250,17 @@ class CompletionRequest(OpenAIBaseModel):
     @classmethod
     def check_logprobs(cls, data):
         if (prompt_logprobs := data.get("prompt_logprobs")) is not None:
-            if data.get("stream") and prompt_logprobs > 0:
+            if data.get("stream") and (prompt_logprobs > 0
+                                       or prompt_logprobs == -1):
                 raise ValueError(
                     "`prompt_logprobs` are not available when `stream=True`.")
 
-            if prompt_logprobs < 0:
-                raise ValueError("`prompt_logprobs` must be a positive value.")
-
+            if prompt_logprobs < 0 and prompt_logprobs != -1:
+                raise ValueError(
+                    "`prompt_logprobs` must be a positive value or -1.")
+            if prompt_logprobs == -1 and not envs.VLLM_USE_V1:
+                raise ValueError("`prompt_logprobs=-1` is only supported with "
+                                 "vLLM engine V1.")
         if (logprobs := data.get("logprobs")) is not None and logprobs < 0:
             raise ValueError("`logprobs` must be a positive value.")
 

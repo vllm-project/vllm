@@ -58,16 +58,13 @@ def deepseek_r1_qwen_tokenizer():
 
 @pytest.fixture
 def stop_checker():
-    return StopChecker(max_model_len=10,
-                       get_tokenizer_for_seq=deepseek_r1_qwen_tokenizer)
+    return StopChecker(max_model_len=10)
 
 
 @pytest.fixture
 def stop_checker_with_reasoner():
     reasoner = MockReasoningParser(deepseek_r1_qwen_tokenizer)
-    return StopChecker(max_model_len=10,
-                       get_tokenizer_for_seq=deepseek_r1_qwen_tokenizer,
-                       reasoner=reasoner)
+    return StopChecker(max_model_len=10, reasoner=reasoner)
 
 
 def test_eos_token_stopping(stop_checker):

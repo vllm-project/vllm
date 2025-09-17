@@ -29,8 +29,8 @@ from vllm.tasks import SupportedTask
 from vllm.tracing import init_tracer
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
-from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
+from vllm.transformers_utils.tokenizer import (AnyTokenizer,
+                                               init_tokenizer_from_configs)
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (Device, as_list, cancel_task_threadsafe, cdiv,
                         deprecate_kwargs)
@@ -112,9 +112,7 @@ class AsyncLLM(EngineClient):
         else:
             # Tokenizer (+ ensure liveness if running in another process).
             self.tokenizer = init_tokenizer_from_configs(
-                model_config=vllm_config.model_config,
-                scheduler_config=vllm_config.scheduler_config,
-                lora_config=vllm_config.lora_config)
+                model_config=vllm_config.model_config)
 
         # Processor (converts Inputs --> EngineCoreRequests).
         self.processor = Processor(
@@ -596,15 +594,12 @@ class AsyncLLM(EngineClient):
     async def get_input_preprocessor(self) -> InputPreprocessor:
         return self.processor.input_preprocessor
 
-    async def get_tokenizer(
-        self,
-        lora_request: Optional[LoRARequest] = None,
-    ) -> AnyTokenizer:
+    async def get_tokenizer(self) -> AnyTokenizer:
         if self.tokenizer is None:
             raise ValueError("Unable to get tokenizer because "
                              "skip_tokenizer_init is True")
 
-        return self.tokenizer.get_lora_tokenizer(lora_request)
+        return self.tokenizer
 
     async def is_tracing_enabled(self) -> bool:
         return self.observability_config.otlp_traces_endpoint is not None

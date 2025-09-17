@@ -427,6 +427,7 @@ class ArcticForCausalLM(nn.Module, SupportsPP, SupportsQuant):
             self.vocab_size,
             config.hidden_size,
             quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "lm_head"),
         )
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
