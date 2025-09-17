@@ -271,7 +271,8 @@ class QWenBaseModel(nn.Module):
                                                 prefix, "transformer"))
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
-                                      quant_config=quant_config)
+                                      quant_config=quant_config,
+                                      prefix=maybe_prefix(prefix, "lm_head"))
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.transformer.wte.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
