@@ -271,7 +271,7 @@ class Fp8LinearMethod(LinearMethodBase):
         if self.block_quant:
             assert self.weight_block_size is not None
             layer.weight_block_size = self.weight_block_size
-            validate_fp8_block_shape(input_size, output_size,
+            validate_fp8_block_shape(layer, input_size, output_size,
                                      input_size_per_partition,
                                      output_partition_sizes,
                                      self.weight_block_size)
@@ -384,7 +384,6 @@ class Fp8LinearMethod(LinearMethodBase):
                 block_sz = tuple(layer.weight_block_size)
                 requant_weight_ue8m0_inplace(layer.weight.data,
                                              layer.weight_scale.data, block_sz)
-
             # SM90 Block FP8 CUTLASS requires row-major weight scales
             elif (current_platform.is_device_capability(90)
                   and self.cutlass_block_fp8_supported
