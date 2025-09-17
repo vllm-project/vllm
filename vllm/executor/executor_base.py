@@ -238,7 +238,7 @@ class ExecutorBase(ABC):
     def __del__(self):
         try:
             self.shutdown()
-        except TypeError:
+        except (TypeError, AttributeError):
             pass
 
     async def execute_model_async(
