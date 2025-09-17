@@ -29,7 +29,9 @@ from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.utils import (decorate_logs, get_hash_fn_by_name, make_zmq_socket,
                         resolve_obj_by_qualname, set_process_title)
-from vllm.v1.core.kv_cache_utils import (BlockHash, get_kv_cache_configs,
+from vllm.v1.core.kv_cache_utils import (BlockHash,
+                                         generate_scheduler_kv_cache_config,
+                                         get_kv_cache_configs,
                                          get_request_block_hasher,
                                          init_none_hash)
 from vllm.v1.core.sched.interface import SchedulerInterface
@@ -194,16 +196,10 @@ class EngineCore:
 
         assert len(kv_cache_specs) == len(available_gpu_memory)
 
-        scheduler_kv_cache_config, kv_cache_configs = get_kv_cache_configs(
-            vllm_config, kv_cache_specs, available_gpu_memory)
-        print("kv_cache_configs", kv_cache_configs[0])
-
-        assert all([
-            cfg.num_blocks == kv_cache_configs[0].num_blocks
-            for cfg in kv_cache_configs
-        ])
-        assert scheduler_kv_cache_config.num_blocks == kv_cache_configs[
-            0].num_blocks
+        kv_cache_configs = get_kv_cache_configs(vllm_config, kv_cache_specs,
+                                                available_gpu_memory)
+        scheduler_kv_cache_config = generate_scheduler_kv_cache_config(
+            kv_cache_configs)
         num_gpu_blocks = scheduler_kv_cache_config.num_blocks
         num_cpu_blocks = 0
 

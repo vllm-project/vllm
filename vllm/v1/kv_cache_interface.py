@@ -262,6 +262,10 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
         """
         Whether all layers have the same type of KV cache spec.
         """
+        block_sizes = set(spec.block_size for spec in kv_cache_specs.values())
+        if len(block_sizes) > 1:
+            # Different block sizes, not uniform.
+            return False
         one_spec = next(iter(kv_cache_specs.values()))
         if isinstance(one_spec, (FullAttentionSpec, CrossAttentionSpec)):
             return all(
@@ -295,12 +299,8 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
         of KV cache spec. Return None if not.
         """
         if cls.is_uniform_type(kv_cache_specs):
-            block_sizes = set(spec.block_size
-                              for spec in kv_cache_specs.values())
-            assert len(block_sizes) == 1, (
-                "All layers must have the same block size.")
-            return cls(block_size=block_sizes.pop(),
-                       kv_cache_specs=kv_cache_specs)
+            block_size = next(iter(kv_cache_specs.values())).block_size
+            return cls(block_size=block_size, kv_cache_specs=kv_cache_specs)
         else:
             return None
 

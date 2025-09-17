@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """KV-Cache Utilities."""
 
+import copy
 import os
 from collections import defaultdict, deque
 from collections.abc import Iterable, Sequence
@@ -1171,9 +1172,13 @@ def generate_scheduler_kv_cache_config(
     """
     Generate the KV cache configuration for the scheduler.
     """
+    assert all([
+        cfg.num_blocks == kv_cache_configs[0].num_blocks
+        for cfg in kv_cache_configs
+    ])
     # All workers have the same kv_cache_config except layer names, so use
     # an arbitrary one to initialize the scheduler.
-    cfg = kv_cache_configs[0]
+    cfg = copy.deepcopy(kv_cache_configs[0])
     for group in cfg.kv_cache_groups:
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
             # All layers in the UniformTypeKVCacheSpecs have the same type,
@@ -1183,10 +1188,9 @@ def generate_scheduler_kv_cache_config(
     return cfg
 
 
-def get_kv_cache_configs(
-        vllm_config: VllmConfig, kv_cache_specs: list[dict[str, KVCacheSpec]],
-        available_memory: list[int]
-) -> tuple[KVCacheConfig, list[KVCacheConfig]]:
+def get_kv_cache_configs(vllm_config: VllmConfig,
+                         kv_cache_specs: list[dict[str, KVCacheSpec]],
+                         available_memory: list[int]) -> list[KVCacheConfig]:
     """
     Generates the KV cache configuration   s for a model. 
     Since we use a shared centralized controller for all workers, we need the
@@ -1210,9 +1214,7 @@ def get_kv_cache_configs(
         worker.
 
     Returns:
-        The generated KVCacheConfig as a tuple of:
-        - The KVCacheConfig for the scheduler
-        - The KVCacheConfigs for each worker
+        The generated KVCacheConfigs for each worker
     """
 
     # Check if the available memory is enough for each worker.
@@ -1266,7 +1268,4 @@ def get_kv_cache_configs(
     for kv_cache_config in kv_cache_configs:
         kv_cache_config.num_blocks = min_num_blocks
 
-    scheduler_kv_cache_config = generate_scheduler_kv_cache_config(
-        kv_cache_configs)
-
-    return scheduler_kv_cache_config, kv_cache_configs
+    return kv_cache_configs
