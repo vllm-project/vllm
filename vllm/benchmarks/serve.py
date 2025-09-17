@@ -139,7 +139,7 @@ async def get_request(
             A lower burstiness value (0 < burstiness < 1) results
             in more bursty requests, while a higher burstiness value
             (burstiness > 1) results in a more uniform arrival of requests.
-         ramp_up_strategy (optional):
+        ramp_up_strategy (optional):
             The ramp-up strategy. Can be "linear" or "exponential".
             If None, uses constant request rate (specified by request_rate).
         ramp_up_start_rps (optional):
