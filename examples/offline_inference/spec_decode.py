@@ -16,7 +16,10 @@ try:
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
-OUTPUTS_DIR = pathlib.Path("outputs/")
+# create output directory
+from datetime import datetime
+outputs_dir = pathlib.Path("outputs/") / datetime.now().strftime("%Y%m%d_%H%M%S")
+outputs_dir.mkdir(parents=True, exist_ok=True)
 
 def read_stats(path):
     forward_times, shapes = [], []
@@ -26,6 +29,17 @@ def read_stats(path):
             forward_times.append(float(parts[0]))
             shapes.append(parts[1])
     return forward_times, shapes
+
+def print_dict(stats, file=None, newlines=[]):
+  if file is None:
+    for i, (k, v) in enumerate(stats.items()):
+        print(f"{k:<50}{v}")
+        if i in newlines: print()
+  else:
+    file.touch()
+    with open(file, 'a') as f:
+      for k, v in stats.items():
+        f.write(json.dumps({k: v}) + '\n')
 
 QUESTION = "What is the content of each image?"
 IMAGE_URLS = [
@@ -156,6 +170,9 @@ def main():
     else:
         raise ValueError(f"unknown method: {args.method}")
 
+    # save args
+    print_dict({str(k): str(v) for k, v in vars(args).items()}, outputs_dir / "args.jsonl")
+
     llm = LLM(
         model=model_dir,
         trust_remote_code=True,
@@ -181,11 +198,8 @@ def main():
 
     sampling_params = SamplingParams(temperature=args.temp, max_tokens=args.output_len)
     if not args.custom_mm_prompts:
-        tokenized_prompts = [TokensPrompt(prompt_token_ids=x) for x in prompt_ids]
-        lengths = [len(prompt['prompt_token_ids']) for prompt in tokenized_prompts]
-        ic(lengths)
         outputs = llm.generate(
-            tokenized_prompts,
+            [TokensPrompt(prompt_token_ids=x) for x in prompt_ids],
             sampling_params=sampling_params,
         )
     else:
@@ -253,40 +267,27 @@ def main():
     acceptance_length = 1 + (accepted_tokens / drafts) if drafts > 0 else 1
     draft_utilization_rate = accepted_tokens / draft_tokens * 100 if draft_tokens > 0 else 0
 
-    drafter_forward_times, _ = read_stats(OUTPUTS_DIR / "drafter.csv")
-    target_forward_times, _ = read_stats(OUTPUTS_DIR / "target.csv")
-    drafter_forward_time = sum(drafter_forward_times) # measure in secs
+    drafter_forward_times, _ = read_stats(outputs_dir / "drafter.csv")
+    target_forward_times, _ = read_stats(outputs_dir / "target.csv")
+    drafter_forward_time = sum(drafter_forward_times)
     target_forward_time = sum(target_forward_times)
     forward_ratio = drafter_forward_time / target_forward_time
 
-    # Print formatted benchmark results
-    print("=========== Speculative Decoding Stats ============")
-    print(f"Number of input tokens:                    {input_tokens:<10}")
-    print(f"Number of output tokens:                   {output_tokens:<10}")
-    print()
+    stats = {
+        "input_tokens": input_tokens, "output_tokens": output_tokens,
+        "input_time_sec": input_time_sec, "output_time_sec": output_time_sec, "total_time_sec": time_sec,
+        "drafter_forward_time": drafter_forward_time, "target_forward_time": target_forward_time, "forward_ratio": forward_ratio,
+        "input_speed": input_speed, "output_speed": output_speed, "overall_speed": overall_speed,
+        "drafts": drafts, "draft_tokens": draft_tokens, "draft_utilization_rate": draft_utilization_rate,
+        "accepted_tokens": accepted_tokens, "acceptance_length": acceptance_length
+    }
 
-    print(f"Input time (sec):                          {input_time_sec:<10.2f}")
-    print(f"Output time (sec):                         {output_time_sec:<10.2f}")
-    print(f"Total time (sec):                          {time_sec:<10.2f}")
-    print()
+    # print stats to stdout
+    print_dict(stats, newlines=[1, 4, 7, 10, 13])
 
-    print(f"Drafter forward time (sec)                 {drafter_forward_time:<10.2f}")
-    print(f"Target forward time (sec)                  {target_forward_time:<10.2f}")
-    print(f"Forward ratio (D:T)                        {forward_ratio:<10.2f}")
-    print()
+    # save stats to file
+    print_dict(stats, file=outputs_dir / "stats.jsonl")
 
-    print(f"Input token throughput (tok/sec):          {input_speed:<10.2f}")
-    print(f"Output token throughput (tok/sec):         {output_speed:<10.2f}")
-    print(f"Total throughput (tok/sec):                {overall_speed:<10.2f}")
-    print()
-
-    print(f"Number of drafts:                            {drafts:<10}")
-    print(f"Draft tokens generated:                      {draft_tokens:<10}")
-    print(f"Draft utilization rate:                      {draft_utilization_rate:<10.1f}")
-    print(f"Accepted tokens:                             {accepted_tokens:<10}")
-    print(f"Mean acceptance length:                      {acceptance_length:<10.2f}")
-
-    print("====================================================")
 
 if __name__ == "__main__":
     main()
