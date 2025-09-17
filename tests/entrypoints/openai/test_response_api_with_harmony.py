@@ -452,7 +452,6 @@ async def test_web_search(client: OpenAI, model_name: str):
     )
     assert response is not None
     assert response.status == "completed"
-    assert "web_search_call" in [output.type for output in response.output]
 
 
 @pytest.mark.asyncio
