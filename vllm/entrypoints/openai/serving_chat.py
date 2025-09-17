@@ -1360,11 +1360,19 @@ class OpenAIServingChat(OpenAIServing):
                                       reasoning_content=reasoning_content,
                                       content=content)
 
+            # According to the OpenAI API, the finish_reason is typically set
+            # to "tool_calls" when a tool is invoked. However, for named tool
+            # calls, # the finish_reason is instead set to "stop" as an
+            # exception to this rule.
+            is_finish_reason_tool_calls = auto_tools_called or (
+                request.tool_choice and request.tool_choice == "required"
+                and output.finish_reason == "stop")
+
             choice_data = ChatCompletionResponseChoice(
                 index=output.index,
                 message=message,
                 logprobs=logprobs,
-                finish_reason="tool_calls" if auto_tools_called else
+                finish_reason="tool_calls" if is_finish_reason_tool_calls else
                 output.finish_reason if output.finish_reason else "stop",
                 stop_reason=output.stop_reason,
                 token_ids=(as_list(output.token_ids)
