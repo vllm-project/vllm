@@ -78,6 +78,31 @@ def test_quark_fp8_w_per_tensor_a_per_tensor(vllm_runner, kv_cache_dtype, tp):
 
 
 @pytest.mark.parametrize('tp', [1])
+def test_quark_fp8_w_per_channel_a_per_token(vllm_runner, tp):
+    model_path = "amd/Qwen2.5-1.5B-Instruct-ptpc-Quark-ts"
+    with vllm_runner(model_path, tensor_parallel_size=tp) as llm:
+
+        def check_model(model):
+            layer = model.model.layers[0]
+
+            qkv_proj = layer.self_attn.qkv_proj
+
+            assert isinstance(qkv_proj.quant_method, QuarkLinearMethod)
+            assert isinstance(qkv_proj.scheme, QuarkW8A8Fp8)
+
+            if isinstance(qkv_proj.scheme, QuarkW8A8Fp8):
+                assert qkv_proj.weight.dtype is current_platform.fp8_dtype()
+                assert qkv_proj.weight_scale.shape[0] == qkv_proj.weight.shape[
+                    1]
+                assert qkv_proj.weight_scale.shape[1] == 1
+
+        llm.apply_model(check_model)
+
+        output = llm.generate_greedy("Hello my name is", max_tokens=20)
+        assert output
+
+
+@pytest.mark.parametrize('tp', [1])
 def test_quark_int8_w_per_tensor_a_per_tensor(vllm_runner, tp):
     model_path = "amd/Llama-3.1-8B-Instruct-w-int8-a-int8-sym-test"
     with vllm_runner(model_path, tensor_parallel_size=tp) as llm:
