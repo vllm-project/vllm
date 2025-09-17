@@ -16,7 +16,7 @@ if sys.version_info[:2] >= (3, 11):
     from asyncio import timeout as asyncio_timeout
 else:
 
-    def asyncio_timeout(delay: Optional[float]) -> "Timeout":
+    def asyncio_timeout(delay: Optional[float]) -> Any:
         """timeout context manager.
         Useful in cases when you want to apply timeout logic around block
         of code or in cases when asyncio.wait_for is not suitable. For example:
