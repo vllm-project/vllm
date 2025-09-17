@@ -325,6 +325,7 @@ if __name__ == "__main__":
                     f"but DataFrame has: {list(output_df.columns)}"
                 )
             output_df_sorted = output_df.sort_values(by=existing_group_cols)
+            output_df_sorted = output_df.sort_values(by=args.xaxis)
             output_groups = output_df_sorted.groupby(existing_group_cols, dropna=False)
             for name, group in output_groups:
                 group_name = ",".join(map(str, name)).replace(",", "_").replace("/","-")
