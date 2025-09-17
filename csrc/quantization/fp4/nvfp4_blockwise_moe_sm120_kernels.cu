@@ -226,7 +226,7 @@ static inline void run_fp4_blockwise_scaled_group_mm_sm120(
           ArchTag, EpilogueOperatorClass, typename MMA1SMConfig::MmaTileShape,
           ClusterShape, cutlass::epilogue::collective::EpilogueTileAuto,
           ElementAccumulator, ElementAccumulator, ElementC, LayoutC*, AlignmentC,
-          ElementD, LayoutD, AlignmentD,
+          ElementD, LayoutD*, AlignmentD,
           typename MMA1SMConfig::EpilogueSchedule>::CollectiveOp;
 
   using CollectiveMainloop =
@@ -243,15 +243,19 @@ static inline void run_fp4_blockwise_scaled_group_mm_sm120(
                                            CollectiveEpilogue>;
   using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
 
-  using StrideA = typename Gemm::GemmKernel::InternalStrideA;
-  using StrideB = typename Gemm::GemmKernel::InternalStrideB;
-  using StrideC = typename Gemm::GemmKernel::InternalStrideC;
-  using StrideD = typename Gemm::GemmKernel::InternalStrideD;
+  using StrideAParam = typename Gemm::GemmKernel::StrideA;
+  using StrideBParam = typename Gemm::GemmKernel::StrideB;
+  using StrideCParam = typename Gemm::GemmKernel::StrideC;
+  using StrideDParam = typename Gemm::GemmKernel::StrideD;
 
-  using LayoutSFA =
+  using InternalLayoutSFA =
       typename Gemm::GemmKernel::CollectiveMainloop::InternalLayoutSFA;
-  using LayoutSFB =
+  using InternalLayoutSFB =
       typename Gemm::GemmKernel::CollectiveMainloop::InternalLayoutSFB;
+  using LayoutSFAArg =
+      typename Gemm::GemmKernel::CollectiveMainloop::LayoutSFA;
+  using LayoutSFBArg =
+      typename Gemm::GemmKernel::CollectiveMainloop::LayoutSFB;
   using ScaleConfig =
       typename Gemm::GemmKernel::CollectiveMainloop::Sm1xxBlkScaledConfig;
 
@@ -275,7 +279,7 @@ static inline void run_fp4_blockwise_scaled_group_mm_sm120(
   torch::Tensor b_strides1 =
       torch::full({num_experts}, b.stride(1) * 2, options_int);
 
-  run_get_group_gemm_starts_sm120<LayoutSFA, LayoutSFB, ScaleConfig>(
+  run_get_group_gemm_starts_sm120<InternalLayoutSFA, InternalLayoutSFB, ScaleConfig>(
       a_ptrs, b_ptrs, out_ptrs, a_scales_ptrs, b_scales_ptrs, alpha_ptrs,
       layout_sfa, layout_sfb, a, b, output, a_blockscale, b_blockscales, alphas,
       expert_offsets, sf_offsets, problem_sizes, M, N, K);
@@ -303,20 +307,20 @@ static inline void run_fp4_blockwise_scaled_group_mm_sm120(
 
   typename GemmKernel::MainloopArguments mainloop_args{
       static_cast<const ElementType**>(a_ptrs.data_ptr()),
-      static_cast<StrideA*>(a_strides1.data_ptr()),
+      reinterpret_cast<StrideAParam>(a_strides1.data_ptr()),
       static_cast<const ElementType**>(b_ptrs.data_ptr()),
-      static_cast<StrideB*>(b_strides1.data_ptr()),
+      reinterpret_cast<StrideBParam>(b_strides1.data_ptr()),
       static_cast<const ElementSFType**>(a_scales_ptrs.data_ptr()),
-      reinterpret_cast<LayoutSFA*>(layout_sfa.data_ptr()),
+      reinterpret_cast<LayoutSFAArg>(layout_sfa.data_ptr()),
       static_cast<const ElementSFType**>(b_scales_ptrs.data_ptr()),
-      reinterpret_cast<LayoutSFB*>(layout_sfb.data_ptr())};
+      reinterpret_cast<LayoutSFBArg>(layout_sfb.data_ptr())};
 
   typename GemmKernel::EpilogueArguments epilogue_args{
       {},  // epilogue.thread
       nullptr,
-      static_cast<StrideC*>(c_strides1.data_ptr()),
-      static_cast<ElementD**>(out_ptrs.data_ptr()),
-      static_cast<StrideC*>(c_strides1.data_ptr())};
+      reinterpret_cast<StrideCParam>(c_strides1.data_ptr()),
+      reinterpret_cast<ElementD**>(out_ptrs.data_ptr()),
+      reinterpret_cast<StrideDParam>(c_strides1.data_ptr())};
   auto& fusion_args = epilogue_args.thread;
   fusion_args.alpha_ptr_array =
       reinterpret_cast<float**>(alpha_ptrs.data_ptr());
