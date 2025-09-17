@@ -33,8 +33,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     MLA (Multi-Head Latent Attention) layer that implements AttentionLayerBase.
     
     This class provides a dedicated attention layer for MLA that is separate
-    from the standard MHA/GQA/MQA attention mechanisms. It uses the existing
-    MultiHeadLatentAttention CustomOp for the actual computation.
+    from the standard MHA/GQA/MQA attention mechanisms.
     """
 
     def __init__(
@@ -96,7 +95,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             is_attention_free = False
 
         dtype = torch.get_default_dtype()
-        self.mla_backend = get_attn_backend(
+        self.attn_backend = get_attn_backend(
             head_size=self.kv_lora_rank + self.qk_rope_head_dim,
             dtype=dtype,
             kv_cache_dtype=kv_cache_dtype,
@@ -106,76 +105,83 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             has_sink=False,
         )
 
-        # Parse debug layer index from prefix (e.g., "layers.0.attn" -> 0)
+        # MLA backend implementation
+        impl_cls = self.attn_backend.get_impl_cls()
+        self.impl = impl_cls(
+            num_heads=self.num_heads,
+            head_size=self.kv_lora_rank + self.qk_rope_head_dim,
+            scale=self.scale,
+            num_kv_heads=self.num_heads,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype=kv_cache_dtype,
+            logits_soft_cap=None,
+            attn_type="decoder",
+            kv_sharing_target_layer_name=None,
+            q_lora_rank=self.q_lora_rank,
+            kv_lora_rank=self.kv_lora_rank,
+            qk_nope_head_dim=self.qk_nope_head_dim,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            qk_head_dim=self.qk_head_dim,
+            v_head_dim=self.v_head_dim,
+            kv_b_proj=self.kv_b_proj,
+        )
+
+        # "layers.0.attn" -> 0
         prefix_parts = self.prefix.split(".")
         if len(prefix_parts) >= 2:
             try:
                 self.debug_layer_idx = int(prefix_parts[-2])
             except ValueError:
-                self.debug_layer_idx = 0  # Default to 0 if not a number
+                self.debug_layer_idx = 0
         else:
-            self.debug_layer_idx = 0  # Default to 0 if prefix format is unexpected
+            self.debug_layer_idx = 0
+
+        self.kv_cache = None
+        self.layer_name = prefix
 
     def forward(
         self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        output_shape: Optional[torch.Size] = None,
     ) -> torch.Tensor:
         """
         Forward pass for MLA attention.
         
         Args:
-            positions: Position indices tensor
-            hidden_states: Input hidden states tensor
+            query: Query tensor - contains the processed query
+            key: Key tensor - contains kv_c_normed
+            value: Value tensor - contains k_pe
+            output_shape: Optional output shape specification
             
         Returns:
             Output tensor after MLA attention computation
         """
-        q_c = None
-        kv_lora = None
+        # get the forward context to access attention metadata
+        from vllm.attention.layer import get_forward_context
+        forward_context = get_forward_context()
+        attn_metadata = forward_context.attn_metadata
+        if isinstance(attn_metadata, dict):
+            attn_metadata = attn_metadata[self.layer_name]
+        kv_cache = self.kv_cache[forward_context.virtual_engine]
 
-        if self.q_lora_rank is not None:
-            assert self.fused_qkv_a_proj is not None, \
-                "fused_qkv_a_proj is required when q_lora_rank is not None"
-            assert self.q_a_layernorm is not None, \
-                "q_a_layernorm is required when q_lora_rank is not None"
-            assert self.q_b_proj is not None, \
-                "q_b_proj is required when q_lora_rank is not None"
-            qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
-            q_c, kv_lora = qkv_lora.split(
-                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
-                dim=-1,
-            )
-            q_c = self.q_a_layernorm(q_c)
-            q = self.q_b_proj(q_c)[0]
-        else:
-            assert self.kv_a_proj_with_mqa is not None, \
-                "kv_a_proj_with_mqa is required when q_lora_rank is None"
-            assert self.q_proj is not None, \
-                "q_proj is required when q_lora_rank is None"
-            kv_lora = self.kv_a_proj_with_mqa(hidden_states)[0]
-            q = self.q_proj(hidden_states)[0]
+        # For MLA, the query, key, value are already processed by the model
+        q = query.view(-1, self.num_heads, self.qk_head_dim)
+        kv_c_normed = key  # normalized KV cache
+        k_pe = value.unsqueeze(1) if value.dim() == 2 else value
 
-        kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim],
-                                   dim=-1)
-        kv_c_normed = self.kv_a_layernorm(kv_c)
-
-        q = q.view(-1, self.num_heads, self.qk_head_dim)
-        # Add head dim of 1 to k_pe
-        k_pe = k_pe.unsqueeze(1)
-
-        q[..., self.qk_nope_head_dim:], k_pe = self.rotary_emb(
-            positions, q[..., self.qk_nope_head_dim:], k_pe)
-
-        # Use the MLA backend directly for attention computation
-        attn_out = self.mla_backend.forward(
-            q,
-            kv_c_normed,
-            k_pe,
-            output_shape=(hidden_states.shape[0],
-                          self.num_heads * self.v_head_dim))
+        attn_out = self.impl.forward(
+            layer=self,
+            q=q,
+            k_c_normed=kv_c_normed,
+            k_pe=k_pe,
+            kv_cache=kv_cache,
+            attn_metadata=attn_metadata,
+        )
         return self.o_proj(attn_out)[0]
 
     def get_attn_backend(self) -> type:
         """Get the attention backend class for this MLA layer."""
-        return self.mla_backend
+        return self.attn_backend
