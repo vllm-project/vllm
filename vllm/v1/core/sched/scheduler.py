@@ -25,7 +25,7 @@ from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
 from vllm.v1.core.sched.request_queue import (SchedulingPolicy,
                                               create_request_queue)
-from vllm.v1.core.sched.utils import check_stop, remove_all
+from vllm.v1.core.sched.utils import check_stop, remove_all, add_token_and_check_stop
 from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
                             EngineCoreOutputs)
 from vllm.v1.kv_cache_interface import KVCacheConfig
