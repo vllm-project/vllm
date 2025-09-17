@@ -308,7 +308,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/quantization/fp4/nvfp4_blockwise_moe_kernel.cu"
     "csrc/sparse/cutlass/sparse_scaled_mm_entry.cu"
     "csrc/cutlass_extensions/common.cpp"
-    "csrc/attention/mla/cutlass_mla_entry.cu"
     "csrc/quantization/fp8/per_token_group_quant.cu")
 
   set_gencode_flags_for_srcs(
@@ -595,7 +594,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   cuda_archs_loose_intersection(MLA_ARCHS "10.0a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND MLA_ARCHS)
     set(SRCS
-      "csrc/attention/mla/cutlass_mla_kernels.cu"
       "csrc/attention/mla/sm100_cutlass_mla_kernel.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
