@@ -159,6 +159,10 @@ class SchedulerConfig:
     structured outputs, speculative decoding, and pipeline parallelism.
     """
 
+    context_parallel_size: int = 1
+    tensor_parallel_size: int = 1
+    enable_sequence_parallel: bool = False
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

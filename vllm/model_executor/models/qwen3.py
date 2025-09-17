@@ -42,6 +42,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.model_executor.custom_op import CustomOp
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsEagle3, SupportsLoRA, SupportsPP
@@ -159,7 +160,8 @@ class Qwen3Attention(nn.Module):
         return output
 
 
-class Qwen3DecoderLayer(nn.Module):
+@CustomOp.register("qwen3_decoder_layer")
+class Qwen3DecoderLayer(CustomOp):
 
     def __init__(
         self,
