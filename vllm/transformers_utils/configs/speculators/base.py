@@ -24,20 +24,7 @@ class SpeculatorsConfig(PretrainedConfig):
         config_dict, _ = cls.get_config_dict(pretrained_model_name_or_path,
                                              **kwargs)
 
-        speculators_model_type = config_dict.get("speculators_model_type")
-        if speculators_model_type not in SUPPORTED_SPECULATORS_TYPES:
-            raise ValueError(
-                f"Expected one of: {SUPPORTED_SPECULATORS_TYPES}. "
-                "Please ensure you're loading a speculators-format model.")
-
-        # validate fields
-        # TODO: @dsikka - use speculators pydantic model to validate
-        cls.validate_speculators_config(config_dict=config_dict)
-        # Convert from speculators config -> format that can be ingested by vLLM
-        vllm_config = cls.convert_speculators_to_vllm(config_dict=config_dict)
-        # Apply anything specific to the supported algorithm
-        algo_updater = SUPPORTED_SPECULATORS_TYPES[speculators_model_type]
-        algo_updater(config_dict=config_dict, vllm_config=vllm_config)
+        vllm_config = cls.get_vllm_config(config_dict=config_dict)
         return cls(**vllm_config)
 
     @classmethod
@@ -60,14 +47,36 @@ class SpeculatorsConfig(PretrainedConfig):
                 "'transformer_layer_config' must be a dictionary if provided")
 
     @classmethod
+    def get_vllm_config(cls, config_dict: dict[str, Any]) -> dict[str, Any]:
+        """
+        Validate and convert speculators config dict to vLLM format.
+
+        This method includes algorithm-specific processing and validation.
+        """
+        speculators_model_type = config_dict.get("speculators_model_type")
+        if speculators_model_type not in SUPPORTED_SPECULATORS_TYPES:
+            raise ValueError(
+                f"Expected one of: {SUPPORTED_SPECULATORS_TYPES}. "
+                "Please ensure you're loading a speculators-format model.")
+
+        # validate fields
+        cls.validate_speculators_config(config_dict=config_dict)
+        # Convert from speculators config -> format that can be ingested by vLLM
+        vllm_config = cls.convert_speculators_to_vllm(config_dict=config_dict)
+        # Apply anything specific to the supported algorithm
+        algo_updater = SUPPORTED_SPECULATORS_TYPES[speculators_model_type]
+        algo_updater(config_dict=config_dict, vllm_config=vllm_config)
+        return vllm_config
+
+    @classmethod
     def convert_speculators_to_vllm(
             cls, config_dict: dict[str, Any]) -> dict[str, Any]:
         """
         Convert speculators config format to vLLM format.
-        
+
         This method handles the translation of field names and structure
         between speculators and vLLM formats.
-        
+
         Returns:
             Dictionary with vLLM-compatible configuration
         """

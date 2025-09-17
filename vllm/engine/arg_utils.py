@@ -50,6 +50,8 @@ from vllm.v1.sample.logits_processor import LogitsProcessor
 
 # yapf: enable
 
+logger = init_logger(__name__)
+
 if TYPE_CHECKING:
     from vllm.executor.executor_base import ExecutorBase
     from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -1079,7 +1081,7 @@ class EngineArgs:
         target_parallel_config: ParallelConfig,
         enable_chunked_prefill: bool,
         disable_log_stats: bool,
-    ) -> Optional["SpeculativeConfig"]:
+    ) -> tuple[ModelConfig, Optional["SpeculativeConfig"]]:
         """Initializes and returns a SpeculativeConfig object based on
         `speculative_config`.
 
@@ -1087,11 +1089,20 @@ class EngineArgs:
         SpeculativeConfig object. The `speculative_config` can either be
         provided as a JSON string input via CLI arguments or directly as a
         dictionary from the engine.
+
+        Returns:
+            A tuple of (possibly updated model_config, speculative_config).
+            If a speculators model is detected, model_config is updated to
+            point to the target model and speculative_config is configured
+            with the draft model.
         """
+        from dataclasses import replace
 
         from vllm.transformers_utils.config import get_config
         from vllm.transformers_utils.configs.speculators.base import (
             SpeculatorsConfig)
+
+        updated_model_config = target_model_config
 
         if self.speculative_config is None:
             hf_config = get_config(
@@ -1103,25 +1114,64 @@ class EngineArgs:
             # details from the config directly
             # no user input required / expected
             if isinstance(hf_config, SpeculatorsConfig):
-                # We create one since we don't create one
-                self.speculative_config = {}
-                self.speculative_config[
-                    "num_speculative_tokens"] = hf_config.num_lookahead_tokens
-                self.speculative_config["model"] = target_model_config.model
-                self.speculative_config["method"] = hf_config.method
+                # Get the complete vLLM config with algorithm-specific fields
+                try:
+                    config_dict, _ = SpeculatorsConfig.get_config_dict(
+                        target_model_config.model)
+                    vllm_config = SpeculatorsConfig.get_vllm_config(
+                        config_dict)
+                except Exception as e:
+                    raise ValueError(
+                        f"Failed to process speculators model "
+                        f"'{target_model_config.model}': {e}") from e
+
+                # Update model config to point to actual target model
+                updated_model_config = replace(
+                    target_model_config, model=vllm_config["target_model"])
+
+                # Set up speculative config with original speculators model
+                # as draft
+                self.speculative_config = {
+                    "model":
+                    target_model_config.model,  # Original speculators model
+                    "num_speculative_tokens":
+                    vllm_config["num_lookahead_tokens"],
+                    "method": vllm_config["method"]
+                }
+
+                # Add all algorithm-specific fields
+                for key, value in vllm_config.items():
+                    if key not in [
+                            "target_model", "num_lookahead_tokens", "method"
+                    ]:
+                        self.speculative_config[key] = value
+
+                logger.info(
+                    "Detected speculators model. Using target model: %s",
+                    vllm_config['target_model'])
+                logger.info(
+                    "Speculative config: %s", {
+                        k: v
+                        for k, v in self.speculative_config.items() if k not in
+                        ["target_model_config", "target_parallel_config"]
+                    })
             else:
-                return None
+                return updated_model_config, None
+
+        if self.speculative_config is None:
+            return updated_model_config, None
 
         # Note(Shangming): These parameters are not obtained from the cli arg
         # '--speculative-config' and must be passed in when creating the engine
         # config.
         self.speculative_config.update({
-            "target_model_config": target_model_config,
+            "target_model_config": updated_model_config,
             "target_parallel_config": target_parallel_config,
             "enable_chunked_prefill": enable_chunked_prefill,
             "disable_log_stats": disable_log_stats,
         })
-        return SpeculativeConfig(**self.speculative_config)
+        return updated_model_config, SpeculativeConfig(
+            **self.speculative_config)
 
     def create_engine_config(
         self,
@@ -1363,7 +1413,7 @@ class EngineArgs:
             decode_context_parallel_size=self.decode_context_parallel_size,
         )
 
-        speculative_config = self.create_speculative_config(
+        model_config, speculative_config = self.create_speculative_config(
             target_model_config=model_config,
             target_parallel_config=parallel_config,
             enable_chunked_prefill=self.enable_chunked_prefill,
