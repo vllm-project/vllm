@@ -8,11 +8,10 @@ from typing import Union
 import pytest
 import torch
 
-from vllm.attention.backends.utils import backend_to_class_str
+from vllm.attention.backends.registry import _Backend, backend_to_class_str
 from vllm.config import (CacheConfig, CompilationConfig, DeviceConfig,
                          LoadConfig, ModelConfig, ModelDType, ParallelConfig,
                          SchedulerConfig, VllmConfig)
-from vllm.platforms import _Backend
 from vllm.utils import resolve_obj_by_qualname
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec

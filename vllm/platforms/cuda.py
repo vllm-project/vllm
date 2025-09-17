@@ -17,13 +17,13 @@ from typing_extensions import ParamSpec
 # import custom ops, trigger op registration
 import vllm._C  # noqa
 import vllm.envs as envs
-from vllm.attention.backends.utils import (backend_to_class,
-                                           backend_to_class_str)
+from vllm.attention.backends.registry import (_Backend, backend_to_class,
+                                              backend_to_class_str)
 from vllm.logger import init_logger
 from vllm.utils import (cuda_device_count_stateless, import_pynvml,
                         resolve_obj_by_qualname)
 
-from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
+from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig

@@ -7,8 +7,9 @@ from typing import Final, Generic, Optional, Protocol, TypeVar, Union
 import torch
 from transformers import PretrainedConfig
 
+from vllm.attention.backends.registry import _Backend
 from vllm.logger import init_logger
-from vllm.platforms import _Backend, current_platform
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 

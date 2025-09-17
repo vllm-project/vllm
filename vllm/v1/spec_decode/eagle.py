@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from vllm.attention.backends.utils import backend_to_class_str
+from vllm.attention.backends.registry import _Backend, backend_to_class_str
 from vllm.attention.layer import Attention
 from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config)
@@ -20,7 +20,6 @@ from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.platforms import current_platform
-from vllm.platforms.interface import _Backend
 from vllm.utils import is_pin_memory_available
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.tree_attn import (TreeAttentionMetadata,
