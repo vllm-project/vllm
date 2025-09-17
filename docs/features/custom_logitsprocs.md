@@ -41,9 +41,10 @@ Custom logits processors must subclass `vllm.v1.sample.logits_processor.LogitsPr
 ### How the vLLM engine builds the `BatchUpdate` data structure
 
 !!! important
-    Some logits processors design changes are still in progress, we expect
-    that once those changes are complete the information in this section will
-    become irrelevant
+    Some logits processors design changes are still in progress. We expect
+    that in the future you will not need to account for batch state changes
+    when implementing a logits processor, and the information in this section
+    will become irrelevant.
 
 Logits processor `update_state()` implementations should assume the following model for how the model runner updates persistent batch state (expressed here in terms of the `BatchUpdate` abstraction):
 
