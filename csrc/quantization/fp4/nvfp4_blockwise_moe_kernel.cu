@@ -200,11 +200,7 @@ void run_fp4_blockwise_scaled_group_mm(
   static constexpr int AlignmentD = 128 / cutlass::sizeof_bits<ElementD>::value;
 
   // Architecture definitions
-#if defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120
-  using ArchTag = cutlass::arch::Sm120;
-#else
   using ArchTag = cutlass::arch::Sm100;
-#endif
   using EpilogueOperatorClass =
       cutlass::arch::OpClassTensorOp;  // Epilogue Operator class tag
   using MainloopOperatorClass =
@@ -216,16 +212,10 @@ void run_fp4_blockwise_scaled_group_mm(
   using ClusterShape = Shape<_1, _1, _1>;
   struct MMA1SMConfig {
     using MmaTileShape = Shape<_128, _128, _128>;
-#if defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120
-    using KernelSchedule = cutlass::gemm::KernelTmaWarpSpecializedPingpongNvf4Sm120;
-#else
-    using KernelSchedule = cutlass::gemm::KernelPtrArrayTmaWarpSpecialized1SmNvf4Sm100;
-#endif
-#if defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120
-    using EpilogueSchedule = cutlass::epilogue::collective::EpilogueScheduleAuto;
-#else
-    using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecialized1Sm;
-#endif
+    using KernelSchedule = cutlass::gemm::
+        KernelPtrArrayTmaWarpSpecialized1SmNvf4Sm100;  // Kernel to launch
+    using EpilogueSchedule =
+        cutlass::epilogue::PtrArrayTmaWarpSpecialized1Sm;  // Epilogue to launch
   };
 
   using CollectiveEpilogue =
@@ -274,10 +264,8 @@ void run_fp4_blockwise_scaled_group_mm(
   torch::Tensor a_scales_ptrs = torch::empty(num_experts, options_int);
   torch::Tensor b_scales_ptrs = torch::empty(num_experts, options_int);
   torch::Tensor alpha_ptrs = torch::empty(num_experts, options_int);
-  constexpr size_t kWordsPerLayoutSFA = (sizeof(LayoutSFA) + sizeof(int64_t) - 1) / sizeof(int64_t);
-  constexpr size_t kWordsPerLayoutSFB = (sizeof(LayoutSFB) + sizeof(int64_t) - 1) / sizeof(int64_t);
-  torch::Tensor layout_sfa = torch::empty({num_experts, static_cast<long>(kWordsPerLayoutSFA)}, options_int);
-  torch::Tensor layout_sfb = torch::empty({num_experts, static_cast<long>(kWordsPerLayoutSFB)}, options_int);
+  torch::Tensor layout_sfa = torch::empty({num_experts, 5}, options_int);
+  torch::Tensor layout_sfb = torch::empty({num_experts, 5}, options_int);
   torch::Tensor c_strides1 =
       torch::full({num_experts}, output.stride(0), options_int);
   torch::Tensor a_strides1 =
@@ -299,15 +287,11 @@ void run_fp4_blockwise_scaled_group_mm(
 
   // Set the Scheduler info
   cutlass::KernelHardwareInfo hw_info;
-#if defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100
   using RasterOrderOptions = typename cutlass::gemm::kernel::detail::
       PersistentTileSchedulerSm100GroupParams<
           typename ProblemShape::UnderlyingProblemShape>::RasterOrderOptions;
   typename Gemm::GemmKernel::TileSchedulerArguments scheduler;
   scheduler.raster_order = RasterOrderOptions::AlongM;
-#else
-  typename Gemm::GemmKernel::TileSchedulerArguments scheduler{};
-#endif
   hw_info.device_id = a.get_device();
   static std::unordered_map<int, int> cached_sm_counts;
   if (cached_sm_counts.find(hw_info.device_id) == cached_sm_counts.end()) {
@@ -356,30 +340,18 @@ void run_fp4_blockwise_scaled_group_mm(
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(a.get_device());
 
   auto can_implement_status = gemm_op.can_implement(args);
-  if (can_implement_status != cutlass::Status::kSuccess) {
-    auto dev = a.get_device();
-    auto cc = at::cuda::getCurrentDeviceProperties()->major * 10 + at::cuda::getCurrentDeviceProperties()->minor;
-    TORCH_CHECK(false,
-      "cutlass_fp4_group_mm can_implement failed: status=", (int)can_implement_status,
-      ", device=", dev, ", cc=", cc,
-      ", num_experts=", num_experts,
-      ", problem_shape_ptr=", (void*)problem_sizes_as_shapes,
-      ", note: ensure TORCH_CUDA_ARCH_LIST includes 12.0/12.0a and CUTLASS >= 3.8\n");
-  }
+  TORCH_CHECK(can_implement_status == cutlass::Status::kSuccess,
+              "Failed to implement GEMM");
 
   // Run the GEMM
   auto status = gemm_op.initialize(args, workspace.data_ptr());
-  if (status != cutlass::Status::kSuccess) {
-    TORCH_CHECK(false, "cutlass_fp4_group_mm initialize failed: status=", (int)status,
-      "; verify SFA/SFB layout sizes & 128B alignment; try NVF4 schedule.");
-  }
+  TORCH_CHECK(status == cutlass::Status::kSuccess, "Failed to initialize GEMM");
 
   status = gemm_op.run(args, workspace.data_ptr(), stream);
   TORCH_CHECK(status == cutlass::Status::kSuccess, "Failed to run GEMM");
 }
 
-#if (defined ENABLE_NVFP4_SM100 && ENABLE_NVFP4_SM100) || \
-    (defined ENABLE_NVFP4_SM120 && ENABLE_NVFP4_SM120)
+#if defined ENABLE_NVFP4_SM100 && ENABLE_NVFP4_SM100
 constexpr auto FLOAT4_E2M1X2 = at::ScalarType::Byte;
 constexpr auto SF_DTYPE = at::ScalarType::Float8_e4m3fn;
 #endif
@@ -400,8 +372,7 @@ void cutlass_fp4_group_mm(
     const torch::Tensor& a_blockscale, const torch::Tensor& b_blockscales,
     const torch::Tensor& alphas, const torch::Tensor& problem_sizes,
     const torch::Tensor& expert_offsets, const torch::Tensor& sf_offsets) {
-#if (defined ENABLE_NVFP4_SM100 && ENABLE_NVFP4_SM100) || \
-    (defined ENABLE_NVFP4_SM120 && ENABLE_NVFP4_SM120)
+#if defined ENABLE_NVFP4_SM100 && ENABLE_NVFP4_SM100
   // Input validation
   CHECK_INPUT(a, FLOAT4_E2M1X2, "a");
   CHECK_INPUT(b, FLOAT4_E2M1X2, "b");
@@ -443,7 +414,7 @@ void cutlass_fp4_group_mm(
   TORCH_CHECK_NOT_IMPLEMENTED(
       false,
       "No compiled cutlass_fp4_group_mm kernel, vLLM must "
-      "be compiled with ENABLE_NVFP4_SM100 or ENABLE_NVFP4_SM120 "
-      "and CUDA 12.8 or above.");
+      "be compiled with ENABLE_NVFP4_SM100 for SM100+ and CUDA "
+      "12.8 or above.");
 #endif
 }
