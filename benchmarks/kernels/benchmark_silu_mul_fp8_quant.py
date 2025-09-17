@@ -8,6 +8,7 @@ import torch
 
 from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
     silu_mul_fp8_quant_deep_gemm_cuda,
+    silu_v1,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -94,6 +95,7 @@ def silu_mul_fp8_quant_deep_gemm_triton(
     num_parallel_tokens,
     group_size: int = 128,
     eps: float = 1e-10,
+    expert_offsets: torch.Tensor = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize silu(y[..., :H]) * y[..., H:] to FP8 with group per-token scales
 
@@ -405,9 +407,9 @@ def create_combined_plot(all_results):
 outer_dim = 7168
 configs = [
     # DeepSeekV3 Configs
-    (8, 1024, 7168),
+    # (8, 1024, 7168),
     # DeepSeekV3 Configs
-    (32, 1024, 7168),
+    # (32, 1024, 7168),
     # DeepSeekV3 Configs
     (256, 1024, 7168),
 ]
@@ -441,7 +443,15 @@ for id, strategy in enumerate(strategies):
     all_ratios = []
 
     for E, T, H in configs:
-        total_tokens_config = [8 * E, 16 * E, 32 * E, 64 * E, 128 * E, 256 * E]
+        total_tokens_config = [
+            8 * E,
+            16 * E,
+            32 * E,
+            64 * E,
+            128 * E,
+            256 * E,
+            512 * E,
+        ]
         config_x_axis.append(total_tokens_config)
 
         cuda_results = []
@@ -467,7 +477,7 @@ for id, strategy in enumerate(strategies):
 
             # Baseline results
             time_ms_triton, gflops, gbps, perc = benchmark(
-                silu_mul_fp8_quant_deep_gemm_triton,
+                silu_v1,
                 E,
                 T,
                 H,
@@ -521,7 +531,7 @@ def create_total_tokens_plot(all_results):
 
     # Add main title to the entire figure
     fig.suptitle(
-        "Performance Analysis: Speedup vs Bandwidth Utilization (Triton & CUDA)",
+        "Performance Analysis: Speedup vs Bandwidth Utilization (SiLU V1 and V2)",
         fontsize=16,
         fontweight="bold",
         y=0.98,
@@ -568,7 +578,7 @@ def create_total_tokens_plot(all_results):
                 total_tokens_values, ratios, "bo-", linewidth=3, markersize=8
             )
             ax_speedup.set_title(
-                f"{strategy_name}\nSpeedup (CUDA/Triton)\nE={E}, T={T}, H={H}",
+                f"{strategy_name}\nSpeedup (V2/V1)\nE={E}, T={T}, H={H}",
                 fontsize=12,
                 fontweight="bold",
             )
@@ -582,7 +592,7 @@ def create_total_tokens_plot(all_results):
                 "ro-",
                 linewidth=3,
                 markersize=8,
-                label="CUDA",
+                label="SiLU V2",
             )
             ax_bandwidth.plot(
                 total_tokens_values,
@@ -590,7 +600,7 @@ def create_total_tokens_plot(all_results):
                 "go-",
                 linewidth=3,
                 markersize=8,
-                label="Triton",
+                label="SiLU V1",
             )
             ax_bandwidth.set_title(
                 f"{strategy_name}\nBandwidth Utilization (Hopper)\nE={E}, T={T}, H={H}",
