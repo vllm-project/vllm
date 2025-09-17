@@ -2656,12 +2656,6 @@ class VllmConfig:
         if self.lora_config is not None:
             self.lora_config.verify_with_cache_config(self.cache_config)
             self.lora_config.verify_with_model_config(self.model_config)
-            if self.model_config._head_dtype != self.model_config.dtype:
-                self.model_config._head_dtype = self.model_config.dtype
-                logger.warning_once(
-                    "Does not support [%s] head dtype when Lora is enabled, "
-                    "fallback to model dtype [%s].",
-                    self.model_config._head_dtype, self.model_config.dtype)
 
         if self.quant_config is None and self.model_config is not None:
             self.quant_config = VllmConfig._get_quantization_config(

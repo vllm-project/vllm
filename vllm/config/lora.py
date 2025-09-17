@@ -130,3 +130,9 @@ class LoRAConfig:
             self.lora_dtype = model_config.dtype
         elif isinstance(self.lora_dtype, str):
             self.lora_dtype = getattr(torch, self.lora_dtype)
+        if model_config._head_dtype != model_config.dtype:
+            model_config._head_dtype = model_config.dtype
+            logger.warning_once(
+                "Does not support [%s] head dtype when Lora is enabled, "
+                "fallback to model dtype [%s].", model_config._head_dtype,
+                model_config.dtype)
