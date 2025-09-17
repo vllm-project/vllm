@@ -83,10 +83,8 @@ class NgramProposer:
             original_num_numba_threads = get_num_threads()
             # Ensure we use at least one thread.
             set_num_threads(
-                max(
-                    1,
-                    min(self.num_numba_thread_available,
-                        len(valid_ngram_requests))))
+                max(1, min(self.num_numba_thread_available,
+                           num_ngram_requests)))
 
             batch_propose_numba(valid_ngram_requests, num_tokens_no_spec,
                                 token_ids_cpu, self.min_n, self.max_n,
