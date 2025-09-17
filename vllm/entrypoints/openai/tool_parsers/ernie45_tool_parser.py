@@ -97,7 +97,7 @@ class Ernie45ToolParser(ToolParser):
                         ))
 
                 content = model_output[:model_output.find(
-                    self.tool_calls_start_token)].lstrip("\n")
+                    self.tool_calls_start_token)].rstrip("\n")
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=tool_calls,
