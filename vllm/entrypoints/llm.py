@@ -301,23 +301,17 @@ class LLM:
         self.io_processor = get_io_processor(self.llm_engine.vllm_config,
                                              io_processor_plugin)
 
-    def get_tokenizer(
-        self,
-        lora_request: Optional[LoRARequest] = None,
-    ) -> AnyTokenizer:
-        return self.llm_engine.get_tokenizer_group().get_lora_tokenizer(
-            lora_request)
+    def get_tokenizer(self) -> AnyTokenizer:
+        return self.llm_engine.get_tokenizer()
 
     def set_tokenizer(self, tokenizer: AnyTokenizer) -> None:
-        tokenizer_group = self.llm_engine.get_tokenizer_group()
-
         # While CachedTokenizer is dynamic, have no choice but
         # compare class name. Misjudgment will arise from
         # user-defined tokenizer started with 'Cached'
         if tokenizer.__class__.__name__.startswith("Cached"):
-            tokenizer_group.tokenizer = tokenizer
+            self.llm_engine.tokenizer = tokenizer
         else:
-            tokenizer_group.tokenizer = get_cached_tokenizer(tokenizer)
+            self.llm_engine.tokenizer = get_cached_tokenizer(tokenizer)
 
     def get_default_sampling_params(self) -> SamplingParams:
         if self.default_sampling_params is None:
@@ -707,7 +701,6 @@ class LLM:
         self,
         messages: Union[list[ChatCompletionMessageParam],
                         list[list[ChatCompletionMessageParam]]],
-        lora_request: Optional[LoRARequest] = None,
         chat_template: Optional[str] = None,
         chat_template_content_format: ChatTemplateContentFormatOption = "auto",
         add_generation_prompt: bool = True,
@@ -739,7 +732,7 @@ class LLM:
                 cast(list[ChatCompletionMessageParam], messages)
             ]
 
-        tokenizer = self.get_tokenizer(lora_request)
+        tokenizer = self.get_tokenizer()
         model_config = self.llm_engine.get_model_config()
         resolved_content_format = resolve_chat_template_content_format(
             chat_template,
@@ -872,7 +865,6 @@ class LLM:
 
         prompts = self.preprocess_chat(
             messages=messages,
-            lora_request=lora_request,
             chat_template=chat_template,
             chat_template_content_format=chat_template_content_format,
             add_generation_prompt=add_generation_prompt,
@@ -1491,6 +1483,11 @@ class LLM:
 
         for i, prompt in enumerate(it):
 
+            if isinstance(prompt, dict):
+                self._validate_mm_data_and_uuids(
+                    prompt.get("multi_modal_data"),
+                    prompt.get("multi_modal_uuids"))
+
             param = params[i] if isinstance(params, Sequence) else params
 
             tokenization_kwargs: dict[str, Any] = {}
@@ -1506,6 +1503,41 @@ class LLM:
                     lora_request, Sequence) else lora_request,
                 priority=priority[i] if priority else 0,
             )
+
+    def _validate_mm_data_and_uuids(
+            self,
+            multi_modal_data: Optional[Any],  # MultiModalDataDict
+            multi_modal_uuids: Optional[Any],  # MultiModalUUIDDict
+    ):
+        """
+        Validate that if any multi-modal data is skipped (i.e. None),
+        then its corresponding UUID must be set.
+        """
+        if multi_modal_data is None:
+            return
+
+        for modality, data in multi_modal_data.items():
+            if isinstance(data, list):
+                for i, d in enumerate(data):
+                    if d is None:
+                        if multi_modal_uuids is None or modality not in multi_modal_uuids or multi_modal_uuids[  # noqa: E501
+                                modality] is None:
+                            raise ValueError(
+                                f"Multi-modal data for {modality} is None "
+                                f"but UUID is not provided")
+                        else:
+                            if len(
+                                    multi_modal_uuids[modality]
+                            ) <= i or multi_modal_uuids[modality][i] is None:
+                                raise ValueError(
+                                    f"Multi-modal data for {modality} is None "
+                                    f"but UUID is not provided")
+            else:
+                if data is None and (multi_modal_uuids is None
+                                     or modality not in multi_modal_uuids
+                                     or multi_modal_uuids[modality] is None):
+                    raise ValueError(f"Multi-modal data for {modality} is None"
+                                     f" but UUID is not provided")
 
     def _add_request(
         self,

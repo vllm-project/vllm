@@ -772,10 +772,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             if self.allow_deep_gemm and not is_deep_gemm_e8m0_used():
                 if _is_col_major(layer.w13_weight_scale_inv):
                     layer.w13_weight_scale_inv = \
-                        get_col_major_tma_aligned_tensor(layer.w13_weight_scale_inv).contiguous()
+                        get_col_major_tma_aligned_tensor(layer.w13_weight_scale_inv)
                 if _is_col_major(layer.w2_weight_scale_inv):
                     layer.w2_weight_scale_inv = \
-                        get_col_major_tma_aligned_tensor(layer.w2_weight_scale_inv).contiguous()
+                        get_col_major_tma_aligned_tensor(layer.w2_weight_scale_inv)
 
         # If checkpoint is fp16, quantize in place.
         elif not self.quant_config.is_checkpoint_fp8_serialized:
@@ -923,10 +923,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             # Ensure column-major TMA alignment expected by DeepGEMM.
             if _is_col_major(layer.w13_weight_scale_inv):
                 layer.w13_weight_scale_inv = get_col_major_tma_aligned_tensor(
-                    layer.w13_weight_scale_inv).contiguous()
+                    layer.w13_weight_scale_inv)
             if _is_col_major(layer.w2_weight_scale_inv):
                 layer.w2_weight_scale_inv = get_col_major_tma_aligned_tensor(
-                    layer.w2_weight_scale_inv).contiguous()
+                    layer.w2_weight_scale_inv)
 
     def select_gemm_impl(
         self,
@@ -1103,7 +1103,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 quant_type_id=scalar_types.float8_e4m3fn.id,
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
-                expert_map=expert_map)
+                expert_map=expert_map,
+                workspace=layer.workspace)
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
             assert self.block_quant is None
             assert (not renormalize and custom_routing_function is not None)
