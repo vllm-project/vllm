@@ -206,10 +206,12 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
         )
 
         if H < MAX_HEADS:
-            # Extract the subsets of the outputs
-            returned_lse = lse[:, :H].contiguous(
-            ) if self.need_to_return_lse_for_decode else lse
             out = out[:, :H]
+
+        if self.need_to_return_lse_for_decode:
+            returned_lse = lse[:, :H].contiguous() if H < MAX_HEADS else lse
+        else:
+            returned_lse = lse
 
         return out, returned_lse
 
