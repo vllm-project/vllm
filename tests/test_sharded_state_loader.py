@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import fnmatch
 import multiprocessing as mp
 import os
 import shutil
@@ -8,7 +12,7 @@ import torch
 from huggingface_hub import snapshot_download
 
 from vllm import LLM, SamplingParams
-from vllm.model_executor.model_loader.loader import ShardedStateLoader
+from vllm.model_executor.model_loader import ShardedStateLoader
 
 prompts = [
     "Hello, my name is",
@@ -44,12 +48,11 @@ def test_filter_subtensors():
 
 
 @pytest.fixture(scope="module")
-def llama_2_7b_files():
-    with TemporaryDirectory() as cache_dir:
-        input_dir = snapshot_download("meta-llama/Llama-2-7b-hf",
-                                      cache_dir=cache_dir,
-                                      ignore_patterns="*.bin*")
-        yield input_dir
+def llama_3p2_1b_files():
+    input_dir = snapshot_download("meta-llama/Llama-3.2-1B-Instruct",
+                                  ignore_patterns=["*.bin*", "original/*"])
+
+    yield input_dir
 
 
 def _run_writer(input_dir, output_dir, weights_patterns, **kwargs):
@@ -58,10 +61,14 @@ def _run_writer(input_dir, output_dir, weights_patterns, **kwargs):
     # Dump worker states to output directory
     llm_sharded_writer.llm_engine.model_executor.save_sharded_state(
         path=output_dir)
+
     # Copy metadata files to output directory
     for file in os.listdir(input_dir):
-        if not any(file.endswith(ext) for ext in weights_patterns):
-            shutil.copy(f"{input_dir}/{file}", output_dir)
+        if os.path.isdir(os.path.join(input_dir, file)):
+            shutil.copytree(os.path.join(input_dir, file),
+                            os.path.join(output_dir, file))
+        elif not any(fnmatch.fnmatch(file, ext) for ext in weights_patterns):
+            shutil.copy(os.path.join(input_dir, file), output_dir)
 
 
 def _run_generate(input_dir, queue: mp.Queue, **kwargs):
@@ -75,14 +82,17 @@ def _run_generate(input_dir, queue: mp.Queue, **kwargs):
 @pytest.mark.parametrize("enable_lora", [False, True])
 @pytest.mark.parametrize("tp_size", [1, 2])
 def test_sharded_state_loader(enable_lora, tp_size, num_gpus_available,
-                              llama_2_7b_files):
+                              llama_3p2_1b_files,
+                              monkeypatch: pytest.MonkeyPatch):
     if num_gpus_available < tp_size:
         pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
 
     weights_patterns = ("*.safetensors", )
     gpu_memory_utilization = 0.8
-    input_dir = llama_2_7b_files
+    input_dir = llama_3p2_1b_files
     ctx = mp.get_context("spawn")
+    # The interface in v1 engine has changed, run in v1 engine will hang.
+    monkeypatch.setenv("VLLM_USE_V1", "0")
 
     # Run in separate processes for memory & CUDA isolation
     with TemporaryDirectory() as output_dir:
@@ -108,8 +118,17 @@ def test_sharded_state_loader(enable_lora, tp_size, num_gpus_available,
                             tensor_parallel_size=tp_size,
                         ))
         p.start()
-        p.join()
+        # Call queue.get() before p.join() to prevent deadlock:
+        # If p.join() is called before queue.get() and the queue is full,
+        # the child process may block while writing to the queue and never
+        # terminate, causing the parent to wait indefinitely on p.join().
+        # See: https://github.com/vllm-project/vllm/pull/22371#discussion_r2257773814
         out_before = queue.get()
+        p.join()
+        queue.close()
+        queue.join_thread()
+
+        queue = ctx.Queue()
 
         p = ctx.Process(target=_run_generate,
                         args=(output_dir, queue),
@@ -121,7 +140,14 @@ def test_sharded_state_loader(enable_lora, tp_size, num_gpus_available,
                             load_format="sharded_state",
                         ))
         p.start()
-        p.join()
+        # Call queue.get() before p.join() to prevent deadlock:
+        # If p.join() is called before queue.get() and the queue is full,
+        # the child process may block while writing to the queue and never
+        # terminate, causing the parent to wait indefinitely on p.join().
+        # See: https://github.com/vllm-project/vllm/pull/22371#discussion_r2257773814
         out_after = queue.get()
+        p.join()
+        queue.close()
+        queue.join_thread()
 
         assert out_before == out_after

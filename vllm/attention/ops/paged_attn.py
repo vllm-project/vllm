@@ -1,10 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import torch
 
-from vllm import _custom_ops as ops
-from vllm.attention.ops.prefix_prefill import context_attention_fwd
+from vllm.platforms import current_platform
+from vllm.triton_utils import HAS_TRITON
+
+if current_platform.is_cuda_alike():
+    from vllm import _custom_ops as ops
+elif current_platform.is_xpu():
+    from vllm._ipex_ops import ipex_ops as ops
+
+if HAS_TRITON:
+    from vllm.attention.ops.prefix_prefill import context_attention_fwd
 
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
 _PARTITION_SIZE = 512
@@ -31,7 +42,7 @@ class PagedAttention:
 
     @staticmethod
     def get_supported_head_sizes() -> List[int]:
-        return [64, 80, 96, 112, 128, 192, 256]
+        return [32, 64, 80, 96, 112, 120, 128, 192, 256]
 
     @staticmethod
     def get_kv_cache_shape(
@@ -66,8 +77,8 @@ class PagedAttention:
         value_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
         kv_cache_dtype: str,
-        k_scale: float,
-        v_scale: float,
+        k_scale: torch.Tensor,
+        v_scale: torch.Tensor,
     ) -> None:
         ops.reshape_and_cache(
             key,
@@ -92,8 +103,8 @@ class PagedAttention:
         num_kv_heads: int,
         scale: float,
         alibi_slopes: Optional[torch.Tensor],
-        k_scale: float,
-        v_scale: float,
+        k_scale: torch.Tensor,
+        v_scale: torch.Tensor,
         tp_rank: int = 0,
         blocksparse_local_blocks: int = 0,
         blocksparse_vert_stride: int = 0,
@@ -191,30 +202,36 @@ class PagedAttention:
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
+        kv_cache_dtype: str,
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
         block_tables: torch.Tensor,
         query_start_loc: torch.Tensor,
         seq_lens_tensor: torch.Tensor,
-        context_lens: torch.Tensor,
         max_query_len: int,
         alibi_slopes: Optional[torch.Tensor],
         sliding_window: Optional[int],
+        k_scale: torch.Tensor,
+        v_scale: torch.Tensor,
     ) -> torch.Tensor:
         output = torch.empty_like(query)
+        max_seq_len = None
         context_attention_fwd(
             query,
             key,
             value,
             output,
+            kv_cache_dtype,
             key_cache,
             value_cache,
             block_tables,
             # query_start_loc is (batch_size + 1,)
-            query_start_loc[:-1],
+            query_start_loc,
             seq_lens_tensor,
-            context_lens,
+            max_seq_len,
             max_query_len,
+            k_scale,
+            v_scale,
             alibi_slopes,
             sliding_window,
         )

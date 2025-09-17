@@ -1,0 +1,18 @@
+mkdocs
+mkdocs-api-autonav
+mkdocs-material
+mkdocstrings-python
+mkdocs-gen-files
+mkdocs-awesome-nav
+mkdocs-glightbox
+mkdocs-git-revision-date-localized-plugin
+mkdocs-minify-plugin
+regex
+ruff
+
+# Required for argparse hook only
+-f https://download.pytorch.org/whl/cpu
+cachetools
+msgspec
+pydantic
+torch

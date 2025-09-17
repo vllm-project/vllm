@@ -1,17 +1,18 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # imports for guided decoding tests
 import json
-import re
-import shutil
-from tempfile import TemporaryDirectory
-from typing import List
+import os
+from typing import Optional
 
 import jsonschema
 import openai  # use the official client for correctness check
 import pytest
+import pytest_asyncio
+import regex as re
+import requests
 # downloading lora to test lora requests
-from huggingface_hub import snapshot_download
 from openai import BadRequestError
-from transformers import AutoTokenizer
 
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
@@ -21,42 +22,13 @@ from ...utils import RemoteOpenAIServer
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 # technically these adapters use a different base model,
 # but we're not testing generation quality here
-LORA_NAME = "typeof/zephyr-7b-beta-lora"
-PA_NAME = "swapnilbp/llama_tweet_ptune"
-# if PA_NAME changes, PA_NUM_VIRTUAL_TOKENS might also
-# need to change to match the prompt adapter
-PA_NUM_VIRTUAL_TOKENS = 8
+
+GUIDED_DECODING_BACKENDS = ["outlines", "xgrammar", "guidance"]
 
 
 @pytest.fixture(scope="module")
-def zephyr_lora_files():
-    return snapshot_download(repo_id=LORA_NAME)
-
-
-@pytest.fixture(scope="module")
-def zephyr_lora_added_tokens_files(zephyr_lora_files):
-    tmp_dir = TemporaryDirectory()
-    tmp_model_dir = f"{tmp_dir.name}/zephyr"
-    shutil.copytree(zephyr_lora_files, tmp_model_dir)
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    # Copy tokenizer to adapter and add some unique tokens
-    # 32000, 32001, 32002
-    added = tokenizer.add_tokens(["vllm1", "vllm2", "vllm3"],
-                                 special_tokens=True)
-    assert added == 3
-    tokenizer.save_pretrained(tmp_model_dir)
-    yield tmp_model_dir
-    tmp_dir.cleanup()
-
-
-@pytest.fixture(scope="module")
-def zephyr_pa_files():
-    return snapshot_download(repo_id=PA_NAME)
-
-
-@pytest.fixture(scope="module")
-def server(zephyr_lora_files, zephyr_lora_added_tokens_files, zephyr_pa_files):
-    args = [
+def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files):
+    return [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         "bfloat16",
@@ -74,36 +46,50 @@ def server(zephyr_lora_files, zephyr_lora_added_tokens_files, zephyr_pa_files):
         "64",
         "--max-cpu-loras",
         "2",
-        # pa config
-        "--enable-prompt-adapter",
-        "--prompt-adapters",
-        f"zephyr-pa={zephyr_pa_files}",
-        f"zephyr-pa2={zephyr_pa_files}",
-        "--max-prompt-adapters",
-        "2",
-        "--max-prompt-adapter-token",
-        "128",
     ]
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
-        yield remote_server
+
+@pytest.fixture(scope="module",
+                params=["", "--disable-frontend-multiprocessing"])
+def server(default_server_args, request):
+    if request.param:
+        default_server_args.append(request.param)
+
+    original_value = os.environ.get('VLLM_USE_V1')
+    os.environ['VLLM_USE_V1'] = '0'
+    try:
+        with RemoteOpenAIServer(MODEL_NAME,
+                                default_server_args) as remote_server:
+            yield remote_server
+    finally:
+        # Restore original env value
+        if original_value is None:
+            os.environ.pop('VLLM_USE_V1', None)
+        else:
+            os.environ['VLLM_USE_V1'] = original_value
 
 
-@pytest.fixture(scope="module")
-def client(server):
-    return server.get_async_client()
+@pytest.fixture
+def is_v1_server(server):
+    import os
+
+    # For completion tests, we assume v0 since there's no explicit v1 setup
+    return os.environ.get('VLLM_USE_V1', '0') == '1'
+
+
+@pytest_asyncio.fixture
+async def client(server):
+    async with server.get_async_client() as async_client:
+        yield async_client
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    # first test base model, then test loras, then test prompt adapters
-    "model_name,num_virtual_tokens",
-    [(MODEL_NAME, 0), ("zephyr-lora", 0), ("zephyr-lora2", 0),
-     ("zephyr-pa", PA_NUM_VIRTUAL_TOKENS),
-     ("zephyr-pa2", PA_NUM_VIRTUAL_TOKENS)],
+    # first test base model, then test loras
+    "model_name",
+    [MODEL_NAME, "zephyr-lora", "zephyr-lora2"],
 )
-async def test_single_completion(client: openai.AsyncOpenAI, model_name: str,
-                                 num_virtual_tokens: int):
+async def test_single_completion(client: openai.AsyncOpenAI, model_name: str):
     completion = await client.completions.create(model=model_name,
                                                  prompt="Hello, my name is",
                                                  max_tokens=5,
@@ -116,9 +102,7 @@ async def test_single_completion(client: openai.AsyncOpenAI, model_name: str,
     assert len(choice.text) >= 5
     assert choice.finish_reason == "length"
     assert completion.usage == openai.types.CompletionUsage(
-        completion_tokens=5,
-        prompt_tokens=6 + num_virtual_tokens,
-        total_tokens=11 + num_virtual_tokens)
+        completion_tokens=5, prompt_tokens=6, total_tokens=11)
 
     # test using token IDs
     completion = await client.completions.create(
@@ -128,6 +112,7 @@ async def test_single_completion(client: openai.AsyncOpenAI, model_name: str,
         temperature=0.0,
     )
     assert len(completion.choices[0].text) >= 1
+    assert completion.choices[0].prompt_logprobs is None
 
 
 @pytest.mark.asyncio
@@ -147,22 +132,22 @@ async def test_added_lora_tokens(client: openai.AsyncOpenAI):
 @pytest.mark.asyncio
 async def test_added_lora_tokens_base_model(client: openai.AsyncOpenAI):
     # test using token IDs
-    completion = await client.completions.create(
-        model=MODEL_NAME,
-        prompt=[0, 0, 32000, 32001, 32002],
-        echo=True,
-        max_tokens=5,
-        temperature=0.0,
-    )
-    # Added tokens should not appear in tokenized prompt
-    assert "vllm" not in completion.choices[0].text
+    with pytest.raises(openai.BadRequestError, match="out of vocabulary"):
+        # Added tokens should be rejected by the base model
+        await client.completions.create(
+            model=MODEL_NAME,
+            prompt=[0, 0, 32000, 32001, 32002],
+            echo=True,
+            max_tokens=5,
+            temperature=0.0,
+        )
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    # first test base model, then test loras, then test prompt adapters
+    # first test base model, then test loras
     "model_name",
-    [MODEL_NAME, "zephyr-lora", "zephyr-lora2", "zephyr-pa", "zephyr-pa2"],
+    [MODEL_NAME, "zephyr-lora", "zephyr-lora2"],
 )
 async def test_no_logprobs(client: openai.AsyncOpenAI, model_name: str):
     # test using token IDs
@@ -179,9 +164,9 @@ async def test_no_logprobs(client: openai.AsyncOpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    # just test 1 lora and 1 pa hereafter
+    # just test 1 lora
     "model_name",
-    [MODEL_NAME, "zephyr-lora", "zephyr-pa"],
+    [MODEL_NAME, "zephyr-lora"],
 )
 async def test_zero_logprobs(client: openai.AsyncOpenAI, model_name: str):
     # test using token IDs
@@ -202,7 +187,7 @@ async def test_zero_logprobs(client: openai.AsyncOpenAI, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
-    [MODEL_NAME, "zephyr-lora", "zephyr-pa"],
+    [MODEL_NAME, "zephyr-lora"],
 )
 async def test_some_logprobs(client: openai.AsyncOpenAI, model_name: str):
     # test using token IDs
@@ -223,7 +208,7 @@ async def test_some_logprobs(client: openai.AsyncOpenAI, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
-    [MODEL_NAME, "zephyr-lora", "zephyr-pa"],
+    [MODEL_NAME, "zephyr-lora"],
 )
 async def test_too_many_completion_logprobs(client: openai.AsyncOpenAI,
                                             model_name: str):
@@ -266,9 +251,40 @@ async def test_too_many_completion_logprobs(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("model_name, prompt_logprobs", [(MODEL_NAME, -1),
+                                                         (MODEL_NAME, 0),
+                                                         (MODEL_NAME, 1),
+                                                         (MODEL_NAME, None)])
+async def test_prompt_logprobs_completion(client: openai.AsyncOpenAI,
+                                          model_name: str,
+                                          prompt_logprobs: Optional[int]):
+    params: dict = {
+        "prompt": ["A robot may not injure another robot", "My name is"],
+        "model": model_name,
+    }
+    if prompt_logprobs is not None:
+        params["extra_body"] = {"prompt_logprobs": prompt_logprobs}
+
+    if prompt_logprobs is not None and prompt_logprobs < 0:
+        with pytest.raises(BadRequestError):
+            await client.completions.create(**params)
+    else:
+        completion = await client.completions.create(**params)
+        if prompt_logprobs is not None:
+            assert completion.choices[0].prompt_logprobs is not None
+            assert len(completion.choices[0].prompt_logprobs) > 0
+
+            assert completion.choices[1].prompt_logprobs is not None
+            assert len(completion.choices[1].prompt_logprobs) > 0
+
+        else:
+            assert completion.choices[0].prompt_logprobs is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
-    [MODEL_NAME, "zephyr-lora", "zephyr-pa"],
+    [MODEL_NAME, "zephyr-lora"],
 )
 async def test_completion_streaming(client: openai.AsyncOpenAI,
                                     model_name: str):
@@ -286,7 +302,7 @@ async def test_completion_streaming(client: openai.AsyncOpenAI,
                                              max_tokens=5,
                                              temperature=0.0,
                                              stream=True)
-    chunks: List[str] = []
+    chunks: list[str] = []
     finish_reason_count = 0
     async for chunk in stream:
         chunks.append(chunk.choices[0].text)
@@ -302,7 +318,41 @@ async def test_completion_streaming(client: openai.AsyncOpenAI,
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
-    [MODEL_NAME, "zephyr-lora", "zephyr-pa"],
+    [MODEL_NAME, "zephyr-lora"],
+)
+async def test_parallel_streaming(client: openai.AsyncOpenAI, model_name: str):
+    """Streaming for parallel sampling.
+    The tokens from multiple samples, are flattened into a single stream,
+    with an index to indicate which sample the token belongs to.
+    """
+
+    prompt = "What is an LLM?"
+    n = 3
+    max_tokens = 5
+
+    stream = await client.completions.create(model=model_name,
+                                             prompt=prompt,
+                                             max_tokens=max_tokens,
+                                             n=n,
+                                             stream=True)
+    chunks: list[list[str]] = [[] for i in range(n)]
+    finish_reason_count = 0
+    async for chunk in stream:
+        index = chunk.choices[0].index
+        text = chunk.choices[0].text
+        chunks[index].append(text)
+        if chunk.choices[0].finish_reason is not None:
+            finish_reason_count += 1
+    assert finish_reason_count == n
+    for chunk in chunks:
+        assert len(chunk) == max_tokens
+        print("".join(chunk))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME, "zephyr-lora"],
 )
 async def test_completion_stream_options(client: openai.AsyncOpenAI,
                                          model_name: str):
@@ -439,7 +489,7 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI,
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
-    [MODEL_NAME, "zephyr-lora", "zephyr-pa"],
+    [MODEL_NAME, "zephyr-lora"],
 )
 async def test_batch_completions(client: openai.AsyncOpenAI, model_name: str):
     # test both text and token IDs
@@ -462,8 +512,8 @@ async def test_batch_completions(client: openai.AsyncOpenAI, model_name: str):
             max_tokens=5,
             temperature=0.0,
             extra_body=dict(
-                # NOTE: this has to be true for n > 1 in vLLM, but not necessary
-                # for official client.
+                # NOTE: this has to be true for n > 1 in vLLM, but
+                # not necessary for official client.
                 use_beam_search=True),
         )
         assert len(batch.choices) == 4
@@ -538,11 +588,35 @@ async def test_logits_bias(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guided_decoding_backend",
-                         ["outlines", "lm-format-enforcer"])
+async def test_allowed_token_ids(client: openai.AsyncOpenAI):
+    prompt = "Hello, my name is"
+    max_tokens = 1
+    tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
+
+    # Test exclusive selection
+    allowed_ids = [21555, 21557, 21558]
+    completion = await client.completions.create(
+        model=MODEL_NAME,
+        prompt=prompt,
+        max_tokens=max_tokens,
+        temperature=0.0,
+        seed=42,
+        extra_body=dict(allowed_token_ids=allowed_ids),
+        logprobs=1,
+    )
+    response_tokens = completion.choices[0].logprobs.tokens
+    assert len(response_tokens) == 1
+    assert tokenizer.convert_tokens_to_ids(response_tokens)[0] in allowed_ids
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 async def test_guided_json_completion(client: openai.AsyncOpenAI,
                                       guided_decoding_backend: str,
-                                      sample_json_schema):
+                                      sample_json_schema, is_v1_server: bool):
+    if not is_v1_server:
+        pytest.skip("Guided decoding is only supported in v1 engine")
+
     completion = await client.completions.create(
         model=MODEL_NAME,
         prompt=f"Give an example JSON for an employee profile "
@@ -561,11 +635,13 @@ async def test_guided_json_completion(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guided_decoding_backend",
-                         ["outlines", "lm-format-enforcer"])
+@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 async def test_guided_regex_completion(client: openai.AsyncOpenAI,
                                        guided_decoding_backend: str,
-                                       sample_regex):
+                                       sample_regex, is_v1_server: bool):
+    if not is_v1_server:
+        pytest.skip("Guided decoding is only supported in v1 engine")
+
     completion = await client.completions.create(
         model=MODEL_NAME,
         prompt=f"Give an example IPv4 address with this regex: {sample_regex}",
@@ -583,11 +659,14 @@ async def test_guided_regex_completion(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guided_decoding_backend",
-                         ["outlines", "lm-format-enforcer"])
+@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 async def test_guided_choice_completion(client: openai.AsyncOpenAI,
                                         guided_decoding_backend: str,
-                                        sample_guided_choice):
+                                        sample_guided_choice,
+                                        is_v1_server: bool):
+    if not is_v1_server:
+        pytest.skip("Guided decoding is only supported in v1 engine")
+
     completion = await client.completions.create(
         model=MODEL_NAME,
         prompt="The best language for type-safe systems programming is ",
@@ -605,7 +684,9 @@ async def test_guided_choice_completion(client: openai.AsyncOpenAI,
 
 @pytest.mark.asyncio
 async def test_guided_grammar(client: openai.AsyncOpenAI,
-                              sample_sql_statements):
+                              sample_sql_statements, is_v1_server: bool):
+    if not is_v1_server:
+        pytest.skip("Guided grammar is only supported in v1 engine")
 
     completion = await client.completions.create(
         model=MODEL_NAME,
@@ -664,11 +745,14 @@ async def test_echo_logprob_completion(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guided_decoding_backend",
-                         ["outlines", "lm-format-enforcer"])
+@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 async def test_guided_decoding_type_error(client: openai.AsyncOpenAI,
                                           guided_decoding_backend: str,
-                                          sample_json_schema, sample_regex):
+                                          sample_json_schema, sample_regex,
+                                          is_v1_server: bool):
+    if not is_v1_server:
+        pytest.skip("Guided decoding is only supported in v1 engine")
+
     with pytest.raises(openai.BadRequestError):
         _ = await client.completions.create(
             model=MODEL_NAME,
@@ -682,3 +766,81 @@ async def test_guided_decoding_type_error(client: openai.AsyncOpenAI,
             prompt="Give an example string that fits this regex",
             extra_body=dict(guided_regex=sample_regex,
                             guided_json=sample_json_schema))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name,stream,echo",
+    [
+        (MODEL_NAME, False, False),
+        (MODEL_NAME, False, True),
+        (MODEL_NAME, True, False),
+        (MODEL_NAME, True, True)  # should not raise BadRequestError error
+    ],
+)
+async def test_echo_stream_completion(client: openai.AsyncOpenAI,
+                                      model_name: str, stream: bool,
+                                      echo: bool):
+    saying: str = "Hello, my name is"
+    result = await client.completions.create(model=model_name,
+                                             prompt=saying,
+                                             max_tokens=10,
+                                             temperature=0.0,
+                                             echo=echo,
+                                             stream=stream)
+
+    stop_reason = "length"
+
+    if not stream:
+        completion = result
+        assert completion.id is not None
+        assert completion.choices is not None and len(completion.choices) == 1
+
+        choice = completion.choices[0]
+        assert len(choice.text) >= 5
+        assert choice.finish_reason == stop_reason
+
+        if echo:
+            assert choice.text is not None and saying in choice.text
+        else:
+            assert choice.text is not None and saying not in choice.text
+
+    else:
+        chunks: list[str] = []
+        final_finish_reason = None
+        async for chunk in result:
+            if chunk.choices and chunk.choices[0].text:
+                chunks.append(chunk.choices[0].text)
+            if chunk.choices and chunk.choices[0].finish_reason:
+                final_finish_reason = chunk.choices[0].finish_reason
+
+        assert final_finish_reason == stop_reason
+        content = "".join(chunks)
+        if echo:
+            assert content is not None and saying in content
+        else:
+            assert content is not None and saying not in content
+
+
+@pytest.mark.asyncio
+async def test_invocations(server: RemoteOpenAIServer,
+                           client: openai.AsyncOpenAI):
+    request_args = {
+        "model": MODEL_NAME,
+        "prompt": "Hello, my name is",
+        "max_tokens": 5,
+        "temperature": 0.0,
+        "logprobs": None,
+    }
+
+    completion = await client.completions.create(**request_args)
+
+    invocation_response = requests.post(server.url_for("invocations"),
+                                        json=request_args)
+    invocation_response.raise_for_status()
+
+    completion_output = completion.model_dump()
+    invocation_output = invocation_response.json()
+
+    assert completion_output.keys() == invocation_output.keys()
+    assert completion_output["choices"] == invocation_output["choices"]

@@ -1,5 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import os
-from typing import Mapping, Optional
+from collections.abc import Mapping
+from typing import Optional
 
 from vllm.logger import init_logger
 from vllm.utils import run_once
@@ -8,19 +12,25 @@ TRACE_HEADERS = ["traceparent", "tracestate"]
 
 logger = init_logger(__name__)
 
-_is_otel_installed = False
+_is_otel_imported = False
+otel_import_error_traceback: Optional[str] = None
 try:
     from opentelemetry.context.context import Context
     from opentelemetry.sdk.environment_variables import (
         OTEL_EXPORTER_OTLP_TRACES_PROTOCOL)
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
-    from opentelemetry.semconv.ai import SpanAttributes as BaseSpanAttributes
     from opentelemetry.trace import SpanKind, Tracer, set_tracer_provider
     from opentelemetry.trace.propagation.tracecontext import (
         TraceContextTextMapPropagator)
-    _is_otel_installed = True
+    _is_otel_imported = True
 except ImportError:
+    # Capture and format traceback to provide detailed context for the import
+    # error. Only the string representation of the error is retained to avoid
+    # memory leaks.
+    # See https://github.com/vllm-project/vllm/pull/7266#discussion_r1707395458
+    import traceback
+    otel_import_error_traceback = traceback.format_exc()
 
     class Context:  # type: ignore
         pass
@@ -35,14 +45,17 @@ except ImportError:
         pass
 
 
-def is_otel_installed() -> bool:
-    return _is_otel_installed
+def is_otel_available() -> bool:
+    return _is_otel_imported
 
 
 def init_tracer(instrumenting_module_name: str,
                 otlp_traces_endpoint: str) -> Optional[Tracer]:
-    assert is_otel_installed(), ("OpenTelemetry packages must be installed "
-                                 "prior to initializing a tracer")
+    if not is_otel_available():
+        raise ValueError(
+            "OpenTelemetry is not available. Unable to initialize "
+            "a tracer. Ensure OpenTelemetry packages are installed. "
+            f"Original error:\n{otel_import_error_traceback}")
     trace_provider = TracerProvider()
 
     span_exporter = get_span_exporter(otlp_traces_endpoint)
@@ -60,7 +73,7 @@ def get_span_exporter(endpoint):
             OTLPSpanExporter)
     elif protocol == "http/protobuf":
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
-            OTLPSpanExporter)
+            OTLPSpanExporter)  # type: ignore
     else:
         raise ValueError(
             f"Unsupported OTLP protocol '{protocol}' is configured")
@@ -70,7 +83,7 @@ def get_span_exporter(endpoint):
 
 def extract_trace_context(
         headers: Optional[Mapping[str, str]]) -> Optional[Context]:
-    if is_otel_installed():
+    if is_otel_available():
         headers = headers or {}
         return TraceContextTextMapPropagator().extract(headers)
     else:
@@ -82,16 +95,35 @@ def extract_trace_headers(headers: Mapping[str, str]) -> Mapping[str, str]:
     return {h: headers[h] for h in TRACE_HEADERS if h in headers}
 
 
-class SpanAttributes(BaseSpanAttributes):
-    # The following span attribute names are added here because they are missing
-    # from the Semantic Conventions for LLM.
-    LLM_REQUEST_ID = "gen_ai.request.id"
-    LLM_REQUEST_BEST_OF = "gen_ai.request.best_of"
-    LLM_REQUEST_N = "gen_ai.request.n"
-    LLM_USAGE_NUM_SEQUENCES = "gen_ai.usage.num_sequences"
-    LLM_LATENCY_TIME_IN_QUEUE = "gen_ai.latency.time_in_queue"
-    LLM_LATENCY_TIME_TO_FIRST_TOKEN = "gen_ai.latency.time_to_first_token"
-    LLM_LATENCY_E2E = "gen_ai.latency.e2e"
+class SpanAttributes:
+    # Attribute names copied from here to avoid version conflicts:
+    # https://github.com/open-telemetry/semantic-conventions/blob/main/docs/gen-ai/gen-ai-spans.md
+    GEN_AI_USAGE_COMPLETION_TOKENS = "gen_ai.usage.completion_tokens"
+    GEN_AI_USAGE_PROMPT_TOKENS = "gen_ai.usage.prompt_tokens"
+    GEN_AI_REQUEST_MAX_TOKENS = "gen_ai.request.max_tokens"
+    GEN_AI_REQUEST_TOP_P = "gen_ai.request.top_p"
+    GEN_AI_REQUEST_TEMPERATURE = "gen_ai.request.temperature"
+    GEN_AI_RESPONSE_MODEL = "gen_ai.response.model"
+    # Attribute names added until they are added to the semantic conventions:
+    GEN_AI_REQUEST_ID = "gen_ai.request.id"
+    GEN_AI_REQUEST_N = "gen_ai.request.n"
+    GEN_AI_USAGE_NUM_SEQUENCES = "gen_ai.usage.num_sequences"
+    GEN_AI_LATENCY_TIME_IN_QUEUE = "gen_ai.latency.time_in_queue"
+    GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN = "gen_ai.latency.time_to_first_token"
+    GEN_AI_LATENCY_E2E = "gen_ai.latency.e2e"
+    GEN_AI_LATENCY_TIME_IN_SCHEDULER = "gen_ai.latency.time_in_scheduler"
+    # Time taken in the forward pass for this across all workers
+    GEN_AI_LATENCY_TIME_IN_MODEL_FORWARD = (
+        "gen_ai.latency.time_in_model_forward")
+    # Time taken in the model execute function. This will include model
+    # forward, block/sync across workers, cpu-gpu sync time and sampling time.
+    GEN_AI_LATENCY_TIME_IN_MODEL_EXECUTE = (
+        "gen_ai.latency.time_in_model_execute")
+    GEN_AI_LATENCY_TIME_IN_MODEL_PREFILL = \
+        "gen_ai.latency.time_in_model_prefill"
+    GEN_AI_LATENCY_TIME_IN_MODEL_DECODE = "gen_ai.latency.time_in_model_decode"
+    GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE = \
+        "gen_ai.latency.time_in_model_inference"
 
 
 def contains_trace_headers(headers: Mapping[str, str]) -> bool:

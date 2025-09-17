@@ -1,0 +1,58 @@
+nav:
+  - Home: README.md
+  - User Guide:
+    - usage/README.md
+    - Getting Started:
+      - getting_started/quickstart.md
+      - getting_started/installation
+    - Examples:
+      - examples/README.md
+      - Offline Inference: examples/offline_inference
+      - Online Serving: examples/online_serving
+      - Others: examples/others
+    - General:
+      - usage/v1_guide.md
+      - usage/*
+    - Inference and Serving:
+      - serving/offline_inference.md
+      - serving/openai_compatible_server.md
+      - serving/*
+      - serving/integrations
+    - Deployment:
+      - deployment/*
+      - deployment/frameworks
+      - deployment/integrations
+    - Training: training
+    - Configuration:
+      - configuration/README.md
+      - configuration/*
+    - Models:
+      - models/supported_models.md
+      - models/generative_models.md
+      - models/pooling_models.md
+      - models/extensions
+      - Hardware Supported Models: models/hardware_supported_models
+    - Features: features
+  - Developer Guide:
+    - contributing/README.md
+    - General:
+      - glob: contributing/*
+        flatten_single_child_sections: true
+    - Model Implementation:
+      - contributing/model/README.md
+      - contributing/model/basic.md
+      - contributing/model/registration.md
+      - contributing/model/tests.md
+      - contributing/model/multimodal.md
+      - contributing/model/transcription.md
+    - CI: contributing/ci
+    - Design Documents: design
+  - API Reference:
+    - api/README.md
+    - api/vllm
+  - CLI Reference: cli
+  - Community:
+    - community/*
+    - Blog: https://blog.vllm.ai
+    - Forum: https://discuss.vllm.ai
+    - Slack: https://slack.vllm.ai

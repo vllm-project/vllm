@@ -1,23 +1,37 @@
-import functools
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Callable, Dict, Optional, Tuple, Type,
-                    TypeVar)
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
 
-from torch import nn
-from transformers import PretrainedConfig
+import torch
+from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
+from typing_extensions import TypeVar
 
 from vllm.logger import init_logger
-
-from .data import LLMInputs
+from vllm.transformers_utils.processor import cached_processor_from_config
+from vllm.utils import get_allowed_kwarg_only_overrides
+from vllm.utils.jsontree import JSONTree, json_map_leaves
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig, MultiModalConfig
-    from vllm.multimodal import MultiModalDataDict
+    from vllm.config import ModelConfig
+    from vllm.multimodal import (MultiModalDataDict, MultiModalPlaceholderDict,
+                                 MultiModalRegistry)
     from vllm.sequence import SequenceData
+    from vllm.transformers_utils.tokenizer import AnyTokenizer
+else:
+    ModelConfig = Any
+    MultiModalDataDict = Any
+    MultiModalPlaceholderDict = Any
+    MultiModalRegistry = Any
+    SequenceData = Any
+    AnyTokenizer = Any
+
+_T = TypeVar("_T")
+_C = TypeVar("_C", bound=PretrainedConfig, default=PretrainedConfig)
+_P = TypeVar("_P", bound=ProcessorMixin, default=ProcessorMixin)
 
 logger = init_logger(__name__)
-
-C = TypeVar("C", bound=PretrainedConfig)
 
 
 @dataclass(frozen=True)
@@ -27,183 +41,211 @@ class InputContext:
     modify the inputs.
     """
 
-    model_config: "ModelConfig"
+    model_config: ModelConfig
     """The configuration of the model."""
 
-    def get_multimodal_config(self) -> "MultiModalConfig":
-        """
-        Get the multimodal configuration of the model.
-
-        Raises:
-            ValueError: If the model is not multimodal.
-        """
-
-        multimodal_config = self.model_config.multimodal_config
-        if multimodal_config is None:
-            raise ValueError("No multimodal config found")
-
-        return multimodal_config
-
-    def get_hf_config(self, hf_config_type: Type[C]) -> C:
+    def get_hf_config(
+        self,
+        typ: Union[type[_C], tuple[type[_C], ...]] = PretrainedConfig,
+        /,
+    ) -> _C:
         """
         Get the HuggingFace configuration
-        (:class:`transformers.PretrainedConfig`) of the model,
+        (`transformers.PretrainedConfig`) of the model,
         additionally checking its type.
 
         Raises:
-            TypeError: If the model is not of the specified type.
+            TypeError: If the configuration is not of the specified type.
         """
-
         hf_config = self.model_config.hf_config
-        if not isinstance(hf_config, hf_config_type):
+        if not isinstance(hf_config, typ):
             raise TypeError("Invalid type of HuggingFace config. "
-                            f"Expected type: {hf_config_type}, but "
+                            f"Expected type: {typ}, but "
                             f"found type: {type(hf_config)}")
 
         return hf_config
 
+    def get_hf_image_processor_config(self) -> dict[str, Any]:
+        """
+        Get the HuggingFace image processor configuration of the model.
+        """
+        return self.model_config.hf_image_processor_config
 
-N = TypeVar("N", bound=Type[nn.Module])
+    def get_mm_config(self):
+        """
+        Get the multimodal config of the model.
 
-DummyDataFactory = Callable[[InputContext, int],
-                            Tuple["SequenceData",
-                                  Optional["MultiModalDataDict"]]]
-"""
-Create dummy data to be inputted into the model.
+        Raises:
+            RuntimeError: If the model is not a multimodal model.
+        """
+        mm_config = self.model_config.multimodal_config
+        if mm_config is None:
+            raise RuntimeError("Not a multimodal model")
 
-Note:
-    :data:`InputProcessor` is not applied to the dummy data.
-"""
+        return mm_config
 
-InputProcessor = Callable[[InputContext, LLMInputs], LLMInputs]
-"""Preprocess the inputs to the model."""
+    def get_hf_processor(
+        self,
+        typ: Union[type[_P], tuple[type[_P], ...]] = ProcessorMixin,
+        /,
+        **kwargs: object,
+    ) -> _P:
+        """
+        Get the HuggingFace processor
+        (`transformers.ProcessorMixin`) of the model,
+        additionally checking its type.
+
+        Raises:
+            TypeError: If the processor is not of the specified type.
+        """
+        return cached_processor_from_config(
+            self.model_config,
+            processor_cls=typ,
+            **kwargs,
+        )
+
+    def init_processor(
+        self,
+        typ: type[_T],
+        /,
+        **kwargs: object,
+    ) -> _T:
+        """
+        Initialize a HuggingFace-like processor class, merging the
+        keyword arguments with those in the model's configuration.
+        """
+        mm_config = self.model_config.get_multimodal_config()
+        base_kwargs = mm_config.mm_processor_kwargs
+        if base_kwargs is None:
+            base_kwargs = {}
+
+        merged_kwargs = {**base_kwargs, **kwargs}
+
+        return typ(**merged_kwargs)
+
+
+@dataclass(frozen=True)
+class InputProcessingContext(InputContext):
+    tokenizer: AnyTokenizer
+    """The tokenizer used to tokenize the inputs."""
+
+    def get_hf_processor(
+        self,
+        typ: Union[type[_P], tuple[type[_P], ...]] = ProcessorMixin,
+        /,
+        **kwargs: object,
+    ) -> _P:
+        return super().get_hf_processor(
+            typ,
+            tokenizer=self.tokenizer,
+            **kwargs,
+        )
+
+    def call_hf_processor(
+        self,
+        hf_processor: ProcessorMixin,
+        data: Mapping[str, object],
+        kwargs: Mapping[str, object] = {},
+    ) -> Union[BatchFeature, JSONTree]:
+        """
+        Call `hf_processor` on the prompt `data`
+        (text, image, audio...) with configurable options `kwargs`.
+        """
+        assert callable(hf_processor)
+
+        mm_config = self.model_config.get_multimodal_config()
+        merged_kwargs = mm_config.merge_mm_processor_kwargs(kwargs)
+
+        allowed_kwargs = get_allowed_kwarg_only_overrides(
+            hf_processor,
+            merged_kwargs,
+            requires_kw_only=False,
+            allow_var_kwargs=True,
+        )
+
+        def maybe_cast_dtype(x):
+            # This mimics the behavior of transformers.BatchFeature
+            if isinstance(x, torch.Tensor) and x.is_floating_point():
+                return x.to(dtype=self.model_config.dtype)
+            return x
+
+        try:
+            output = hf_processor(**data,
+                                  **allowed_kwargs,
+                                  return_tensors="pt")
+            # this emulates output.to(dtype=self.model_config.dtype)
+            if isinstance(output, BatchFeature):
+                cast_output = json_map_leaves(maybe_cast_dtype, output.data)
+                return BatchFeature(cast_output)
+
+            cast_output = json_map_leaves(maybe_cast_dtype, output)
+
+            logger.warning_once(
+                f"{type(hf_processor).__name__} did not return `BatchFeature`. "
+                "Make sure to match the behaviour of `ProcessorMixin` when "
+                "implementing custom processors.")
+            return cast_output
+
+        except Exception as exc:
+            msg = (f"Failed to apply {type(hf_processor).__name__} "
+                   f"on data={data} with kwargs={allowed_kwargs}")
+
+            raise ValueError(msg) from exc
+
+
+class DummyData(NamedTuple):
+    """
+    Dummy data used for profiling.
+
+    Note: This is only used in V0.
+    """
+
+    seq_data: SequenceData
+    multi_modal_data: Optional[MultiModalDataDict] = None
+    multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None
 
 
 class InputRegistry:
     """
-    A registry to dispatch data processing
-    according to the target model.
+    Note: This is only used in V0.
     """
 
-    def __init__(self) -> None:
-        self._dummy_factories_by_model_type: Dict[Type[nn.Module],
-                                                  DummyDataFactory] = {}
-        self._input_processors_by_model_type: Dict[Type[nn.Module],
-                                                   InputProcessor] = {}
-
-    def _default_dummy_data_factory(
+    def dummy_data_for_profiling(
         self,
-        ctx: InputContext,
+        model_config: ModelConfig,
         seq_len: int,
-    ) -> Tuple["SequenceData", Optional["MultiModalDataDict"]]:
-        """
-        The default dummy data factory represents the longest possible text
-        that can be inputted to the model.
-
-        Note:
-            :data:`InputProcessor` is not applied to the dummy data.
-        """
-        # Avoid circular import
-        from vllm.sequence import SequenceData
-
-        dummy_seq_data = SequenceData([0] * seq_len)
-        dummy_multi_modal_data = None
-
-        return dummy_seq_data, dummy_multi_modal_data
-
-    def register_dummy_data(self, factory: DummyDataFactory):
-        """
-        Register a dummy data factory to a model class.
-
-        During memory profiling, the provided function is invoked to create
-        dummy data to be inputted into the model. The resulting memory usage
-        should be an upper bound of what the model would use at inference time.
-        """
-
-        def wrapper(model_cls: N) -> N:
-            if model_cls in self._dummy_factories_by_model_type:
-                logger.warning(
-                    "Model class %s already has dummy data "
-                    "registered to %s. It is overwritten by the new one.",
-                    model_cls, self)
-
-            self._dummy_factories_by_model_type[model_cls] = factory
-
-            return model_cls
-
-        return wrapper
-
-    def dummy_data_for_profiling(self, model_config: "ModelConfig",
-                                 seq_len: int):
+        mm_registry: MultiModalRegistry,
+        is_encoder_data: bool = False,
+    ) -> DummyData:
         """
         Create dummy data for profiling the memory usage of a model.
 
         The model is identified by ``model_config``.
-
-        See also:
-            :ref:`enabling_multimodal_inputs`
         """
         # Avoid circular import
-        from vllm.model_executor.model_loader import get_model_architecture
+        from vllm.multimodal.cache import processor_only_cache_from_config
+        from vllm.sequence import SequenceData
 
-        model_cls, _ = get_model_architecture(model_config)
-        dummy_factory = self._dummy_factories_by_model_type \
-            .get(model_cls, self._default_dummy_data_factory)
+        if not model_config.is_multimodal_model:
+            seq_data = SequenceData.from_prompt_token_counts((0, seq_len))
+            return DummyData(seq_data=seq_data)
 
-        return dummy_factory(InputContext(model_config), seq_len)
+        cache = processor_only_cache_from_config(model_config, mm_registry)
 
-    def _default_input_processor(self, ctx: InputContext,
-                                 inputs: LLMInputs) -> LLMInputs:
-        """The default input processor is a no-op."""
-        return inputs
+        # Encoder dummy data does not contain multi-modal data
+        if is_encoder_data:
+            enc_data = mm_registry.get_encoder_dummy_data(model_config,
+                                                          seq_len,
+                                                          cache=cache)
+            seq_data = SequenceData.from_seqs(enc_data.prompt_token_ids)
+            return DummyData(seq_data=seq_data)
 
-    def register_input_processor(self, processor: InputProcessor):
-        """
-        Register an input processor to a model class.
+        dec_data = mm_registry.get_decoder_dummy_data(model_config,
+                                                      seq_len,
+                                                      cache=cache)
 
-        The provided function is invoked on each input to the model. This
-        happens before :meth:`~vllm.multimodal.MultiModalRegistry.map_input`.
-
-        See also:
-            :ref:`input_processing_pipeline`
-        """
-
-        def wrapper(model_cls: N) -> N:
-            if model_cls in self._input_processors_by_model_type:
-                logger.warning(
-                    "Model class %s already has input processor "
-                    "registered to %s. It is overwritten by the new one.",
-                    model_cls, self)
-
-            self._input_processors_by_model_type[model_cls] = processor
-
-            return model_cls
-
-        return wrapper
-
-    def process_input(self, model_config: "ModelConfig",
-                      inputs: LLMInputs) -> LLMInputs:
-        """
-        Apply an input processor to an instance of model inputs.
-
-        The model is identified by ``model_config``.
-
-        See also:
-            :ref:`input_processing_pipeline`
-        """
-        # Avoid circular import
-        from vllm.model_executor.model_loader import get_model_architecture
-
-        model_cls, _ = get_model_architecture(model_config)
-
-        processor = self._input_processors_by_model_type \
-            .get(model_cls, self._default_input_processor)
-
-        return processor(InputContext(model_config), inputs)
-
-    def create_input_processor(self, model_config: "ModelConfig"):
-        """
-        Create an input processor (see :meth:`process_input`) for a
-        specific model.
-        """
-        return functools.partial(self.process_input, model_config)
+        return DummyData(
+            seq_data=SequenceData.from_seqs(dec_data.prompt_token_ids),
+            multi_modal_data=dec_data.multi_modal_data.get_data(),
+            multi_modal_placeholders=dec_data.multi_modal_placeholders,
+        )

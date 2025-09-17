@@ -1,69 +1,27 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 
-
-@pytest.fixture
-def sample_regex():
-    return (r"((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.){3}"
-            r"(25[0-5]|(2[0-4]|1\d|[1-9]|)\d)")
+from vllm.assets.audio import AudioAsset
 
 
 @pytest.fixture
-def sample_json_schema():
-    return {
-        "type": "object",
-        "properties": {
-            "name": {
-                "type": "string"
-            },
-            "age": {
-                "type": "integer"
-            },
-            "skills": {
-                "type": "array",
-                "items": {
-                    "type": "string",
-                    "maxLength": 10
-                },
-                "minItems": 3
-            },
-            "work_history": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "company": {
-                            "type": "string"
-                        },
-                        "duration": {
-                            "type": "number"
-                        },
-                        "position": {
-                            "type": "string"
-                        }
-                    },
-                    "required": ["company", "position"]
-                }
-            }
-        },
-        "required": ["name", "age", "skills", "work_history"]
-    }
+def mary_had_lamb():
+    path = AudioAsset('mary_had_lamb').get_local_path()
+    with open(str(path), "rb") as f:
+        yield f
 
 
 @pytest.fixture
-def sample_guided_choice():
-    return [
-        "Python", "Java", "JavaScript", "C++", "C#", "PHP", "TypeScript",
-        "Ruby", "Swift", "Kotlin"
-    ]
+def winning_call():
+    path = AudioAsset('winning_call').get_local_path()
+    with open(str(path), "rb") as f:
+        yield f
 
 
 @pytest.fixture
-def sample_sql_statements():
-    return ("""
-start: select_statement
-select_statement: "SELECT" column "from" table "where" condition
-column: "col_1" | "col_2"
-table: "table_1" | "table_2"
-condition: column "=" number
-number: "1" | "2"
-""")
+def foscolo():
+    # Test translation it->en
+    path = AudioAsset('azacinto_foscolo').get_local_path()
+    with open(str(path), "rb") as f:
+        yield f

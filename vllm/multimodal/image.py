@@ -1,136 +1,130 @@
-from functools import lru_cache
-from typing import List, Optional, Tuple, TypeVar
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from io import BytesIO
+from pathlib import Path
+from typing import Union
+
+import pybase64
 import torch
 from PIL import Image
-from transformers import PreTrainedTokenizerBase
 
-from vllm.config import ModelConfig
-from vllm.inputs.registry import InputContext
-from vllm.logger import init_logger
-from vllm.transformers_utils.image_processor import get_image_processor
-from vllm.transformers_utils.tokenizer import get_tokenizer
-
-from .base import MultiModalInputs, MultiModalPlugin
-
-logger = init_logger(__name__)
-
-cached_get_image_processor = lru_cache(get_image_processor)
-cached_get_tokenizer = lru_cache(get_tokenizer)
-
-# Utilities for image input processors
-_T = TypeVar("_T", str, int)
+from .base import MediaIO
 
 
-def repeat_and_pad_token(
-    token: _T,
-    *,
-    repeat_count: int = 1,
-    pad_token_left: Optional[_T] = None,
-    pad_token_right: Optional[_T] = None,
-) -> List[_T]:
-    replacement = [token] * repeat_count
-    if pad_token_left is not None:
-        replacement = [pad_token_left] + replacement
-    if pad_token_right is not None:
-        replacement = replacement + [pad_token_right]
-
-    return replacement
+def rescale_image_size(image: Image.Image,
+                       size_factor: float,
+                       transpose: int = -1) -> Image.Image:
+    """Rescale the dimensions of an image by a constant factor."""
+    new_width = int(image.width * size_factor)
+    new_height = int(image.height * size_factor)
+    image = image.resize((new_width, new_height))
+    if transpose >= 0:
+        image = image.transpose(Image.Transpose(transpose))
+    return image
 
 
-def repeat_and_pad_image_tokens(
-    tokenizer: PreTrainedTokenizerBase,
-    prompt: Optional[str],
-    prompt_token_ids: List[int],
-    *,
-    image_token_id: int,
-    repeat_count: int = 1,
-    pad_token_left: Optional[int] = None,
-    pad_token_right: Optional[int] = None,
-) -> Tuple[Optional[str], List[int]]:
-    if prompt is None:
-        new_prompt = None
+def rgba_to_rgb(
+    image: Image.Image,
+    background_color: Union[tuple[int, int, int], list[int]] = (255, 255, 255)
+) -> Image.Image:
+    """Convert an RGBA image to RGB with filled background color."""
+    assert image.mode == "RGBA"
+    converted = Image.new("RGB", image.size, background_color)
+    converted.paste(image, mask=image.split()[3])  # 3 is the alpha channel
+    return converted
+
+
+def convert_image_mode(image: Image.Image, to_mode: str):
+    if image.mode == to_mode:
+        return image
+    elif image.mode == "RGBA" and to_mode == "RGB":
+        return rgba_to_rgb(image)
     else:
-        image_token_str = tokenizer.decode(image_token_id)
-        pad_token_str_left = (None if pad_token_left is None else
-                              tokenizer.decode(pad_token_left))
-        pad_token_str_right = (None if pad_token_right is None else
-                               tokenizer.decode(pad_token_right))
-        replacement_str = "".join(
-            repeat_and_pad_token(
-                image_token_str,
-                repeat_count=repeat_count,
-                pad_token_left=pad_token_str_left,
-                pad_token_right=pad_token_str_right,
-            ))
+        return image.convert(to_mode)
 
-        image_token_count = prompt.count(image_token_str)
-        # This is an arbitrary number to distinguish between the two cases
-        if image_token_count > 16:
-            logger.warning(
-                "Please follow the prompt format that is "
-                "documented on HuggingFace which does not involve "
-                "repeating %s tokens.", image_token_str)
-        elif image_token_count > 1:
-            logger.warning("Multiple image input is not supported yet, "
-                           "so any extra image tokens will be treated "
-                           "as plain text.")
 
-        # The image tokens are removed to be consistent with HuggingFace
-        new_prompt = prompt.replace(image_token_str, replacement_str, 1)
+class ImageMediaIO(MediaIO[Image.Image]):
 
-    new_token_ids: List[int] = []
-    for i, token in enumerate(prompt_token_ids):
-        if token == image_token_id:
-            replacement_ids = repeat_and_pad_token(
-                image_token_id,
-                repeat_count=repeat_count,
-                pad_token_left=pad_token_left,
-                pad_token_right=pad_token_right,
-            )
-            new_token_ids.extend(replacement_ids)
+    def __init__(self, image_mode: str = "RGB", **kwargs) -> None:
+        super().__init__()
 
-            # No need to further scan the list since we only replace once
-            new_token_ids.extend(prompt_token_ids[i + 1:])
-            break
+        self.image_mode = image_mode
+        # `kwargs` contains custom arguments from
+        # --media-io-kwargs for this modality.
+        # They can be passed to the underlying
+        # media loaders (e.g. custom implementations)
+        # for flexible control.
+        self.kwargs = kwargs
+
+        # Extract RGBA background color from kwargs if provided
+        # Default to white background for backward compatibility
+        rgba_bg = kwargs.get('rgba_background_color', (255, 255, 255))
+        # Convert list to tuple for consistency
+        if isinstance(rgba_bg, list):
+            rgba_bg = tuple(rgba_bg)
+
+        # Validate rgba_background_color format
+        if not (isinstance(rgba_bg, tuple) and len(rgba_bg) == 3
+                and all(isinstance(c, int) and 0 <= c <= 255
+                        for c in rgba_bg)):
+            raise ValueError(
+                "rgba_background_color must be a list or tuple of 3 integers "
+                "in the range [0, 255].")
+        self.rgba_background_color = rgba_bg
+
+    def _convert_image_mode(self, image: Image.Image) -> Image.Image:
+        """Convert image mode with custom background color."""
+        if image.mode == self.image_mode:
+            return image
+        elif image.mode == "RGBA" and self.image_mode == "RGB":
+            return rgba_to_rgb(image, self.rgba_background_color)
         else:
-            new_token_ids.append(token)
+            return convert_image_mode(image, self.image_mode)
 
-    return new_prompt, new_token_ids
+    def load_bytes(self, data: bytes) -> Image.Image:
+        image = Image.open(BytesIO(data))
+        image.load()
+        return self._convert_image_mode(image)
+
+    def load_base64(self, media_type: str, data: str) -> Image.Image:
+        return self.load_bytes(pybase64.b64decode(data, validate=True))
+
+    def load_file(self, filepath: Path) -> Image.Image:
+        image = Image.open(filepath)
+        image.load()
+        return self._convert_image_mode(image)
+
+    def encode_base64(
+        self,
+        media: Image.Image,
+        *,
+        image_format: str = "JPEG",
+    ) -> str:
+        image = media
+
+        with BytesIO() as buffer:
+            image = self._convert_image_mode(image)
+            image.save(buffer, image_format)
+            data = buffer.getvalue()
+
+        return pybase64.b64encode(data).decode('utf-8')
 
 
-class ImagePlugin(MultiModalPlugin):
-    """Plugin for image data."""
+class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
 
-    def get_data_key(self) -> str:
-        return "image"
+    def __init__(self) -> None:
+        super().__init__()
 
-    def _get_hf_image_processor(self, model_config: ModelConfig):
-        return cached_get_image_processor(
-            model_config.model,
-            trust_remote_code=model_config.trust_remote_code)
+    def load_bytes(self, data: bytes) -> torch.Tensor:
+        buffer = BytesIO(data)
+        return torch.load(buffer, weights_only=True)
 
-    def _default_input_mapper(self, ctx: InputContext,
-                              data: object) -> MultiModalInputs:
-        model_config = ctx.model_config
-        if isinstance(data, Image.Image):
-            image_processor = self._get_hf_image_processor(model_config)
-            if image_processor is None:
-                raise RuntimeError("No HuggingFace processor is available "
-                                   "to process the image object")
-            try:
-                batch_data = image_processor \
-                    .preprocess(data, return_tensors="pt") \
-                    .data
-            except Exception:
-                logger.error("Failed to process image (%s)", data)
-                raise
+    def load_base64(self, media_type: str, data: str) -> torch.Tensor:
+        return self.load_bytes(pybase64.b64decode(data, validate=True))
 
-            return MultiModalInputs(batch_data)
-        elif isinstance(data, torch.Tensor):
-            raise NotImplementedError("Embeddings input is not supported yet")
+    def load_file(self, filepath: Path) -> torch.Tensor:
+        return torch.load(filepath, weights_only=True)
 
-        raise TypeError(f"Invalid image type: {type(data)}")
-
-    def _default_max_multimodal_tokens(self, ctx: InputContext) -> int:
-        return 3000
+    def encode_base64(self, media: torch.Tensor) -> str:
+        return pybase64.b64encode(media.numpy()).decode('utf-8')

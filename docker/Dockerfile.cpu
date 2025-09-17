@@ -1,0 +1,182 @@
+# This vLLM Dockerfile is used to build images that can run vLLM on both x86_64 and arm64 CPU platforms.
+#
+# Supported platforms:
+#   - linux/amd64 (x86_64)
+#   - linux/arm64 (aarch64)
+#
+# Use the `--platform` option with `docker buildx build` to specify the target architecture, e.g.:
+#   docker buildx build --platform=linux/arm64 -f docker/Dockerfile.cpu .
+#
+# Build targets:
+#   vllm-openai (default): used for serving deployment
+#   vllm-test: used for CI tests
+#   vllm-dev: used for development
+#
+# Build arguments:
+#   PYTHON_VERSION=3.12 (default)|3.11|3.10|3.9
+#   VLLM_CPU_DISABLE_AVX512=false (default)|true
+#   VLLM_CPU_AVX512BF16=false (default)|true
+#   VLLM_CPU_AVX512VNNI=false (default)|true
+#
+
+######################### COMMON BASE IMAGE #########################
+FROM ubuntu:22.04 AS base-common
+
+WORKDIR /workspace/
+
+ARG PYTHON_VERSION=3.12
+ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu"
+
+# Install minimal dependencies and uv
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update -y \
+    && apt-get install -y --no-install-recommends ccache git curl wget ca-certificates \
+        gcc-12 g++-12 libtcmalloc-minimal4 libnuma-dev ffmpeg libsm6 libxext6 libgl1 jq lsof \
+    && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12 \
+    && curl -LsSf https://astral.sh/uv/install.sh | sh
+
+ENV CCACHE_DIR=/root/.cache/ccache
+ENV CMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+ENV PATH="/root/.local/bin:$PATH"
+ENV VIRTUAL_ENV="/opt/venv"
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python
+RUN uv venv --python ${PYTHON_VERSION} --seed ${VIRTUAL_ENV}
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
+ENV UV_HTTP_TIMEOUT=500
+
+# Install Python dependencies 
+ENV PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
+ENV UV_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
+ENV UV_INDEX_STRATEGY="unsafe-best-match"
+ENV UV_LINK_MODE="copy"
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,src=requirements/common.txt,target=requirements/common.txt \
+    --mount=type=bind,src=requirements/cpu.txt,target=requirements/cpu.txt \
+    uv pip install --upgrade pip && \
+    uv pip install -r requirements/cpu.txt
+
+ARG TARGETARCH
+ENV TARGETARCH=${TARGETARCH}
+
+######################### x86_64 BASE IMAGE #########################
+FROM base-common AS base-amd64
+
+ENV LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:/opt/venv/lib/libiomp5.so"
+
+######################### arm64 BASE IMAGE #########################
+FROM base-common AS base-arm64
+
+ENV LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libtcmalloc_minimal.so.4"
+
+######################### BASE IMAGE #########################
+FROM base-${TARGETARCH} AS base
+
+RUN echo 'ulimit -c 0' >> ~/.bashrc
+
+######################### BUILD IMAGE #########################
+FROM base AS vllm-build
+
+ARG GIT_REPO_CHECK=0
+# Support for building with non-AVX512 vLLM: docker build --build-arg VLLM_CPU_DISABLE_AVX512="true" ...
+ARG VLLM_CPU_DISABLE_AVX512=0
+ENV VLLM_CPU_DISABLE_AVX512=${VLLM_CPU_DISABLE_AVX512}
+# Support for building with AVX512BF16 ISA: docker build --build-arg VLLM_CPU_AVX512BF16="true" ...
+ARG VLLM_CPU_AVX512BF16=0
+ENV VLLM_CPU_AVX512BF16=${VLLM_CPU_AVX512BF16}
+# Support for building with AVX512VNNI ISA: docker build --build-arg VLLM_CPU_AVX512VNNI="true" ...
+ARG VLLM_CPU_AVX512VNNI=0
+ENV VLLM_CPU_AVX512VNNI=${VLLM_CPU_AVX512VNNI}
+
+WORKDIR /workspace/vllm
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,src=requirements/cpu-build.txt,target=requirements/build.txt \
+    uv pip install -r requirements/build.txt
+
+COPY . .
+RUN --mount=type=bind,source=.git,target=.git \
+    if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh ; fi
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=cache,target=/workspace/vllm/.deps,sharing=locked \
+    --mount=type=bind,source=.git,target=.git \
+    VLLM_TARGET_DEVICE=cpu python3 setup.py bdist_wheel 
+
+######################### TEST DEPS #########################
+FROM base AS vllm-test-deps
+
+WORKDIR /workspace/vllm
+
+RUN --mount=type=bind,src=requirements/test.in,target=requirements/test.in \
+    cp requirements/test.in requirements/cpu-test.in && \
+    sed -i '/mamba_ssm/d' requirements/cpu-test.in && \
+    sed -i 's/^torch==.*/torch==2.6.0/g' requirements/cpu-test.in && \
+    sed -i 's/torchaudio.*/torchaudio/g' requirements/cpu-test.in && \
+    sed -i 's/torchvision.*/torchvision/g' requirements/cpu-test.in && \
+    uv pip compile requirements/cpu-test.in -o requirements/cpu-test.txt --index-strategy unsafe-best-match --torch-backend cpu
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install -r requirements/cpu-test.txt 
+
+######################### DEV IMAGE #########################
+FROM vllm-build AS vllm-dev
+
+WORKDIR /workspace/vllm
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get install -y --no-install-recommends vim numactl xz-utils
+
+# install development dependencies (for testing)
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install -e tests/vllm_test_utils 
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=bind,source=.git,target=.git \
+    VLLM_TARGET_DEVICE=cpu python3 setup.py develop 
+
+COPY --from=vllm-test-deps /workspace/vllm/requirements/cpu-test.txt requirements/test.txt
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install -r requirements/dev.txt && \
+    pre-commit install --hook-type pre-commit --hook-type commit-msg
+
+ENTRYPOINT ["bash"]
+
+######################### TEST IMAGE #########################
+FROM vllm-test-deps AS vllm-test
+
+WORKDIR /workspace/
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,from=vllm-build,src=/workspace/vllm/dist,target=dist \
+    uv pip install dist/*.whl
+
+ADD ./tests/ ./tests/
+ADD ./examples/ ./examples/
+ADD ./benchmarks/ ./benchmarks/
+ADD ./vllm/collect_env.py .
+ADD ./.buildkite/ ./.buildkite/
+
+# install development dependencies (for testing)
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install -e tests/vllm_test_utils 
+
+ENTRYPOINT ["bash"]
+
+######################### RELEASE IMAGE #########################
+FROM base AS vllm-openai
+
+WORKDIR /workspace/
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=bind,from=vllm-build,src=/workspace/vllm/dist,target=dist \
+    uv pip install dist/*.whl
+
+ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]

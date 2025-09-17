@@ -12,13 +12,26 @@ namespace vllm {
 namespace fp8 {
   #ifdef ENABLE_FP8
 
-    #if 0  // Disable the following code to reduce the binary size.
 template <typename Tout, typename Tin>
-__inline__ __device__ Tout
-vec_conversion(const Tin &x, const __nv_fp8_interpretation_t fp8_type) {
+__inline__ __device__ Tout vec_conversion(
+    const Tin& x, const __nv_fp8_interpretation_t fp8_type = __NV_E4M3) {
   return x;
 }
 
+// float -> c10::Float8_e4m3fn
+template <>
+__inline__ __device__ c10::Float8_e4m3fn
+vec_conversion<c10::Float8_e4m3fn, float>(
+    const float& a, const __nv_fp8_interpretation_t fp8_type) {
+    #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+  return static_cast<c10::Float8_e4m3fn>(a);
+    #else
+  return c10::Float8_e4m3fn(__nv_cvt_float_to_fp8(a, __NV_SATFINITE, fp8_type),
+                            c10::Float8_e4m3fn::from_bits());
+    #endif
+}
+
+    #if 0  // Disable the following code to reduce the binary size.
 // fp8 -> half
 template <>
 __inline__ __device__ uint16_t vec_conversion<uint16_t, uint8_t>(
@@ -475,6 +488,7 @@ __inline__ __device__ uint8_t scaled_vec_conversion<uint8_t, __nv_bfloat16>(
                                                  __NV_SATFINITE, fp8_type);
   return (uint8_t)res;
     #endif
+  __builtin_unreachable();  // Suppress missing return statement warning
 }
 
 // float -> fp8
@@ -508,6 +522,7 @@ __inline__ __device__ Tout convert(const Tin& x) {
   }
   #endif
   assert(false);
+  __builtin_unreachable();  // Suppress missing return statement warning
 }
 
 template <typename Tout, typename Tin, Fp8KVCacheDataType kv_dt>
@@ -520,6 +535,7 @@ __inline__ __device__ Tout scaled_convert(const Tin& x, const float scale) {
   }
   #endif
   assert(false);
+  __builtin_unreachable();  // Suppress missing return statement warning
 }
 
   // The following macro is used to dispatch the conversion function based on

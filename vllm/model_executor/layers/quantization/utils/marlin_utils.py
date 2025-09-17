@@ -1,92 +1,115 @@
-from typing import List, Optional, Tuple
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from typing import Optional
 
 import numpy
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm.logger import init_logger
+from vllm.model_executor.layers.linear import LinearBase
 from vllm.platforms import current_platform
+from vllm.scalar_type import ScalarType, scalar_types
 
 from .quant_utils import pack_cols, unpack_cols
+
+logger = init_logger(__name__)
 
 GPTQ_MARLIN_TILE = 16
 GPTQ_MARLIN_MIN_THREAD_N = 64
 GPTQ_MARLIN_MIN_THREAD_K = 128
 GPTQ_MARLIN_MAX_PARALLEL = 16
 
-MARLIN_SUPPORTED_NUM_BITS = [4, 8]
 MARLIN_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
 
+# In case there is a performance issue with Marlin, the variable below can be
+# changed to False, which allows Marlin to perform global reductions in fp16
+# precision (instead of fp32), and therefore, save on some memory movements.
+USE_FP32_REDUCE_DEFAULT = True
 
-def _check_marlin_supported(num_bits: int, group_size: int, is_sym: bool,
-                            min_capability: Optional[int],
-                            has_zp: bool) -> Tuple[bool, Optional[str]]:
-    if min_capability is not None:
-        major, minor = current_platform.get_device_capability()
-        device_capability = major * 10 + minor
-        if device_capability < min_capability:
-            return (False, "Marlin does not support device_capability = {}"
-                    ", the min_capability required is {}".format(
-                        device_capability, min_capability))
 
-    if num_bits not in MARLIN_SUPPORTED_NUM_BITS:
-        return (False, "Marlin does not support weight_bits = {}. "
-                "Only weight_bits = {} are supported.".format(
-                    num_bits, MARLIN_SUPPORTED_NUM_BITS))
+# For binary size and compile time, we don't support the same types for with and
+#  without runtime zero-point. We support common cases, i.e. AWQ and GPTQ.
+#  TODO: we may want to move this into the C++ so its closer to the actual impl
+def query_marlin_supported_quant_types(
+    has_zp: Optional[bool] = None,
+    include_fp_type: bool = True,
+    device_capability: Optional[int] = None,
+):
+    if device_capability is None:
+        capability_tuple = current_platform.get_device_capability()
+        device_capability = (-1 if capability_tuple is None else
+                             capability_tuple.to_int())
 
-    if group_size not in MARLIN_SUPPORTED_GROUP_SIZES:
-        return (False, "Marlin does not support group_size = {}. Only "
-                "group_sizes = {} are supported.".format(
-                    group_size, MARLIN_SUPPORTED_GROUP_SIZES))
+    if device_capability < 80:
+        return []
 
-    if not has_zp and not is_sym:
-        return (False,
-                "Marlin without zero_points must have symmetric quantization")
+    # - has_zp is True: return quant_types that has zero points
+    # - has_zp is False: return quant_types that has not zero points
+    # - has_zp is None: both
+    if has_zp is None:
+        types0 = query_marlin_supported_quant_types(False, include_fp_type,
+                                                    device_capability)
+        types1 = query_marlin_supported_quant_types(True, include_fp_type,
+                                                    device_capability)
+        return types0 + types1
+
+    if has_zp:
+        # AWQ style, unsigned + runtime zero-point
+        return [scalar_types.uint4]
+    else:
+        # GPTQ style, unsigned + symmetric bias
+        res = [scalar_types.uint4b8, scalar_types.uint8b128]
+        if include_fp_type:
+            res += [scalar_types.float8_e4m3fn, scalar_types.float4_e2m1f]
+        return res
+
+
+def _check_marlin_supported(
+        quant_type: ScalarType,
+        group_size: Optional[int],
+        has_zp: bool,
+        device_capability: Optional[int] = None) -> tuple[bool, Optional[str]]:
+
+    if device_capability is None:
+        capability_tuple = current_platform.get_device_capability()
+        device_capability = (-1 if capability_tuple is None else
+                             capability_tuple.to_int())
+
+    supported_types = query_marlin_supported_quant_types(
+        has_zp, True, device_capability)
+
+    if quant_type not in supported_types:
+        return (False, f"Marlin does not support weight_bits = {quant_type}. "
+                f"Only types = {supported_types} "
+                f"are supported (for group_size = {group_size}, "
+                f"device_capability = {device_capability}, zp = {has_zp}).")
+    if (group_size is None or group_size not in MARLIN_SUPPORTED_GROUP_SIZES):
+        return (False, f"Marlin does not support group_size = {group_size}. "
+                f"Only group_sizes = {MARLIN_SUPPORTED_GROUP_SIZES} "
+                "are supported.")
 
     return True, None
 
 
-def check_gptq_marlin_supported(num_bits: int, group_size: int, is_sym: bool,
-                                min_capability: int) -> bool:
-    cond, _ = _check_marlin_supported(num_bits,
-                                      group_size,
-                                      is_sym,
-                                      min_capability,
-                                      has_zp=False)
+def check_marlin_supported(quant_type: ScalarType,
+                           group_size: int,
+                           has_zp: bool = False,
+                           device_capability: Optional[int] = None) -> bool:
+    cond, _ = _check_marlin_supported(quant_type, group_size, has_zp,
+                                      device_capability)
     return cond
 
 
-def check_awq_marlin_supported(num_bits: int, group_size: int, has_zp: bool,
-                               min_capability: int) -> bool:
-    cond, _ = _check_marlin_supported(num_bits,
-                                      group_size,
-                                      False,
-                                      min_capability,
-                                      has_zp=has_zp)
-    return cond
-
-
-def verify_gptq_marlin_supported(num_bits: int, group_size: int,
-                                 is_sym: bool) -> None:
-    cond, err_msg = _check_marlin_supported(num_bits,
-                                            group_size,
-                                            is_sym,
-                                            min_capability=None,
-                                            has_zp=False)
+def verify_marlin_supported(quant_type: ScalarType,
+                            group_size: int,
+                            has_zp: bool = False) -> None:
+    cond, err_msg = _check_marlin_supported(quant_type, group_size, has_zp)
     if not cond:
         assert err_msg is not None
-        raise ValueError("GPTQ" + err_msg)
-
-
-def verify_awq_marlin_supported(num_bits: int, group_size: int,
-                                has_zp: bool) -> None:
-    cond, err_msg = _check_marlin_supported(num_bits,
-                                            group_size,
-                                            False,
-                                            min_capability=None,
-                                            has_zp=has_zp)
-    if not cond:
-        assert err_msg is not None
-        raise ValueError("AWQ" + err_msg)
+        raise ValueError(err_msg)
 
 
 def verify_marlin_supports_shape(output_size_per_partition: int,
@@ -113,9 +136,55 @@ def verify_marlin_supports_shape(output_size_per_partition: int,
             and input_size_per_partition % group_size != 0):
         raise ValueError(
             f"Weight input_size_per_partition = {input_size_per_partition}"
-            f" is not divisible by group_size = {group_size}."
+            f" is not divisible by group_size = {group_size}. "
             "Consider reducing tensor_parallel_size or running "
             "with --quantization gptq.")
+
+
+def check_marlin_supports_shape(output_size_per_partition: int,
+                                input_size_per_partition: int,
+                                input_size: int, group_size: int) \
+                                    -> tuple[bool, Optional[str]]:
+    try:
+        verify_marlin_supports_shape(output_size_per_partition,
+                                     input_size_per_partition, input_size,
+                                     group_size)
+    except ValueError as e:
+        return False, e.__str__()
+    return True, None
+
+
+def check_marlin_supports_layer(layer: LinearBase, group_size: int) \
+                                    -> bool:
+    output_size_per_partition = getattr(layer, "output_size_per_partition",
+                                        None) or layer.output_size
+    input_size_per_partition = getattr(layer, "input_size_per_partition",
+                                       None) or layer.input_size
+
+    return check_marlin_supports_shape(
+        output_size_per_partition=output_size_per_partition,
+        input_size_per_partition=input_size_per_partition,
+        input_size=layer.input_size,
+        group_size=group_size)[0]
+
+
+def check_moe_marlin_supports_layer(layer: LinearBase, group_size: int) \
+                                    -> bool:
+    hidden_size = layer.hidden_size
+    intermediate_size_per_partition = layer.intermediate_size_per_partition
+    # apply_router_weight_on_input is not supported for moe marlin
+    supports_router_weight = not layer.apply_router_weight_on_input
+    # moe marlin requires the activation to be silu
+    supports_activation = layer.activation == "silu"
+
+    # gate-up: (n, k) = (intermediate_size_per_partition * 2, hidden_size)
+    # down: (n, k) = (hidden_size, intermediate_size_per_partition)
+    # moe marlin requires n % 128 == 0 and k % 64 == 0
+    supports_shape = hidden_size % 128 == 0 and \
+        intermediate_size_per_partition % max(64, group_size) == 0
+    supports_group_size = group_size in [-1, 32, 64, 128]
+    return supports_shape and supports_group_size and \
+        supports_router_weight and supports_activation
 
 
 def marlin_make_workspace(output_size_per_partition: int,
@@ -124,6 +193,17 @@ def marlin_make_workspace(output_size_per_partition: int,
                           GPTQ_MARLIN_MIN_THREAD_N) * GPTQ_MARLIN_MAX_PARALLEL
 
     return torch.zeros(max_workspace_size,
+                       dtype=torch.int,
+                       device=device,
+                       requires_grad=False)
+
+
+def marlin_make_workspace_new(device: torch.device,
+                              max_blocks_per_sm: int = 1) -> torch.Tensor:
+    # In the new marlin kernel, we use the num of threadblocks as workspace
+    # size. The num of threadblocks is sms_count * max_blocks_per_sm.
+    sms = torch.cuda.get_device_properties(device).multi_processor_count
+    return torch.zeros(sms * max_blocks_per_sm,
                        dtype=torch.int,
                        device=device,
                        requires_grad=False)
@@ -146,17 +226,22 @@ def marlin_make_empty_g_idx(device: torch.device) -> torch.Tensor:
                               requires_grad=False)
 
 
+def marlin_make_empty_zp(device: torch.device) -> torch.Tensor:
+    return torch.nn.Parameter(torch.empty(0, dtype=torch.int, device=device),
+                              requires_grad=False)
+
+
 def marlin_sort_g_idx(
-        g_idx: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        g_idx: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     g_idx_sort_indices = torch.argsort(g_idx).to(torch.int)
     return g_idx[g_idx_sort_indices], g_idx_sort_indices
 
 
 def get_scale_perms():
-    scale_perm: List[int] = []
+    scale_perm: list[int] = []
     for i in range(8):
         scale_perm.extend([i + 8 * j for j in range(8)])
-    scale_perm_single: List[int] = []
+    scale_perm_single: list[int] = []
     for i in range(4):
         scale_perm_single.extend(
             [2 * i + j for j in [0, 1, 8, 9, 16, 17, 24, 25]])
@@ -174,6 +259,31 @@ def marlin_permute_scales(s: torch.Tensor, size_k: int, size_n: int,
     s = s.reshape((-1, size_n)).contiguous()
 
     return s
+
+
+def marlin_permute_bias(s: torch.Tensor) -> torch.Tensor:
+    origin_shape = s.shape
+    _, scale_perm_single = get_scale_perms()
+    s = s.reshape((-1, len(scale_perm_single)))[:, scale_perm_single]
+    return s.reshape(*origin_shape).contiguous()
+
+
+def marlin_moe_permute_scales(
+    s: torch.Tensor,
+    size_k: int,
+    size_n: int,
+    group_size: int,
+):
+    num_experts = s.shape[0]
+    output = torch.empty(
+        (num_experts, s.shape[1], s.shape[2]),
+        device=s.device,
+        dtype=s.dtype,
+    )
+
+    for e in range(num_experts):
+        output[e] = marlin_permute_scales(s[e], size_k, size_n, group_size)
+    return output
 
 
 def marlin_zero_points(zp: torch.Tensor, size_k: int, size_n: int,
@@ -221,15 +331,64 @@ def awq_to_marlin_zero_points(q_zp_packed: torch.Tensor, size_k: int,
     return marlin_zp
 
 
-# Newly generated tensors need to replace existing tensors that are
-# already registered as parameters by vLLM (and won't be freed)
-def replace_tensor(layer: torch.nn.Module, name: str,
-                   new_t: torch.Tensor) -> None:
-    # It is important to use resize_() here since it ensures
-    # the same buffer is reused
-    getattr(layer, name).resize_(new_t.shape)
-    getattr(layer, name).copy_(new_t)
-    del new_t
+def moe_awq_to_marlin_zero_points(q_zp_packed: torch.Tensor, size_k: int,
+                                  size_n: int, num_bits: int):
+    num_experts = q_zp_packed.shape[0]
+    output = torch.empty(
+        (num_experts, q_zp_packed.shape[1], q_zp_packed.shape[2]),
+        device=q_zp_packed.device,
+        dtype=q_zp_packed.dtype,
+    )
+    for e in range(num_experts):
+        output[e] = awq_to_marlin_zero_points(q_zp_packed[e], size_k, size_n,
+                                              num_bits)
+    return output
+
+
+def maybe_warn_marlin_atomic_add(device, dtype):
+    if torch.compiler.is_dynamo_compiling():
+        return
+    device_capability = torch.cuda.get_device_capability(device)
+    if device_capability[0] < 9 and dtype == torch.bfloat16:
+        logger.info_once(
+            "You are running Marlin kernel with bf16 on GPUs before SM90. "
+            "You can consider change to fp16 to achieve better performance "
+            "if possible.")
+
+
+def maybe_warn_marlin_atomic_add_env():
+    if torch.compiler.is_dynamo_compiling():
+        return
+    if envs.VLLM_MARLIN_USE_ATOMIC_ADD:
+        return
+    logger.info_once(
+        "Marlin kernel can achieve better performance for small size_n "
+        "with experimental use_atomic_add feature. "
+        "You can consider set environment variable "
+        "VLLM_MARLIN_USE_ATOMIC_ADD to 1 if possible.")
+
+
+def should_use_atomic_add_reduce(m: int, n: int, k: int, device: torch.device,
+                                 dtype: torch.dtype) -> bool:
+
+    # the performance of atomicAdd is better than global reduce
+    # only when m*n is small and k is large
+    if n >= 2048 or k < 2048 or device.type != "cuda":
+        return False
+
+    # disable atomicAdd reduce by default,
+    # one can enable it with VLLM_MARLIN_USE_ATOMIC_ADD=1
+    if not envs.VLLM_MARLIN_USE_ATOMIC_ADD:
+        maybe_warn_marlin_atomic_add_env()
+        return False
+
+    # sm8x doesn't support atomicAdd + bfloat16 natively
+    device_capability = torch.cuda.get_device_capability(device)
+    if device_capability[0] < 9 and dtype == torch.bfloat16:
+        maybe_warn_marlin_atomic_add(device, dtype)
+        return False
+
+    return True
 
 
 def apply_gptq_marlin_linear(
@@ -240,30 +399,39 @@ def apply_gptq_marlin_linear(
         g_idx: torch.Tensor,
         g_idx_sort_indices: torch.Tensor,
         workspace: torch.Tensor,
-        num_bits: int,
+        wtype: ScalarType,
         output_size_per_partition: int,
         input_size_per_partition: int,
         is_k_full: bool,
-        bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        bias: Optional[torch.Tensor] = None,
+        use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT) -> torch.Tensor:
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition, )
 
+    use_atomic_add = should_use_atomic_add_reduce(m=reshaped_x.size(0),
+                                                  n=output_size_per_partition,
+                                                  k=reshaped_x.size(1),
+                                                  device=input.device,
+                                                  dtype=input.dtype)
+
     output = ops.gptq_marlin_gemm(reshaped_x,
+                                  None,
                                   weight,
+                                  bias,
                                   weight_scale,
+                                  None,
                                   weight_zp,
                                   g_idx,
                                   g_idx_sort_indices,
                                   workspace,
-                                  num_bits,
+                                  wtype,
                                   size_m=reshaped_x.shape[0],
                                   size_n=output_size_per_partition,
                                   size_k=input_size_per_partition,
                                   is_k_full=is_k_full,
-                                  has_zp=False)
-
-    if bias is not None:
-        output.add_(bias)  # In-place add
+                                  use_atomic_add=use_atomic_add,
+                                  use_fp32_reduce=use_fp32_reduce,
+                                  is_zp_float=False)
 
     return output.reshape(out_shape)
 
@@ -276,28 +444,36 @@ def apply_awq_marlin_linear(
         g_idx: torch.Tensor,
         g_idx_sort_indices: torch.Tensor,
         workspace: torch.Tensor,
-        num_bits: int,
+        quant_type: ScalarType,
         output_size_per_partition: int,
         input_size_per_partition: int,
-        bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        bias: Optional[torch.Tensor] = None,
+        use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT) -> torch.Tensor:
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition, )
 
+    use_atomic_add = should_use_atomic_add_reduce(m=reshaped_x.size(0),
+                                                  n=output_size_per_partition,
+                                                  k=reshaped_x.size(1),
+                                                  device=input.device,
+                                                  dtype=input.dtype)
+
     output = ops.gptq_marlin_gemm(reshaped_x,
+                                  None,
                                   weight,
+                                  bias,
                                   weight_scale,
+                                  None,
                                   weight_zp,
                                   g_idx,
                                   g_idx_sort_indices,
                                   workspace,
-                                  num_bits,
+                                  quant_type,
                                   size_m=reshaped_x.shape[0],
                                   size_n=output_size_per_partition,
                                   size_k=input_size_per_partition,
-                                  is_k_full=True,
-                                  has_zp=True)
-
-    if bias is not None:
-        output.add_(bias)  # In-place add
+                                  use_atomic_add=use_atomic_add,
+                                  use_fp32_reduce=use_fp32_reduce,
+                                  is_zp_float=False)
 
     return output.reshape(out_shape)

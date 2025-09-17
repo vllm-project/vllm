@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 # Weight Shapes are in the format
 # ([K, N], TP_SPLIT_DIM)
 # Example:

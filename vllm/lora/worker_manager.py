@@ -1,5 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 from contextlib import contextmanager
-from typing import Any, Dict, List, Literal, Optional, Set, Type, Union
+from typing import Any, Literal, Optional, Union
 
 import torch
 
@@ -8,11 +11,13 @@ from vllm.adapter_commons.utils import (add_adapter_worker,
                                         list_adapters_worker,
                                         set_active_adapters_worker)
 from vllm.adapter_commons.worker_manager import AbstractWorkerManager
-from vllm.config import LoRAConfig
+from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.models import (LoRAModel, LoRAModelManager,
                               LRUCacheLoRAModelManager, create_lora_manager)
+from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
+from vllm.lora.utils import get_adapter_absolute_path
 
 logger = init_logger(__name__)
 
@@ -23,7 +28,7 @@ class WorkerLoRAManager(AbstractWorkerManager):
     Every request, the requested LoRAs will be loaded (unless they are already
     loaded), and every other LoRA will be unloaded."""
 
-    _manager_cls: Type[LoRAModelManager] = LoRAModelManager
+    _manager_cls: type[LoRAModelManager] = LoRAModelManager
 
     def __init__(
         self,
@@ -32,9 +37,9 @@ class WorkerLoRAManager(AbstractWorkerManager):
         vocab_size: int,
         lora_config: LoRAConfig,
         device: torch.device,
-        embedding_modules: Dict[str, str],
-        embedding_padding_modules: List[str],
-        lora_model_cls: Type[LoRAModel] = LoRAModel,
+        embedding_modules: dict[str, str],
+        embedding_padding_modules: list[str],
+        lora_model_cls: type[LoRAModel] = LoRAModel,
         max_position_embeddings: Optional[int] = None,
     ):
         self._lora_model_cls = lora_model_cls
@@ -72,6 +77,7 @@ class WorkerLoRAManager(AbstractWorkerManager):
             max_num_batched_tokens=self.max_num_batched_tokens,
             vocab_size=self.vocab_size,
             lora_config=self.lora_config,
+            device=self.device,
             lora_manager_cls=self._manager_cls,
         )
         self._adapter_manager = lora_manager
@@ -79,20 +85,38 @@ class WorkerLoRAManager(AbstractWorkerManager):
 
     def _load_adapter(self, lora_request: LoRARequest) -> LoRAModel:
         try:
-            model = self._adapter_manager.model
-            supported_lora_modules = model.supported_lora_modules
-            packed_modules_mapping = model.packed_modules_mapping
-            expected_lora_modules: List[str] = []
+            supported_lora_modules = (
+                self._adapter_manager.supported_lora_modules)
+            packed_modules_mapping = (
+                self._adapter_manager.packed_modules_mapping)
+            expected_lora_modules: list[str] = []
             for module in supported_lora_modules:
                 if module in packed_modules_mapping:
                     expected_lora_modules.extend(
                         packed_modules_mapping[module])
                 else:
                     expected_lora_modules.append(module)
+
+            expected_lora_modules = list(set(expected_lora_modules))
+            lora_path = get_adapter_absolute_path(lora_request.lora_path)
+
+            peft_helper = PEFTHelper.from_local_dir(
+                lora_path, self.max_position_embeddings,
+                lora_request.tensorizer_config_dict)
+
+            # Validates the LoRA configuration against requirements before
+            # loading weights, throwing an exception if validation fails.
+            peft_helper.validate_legal(self.lora_config)
+
+            # For some models like Qwen2VL, we need to use hf_to_vllm_mapper
+            # to ensure correct loading of lora weights.
+            model = self._adapter_manager.model
+            hf_to_vllm_mapper = getattr(model, "hf_to_vllm_mapper", None)
+
             lora = self._lora_model_cls.from_local_checkpoint(
-                lora_request.lora_local_path,
+                lora_path,
                 expected_lora_modules,
-                max_position_embeddings=self.max_position_embeddings,
+                peft_helper=peft_helper,
                 lora_model_id=lora_request.lora_int_id,
                 device="cpu",
                 dtype=self.lora_config.lora_dtype,
@@ -100,14 +124,22 @@ class WorkerLoRAManager(AbstractWorkerManager):
                 self.lora_config.lora_extra_vocab_size,
                 embedding_modules=self.embedding_modules,
                 embedding_padding_modules=self.embedding_padding_modules,
-            )
-        except Exception as e:
-            raise RuntimeError(
-                f"Loading lora {lora_request.lora_local_path} failed") from e
-        if lora.rank > self.lora_config.max_lora_rank:
+                tensorizer_config_dict=lora_request.tensorizer_config_dict,
+                weights_mapper=hf_to_vllm_mapper)
+
+        except FileNotFoundError as e:
+            # FileNotFoundError should be raised if both
+            # - No adapter found to download from huggingface (or in
+            #       offline mode)
+            # - No local adapter files found at `lora_request.lora_path`
+            # For NotFoundError
             raise ValueError(
-                f"LoRA rank {lora.rank} is greater than max_lora_rank "
-                f"{self.lora_config.max_lora_rank}.")
+                f"Loading lora {lora_request.lora_name} failed: No adapter "
+                f"found for {lora_request.lora_path}") from e
+        except Exception as e:
+            # For BadRequestError
+            raise e
+
         if lora.extra_vocab_size > self.lora_config.lora_extra_vocab_size:
             raise ValueError(f"LoRA added vocab size {lora.extra_vocab_size} "
                              f"is greater than lora_extra_vocab_size "
@@ -122,7 +154,7 @@ class WorkerLoRAManager(AbstractWorkerManager):
                 lora_request.lora_int_id)
         else:
             dummy_lora = self._adapter_manager.create_dummy_lora(
-                lora_request.lora_int_id, rank, 1, self.embedding_modules)
+                lora_request.lora_int_id, rank, self.embedding_modules)
             if self._cached_dummy_lora is None:
                 self._cached_dummy_lora = dummy_lora
         return self._adapter_manager.add_adapter(dummy_lora)
@@ -130,12 +162,12 @@ class WorkerLoRAManager(AbstractWorkerManager):
     def pin_adapter(self, adapter_id: int) -> bool:
         return self._adapter_manager.pin_adapter(adapter_id)
 
-    def set_active_adapters(self, requests: Set[Any],
+    def set_active_adapters(self, requests: set[Any],
                             mapping: Optional[Any]) -> None:
         set_active_adapters_worker(requests, mapping, self._apply_adapters,
                                    self._adapter_manager.set_adapter_mapping)
 
-    def _apply_adapters(self, adapter_requests: Set[Any]) -> None:
+    def _apply_adapters(self, adapter_requests: set[Any]) -> None:
         apply_adapters_worker(adapter_requests, self.list_adapters,
                               self._adapter_manager.adapter_slots,
                               self.remove_adapter, self.add_adapter)
@@ -152,7 +184,7 @@ class WorkerLoRAManager(AbstractWorkerManager):
     def remove_all_adapters(self):
         self._adapter_manager.remove_all_adapters()
 
-    def list_adapters(self) -> Set[int]:
+    def list_adapters(self) -> set[int]:
         return list_adapters_worker(self._adapter_manager.list_adapters)
 
 
@@ -163,7 +195,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
     (unless they are already loaded) and least recently used LoRAs will
     be unloaded if the cache is above capacity."""
 
-    _manager_cls: Type[LRUCacheLoRAModelManager] = LRUCacheLoRAModelManager
+    _manager_cls: type[LRUCacheLoRAModelManager] = LRUCacheLoRAModelManager
 
     def create_lora_manager(
         self,
@@ -175,12 +207,13 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
             max_num_seqs=self.max_num_seqs,
             vocab_size=self.vocab_size,
             lora_config=self.lora_config,
+            device=self.device,
             max_num_batched_tokens=self.max_num_batched_tokens,
         )
         self._adapter_manager = lora_manager
         return lora_manager.model
 
-    def _apply_adapters(self, lora_requests: Set[LoRARequest]) -> None:
+    def _apply_adapters(self, lora_requests: set[LoRARequest]) -> None:
         loras_map = {
             lora_request.lora_int_id: lora_request
             for lora_request in lora_requests if lora_request
@@ -194,13 +227,25 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
             self.add_adapter(lora)
 
     def add_adapter(self, lora_request: LoRARequest) -> bool:
+        # Note that this method is not thread-safe. It may be invoked multiple
+        # times for the same adapter when using multiple API servers.
+        # This is ok because it's currently only called from
+        # the single-threaded core engine loop.
+
         if lora_request.lora_int_id not in self.list_adapters():
-            # Remove before we load the new lora to save memory
+            # Load the new adapter first to ensure it is actually valid, before
+            # evicting any existing adapters.
+            # This may cause the # of loaded lora adapters to very temporarily
+            # exceed `--max-cpu-loras`.
+            lora = self._load_adapter(lora_request)
+
+            # Loading succeeded, now check if we will exceed cache capacity and
+            # evict if the oldest adapter if so
             if len(self._adapter_manager) + 1 > self._adapter_manager.capacity:
                 assert isinstance(self._adapter_manager,
                                   LRUCacheLoRAModelManager)
                 self._adapter_manager.remove_oldest_adapter()
-            lora = self._load_adapter(lora_request)
+            # Then add the new adapter to the cache
             loaded = self._adapter_manager.add_adapter(lora)
         else:
             # If the lora is already loaded, just touch it to

@@ -1,4 +1,6 @@
-# coding=utf-8
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 # adapted from https://github.com/huggingface/transformers/blob/v4.39.3/src/transformers/models/fuyu/modeling_fuyu.py
 # Copyright 2023 The vLLM team.
 # Copyright 2023 HuggingFace Inc. team. All rights reserved.
@@ -16,212 +18,277 @@
 # limitations under the License.
 """ PyTorch Fuyu model."""
 import math
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Annotated, Literal, Optional
 
 import torch
 import torch.nn as nn
-import torch.utils.checkpoint
-from PIL import Image
-from transformers import FuyuConfig, FuyuImageProcessor
+from transformers import (BatchFeature, FuyuConfig, FuyuImageProcessor,
+                          FuyuProcessor)
 
-from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, MultiModalConfig
-from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
-from vllm.logger import init_logger
+from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ColumnParallelLinear
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.persimmon import PersimmonForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.base import MultiModalInputs
-from vllm.multimodal.image import (cached_get_image_processor,
-                                   cached_get_tokenizer)
-from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    MultiModalKwargsItems)
+from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
+                                   MultiModalDataItems)
+from vllm.multimodal.processing import (BaseMultiModalProcessor,
+                                        BaseProcessingInfo, PromptReplacement,
+                                        PromptUpdate, PromptUpdateDetails)
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.sequence import IntermediateTensors
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .interfaces import SupportsVision
-from .utils import merge_vision_embeddings
-
-logger = init_logger(__name__)
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn, maybe_prefix,
+                    merge_multimodal_embeddings)
 
 # Cannot find the following 2 numbers from hf config.
 _IMAGE_TOKEN_ID = 71011
 _NEWLINE_TOKEN_ID = 71019
 
-MAX_IMAGE_FEATURE_SIZE_HEIGHT = 1080
-MAX_IMAGE_FEATURE_SIZE_WIDTH = 1920
 
-
-class FuyuImagePixelInputs(TypedDict):
-    type: Literal["pixel_values"]
-    data: torch.Tensor
+class FuyuImagePatchInputs(TensorSchema):
     """
-    Shape: 
-    (batch_size, num_patches, patch_size_x * patch_size_y * num_channels)
+    Dimensions:
+        - bn: Batch size * number of images
+        - bnp: Batch size * number of images * number of patches
+        - fn: patch_size_x * patch_size_y * num_channels
     """
 
+    type: Literal["image_patches"] = "image_patches"
 
-def _calculate_num_image_tokens(
-    height: int,
-    width: int,
-) -> Tuple[int, int]:
+    flat_data: Annotated[
+        torch.Tensor,
+        TensorShape("bnp", "fn"),
+    ]
+
+    patches_per_image: Annotated[list[int], TensorShape("bn")]
     """
-    calculate number of image tokens needed for a given image size
-    The expected Fuyu image prompts is in format:
-        (image_token * ncols + newline_token) * nrows
-    args:
-        image_size: Tuple[int, int] - (width, height) of the image
-    returns:
-        ncols: int - number of image tokens in x direction
-        nrows: int - number of image tokens in y direction
+    The number of total patches for each image in the batch.
+    
+    This is used to split the embeddings which has the first two dimensions
+    flattened just like `flat_data`.
     """
-    ncol = math.ceil(width / 30)
-    nrow = math.ceil(height / 30)
-    return ncol, nrow
 
 
-def get_max_fuyu_image_feature_size():
+class FuyuProcessingInfo(BaseProcessingInfo):
 
-    return _calculate_num_image_tokens(
-        height=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
-        width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
-    )
+    def get_hf_config(self):
+        return self.ctx.get_hf_config(FuyuConfig)
 
+    def get_hf_processor(self, **kwargs: object):
+        return self.ctx.get_hf_processor(FuyuProcessor, **kwargs)
 
-def get_max_fuyu_image_tokens(ctx: InputContext):
-    ncol, nrow = get_max_fuyu_image_feature_size()
-    return (ncol + 1) * nrow
+    def get_image_processor(self, **kwargs: object) -> FuyuImageProcessor:
+        return self.get_hf_processor(**kwargs).image_processor
 
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": 1}
 
-def dummy_seq_data_for_fuyu(ctx: InputContext, seq_len: int):
-    ncol, nrow = get_max_fuyu_image_feature_size()
-    image_feature_size = get_max_fuyu_image_tokens(ctx)
+    def get_image_feature_grid_size(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+    ) -> tuple[int, int]:
+        image_processor = self.get_image_processor()
+        target_width = image_processor.size["width"]
+        target_height = image_processor.size["height"]
+        patch_width = image_processor.patch_size["width"]
+        patch_height = image_processor.patch_size["height"]
 
-    token_ids = ([_IMAGE_TOKEN_ID] * ncol + [_NEWLINE_TOKEN_ID]) * nrow
-    token_ids += [0] * (seq_len - image_feature_size)
-    return SequenceData(token_ids)
+        if not (image_width <= target_width and image_height <= target_height):
+            height_scale_factor = target_height / image_height
+            width_scale_factor = target_width / image_width
+            optimal_scale_factor = min(height_scale_factor, width_scale_factor)
 
+            image_height = int(image_height * optimal_scale_factor)
+            image_width = int(image_width * optimal_scale_factor)
 
-def dummy_image_for_fuyu(
-    image_width: int,
-    image_height: int,
-):
-    image = Image.new("RGB", (image_width, image_height), color=0)
-    return {"image": image}
+        ncols = math.ceil(image_width / patch_width)
+        nrows = math.ceil(image_height / patch_height)
+        return ncols, nrows
 
+    def get_num_image_tokens(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+    ) -> int:
+        ncols, nrows = self.get_image_feature_grid_size(
+            image_width=image_width,
+            image_height=image_height,
+        )
 
-def dummy_data_for_fuyu(ctx: InputContext, seq_len: int):
-    seq_data = dummy_seq_data_for_fuyu(ctx, seq_len)
-    mm_data = dummy_image_for_fuyu(MAX_IMAGE_FEATURE_SIZE_WIDTH,
-                                   MAX_IMAGE_FEATURE_SIZE_HEIGHT)
-    return seq_data, mm_data
+        return ncols * nrows
 
-
-def _fuyu_image_preprocess(image_processor: FuyuImageProcessor,
-                           data: Image.Image):
-    image_encoding = image_processor.preprocess(data, return_tensors="pt")
-    batch_images = torch.stack([img[0] for img in image_encoding["images"]
-                                ]).unsqueeze(1)
-    image_unpadded_heights = torch.tensor(
-        image_encoding["image_unpadded_heights"])
-    image_unpadded_widths = torch.tensor(
-        image_encoding["image_unpadded_widths"])
-
-    batch_size = len(image_encoding["images"])
-    image_present = torch.ones(batch_size, 1, 1)
-    model_image_input = image_processor.preprocess_with_tokenizer_info(
-        image_input=batch_images,
-        image_present=image_present,
-        image_unpadded_h=image_unpadded_heights,
-        image_unpadded_w=image_unpadded_widths,
-        image_placeholder_id=_IMAGE_TOKEN_ID,
-        image_newline_id=_NEWLINE_TOKEN_ID,
-        variable_sized=True,
-    )
-    return model_image_input
+    def get_image_size_with_most_features(self) -> ImageSize:
+        image_processor = self.get_image_processor()
+        return ImageSize(width=image_processor.size["width"],
+                         height=image_processor.size["height"])
 
 
-def input_processor_for_fuyu(ctx: InputContext, llm_inputs: LLMInputs):
-    multi_modal_data = llm_inputs.get("multi_modal_data")
-    if multi_modal_data is None or "image" not in multi_modal_data:
-        return llm_inputs
+class FuyuDummyInputsBuilder(BaseDummyInputsBuilder[FuyuProcessingInfo]):
 
-    model_config = ctx.model_config
-    image_data = multi_modal_data["image"]
-    new_multi_modal_data = {}
-    # process image data
-    if isinstance(image_data, Image.Image):
-        # Fuyu's image_processor can also finish token padding
-        image_processor: FuyuImageProcessor = cached_get_image_processor(
-            model_config.model)
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        return ""
 
-        model_image_input = _fuyu_image_preprocess(image_processor, image_data)
-        image_patches = torch.stack([
-            image_patch[0]
-            for image_patch in model_image_input["image_patches"]
-        ])
-        new_multi_modal_data["image"] = image_patches
+    def get_dummy_mm_data(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> MultiModalDataDict:
+        target_width, target_height = \
+            self.info.get_image_size_with_most_features()
+        num_images = mm_counts.get("image", 0)
 
-    elif isinstance(image_data, torch.Tensor):
-        raise NotImplementedError("Embeddings input is not supported yet")
-    else:
-        raise TypeError(f"Invalid image type: {type(image_data)}")
-
-    # process prompts
-    prompt = llm_inputs["prompt"]
-    prompt_token_ids = llm_inputs["prompt_token_ids"]
-    tokenizer = cached_get_tokenizer(model_config.model)
-    # dim0 is batch_size, dim1 is subseq_size which will always be 1
-    image_input_ids: List[List[
-        torch.Tensor]] = model_image_input["image_input_ids"]
-    image_input_ids = image_input_ids[0][0].tolist()
-    bos_token = tokenizer.encode("<s>", add_special_tokens=False)[1:]
-    boa_token = tokenizer.encode("\x04", add_special_tokens=False)[1:]
-
-    new_prompt = prompt + "\x04"
-    new_prompt_token_ids = image_input_ids + bos_token + prompt_token_ids[
-        1:] + boa_token
-
-    return LLMInputs(prompt=new_prompt,
-                     prompt_token_ids=new_prompt_token_ids,
-                     multi_modal_data=new_multi_modal_data)
+        return {
+            "image":
+            self._get_dummy_images(width=target_width,
+                                   height=target_height,
+                                   num_images=num_images)
+        }
 
 
-def input_mapper_for_fuyu(ctx: InputContext, data: object):
-    model_config = ctx.model_config
-    if isinstance(data, Image.Image):
-        # Fuyu's image_processor can also finish token padding
-        image_processor: FuyuImageProcessor = cached_get_image_processor(
-            model_config.model)
+class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
 
-        model_image_input = _fuyu_image_preprocess(image_processor, data)
-        data = torch.stack([
-            image_patch[0]
-            for image_patch in model_image_input["image_patches"]
-        ])
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        if not mm_data:
+            # Avoid warning from HF logger for text-only input
+            prompt_ids = self.info.get_tokenizer().encode(prompt)
+            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
+            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
-    # image has been processed with prompt in input processor
-    return MultiModalInputs({"image_patches": data})
+        processed_outputs = super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
+        )
+
+        image_patches = processed_outputs.get("image_patches")
+        if image_patches is not None:
+            images = mm_data["images"]
+            assert isinstance(images, list)
+
+            # Original output: (1, num_images, Pn, Px * Py * C)
+            # New output: (num_images, Pn, Px * Py * C)
+            # image_patches is a list with shape:
+            # (1, num_images, Pn, Px * Py * C)
+            # before Transformers 4.53
+            if isinstance(image_patches, list):
+                assert len(image_patches) == 1
+                assert (isinstance(image_patches[0], torch.Tensor)
+                        and len(image_patches[0]) == len(images))
+                processed_outputs["image_patches"] = image_patches[0]
+            # image_patches is a tensor with shape:
+            # (num_images, Pn, Px * Py * C)
+            # after Transformers 4.53
+            elif isinstance(image_patches, torch.Tensor):
+                assert len(image_patches) == len(images)
+            else:
+                raise AssertionError("This line should be unreachable.")
+
+        return processed_outputs
+
+    def _apply_hf_processor_tokens_only(
+        self,
+        prompt_tokens: list[int],
+    ) -> list[int]:
+        # HF processor adds boa_token_id
+        tokenizer = self.info.get_tokenizer()
+        vocab = tokenizer.get_vocab()
+
+        boa_token_id = vocab["<0x04>"]
+        if prompt_tokens[-1] != boa_token_id:
+            prompt_tokens.append(boa_token_id)
+
+        return prompt_tokens
+
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        return dict(image_patches=MultiModalFieldConfig.batched("image"))
+
+    def _get_prompt_updates(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargsItems,
+    ) -> Sequence[PromptUpdate]:
+        hf_config = self.info.get_hf_config()
+        bos_token_id = hf_config.bos_token_id
+        assert isinstance(bos_token_id, int)
+
+        tokenizer = self.info.get_tokenizer()
+        eot_token_id = tokenizer.bos_token_id
+        assert isinstance(eot_token_id, int)
+
+        def get_replacement_fuyu(item_idx: int):
+            images = mm_items.get_items("image", ImageProcessorItems)
+            image_size = images.get_image_size(item_idx)
+
+            ncols, nrows = self.info.get_image_feature_grid_size(
+                image_width=image_size.width,
+                image_height=image_size.height,
+            )
+            image_tokens = ([_IMAGE_TOKEN_ID] * ncols +
+                            [_NEWLINE_TOKEN_ID]) * nrows
+
+            return PromptUpdateDetails.select_token_id(
+                image_tokens + [bos_token_id],
+                embed_token_id=_IMAGE_TOKEN_ID,
+            )
+
+        return [
+            PromptReplacement(
+                modality="image",
+                target=[eot_token_id],
+                replacement=get_replacement_fuyu,
+            )
+        ]
 
 
-@MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_fuyu)
-@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_fuyu_image_tokens)
-@INPUT_REGISTRY.register_dummy_data(dummy_data_for_fuyu)
-@INPUT_REGISTRY.register_input_processor(input_processor_for_fuyu)
-class FuyuForCausalLM(nn.Module, SupportsVision):
+@MULTIMODAL_REGISTRY.register_processor(FuyuMultiModalProcessor,
+                                        info=FuyuProcessingInfo,
+                                        dummy_inputs=FuyuDummyInputsBuilder)
+class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
-    def __init__(self,
-                 config: FuyuConfig,
-                 multimodal_config: MultiModalConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "model.vision_embed_tokens.": "vision_embed_tokens.",
+            "model.language_model.": "language_model.model.",
+            "lm_head.": "language_model.lm_head.",
+        })
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return None
+
+        raise ValueError("Only image modality is supported")
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.padding_idx = config.pad_token_id
-        self.vocab_size = config.vocab_size
+        self.vocab_size = config.text_config.vocab_size
         self.image_token_id = _IMAGE_TOKEN_ID
         self.image_feature_size = config.patch_size**2 * config.num_channels
 
@@ -229,100 +296,106 @@ class FuyuForCausalLM(nn.Module, SupportsVision):
             self.image_feature_size,
             config.hidden_size,
             quant_config=quant_config,
+            gather_output=True,
         )
-        self.language_model = PersimmonForCausalLM(config,
-                                                   cache_config=cache_config,
-                                                   quant_config=quant_config)
+        self.language_model = PersimmonForCausalLM(
+            vllm_config=vllm_config.with_hf_config(config.text_config),
+            prefix=maybe_prefix(prefix, "language_model"),
+        )
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors)
 
-    def _parse_and_validate_image_input(self, **kwargs: object):
+    def _parse_and_validate_image_input(
+            self, **kwargs: object) -> Optional[FuyuImagePatchInputs]:
         image_patches = kwargs.pop("image_patches", None)
+        if image_patches is not None:
+            image_patches_flat = flatten_bn(image_patches)
+            flat_data = flatten_bn(image_patches_flat, concat=True)
 
-        if isinstance(image_patches, torch.Tensor):
-            expected_feature_size = self.image_feature_size
-            if image_patches.size(-1) != expected_feature_size:
-                raise ValueError(
-                    f"Expected image patches to have the last dimension of "
-                    f"{expected_feature_size}, got {image_patches.size(-1)}")
-            image_patches = image_patches.to(
-                self.vision_embed_tokens.weight.dtype)
-            return FuyuImagePixelInputs(type="pixel_values",
-                                        data=image_patches)
+            return FuyuImagePatchInputs(
+                type="image_patches",
+                flat_data=flat_data,
+                patches_per_image=[x.size(0) for x in image_patches_flat],
+                resolve_bindings={"fn": self.image_feature_size},
+            )
+
         return None
+
+    def _process_image_input(
+            self, image_input: FuyuImagePatchInputs) -> MultiModalEmbeddings:
+        image_patches_flat = image_input["flat_data"]
+        patches_per_image = image_input["patches_per_image"]
+
+        assert self.vision_embed_tokens is not None
+        vision_embeddings_flat, _ = self.vision_embed_tokens(
+            image_patches_flat)
+
+        return vision_embeddings_flat.split(patches_per_image, dim=0)
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
+
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
+        image_input = self._parse_and_validate_image_input(**kwargs)
+        if image_input is None:
+            return []
+
+        return self._process_image_input(image_input)
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
+        if multimodal_embeddings is not None \
+            and len(multimodal_embeddings) != 0:
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids,
+                inputs_embeds,
+                multimodal_embeddings,
+                _IMAGE_TOKEN_ID,
+            )
+        return inputs_embeds
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ):
-        image_input = self._parse_and_validate_image_input(**kwargs)
-
-        if image_input is not None:
-            vision_embeddings, _ = self.vision_embed_tokens(
-                image_input["data"])
-            inputs_embeds = self.language_model.model.embed_tokens(input_ids)
-            inputs_embeds = merge_vision_embeddings(input_ids, inputs_embeds,
-                                                    vision_embeddings,
-                                                    self.image_token_id)
-
-        else:
+        if intermediate_tensors is not None:
             inputs_embeds = None
+
+        # NOTE: In v1, inputs_embeds is always generated at model runner, this
+        # condition is for v0 compatibility.
+        elif inputs_embeds is None:
+            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
+            inputs_embeds = self.get_input_embeddings(input_ids,
+                                                      vision_embeddings)
+            input_ids = None
 
         hidden_states = self.language_model(
             input_ids=input_ids,
             positions=positions,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
+            intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
         )
         return hidden_states
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
         logits = self.language_model.logits_processor(
             self.language_model.lm_head, hidden_states, sampling_metadata)
         return logits
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.language_model.sampler(logits, sampling_metadata)
-        return next_tokens
-
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
-                continue
-            if ("rotary_emb.cos_cached" in name
-                    or "rotary_emb.sin_cached" in name):
-                # Models trained using ColossalAI may include these tensors in
-                # the checkpoint. Skip them.
-                continue
-            param = params_dict[name]
-
-            if "query_key_value" in name:
-                # copy from vllm/model_executor/models/bloom.py
-                # NOTE: Fuyu's fused QKV's output_dim has the shape of
-                # (num_heads * 3 * head_size), while the
-                # required shape is (3 * num_heads * head_size).
-                # Thus, we need weight conversion.
-                output_dim = getattr(param, "output_dim", None)
-                num_heads = self.config.num_attention_heads
-                if output_dim is not None:
-                    loaded_weight_shape = loaded_weight.shape
-                    loaded_weight = loaded_weight.view(
-                        loaded_weight_shape[:output_dim] + (num_heads, 3, -1) +
-                        loaded_weight_shape[output_dim + 1:])
-                    loaded_weight = loaded_weight.transpose(
-                        output_dim, output_dim + 1)
-                    loaded_weight = loaded_weight.reshape(loaded_weight_shape)
-
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights)

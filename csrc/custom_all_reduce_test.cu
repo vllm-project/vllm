@@ -9,7 +9,7 @@
  * during the rapid prototyping process.
  *
  * To run:
- * mpirun -np 8 ./custom_all_reduce_test
+ * mpirun --allow-run-as-root -np 8 ./custom_all_reduce_test
  */
 #include <cuda.h>
 #include <curand_kernel.h>
@@ -22,7 +22,15 @@
 #include "cuda_profiler_api.h"
 #include "custom_all_reduce.cuh"
 #include "mpi.h"
-#include "nccl.h"
+#ifdef USE_ROCM
+  #include <hip/hip_bf16.h>
+typedef __hip_bfloat16 nv_bfloat16;
+  #include "rccl/rccl.h"
+  #include "custom_all_reduce_hip.cuh"
+#else
+  #include "nccl.h"
+  #include "custom_all_reduce.cuh"
+#endif
 
 #define MPICHECK(cmd)                                                  \
   do {                                                                 \
@@ -43,9 +51,29 @@
     }                                                               \
   } while (0)
 
+#ifdef USE_ROCM
 __global__ void dummy_kernel() {
+  for (int i = 0; i < 100; i++) {
+    uint64_t start = wall_clock64();
+    uint64_t cycles_elapsed;
+    do {
+      cycles_elapsed = wall_clock64() - start;
+    } while (cycles_elapsed < 100);
+  }
   for (int i = 0; i < 100; i++) __nanosleep(1000000);  // 100ms
 }
+#else
+__global__ void dummy_kernel() {
+  #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
+  for (int i = 0; i < 100; i++) __nanosleep(1000000);  // 100ms
+  #else
+  for (int i = 0; i < 100; i++) {
+    long long int start = clock64();
+    while (clock64() - start < 150000000);  // approximately 98.4ms on P40
+  }
+  #endif
+}
+#endif
 
 template <typename T>
 __global__ void set_data(T* data, int size, int myRank) {
@@ -114,8 +142,14 @@ void run(int myRank, int nRanks, ncclComm_t& comm, int threads, int block_limit,
    * registration, they are allocated and registered together in the test for
    * convenience.
    */
+#ifdef USE_ROCM
+  CUDACHECK(hipExtMallocWithFlags(
+      (void**)&buffer, 2 * data_size * sizeof(T) + sizeof(vllm::Signal),
+      hipDeviceMallocUncached));
+#else
   CUDACHECK(
       cudaMalloc(&buffer, 2 * data_size * sizeof(T) + sizeof(vllm::Signal)));
+#endif
   CUDACHECK(
       cudaMemset(buffer, 0, 2 * data_size * sizeof(T) + sizeof(vllm::Signal)));
   CUDACHECK(cudaMalloc(&self_data_copy, data_size * sizeof(T)));
@@ -128,24 +162,26 @@ void run(int myRank, int nRanks, ncclComm_t& comm, int threads, int block_limit,
   void* rank_data;
   size_t rank_data_sz = 16 * 1024 * 1024;
   CUDACHECK(cudaMalloc(&rank_data, rank_data_sz));
-  std::vector<int64_t> offsets(nRanks, 0);
-  vllm::CustomAllreduce fa(buffer, rank_data, rank_data_sz, data_handles,
-                           offsets, myRank);
+  vllm::Signal* ipc_ptrs[8];
+  for (int i = 0; i < nRanks; i++) {
+    if (i == myRank)
+      ipc_ptrs[i] = buffer;
+    else
+      CUDACHECK(cudaIpcOpenMemHandle((void**)&ipc_ptrs[i], data_handles[i],
+                                     cudaIpcMemLazyEnablePeerAccess));
+  }
+  vllm::CustomAllreduce fa(ipc_ptrs, rank_data, rank_data_sz, myRank, nRanks);
   auto* self_data =
       reinterpret_cast<T*>(reinterpret_cast<char*>(buffer) +
                            sizeof(vllm::Signal) + data_size * sizeof(T));
   // hack buffer registration
   {
-    std::vector<std::string> handles;
-    handles.reserve(nRanks);
+    void* data[8];
     for (int i = 0; i < nRanks; i++) {
-      char* begin = (char*)&data_handles[i];
-      char* end = (char*)&data_handles[i + 1];
-      handles.emplace_back(begin, end);
+      data[i] =
+          ((char*)ipc_ptrs[i]) + sizeof(vllm::Signal) + data_size * sizeof(T);
     }
-    std::vector<int64_t> offsets(nRanks,
-                                 sizeof(vllm::Signal) + data_size * sizeof(T));
-    fa.register_buffer(handles, offsets, self_data);
+    fa.register_buffer(data);
   }
 
   double* ground_truth;
@@ -302,15 +338,24 @@ int main(int argc, char** argv) {
 
   bool performance_test = true;
   cudaProfilerStart();
-  // for (int threads : {256, 512}) {
-  //   for (int block_limit = 16; block_limit < 112; block_limit += 4) {
-  //     run<half>(myRank, nRanks, comm, threads, block_limit, 4096 * 1024);
-  //   }
-  // }
+// Uncomment to scan through different block size configs.
+// for (int threads : {256, 512, 1024}) {
+//   for (int block_limit = 16; block_limit < 112; block_limit += 4) {
+//     run<half>(myRank, nRanks, comm, threads, block_limit, 1024 * 1024,
+//     performance_test);
+//   }
+// }
+#ifdef USE_ROCM
+  const int block_limit = 16;
+#else
+  const int block_limit = 36;
+#endif
+  // Scan through different sizes to test performance.
   for (int sz = 512; sz <= (8 << 20); sz *= 2) {
     run<half>(myRank, nRanks, comm, 512, 36, sz + 8 * 47, performance_test);
   }
 
   cudaProfilerStop();
+  MPICHECK(MPI_Finalize());
   return EXIT_SUCCESS;
 }

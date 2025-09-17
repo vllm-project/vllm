@@ -1,4 +1,7 @@
-from typing import List, Optional
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from typing import Optional
 
 from transformers import PretrainedConfig
 
@@ -15,7 +18,7 @@ class MLPSpeculatorConfig(PretrainedConfig):
                  emb_dim: int = 4096,
                  inner_dim: int = 0,
                  n_predict: int = 3,
-                 top_k_tokens_per_head: Optional[List[int]] = None,
+                 top_k_tokens_per_head: Optional[list[int]] = None,
                  n_candidates: int = 5,
                  tie_weights: bool = False,
                  scale_input: bool = False,
@@ -32,7 +35,7 @@ class MLPSpeculatorConfig(PretrainedConfig):
                 the inner dimension of the model. If 0, will be the emb_dim.
             n_predict: int
                 the number of lookaheads for the speculator
-            top_k_tokens_per_head: List[int]
+            top_k_tokens_per_head: list[int]
                 Number of tokens to consider from each head when forming the
                 candidate tree.
                 For each candidate branch in the tree, head n produces topk[n]

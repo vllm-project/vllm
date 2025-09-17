@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 # Workaround for https://github.com/python/cpython/issues/86296
 #
 # From https://github.com/aio-libs/async-timeout/blob/master/async_timeout/__init__.py
@@ -6,7 +9,6 @@
 import asyncio
 import enum
 import sys
-import warnings
 from types import TracebackType
 from typing import Any, Optional, Type
 
@@ -63,24 +65,6 @@ else:
                 self._deadline = None  # type: Optional[float]
             else:
                 self.update(deadline)
-
-        def __enter__(self) -> "Timeout":
-            warnings.warn(
-                "with timeout() is deprecated, use async with timeout()",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            self._do_enter()
-            return self
-
-        def __exit__(
-            self,
-            exc_type: Optional[Type[BaseException]],
-            exc_val: Optional[BaseException],
-            exc_tb: Optional[TracebackType],
-        ) -> Optional[bool]:
-            self._do_exit(exc_type)
-            return None
 
         async def __aenter__(self) -> "Timeout":
             self._do_enter()

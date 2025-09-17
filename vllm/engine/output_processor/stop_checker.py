@@ -1,10 +1,13 @@
-from typing import Callable, Optional
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from transformers import PreTrainedTokenizer
+from typing import Callable, List, Optional, Tuple
 
 from vllm.lora.request import LoRARequest
+from vllm.reasoning import ReasoningParser
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import Sequence, SequenceStatus
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 
 class StopChecker:
@@ -14,12 +17,16 @@ class StopChecker:
     emitted, or if we have exceeded the max model len.
     """
 
-    def __init__(self, max_model_len: int,
-                 get_tokenizer_for_seq: Callable[[Sequence],
-                                                 PreTrainedTokenizer]):
+    def __init__(
+        self,
+        max_model_len: int,
+        get_tokenizer_for_seq: Callable[[Sequence], AnyTokenizer],
+        reasoner: Optional[ReasoningParser] = None,
+    ):
         # Do not use it directly, but use `self._get_max_model_len`.
         self._max_model_len = max_model_len
         self.get_tokenizer_for_seq = get_tokenizer_for_seq
+        self.reasoner = reasoner
 
     def _get_max_model_len(self, lora_req: Optional[LoRARequest]):
         if lora_req and lora_req.long_lora_max_len:
@@ -56,10 +63,15 @@ class StopChecker:
             seq.status = SequenceStatus.FINISHED_STOPPED
             return
 
+        # Skip stop string/token checks if in reasoning content generation
+        if self.reasoner is not None and \
+            not self.reasoner.is_reasoning_end(seq.get_token_ids()):
+            return
+
         # Check if a stop token was encountered.
         # This assumes a single token produced per step.
         last_token_id = seq.get_last_token_id()
-        if last_token_id in sampling_params.stop_token_ids:
+        if last_token_id in (sampling_params.stop_token_ids or ()):
             if new_char_count and (
                     not sampling_params.include_stop_str_in_output):
                 # Remove last token
@@ -69,15 +81,19 @@ class StopChecker:
             return
 
         # Check if any stop strings are matched.
-        stop_str = self._check_stop_strings(seq, new_char_count,
-                                            sampling_params)
-        if stop_str is not None:
+        stop = self.check_stop_strings(
+            seq.output_text, new_char_count, sampling_params.stop,
+            sampling_params.include_stop_str_in_output)
+        if stop is not None:
+            stop_str, truncate_to = stop
+            if truncate_to != -1:
+                seq.output_text = seq.output_text[:truncate_to]
             seq.status = SequenceStatus.FINISHED_STOPPED
             seq.stop_reason = stop_str
             return
 
         # Check if the sequence has reached max_model_len.
-        if seq.get_len() > self._get_max_model_len(lora_req):
+        if seq.get_len() >= self._get_max_model_len(lora_req):
             seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
             return
 
@@ -87,33 +103,40 @@ class StopChecker:
             return
 
     @staticmethod
-    def _check_stop_strings(seq: Sequence, new_char_count: int,
-                            sampling_params: SamplingParams) -> Optional[str]:
+    def check_stop_strings(
+        output_text: str,
+        new_char_count: int,
+        stop: List[str],
+        include_in_output: bool,
+    ) -> Optional[Tuple[str, int]]:
         """Check if any stop strings are matched and truncate sequence
         output text accordingly.
 
-        Returns the stop string if matched or else None.
+        Returns tuple (stop_string, offset) if matched or else None.
+
+        Where stop_string is the matched stop string and offset is the
+        length to which output_text should be truncated, or -1 for no
+        truncation.
         """
-        if not new_char_count:
+        if not new_char_count or not stop:
             return None
 
-        for stop_str in sampling_params.stop:
+        for stop_str in stop:
             stop_string_len = len(stop_str)
             # Avoid searching already-searched text.
-            stop_index = seq.output_text.find(
-                stop_str, -new_char_count - stop_string_len)
+            stop_index = output_text.find(stop_str,
+                                          1 - new_char_count - stop_string_len)
             if stop_index == -1:
                 continue
 
-            if sampling_params.include_stop_str_in_output:
+            if include_in_output:
                 # Truncate to end of stop string.
                 stop_index += stop_string_len
-                if stop_index >= len(seq.output_text):
+                if stop_index >= len(output_text):
                     # No truncation required.
-                    return stop_str
+                    return stop_str, -1
 
             # Truncate the output text to either the beginning
             # or end of the stop string.
-            seq.output_text = seq.output_text[:stop_index]
-            return stop_str
+            return stop_str, stop_index
         return None

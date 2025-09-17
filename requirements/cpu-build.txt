@@ -1,0 +1,12 @@
+# Temporarily used for x86 CPU backend to avoid performance regression of torch>2.6.0+cpu,
+# see https://github.com/pytorch/pytorch/pull/151218
+cmake>=3.26.1
+ninja
+packaging>=24.2
+setuptools>=77.0.3,<80.0.0
+setuptools-scm>=8
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.6.0+cpu
+wheel
+jinja2>=3.1.6
+regex

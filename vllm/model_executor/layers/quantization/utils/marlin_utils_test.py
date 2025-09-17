@@ -1,21 +1,25 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility functions used for tests and benchmarks"""
 
-from typing import List
+from typing import Optional
 
 import numpy as np
 import torch
 
+from vllm.scalar_type import ScalarType
+
 from .marlin_utils import (GPTQ_MARLIN_TILE, marlin_permute_scales,
                            marlin_zero_points)
-from .quant_utils import (get_pack_factor, quantize_weights,
-                          quantize_weights_with_zp, sort_weights)
+from .quant_utils import (get_pack_factor, gptq_quantize_weights,
+                          quantize_weights, sort_weights)
 
 
 class MarlinWorkspace:
 
     def __init__(self, out_features, min_thread_n, max_parallel):
         assert (out_features % min_thread_n == 0), (
-            "out_features = {} is undivisible by min_thread_n = {}".format(
+            "out_features = {} is indivisible by min_thread_n = {}".format(
                 out_features, min_thread_n))
 
         max_workspace_size = ((out_features // min_thread_n) * max_parallel)
@@ -61,9 +65,9 @@ def marlin_weights(q_w, size_k, size_n, num_bits, perm):
 
 
 def get_weight_perm(num_bits: int):
-    perm_list: List[int] = []
+    perm_list: list[int] = []
     for i in range(32):
-        perm1: List[int] = []
+        perm1: list[int] = []
         col = i // 4
         for block in [0, 1]:
             for row in [
@@ -90,9 +94,13 @@ def get_weight_perm(num_bits: int):
     return perm
 
 
-def marlin_quantize(w: torch.Tensor, num_bits: int, group_size: int,
-                    act_order: bool):
+def marlin_quantize(w: torch.Tensor,
+                    quant_type: ScalarType,
+                    group_size: int,
+                    act_order: bool,
+                    test_perm: Optional[torch.Tensor] = None):
     size_k, size_n = w.shape
+    num_bits = quant_type.size_bits
 
     # Normalize group_size
     if group_size == -1:
@@ -100,8 +108,8 @@ def marlin_quantize(w: torch.Tensor, num_bits: int, group_size: int,
     assert group_size <= size_k
 
     # Quantize (and apply act_order if provided)
-    w_ref, q_w, s, g_idx, rand_perm = quantize_weights(w, num_bits, group_size,
-                                                       act_order)
+    w_ref, q_w, s, g_idx, rand_perm = gptq_quantize_weights(
+        w, quant_type, group_size, act_order, test_perm)
 
     # For act_order, sort the "weights" and "g_idx" so that group ids are
     # increasing
@@ -122,7 +130,8 @@ def marlin_quantize(w: torch.Tensor, num_bits: int, group_size: int,
     return res_list
 
 
-def awq_marlin_quantize(w: torch.Tensor, num_bits: int, group_size: int):
+def awq_marlin_quantize(w: torch.Tensor, quant_type: ScalarType,
+                        group_size: int):
     size_k, size_n = w.shape
 
     # Normalize group_size
@@ -135,13 +144,18 @@ def awq_marlin_quantize(w: torch.Tensor, num_bits: int, group_size: int):
     num_groups = size_k // group_size
 
     # Quantize with zp
-    w_ref, q_w, s, zp = quantize_weights_with_zp(w, num_bits, group_size)
+    w_ref, q_w, s, zp = quantize_weights(w,
+                                         quant_type,
+                                         group_size,
+                                         zero_points=True)
 
     # Reformat to marlin
-    weight_perm = get_weight_perm(num_bits)
-    marlin_q_w = marlin_weights(q_w, size_k, size_n, num_bits, weight_perm)
+    weight_perm = get_weight_perm(quant_type.size_bits)
+    marlin_q_w = marlin_weights(q_w, size_k, size_n, quant_type.size_bits,
+                                weight_perm)
     marlin_s = marlin_permute_scales(s, size_k, size_n, group_size)
-    marlin_zp = marlin_zero_points(zp, num_groups, size_n, num_bits)
+    marlin_zp = marlin_zero_points(zp, num_groups, size_n,
+                                   quant_type.size_bits)
 
     # Create result
     res_list = [w_ref, marlin_q_w, marlin_s, marlin_zp]

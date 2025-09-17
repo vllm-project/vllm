@@ -1,40 +1,50 @@
-import shutil
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 from dataclasses import dataclass
-from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
-import requests
+import torch
 from PIL import Image
 
-from .base import get_cache_dir
+from .base import get_vllm_public_assets
 
+VLM_IMAGES_DIR = "vision_model_images"
 
-@lru_cache
-def get_air_example_data_2_asset(filename: str) -> Image.Image:
-    """
-    Download and open an image from
-    ``s3://air-example-data-2/vllm_opensource_llava/``.
-    """
-    image_directory = get_cache_dir() / "air-example-data-2"
-    image_directory.mkdir(parents=True, exist_ok=True)
-
-    image_path = image_directory / filename
-    if not image_path.exists():
-        base_url = "https://air-example-data-2.s3.us-west-2.amazonaws.com/vllm_opensource_llava"
-
-        with requests.get(f"{base_url}/{filename}", stream=True) as response:
-            response.raise_for_status()
-
-            with image_path.open("wb") as f:
-                shutil.copyfileobj(response.raw, f)
-
-    return Image.open(image_path)
+ImageAssetName = Literal["stop_sign", "cherry_blossom", "hato",
+                         "2560px-Gfp-wisconsin-madison-the-nature-boardwalk",
+                         "Grayscale_8bits_palette_sample_image",
+                         "1280px-Venn_diagram_rgb", "RGBA_comp", "237-400x300",
+                         "231-200x300", "27-500x500", "17-150x600",
+                         "handelsblatt-preview", "paper-11"]
 
 
 @dataclass(frozen=True)
 class ImageAsset:
-    name: Literal["stop_sign", "cherry_blossom"]
+    name: ImageAssetName
+
+    def get_path(self, ext: str) -> Path:
+        """
+        Return s3 path for given image.
+        """
+        return get_vllm_public_assets(filename=f"{self.name}.{ext}",
+                                      s3_prefix=VLM_IMAGES_DIR)
 
     @property
-    def pil_image(self) -> Image.Image:
-        return get_air_example_data_2_asset(f"{self.name}.jpg")
+    def pil_image(self, ext="jpg") -> Image.Image:
+
+        image_path = self.get_path(ext)
+        return Image.open(image_path)
+
+    @property
+    def image_embeds(self) -> torch.Tensor:
+        """
+        Image embeddings, only used for testing purposes with llava 1.5.
+        """
+        image_path = self.get_path('pt')
+        return torch.load(image_path, map_location="cpu", weights_only=True)
+
+    def read_bytes(self, ext: str) -> bytes:
+        p = Path(self.get_path(ext))
+        return p.read_bytes()

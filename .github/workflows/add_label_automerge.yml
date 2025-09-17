@@ -1,4 +1,6 @@
 name: Add label on auto-merge enabled
+permissions:
+    pull-requests: write
 on:
     pull_request_target:
         types:
@@ -8,7 +10,7 @@ jobs:
         runs-on: ubuntu-latest
         steps:
             -   name: Add label
-                uses: actions/github-script@v5
+                uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
                 with:
                     script: |
                         github.rest.issues.addLabels({

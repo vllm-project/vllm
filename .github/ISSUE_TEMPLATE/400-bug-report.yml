@@ -1,0 +1,108 @@
+name: 🐛 Bug report
+description: Raise an issue here if you find a bug.
+title: "[Bug]: "
+labels: ["bug"]
+
+body:
+- type: markdown
+  attributes:
+    value: >
+      #### Before submitting an issue, please make sure the issue hasn't been already addressed by searching through [the existing and past issues](https://github.com/vllm-project/vllm/issues?q=is%3Aissue+sort%3Acreated-desc+).
+- type: markdown
+  attributes:
+    value: |
+      ⚠️ **SECURITY WARNING:** Please review any text you paste to ensure it does not contain sensitive information such as:
+      - API tokens or keys (e.g., Hugging Face tokens, OpenAI API keys)
+      - Passwords or authentication credentials
+      - Private URLs or endpoints
+      - Personal or confidential data
+      
+      Consider redacting or replacing sensitive values with placeholders like `<YOUR_TOKEN_HERE>` when sharing configuration or code examples.
+- type: textarea
+  attributes:
+    label: Your current environment
+    description: |
+      Please run the following and paste the output below.
+      ```sh
+      wget https://raw.githubusercontent.com/vllm-project/vllm/main/vllm/collect_env.py
+      # For security purposes, please feel free to check the contents of collect_env.py before running it.
+      python collect_env.py
+      ```
+      It is suggested to download and execute the latest script, as vllm might frequently update the diagnosis information needed for accurately and quickly responding to issues.
+    value: |
+      <details>
+      <summary>The output of <code>python collect_env.py</code></summary>
+
+      ```text
+      Your output of `python collect_env.py` here
+      ```
+
+      </details>
+  validations:
+    required: true
+- type: textarea
+  attributes:
+    label: 🐛 Describe the bug
+    description: |
+      Please provide a clear and concise description of what the bug is.
+
+      If relevant, add a minimal example so that we can reproduce the error by running the code. It is very important for the snippet to be as succinct (minimal) as possible, so please take time to trim down any irrelevant code to help us debug efficiently. We are going to copy-paste your code and we expect to get the same result as you did: avoid any external data, and include the relevant imports, etc. For example:
+
+      ```python
+      from vllm import LLM, SamplingParams
+
+      prompts = [
+          "Hello, my name is",
+          "The president of the United States is",
+          "The capital of France is",
+          "The future of AI is",
+      ]
+      sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+
+      llm = LLM(model="facebook/opt-125m")
+
+      outputs = llm.generate(prompts, sampling_params)
+
+      # Print the outputs.
+      for output in outputs:
+          prompt = output.prompt
+          generated_text = output.outputs[0].text
+          print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+      ```
+
+      If the code is too long (hopefully, it isn't), feel free to put it in a public gist and link it in the issue: https://gist.github.com.
+
+      Please also paste or describe the results you observe instead of the expected results. If you observe an error, please paste the error message including the **full** traceback of the exception. It may be relevant to wrap error messages in ```` ```triple quotes blocks``` ````.
+
+      Please set the environment variable `export VLLM_LOGGING_LEVEL=DEBUG` to turn on more logging to help debugging potential issues.
+
+      If you experienced crashes or hangs, it would be helpful to run vllm with `export VLLM_TRACE_FUNCTION=1` . All the function calls in vllm will be recorded. Inspect these log files, and tell which function crashes or hangs.
+    placeholder: |
+      A clear and concise description of what the bug is.
+
+      ```python
+      # Sample code to reproduce the problem
+      ```
+
+      ```
+      The error message you got, with the full traceback and the error logs with [dump_input.py:##] if present.
+      ```
+  validations:
+    required: true
+- type: markdown
+  attributes:
+    value: |
+      ⚠️ Please separate bugs of `transformers` implementation or usage from bugs of `vllm`. If you think anything is wrong with the model's output:
+
+      - Try the counterpart of `transformers` first. If the error appears, please go to [their issues](https://github.com/huggingface/transformers/issues?q=is%3Aissue+is%3Aopen+sort%3Aupdated-desc).
+
+      - If the error only appears in vllm, please provide the detailed script of how you run `transformers` and `vllm`, also highlight the difference and what you expect.
+
+      Thanks for reporting 🙏!
+- type: checkboxes
+  id: askllm
+  attributes:
+    label: Before submitting a new issue...
+    options:
+      - label: Make sure you already searched for relevant issues, and asked the chatbot living at the bottom right corner of the [documentation page](https://docs.vllm.ai/en/latest/), which can answer lots of frequently asked questions.
+        required: true

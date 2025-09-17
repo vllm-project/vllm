@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import pytest
 
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
