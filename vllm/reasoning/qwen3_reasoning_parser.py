@@ -146,7 +146,8 @@ class Qwen3ReasoningParser(ReasoningParser):
             return self.model_tokenizer.encode(content)
 
     def _prompt_contains_start_token(self) -> bool:
-        assert len(self.cached_prompt_tokens) > 0
+        if not self.cached_prompt_tokens:
+            return False
 
         start_idx, _ = find_subsequence(self.think_start_token_ids,
                                         self.cached_prompt_tokens)
