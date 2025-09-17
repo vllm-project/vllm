@@ -830,19 +830,15 @@ class ModelConfig:
             tokenizer: Tokenizer name or path
         """
 
-        def _generate_directory(url: str) -> str:
-            return hashlib.sha256(str(url).encode()).hexdigest()[:8]
-
         if not (is_runai_obj_uri(model) or is_runai_obj_uri(tokenizer)):
             return
 
         if is_runai_obj_uri(model):
-            directory = _generate_directory(model)
-            object_storage_model = ObjectStorageModel(dir=directory)
+            object_storage_model = ObjectStorageModel(url=model)
             object_storage_model.pull_files(
                 model, allow_pattern=["*.model", "*.py", "*.json"])
             self.model_weights = model
-            self.model = object_storage_model.dir
+            self.model = object_storage_model.dir_name
 
             # If tokenizer is same as model, download to same directory
             if model == tokenizer:
@@ -851,13 +847,12 @@ class ModelConfig:
                                                     "*.pt", "*.safetensors",
                                                     "*.bin", "*.tensors"
                                                 ])
-                self.tokenizer = object_storage_model.dir
+                self.tokenizer = object_storage_model.dir_name
                 return
 
         # Only download tokenizer if needed and not already handled
         if is_runai_obj_uri(tokenizer):
-            directory = _generate_directory(tokenizer)
-            object_storage_tokenizer = ObjectStorageModel(dir=directory)
+            object_storage_tokenizer = ObjectStorageModel(url=tokenizer)
             object_storage_tokenizer.pull_files(
                 model,
                 ignore_pattern=["*.pt", "*.safetensors", "*.bin", "*.tensors"])
