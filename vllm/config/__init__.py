@@ -46,8 +46,6 @@ from vllm.config.speculative import SpeculativeConfig
 from vllm.config.utils import ConfigType, config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationMethods
-from vllm.model_executor.model_loader import LoadFormats
-from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import (
