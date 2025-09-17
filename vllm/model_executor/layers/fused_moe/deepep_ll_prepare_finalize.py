@@ -77,15 +77,13 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def _do_quant(
         self,
         x: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
-        a1_scale: Optional[torch.Tensor],
         a1_dtype: torch.dtype,
-        quant_dtype: Union[torch.dtype, str, None],
-        per_act_token_quant: bool,
-        block_shape: Optional[list[int]],
+        quant_config: FusedMoEQuantConfig,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
 
-        block_k = block_shape[1] if block_shape is not None else None
         if self.use_fp8_dispatch:
+            block_k = quant_config.block_shape[
+                1] if quant_config.block_shape is not None else None
             if block_k == DEEPEP_QUANT_BLOCK_SIZE:
                 # DeepEP kernels did the quantization for us.
                 x, x_scales = x
@@ -101,12 +99,12 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         # TODO (varun): Optimization - Use a batched version of quant
         x = x.view((-1, hidden_dim))
-        x, x_scales = moe_kernel_quantize_input(x, a1_scale, quant_dtype,
-                                                per_act_token_quant,
-                                                block_shape)
+        x, x_scales = moe_kernel_quantize_input(
+            x, quant_config.a1_scale, quant_config.quant_dtype,
+            quant_config.per_act_token_quant, quant_config.block_shape)
         x = x.view((num_experts, -1, hidden_dim))
 
-        if quant_dtype is not None:
+        if quant_config.quant_dtype is not None:
             assert x_scales is not None
             x_scales = normalize_batched_scales_shape(x_scales, num_experts)
 
@@ -118,8 +116,6 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def prepare_async(
         self,
         a1: torch.Tensor,
-        a1_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
@@ -139,9 +135,10 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             assert hidden_size % 128 == 0, \
             "DeepEP kernels quantize the inputs in blocks of shape 128"
 
-        has_per_token_scales = a1_scale.numel(
-        ) != 1 if a1_scale is not None else (
-            a2_scale.numel() != 1 if a2_scale is not None else False)
+        has_per_token_scales = quant_config.a1_scale.numel(
+        ) != 1 if quant_config.a1_scale is not None else (
+            quant_config.a2_scale.numel() != 1
+            if quant_config.a2_scale is not None else False)
         assert not has_per_token_scales, (
             "low_latency kernels doesn't support dispatching per-token scales")
 
@@ -163,20 +160,21 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                                                 return_recv_hook=True)
         self.handles[a2a_idx] = handle
 
-        return (hook, lambda: self._receiver(expert_x, expert_num_tokens,
-                                             a1_scale, a1.dtype, quant_config))
+        return (
+            hook,
+            lambda: self._receiver(expert_x, expert_num_tokens, quant_config.
+                                   a1_scale, a1.dtype, quant_config))
 
     def _receiver(
         self,
         expert_x: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
         expert_num_tokens: torch.Tensor,
-        a1_scale,
-        a1_dtype,
+        a1_scale: Optional[torch.Tensor],
+        a1_dtype: torch.dtype,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
-        expert_x, expert_x_scale = self._do_quant(
-            expert_x, a1_scale, a1_dtype, quant_config.quant_dtype,
-            quant_config.per_act_token_quant, quant_config.block_shape)
+        expert_x, expert_x_scale = self._do_quant(expert_x, a1_dtype,
+                                                  quant_config)
 
         expert_tokens_meta = mk.ExpertTokensMetadata(
             expert_num_tokens=expert_num_tokens, expert_num_tokens_cpu=None)
@@ -186,8 +184,6 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def prepare(
         self,
         a1: torch.Tensor,
-        a1_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
@@ -195,8 +191,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
-        hook, receiver = self.prepare_async(a1, a1_scale, a2_scale,
-                                            topk_weights, topk_ids,
+        hook, receiver = self.prepare_async(a1, topk_weights, topk_ids,
                                             num_experts, expert_map,
                                             apply_router_weight_on_input,
                                             quant_config)

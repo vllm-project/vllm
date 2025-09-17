@@ -6,6 +6,8 @@ import pytest
 import torch
 
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.model_executor.layers.fused_moe.config import (
+    fp8_w8a8_moe_quant_config)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
@@ -145,6 +147,14 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
             custom_routing_function=Llama4MoE.custom_routing_function,
             scoring_func="softmax")
 
+        quant_config = fp8_w8a8_moe_quant_config(
+            w1_scale=td.w13_weight_scale,
+            w2_scale=td.w2_weight_scale,
+            a1_scale=td.a1_scale,
+            a2_scale=td.a2_scale,
+            per_act_token_quant=False,
+        )
+
         output = fused_experts(
             td.hidden_states,
             td.w13_quantized,
@@ -153,15 +163,10 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
             topk_ids=topk_ids,
             inplace=False,
             activation="silu",
-            use_fp8_w8a8=True,
-            per_channel_quant=False,
             global_num_experts=e,
             expert_map=None,
-            w1_scale=td.w13_weight_scale,
-            w2_scale=td.w2_weight_scale,
-            a1_scale=td.a1_scale,
-            a2_scale=td.a2_scale,
             apply_router_weight_on_input=True,
+            quant_config=quant_config,
         )
 
         flashinfer_output = apply_flashinfer_per_tensor_scale_fp8(
@@ -210,6 +215,14 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
             custom_routing_function=Llama4MoE.custom_routing_function,
             scoring_func="softmax")
 
+        quant_config = fp8_w8a8_moe_quant_config(
+            w1_scale=td.w13_weight_scale,
+            w2_scale=td.w2_weight_scale,
+            a1_scale=td.a1_scale,
+            a2_scale=td.a2_scale,
+            per_act_token_quant=False,
+        )
+
         output = fused_experts(
             td.hidden_states,
             td.w13_quantized,
@@ -218,15 +231,10 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
             topk_ids=topk_ids,
             inplace=False,
             activation="silu",
-            use_fp8_w8a8=True,
-            per_channel_quant=False,
             global_num_experts=e,
             expert_map=None,
-            w1_scale=td.w13_weight_scale,
-            w2_scale=td.w2_weight_scale,
-            a1_scale=td.a1_scale,
-            a2_scale=td.a2_scale,
             apply_router_weight_on_input=True,
+            quant_config=quant_config,
         )
 
         td.layer.dp_size = 1
