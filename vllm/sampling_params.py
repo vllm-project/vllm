@@ -142,8 +142,9 @@ class SamplingParams(
     seed: Optional[int] = None
     """Random seed to use for the generation."""
     stop: Optional[Union[str, list[Union[str, list[int]]]]] = None
-    """String(s) that stop the generation when they are generated. The returned
-    output will not contain the stop strings."""
+    """String(s) or sequence(s) of token ids that stop the generation when they
+    are generated. The returned output will not contain the stop strings/tokens
+    unless include_stop_str_in_output is set to True (defaults to False)."""
     stop_token_ids: Optional[list[int]] = None
     """Token IDs that stop the generation when they are generated. The returned
     output will contain the stop tokens unless the stop tokens are special
@@ -229,7 +230,7 @@ class SamplingParams(
         top_k: int = 0,
         min_p: float = 0.0,
         seed: Optional[int] = None,
-        stop: Optional[Union[str, list[str]]] = None,
+        stop: Optional[Union[str, list[Union[str, list[int]]]]] = None,
         stop_token_ids: Optional[list[int]] = None,
         bad_words: Optional[list[str]] = None,
         include_stop_str_in_output: bool = False,
