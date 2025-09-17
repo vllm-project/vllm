@@ -786,6 +786,21 @@ def get_max_concurrency_for_kv_cache_config(
     return max_concurrency
 
 
+def may_override_num_blocks(vllm_config: VllmConfig, num_blocks: int) -> int:
+    """
+    Override the number of kv cache blocks if `num_gpu_blocks_override` is set.
+    """
+    if vllm_config.cache_config.num_gpu_blocks_override is not None:
+        num_gpu_blocks_override = \
+            vllm_config.cache_config.num_gpu_blocks_override
+        logger.info(
+            "Overriding num_gpu_blocks=%d with "
+            "num_gpu_blocks_override=%d", num_blocks, num_gpu_blocks_override)
+        num_blocks = num_gpu_blocks_override
+
+    return num_blocks
+
+
 def get_num_blocks(vllm_config: VllmConfig, num_layers: int,
                    available_memory: int, page_size: int) -> int:
     """
@@ -799,13 +814,7 @@ def get_num_blocks(vllm_config: VllmConfig, num_layers: int,
     """
     num_blocks = int(available_memory // page_size // num_layers)
     num_blocks = max(num_blocks, 0)
-    if vllm_config.cache_config.num_gpu_blocks_override is not None:
-        num_gpu_blocks_override = \
-            vllm_config.cache_config.num_gpu_blocks_override
-        logger.info(
-            "Overriding num_gpu_blocks=%d with "
-            "num_gpu_blocks_override=%d", num_blocks, num_gpu_blocks_override)
-        num_blocks = num_gpu_blocks_override
+    num_blocks = may_override_num_blocks(vllm_config, num_blocks)
     return num_blocks
 
 
@@ -1016,6 +1025,7 @@ def get_kv_cache_config_from_groups(vllm_config: VllmConfig,
         # layer based on its hidden size.
         num_blocks = available_memory // kv_cache_groups[
             0].kv_cache_spec.page_size_bytes
+        num_blocks = may_override_num_blocks(vllm_config, num_blocks)
         per_layer_specs = kv_cache_groups[0].kv_cache_spec.kv_cache_specs
         kv_cache_tensors = [
             KVCacheTensor(size=per_layer_specs[layer_name].page_size_bytes *
