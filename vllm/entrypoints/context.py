@@ -141,6 +141,9 @@ class HarmonyContext(ConversationContext):
         if isinstance(output, RequestOutput):
             output_token_ids = output.outputs[0].token_ids
             self.parser = get_streamable_parser_for_assistant()
+            print(
+                f"--DEBUG------------------------{output.outputs[0].text}-----"
+            )
             for token_id in output_token_ids:
                 self.parser.process(token_id)
                 # Check if the current token is part of reasoning content
