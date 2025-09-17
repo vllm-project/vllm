@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
-from typing import Optional
 
 import numpy as np
 from numba import get_num_threads, jit, njit, prange, set_num_threads
@@ -47,9 +46,7 @@ class NgramProposer:
 
         # Trigger Numba JIT compilation for N-gram proposer.
         # This usually takes less than 1 second.
-        self.propose([[]]*1024, 
-                     [""] * 1024, 
-                     np.zeros(1024, dtype=np.int32), 
+        self.propose([[]] * 1024, [""] * 1024, np.zeros(1024, dtype=np.int32),
                      np.zeros((1024, self.max_model_len), dtype=np.int32),
                      set())
 
@@ -90,13 +87,13 @@ class NgramProposer:
                     1,
                     min(self.num_numba_thread_available,
                         len(valid_ngram_requests))))
-            
+
             batch_propose_numba(valid_ngram_requests, num_tokens_no_spec,
                                 token_ids_cpu, self.min_n, self.max_n,
                                 self.max_model_len, self.k,
                                 self.valid_ngram_draft,
                                 self.valid_ngram_num_drafts)
-            
+
             set_num_threads(original_num_numba_threads)
 
         for i in range(num_requests):
@@ -136,7 +133,7 @@ class NgramProposer:
             if num_tokens >= self.max_model_len:
                 # Skip requests that have already reached the max model length.
                 continue
-            
+
             valid_ngram_requests.append(i)
 
         draft_token_ids = self.batch_propose(
@@ -145,7 +142,7 @@ class NgramProposer:
             num_tokens_no_spec,
             token_ids_cpu,
         )
-            
+
         return draft_token_ids
 
     def load_model(self, *args, **kwargs):

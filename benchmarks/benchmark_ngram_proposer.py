@@ -152,7 +152,7 @@ def benchmark_batched_propose(args):
                 dummy_input_batch.req_ids,
                 dummy_input_batch.num_tokens_no_spec,
                 dummy_input_batch.token_ids_cpu,
-                dummy_input_batch.spec_decode_unsupported_reqs
+                dummy_input_batch.spec_decode_unsupported_reqs,
             )
             end = time.time()
             print(f"Iteration time (s): {end - start}")
