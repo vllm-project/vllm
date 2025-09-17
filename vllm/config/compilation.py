@@ -566,11 +566,18 @@ class CompilationConfig:
             "set_splitting_ops_for_v1 should only be called when "
             "level is CompilationLevel.PIECEWISE")
 
+        use_inductor_graph_partition_msg = (
+            "When use_inductor_graph_partition=True, splitting_ops "
+            "are ignored and set to an empty list. Instead, "
+            "\"tags=(torch._C.Tag.cudagraph_unsafe, ),\" is "
+            "used to annotate custom ops for graph partition.")
+
         if self.splitting_ops is None:
             if self.use_inductor_graph_partition:
                 # When using inductor graph partition, we set splitting_ops
                 # to be empty and rely on torch._C.Tag.cudagraph_unsafe to
                 # annotate custom ops as splitting ops.
+                logger.warning_once(use_inductor_graph_partition_msg)
                 self.splitting_ops = []
             else:
                 # NOTE: When using full cudagraph, instead of setting an empty
@@ -599,11 +606,7 @@ class CompilationConfig:
                 self.cudagraph_mode = CUDAGraphMode.FULL
             self.splitting_ops = []
         elif self.use_inductor_graph_partition:
-            logger.warning_once(
-                "When use_inductor_graph_partition=True, splitting_ops "
-                "are ignored and set to an empty list. Instead, "
-                "\"tags=(torch._C.Tag.cudagraph_unsafe, ),\" is "
-                "used to annotate custom ops for graph partition.")
+            logger.warning_once(use_inductor_graph_partition_msg)
             self.splitting_ops = []
 
         if envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput":
