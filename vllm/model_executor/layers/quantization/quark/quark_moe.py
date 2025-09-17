@@ -352,12 +352,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                 topk_ids=topk_ids,
                 activation=activation,
                 apply_router_weight_on_input=apply_router_weight_on_input,
-                use_fp8_w8a8=True,
-                per_channel_quant=self.weight_qscheme == "per_channel",
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
-                a1_scale=layer.w13_input_scale,
-                a2_scale=layer.w2_input_scale,
+                quant_config=self.moe_quant_config,
                 expert_map=expert_map)
         if self.use_marlin:
             assert activation == "silu", (
