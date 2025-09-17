@@ -9,8 +9,9 @@ from transformers import PreTrainedTokenizerBase
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaMessage)
 from vllm.logger import init_logger
-from vllm.reasoning import (DeepSeekR1ReasoningParser,
-                            ReasoningParser, ReasoningParserManager)
+from vllm.reasoning import (DeepSeekR1ReasoningParser, ReasoningParser,
+                            ReasoningParserManager)
+
 from .identity_reasoning_parser import IdentityReasoningParser
 
 logger = init_logger(__name__)
