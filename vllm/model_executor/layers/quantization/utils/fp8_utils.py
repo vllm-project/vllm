@@ -98,6 +98,56 @@ if current_platform.is_rocm():
         aiter_per1x128_quant = get_hip_quant(rocm_aiter.QuantType.per_1x128)
 
 
+def _padded_cutlass(
+    qx: torch.Tensor,
+    weight: torch.Tensor,
+    x_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+    block_size: list[int],
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    pad_multiple = 4
+    dim = qx.shape[0]
+    padded = dim if dim % pad_multiple == 0 else dim + pad_multiple - (
+        dim % pad_multiple)
+
+    padded_shape = [padded, *qx.shape[1:]]
+    padded_qx = torch.zeros(padded_shape, device=qx.device, dtype=qx.dtype)
+    padded_qx[0:qx.shape[0], ...].copy_(qx)
+
+    padded_x_scale_shape = [*x_scale.shape[1:], padded]
+    padded_x_scale = torch.ones(padded_x_scale_shape,
+                                device=x_scale.device,
+                                dtype=x_scale.dtype).permute(-1, -2)
+    padded_x_scale[0:x_scale.shape[0], ...].copy_(x_scale)
+
+    output = cutlass_scaled_mm(padded_qx, weight, padded_x_scale, weight_scale,
+                               block_size, output_dtype, True)
+    return output[0:qx.shape[0], ...]
+
+
+def _padded_cutlass_fake(
+    qx: torch.Tensor,
+    weight: torch.Tensor,
+    x_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+    block_size: list[int],
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    return torch.empty((qx.size(0), weight.size(0)),
+                       dtype=output_dtype,
+                       device=qx.device)
+
+
+direct_register_custom_op(
+    "padded_cutlass",
+    _padded_cutlass,
+    mutates_args=[],
+    fake_impl=_padded_cutlass_fake,
+    dispatch_key="CUDA",
+)
+
+
 def dispatch_w8a8_blockscale_func(
     use_cutlass: bool, use_aiter_and_is_supported: bool
 ) -> Callable[[
@@ -148,6 +198,7 @@ class W8A8BlockFp8LinearOp:
         input_2d = input.view(-1, input.shape[-1])
         output_shape = [*input.shape[:-1], weight.shape[0]]
         output_dtype = input.dtype
+
         if should_use_deepgemm_for_fp8_linear(self.is_deep_gemm_supported,
                                               output_dtype, weight):
             output = self._run_deepgemm(input, weight, block_size,
@@ -193,23 +244,17 @@ class W8A8BlockFp8LinearOp:
         block_size: list[int],
         weight_scale: torch.Tensor,
     ) -> torch.Tensor:
-        num_pad = 0
-        if self.is_hopper:
-            # pad first dimension to be divisible by 4 due to
-            # cutlass blockwise gemm limitation for hopper
-            num_pad = 4 - (input_2d.shape[0] % 4)
-            if num_pad > 0:
-                input_2d = torch.nn.functional.pad(input_2d,
-                                                   (0, 0, 0, num_pad),
-                                                   "constant", 0)
         q_input, x_scale = per_token_group_quant_fp8(input_2d,
                                                      block_size[1],
                                                      column_major_scales=True,
                                                      use_ue8m0=False)
-        output = cutlass_scaled_mm(q_input, weight, x_scale, weight_scale,
-                                   block_size, input_2d.dtype, self.is_hopper)
-        if num_pad > 0:
-            output = output[:-num_pad]
+        if self.is_hopper:
+            output = torch.ops.vllm.padded_cutlass(q_input, weight, x_scale,
+                                                   weight_scale, block_size,
+                                                   input_2d.dtype)
+        else:
+            output = cutlass_scaled_mm(q_input, weight, x_scale, weight_scale,
+                                       block_size, input_2d.dtype, False)
         return output
 
     def _run_aiter(
@@ -235,8 +280,9 @@ class W8A8BlockFp8LinearOp:
                                                      block_size[1],
                                                      column_major_scales=False,
                                                      use_ue8m0=False)
-        return w8a8_block_fp8_matmul(q_input, weight, x_scale, weight_scale,
-                                     block_size, input_2d.dtype)
+        return w8a8_block_fp8_matmul(q_input, weight, x_scale,
+                                     weight_scale.t(), block_size,
+                                     input_2d.dtype)
 
     def _dispatch_w8a8_blockscale_op(
         self,
