@@ -198,12 +198,20 @@ class TokenformerSurgeon(ABC):
 
         logger.info(f"Wrapping layer {name} with TokenformerMLPAdaptor")
 
+        if hasattr(self.model, "config"):
+            hidden_size = self.model.config.hidden_size
+        elif hasattr(self.model, "model_config"):
+            hidden_size = self.model.model_config.hidden_size
+        else:
+            logger.error("Model does not have config or model_config attribute")
+            return
+
         # Wrap the layer with a TokenformerMLPAdapter
         self._recursive_setattr(
             self.model,
             name,
             TokenformerMLPAdapter(
-                layer, self.model.config.hidden_size, device=self.device
+                layer, hidden_size, device=self.device
             ),
         )
 

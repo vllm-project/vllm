@@ -142,8 +142,6 @@ class TokenformerModelManager(AdapterModelManager):
 
         logger.info(f"Activating Tokenformer - {adapter_id}")
 
-        logger.info(f"Model is {self.model}")
-
         model_state_dict = self.model.state_dict()
         tokenformers = self._registered_adapters[adapter_id].tokenformers
 
@@ -155,12 +153,7 @@ class TokenformerModelManager(AdapterModelManager):
             logger.info(f"Loading {key} from adapter {adapter_id}")
             model_state_dict[key] = value
 
-        load_result = self.model.load_state_dict(model_state_dict, strict=False)
-
-        if len(load_result.unexpected_keys) > 0:
-            logger.warning(
-                f"Unexpected keys in state dict: {load_result.unexpected_keys}"
-            )
+        self.model.load_state_dict(model_state_dict, strict=False)
 
         self._active_adapter = adapter_id
 
