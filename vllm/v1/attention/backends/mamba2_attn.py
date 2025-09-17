@@ -143,7 +143,7 @@ class Mamba2AttentionMetadata:
 class Mamba2AttentionMetadataBuilder(
         BaseMambaAttentionMetadataBuilder[Mamba2AttentionMetadata]):
 
-    def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
+    def __init__(self, kv_cache_spec: MambaSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.chunk_size = vllm_config.model_config.get_mamba_chunk_size()
