@@ -439,7 +439,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     model: Optional[str] = None
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[dict[str, float]] = None
-    logprobs: Union[Optional[bool], Optional[int]] = False
+    logprobs: Optional[bool] = False
     top_logprobs: Optional[int] = 0
     max_tokens: Optional[int] = Field(
         default=None,
@@ -863,10 +863,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 raise ValueError("`prompt_logprobs=-1` is only supported with "
                                  "vLLM engine V1.")
         if (top_logprobs := data.get("top_logprobs")) is not None:
-            if top_logprobs < 0:
-                raise ValueError("`top_logprobs` must be a positive value.")
+            if top_logprobs < 0 and top_logprobs != -1:
+                raise ValueError(
+                    "`top_logprobs` must be a positive value or -1.")
 
-            if top_logprobs > 0 and not data.get("logprobs"):
+            if (top_logprobs == -1
+                    or top_logprobs > 0) and not data.get("logprobs"):
                 raise ValueError(
                     "when using `top_logprobs`, `logprobs` must be set to true."
                 )
