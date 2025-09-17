@@ -302,7 +302,8 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.lm_head = ParallelLMHead(
                 self.transformer.vocab_size,
                 self.transformer.embed_dim,
-                org_num_embeddings=self.config.vocab_size)
+                org_num_embeddings=self.config.vocab_size,
+                prefix=maybe_prefix(prefix, "lm_head"))
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size

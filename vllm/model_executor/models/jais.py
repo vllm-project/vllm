@@ -302,7 +302,9 @@ class JAISLMHeadModel(nn.Module, SupportsPP):
             self.lm_head = self.transformer.wte
         else:
             self.lm_head = ParallelLMHead(self.config.vocab_size,
-                                          self.config.hidden_size)
+                                          self.config.hidden_size,
+                                          prefix=maybe_prefix(
+                                              prefix, "lm_head"))
         if hasattr(config, "width_scale"):
             self.output_logits_scale = config.width_scale
         else:

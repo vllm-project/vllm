@@ -438,6 +438,7 @@ class DbrxForCausalLM(nn.Module, SupportsPP):
             org_num_embeddings=config.vocab_size,
             padding_size=DEFAULT_VOCAB_PADDING_SIZE,
             quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "lm_head"),
         )
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)

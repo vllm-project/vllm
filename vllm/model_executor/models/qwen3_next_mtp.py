@@ -238,7 +238,8 @@ class Qwen3NextMTP(nn.Module, SupportsPP):
         self.lm_head = ParallelLMHead(self.unpadded_vocab_size,
                                       config.hidden_size,
                                       org_num_embeddings=config.vocab_size,
-                                      padding_size=DEFAULT_VOCAB_PADDING_SIZE)
+                                      padding_size=DEFAULT_VOCAB_PADDING_SIZE,
+                                      prefix=maybe_prefix(prefix, "lm_head"))
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
         self.make_empty_intermediate_tensors = (

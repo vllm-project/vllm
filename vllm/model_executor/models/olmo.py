@@ -364,6 +364,7 @@ class OlmoForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
                 config.hidden_size,
                 org_num_embeddings=config.vocab_size,
                 quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
             )
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
