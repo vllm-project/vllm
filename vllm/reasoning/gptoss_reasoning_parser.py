@@ -29,7 +29,7 @@ class GptOssReasoningParser(ReasoningParser):
         self.reasoning_end_token_ids = self.model_tokenizer.encode(
             "<|start|>assistant<|channel|>final<|message|>")
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: list[int], is_prompt: bool) -> bool:
         end_token_ids = self.reasoning_end_token_ids
         assert len(end_token_ids) > 0, "reasoning_end_token_ids is empty"
         # Check if the end sequence is present in the input_ids.
@@ -53,6 +53,7 @@ class GptOssReasoningParser(ReasoningParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
+        request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
         prev_reasoning, prev_content, _ = parse_chat_output(
             list(previous_token_ids))
@@ -80,6 +81,7 @@ class GptOssReasoningParser(ReasoningParser):
     def extract_reasoning_content(
         self,
         model_output: str,
+        prompt_token_ids: list[int],
         request: ChatCompletionRequest,
     ) -> tuple[Optional[str], Optional[str]]:
         raise NotImplementedError(

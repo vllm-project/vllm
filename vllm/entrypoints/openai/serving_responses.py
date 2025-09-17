@@ -301,6 +301,7 @@ class OpenAIServingResponses(OpenAIServing):
                         context = HarmonyContext(messages, available_tools)
                 else:
                     context = SimpleContext()
+                context.set_prompt(request_prompts[i])
                 generator = self._generate_with_builtin_tools(
                     request_id=request.request_id,
                     request_prompt=request_prompts[i],
@@ -492,7 +493,7 @@ class OpenAIServingResponses(OpenAIServing):
             final_output = final_res.outputs[0]
 
             output = self._make_response_output_items(request, final_output,
-                                                      tokenizer)
+                                                      tokenizer, context)
 
             # Calculate usage.
             assert final_res.prompt_token_ids is not None
@@ -605,6 +606,7 @@ class OpenAIServingResponses(OpenAIServing):
         request: ResponsesRequest,
         final_output: CompletionOutput,
         tokenizer: AnyTokenizer,
+        context: ConversationContext,
     ) -> list[ResponseOutputItem]:
         if self.reasoning_parser:
             try:
@@ -614,8 +616,8 @@ class OpenAIServingResponses(OpenAIServing):
                 raise e
 
             reasoning_content, content = (
-                reasoning_parser.extract_reasoning_content(final_output.text,
-                                                           request=request))
+                reasoning_parser.extract_reasoning_content(
+                    final_output.text, context.get_prompt(), request=request))
         else:
             reasoning_content = None
             content = final_output.text
@@ -1011,6 +1013,7 @@ class OpenAIServingResponses(OpenAIServing):
                         current_token_ids=previous_token_ids +
                         output.token_ids,
                         delta_token_ids=output.token_ids,
+                        request=request,
                     )
                 else:
                     delta_message = DeltaMessage(content=output.text, )

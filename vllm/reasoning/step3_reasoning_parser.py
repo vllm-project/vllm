@@ -50,6 +50,7 @@ class Step3ReasoningParser(ReasoningParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
+        request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
         """
         Extract reasoning content from a delta message.
@@ -79,7 +80,8 @@ class Step3ReasoningParser(ReasoningParser):
             return DeltaMessage(reasoning_content=delta_text)
 
     def extract_reasoning_content(
-            self, model_output: str, request: ChatCompletionRequest
+            self, model_output: str, prompt_token_ids: list[int],
+            request: ChatCompletionRequest
     ) -> tuple[Optional[str], Optional[str]]:
 
         # Check if the model output contains the </think> token
@@ -99,7 +101,7 @@ class Step3ReasoningParser(ReasoningParser):
 
             return reasoning_content, content
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: list[int], is_prompt: bool) -> bool:
         return self.think_end_token_id in input_ids
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:

@@ -44,7 +44,7 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
                 "Glm4MoeModel reasoning parser could not locate "
                 "think start/end tokens in the tokenizer!")
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: list[int], is_prompt: bool) -> bool:
         return self.think_end_token_id in input_ids
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
@@ -64,6 +64,7 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
+        request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
         """
         Extract reasoning content from a delta message.
@@ -116,7 +117,8 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
             return DeltaMessage(content=delta_text)
 
     def extract_reasoning_content(
-            self, model_output: str, request: ChatCompletionRequest
+            self, model_output: str, prompt_token_ids: list[int],
+            request: ChatCompletionRequest
     ) -> tuple[Optional[str], Optional[str]]:
         """
         Extract reasoning content from the model output.
