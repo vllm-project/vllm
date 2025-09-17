@@ -12,7 +12,6 @@ from blake3 import blake3
 from PIL import Image
 
 from vllm.logger import init_logger
-from vllm.multimodal.image import convert_image_mode
 
 logger = init_logger(__name__)
 
@@ -35,8 +34,12 @@ class MultiModalHasher:
                     exif[Image.ExifTags.Base.ImageID], uuid.UUID):
                 # If the image has exif ImageID tag, use that
                 return (exif[Image.ExifTags.Base.ImageID].bytes, )
-            return cls.iter_item_to_bytes(
-                "image", np.asarray(convert_image_mode(obj, "RGBA")))
+            data = {"mode": obj.mode, "data": np.asarray(obj)}
+            if obj.palette is not None:
+                data["palette"] = obj.palette.palette
+                if obj.palette.rawmode is not None:
+                    data["palette_rawmode"] = obj.palette.rawmode
+            return cls.iter_item_to_bytes("image", data)
         if isinstance(obj, torch.Tensor):
             tensor_obj: torch.Tensor = obj.cpu()
             tensor_dtype = tensor_obj.dtype
