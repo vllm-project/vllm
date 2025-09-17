@@ -91,17 +91,6 @@ steps:
   - pytest -v -s basic_correctness/test_cpu_offload.py
   - VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py
 
-- label: Core Test # 22min
-  timeout_in_minutes: 35
-  mirror_hardwares: [amdexperimental]
-  fast_check: true
-  source_file_dependencies:
-  - vllm/core
-  - vllm/distributed
-  - tests/core
-  commands:
-  - pytest -v -s core
-
 - label: Entrypoints Unit Tests # 5min
   timeout_in_minutes: 10
   working_dir: "/vllm-workspace/tests"
