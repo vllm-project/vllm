@@ -739,7 +739,7 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         else:
             pixel_values = image_input["pixel_values"].type(
                 self.vision_tower.dtype)
-            image_embeds = self.vision_forward(
+            image_embeds = self.vision_tower(
                 pixel_values, grid_thw)[:, :self.config.hidden_size]
 
         # Split concatenated embeddings for each image item.
