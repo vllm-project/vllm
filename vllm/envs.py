@@ -153,7 +153,6 @@ if TYPE_CHECKING:
                                   "deepep_low_latency"] = "naive"
     VLLM_NIXL_HANDSHAKE_TIMEOUT: float = 2.0
     VLLM_NIXL_HANDSHAKE_METHOD: str = "zmq"
-    VLLM_ALL2ALL_BACKEND: str = "naive"
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_SLEEP_WHEN_IDLE: bool = False
