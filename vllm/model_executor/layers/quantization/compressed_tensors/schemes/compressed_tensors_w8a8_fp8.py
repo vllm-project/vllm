@@ -13,9 +13,10 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     apply_fp8_block_linear, check_aiter_fp8_linear_support,
     create_fp8_input_scale, create_fp8_scale_parameter,
-    create_fp8_weight_parameter, maybe_deepgemm_requant,
-    process_fp8_weight_block_strategy, process_fp8_weight_channel_strategy,
-    process_fp8_weight_tensor_strategy, validate_fp8_block_shape)
+    create_fp8_weight_parameter, process_fp8_weight_block_strategy,
+    process_fp8_weight_channel_strategy, process_fp8_weight_tensor_strategy,
+    requant_weight_ue8m0_inplace, should_use_deepgemm_for_fp8_linear,
+    validate_fp8_block_shape)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -23,6 +24,8 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.model_executor.parameter import (BlockQuantScaleParameter,
                                            ChannelQuantScaleParameter,
                                            PerTensorScaleParameter)
+from vllm.platforms import current_platform
+from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
 
 __all__ = ["CompressedTensorsW8A8Fp8"]
 
@@ -71,7 +74,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             assert self.weight_block_size is not None
             layer.weight_block_size = self.weight_block_size
             # Validate block quantization shapes
-            validate_fp8_block_shape(input_size, output_size,
+            validate_fp8_block_shape(layer, input_size, output_size,
                                      input_size_per_partition,
                                      output_partition_sizes,
                                      self.weight_block_size)
@@ -132,7 +135,23 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         else:
             layer.input_scale = None
 
-        maybe_deepgemm_requant(layer)
+        if self.block_quant:
+            # On Blackwell or Hopper, if E8M0 for DeepGemm is used, we need to
+            # requantize the weight and input to the specific scale
+            # at the same time.
+            if is_deep_gemm_e8m0_used():
+                assert layer.weight_block_size is not None
+                block_sz = tuple(layer.weight_block_size)
+                requant_weight_ue8m0_inplace(layer.weight.data,
+                                             layer.weight_scale.data, block_sz)
+            # SM90 Block FP8 CUTLASS requires row-major weight scales
+            elif (current_platform.is_device_capability(90)
+                  and self.cutlass_block_fp8_supported
+                  and not should_use_deepgemm_for_fp8_linear(
+                      torch.bfloat16, layer.weight)):
+                layer.weight_scale = Parameter(
+                    layer.weight_scale.data.T.contiguous(),
+                    requires_grad=False)
 
     def apply_weights(self,
                       layer: torch.nn.Module,

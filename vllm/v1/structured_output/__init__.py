@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Optional
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
-from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
+from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
 from vllm.utils import LazyLoader
 from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
@@ -60,10 +60,7 @@ class StructuredOutputManager:
             max_workers = max(1, (multiprocessing.cpu_count() + 1) // 2)
             self.executor = ThreadPoolExecutor(max_workers=max_workers)
             self.tokenizer = init_tokenizer_from_configs(
-                model_config=self.vllm_config.model_config,
-                scheduler_config=self.vllm_config.scheduler_config,
-                lora_config=self.vllm_config.lora_config,
-            ).get_lora_tokenizer(None)
+                model_config=self.vllm_config.model_config)
             reasoning_backend = \
                     self.vllm_config.decoding_config.reasoning_backend
             if reasoning_backend:
@@ -104,6 +101,14 @@ class StructuredOutputManager:
                     OutlinesBackend)
 
                 self.backend = OutlinesBackend(
+                    self.vllm_config,
+                    tokenizer=self.tokenizer,
+                    vocab_size=vocab_size,
+                )
+            elif backend == "lm-format-enforcer":
+                from vllm.v1.structured_output.backend_lm_format_enforcer import (  # noqa: E501
+                    LMFormatEnforcerBackend)
+                self.backend = LMFormatEnforcerBackend(
                     self.vllm_config,
                     tokenizer=self.tokenizer,
                     vocab_size=vocab_size,
@@ -267,7 +272,7 @@ class StructuredOutputManager:
             assert request.structured_output_request is not None
             assert request.structured_output_request.grammar is not None
         # by default, we should always advance
-        # for cases that doesn't uses thinking mode.
+        # for cases that don't use thinking mode.
         if self.reasoner is not None:
             structured_req = request.structured_output_request
 
@@ -276,7 +281,7 @@ class StructuredOutputManager:
 
             # Check if reasoning ends in *this* step
             if self.reasoner.is_reasoning_end(request.all_token_ids):
-                # Reasoning just ended, so we shouldn't advanced til
+                # Reasoning just ended, so we shouldn't advance til
                 # next pass
                 structured_req.reasoning_ended = True
 

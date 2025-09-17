@@ -48,13 +48,16 @@ class _Backend(enum.Enum):
     ROCM_AITER_MLA_VLLM_V1 = enum.auto()
     ROCM_AITER_FA = enum.auto()  # used for ViT attn backend
     TORCH_SDPA = enum.auto()
+    TORCH_SDPA_VLLM_V1 = enum.auto()
     FLASHINFER = enum.auto()
     FLASHINFER_VLLM_V1 = enum.auto()
+    FLASHINFER_MLA = enum.auto()
     TRITON_MLA = enum.auto()  # Supported by V1
     TRITON_MLA_VLLM_V1 = enum.auto()
-    FLASHMLA_VLLM_V1 = enum.auto()
-    FLASHMLA = enum.auto()  # Supported by V1
     CUTLASS_MLA = enum.auto()
+    FLASHMLA = enum.auto()  # Supported by V1
+    FLASHMLA_VLLM_V1 = enum.auto()
+    FLASH_ATTN_MLA = enum.auto()  # Supported by V1
     PALLAS = enum.auto()
     PALLAS_VLLM_V1 = enum.auto()
     IPEX = enum.auto()
@@ -72,7 +75,6 @@ class PlatformEnum(enum.Enum):
     TPU = enum.auto()
     XPU = enum.auto()
     CPU = enum.auto()
-    NEURON = enum.auto()
     OOT = enum.auto()
     UNSPECIFIED = enum.auto()
 
@@ -163,9 +165,6 @@ class Platform:
     def is_cpu(self) -> bool:
         return self._enum == PlatformEnum.CPU
 
-    def is_neuron(self) -> bool:
-        return self._enum == PlatformEnum.NEURON
-
     def is_out_of_tree(self) -> bool:
         return self._enum == PlatformEnum.OOT
 
@@ -193,7 +192,8 @@ class Platform:
             return device_id
 
     @classmethod
-    def get_vit_attn_backend(cls, support_fa: bool = False) -> _Backend:
+    def get_vit_attn_backend(cls, head_size: int,
+                             dtype: torch.dtype) -> _Backend:
         return _Backend.TORCH_SDPA
 
     @classmethod
@@ -510,6 +510,14 @@ class Platform:
         return False
 
     @classmethod
+    def opaque_attention_op(cls) -> bool:
+        """
+        Returns True if we register attention as one giant opaque custom op
+        on the current platform
+        """
+        return False
+
+    @classmethod
     def validate_request(
         cls,
         prompt: PromptType,
@@ -529,7 +537,7 @@ class Platform:
 
     def get_global_graph_pool(self) -> Any:
         """
-        Return the global graph pool for the this platform.
+        Return the global graph pool for this platform.
         """
         cls = self.__class__
         if cls._global_graph_pool is None:
@@ -565,9 +573,24 @@ class Platform:
         raise RuntimeError(f"Unsupported torch distributed backend: {backend}")
 
     @classmethod
-    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str) -> bool:
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
+                                    model_config: "ModelConfig") -> bool:
         """
         Returns if the kv_cache_dtype is supported by the current platform.
+        """
+        return False
+
+    @classmethod
+    def check_if_supports_dtype(cls, torch_dtype: torch.dtype):
+        """
+        Check if the dtype is supported by the current platform.
+        """
+        raise NotImplementedError
+
+    @classmethod
+    def support_hybrid_kv_cache(cls) -> bool:
+        """
+        Returns if the hybrid kv cache is supported by the current platform.
         """
         return False
 

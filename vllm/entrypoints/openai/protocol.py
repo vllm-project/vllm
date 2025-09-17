@@ -6,7 +6,8 @@
 import json
 import time
 from http import HTTPStatus
-from typing import Annotated, Any, ClassVar, Literal, Optional, Union
+from typing import (Annotated, Any, ClassVar, Generic, Literal, Optional,
+                    TypeVar, Union)
 
 import regex as re
 import torch
@@ -29,7 +30,7 @@ except ImportError:  # For newer openai versions (>= 1.100.0)
     from openai.types.responses import (ResponseFormatTextConfig as
                                         ResponseTextConfig)
 
-from openai.types.responses.response import ToolChoice
+from openai.types.responses.response import IncompleteDetails, ToolChoice
 from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
 from pydantic import (BaseModel, ConfigDict, Field, TypeAdapter,
@@ -38,14 +39,14 @@ from typing_extensions import TypeAlias
 
 from vllm import envs
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
-                                         random_tool_call_id)
+                                         make_tool_call_id)
 from vllm.entrypoints.score_utils import (ScoreContentPartParam,
                                           ScoreMultiModalParam)
 from vllm.logger import init_logger
+from vllm.logprobs import Logprob
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
                                   RequestOutputKind, SamplingParams)
-from vllm.sequence import Logprob
 from vllm.utils import random_uuid, resolve_obj_by_qualname
 
 logger = init_logger(__name__)
@@ -241,7 +242,7 @@ def get_logits_processors(processors: Optional[LogitsProcessors],
     elif processors:
         raise ValueError(
             "The `logits_processors` argument is not supported by this "
-            "server. See --logits-processor-pattern engine argugment "
+            "server. See --logits-processor-pattern engine argument "
             "for more information.")
     return None
 
@@ -357,12 +358,21 @@ class ResponsesRequest(OpenAIBaseModel):
             temperature=temperature,
             top_p=top_p,
             max_tokens=max_tokens,
-            logprobs=self.top_logprobs,
+            logprobs=self.top_logprobs
+            if self.is_include_output_logprobs() else None,
             stop_token_ids=stop_token_ids,
             output_kind=(RequestOutputKind.DELTA
                          if self.stream else RequestOutputKind.FINAL_ONLY),
             guided_decoding=guided_decoding,
         )
+
+    def is_include_output_logprobs(self) -> bool:
+        """Check if the request includes output logprobs."""
+        if self.include is None:
+            return False
+        return isinstance(
+            self.include,
+            list) and "message.output_text.logprobs" in self.include
 
     @model_validator(mode="before")
     def validate_background(cls, data):
@@ -443,7 +453,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     min_tokens: int = 0
     skip_special_tokens: bool = True
     spaces_between_special_tokens: bool = True
-    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
     prompt_logprobs: Optional[int] = None
     allowed_token_ids: Optional[list[int]] = None
     bad_words: list[str] = Field(default_factory=list)
@@ -812,13 +822,17 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @classmethod
     def check_logprobs(cls, data):
         if (prompt_logprobs := data.get("prompt_logprobs")) is not None:
-            if data.get("stream") and prompt_logprobs > 0:
+            if data.get("stream") and (prompt_logprobs > 0
+                                       or prompt_logprobs == -1):
                 raise ValueError(
                     "`prompt_logprobs` are not available when `stream=True`.")
 
-            if prompt_logprobs < 0:
-                raise ValueError("`prompt_logprobs` must be a positive value.")
-
+            if prompt_logprobs < 0 and prompt_logprobs != -1:
+                raise ValueError(
+                    "`prompt_logprobs` must be a positive value or -1.")
+            if prompt_logprobs == -1 and not envs.VLLM_USE_V1:
+                raise ValueError("`prompt_logprobs=-1` is only supported with "
+                                 "vLLM engine V1.")
         if (top_logprobs := data.get("top_logprobs")) is not None:
             if top_logprobs < 0:
                 raise ValueError("`top_logprobs` must be a positive value.")
@@ -986,7 +1000,7 @@ class CompletionRequest(OpenAIBaseModel):
     min_tokens: int = 0
     skip_special_tokens: bool = True
     spaces_between_special_tokens: bool = True
-    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
     allowed_token_ids: Optional[list[int]] = None
     prompt_logprobs: Optional[int] = None
     # --8<-- [end:completion-sampling-params]
@@ -1236,13 +1250,17 @@ class CompletionRequest(OpenAIBaseModel):
     @classmethod
     def check_logprobs(cls, data):
         if (prompt_logprobs := data.get("prompt_logprobs")) is not None:
-            if data.get("stream") and prompt_logprobs > 0:
+            if data.get("stream") and (prompt_logprobs > 0
+                                       or prompt_logprobs == -1):
                 raise ValueError(
                     "`prompt_logprobs` are not available when `stream=True`.")
 
-            if prompt_logprobs < 0:
-                raise ValueError("`prompt_logprobs` must be a positive value.")
-
+            if prompt_logprobs < 0 and prompt_logprobs != -1:
+                raise ValueError(
+                    "`prompt_logprobs` must be a positive value or -1.")
+            if prompt_logprobs == -1 and not envs.VLLM_USE_V1:
+                raise ValueError("`prompt_logprobs=-1` is only supported with "
+                                 "vLLM engine V1.")
         if (logprobs := data.get("logprobs")) is not None and logprobs < 0:
             raise ValueError("`logprobs` must be a positive value.")
 
@@ -1260,9 +1278,20 @@ class CompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def validate_prompt_and_prompt_embeds(cls, data):
-        if data.get("prompt") is None and data.get("prompt_embeds") is None:
+        prompt = data.get("prompt")
+        prompt_embeds = data.get("prompt_embeds")
+
+        prompt_is_empty = (prompt is None
+                           or (isinstance(prompt, str) and prompt == ""))
+        embeds_is_empty = (prompt_embeds is None
+                           or (isinstance(prompt_embeds, list)
+                               and len(prompt_embeds) == 0))
+
+        if prompt_is_empty and embeds_is_empty:
             raise ValueError(
-                "At least one of `prompt` or `prompt_embeds` must be set.")
+                "Either prompt or prompt_embeds must be provided and non-empty."
+            )
+
         return data
 
     @model_validator(mode="before")
@@ -1316,8 +1345,10 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
     # --8<-- [end:embedding-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams(dimensions=self.dimensions,
-                             normalize=self.normalize)
+        return PoolingParams(
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            dimensions=self.dimensions,
+            normalize=self.normalize)
 
 
 class EmbeddingChatRequest(OpenAIBaseModel):
@@ -1330,6 +1361,14 @@ class EmbeddingChatRequest(OpenAIBaseModel):
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
 
     # --8<-- [start:chat-embedding-extra-params]
+    add_generation_prompt: bool = Field(
+        default=False,
+        description=
+        ("If true, the generation prompt will be added to the chat template. "
+         "This is a parameter used by chat template in tokenizer config of the "
+         "model."),
+    )
+
     add_special_tokens: bool = Field(
         default=False,
         description=(
@@ -1384,15 +1423,57 @@ class EmbeddingChatRequest(OpenAIBaseModel):
         return data
 
     def to_pooling_params(self):
-        return PoolingParams(dimensions=self.dimensions,
-                             normalize=self.normalize)
+        return PoolingParams(
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            dimensions=self.dimensions,
+            normalize=self.normalize)
 
 
 EmbeddingRequest = Union[EmbeddingCompletionRequest, EmbeddingChatRequest]
 
 PoolingCompletionRequest = EmbeddingCompletionRequest
 PoolingChatRequest = EmbeddingChatRequest
-PoolingRequest = Union[PoolingCompletionRequest, PoolingChatRequest]
+
+T = TypeVar("T")
+
+
+class IOProcessorRequest(OpenAIBaseModel, Generic[T]):
+    model: Optional[str] = None
+
+    priority: int = Field(default=0)
+    """
+    The priority of the request (lower means earlier handling;
+    default: 0). Any priority other than 0 will raise an error
+    if the served model does not use priority scheduling.
+    """
+    data: T
+    """
+    When using plugins IOProcessor plugins, the actual input is processed
+    by the plugin itself. Hence, we use a generic type for the request data
+    """
+    softmax: bool = True
+
+    def to_pooling_params(self):
+        return PoolingParams(task="encode", softmax=self.softmax)
+
+
+class IOProcessorResponse(OpenAIBaseModel, Generic[T]):
+
+    request_id: Optional[str] = None
+    """
+    The request_id associated with this response
+    """
+    created_at: int = Field(default_factory=lambda: int(time.time()))
+
+    data: T
+    """
+    When using plugins IOProcessor plugins, the actual output is generated
+    by the plugin itself. Hence, we use a generic type for the response data
+    """
+
+
+PoolingRequest = Union[PoolingCompletionRequest, PoolingChatRequest,
+                       IOProcessorRequest]
 
 
 class ScoreRequest(OpenAIBaseModel):
@@ -1421,7 +1502,9 @@ class ScoreRequest(OpenAIBaseModel):
     # --8<-- [end:score-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams(activation=self.activation)
+        return PoolingParams(
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            activation=self.activation)
 
 
 class RerankRequest(OpenAIBaseModel):
@@ -1451,7 +1534,9 @@ class RerankRequest(OpenAIBaseModel):
     # --8<-- [end:rerank-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams(activation=self.activation)
+        return PoolingParams(
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            activation=self.activation)
 
 
 class RerankDocument(BaseModel):
@@ -1609,7 +1694,9 @@ class ClassificationRequest(OpenAIBaseModel):
     # --8<-- [end:classification-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams(activation=self.activation)
+        return PoolingParams(
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            activation=self.activation)
 
 
 class ClassificationData(OpenAIBaseModel):
@@ -1634,7 +1721,7 @@ class FunctionCall(OpenAIBaseModel):
 
 
 class ToolCall(OpenAIBaseModel):
-    id: str = Field(default_factory=random_tool_call_id)
+    id: str = Field(default_factory=make_tool_call_id)
     type: Literal["function"] = "function"
     function: FunctionCall
 
@@ -1773,7 +1860,8 @@ class InputTokensDetails(OpenAIBaseModel):
 
 
 class OutputTokensDetails(OpenAIBaseModel):
-    reasoning_tokens: int
+    reasoning_tokens: int = 0
+    tool_output_tokens: int = 0
 
 
 class ResponseUsage(OpenAIBaseModel):
@@ -1788,7 +1876,7 @@ class ResponsesResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"resp_{random_uuid()}")
     created_at: int = Field(default_factory=lambda: int(time.time()))
     # error: Optional[ResponseError] = None
-    # incomplete_details: Optional[IncompleteDetails] = None
+    incomplete_details: Optional[IncompleteDetails] = None
     instructions: Optional[str] = None
     metadata: Optional[Metadata] = None
     model: str
@@ -1808,7 +1896,7 @@ class ResponsesResponse(OpenAIBaseModel):
     service_tier: Literal["auto", "default", "flex", "scale", "priority"]
     status: ResponseStatus
     text: Optional[ResponseTextConfig] = None
-    top_logprobs: int
+    top_logprobs: Optional[int] = None
     truncation: Literal["auto", "disabled"]
     usage: Optional[ResponseUsage] = None
     user: Optional[str] = None
@@ -1824,9 +1912,18 @@ class ResponsesResponse(OpenAIBaseModel):
         status: ResponseStatus,
         usage: Optional[ResponseUsage] = None,
     ) -> "ResponsesResponse":
+
+        incomplete_details: Optional[IncompleteDetails] = None
+        if status == 'incomplete':
+            incomplete_details = IncompleteDetails(reason='max_output_tokens')
+        # TODO: implement the other reason for incomplete_details,
+        # which is content_filter
+        # incomplete_details = IncompleteDetails(reason='content_filter')
+
         return cls(
             id=request.request_id,
             created_at=created_time,
+            incomplete_details=incomplete_details,
             instructions=request.instructions,
             metadata=request.metadata,
             model=model_name,
@@ -2029,7 +2126,7 @@ class DetokenizeResponse(OpenAIBaseModel):
 
 class TokenizerInfoResponse(OpenAIBaseModel):
     """
-    Response containing tokenizer configuration 
+    Response containing tokenizer configuration
     equivalent to tokenizer_config.json
     """
 
@@ -2115,6 +2212,13 @@ class TranscriptionRequest(OpenAIBaseModel):
                      "numeric values, used by custom extensions."),
     )
     # --8<-- [end:transcription-extra-params]
+
+    to_language: Optional[str] = None
+    """The language of the output audio we transcribe to.
+
+    Please note that this is not currently used by supported models at this
+    time, but it is a placeholder for future use, matching translation api.
+    """
 
     # --8<-- [start:transcription-sampling-params]
     temperature: float = Field(default=0.0)
@@ -2223,9 +2327,15 @@ class TranscriptionRequest(OpenAIBaseModel):
 
 
 # Transcription response objects
+class TranscriptionUsageAudio(OpenAIBaseModel):
+    type: Literal["duration"] = "duration"
+    seconds: int
+
+
 class TranscriptionResponse(OpenAIBaseModel):
     text: str
     """The transcribed text."""
+    usage: TranscriptionUsageAudio
 
 
 class TranscriptionWord(OpenAIBaseModel):
@@ -2343,6 +2453,9 @@ class TranslationRequest(OpenAIBaseModel):
 
     # TODO support additional sampling parameters
     # --8<-- [start:translation-sampling-params]
+    seed: Optional[int] = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
+    """The seed to use for sampling."""
+
     temperature: float = Field(default=0.0)
     """The sampling temperature, between 0 and 1.
 
@@ -2360,6 +2473,14 @@ class TranslationRequest(OpenAIBaseModel):
     Supplying the input language in
     [ISO-639-1](https://en.wikipedia.org/wiki/List_of_ISO_639-1_codes) format
     will improve accuracy.
+    """
+
+    to_language: Optional[str] = None
+    """The language of the input audio we translate to.
+
+    Please note that this is not supported by all models, refer to the specific
+    model documentation for more details.
+    For instance, Whisper only supports `to_language=en`.
     """
 
     stream: Optional[bool] = False
@@ -2393,6 +2514,7 @@ class TranslationRequest(OpenAIBaseModel):
 
         return SamplingParams.from_optional(temperature=temperature,
                                             max_tokens=max_tokens,
+                                            seed=self.seed,
                                             output_kind=RequestOutputKind.DELTA
                                             if self.stream \
                                             else RequestOutputKind.FINAL_ONLY)
