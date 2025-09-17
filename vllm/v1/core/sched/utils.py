@@ -81,7 +81,7 @@ def add_token_and_check_stop(token_ids: list[int], request: Request,
 
     true_idx = 0
     sampling_params = request.sampling_params
-
+    assert sampling_params is not None
     for true_idx, last_token_id in enumerate(token_ids[:possible_len], 1):
         if (not sampling_params.ignore_eos
                 and last_token_id == request.eos_token_id):
