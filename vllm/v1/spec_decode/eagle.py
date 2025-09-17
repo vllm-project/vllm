@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 
 from vllm.attention.layer import Attention
-from vllm.config import (CompilationLevel, VllmConfig,
+from vllm.config import (CompilationLevel, CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config)
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
@@ -78,6 +78,11 @@ class EagleProposer:
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE and
                                not self.vllm_config.model_config.enforce_eager)
+
+        self.cudagraph_runtime_mode = (CUDAGraphMode.PIECEWISE
+                                       if self.use_cuda_graph else
+                                       CUDAGraphMode.NONE)
+
         self.cudagraph_batch_sizes = list(
             reversed(
                 self.vllm_config.compilation_config.cudagraph_capture_sizes))
@@ -212,9 +217,12 @@ class EagleProposer:
             inputs_embeds = None
             input_ids = self.input_ids[:num_input_tokens]
 
-        with set_forward_context(per_layer_attn_metadata,
-                                 self.vllm_config,
-                                 num_tokens=num_input_tokens):
+        with set_forward_context(
+                per_layer_attn_metadata,
+                self.vllm_config,
+                num_tokens=num_input_tokens,
+                cudagraph_runtime_mode=self.cudagraph_runtime_mode,
+        ):
             ret_hidden_states = self.model(
                 input_ids=input_ids,
                 positions=self.positions[:num_input_tokens],
@@ -322,9 +330,12 @@ class EagleProposer:
                 input_ids = self.input_ids[:input_batch_size]
 
             # Run the model.
-            with set_forward_context(per_layer_attn_metadata,
-                                     self.vllm_config,
-                                     num_tokens=input_batch_size):
+            with set_forward_context(
+                    per_layer_attn_metadata,
+                    self.vllm_config,
+                    num_tokens=input_batch_size,
+                    cudagraph_runtime_mode=self.cudagraph_runtime_mode,
+            ):
                 ret_hidden_states = self.model(
                     input_ids=input_ids,
                     positions=self.positions[:input_batch_size],
@@ -478,9 +489,12 @@ class EagleProposer:
             else:
                 num_input_tokens = num_tokens
             # Run the model.
-            with set_forward_context(per_layer_attn_metadata,
-                                     self.vllm_config,
-                                     num_tokens=num_input_tokens):
+            with set_forward_context(
+                    per_layer_attn_metadata,
+                    self.vllm_config,
+                    num_tokens=num_input_tokens,
+                    cudagraph_runtime_mode=self.cudagraph_runtime_mode,
+            ):
                 last_hidden_states, hidden_states = self.model(
                     input_ids=self.input_ids[:num_input_tokens],
                     positions=self.positions[:num_input_tokens],
@@ -665,8 +679,12 @@ class EagleProposer:
         self,
         num_tokens: int,
     ) -> None:
-        with set_forward_context(None, self.vllm_config,
-                                 num_tokens=num_tokens):
+        with set_forward_context(
+                None,
+                self.vllm_config,
+                num_tokens=num_tokens,
+                cudagraph_runtime_mode=self.cudagraph_runtime_mode,
+        ):
             if self.is_multimodal_model:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds[:num_tokens]
