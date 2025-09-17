@@ -12,6 +12,8 @@ from compressed_tensors.utils import is_match
 from vllm.model_executor.layers.linear import (WEIGHT_LOADER_V2_SUPPORTED,
                                                LinearMethodBase,
                                                QKVCrossParallelLinear)
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+    CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.compressed_tensors.transform.module import (  # noqa: E501
     HadamardTransform)
 from vllm.model_executor.layers.quantization.compressed_tensors.transform.utils import (  # noqa: E501
@@ -26,14 +28,22 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
 
     @classmethod
     def from_schemes(
-        cls, quant_method: LinearMethodBase, input_tfms: dict[int,
-                                                              TransformTuple],
-        output_tfms: dict[int, TransformTuple]
+        cls,
+        quant_method: LinearMethodBase,
+        quant_scheme: Optional[CompressedTensorsScheme],
+        input_tfms: dict[int, TransformTuple],
+        output_tfms: dict[int, TransformTuple],
     ) -> "CompressedTensorsLinearTransformMethod":
+        from vllm.model_executor.layers.quantization.compressed_tensors.transform.schemes.linear_qutlass_nvfp4 import (  # noqa: E501
+            QutlassNvFP4LinearMethod, is_qutlass_fp4_scheme)
+
         assert input_tfms or output_tfms
 
-        # TODO (@ksayers): implement QutlassLinearMethodNvFP4
-        # hadacore and fwht can be selected by Transform module
+        if is_qutlass_fp4_scheme(quant_scheme, input_tfms):
+            return QutlassNvFP4LinearMethod(quant_method, input_tfms,
+                                            output_tfms)
+
+        # hadacore or dense gemm is selected by Transform module
 
         return cls(quant_method, input_tfms, output_tfms)
 
@@ -129,11 +139,12 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
         assert bias is None
         x = self.quant_method.apply(layer, x, bias)
 
-        # TODO (@ksayers): Write a triton kernel to do this in parallel
+        # In most cases, input transforms are preferred over output transforms
+        # (@ksayers): confirm that this is done concurrently
         if self.output_transform is not None:
             for part_id, (start, length) in enumerate(self.partition_ranges):
                 x[:, start:start + length] = self.output_transform(
-                    x[:, start:start + length], part_id=part_id)
+                    x[:, start:start + length].contiguous(), part_id=part_id)
 
         return x
 
