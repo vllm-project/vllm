@@ -103,20 +103,13 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
                 max_loras,
                 1,
                 # Pad for kernel compatibility
-                math.ceil(self.base_layer.vocab_size /
-                          lora_config.lora_vocab_padding_size) *
-                lora_config.lora_vocab_padding_size,
+                math.ceil(self.base_layer.vocab_size / 256) * 256,
                 lora_config.max_lora_rank,
             ),
             dtype=lora_config.lora_dtype,
             device=self.device,
         )
-        self.embeddings_tensors = torch.full(
-            (max_loras, lora_config.lora_extra_vocab_size, self.hidden_size),
-            fill_value=float("-inf"),
-            dtype=self.dtype,
-            device=self.device,
-        )
+        # No additional vocabulary support for LoRA
         if self.sharded_to_full_mapping is not None:
             self.sharded_to_full_mapping_gpu = torch.tensor(
                 self.sharded_to_full_mapping,
@@ -128,7 +121,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
     def reset_lora(self, index: int):
         self.lora_a_stacked[index] = 0
         self.lora_b_stacked[index] = 0
-        self.embeddings_tensors[index] = float("-inf")
+        # No additional vocabulary support for LoRA
 
     def set_lora(
         self,
@@ -145,12 +138,8 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         self.lora_b_stacked[index,
                             0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
                                 lora_b.T, non_blocking=True)
-        if embeddings_tensor is not None:
-            self.embeddings_tensors[
-                index,
-                :embeddings_tensor.shape[0],
-                :embeddings_tensor.shape[1],
-            ] = embeddings_tensor
+        # No additional vocabulary support for LoRA
+        # embeddings_tensor parameter is no longer used
 
     def _get_logits(
         self,
@@ -188,37 +177,15 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             # token_id: [0, 1, 2, 3, 4, 5, -1, -1]
             logits = logits[:, self.sharded_to_full_mapping_gpu]
 
-        lora_logits = torch.empty(
-            self.embeddings_tensors.shape[0] + 1,
-            self.embeddings_tensors.shape[1],
-            hidden_states.shape[0],
-            dtype=self.embeddings_tensors.dtype,
-            device=self.embeddings_tensors.device,
-        )
-        torch.matmul(self.embeddings_tensors,
-                     hidden_states.T,
-                     out=lora_logits[:-1])
-
-        neg_inf, pos_inf = current_platform.get_infinity_values(
-            lora_logits.dtype)
-
-        lora_logits[-1] = neg_inf
-        lora_logits = lora_logits.mT
+        # No additional vocabulary support for LoRA - skip lora_logits computation
+        # The original logits computation remains unchanged
         indices_padded = self.punica_wrapper.sampler_indices_padded
 
         if current_platform.is_tpu() or current_platform.is_xpu():
             indices_padded = indices_padded[:logits.size(0)]
 
-        lora_logits = (lora_logits.reshape(
-            lora_logits.shape[0] * lora_logits.shape[1],
-            lora_logits.shape[2],
-        ).index_select(0, indices_padded).nan_to_num_(nan=neg_inf,
-                                                      posinf=pos_inf,
-                                                      neginf=neg_inf))
-
-        logits[:,
-               self.base_layer.org_vocab_size:self.base_layer.org_vocab_size +
-               lora_logits.shape[1]] = lora_logits
+        # Continue with the base logits without additional vocabulary
+        # No additional vocabulary assignment needed
 
         lora_output: Optional[
             torch.Tensor] = self.punica_wrapper.add_lora_logits(

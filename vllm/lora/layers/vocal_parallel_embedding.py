@@ -30,37 +30,13 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             lora_config: LoRAConfig,
             model_config: Optional[PretrainedConfig] = None) -> None:
 
-        if self.base_layer.num_added_embeddings_per_partition > 0:
-            # We can start adding lora weights
-            self.embeddings_weights = self.base_layer.weight.data[
-                self.base_layer.num_org_embeddings_per_partition:self.
-                base_layer.num_org_embeddings_per_partition +
-                self.base_layer.num_added_embeddings_per_partition]
-            self.embeddings_slice = (
-                self.base_layer.shard_indices.added_vocab_start_index -
-                self.base_layer.org_vocab_size,
-                self.base_layer.shard_indices.added_vocab_end_index -
-                self.base_layer.org_vocab_size)
-            self.base_layer.weight.data[
-                self.base_layer.num_org_embeddings_per_partition:].fill_(0)
-        else:
-            self.embeddings_slice = None
-            self.embeddings_weights = None
-
-        self.embeddings_tensors = torch.zeros(
-            (
-                max_loras,
-                lora_config.lora_extra_vocab_size,
-                self.base_layer.embedding_dim,
-            ),
-            dtype=self.base_layer.weight.dtype,
-            device=self.base_layer.weight.device,
-        )
+        # No additional vocabulary support for LoRA
+        self.embeddings_slice = None
+        self.embeddings_weights = None
         self.lora_a_stacked = torch.zeros(
             (
                 max_loras,
-                self.base_layer.org_vocab_size +
-                lora_config.lora_extra_vocab_size,
+                self.base_layer.org_vocab_size,
                 lora_config.max_lora_rank,
             ),
             dtype=lora_config.lora_dtype,
@@ -84,7 +60,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
     def reset_lora(self, index: int):
         self.lora_a_stacked[index] = 0
         self.lora_b_stacked[index] = 0
-        self.embeddings_tensors[index] = 0
+        # No additional vocabulary support for LoRA
 
     def set_lora(
         self,
@@ -100,22 +76,8 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         self.lora_b_stacked[index,
                             0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
                                 lora_b.T, non_blocking=True)
-        if embeddings_tensor is not None:
-            self.embeddings_tensors[
-                index,
-                :embeddings_tensor.shape[0],
-                :embeddings_tensor.shape[1],
-            ].copy_(embeddings_tensor, non_blocking=True)
-            if self.embeddings_slice is not None:
-                # TODO(yard1): Optimize this copy, we don't need to copy
-                # everything, just the modified part
-                embeddings = self.embeddings_tensors.view(
-                    self.embeddings_tensors.shape[0] *
-                    self.embeddings_tensors.shape[1],
-                    self.embeddings_tensors.shape[2],
-                )[self.embeddings_slice[0]:self.embeddings_slice[1]]
-                assert self.embeddings_weights is not None
-                self.embeddings_weights[:embeddings.shape[0]].copy_(embeddings)
+        # No additional vocabulary support for LoRA
+        # embeddings_tensor parameter is no longer used
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         added_tokens_mask = torch.where(x > self.base_layer.org_vocab_size - 1,
