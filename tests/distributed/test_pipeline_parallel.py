@@ -324,7 +324,6 @@ def _compare_tp(
 
     if distributed_backend == "ray":
         # For V1, test Ray Compiled Graph for all the tests
-        # For V0, test Ray Compiled Graph for a subset of the tests
         pp_env = {
             "VLLM_USE_V1": "1",
             "VLLM_USE_RAY_COMPILED_DAG": "1",
@@ -335,7 +334,6 @@ def _compare_tp(
         # terminate because of a Ray Compiled Graph issue.
         common_args.append("--disable-frontend-multiprocessing")
     elif distributed_backend == "mp":
-        # Both V0/V1 of multiprocessing executor support PP
         pp_env = {
             "VLLM_USE_V1": "1",
         }
