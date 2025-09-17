@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     VLLM_XLA_USE_SPMD: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: Literal["fork", "spawn"] = "fork"
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
+    VLLM_ASSETS_CACHE_MODEL_CLEAN: bool = False
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_VIDEO_FETCH_TIMEOUT: int = 30
     VLLM_AUDIO_FETCH_TIMEOUT: int = 10
@@ -698,6 +699,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
             "VLLM_ASSETS_CACHE",
             os.path.join(get_default_cache_root(), "vllm", "assets"),
         )),
+
+    # If the env var is set, we will clean model file in
+    # this path $VLLM_ASSETS_CACHE/model_streamer/$model_name
+    "VLLM_ASSETS_CACHE_MODEL_CLEAN":
+    lambda: bool(int(os.getenv("VLLM_ASSETS_CACHE_MODEL_CLEAN", "0"))),
 
     # Timeout for fetching images when serving multimodal models
     # Default is 5 seconds

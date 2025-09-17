@@ -5,9 +5,11 @@ import hashlib
 import os
 import shutil
 import signal
-import tempfile
+from pathlib import Path
 from typing import Optional
 
+from vllm import envs
+from vllm.assets.base import get_cache_dir
 from vllm.logger import init_logger
 from vllm.utils import PlaceholderModule
 
