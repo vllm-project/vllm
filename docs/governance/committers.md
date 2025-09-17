@@ -96,7 +96,7 @@ If you have PRs touching the area, please ping the area owner for review.
 ### Model Implementations
 
 - Model Interface: The `nn.Module` interface and implementation for various models
-    - @zhuohan123, @mgoin, @simon-mo, @houseroad, @ywang96 (multimodality)
+    - @zhuohan123, @mgoin, @simon-mo, @houseroad, @ywang96 (multimodality), @jeejeelee (lora)
 - Logits Processors / Sampler: The provided sampler class and pluggable logits processors
     - @njhill, @houseroad
 - Custom Layers: Utility layers in vLLM such as rotary embedding and rms norms
@@ -106,13 +106,15 @@ If you have PRs touching the area, please ping the area owner for review.
 - FusedMoE: FusedMoE kernel, Modular kernel framework, EPLB
     - @tlrmchlsmth
 - Quantization: Various quantization config, weight loading, and kernel.
-    - @mgoin
+    - @mgoin, @Isotr0py
 - Multi-modal Input Processing: Components that load and process image/video/audio data into feature tensors
     - @DarkLight1337, @ywang96, @Isotr0py
 - torch compile: The torch compile integration for vLLM
     - @ProExpertProg, @zou3519, @youkaichao
 - State space models: The state space models implementation in vLLM
     - @tdoublep, @tlrmchlsmth
+- Reasoning and tool calling parsers
+    - @chaunceyjiang, @aarnphm
 
 ### Entrypoints
 
@@ -157,7 +159,7 @@ If you have PRs touching the area, please ping the area owner for review.
 - Ray: @ruisearch42
 - NIXL: @robertgshaw2-redhat, @NickLucche
 
-### Model Definitions and Integrations
+### Collaboration with Model Vendors
 
 - gpt-oss: @heheda12345, @simon-mo, @zhuohan123
 - Llama: @luccafong
