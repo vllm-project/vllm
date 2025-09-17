@@ -252,14 +252,13 @@ class LoRAModel(AdapterModel):
         else:
             raise ValueError(f"{lora_dir} doesn't contain tensors")
 
-        return cls.from_lora_tensors(
-            lora_model_id=get_lora_id()
-            if lora_model_id is None else lora_model_id,
-            tensors=tensors,
-            peft_helper=peft_helper,
-            device=device,
-            dtype=dtype,
-            weights_mapper=weights_mapper)
+        return cls.from_lora_tensors(lora_model_id=get_lora_id() if
+                                     lora_model_id is None else lora_model_id,
+                                     tensors=tensors,
+                                     peft_helper=peft_helper,
+                                     device=device,
+                                     dtype=dtype,
+                                     weights_mapper=weights_mapper)
 
 
 class LoRAModelManager(AdapterModelManager):
@@ -487,9 +486,9 @@ class LoRAModelManager(AdapterModelManager):
             if module_name not in self.packed_modules:
                 assert embedding_modules is not None
                 if parts[-1] in embedding_modules:
-                    input_dim = (module.base_layer.org_vocab_size if
-                                 hasattr(module.base_layer, "org_vocab_size")
-                                 else module.base_layer.weight.shape[1])
+                    input_dim = (module.base_layer.org_vocab_size if hasattr(
+                        module.base_layer, "org_vocab_size") else
+                                 module.base_layer.weight.shape[1])
                     output_dim = module.base_layer.embedding_dim if hasattr(
                         module.base_layer,
                         "embedding_dim") else module.base_layer.weight.shape[0]
