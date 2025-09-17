@@ -415,6 +415,13 @@ class StreamingHarmonyContext(HarmonyContext):
 
             # For streaming, update previous turn when message is complete
             if output.finished:
+                # Sync messages from parser if it has more than context
+                if len(self._messages) - self.num_init_messages < len(
+                        self.parser.messages):
+                    new_messages = self.parser.messages[len(self._messages) -
+                                                        self.
+                                                        num_init_messages:]
+                    self._messages.extend(new_messages)
                 self.previous_turn = self.current_turn.copy()
         else:
             # Handle the case of tool output in direct message format

@@ -499,11 +499,20 @@ async def test_streaming_message_synchronization(mock_parser):
         ),
     ]
 
-    # This should trigger the message synchronization logic
+    # This should not trigger synchronization yet (not finished)
     context.append_output(
         create_mock_request_output(prompt_token_ids=[1, 2, 3],
                                    output_token_ids=[101],
                                    finished=False))
+
+    # Messages should not be synchronized yet
+    assert len(context._messages) == 1
+
+    # Complete the message to trigger synchronization
+    context.append_output(
+        create_mock_request_output(prompt_token_ids=[1, 2, 3],
+                                   output_token_ids=[101],
+                                   finished=True))
 
     # Verify that messages were synchronized
     assert len(context._messages) == 2
@@ -523,7 +532,7 @@ async def test_streaming_message_synchronization(mock_parser):
     mock_parser.messages.append(
         Message(
             author=Author(role=Role.ASSISTANT, name="assistant"),
-            content=[TextContent(text="Response 4")],
+            content=[TextContent(text="Response 2")],
             recipient=Role.USER,
         ))
 
@@ -534,7 +543,7 @@ async def test_streaming_message_synchronization(mock_parser):
 
     context.append_output(mock_output2)
 
-    # Verify the fourth message was added, num_init_messages is still 1
+    # Verify the second message was added, num_init_messages is still 1
     assert len(context._messages) == 3
     assert context.num_init_messages == 1
-    assert context._messages[2].content[0].text == "Response 4"
+    assert context._messages[2].content[0].text == "Response 2"
