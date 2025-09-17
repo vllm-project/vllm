@@ -121,7 +121,7 @@ def benchmark_batched_propose(args):
 
         # hack max model len
         runner.max_model_len = MAX_MODEL_LEN
-        runner.drafter_ngram.max_model_len = MAX_MODEL_LEN
+        runner.drafter.max_model_len = MAX_MODEL_LEN
 
         dummy_input_batch = InputBatch(
             max_num_reqs=args.num_req,
@@ -133,7 +133,7 @@ def benchmark_batched_propose(args):
             block_sizes=[16],
         )
         dummy_input_batch._req_ids = list(str(id) for id in range(args.num_req))
-        dummy_input_batch.spec_decode_unsupported_reqs = []
+        dummy_input_batch.spec_decode_unsupported_reqs = ()
         dummy_input_batch.num_tokens_no_spec = [args.num_token] * args.num_req
         dummy_input_batch.token_ids_cpu = np.random.randint(
             0, 20, (args.num_req, args.num_token)
@@ -147,8 +147,13 @@ def benchmark_batched_propose(args):
         # first run is warmup so ignore it
         for _ in range(args.num_iteration):
             start = time.time()
-            # runner.propose_ngram_draft_token_ids(sampled_token_ids)
-            runner.propose_ngram_draft_token_ids_numba(sampled_token_ids)
+            runner.drafter.propose(
+                sampled_token_ids,
+                dummy_input_batch.req_ids,
+                dummy_input_batch.num_tokens_no_spec,
+                dummy_input_batch.token_ids_cpu,
+                dummy_input_batch.spec_decode_unsupported_reqs
+            )
             end = time.time()
             print(f"Iteration time (s): {end - start}")
 
