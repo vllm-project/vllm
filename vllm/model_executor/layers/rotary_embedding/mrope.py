@@ -151,9 +151,6 @@ def _triton_interleaved_mrope_forward(
     # ####################################################################
     # Note: cos and sin now have shape (3, num_tokens, head_dim // 2)
 
-    t_end = mrope_section_t
-    h_end = t_end + mrope_section_h
-
     # Updated stride calculation for half head_dim
     half_rd = rd // 2
     t_cos = cos + pid * half_rd
@@ -164,10 +161,12 @@ def _triton_interleaved_mrope_forward(
     w_sin = h_sin + num_tokens * half_rd
 
     # Updated offsets for half head_dim
-    cos_offsets = tl.arange(0, pad_hd // 2) * 2
-    t_mask = cos_offsets < t_end
-    h_mask = (t_end <= cos_offsets) & (cos_offsets < h_end)
-    w_mask = (h_end <= cos_offsets) & (cos_offsets < half_rd)
+    # create interleaved mask
+    # [TTT...HHH...WWW] -> [THTHWHTHW...TT]
+    cos_offsets = tl.arange(0, pad_hd // 2)
+    t_mask = (cos_offsets % 3) == 0
+    h_mask = (cos_offsets % 3) == 1
+    w_mask = (cos_offsets % 3) == 2
 
     t_cos_row = tl.load(t_cos + cos_offsets, mask=t_mask, other=0)
     h_cos_row = tl.load(h_cos + cos_offsets, mask=h_mask, other=0)

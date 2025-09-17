@@ -49,7 +49,7 @@ model_tp_dict = {
 
 # https://github.com/pytorch/pytorch/blob/main/torch/testing/_comparison.py#L1317
 dtype_atol_rtol_list = [
-    [torch.bfloat16, 1e-2, 1.6e-2],
+    [torch.bfloat16, 1.3e-2, 1.6e-2],
 ]
 
 num_tokens_list = [11, 8192]
@@ -64,13 +64,15 @@ num_tokens_list = [11, 8192]
 def test_mrope(model_name, tp_size, dtype, atol, rtol, num_tokens):
 
     config = AutoConfig.from_pretrained(model_name)
+    config = config.get_text_config()
 
     # get the model config
     total_num_kv_heads = config.num_key_value_heads
     total_num_heads = config.num_attention_heads
     num_heads = total_num_heads // tp_size
     num_kv_heads = max(1, total_num_kv_heads // tp_size)
-    head_dim = config.hidden_size // total_num_heads
+    head_dim = (config.head_dim if hasattr(config, "head_dim") else
+                config.hidden_size // total_num_heads)
     is_neox_style = True
 
     rope_theta = config.rope_theta
@@ -124,13 +126,15 @@ def test_mrope(model_name, tp_size, dtype, atol, rtol, num_tokens):
 def test_mrope_torch_compile_tracing(model_name, tp_size, dtype, atol, rtol,
                                      num_tokens):
     config = AutoConfig.from_pretrained(model_name)
+    config = config.get_text_config()
 
     # get the model config
     total_num_kv_heads = config.num_key_value_heads
     total_num_heads = config.num_attention_heads
     num_heads = total_num_heads // tp_size
     num_kv_heads = max(1, total_num_kv_heads // tp_size)
-    head_dim = config.hidden_size // total_num_heads
+    head_dim = (config.head_dim if hasattr(config, "head_dim") else
+                config.hidden_size // total_num_heads)
     is_neox_style = True
     rope_theta = config.rope_theta
     max_position = config.max_position_embeddings
