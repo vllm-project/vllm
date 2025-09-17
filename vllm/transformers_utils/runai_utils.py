@@ -57,7 +57,7 @@ class ObjectStorageModel:
         pull_files(): Pull model from object storage to the temporary directory.
     """
 
-    def __init__(self, url: Optional[str] = None) -> None:
+    def __init__(self, url: str) -> None:
         for sig in (signal.SIGINT, signal.SIGTERM):
             existing_handler = signal.getsignal(sig)
             signal.signal(sig, self._close_by_signal(existing_handler))
@@ -66,14 +66,14 @@ class ObjectStorageModel:
             tempfile.gettempdir(),
             hashlib.sha256(str(url).encode()).hexdigest()[:8])
         os.makedirs(dir_name, exist_ok=True)
-        self.dir_name = dir_name
+        self.dir = dir_name
 
     def __del__(self):
         self._close()
 
     def _close(self) -> None:
-        if os.path.exists(self.dir_name):
-            shutil.rmtree(self.dir_name)
+        if os.path.exists(self.dir):
+            shutil.rmtree(self.dir)
 
     def _close_by_signal(self, existing_handler=None):
 
@@ -99,5 +99,4 @@ class ObjectStorageModel:
         """
         if not model_path.endswith("/"):
             model_path = model_path + "/"
-        runai_pull_files(model_path, self.dir_name, allow_pattern,
-                         ignore_pattern)
+        runai_pull_files(model_path, self.dir, allow_pattern, ignore_pattern)

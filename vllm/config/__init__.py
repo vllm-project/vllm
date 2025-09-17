@@ -838,7 +838,7 @@ class ModelConfig:
             object_storage_model.pull_files(
                 model, allow_pattern=["*.model", "*.py", "*.json"])
             self.model_weights = model
-            self.model = object_storage_model.dir_name
+            self.model = object_storage_model.dir
 
             # If tokenizer is same as model, download to same directory
             if model == tokenizer:
@@ -847,7 +847,7 @@ class ModelConfig:
                                                     "*.pt", "*.safetensors",
                                                     "*.bin", "*.tensors"
                                                 ])
-                self.tokenizer = object_storage_model.dir_name
+                self.tokenizer = object_storage_model.dir
                 return
 
         # Only download tokenizer if needed and not already handled
