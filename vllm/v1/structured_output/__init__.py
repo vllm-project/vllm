@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Optional
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
-from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
+from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
 from vllm.utils import LazyLoader
 from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
@@ -60,10 +60,7 @@ class StructuredOutputManager:
             max_workers = max(1, (multiprocessing.cpu_count() + 1) // 2)
             self.executor = ThreadPoolExecutor(max_workers=max_workers)
             self.tokenizer = init_tokenizer_from_configs(
-                model_config=self.vllm_config.model_config,
-                scheduler_config=self.vllm_config.scheduler_config,
-                lora_config=self.vllm_config.lora_config,
-            ).get_lora_tokenizer(None)
+                model_config=self.vllm_config.model_config)
             reasoning_backend = \
                     self.vllm_config.decoding_config.reasoning_backend
             if reasoning_backend:
