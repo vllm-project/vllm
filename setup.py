@@ -330,6 +330,36 @@ class precompiled_wheel_utils:
     """Extracts libraries and other files from an existing wheel."""
 
     @staticmethod
+    def build_wheel_url(commit_hash: str):
+        """Build the wheel URL for a given commit hash by finding the first wheel for current arch."""
+        import platform
+        import re
+        from urllib.request import urlopen
+        
+        arch = platform.machine()
+        arch_suffix = f"{arch}.whl"
+        
+        # Get the index page and find the first wheel ending with our arch suffix
+        index_url = f"https://wheels.vllm.ai/{commit_hash}/vllm/index.html"
+        try:
+            with urlopen(index_url) as response:
+                content = response.read().decode('utf-8')
+                
+            # Find any wheel filename ending with our architecture suffix
+            pattern = rf'href="\.\./(.*?{re.escape(arch_suffix)})"'
+            match = re.search(pattern, content)
+            
+            if match:
+                wheel_filename = match.group(1)
+                return f"https://wheels.vllm.ai/{commit_hash}/{wheel_filename}"
+            else:
+                raise ValueError(f"No wheel found for platform {arch}")
+                
+        except Exception as e:
+            # If parsing fails, there's no wheel available
+            raise ValueError(f"No wheels available for commit {commit_hash} on {arch}")
+
+    @staticmethod
     def extract_precompiled_and_patch_package(wheel_url_or_path: str) -> dict:
         import tempfile
         import zipfile
@@ -441,18 +471,9 @@ class precompiled_wheel_utils:
     def check_precompiled_wheels_available(commit_hash: str) -> bool:
         """Check if precompiled wheels are available for the given commit."""
         try:
-            import platform
-            arch = platform.machine()
-            if arch == "x86_64":
-                wheel_tag = "manylinux1_x86_64"
-            elif arch == "aarch64":
-                wheel_tag = "manylinux2014_aarch64"
-            else:
-                return False
-            
-            # Check if wheels are available at the commit-specific URL
-            index_url = f"https://wheels.vllm.ai/{commit_hash}/vllm/index.html"
-            return is_url_available(index_url)
+            # build_wheel_url() will check the index and find the correct wheel
+            wheel_url = precompiled_wheel_utils.build_wheel_url(commit_hash)
+            return is_url_available(wheel_url)
         except Exception:
             return False
 
@@ -661,17 +682,9 @@ if envs.VLLM_USE_PRECOMPILED:
     if wheel_location is not None:
         wheel_url = wheel_location
     else:
-        import platform
-        arch = platform.machine()
-        if arch == "x86_64":
-            wheel_tag = "manylinux1_x86_64"
-        elif arch == "aarch64":
-            wheel_tag = "manylinux2014_aarch64"
-        else:
-            raise ValueError(f"Unsupported architecture: {arch}")
         base_commit = precompiled_wheel_utils.get_base_commit_in_main_branch()
-        wheel_url = f"https://wheels.vllm.ai/{base_commit}/vllm-1.0.0.dev-cp38-abi3-{wheel_tag}.whl"
-        nightly_wheel_url = f"https://wheels.vllm.ai/nightly/vllm-1.0.0.dev-cp38-abi3-{wheel_tag}.whl"
+        wheel_url = precompiled_wheel_utils.build_wheel_url(base_commit)
+        nightly_wheel_url = precompiled_wheel_utils.build_wheel_url("nightly")
         from urllib.request import urlopen
         try:
             with urlopen(wheel_url) as resp:
@@ -722,15 +735,7 @@ if (not envs.VLLM_USE_PRECOMPILED and envs.VLLM_AUTO_USE_PRECOMPILED and
             if wheel_location is not None:
                 wheel_url = wheel_location
             else:
-                import platform
-                arch = platform.machine()
-                if arch == "x86_64":
-                    wheel_tag = "manylinux1_x86_64"
-                elif arch == "aarch64":
-                    wheel_tag = "manylinux2014_aarch64"
-                else:
-                    raise ValueError(f"Unsupported architecture: {arch}")
-                wheel_url = f"https://wheels.vllm.ai/{current_commit}/vllm-1.0.0.dev-cp38-abi3-{wheel_tag}.whl"
+                wheel_url = precompiled_wheel_utils.build_wheel_url(current_commit)
                 
             patch = precompiled_wheel_utils.extract_precompiled_and_patch_package(wheel_url)
             for pkg, files in patch.items():
