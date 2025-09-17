@@ -33,7 +33,7 @@ def get_io_processor(
         model_plugin = config_plugin
 
     if model_plugin is None:
-        logger.info("No IOProcessor plugins requested by the model")
+        logger.debug("No IOProcessor plugins requested by the model")
         return None
 
     logger.debug("IOProcessor plugin to be loaded %s", model_plugin)
