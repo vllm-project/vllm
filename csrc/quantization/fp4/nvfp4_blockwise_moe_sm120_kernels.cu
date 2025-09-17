@@ -59,15 +59,15 @@ using namespace cute;
 constexpr auto FLOAT4_E2M1X2 = at::ScalarType::Byte;
 constexpr auto SF_DTYPE = at::ScalarType::Float8_e4m3fn;
 
-template <typename ElementAB, typename ElementC, typename ElementSF,
-          typename ElementAccumulator, typename LayoutSFA, typename LayoutSFB,
-          typename ScaleConfig>
+template <typename ElementA, typename ElementB, typename ElementC,
+          typename ElementSF, typename ElementAccumulator, typename LayoutSFA,
+          typename LayoutSFB, typename ScaleConfig>
 __global__ void __get_group_gemm_starts_sm120(
-    ElementAB** a_offsets, ElementAB** b_offsets, ElementC** out_offsets,
+    ElementA** a_offsets, ElementB** b_offsets, ElementC** out_offsets,
     ElementSF** a_scales_offsets, ElementSF** b_scales_offsets,
     ElementAccumulator** alpha_offsets, LayoutSFA* layout_sfa_base_as_int,
-    LayoutSFB* layout_sfb_base_as_int, ElementAB* a_base_as_int,
-    ElementAB* b_base_as_int, ElementC* out_base_as_int,
+    LayoutSFB* layout_sfb_base_as_int, uint8_t* a_base_bytes,
+    uint8_t* b_base_bytes, ElementC* out_base_as_int,
     ElementSF* a_scales_base_as_int, ElementSF* b_scales_base_as_int,
     ElementAccumulator* alphas_base_as_int, const int32_t* expert_offsets,
     const int32_t* sf_offsets, const int32_t* problem_sizes_as_shapes,
@@ -89,8 +89,10 @@ __global__ void __get_group_gemm_starts_sm120(
   int64_t half_k = static_cast<int64_t>(k / 2);
   int64_t group_k = static_cast<int64_t>(k / group_size);
 
-  a_offsets[expert_id] = a_base_as_int + expert_offset * half_k;
-  b_offsets[expert_id] = b_base_as_int + expert_id * n * half_k;
+  int64_t a_byte_offset = expert_offset * half_k;
+  int64_t b_byte_offset = static_cast<int64_t>(expert_id) * n * half_k;
+  a_offsets[expert_id] = reinterpret_cast<ElementA*>(a_base_bytes + a_byte_offset);
+  b_offsets[expert_id] = reinterpret_cast<ElementB*>(b_base_bytes + b_byte_offset);
   out_offsets[expert_id] = out_base_as_int + expert_offset * n;
 
   a_scales_offsets[expert_id] = a_scales_base_as_int + sf_offset * group_k;
@@ -113,31 +115,30 @@ __global__ void __get_group_gemm_starts_sm120(
                        static_cast<int>(k), 1));
 }
 
-#define __CALL_GET_STARTS_KERNEL_BLOCKSCALE_SM120(ELEMENT_AB_TYPE, SF_TYPE,    \
-                                                  TENSOR_C_TYPE, C_TYPE,      \
-                                                  LayoutSFA, LayoutSFB,       \
-                                                  ScaleConfig)                \
-  else if (out_tensors.dtype() == TENSOR_C_TYPE) {                            \
-    __get_group_gemm_starts_sm120<ELEMENT_AB_TYPE, C_TYPE, SF_TYPE, float,     \
-                                  LayoutSFA, LayoutSFB, ScaleConfig>          \
-        <<<1, num_experts, 0, stream>>>(                                      \
-            static_cast<ELEMENT_AB_TYPE**>(a_starts.data_ptr()),              \
-            static_cast<ELEMENT_AB_TYPE**>(b_starts.data_ptr()),              \
-            static_cast<C_TYPE**>(out_starts.data_ptr()),                     \
-            static_cast<SF_TYPE**>(a_scales_starts.data_ptr()),               \
-            static_cast<SF_TYPE**>(b_scales_starts.data_ptr()),               \
-            static_cast<float**>(alpha_starts.data_ptr()),                    \
-            reinterpret_cast<LayoutSFA*>(layout_sfa.data_ptr()),              \
-            reinterpret_cast<LayoutSFB*>(layout_sfb.data_ptr()),              \
-            static_cast<ELEMENT_AB_TYPE*>(a_tensors.data_ptr()),              \
-            static_cast<ELEMENT_AB_TYPE*>(b_tensors.data_ptr()),              \
-            static_cast<C_TYPE*>(out_tensors.data_ptr()),                     \
-            static_cast<SF_TYPE*>(a_scales.data_ptr()),                       \
-            static_cast<SF_TYPE*>(b_scales.data_ptr()),                       \
-            static_cast<float*>(alphas.data_ptr()),                           \
-            static_cast<int32_t*>(expert_offsets.data_ptr()),                 \
-            static_cast<int32_t*>(sf_offsets.data_ptr()),                     \
-            static_cast<int32_t*>(problem_sizes.data_ptr()), K, N);           \
+#define __CALL_GET_STARTS_KERNEL_BLOCKSCALE_SM120(ELEMENT_A_TYPE, ELEMENT_B_TYPE, SF_TYPE, \
+                                                  TENSOR_C_TYPE, C_TYPE, LayoutSFA,       \
+                                                  LayoutSFB, ScaleConfig)                  \
+  else if (out_tensors.dtype() == TENSOR_C_TYPE) {                                        \
+    __get_group_gemm_starts_sm120<ELEMENT_A_TYPE, ELEMENT_B_TYPE, C_TYPE, SF_TYPE, float, \
+                                  LayoutSFA, LayoutSFB, ScaleConfig>                      \
+        <<<1, num_experts, 0, stream>>>(                                                  \
+            static_cast<ELEMENT_A_TYPE**>(a_starts.data_ptr()),                           \
+            static_cast<ELEMENT_B_TYPE**>(b_starts.data_ptr()),                           \
+            static_cast<C_TYPE**>(out_starts.data_ptr()),                                 \
+            static_cast<SF_TYPE**>(a_scales_starts.data_ptr()),                           \
+            static_cast<SF_TYPE**>(b_scales_starts.data_ptr()),                           \
+            static_cast<float**>(alpha_starts.data_ptr()),                                \
+            reinterpret_cast<LayoutSFA*>(layout_sfa.data_ptr()),                          \
+            reinterpret_cast<LayoutSFB*>(layout_sfb.data_ptr()),                          \
+            static_cast<uint8_t*>(a_tensors.data_ptr()),                                  \
+            static_cast<uint8_t*>(b_tensors.data_ptr()),                                  \
+            static_cast<C_TYPE*>(out_tensors.data_ptr()),                                 \
+            static_cast<SF_TYPE*>(a_scales.data_ptr()),                                   \
+            static_cast<SF_TYPE*>(b_scales.data_ptr()),                                   \
+            static_cast<float*>(alphas.data_ptr()),                                       \
+            static_cast<int32_t*>(expert_offsets.data_ptr()),                             \
+            static_cast<int32_t*>(sf_offsets.data_ptr()),                                 \
+            static_cast<int32_t*>(problem_sizes.data_ptr()), K, N);                       \
   }
 
 template <typename LayoutSFA, typename LayoutSFB, typename ScaleConfig>
@@ -162,12 +163,15 @@ static inline void run_get_group_gemm_starts_sm120(
   if (false) {
   }
   __CALL_GET_STARTS_KERNEL_BLOCKSCALE_SM120(
-      cutlass::float_e2m1_t, cutlass::float_ue4m3_t, torch::kBFloat16,
-      cutlass::bfloat16_t, LayoutSFA, LayoutSFB, ScaleConfig)
-  __CALL_GET_STARTS_KERNEL_BLOCKSCALE_SM120(cutlass::float_e2m1_t,
-                                            cutlass::float_ue4m3_t,
-                                            torch::kFloat16, half, LayoutSFA,
-                                            LayoutSFB, ScaleConfig)
+      cutlass::nv_float4_t<cutlass::float_e2m1_t>,
+      cutlass::nv_float4_t<cutlass::float_e2m1_t>,
+      cutlass::float_ue4m3_t, torch::kBFloat16, cutlass::bfloat16_t, LayoutSFA,
+      LayoutSFB, ScaleConfig)
+  __CALL_GET_STARTS_KERNEL_BLOCKSCALE_SM120(
+      cutlass::nv_float4_t<cutlass::float_e2m1_t>,
+      cutlass::nv_float4_t<cutlass::float_e2m1_t>,
+      cutlass::float_ue4m3_t, torch::kFloat16, half, LayoutSFA, LayoutSFB,
+      ScaleConfig)
   else {
     TORCH_CHECK(false, "Invalid output type (must be float16 or bfloat16)");
   }
@@ -243,10 +247,10 @@ static inline void run_fp4_blockwise_scaled_group_mm_sm120(
                                            CollectiveEpilogue>;
   using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
 
-  using StrideAParam = typename Gemm::GemmKernel::StrideA;
-  using StrideBParam = typename Gemm::GemmKernel::StrideB;
-  using StrideCParam = typename Gemm::GemmKernel::StrideC;
-  using StrideDParam = typename Gemm::GemmKernel::StrideD;
+  using StrideAParam = typename Gemm::GemmKernel::StrideA*;
+  using StrideBParam = typename Gemm::GemmKernel::StrideB*;
+  using StrideCParam = typename Gemm::GemmKernel::StrideC*;
+  using StrideDParam = typename Gemm::GemmKernel::StrideD*;
 
   using InternalLayoutSFA =
       typename Gemm::GemmKernel::CollectiveMainloop::InternalLayoutSFA;
@@ -270,14 +274,36 @@ static inline void run_fp4_blockwise_scaled_group_mm_sm120(
   torch::Tensor a_scales_ptrs = torch::empty(num_experts, options_int);
   torch::Tensor b_scales_ptrs = torch::empty(num_experts, options_int);
   torch::Tensor alpha_ptrs = torch::empty(num_experts, options_int);
-  torch::Tensor layout_sfa = torch::empty({num_experts, 5}, options_int);
-  torch::Tensor layout_sfb = torch::empty({num_experts, 5}, options_int);
-  torch::Tensor c_strides1 =
-      torch::full({num_experts}, output.stride(0), options_int);
-  torch::Tensor a_strides1 =
-      torch::full({num_experts}, a.stride(0) * 2, options_int);
-  torch::Tensor b_strides1 =
-      torch::full({num_experts}, b.stride(1) * 2, options_int);
+  auto options_byte = torch::TensorOptions().dtype(torch::kUInt8).device(a.device());
+  torch::Tensor layout_sfa = torch::empty({num_experts, (long)sizeof(InternalLayoutSFA)}, options_byte);
+  torch::Tensor layout_sfb = torch::empty({num_experts, (long)sizeof(InternalLayoutSFB)}, options_byte);
+  auto problem_sizes_cpu = problem_sizes.to(torch::kCPU).contiguous();
+  auto ps_ptr = problem_sizes_cpu.data_ptr<int32_t>();
+  std::vector<typename Gemm::GemmKernel::StrideA> host_strideA(num_experts);
+  std::vector<typename Gemm::GemmKernel::StrideB> host_strideB(num_experts);
+  std::vector<typename Gemm::GemmKernel::StrideC> host_strideC(num_experts);
+  std::vector<typename Gemm::GemmKernel::StrideD> host_strideD(num_experts);
+  for (int i = 0; i < num_experts; ++i) {
+    int Mi = ps_ptr[3 * i + 0];
+    int Ni = ps_ptr[3 * i + 1];
+    int Ki = ps_ptr[3 * i + 2];
+    host_strideA[i] = cutlass::make_cute_packed_stride(
+        typename Gemm::GemmKernel::StrideA{}, {Mi, Ki, 1});
+    host_strideB[i] = cutlass::make_cute_packed_stride(
+        typename Gemm::GemmKernel::StrideB{}, {Ni, Ki, 1});
+    host_strideC[i] = cutlass::make_cute_packed_stride(
+        typename Gemm::GemmKernel::StrideC{}, {Mi, Ni, 1});
+    host_strideD[i] = cutlass::make_cute_packed_stride(
+        typename Gemm::GemmKernel::StrideD{}, {Mi, Ni, 1});
+  }
+  torch::Tensor a_strides_buf = torch::empty({num_experts, (long)sizeof(host_strideA[0])}, options_byte);
+  torch::Tensor b_strides_buf = torch::empty({num_experts, (long)sizeof(host_strideB[0])}, options_byte);
+  torch::Tensor c_strides_buf = torch::empty({num_experts, (long)sizeof(host_strideC[0])}, options_byte);
+  torch::Tensor d_strides_buf = torch::empty({num_experts, (long)sizeof(host_strideD[0])}, options_byte);
+  cudaMemcpyAsync(a_strides_buf.data_ptr(), host_strideA.data(), host_strideA.size() * sizeof(host_strideA[0]), cudaMemcpyHostToDevice, at::cuda::getCurrentCUDAStream());
+  cudaMemcpyAsync(b_strides_buf.data_ptr(), host_strideB.data(), host_strideB.size() * sizeof(host_strideB[0]), cudaMemcpyHostToDevice, at::cuda::getCurrentCUDAStream());
+  cudaMemcpyAsync(c_strides_buf.data_ptr(), host_strideC.data(), host_strideC.size() * sizeof(host_strideC[0]), cudaMemcpyHostToDevice, at::cuda::getCurrentCUDAStream());
+  cudaMemcpyAsync(d_strides_buf.data_ptr(), host_strideD.data(), host_strideD.size() * sizeof(host_strideD[0]), cudaMemcpyHostToDevice, at::cuda::getCurrentCUDAStream());
 
   run_get_group_gemm_starts_sm120<InternalLayoutSFA, InternalLayoutSFB, ScaleConfig>(
       a_ptrs, b_ptrs, out_ptrs, a_scales_ptrs, b_scales_ptrs, alpha_ptrs,
@@ -306,21 +332,21 @@ static inline void run_fp4_blockwise_scaled_group_mm_sm120(
   hw_info.sm_count = std::min(cached_sm_counts[hw_info.device_id], INT_MAX);
 
   typename GemmKernel::MainloopArguments mainloop_args{
-      static_cast<const ElementType**>(a_ptrs.data_ptr()),
-      reinterpret_cast<StrideAParam>(a_strides1.data_ptr()),
-      static_cast<const ElementType**>(b_ptrs.data_ptr()),
-      reinterpret_cast<StrideBParam>(b_strides1.data_ptr()),
-      static_cast<const ElementSFType**>(a_scales_ptrs.data_ptr()),
-      reinterpret_cast<LayoutSFAArg>(layout_sfa.data_ptr()),
-      static_cast<const ElementSFType**>(b_scales_ptrs.data_ptr()),
-      reinterpret_cast<LayoutSFBArg>(layout_sfb.data_ptr())};
+      reinterpret_cast<const ElementA**>(a_ptrs.data_ptr()),
+      reinterpret_cast<StrideAParam>(a_strides_buf.data_ptr()),
+      reinterpret_cast<const ElementB**>(b_ptrs.data_ptr()),
+      reinterpret_cast<StrideBParam>(b_strides_buf.data_ptr()),
+      reinterpret_cast<const ElementSFType**>(a_scales_ptrs.data_ptr()),
+      reinterpret_cast<LayoutSFAArg*>(layout_sfa.data_ptr()),
+      reinterpret_cast<const ElementSFType**>(b_scales_ptrs.data_ptr()),
+      reinterpret_cast<LayoutSFBArg*>(layout_sfb.data_ptr())};
 
   typename GemmKernel::EpilogueArguments epilogue_args{
       {},  // epilogue.thread
       nullptr,
-      reinterpret_cast<StrideCParam>(c_strides1.data_ptr()),
+      reinterpret_cast<StrideCParam>(c_strides_buf.data_ptr()),
       reinterpret_cast<ElementD**>(out_ptrs.data_ptr()),
-      reinterpret_cast<StrideDParam>(c_strides1.data_ptr())};
+      reinterpret_cast<StrideDParam>(d_strides_buf.data_ptr())};
   auto& fusion_args = epilogue_args.thread;
   fusion_args.alpha_ptr_array =
       reinterpret_cast<float**>(alpha_ptrs.data_ptr());
@@ -337,7 +363,12 @@ static inline void run_fp4_blockwise_scaled_group_mm_sm120(
   size_t workspace_size = Gemm::get_workspace_size(args);
   auto const workspace_options =
       torch::TensorOptions().dtype(torch::kUInt8).device(a.device());
-  auto workspace = torch::empty(workspace_size, workspace_options);
+  torch::Tensor workspace;
+  void* workspace_ptr = nullptr;
+  if (workspace_size > 0) {
+    workspace = torch::empty(workspace_size, workspace_options);
+    workspace_ptr = workspace.data_ptr();
+  }
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(a.get_device());
 
   auto can_implement_status = gemm_op.can_implement(args);
@@ -349,7 +380,7 @@ static inline void run_fp4_blockwise_scaled_group_mm_sm120(
   TORCH_CHECK(can_implement_status == cutlass::Status::kSuccess,
               "Failed to implement GEMM (SM120 NVFP4 MoE)");
 
-  auto status = gemm_op.initialize(args, workspace.data_ptr());
+  auto status = gemm_op.initialize(args, workspace_ptr);
   if (nvfp4_sm120_debug_enabled()) {
     std::fprintf(stderr,
                  "[nvfp4-sm120] initialize status=%d (0==success)\n",
@@ -358,7 +389,7 @@ static inline void run_fp4_blockwise_scaled_group_mm_sm120(
   TORCH_CHECK(status == cutlass::Status::kSuccess,
               "Failed to initialize GEMM (SM120 NVFP4 MoE)");
 
-  status = gemm_op.run(args, workspace.data_ptr(), stream);
+  status = gemm_op.run(args, workspace_ptr, stream);
   if (nvfp4_sm120_debug_enabled()) {
     std::fprintf(stderr, "[nvfp4-sm120] run status=%d (0==success)\n",
                  static_cast<int>(status));
