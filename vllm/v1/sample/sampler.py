@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""A layer that samples the next tokens from the model's outputs."""
+"""A layer that samples the next tokens from the model's outputs"""
 
 from typing import Optional
 
