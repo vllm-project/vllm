@@ -22,7 +22,7 @@
 /vllm/reasoning @aarnphm @chaunceyjiang
 /vllm/entrypoints @aarnphm @chaunceyjiang
 /vllm/compilation @zou3519 @youkaichao @ProExpertProg
-/vllm/distributed/kv_transfer @NickLucche
+/vllm/distributed/kv_transfer @NickLucche @ApostaC
 CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 
 # Any change to the VllmConfig changes can have a large user-facing impact,
@@ -35,8 +35,9 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /vllm/v1/spec_decode @benchislett @luccafong
 /vllm/v1/attention/backends/flashinfer.py @mgoin
 /vllm/v1/attention/backends/triton_attn.py @tdoublep
-/vllm/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @comaniac @alexm-redhat @heheda12345
+/vllm/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @comaniac @alexm-redhat @heheda12345 @ApostaC
 /vllm/v1/kv_cache_interface.py @heheda12345
+/vllm/v1/offloading @ApostaC
 
 # Test ownership
 /.buildkite/lm-eval-harness @mgoin @simon-mo
@@ -54,11 +55,13 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /tests/test_inputs.py @DarkLight1337 @ywang96
 /tests/v1/entrypoints/llm/test_struct_output_generate.py @mgoin @russellb @aarnphm
 /tests/v1/structured_output @mgoin @russellb @aarnphm
-/tests/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @comaniac @alexm-redhat @heheda12345
+/tests/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @comaniac @alexm-redhat @heheda12345 @ApostaC
 /tests/weight_loading @mgoin @youkaichao @yewentao256
 /tests/lora @jeejeelee
 /tests/models/language/generation/test_hybrid.py @tdoublep
-/tests/v1/kv_connector/nixl_integration @NickLucche
+/tests/v1/kv_connector/nixl_integration @NickLucche 
+/tests/v1/kv_connector @ApostaC
+/tests/v1/offloading @ApostaC
 
 # Docs
 /docs @hmellor
