@@ -20,6 +20,7 @@
 """Inference-only BLOOM model compatible with HuggingFace weights."""
 import math
 from collections.abc import Iterable
+from itertools import islice
 from typing import Optional, Union
 
 import torch
@@ -256,7 +257,7 @@ class BloomModel(nn.Module):
                                                     config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.word_embeddings_layernorm(self.word_embeddings(input_ids))
+        return self.word_embeddings(input_ids)
 
     def forward(
         self,
@@ -270,10 +271,11 @@ class BloomModel(nn.Module):
                 hidden_states = inputs_embeds
             else:
                 hidden_states = self.get_input_embeddings(input_ids)
+            hidden_states = self.word_embeddings_layernorm(hidden_states)
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
-        for layer in self.h[self.start_layer:self.end_layer]:
+        for layer in islice(self.h, self.start_layer, self.end_layer):
             hidden_states = layer(position_ids, hidden_states)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})

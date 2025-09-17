@@ -17,6 +17,7 @@
 """Wrapper around `transformers` models"""
 from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Literal, Optional, Union
 
 import regex as re
@@ -43,7 +44,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalInputs, PlaceholderRange)
+                                    MultiModalInputs, MultiModalUUIDDict,
+                                    PlaceholderRange)
 from vllm.multimodal.parse import ImageProcessorItems, MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo)
@@ -58,6 +60,21 @@ from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper,
                     maybe_prefix)
 
 logger = init_logger(__name__)
+
+
+def get_feature_request_tip(
+    model: str,
+    trust_remote_code: bool,
+) -> str:
+    hf_url = f"a discussion at https://huggingface.co/{model}/discussions/new"
+    gh_url = "an issue at https://github.com/huggingface/transformers/issues/new/choose"
+    url = hf_url if trust_remote_code else gh_url
+    prefix = f"Please open {url} to request support for this feature. "
+    if Path(model).exists():
+        prefix = ""
+    doc_url = "https://docs.vllm.ai/en/latest/models/supported_models.html#writing-custom-models"
+    tip = f"See {doc_url} for instructions on how to add support yourself."
+    return f"{prefix}{tip}"
 
 
 def vllm_flash_attention_forward(
@@ -106,8 +123,11 @@ def can_enable_torch_compile(vllm_config: VllmConfig) -> bool:
 
 
 def replace_linear_class(
-    linear: nn.Linear, style: Literal["colwise", "rowwise"],
-    quant_config: QuantizationConfig
+    linear: nn.Linear,
+    style: Literal["colwise", "rowwise"],
+    quant_config: QuantizationConfig,
+    *,
+    prefix: str = "",
 ) -> Union[ColumnParallelLinear, RowParallelLinear, ReplicatedLinear]:
     """
     Replace nn.Linear with one of vLLM's tensor parallel linear classes.
@@ -141,6 +161,7 @@ def replace_linear_class(
         output_size=linear.out_features,
         bias=linear.bias is not None,
         quant_config=quant_config,
+        prefix=prefix,
         return_bias=False,
         **vllm_linear_kwargs,
     )
@@ -208,7 +229,8 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
     def get_max_image_tokens(self) -> int:
         width, height = self.get_max_image_size()
         processor = self.get_hf_processor()
-        mm_processor_kwargs = self.ctx.model_config.mm_processor_kwargs or {}
+        multimodal_config = self.ctx.model_config.multimodal_config
+        mm_processor_kwargs = multimodal_config.mm_processor_kwargs or {}
         mm_tokens = processor._get_num_multimodal_tokens(
             image_sizes=([height, width], ), **mm_processor_kwargs)
         image_tokens = mm_tokens["num_image_tokens"][0]
@@ -327,6 +349,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Optional[Mapping[str, object]] = None,
+        mm_uuids: Optional[MultiModalUUIDDict] = None,
     ) -> MultiModalInputs:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -358,8 +381,8 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         # Below tested on Llava. Prompts and `mm_token_type_ids` are always bs=1
         mm_positions = torch.where(mm_token_type_ids == 1)[1]
         images = mm_items.get_items("image", ImageProcessorItems)
-        mm_processor_kwargs = (self.info.ctx.model_config.mm_processor_kwargs
-                               or {})
+        multimodal_config = self.info.ctx.model_config.multimodal_config
+        mm_processor_kwargs = multimodal_config.mm_processor_kwargs or {}
         image_sizes = []
         for item_idx in range(len(images)):
             image_size = images.get_image_size(item_idx)
@@ -393,9 +416,10 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             self._get_mm_fields_config(processed_data, hf_processor_mm_kwargs,
                                        num_image_patches),
         )
+        # Use overrides if provided; fallback to data-dependent hashing.
+        mm_hashes = (mm_uuids if mm_uuids is not None else self._hash_mm_items(
+            mm_items, hf_processor_mm_kwargs, tokenization_kwargs))
 
-        mm_hashes = self._hash_mm_items(mm_items, hf_processor_mm_kwargs,
-                                        tokenization_kwargs)
         return MultiModalInputs(
             type="multimodal",
             prompt=prompt,
@@ -473,8 +497,11 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
             return
 
         if not self.model.supports_pp_plan:
+            tip = get_feature_request_tip(self.model_config.model,
+                                          self.model_config.trust_remote_code)
             raise ValueError(
-                f"{type(self.model)} does not support pipeline parallel yet!")
+                f"{type(self.model)} does not support pipeline parallel. {tip}"
+            )
 
         module_lists = []
         module_list_idx = None
@@ -528,8 +555,10 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         models_with_tp_plan = filter(supports_tp_plan, pretrained_models)
 
         if not any(models_with_tp_plan) and self.tp_size > 1:
+            tip = get_feature_request_tip(self.model_config.model,
+                                          self.model_config.trust_remote_code)
             raise ValueError(
-                f"{type(self.model)} does not support tensor parallel yet!")
+                f"{type(self.model)} does not support tensor parallel. {tip}")
 
         def _tensor_parallel(module: nn.Module,
                              prefix: str = "",
@@ -554,8 +583,10 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                     generator = (p for p in tp_plan if re.match(p, qual_name))
                     pattern = next(generator, None)
                     style = tp_plan.get(pattern, "replicate")
-                    new_module = replace_linear_class(child_module, style,
-                                                      self.quant_config)
+                    new_module = replace_linear_class(child_module,
+                                                      style,
+                                                      self.quant_config,
+                                                      prefix=qual_name)
                     setattr(module, child_name, new_module)
                     log_replacement(qual_name, child_module, new_module)
                 else:

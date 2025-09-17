@@ -196,6 +196,7 @@ ARG SCCACHE_S3_NO_CREDENTIALS=0
 
 # Flag to control whether to use pre-built vLLM wheels
 ARG VLLM_USE_PRECOMPILED=""
+ARG VLLM_MAIN_CUDA_VERSION=""
 
 # if USE_SCCACHE is set, use sccache to speed up compilation
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -213,6 +214,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         && export SCCACHE_IDLE_TIMEOUT=0 \
         && export CMAKE_BUILD_TYPE=Release \
         && export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" \
+        && export VLLM_MAIN_CUDA_VERSION="${VLLM_MAIN_CUDA_VERSION}" \
         && export VLLM_DOCKER_BUILD_CONTEXT=1 \
         && sccache --show-stats \
         && python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 \
@@ -237,7 +239,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 # Check the size of the wheel if RUN_WHEEL_CHECK is true
 COPY .buildkite/check-wheel-size.py check-wheel-size.py
 # sync the default value with .buildkite/check-wheel-size.py
-ARG VLLM_MAX_SIZE_MB=400
+ARG VLLM_MAX_SIZE_MB=450
 ENV VLLM_MAX_SIZE_MB=$VLLM_MAX_SIZE_MB
 ARG RUN_WHEEL_CHECK=true
 RUN if [ "$RUN_WHEEL_CHECK" = "true" ]; then \
@@ -261,6 +263,8 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 # Use copy mode to avoid hardlink failures with Docker cache mounts
 ENV UV_LINK_MODE=copy
 
+# Install libnuma-dev, required by fastsafetensors (fixes #20384)
+RUN apt-get update && apt-get install -y libnuma-dev && rm -rf /var/lib/apt/lists/*
 COPY requirements/lint.txt requirements/lint.txt
 COPY requirements/test.txt requirements/test.txt
 COPY requirements/dev.txt requirements/dev.txt
@@ -278,6 +282,10 @@ ARG INSTALL_KV_CONNECTORS=false
 WORKDIR /vllm-workspace
 ENV DEBIAN_FRONTEND=noninteractive
 ARG TARGETPLATFORM
+
+ARG GDRCOPY_CUDA_VERSION=12.8
+# Keep in line with FINAL_BASE_IMAGE
+ARG GDRCOPY_OS_VERSION=Ubuntu22_04
 
 SHELL ["/bin/bash", "-c"]
 
@@ -373,7 +381,7 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 # Install FlashInfer from source
 ARG FLASHINFER_GIT_REPO="https://github.com/flashinfer-ai/flashinfer.git"
 # Keep this in sync with "flashinfer" extra in setup.py
-ARG FLASHINFER_GIT_REF="v0.2.14.post1"
+ARG FLASHINFER_GIT_REF="v0.3.1"
 # Flag to control whether to compile FlashInfer AOT kernels
 # Set to "true" to enable AOT compilation:
 # docker build --build-arg FLASHINFER_AOT_COMPILE=true ...
@@ -432,19 +440,26 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 # Install DeepGEMM from source
-ARG DEEPGEMM_GIT_REF="7b6b5563b9d4c1ae07ffbce7f78ad3ac9204827c"
+ARG DEEPGEMM_GIT_REF
 COPY tools/install_deepgemm.sh /tmp/install_deepgemm.sh
 RUN --mount=type=cache,target=/root/.cache/uv \
-    VLLM_DOCKER_BUILD_CONTEXT=1 /tmp/install_deepgemm.sh --cuda-version "${CUDA_VERSION}" --ref "${DEEPGEMM_GIT_REF}" \
-    && rm /tmp/install_deepgemm.sh
+    VLLM_DOCKER_BUILD_CONTEXT=1 /tmp/install_deepgemm.sh --cuda-version "${CUDA_VERSION}" ${DEEPGEMM_GIT_REF:+--ref "$DEEPGEMM_GIT_REF"} 
 
-# Install EP kernels(pplx-kernels and DeepEP), NixL
+COPY tools/install_gdrcopy.sh install_gdrcopy.sh
+RUN set -eux; \
+    case "${TARGETPLATFORM}" in \
+      linux/arm64) UUARCH="aarch64" ;; \
+      linux/amd64) UUARCH="x64" ;; \
+      *) echo "Unsupported TARGETPLATFORM: ${TARGETPLATFORM}" >&2; exit 1 ;; \
+    esac; \
+    ./install_gdrcopy.sh "${GDRCOPY_OS_VERSION}" "${GDRCOPY_CUDA_VERSION}" "${UUARCH}"; \
+    rm ./install_gdrcopy.sh
+
+# Install EP kernels(pplx-kernels and DeepEP)
 COPY tools/ep_kernels/install_python_libraries.sh install_python_libraries.sh
-COPY tools/install_nixl.sh install_nixl.sh
 ENV CUDA_HOME=/usr/local/cuda
 RUN export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-9.0a+PTX}" \
-    && bash install_python_libraries.sh \
-    && bash install_nixl.sh --force
+    && bash install_python_libraries.sh
 
 #################### vLLM installation IMAGE ####################
 
@@ -518,7 +533,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     else \
         BITSANDBYTES_VERSION="0.46.1"; \
     fi; \
-    uv pip install --system accelerate hf_transfer modelscope "bitsandbytes>=${BITSANDBYTES_VERSION}" 'timm==0.9.10' boto3 runai-model-streamer runai-model-streamer[s3]
+    uv pip install --system accelerate hf_transfer modelscope "bitsandbytes>=${BITSANDBYTES_VERSION}" 'timm>=1.0.17' boto3 runai-model-streamer runai-model-streamer[s3]
 
 ENV VLLM_USAGE_SOURCE production-docker-image
 
