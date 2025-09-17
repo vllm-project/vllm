@@ -21,7 +21,8 @@ export UCX_TLS=all  # or specify specific transports like "rc,ud,sm"
 export UCX_NET_DEVICES=all  # or specify network devices like "mlx5_0:1"
 ```
 
-**Note**: When using UCX as the transport backend, NCCL environment variables (like `NCCL_IB_HCA`, `NCCL_SOCKET_IFNAME`) are not applicable to NixlConnector, so configure UCX-specific environment variables instead of NCCL variables.
+!!! tode
+    When using UCX as the transport backend, NCCL environment variables (like `NCCL_IB_HCA`, `NCCL_SOCKET_IFNAME`) are not applicable to NixlConnector, so configure UCX-specific environment variables instead of NCCL variables.
 
 ## Basic Usage (on the same host)
 
