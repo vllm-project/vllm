@@ -1302,7 +1302,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Outputs:
         # cu_num_draft_tokens:      [  3,   3,   5,   5,   6]
         # logits_indices:           [  0,   1,   2,   3, 103, 104, 105, 106,
-        #                            206, 207, 208]
+        #                              206, 207, 208]
         # target_logits_indices:    [  0,   1,   2,   5,   6,   9]
         # bonus_logits_indices:     [  3,   4,   7,   8,  10]
 
