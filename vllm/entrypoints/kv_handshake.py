@@ -62,7 +62,6 @@ class KVConnHandshakeServer:
             return {dp_rank: {tp_rank: tp_data}}
 
     async def start_async(self):
-        logger.debug("DEBUG: KVConnHandshakeServer.start_async() called")
 
         if self.server is not None:
             logger.warning("Side channel server is already running")
@@ -71,8 +70,6 @@ class KVConnHandshakeServer:
         listen_address = f"http://{self.host}:{self.port}"
         logger.info("Starting %s handshake server on %s",
                     self._get_connector_name(), listen_address)
-        logger.debug("DEBUG: Preparing uvicorn configuration for %s",
-                     listen_address)
 
         # prepare uvicorn configuration
         config_kwargs: dict[str, Any] = {
@@ -83,34 +80,21 @@ class KVConnHandshakeServer:
             "access_log": True,
         }
 
-        logger.debug("DEBUG: Creating uvicorn.Config with kwargs: %s",
-                     config_kwargs)
         try:
             config = uvicorn.Config(**config_kwargs)
-            logger.debug("DEBUG: uvicorn.Config created successfully")
-
             config.load()  # need to load config to get SSL context
-            logger.debug("DEBUG: uvicorn.Config loaded successfully")
-
             self.server = uvicorn.Server(config)
-            logger.debug("DEBUG: uvicorn.Server created successfully")
 
             # start the server in a background task
             if self.server is not None:
-                logger.debug(
-                    "DEBUG: Creating background task for server.serve()")
-                task = asyncio.create_task(self.server.serve())
-                logger.debug("DEBUG: Background task created: %s", task)
+                asyncio.create_task(self.server.serve())
 
             logger.info("%s handshake server started successfully",
                         self._get_connector_name())
-            logger.debug(
-                "DEBUG: KVConnHandshakeServer.start_async() completed")
 
         except Exception as e:
             logger.error(
-                "DEBUG: Exception in KVConnHandshakeServer.start_async(): %s",
-                e)
+                "Exception in KVConnHandshakeServer.start_async(): %s", e)
             raise
 
     async def stop_async(self):
@@ -129,30 +113,20 @@ class KVConnHandshakeServer:
 
 
 def should_start_kv_handshake_server(vllm_config: VllmConfig) -> bool:
-    logger.debug("DEBUG: Checking if KV handshake server should start")
-
     if vllm_config.kv_transfer_config is None:
-        logger.debug("DEBUG: kv_transfer_config is None, not starting server")
         return False
 
     connector_name = vllm_config.kv_transfer_config.kv_connector
-    logger.debug("DEBUG: connector_name = %s", connector_name)
     if connector_name is None:
-        logger.debug("DEBUG: connector_name is None, not starting server")
         return False
 
     # check connector-specific handshake method
     if connector_name == "NixlConnector":
         handshake_method = envs.VLLM_NIXL_HANDSHAKE_METHOD.lower()
-        logger.debug("DEBUG: handshake_method = '%s'", handshake_method)
-        should_start = handshake_method == "http"
-        logger.debug("DEBUG: should start handshake server = %s", should_start)
-        return should_start
+        return handshake_method == "http"
 
     # other connectors can be added here with their own logic
     # for now, only nixl supports http handshake
-    logger.debug("DEBUG: Unknown connector %s, not starting server",
-                 connector_name)
     return False
 
 
@@ -174,22 +148,11 @@ def _get_handshake_server_config(vllm_config: VllmConfig) -> tuple[str, int]:
 async def set_up_kv_handshake_server(
         vllm_config: VllmConfig,
         kv_metadata: dict) -> Optional[KVConnHandshakeServer]:
-    logger.debug(
-        "DEBUG: set_up_kv_handshake_server called with kv_metadata keys: %s",
-        list(kv_metadata.keys()) if kv_metadata else "None")
-
     if not should_start_kv_handshake_server(vllm_config):
-        logger.debug(
-            "DEBUG: should_start_kv_handshake_server returned False, no start")
         return None
-
-    logger.debug(
-        "DEBUG: should_start_kv_handshake_server returned True, proceeding")
 
     side_channel_host, side_channel_port = _get_handshake_server_config(
         vllm_config)
-    logger.debug("DEBUG: Got handshake server config: host=%s, port=%d",
-                 side_channel_host, side_channel_port)
 
     assert vllm_config.kv_transfer_config is not None
     connector_name = vllm_config.kv_transfer_config.kv_connector
@@ -200,15 +163,11 @@ async def set_up_kv_handshake_server(
 
     server = KVConnHandshakeServer(side_channel_host, side_channel_port,
                                    kv_metadata, connector_name)
-    logger.debug("DEBUG: Created KVConnHandshakeServer instance")
 
     try:
         await server.start_async()
-        logger.debug(
-            "DEBUG: KVConnHandshakeServer.start_async() completed successfully"
-        )
     except Exception as e:
-        logger.error("DEBUG: Failed to start KVConnHandshakeServer: %s", e)
+        logger.error("Failed to start KVConnHandshakeServer: %s", e)
         raise
 
     return server

@@ -1908,53 +1908,15 @@ async def run_server_worker(listen_address,
             # For V1 path, get metadata from engine_client
             kv_metadata = None
             if hasattr(engine_client, 'get_kv_handshake_metadata'):
-                logger.debug(
-                    "DEBUG: engine_client has get_kv_handshake_metadata method"
-                )
                 kv_metadata = await engine_client.get_kv_handshake_metadata()
-                if kv_metadata:
-                    logger.debug(
-                        "DEBUG: Got kv_metadata from engine_client, metadata " \
-                        "length = %d",
-                        len(str(kv_metadata)))
-                else:
-                    logger.debug(
-                        "DEBUG: engine_client.get_kv_handshake_metadata() " \
-                        "returned None"
-                    )
-            else:
-                logger.debug(
-                    "DEBUG: engine_client does not have " \
-                    "get_kv_handshake_metadata method"
-                )
-
-        logger.debug(
-            "DEBUG: kv_metadata = %s", "None"
-            if kv_metadata is None else f"dict with {len(kv_metadata)} keys")
 
         if kv_metadata:
-            logger.debug(
-                "DEBUG: Calling set_up_kv_handshake_server with " \
-                "vllm_config and kv_metadata"
-            )
             try:
                 kv_conn_metadata_server = await \
                     set_up_kv_handshake_server(vllm_config, kv_metadata)
-                if kv_conn_metadata_server:
-                    logger.debug(
-                        "DEBUG: set_up_kv_handshake_server " \
-                        "returned server instance"
-                    )
-                else:
-                    logger.debug(
-                        "DEBUG: set_up_kv_handshake_server returned None")
             except Exception as e:
                 logger.error("Failed to start NIXL side channel server: %s", e)
                 raise
-        else:
-            logger.debug(
-                "DEBUG: No kv_metadata available, not starting handshake server"
-            )
 
         logger.info("Starting vLLM API server %d on %s", server_index,
                     listen_address)
