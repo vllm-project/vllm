@@ -681,6 +681,7 @@ class FlashAttentionImpl(AttentionImpl):
         max_seqlen_q = attn_metadata.max_query_len
         block_table = attn_metadata.block_table
 
+        query = query.contiguous()
         query_across_dcp = get_dcp_group().all_gather(query, dim=1)
         context_attn_out, context_lse = \
             flash_attn_varlen_func(
