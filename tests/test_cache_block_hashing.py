@@ -11,7 +11,7 @@ import pytest
 from vllm.inputs import token_inputs
 from vllm.lora.request import LoRARequest
 from vllm.sequence import Sequence
-from vllm.transformers_utils.tokenizer_group import TokenizerGroup
+from vllm.transformers_utils.tokenizer import get_tokenizer
 
 # Make two prefixes with different first blocks.
 prefix_start = [("You are an expert"), ("You are a")]
@@ -47,12 +47,7 @@ def flatten_2d(li):
 def test_auto_prefix_caching(model: str, block_size: int, max_num_seqs: int,
                              concurrent_lora_int_ids: list[Optional[int]]):
 
-    tokenizer = TokenizerGroup(
-        tokenizer_id="facebook/opt-125m",
-        enable_lora=False,
-        max_num_seqs=max_num_seqs,
-        max_input_length=None,
-    )
+    tokenizer = get_tokenizer("facebook/opt-125m")
 
     hashes: list[list[list[int]]] = []
 
@@ -76,7 +71,7 @@ def test_auto_prefix_caching(model: str, block_size: int, max_num_seqs: int,
                                inputs=token_inputs(prompt_token_ids,
                                                    prompt=prompt),
                                block_size=block_size,
-                               eos_token_id=tokenizer.tokenizer.eos_token_id,
+                               eos_token_id=tokenizer.eos_token_id,
                                lora_request=lora_request)
 
                 num_blocks = len(prompt_token_ids) // block_size

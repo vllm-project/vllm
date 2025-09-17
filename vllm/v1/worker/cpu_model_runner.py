@@ -64,8 +64,13 @@ class CPUModelRunner(GPUModelRunner):
         if not self.attn_groups[0]:
             return
 
-        mb = getattr(self.attn_groups[0][0], "metadata_builder", None)
-        if not isinstance(mb, TorchSDPAMetadataBuilderV1):
+        mb = getattr(self.attn_groups[0][0], "metadata_builders", None)
+        if isinstance(mb, list):
+            if not isinstance(mb[0], TorchSDPAMetadataBuilderV1):
+                return
+            mb[0].reorder_batch(self.input_batch, scheduler_output)
+            return
+        elif not isinstance(mb, TorchSDPAMetadataBuilderV1):
             # Encoder-only / rerank models do not benefit from reordering,
             # so we safely skip here.
             return
@@ -84,7 +89,7 @@ class CPUModelRunner(GPUModelRunner):
                 assert isinstance(device_tensor, torch.Tensor)
                 setattr(obj, device_attr_name, cpu_tensor)
 
-        for k, v in vars(self).items():
+        for v in vars(self).values():
             if isinstance(v, CpuGpuBuffer):
                 v.gpu = v.cpu
 
@@ -93,9 +98,9 @@ class CPUModelRunner(GPUModelRunner):
                 replace_tensor(self.input_batch, k, k[:-11])
 
         for block_table in self.input_batch.block_table.block_tables:
-            for k, v in vars(block_table).items():
-                if k.endswith("_cpu") and isinstance(v, torch.Tensor):
-                    replace_tensor(block_table, k, k[:-4])
+            for v in vars(block_table).values():
+                if isinstance(v, CpuGpuBuffer):
+                    v.gpu = v.cpu
 
     def load_model(self, eep_scale_up: bool = False) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
@@ -140,12 +145,20 @@ def _torch_cuda_wrapper():
             self.record = lambda: None
             self.synchronize = lambda: None
 
+    class _StreamPlaceholder:
+
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
     cuda_event = torch.cuda.Event
+    cuda_stream = torch.cuda.Stream
     try:
         torch.cuda.Event = _EventPlaceholder
+        torch.cuda.Stream = _StreamPlaceholder
         yield
     finally:
         torch.cuda.Event = cuda_event
+        torch.cuda.Stream = cuda_stream
 
 
 @contextmanager
