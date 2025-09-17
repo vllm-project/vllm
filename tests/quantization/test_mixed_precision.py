@@ -15,7 +15,6 @@ import lm_eval
 import pytest
 from packaging import version
 
-
 QUARK_MXFP4_AVAILABLE = importlib.util.find_spec(
     "quark") is not None and version.parse(
         importlib.metadata.version("amd-quark")) >= version.parse('0.8.99')
@@ -84,4 +83,3 @@ def test_mixed_precision_model_accuracies(model_name: str,
             measured_accuracy - rtol < expect_accuracy
             and measured_accuracy + rtol > expect_accuracy
         ), f"Expected: {expect_accuracy} |  Measured: {measured_accuracy}"
-
