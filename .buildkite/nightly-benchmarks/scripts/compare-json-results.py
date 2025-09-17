@@ -278,30 +278,36 @@ if __name__ == "__main__":
             output_df_sorted = output_df.sort_values(by=existing_group_cols)
             output_groups = output_df_sorted.groupby(existing_group_cols, dropna=False)
             for name, group in output_groups:
+                group_name = ",".join(map(str, name)).replace(",", "_").replace("/","-")
+                group_html_name = "perf_comparison_" + group_name + ".html"
                 html = group.to_html()
                 text_file.write(html_msgs_for_data_cols[i])
                 text_file.write(html)
+                with open(group_html_name, "a") as sub_text_file:
+                    sub_text_file.write(html_msgs_for_data_cols[i])
+                    sub_text_file.write(html)
 
-                if plot and plotly_found:
-                    import plotly.express as px
+                    if plot and plotly_found:
+                        import plotly.express as px
 
-                    df = group[raw_data_cols]
-                    df_sorted = df.sort_values(by=info_cols[y_axis_index])
-                    # Melt DataFrame for plotting
-                    df_melted = df_sorted.melt(
-                        id_vars=info_cols[y_axis_index],
-                        var_name="Configuration",
-                        value_name=data_cols_to_compare[i],
-                    )
-                    title = data_cols_to_compare[i] + " vs " + info_cols[y_axis_index]
-                    # Create Plotly line chart
-                    fig = px.line(
-                        df_melted,
-                        x=info_cols[y_axis_index],
-                        y=data_cols_to_compare[i],
-                        color="Configuration",
-                        title=title,
-                        markers=True,
-                    )
-                    # Export to HTML
-                    text_file.write(fig.to_html(full_html=True, include_plotlyjs="cdn"))
+                        df = group[raw_data_cols]
+                        df_sorted = df.sort_values(by=info_cols[y_axis_index])
+                        # Melt DataFrame for plotting
+                        df_melted = df_sorted.melt(
+                            id_vars=info_cols[y_axis_index],
+                            var_name="Configuration",
+                            value_name=data_cols_to_compare[i],
+                        )
+                        title = data_cols_to_compare[i] + " vs " + info_cols[y_axis_index]
+                        # Create Plotly line chart
+                        fig = px.line(
+                            df_melted,
+                            x=info_cols[y_axis_index],
+                            y=data_cols_to_compare[i],
+                            color="Configuration",
+                            title=title,
+                            markers=True,
+                        )
+                        # Export to HTML
+                        text_file.write(fig.to_html(full_html=True, include_plotlyjs="cdn"))
+                        sub_text_file.write(fig.to_html(full_html=True, include_plotlyjs="cdn"))
