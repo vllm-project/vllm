@@ -845,7 +845,8 @@ class ModelConfig:
                 object_storage_model.pull_files(model,
                                                 ignore_pattern=[
                                                     "*.pt", "*.safetensors",
-                                                    "*.bin", "*.tensors"
+                                                    "*.bin", "*.tensors",
+                                                    "*.pth"
                                                 ])
                 self.tokenizer = object_storage_model.dir
                 return
@@ -853,9 +854,12 @@ class ModelConfig:
         # Only download tokenizer if needed and not already handled
         if is_runai_obj_uri(tokenizer):
             object_storage_tokenizer = ObjectStorageModel()
-            object_storage_tokenizer.pull_files(
-                model,
-                ignore_pattern=["*.pt", "*.safetensors", "*.bin", "*.tensors"])
+            object_storage_tokenizer.pull_files(model,
+                                                ignore_pattern=[
+                                                    "*.pt", "*.safetensors",
+                                                    "*.bin", "*.tensors",
+                                                    "*.pth"
+                                                ])
             self.tokenizer = object_storage_tokenizer.dir
 
     def _get_encoder_config(self):
@@ -1086,22 +1090,6 @@ class ModelConfig:
 
     def _verify_quantization(self) -> None:
         supported_quantization = me_quant.QUANTIZATION_METHODS
-        optimized_quantization_methods = [
-            "fp8",
-            "modelopt",
-            "gptq_marlin_24",
-            "gptq_marlin",
-            "awq_marlin",
-            "fbgemm_fp8",
-            "compressed-tensors",
-            "experts_int8",
-            "quark",
-            "modelopt_fp4",
-            "bitblas",
-            "gptq_bitblas",
-            "inc",
-            "petit_nvfp4",
-        ]
         if self.quantization is not None:
             self.quantization = cast(me_quant.QuantizationMethods,
                                      self.quantization)
@@ -1183,11 +1171,6 @@ class ModelConfig:
                     f"be one of {supported_quantization}.")
             from vllm.platforms import current_platform
             current_platform.verify_quantization(self.quantization)
-            if self.quantization not in optimized_quantization_methods:
-                logger.warning(
-                    "%s quantization is not fully "
-                    "optimized yet. The speed can be slower than "
-                    "non-quantized models.", self.quantization)
 
     def _verify_cuda_graph(self) -> None:
         # The `max_seq_len_to_capture` was incorrectly
