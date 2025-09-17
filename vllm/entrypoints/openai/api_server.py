@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-import atexit
 import gc
 import importlib
 import inspect
@@ -17,7 +16,6 @@ import uuid
 from argparse import Namespace
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
-from functools import partial
 from http import HTTPStatus
 from typing import Annotated, Any, Callable, Optional
 
@@ -42,8 +40,6 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine  # type: ignore
-from vllm.engine.multiprocessing.client import MQLLMEngineClient
-from vllm.engine.multiprocessing.engine import run_mp_engine
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (load_chat_template,
                                          resolve_hf_chat_template,
@@ -102,13 +98,10 @@ from vllm.entrypoints.utils import (cli_env_setup, load_aware_call,
                                     log_non_default_args, with_cancellation)
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
-from vllm.transformers_utils.config import (
-    maybe_register_config_serialize_by_value)
 from vllm.transformers_utils.tokenizer import MistralTokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (Device, FlexibleArgumentParser, decorate_logs,
-                        get_open_zmq_ipc_path, is_valid_ipv6_address,
-                        set_ulimit)
+                        is_valid_ipv6_address, set_ulimit)
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -237,8 +230,7 @@ async def build_async_engine_client_from_engine_args(
                 async_llm.shutdown()
 
     # V0 AsyncLLM.
-    elif (MQLLMEngineClient.is_unsupported_config(vllm_config)
-          or disable_frontend_multiprocessing):
+    else:
 
         engine_client: Optional[EngineClient] = None
         try:
@@ -251,96 +243,6 @@ async def build_async_engine_client_from_engine_args(
         finally:
             if engine_client and hasattr(engine_client, "shutdown"):
                 engine_client.shutdown()
-
-    # V0MQLLMEngine.
-    else:
-        if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
-            # Make TemporaryDirectory for prometheus multiprocessing
-            # Note: global TemporaryDirectory will be automatically
-            #   cleaned up upon exit.
-            global prometheus_multiproc_dir
-            prometheus_multiproc_dir = tempfile.TemporaryDirectory()
-            os.environ[
-                "PROMETHEUS_MULTIPROC_DIR"] = prometheus_multiproc_dir.name
-        else:
-            logger.warning(
-                "Found PROMETHEUS_MULTIPROC_DIR was set by user. "
-                "This directory must be wiped between vLLM runs or "
-                "you will find inaccurate metrics. Unset the variable "
-                "and vLLM will properly handle cleanup.")
-
-        # Select random path for IPC.
-        ipc_path = get_open_zmq_ipc_path()
-        logger.debug("Multiprocessing frontend to use %s for IPC Path.",
-                     ipc_path)
-
-        # Start RPCServer in separate process (holds the LLMEngine).
-        # the current process might have CUDA context,
-        # so we need to spawn a new process
-        context = multiprocessing.get_context("spawn")
-
-        # Ensure we can serialize transformer config before spawning
-        maybe_register_config_serialize_by_value()
-
-        # The Process can raise an exception during startup, which may
-        # not actually result in an exitcode being reported. As a result
-        # we use a shared variable to communicate the information.
-        engine_alive = multiprocessing.Value('b', True, lock=False)
-        engine_process = context.Process(
-            target=run_mp_engine,
-            args=(vllm_config, UsageContext.OPENAI_API_SERVER, ipc_path,
-                  engine_args.disable_log_stats,
-                  engine_args.enable_log_requests, engine_alive))
-        engine_process.start()
-        engine_pid = engine_process.pid
-        assert engine_pid is not None, "Engine process failed to start."
-        logger.info("Started engine process with PID %d", engine_pid)
-
-        def _cleanup_ipc_path():
-            socket_path = ipc_path.replace("ipc://", "")
-            if os.path.exists(socket_path):
-                os.remove(socket_path)
-
-        # Ensure we clean up the local IPC socket file on exit.
-        atexit.register(_cleanup_ipc_path)
-
-        # Build RPCClient, which conforms to EngineClient Protocol.
-        build_client = partial(MQLLMEngineClient, ipc_path, vllm_config,
-                               engine_pid)
-        mq_engine_client = await asyncio.get_running_loop().run_in_executor(
-            None, build_client)
-        try:
-            while True:
-                try:
-                    await mq_engine_client.setup()
-                    break
-                except TimeoutError:
-                    if (not engine_process.is_alive()
-                            or not engine_alive.value):
-                        raise RuntimeError(
-                            "Engine process failed to start. See stack "
-                            "trace for the root cause.") from None
-
-            yield mq_engine_client  # type: ignore[misc]
-        finally:
-            # Ensure rpc server process was terminated
-            engine_process.terminate()
-
-            # Close all open connections to the backend
-            mq_engine_client.close()
-
-            # Wait for engine process to join
-            engine_process.join(4)
-            if engine_process.exitcode is None:
-                # Kill if taking longer than 5 seconds to stop
-                engine_process.kill()
-
-            # Lazy import for prometheus multiprocessing.
-            # We need to set PROMETHEUS_MULTIPROC_DIR environment variable
-            # before prometheus_client is imported.
-            # See https://prometheus.github.io/client_python/multiprocess/
-            from prometheus_client import multiprocess
-            multiprocess.mark_process_dead(engine_process.pid)
 
 
 async def validate_json_request(raw_request: Request):
