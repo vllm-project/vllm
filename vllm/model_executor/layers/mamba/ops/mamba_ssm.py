@@ -117,7 +117,8 @@ def _selective_scan_update_kernel(
         state_ptr += (state_batch_idx * stride_state_batch +
                       pid_h * stride_state_head)
     else:
-        dst_state_ptr = state_ptr + pid_b * stride_state_batch + pid_h * stride_state_head
+        dst_state_ptr = state_ptr + pid_b * stride_state_batch + \
+            pid_h * stride_state_head
         state_ptr += pid_b * stride_state_batch + pid_h * stride_state_head
 
     x_ptr += pid_b * stride_x_batch + pid_h * stride_x_head

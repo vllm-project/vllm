@@ -634,7 +634,7 @@ class MambaMixer2(MambaBase, CustomOp):
             seq_lens_pending = (
                 torch.roll(attn_metadata.query_start_loc, -1, -1) -
                 attn_metadata.query_start_loc)[:-1]
-            seq_lens_completed = (mamba2_metadata.seq_lens - seq_lens_pending)
+            seq_lens_completed = (attn_metadata.seq_lens - seq_lens_pending)
             last_computed_token_block_offset = \
                 seq_lens_completed % mamba_block_size
 

@@ -302,7 +302,6 @@ class MambaModelConfig(VerifyAndUpdateConfig):
             return
 
         model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
         compilation_config = vllm_config.compilation_config
 
         # TODO(tdoublep): remove as full cuda graph support is added
