@@ -85,7 +85,7 @@ class SimpleContext(ConversationContext):
         self.num_cached_tokens = 0
         # todo num_reasoning_tokens is not implemented yet.
         self.num_reasoning_tokens = 0
-        self.prompt_token_ids = []
+        self.prompt_token_ids: list[int] = []
 
     def append_output(self, output) -> None:
         self.last_output = output
@@ -145,7 +145,7 @@ class HarmonyContext(ConversationContext):
         self.previous_turn = TurnTokens()
         self.is_first_turn = True
         self.first_tok_of_message = True  # For streaming support
-        self.prompt_token_ids = []
+        self.prompt_token_ids: list[int] = []
 
     def _update_num_reasoning_tokens(self):
         # Count all analysis and commentary channels as reasoning tokens

@@ -488,7 +488,7 @@ class OpenAIServingResponses(OpenAIServing):
             final_output = final_res.outputs[0]
 
             output = self._make_response_output_items(request, final_output,
-                                                      tokenizer)
+                                                      tokenizer, context)
 
             # Calculate usage.
             assert final_res.prompt_token_ids is not None
