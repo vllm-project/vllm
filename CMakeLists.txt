@@ -308,7 +308,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/quantization/fp4/nvfp4_blockwise_moe_kernel.cu"
     "csrc/sparse/cutlass/sparse_scaled_mm_entry.cu"
     "csrc/cutlass_extensions/common.cpp"
-    "csrc/attention/mla/cutlass_mla_entry.cu"
     "csrc/quantization/w8a8/fp8/per_token_group_quant.cu"
     "csrc/quantization/w8a8/int8/per_token_group_quant.cu")
 
