@@ -303,7 +303,13 @@ class CudaPlatformBase(Platform):
             if use_triton:
                 return _get_version("Triton MLA",
                                     "triton_mla.TritonMLABackend")
+            logger.warning(
+                "Selected MLA backend is not valid, falling back to Triton MLA."
+            )
+            return _get_version("Triton MLA", "triton_mla.TritonMLABackend")
+
         if use_v1:
+            assert not use_mla  # will not trigger
             FLASHINFER_V1 = "vllm.v1.attention.backends.flashinfer.FlashInferBackend"  # noqa: E501
             FLEX_ATTENTION_V1 = "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"  # noqa: E501
             TRITON_ATTN_VLLM_V1 = "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"  # noqa: E501
