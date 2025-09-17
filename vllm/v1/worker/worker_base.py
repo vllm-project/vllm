@@ -9,15 +9,13 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.kv_cache_interface import KVCacheSpec
-from vllm.worker.worker_base import WorkerBase as WorkerBaseV0
 
 logger = init_logger(__name__)
 
 
-class WorkerBase(WorkerBaseV0):
+class WorkerBase:
     """
     Abstract class for v1 worker, mainly define some methods for v1.
-    For methods shared by v0 and v1, define them in v0 WorkerBase
     """
 
     def __init__(
