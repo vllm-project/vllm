@@ -79,7 +79,7 @@ class NgramProposer:
         # Only run batch propose if there are requests needing ngram proposals.
         # avoid calling numba function with empty list which causes error
         # ValueError: cannot compute fingerprint of empty list
-        if len(valid_ngram_requests):
+        if num_ngram_requests := len(valid_ngram_requests):
             original_num_numba_threads = get_num_threads()
             # Ensure we use at least one thread.
             set_num_threads(
