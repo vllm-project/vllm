@@ -1,118 +1,184 @@
-# epd_proxy.py - E+P+D Separation Proxy
+#!/usr/bin/env python3
+"""
+disagg_encoder_proxy.py
+
+Proxy that routes OpenAI-compatible “/v1/chat/completions” requests to two
+clusters:
+  • encode  (multimodal feature extraction)
+  • decode  (language-model inference)
+
+For MM input we:
+    1. Extract *every* image/audio item.
+    2. Fire N concurrent requests to the encoder cluster
+       (one request per item, with **all text removed**).
+    3. Wait for all of them to succeed.
+    4. Forward the *original* request to a decode server.
+
+Usage
+For E + PD setup:
+$ python disagg_encoder_proxy.py \
+      --encode-servers-urls "http://e1:8001,http://e2:8002" \
+      --prefill-servers-urls "disable" \
+      --decode-servers-urls "http://pd1:8003,http://pd2:8004"
+
+For E + P + D setup:
+$ python disagg_encoder_proxy.py \
+      --encode-servers-urls "http://e1:8001,http://e2:8001" \
+      --prefill-servers-urls "http://p1:8003,http://p2:8004" \ 
+      --decode-servers-urls "http://d1:8005,http://d2:8006"
+"""
+
+from __future__ import annotations
+
+import argparse
 import asyncio
-import copy
 import json
 import logging
 import os
-import time
-import uuid
 import random
-from typing import AsyncIterator, Optional, Dict, Any, Union
-from fastapi import FastAPI, Request, HTTPException
+import uuid
+import copy
+from typing import Any, AsyncIterator, List, Optional
 import aiohttp
-from fastapi.responses import StreamingResponse, JSONResponse
 import uvicorn
-import argparse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 
+###############################################################################
+# FastAPI app & global state
+###############################################################################
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger("proxy")
 
 app = FastAPI()
-
 encode_session: Optional[aiohttp.ClientSession] = None
 prefill_session: Optional[aiohttp.ClientSession] = None
 decode_session: Optional[aiohttp.ClientSession] = None
 
-
-@app.on_event("startup")
-async def startup_event():
-    global encode_session, prefill_session, decode_session
-    encode_session = aiohttp.ClientSession(
-        connector=aiohttp.TCPConnector(limit=0),
-        timeout=aiohttp.ClientTimeout(total=100000))
-    prefill_session = aiohttp.ClientSession(
-        connector=aiohttp.TCPConnector(limit=0),
-        timeout=aiohttp.ClientTimeout(total=100000))
-    decode_session = aiohttp.ClientSession(
-        connector=aiohttp.TCPConnector(limit=0),
-        timeout=aiohttp.ClientTimeout(total=100000))
+###############################################################################
+# Utils
+###############################################################################
 
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    global encode_session, prefill_session, decode_session
-    if encode_session:
-        await encode_session.close()
-    if prefill_session:
-        await prefill_session.close()
-    if decode_session:
-        await decode_session.close()
+MM_TYPES = {"image_url", "audio_url", "input_audio"}
 
 
-def has_mm_input(request_data: dict):
-    """Check if request has multimodal input (images, audio, etc.)"""
-    if "messages" not in request_data:
-        return False
-    for message in request_data["messages"]:  
-        if not isinstance(message.get("content"), list):  
+def extract_mm_items(request_data: dict) -> List[dict]:
+    """
+    Return *all* image/audio items that appear anywhere in `messages`.
+
+    Each returned dict looks like:
+        { "type": "image_url", "image_url": {...} }
+    """
+    items: List[dict] = []
+    for msg in request_data.get("messages", []):
+        content = msg.get("content")
+        if not isinstance(content, list):
             continue
-        for content_item in message["content"]:  
-            if content_item.get("type") in ["image_url", "audio_url", "input_audio"]:  
-                return True
-    return False
+
+        for item in content:
+            if item.get("type") in MM_TYPES:
+                items.append(item)
+    return items
 
 
-async def process_encoder_stage(
-    request_data: dict,
+async def fanout_encoder_primer(
+    orig_request: dict,
+    e_urls: List[str],
     request_id: str,
-    e_server_url: str
-):
-    """Process request through Encoder stage (if has MM input)"""
-    if not has_mm_input(request_data):
-        return
-    
-    logger.debug(f"Processing MM input through encoder for request_id: {request_id}/ url: {e_server_url}")
-    encoder_request_data = request_data.copy()
-    encoder_request_data["max_tokens"] = 1
-    if "max_completion_tokens" in encoder_request_data:
-        encoder_request_data["max_completion_tokens"] = 1
-    
-    headers = {"x-request-id": request_id}
-    task1 = asyncio.create_task(
-        encode_session.post(
-            f"{e_server_url}/v1/chat/completions",
-            json=encoder_request_data,
-            headers=headers
-        )
-    )
-    try:
-        response = await task1  # seems fire-and-forget didnt gain any benefit
-        if response.status != 200:
-            error_text = await response.text()
-            raise HTTPException(
-                status_code=response.status,
-                detail={"error": "Encoder request failed", "message": error_text}
+) -> None:
+    """
+    1. Build one request *per MM item* with all text removed.
+    2. Send them concurrently to the encode cluster.
+    3. Raise if any of them fails.
+    """
+    mm_items = extract_mm_items(orig_request)
+    if not mm_items:
+        return  # nothing to do
+
+    tasks = []
+
+    # Round-robin over encode servers to distribute load a bit
+    url_cycle = (e_urls[i % len(e_urls)] for i in range(len(mm_items)))
+
+    for idx, (item, target_url) in enumerate(zip(mm_items, url_cycle)):
+        # Derive a *child* request id:  <parent>:<index>:<random-short>
+        child_req_id = f"{request_id}:{idx}:{uuid.uuid4().hex[:6]}"
+        headers = {"x-request-id": child_req_id}
+
+        encoder_req = {
+            # You *may* need to keep additional fields
+            "model": orig_request.get("model"),
+            "messages": [
+                {"role": "user", "content": [item]},
+            ],
+            # Only need 1 token so the server actually runs the encoder path
+            "max_tokens": 1,
+            "stream": False,
+        }
+        tasks.append(
+            encode_session.post(
+                f"{target_url}/v1/chat/completions",
+                json=encoder_req,
+                headers=headers,
             )
-        logger.debug(f"Encoder processing completed successfully for request_id: {request_id}")
-        return
-    except Exception as e:
-        logger.error(f"Encoder processing failed: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail={"error": "Encoder processing error", "message": str(e)}
         )
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Fail fast if any sub-request failed
+    for r in results:
+        if isinstance(r, Exception):
+            logger.error("Encoder request raised: %s", r)
+            raise HTTPException(status_code=502, detail=str(r))
+        if r.status != 200:
+            try:
+                detail = await r.text()
+            except Exception:
+                detail = "<unable to read body>"
+            logger.error("Encoder request returned %s: %s", r.status, detail)
+            raise HTTPException(
+                status_code=r.status,
+                detail=f"Encoder request failed: {detail}",
+            )
+
+
+async def maybe_prefill(
+    req_data: dict,
+    p_url: str,
+    req_id: str,
+) -> dict:
+    """
+    - Do prefill-only task if p_url exist; 
+    - Return modified request data with kv transfer params (for nixl connector)
+    - Else, skip and return the original request data for decode
+    """
+    if p_url:
+        prefill_response = await process_prefill_stage(
+            req_data, p_url, req_id
+        )
+        # for nixl connector to facilitate kv transfer...
+        prefill_response_json = await prefill_response.json()
+        kv_transfer_params = prefill_response_json.get('kv_transfer_params', {})
+        if kv_transfer_params:
+            req_data["kv_transfer_params"] = kv_transfer_params
+            logger.debug(f"kv_transfer_params: {kv_transfer_params}")
+
+        return req_data
+    else:
+        return req_data
 
 
 async def process_prefill_stage(
-    request_data: dict,
-    request_id: str,
-    p_server_url: str
+    req_data: dict,
+    p_url: str,
+    req_id: str,
 ) -> dict:
     """Process request through Prefill stage and return kv_transfer_params"""
-    logger.debug(f"Processing through prefill for request_id: {request_id}/ url: {p_server_url}")
+    logger.debug(f"Processing through prefill for req_id: {req_id}/ url: {p_url}")
     
-    prefill_request = request_data.copy()
+    prefill_request = req_data.copy()
     prefill_request['kv_transfer_params'] = {
         "do_remote_decode": True,
         "do_remote_prefill": False,
@@ -128,10 +194,10 @@ async def process_prefill_stage(
     if "stream_options" in prefill_request:
         del prefill_request["stream_options"]
     
-    headers = {"x-request-id": request_id}
+    headers = {"x-request-id": req_id}
     try:
         prefill_response = await prefill_session.post(
-            f"{p_server_url}/v1/chat/completions",
+            f"{p_url}/v1/chat/completions",
             json=prefill_request,
             headers=headers
         )
@@ -143,7 +209,7 @@ async def process_prefill_stage(
                 status_code=prefill_response.status,
                 detail={"error": "Prefill request failed", "message": error_text}
             )
-        logger.debug(f"Prefill processing completed successfully for request_id: {request_id}")
+        logger.debug(f"Prefill processing completed successfully for req_id: {req_id}")
         
         return prefill_response
 
@@ -155,193 +221,152 @@ async def process_prefill_stage(
         )
 
 
-async def forward_request(
-    request_data: dict,
-    request_id: str,
-    e_server_url: str,
-    p_server_url: str,
-    d_server_url: str,
-    is_streaming: bool = False
-) -> Union[AsyncIterator[str], dict]:
-    """Forward request through E->P->D pipeline"""
-    
+###############################################################################
+# FastAPI lifecycle
+###############################################################################
+
+
+@app.on_event("startup")
+async def on_startup() -> None:
+    global encode_session, prefill_session, decode_session
+    timeout = aiohttp.ClientTimeout(total=100_000)
+    connector = aiohttp.TCPConnector(limit=0, force_close=False)
+    encode_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+    if app.state.p_urls:
+        # only setup if prefill instance(s) exist
+        prefill_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+    decode_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+
+
+@app.on_event("shutdown")
+async def on_shutdown() -> None:
+    global encode_session, prefill_session, decode_session
+    if encode_session:
+        await encode_session.close()
+    if prefill_session:
+        await prefill_session.close()
+    if decode_session:
+        await decode_session.close()
+
+
+###############################################################################
+# Core forwarding
+###############################################################################
+
+
+async def forward_non_stream(
+    req_data: dict, req_id: str, e_urls: List[str], p_url: str, d_url: str
+) -> dict:
     # Step 1: Process through Encoder instance (if has MM input)
-    await process_encoder_stage(
-        request_data, request_id, e_server_url
-    )
-    
+    await fanout_encoder_primer(req_data, e_urls, req_id)
+        
     # Step 2: Process through Prefill instance
-    prefill_response = await process_prefill_stage(
-        request_data, request_id, p_server_url
-    )
-    # for nixl connector to facilitate kv transfer...
-    prefill_response_json = await prefill_response.json()
-    kv_transfer_params = prefill_response_json.get('kv_transfer_params', {})
-    if kv_transfer_params:
-        request_data["kv_transfer_params"] = kv_transfer_params
-        logger.debug(f"kv_transfer_params: {kv_transfer_params}")
+    req_data = await maybe_prefill(req_data, p_url, req_id)
 
     # Step 3: Process through Decode instance
-    logger.debug(f"{'Streaming' if is_streaming else 'Getting'} response from decode for request_id: {request_id}/ url: {d_server_url}")
+    logger.debug(f"Getting response from decode for req_id: {req_id}/ url: {d_url}")   
+    headers = {"x-request-id": req_id}
     
-    headers = {"x-request-id": request_id}
-    
-    if is_streaming:
-        # Streaming response
-        async def generate_stream():
-            try:
-                async with decode_session.post(
-                    f"{d_server_url}/v1/chat/completions",
-                    json=request_data,
-                    headers=headers
-                ) as response:
-                    response.raise_for_status()
-                    async for chunk in response.content.iter_chunked(128):
-                        if chunk:
-                            yield chunk.decode('utf-8', errors='ignore')
-            except Exception as e:
-                logger.error(f"Error in decode streaming: {e}")
-                raise
+    # Non-streaming response
+    async with decode_session.post(
+        f"{d_url}/v1/chat/completions", json=req_data, headers=headers
+    ) as resp:
+        resp.raise_for_status()
+        return await resp.json()
+
+
+async def forward_stream(
+    req_data: dict, req_id: str, e_urls: List[str], p_url: str, d_url: str
+) -> AsyncIterator[str]:
+    # Step 1: Process through Encoder instance (if has MM input)
+    await fanout_encoder_primer(req_data, e_urls, req_id)
         
-        return generate_stream()
-    else:
-        # Non-streaming response
-        try:
-            async with decode_session.post(
-                f"{d_server_url}/v1/chat/completions",
-                json=request_data,
-                headers=headers
-            ) as response:
-                response.raise_for_status()
-                result = await response.json()
-            return result
-        except Exception as e:
-            logger.error(f"Error in decode response: {e}")
-            raise
+    # Step 2: Process through Prefill instance
+    req_data = await maybe_prefill(req_data, p_url, req_id)
+
+    # Step 3: Process through Decode instance
+    logger.debug(f"Streaming response from decode for req_id: {req_id}/ url: {d_url}")
+    headers = {"x-request-id": req_id}
+
+    # Streaming response
+    async with decode_session.post(
+        f"{d_url}/v1/chat/completions",
+        json=req_data,
+        headers=headers,
+    ) as resp:
+        resp.raise_for_status()
+        async for chunk in resp.content.iter_chunked(1024):
+            if chunk:
+                yield chunk.decode("utf-8", errors="ignore")
+
+###############################################################################
+# Public routes
+###############################################################################
 
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
-    """Handle chat completion requests through E->P->D pipeline."""
-    try:
-        # Load balance across instances
-        e_instance = random.randint(0, len(app.state.e_urls) - 1)
-        p_instance = random.randint(0, len(app.state.p_urls) - 1)
-        d_instance = random.randint(0, len(app.state.d_urls) - 1)
-       
-        e_server_url = app.state.e_urls[e_instance]
-        p_server_url = app.state.p_urls[p_instance]
-        d_server_url = app.state.d_urls[d_instance]
+    req_data = await request.json()
+    req_id = request.headers.get("x-request-id", str(uuid.uuid4()))
 
-        request_data = await request.json()
-        request_id = request.headers.get("x-request-id")
-        if not request_id:
-            request_id = str(uuid.uuid4())
-       
-        is_streaming = request_data.get("stream", False)
-       
-        logger.debug(f"Processing request {request_id} through E->P->D: {e_server_url} -> {p_server_url} -> {d_server_url}")
-       
-        if is_streaming:
-            stream_generator = await forward_request(
-                request_data, request_id, e_server_url, p_server_url, d_server_url, is_streaming=True
-            )
-            return StreamingResponse(stream_generator, media_type="text/event-stream")
-        else:
-            result = await forward_request(
-                request_data, request_id, e_server_url, p_server_url, d_server_url, is_streaming=False
-            )
-            return JSONResponse(content=result)
-    except Exception as e:
-        logger.error(f"Error processing request: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    e_urls = app.state.e_urls  # we want the full list for fan-out
+    p_url = random.choice(app.state.p_urls) if app.state.p_urls else None
+    d_url = random.choice(app.state.d_urls)
+    
+    is_streaming = req_data.get("stream", False)
+    
+    if is_streaming:
+        return StreamingResponse(
+            forward_stream(req_data, req_id, e_urls, p_url, d_url),
+            media_type="text/event-stream",
+        )
+    result = await forward_non_stream(req_data, req_id, e_urls, p_url, d_url)
+    return JSONResponse(content=result)
 
 
 @app.get("/v1/models")
 async def list_models():
-    """List available models from decode instances."""
-    try:
-        async with decode_session.get(f"{app.state.d_urls[0]}/v1/models") as response:
-            response.raise_for_status()
-            return await response.json()
-    except Exception as e:
-        logger.error(f"Error fetching models: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    async with decode_session.get(f"{app.state.d_urls[0]}/v1/models") as resp:
+        resp.raise_for_status()
+        return await resp.json()
 
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint for all instances."""
-    try:
-        async def check_encode():
+    async def healthy(urls):
+        if not urls:
+            return "empty"
+        for u in urls:
             try:
-                for e_url in app.state.e_urls:
-                    async with encode_session.get(f"{e_url}/health") as response:
-                        response.raise_for_status()
-                return True
+                async with encode_session.get(f"{u}/health") as resp:
+                    resp.raise_for_status()
             except Exception:
-                return False
-       
-        async def check_prefill():
-            try:
-                for p_url in app.state.p_urls:
-                    async with prefill_session.get(f"{p_url}/health") as response:
-                        response.raise_for_status()
-                return True
-            except Exception:
-                return False
-       
-        async def check_decode():
-            try:
-                for d_url in app.state.d_urls:
-                    async with decode_session.get(f"{d_url}/health") as response:
-                        response.raise_for_status()
-                return True
-            except Exception:
-                return False
-       
-        encode_healthy, prefill_healthy, decode_healthy = await asyncio.gather(
-            check_encode(), check_prefill(), check_decode(), return_exceptions=True
-        )
+                return "unhealthy"
+        return "healthy"
 
-        if not (encode_healthy is True and prefill_healthy is True and decode_healthy is True):
-            status_code = 503
-        else:
-            status_code = 200
-        
-        return JSONResponse(
-            {
-                "proxy": "healthy",
-                "encode_servers": "healthy" if encode_healthy is True else "unhealthy",
-                "prefill_servers": "healthy" if prefill_healthy is True else "unhealthy",
-                "decode_servers": "healthy" if decode_healthy is True else "unhealthy"
-            },
-            status_code=status_code,
-        )
-       
-        return health_status
-       
-    except Exception as e:
-        logger.error(f"Health check error: {e}")
-        return JSONResponse(
-            content={"proxy": "unhealthy", "error": str(e)},
-            status_code=503
-        )
+    e_status, p_status, d_status = await asyncio.gather(
+        healthy(app.state.e_urls), healthy(app.state.p_urls), healthy(app.state.d_urls)
+    )
+
+    overall_healthy = all(status != "unhealthy" for status in (e_status, p_status, d_status))
+
+    status_code = 200 if overall_healthy else 503
+
+    return JSONResponse(
+        {
+            "proxy": "healthy",
+            "encode_cluster": e_status,
+            "prefill_cluster": p_status,
+            "decode_cluster": d_status,
+        },
+        status_code=status_code,
+    )
 
 
-@app.get("/status")
-async def get_status():
-    """Get status of all instances."""
-    return {
-        "encode_instance_count": len(app.state.e_urls),
-        "prefill_instance_count": len(app.state.p_urls),
-        "decode_instance_count": len(app.state.d_urls),
-        "encode_instances": app.state.e_urls,
-        "prefill_instances": app.state.p_urls,
-        "decode_instances": app.state.d_urls
-    }
+###############################################################################
+# Simple profiler fan-out (unchanged except for sessions)
+###############################################################################
 
-## profiler methods ##
 
 async def _post_if_available(
     session: aiohttp.ClientSession,
@@ -351,6 +376,7 @@ async def _post_if_available(
 ) -> Optional[dict]:
     """
     POST `payload` to `url`.
+
     Returns
     -------
     • The decoded JSON body on success (2xx)  
@@ -374,6 +400,7 @@ async def _post_if_available(
         # Network errors etc.: propagate
         raise
 
+
 async def _profile_cmd(cmd: str, payload: dict, e_url: str, p_url: str, d_url: str):
     """
     Fire & forget to both clusters, tolerate 404.
@@ -385,7 +412,7 @@ async def _profile_cmd(cmd: str, payload: dict, e_url: str, p_url: str, d_url: s
     )
     prefill_task = _post_if_available(
         prefill_session, f"{p_url}/{cmd}_profile", payload, headers
-    )
+    ) if p_url is not None else asyncio.sleep(0)
     decode_task = _post_if_available(
         decode_session, f"{d_url}/{cmd}_profile", payload, headers
     )
@@ -401,16 +428,17 @@ async def _profile_cmd(cmd: str, payload: dict, e_url: str, p_url: str, d_url: s
 
     return {
         "encode": encode_res,   # may be None
-        "prefill": decode_res,   # may be None
+        "prefill": prefill_res,   # may be None
         "decode": decode_res,   # may be None
     }
+
 
 @app.post("/start_profile")
 async def start_profile(request: Request):
     body = await request.json()
     # TODO: handle multi urls properly
     e_url = random.choice(app.state.e_urls)
-    p_url = random.choice(app.state.p_urls)
+    p_url = random.choice(app.state.p_urls) if app.state.p_urls else None
     d_url = random.choice(app.state.d_urls)
     return await _profile_cmd("start", body, e_url, p_url, d_url)
 
@@ -420,42 +448,52 @@ async def stop_profile(request: Request):
     body = await request.json()
     # TODO: handle multi urls properly
     e_url = random.choice(app.state.e_urls)
-    p_url = random.choice(app.state.p_urls)
+    p_url = random.choice(app.state.p_urls) if app.state.p_urls else None
     d_url = random.choice(app.state.d_urls)
     return await _profile_cmd("stop", body, e_url, p_url, d_url)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="E+PD Separation Proxy for distributed vLLM servers")
-    parser.add_argument("--host", type=str, default="0.0.0.0", help="Proxy host")
-    parser.add_argument("--port", type=int, default=8000, help="Proxy port")
-
-    parser.add_argument("--encode-servers-urls", type=str, required=True,
-                       help="URLs of the encode servers in comma separated format"
-                            "(e.g., \"http://localhost:8001,http://localhost:8002\")")
-   
-    parser.add_argument("--prefill-servers-urls", type=str, required=True,
-                       help="URLs of the prefill servers in comma separated format"
-                            "(e.g., \"http://localhost:8003,http://localhost:8004\")")
-   
-    parser.add_argument("--decode-servers-urls", type=str, required=True,
-                       help="URLs of the decode servers in comma separated format"
-                            "(e.g., \"http://localhost:8005,http://localhost:8006\")")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument(
+        "--encode-servers-urls",
+        required=True,
+        help='Comma-separated encode URLs ("http://e1:8001,http://e2:8001")',
+    )
+    parser.add_argument(
+        "--prefill-servers-urls",
+        required=True,
+        help='Comma-separated prefill URLs ("http://p1:8003,http://p2:8004") to enable E->P->D, set "disable" or "none" to enable E->PD',
+    )
+    parser.add_argument(
+        "--decode-servers-urls",
+        required=True,
+        help='Comma-separated decode URLs ("http://d1:8005,http://d2:8006")',
+    )
    
     args = parser.parse_args()
-    app.state.e_urls = args.encode_servers_urls.split(",")
-    app.state.p_urls = args.prefill_servers_urls.split(",")
+    app.state.e_urls = [u.strip() for u in args.encode_servers_urls.split(",") if u.strip()]
     app.state.d_urls = args.decode_servers_urls.split(",")
-   
-    logger.info(f"Starting E+PD separation proxy on {args.host}:{args.port}")
-    logger.info(f"Encode instances: {app.state.e_urls}")
-    logger.info(f"Prefill instances: {app.state.p_urls}")
-    logger.info(f"Decode instances: {app.state.d_urls}")
+    app.state.d_urls = [u.strip() for u in args.decode_servers_urls.split(",") if u.strip()]
+    # handle prefill instances
+    if args.prefill_servers_urls.lower() in ("disable", "none", ""):
+        app.state.p_urls = []
+        logger.info("Disaggregated prefill phase explicitly disabled by user. Running E + PD...")
+    else:
+        app.state.p_urls = [u.strip() for u in args.prefill_servers_urls.split(",") if u.strip()]
+        logger.info("Disaggregated prefill phase is enabled. Running E + P + D...")
+
+    logger.info("Proxy listening on %s:%s", args.host, args.port)
+    logger.info("Encode servers: %s", app.state.e_urls)
+    logger.info("Prefill instances %s", app.state.p_urls)
+    logger.info("Decode servers: %s", app.state.d_urls)
 
     uvicorn.run(
         app,
         host=args.host,
         port=args.port,
         log_level="info",
+        loop="uvloop",
         access_log=False,
-        loop="uvloop"
     )
