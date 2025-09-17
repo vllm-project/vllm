@@ -3,7 +3,8 @@
 INPUT_JSON="$1"
 GCS_PATH="$2" # Optional GCS path for uploading results for each run
 
-AUTOTUNE_SCRIPT="auto_tune.sh"
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
+AUTOTUNE_SCRIPT="$SCRIPT_DIR/auto_tune.sh"
 
 if [[ -z "$INPUT_JSON" ]]; then
   echo "Error: Input JSON file not provided."
