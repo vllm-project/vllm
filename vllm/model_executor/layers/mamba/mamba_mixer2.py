@@ -532,8 +532,6 @@ class MambaMixer2(MambaBase, CustomOp):
             chunk_offsets_p = mamba2_metadata.chunk_offsets_p
             query_start_loc_p = mamba2_metadata.query_start_loc_p
 
-        groups_time_state_size = self.n_groups * self.ssm_state_size
-
         # 1. Gated MLP's linear projection
         projected_states, _ = self.in_proj(hidden_states)
 
@@ -574,6 +572,7 @@ class MambaMixer2(MambaBase, CustomOp):
             out, _ = self.out_proj(hidden_states)
             return out
 
+        # NOTE: V0 put prefill before decode, v1 puts decode before prefill
         num_prefills = attn_metadata.num_prefills  # request count
         num_decodes = attn_metadata.num_decode_tokens  # token count (=request)
         num_prefill_tokens = attn_metadata.num_prefill_tokens  # token count

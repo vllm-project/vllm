@@ -191,16 +191,11 @@ def _bmm_chunk_fwd(a, b, chunk_size, seq_idx, causal=False, output_dtype=None):
         causal: if True, then out[i, j] for i > j will be arbitrary, only out[i, j] for i <= j are
             guaranteed to be correct.
     Return:
-        out: (nchunks, chunk_size, chunk_size) or (nchunks, ngroups, chunk_size, chunk_size)
+        out: (nchunks, ngroups, chunk_size, chunk_size)
     """
-    # Check constraints.
-    has_groups = a.dim() == 3
-    assert has_groups
-    assert seq_idx is not None
-
     seqlen, ngroups, k = a.shape
     assert b.shape == a.shape
-
+    assert seq_idx is not None
     assert seq_idx.shape == (seqlen, )
     if a.stride(-1) != 1 and a.stride(0) != 1:
         a = a.contiguous()
@@ -229,7 +224,7 @@ def _bmm_chunk_fwd(a, b, chunk_size, seq_idx, causal=False, output_dtype=None):
             seqlen=seqlen,
             chunk_size=chunk_size,
             K=k,
-            ngroups=ngroups,  #if has_groups else 1,
+            ngroups=ngroups,
             stride_a_seqlen=a.stride(0),
             stride_a_head=a.stride(1),
             stride_ak=a.stride(2),
