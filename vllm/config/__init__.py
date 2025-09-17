@@ -421,10 +421,6 @@ class VllmConfig:
                     "Encoder-decoder model detected: setting "
                     "`max_num_encoder_input_tokens` to encoder length (%s)",
                     self.scheduler_config.max_num_encoder_input_tokens)
-                self.scheduler_config.disable_chunked_mm_input = True
-                disable_chunked_prefill_reasons.append(
-                    "Encoder-decoder models do not support chunked prefill nor"
-                    " prefix caching; disabling both.")
                 if (self.model_config.architecture
                         == "WhisperForConditionalGeneration"
                         and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD")
@@ -435,7 +431,8 @@ class VllmConfig:
                         "try setting 'VLLM_WORKER_MULTIPROC_METHOD' "
                         "to 'spawn'.")
 
-        if disable_chunked_prefill_reasons:
+        if (not self.scheduler_config.chunked_prefill_enabled
+                or disable_chunked_prefill_reasons):
             for reason in disable_chunked_prefill_reasons:
                 logger.info(reason)
             self.scheduler_config.chunked_prefill_enabled = False
