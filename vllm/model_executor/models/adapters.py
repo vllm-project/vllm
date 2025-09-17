@@ -307,7 +307,7 @@ def as_seq_cls_model(cls: _T) -> _T:
                 hidden_size,
                 config.num_labels,
                 bias=False,
-                params_dtype=torch.float32,
+                params_dtype=vllm_config.model_config.head_dtype,
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "score"),
             )
@@ -339,6 +339,7 @@ def as_seq_cls_model(cls: _T) -> _T:
             })
 
         def _classifier(self, x: torch.Tensor):
+            x=x.to(self.vllm_config.model_config.head_dtype)
             x, _ = self.score(x.float())
             return x
 

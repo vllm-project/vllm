@@ -473,7 +473,7 @@ class EngineArgs:
     kv_sharing_fast_prefill: bool = \
         CacheConfig.kv_sharing_fast_prefill
 
-    max_num_labels: Optional[int] = None
+    max_num_labels: Optional[int] = LoRAConfig.max_num_labels
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -1401,8 +1401,9 @@ class EngineArgs:
             fully_sharded_loras=self.fully_sharded_loras,
             lora_extra_vocab_size=self.lora_extra_vocab_size,
             lora_dtype=self.lora_dtype,
-            max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras
-            and self.max_cpu_loras > 0 else None) if self.enable_lora else None
+            max_cpu_loras=self.max_cpu_loras
+            if self.max_cpu_loras and self.max_cpu_loras > 0 else None,
+            max_num_labels=self.max_num_labels) if self.enable_lora else None
 
         # bitsandbytes pre-quantized model need a specific model loader
         if model_config.quantization == "bitsandbytes":

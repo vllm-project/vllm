@@ -11,16 +11,17 @@ from vllm.config import LoRAConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 
 from .base import BaseLayerWithLoRA
-from .utils import _get_lora_device
+from .utils import _get_layer_device, _get_layer_dtype
+
 
 class ClassifierWithLoRA(BaseLayerWithLoRA):
 
     def __init__(self, base_layer: ReplicatedLinear) -> None:
         super().__init__()
-        self.base_layer=base_layer
+        self.base_layer = base_layer
         self.input_size = base_layer.input_size
         self._label_slot: list = []
-        self.device=_get_lora_device(base_layer)
+        self.device = _get_layer_device(base_layer)
 
     def create_lora_weights(
         self,
@@ -37,7 +38,7 @@ class ClassifierWithLoRA(BaseLayerWithLoRA):
             1,
             self.max_class_label,
             self.input_size,
-            dtype=lora_config.lora_dtype,
+            dtype=_get_layer_dtype(self.base_layer),
             device=self.device,
         )
 
@@ -73,10 +74,15 @@ class ClassifierWithLoRA(BaseLayerWithLoRA):
         y = torch.zeros(self.input_size,
                         self.max_class_label,
                         device=input_.device)
+        lora_weight = tuple(self.lora_a_stacked, )
 
-        self.punica_wrapper.add_shrink(y, self.lora_a_stacked, add_input=True)
+        self.punica_wrapper.add_shrink(y.unsqueeze(dim=0),
+                                       input_,
+                                       lora_weight,
+                                       scale=1.0)
         #TODO Cast y using self._label_slot
-        return y
+        # Keep consistent with the base_layer output
+        return y, None
 
     # ReplicatedLinear should always be replaced, regardless of the fully
     # sharded LoRAs setting, because it is, by definition, copied per GPU.

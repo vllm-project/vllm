@@ -198,7 +198,9 @@ class PackedLoRALayerWeights(LoRALayerWeights):
     def is_packed(self) -> bool:
         return True
 
+
 class ClassifierLoRALayerWeights(LoRALayerWeights):
+
     @classmethod
     def create_dummy_lora_weights(
         cls,
@@ -211,9 +213,10 @@ class ClassifierLoRALayerWeights(LoRALayerWeights):
         bias_enabled: Optional[bool] = False,
     ) -> "LoRALayerWeights":
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
-        lora_a = torch.zeros(
-            [input_dim, rank], dtype=dtype, device=device, pin_memory=pin_memory
-        )
+        lora_a = torch.zeros([input_dim, rank],
+                             dtype=dtype,
+                             device=device,
+                             pin_memory=pin_memory)
         return cls(
             module_name,
             rank=rank,
@@ -226,9 +229,7 @@ class ClassifierLoRALayerWeights(LoRALayerWeights):
 
     def optimize(self) -> "LoRALayerWeights":
         return self
+
     @property
     def output_dim(self) -> int:
         return self.rank
-        
-        
-

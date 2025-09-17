@@ -15,7 +15,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.platforms import current_platform
 
 from .base import BaseLayerWithLoRA
-from .utils import _get_layer_weight, _get_lora_device
+from .utils import _get_layer_device, _get_layer_weight
 
 
 class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
@@ -24,7 +24,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         super().__init__()
         self.base_layer = base_layer
         self.input_size = self.base_layer.input_size
-        self.device = _get_lora_device(self.base_layer)
+        self.device = _get_layer_device(self.base_layer)
         self.lora_bias_stacked: Optional[tuple[torch.Tensor, ...]] = None
 
         self.output_slices: tuple[int, ...]

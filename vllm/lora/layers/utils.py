@@ -33,9 +33,14 @@ def _get_layer_weight(layer: torch.nn.Module) -> torch.Tensor:
         raise ValueError(f"Unsupported base layer: {layer}")
 
 
-def _get_lora_device(base_layer: nn.Module) -> torch.device:
+def _get_layer_device(base_layer: nn.Module) -> torch.device:
     weight = _get_layer_weight(base_layer)
     return weight.device
+
+
+def _get_layer_dtype(base_layer: nn.Module) -> torch.dtype:
+    weight = _get_layer_weight(base_layer)
+    return weight.dtype
 
 
 def _not_fully_sharded_can_replace(can_replace):

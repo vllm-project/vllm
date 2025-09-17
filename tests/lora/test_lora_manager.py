@@ -12,11 +12,11 @@ from vllm.config.lora import LoRAConfig
 from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
                               RowParallelLinearWithLoRA)
-from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.models import (LoRAMapping, LoRAModel, LoRAModelManager,
                               LRUCacheLoRAModelManager)
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
+from vllm.lora.weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.worker_manager import (LRUCacheWorkerLoRAManager,
                                       WorkerLoRAManager)
 from vllm.platforms import current_platform

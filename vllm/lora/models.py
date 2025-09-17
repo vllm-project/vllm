@@ -19,8 +19,6 @@ from vllm.adapter_commons.utils import (add_adapter, deactivate_adapter,
 from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import BaseLayerWithLoRA, LoRAMapping
-from vllm.lora.lora_weights import (ClassifierLoRALayerWeights,
-                                    LoRALayerWeights, PackedLoRALayerWeights)
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.punica_wrapper import get_punica_wrapper
 from vllm.lora.utils import (from_layer, from_layer_classifier,
@@ -28,6 +26,8 @@ from vllm.lora.utils import (from_layer, from_layer_classifier,
                              get_supported_lora_modules,
                              is_regex_target_modules,
                              parse_fine_tuned_lora_name, replace_submodule)
+from vllm.lora.weights import (ClassifierLoRALayerWeights, LoRALayerWeights,
+                               PackedLoRALayerWeights)
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.models import SupportsLoRA, supports_multimodal
