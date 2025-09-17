@@ -158,7 +158,8 @@ class MiMoMTP(nn.Module):
                                              prefix=maybe_prefix(
                                                  prefix, "model"))
         self.lm_head = ParallelLMHead(self.config.vocab_size,
-                                      self.config.hidden_size)
+                                      self.config.hidden_size,
+                                      prefix=maybe_prefix(prefix, "lm_head"))
 
     def forward(
         self,

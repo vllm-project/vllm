@@ -655,6 +655,7 @@ class GptOssForCausalLM(nn.Module, SupportsPP):
         self.lm_head = ParallelLMHead(
             self.config.vocab_size,
             self.config.hidden_size,
+            prefix=maybe_prefix(prefix, "lm_head"),
         )
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
         self.make_empty_intermediate_tensors = (

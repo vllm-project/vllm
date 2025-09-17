@@ -702,6 +702,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
                 self.config.hidden_size,
                 org_num_embeddings=self.config.vocab_size,
                 padding_size=DEFAULT_VOCAB_PADDING_SIZE,
+                prefix=maybe_prefix(prefix, "lm_head"),
             )
 
             self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
