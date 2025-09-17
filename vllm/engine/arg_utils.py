@@ -410,6 +410,9 @@ class EngineArgs:
     tokenizer_revision: Optional[str] = ModelConfig.tokenizer_revision
     quantization: Optional[QuantizationMethods] = ModelConfig.quantization
     enforce_eager: bool = ModelConfig.enforce_eager
+    max_seq_len_to_capture: int = ModelConfig.max_seq_len_to_capture
+    need_structured_in_reasoning: bool = \
+        ModelConfig.need_structured_in_reasoning
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
     limit_mm_per_prompt: dict[str, Union[int, dict[str, int]]] = get_field(
         MultiModalConfig, "limit_per_prompt"
@@ -430,7 +433,6 @@ class EngineArgs:
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
     io_processor_plugin: Optional[str] = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
-    video_pruning_rate: float = MultiModalConfig.video_pruning_rate
     # LoRA fields
     enable_lora: bool = False
     enable_lora_bias: bool = LoRAConfig.bias_enabled
@@ -600,43 +602,33 @@ class EngineArgs:
         model_group.add_argument("--config-format", **model_kwargs["config_format"])
         # This one is a special case because it can bool
         # or str. TODO: Handle this in get_kwargs
-        model_group.add_argument(
-            "--hf-token",
-            type=str,
-            nargs="?",
-            const=True,
-            default=model_kwargs["hf_token"]["default"],
-            help=model_kwargs["hf_token"]["help"],
-        )
-        model_group.add_argument("--hf-overrides", **model_kwargs["hf_overrides"])
-        model_group.add_argument("--pooler-config", **model_kwargs["pooler_config"])
-        model_group.add_argument(
-            "--override-pooler-config",
-            **model_kwargs["override_pooler_config"],
-            deprecated=True,
-        )
-        model_group.add_argument(
-            "--logits-processor-pattern", **model_kwargs["logits_processor_pattern"]
-        )
-        model_group.add_argument(
-            "--generation-config", **model_kwargs["generation_config"]
-        )
-        model_group.add_argument(
-            "--override-generation-config", **model_kwargs["override_generation_config"]
-        )
-        model_group.add_argument(
-            "--enable-sleep-mode", **model_kwargs["enable_sleep_mode"]
-        )
-        model_group.add_argument("--model-impl", **model_kwargs["model_impl"])
-        model_group.add_argument(
-            "--override-attention-dtype", **model_kwargs["override_attention_dtype"]
-        )
-        model_group.add_argument(
-            "--logits-processors", **model_kwargs["logits_processors"]
-        )
-        model_group.add_argument(
-            "--io-processor-plugin", **model_kwargs["io_processor_plugin"]
-        )
+        model_group.add_argument("--hf-token",
+                                 type=str,
+                                 nargs="?",
+                                 const=True,
+                                 default=model_kwargs["hf_token"]["default"],
+                                 help=model_kwargs["hf_token"]["help"])
+        model_group.add_argument("--hf-overrides",
+                                 **model_kwargs["hf_overrides"])
+        model_group.add_argument("--override-pooler-config",
+                                 **model_kwargs["override_pooler_config"])
+        model_group.add_argument("--logits-processor-pattern",
+                                 **model_kwargs["logits_processor_pattern"])
+        model_group.add_argument("--generation-config",
+                                 **model_kwargs["generation_config"])
+        model_group.add_argument("--override-generation-config",
+                                 **model_kwargs["override_generation_config"])
+        model_group.add_argument("--enable-sleep-mode",
+                                 **model_kwargs["enable_sleep_mode"])
+        model_group.add_argument("--model-impl",
+                                 choices=[f.value for f in ModelImpl],
+                                 **model_kwargs["model_impl"])
+        model_group.add_argument("--override-attention-dtype",
+                                 **model_kwargs["override_attention_dtype"])
+        model_group.add_argument("--logits-processors",
+                                 **model_kwargs["logits_processors"])
+        model_group.add_argument("--io-processor-plugin",
+                                 **model_kwargs["io_processor_plugin"])
 
         # Model loading arguments
         load_kwargs = get_kwargs(LoadConfig)
@@ -1140,6 +1132,7 @@ class EngineArgs:
             logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,
             io_processor_plugin=self.io_processor_plugin,
+            need_structured_in_reasoning=self.need_structured_in_reasoning,
         )
 
     def validate_tensorizer_args(self):

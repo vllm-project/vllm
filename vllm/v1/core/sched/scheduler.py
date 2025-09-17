@@ -905,6 +905,10 @@ class Scheduler(SchedulerInterface):
                 structured_output_request_ids,
                 scheduled_spec_decode_tokens,
             )
+            with open("/workspace/track_log", "a") as f:
+                import numpy as np
+                with np.printoptions(threshold=np.inf):
+                    f.write(str(bitmask) + "\n")
         return structured_output_request_ids, bitmask
 
     def update_from_output(
@@ -981,6 +985,12 @@ class Scheduler(SchedulerInterface):
             new_token_ids = generated_token_ids
             kv_transfer_params = None
             status_before_stop = request.status
+
+            # Debug: dump new_token_ids to file
+            with open("/workspace/token_log", "a") as f:
+                f.write(str(new_token_ids) + "\n")
+            with open("/workspace/track_log", "a") as f:
+                f.write(str(new_token_ids) + "\n")
 
             # Check for stop and update request status.
             if new_token_ids:

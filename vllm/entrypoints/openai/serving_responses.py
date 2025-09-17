@@ -369,6 +369,15 @@ class OpenAIServingResponses(OpenAIServing):
                         context = HarmonyContext(messages, available_tools)
                 else:
                     context = SimpleContext()
+
+                # TODO Hanchen make sampling params to include the structural
+                # tag
+                sampling_params.structured_tag = \
+                    self.reasoning_parser.prepare_structured_tag(
+                    sampling_params.structured_tag, self.tool_server)
+                logger.info("sampling_params.structured_tag:\
+                         {sampling_params.structured_tag}")
+
                 generator = self._generate_with_builtin_tools(
                     request_id=request.request_id,
                     request_prompt=request_prompts[i],
@@ -1128,10 +1137,10 @@ class OpenAIServingResponses(OpenAIServing):
                             current_text=previous_text + output.text,
                             delta_text=output.text,
                             previous_token_ids=previous_token_ids,
-                            current_token_ids=previous_token_ids + output.token_ids,
+                            current_token_ids=previous_token_ids +
+                            output.token_ids,
                             delta_token_ids=output.token_ids,
                         )
-                    )
                 else:
                     delta_message = DeltaMessage(
                         content=output.text,
@@ -1818,6 +1827,12 @@ class OpenAIServingResponses(OpenAIServing):
                 processer = self._process_harmony_streaming_events
             else:
                 processer = self._process_simple_streaming_events
+            # TODO Hanchen make sampling params to include the structural tag
+            sampling_params.structured_tag = \
+                self.reasoning_parser.prepare_structured_tag(
+                    sampling_params.structured_tag, self.tool_server)
+            logger.info("sampling_params.structured_tag: %s",
+                        sampling_params.structured_tag)
 
             initial_response = ResponsesResponse.from_request(
                 request,

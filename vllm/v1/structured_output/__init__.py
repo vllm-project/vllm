@@ -72,6 +72,11 @@ class StructuredOutputManager:
                 )
                 self.reasoner = reasoner_cls(tokenizer=self.tokenizer)
 
+        self.need_structured_in_reasoning = \
+            self.vllm_config.model_config.need_structured_in_reasoning
+        logger.info("need_structured_in_reasoning: %s",
+                    self.need_structured_in_reasoning)
+
     def grammar_init(self, request: Request) -> None:
         if request.structured_output_request is None:
             return
@@ -274,6 +279,9 @@ class StructuredOutputManager:
         return bitmask_tensor.numpy()
 
     def should_fill_bitmask(self, request: Request) -> bool:
+        if self.need_structured_in_reasoning:
+            return True
+
         if self.reasoner is not None:
             assert request.structured_output_request is not None
             if request.structured_output_request.reasoning_ended is None:
@@ -295,6 +303,10 @@ class StructuredOutputManager:
         # by default, we should always advance
         # for cases that don't use thinking mode.
         if self.reasoner is not None:
+            # if the model needs structured in reasoning, we should advance
+            if self.need_structured_in_reasoning:
+                return True
+
             structured_req = request.structured_output_request
 
             if structured_req.reasoning_ended:

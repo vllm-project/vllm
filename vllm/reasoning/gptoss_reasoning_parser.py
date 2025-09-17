@@ -8,6 +8,7 @@ from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.harmony_utils import parse_chat_output
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
+from vllm.entrypoints.tool_server import ToolServer
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 
@@ -82,3 +83,9 @@ class GptOssReasoningParser(ReasoningParser):
         raise NotImplementedError(
             "gpt-oss has a special branch for parsing reasoning in non-streaming mode. This method shouldn't be used."  # noqa: E501
         )
+
+    # This function prepares the structural tag to format reasoning output
+    def prepare_structured_tag(self, original_tag: Optional[str],
+                               tool_server: ToolServer) -> str:
+        #TODO Hanchen
+        return original_tag
