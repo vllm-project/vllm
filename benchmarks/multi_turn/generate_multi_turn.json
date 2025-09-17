@@ -15,9 +15,8 @@
         },
         "prefix_num_tokens": {
             "distribution": "lognormal",
-            "mean": 6,
-            "sigma": 4,
-            "max": 1500
+            "average": 1000,
+            "max": 5000
         },
         "num_tokens": {
             "distribution": "uniform",

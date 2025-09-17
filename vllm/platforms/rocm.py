@@ -175,15 +175,15 @@ class RocmPlatform(Platform):
     ]
 
     @classmethod
-    def get_vit_attn_backend(cls, support_fa: bool = False) -> _Backend:
-        if support_fa:
-            if (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA
-                    and on_gfx9()):
-                # Note: AITER FA is only supported for Qwen-VL models.
-                # TODO: Add support for other VL models in their model class.
-                return _Backend.ROCM_AITER_FA
-            if on_gfx9():
-                return _Backend.FLASH_ATTN
+    def get_vit_attn_backend(cls, head_size: int,
+                             dtype: torch.dtype) -> _Backend:
+        if (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA
+                and on_gfx9()):
+            # Note: AITER FA is only supported for Qwen-VL models.
+            # TODO: Add support for other VL models in their model class.
+            return _Backend.ROCM_AITER_FA
+        if on_gfx9():
+            return _Backend.FLASH_ATTN
         return _Backend.TORCH_SDPA
 
     @classmethod
@@ -191,7 +191,7 @@ class RocmPlatform(Platform):
                              kv_cache_dtype, block_size, use_v1, use_mla,
                              has_sink) -> str:
         if use_mla:
-            from vllm.attention.backends.rocm_aiter_mla import (
+            from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
                 is_aiter_mla_enabled)
 
             if selected_backend is None:

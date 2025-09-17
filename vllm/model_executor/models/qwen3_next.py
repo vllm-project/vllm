@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Qwen3Next model."""
 from collections.abc import Iterable
+from itertools import islice
 from typing import Optional
 
 import torch
@@ -416,9 +417,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         self_kv_cache = self.kv_cache[forward_context.virtual_engine]
         conv_state = self_kv_cache[0].transpose(-1, -2)
         ssm_state = self_kv_cache[1]
-        num_actual_tokens = (attn_metadata.num_prefill_tokens +
-                             attn_metadata.num_decode_tokens +
-                             attn_metadata.num_spec_decode_tokens)
+        num_actual_tokens = attn_metadata.num_actual_tokens
         num_accepted_tokens = attn_metadata.num_accepted_tokens
 
         # 1. Set up dimensions for reshapes later
@@ -457,9 +456,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
 
         # 2.1: process the mutli-query part
         if spec_sequence_masks is not None:
-            mixed_qkv_spec = mixed_qkv_spec.view(
-                attn_metadata.num_spec_decodes, -1, mixed_qkv_spec.size(-1))
-            mixed_qkv_spec = rearrange(mixed_qkv_spec, 'b l d -> b d l')
             mixed_qkv_spec = causal_conv1d_update(
                 mixed_qkv_spec,
                 conv_state,
@@ -469,9 +465,10 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 conv_state_indices=spec_state_indices_tensor[:, 0]
                 [:attn_metadata.num_spec_decodes],
                 num_accepted_tokens=num_accepted_tokens,
+                query_start_loc=spec_query_start_loc,
+                max_query_len=spec_state_indices_tensor.size(-1),
                 validate_data=False,
             )
-            mixed_qkv_spec = rearrange(mixed_qkv_spec, 'b d l -> (b l) d')
 
         # 2.2: process the remaining part
         if attn_metadata.num_prefills > 0:
@@ -917,8 +914,11 @@ class Qwen3NextModel(nn.Module):
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
 
-        self.norm = Qwen3NextRMSNorm(config.hidden_size,
-                                     eps=config.rms_norm_eps)
+        if get_pp_group().is_last_rank:
+            self.norm = Qwen3NextRMSNorm(config.hidden_size,
+                                         eps=config.rms_norm_eps)
+        else:
+            self.norm = PPMissingLayer()
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -941,7 +941,7 @@ class Qwen3NextModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in self.layers:
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,
@@ -1085,7 +1085,7 @@ class Qwen3NextForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
             # We need bigger padding if using lora for kernel
             # compatibility
             if not lora_config else lora_config.lora_vocab_padding_size,
-        )
+            prefix=maybe_prefix(prefix, "lm_head"))
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
         self.make_empty_intermediate_tensors = (
