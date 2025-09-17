@@ -21,7 +21,6 @@ from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
 from vllm.entrypoints.openai.tool_parsers.utils import (
     extract_intermediate_diff)
 from vllm.logger import init_logger
-from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
@@ -115,9 +114,11 @@ class Phi4MiniJsonToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> Optional[DeltaMessage]:
-        if not current_text.startswith(self.bot_token):
+        logger.debug("Current text: %s", current_text)
+        if self.bot_token not in current_text:
             return DeltaMessage(content=delta_text)
-        if current_text == self.bot_token:
+        if delta_text == self.bot_token:
+            logger.debug("Delta text is just the bot token")
             # if the current text is just the bot token, we don't have
             # enough information to parse yet
             return None
@@ -130,7 +131,10 @@ class Phi4MiniJsonToolParser(ToolParser):
         flags = Allow.ALL if self.current_tool_name_sent \
             else Allow.ALL & ~Allow.STR
         try:
-            parsable_arr = current_text[len(self.bot_token):]
+            # Find the last occurrence of bot_token and start from there
+            last_bot_token_index = current_text.rfind(self.bot_token)
+            parsable_arr = current_text[last_bot_token_index +
+                                        len(self.bot_token):]
             if parsable_arr.endswith(self.bot_end_token):
                 # if the end token is present, remove it
                 parsable_arr = parsable_arr[:-len(self.bot_end_token)]
@@ -200,7 +204,7 @@ class Phi4MiniJsonToolParser(ToolParser):
                     delta = DeltaMessage(tool_calls=[
                         DeltaToolCall(index=self.current_tool_id,
                                       type="function",
-                                      id=f"chatcmpl-tool-{random_uuid()}",
+                                      id=make_tool_call_id(),
                                       function=DeltaFunctionCall(
                                           name=function_name).model_dump(
                                               exclude_none=True))
