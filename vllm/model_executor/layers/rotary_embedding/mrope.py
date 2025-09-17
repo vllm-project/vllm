@@ -30,6 +30,7 @@ def _triton_mrope_forward(
     pad_hd: tl.constexpr,
     mrope_section_t: tl.constexpr,
     mrope_section_h: tl.constexpr,
+    mrope_section_w: tl.constexpr,
     is_interleaved: tl.constexpr,
 ):
     # Adapted from
@@ -60,9 +61,9 @@ def _triton_mrope_forward(
     # Updated offsets for half head_dim
     cos_offsets = tl.arange(0, pad_hd // 2)
     if is_interleaved:
-        t_mask = (cos_offsets % 3) == 0
-        h_mask = (cos_offsets % 3) == 1
-        w_mask = (cos_offsets % 3) == 2
+        h_mask = ((cos_offsets % 3) == 1) & (cos_offsets <= 3 * mrope_section_h)
+        w_mask = ((cos_offsets % 3) == 2) & (cos_offsets <= 3 * mrope_section_w)
+        t_mask = ~(h_mask | w_mask)
     else:
         t_end = mrope_section_t
         h_end = t_end + mrope_section_h
@@ -179,6 +180,7 @@ def triton_mrope(
         pad_hd,
         mrope_section[0],
         mrope_section[1],
+        mrope_section[2],
         mrope_interleaved,
     )
     return q, k
