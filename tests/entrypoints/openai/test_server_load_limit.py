@@ -38,8 +38,7 @@ class TestServerLoadLimit:
         content = json.loads(response.body.decode('utf-8'))
         assert content["error"]["type"] == "server_overloaded"
         assert "Server is currently overloaded" in content["error"]["message"]
-        assert "Current load: 15" in content["error"]["message"]
-        assert "Max load: 10" in content["error"]["message"]
+        assert "Please try again later" in content["error"]["message"]
 
     @pytest.mark.asyncio
     async def test_load_aware_call_max_load_at_limit(self):

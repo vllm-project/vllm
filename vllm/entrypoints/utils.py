@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import time
+from http import HTTPStatus
 from typing import Any, Optional, Union
 
 from fastapi import Request
@@ -24,6 +25,16 @@ from vllm.platforms import current_platform
 from vllm.utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
+
+SERVER_OVERLOADED_RESPONSE = JSONResponse(
+    content={
+        "error": {
+            "type": "server_overloaded",
+            "message":
+            "Server is currently overloaded. Please try again later."
+        }
+    },
+    status_code=HTTPStatus.SERVICE_UNAVAILABLE)
 
 VLLM_SUBCMD_PARSER_EPILOG = (
     "Tip: Use `vllm [serve|run-batch|bench <bench_type>] "
@@ -158,18 +169,7 @@ def load_aware_call(func):
         if max_load is not None and app_state.server_load_metrics >= max_load:
             # Aggregate rejections since last log
             _aggregate_rejection_stats(app_state)
-            return JSONResponse(content={
-                "error": {
-                    "type":
-                    "server_overloaded",
-                    "message":
-                    f"Server is currently overloaded. Current load: "
-                    f"{app_state.server_load_metrics}, Max load: "
-                    f"{getattr(app_state, 'max_server_load', None)}. "
-                    "Please try again later."
-                }
-            },
-                                status_code=503)
+            return SERVER_OVERLOADED_RESPONSE
 
         app_state.server_load_metrics += 1
         try:
