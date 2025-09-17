@@ -17,8 +17,6 @@ from typing_extensions import ParamSpec
 # import custom ops, trigger op registration
 import vllm._C  # noqa
 import vllm.envs as envs
-from vllm.attention.backends.registry import (_Backend, backend_to_class,
-                                              backend_to_class_str)
 from vllm.logger import init_logger
 from vllm.utils import (cuda_device_count_stateless, import_pynvml,
                         resolve_obj_by_qualname)
@@ -26,6 +24,7 @@ from vllm.utils import (cuda_device_count_stateless, import_pynvml,
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
+    from vllm.attention.backends.registry import _Backend
     from vllm.config import ModelConfig, VllmConfig
 
 logger = init_logger(__name__)
@@ -39,43 +38,38 @@ pynvml = import_pynvml()
 # see https://github.com/huggingface/diffusers/issues/9704 for details
 torch.backends.cuda.enable_cudnn_sdp(False)
 
-BACKEND_PRIORITIES = {
-    # V1 non-MLA backends
-    _Backend.FLASHINFER_VLLM_V1:
-    0,
-    _Backend.FLASH_ATTN_VLLM_V1:
-    1,
-    _Backend.TRITON_ATTN_VLLM_V1:
-    2,
-    _Backend.FLEX_ATTENTION:
-    3,
-    # V0 non-MLA backends
-    # NOTE: backends with V1 versions must match
-    # the numeric values of their V1 counterparts
-    _Backend.FLASH_ATTN:
-    1,
-    _Backend.XFORMERS:
-    4,
 
-    # V1 MLA backends
-    _Backend.CUTLASS_MLA:
-    0,
-    _Backend.FLASHINFER_MLA:
-    1,
-    _Backend.FLASHMLA_VLLM_V1:
-    2,
-    _Backend.FLASH_ATTN_MLA:
-    3,
-    _Backend.TRITON_MLA_VLLM_V1:
-    4,
-    # V0 MLA backends
-    # NOTE: backends with V1 versions must match
-    # the numeric values of their V1 counterparts
-    _Backend.FLASHMLA:
-    2,
-    _Backend.TRITON_MLA:
-    4,
-}
+@cache
+def _get_backend_priorities():
+    """Get backend priorities with lazy import to avoid circular dependency."""
+    from vllm.attention.backends.registry import _Backend
+
+    # fmt: off
+    return {
+        # V1 non-MLA backends
+        _Backend.FLASHINFER_VLLM_V1: 0,
+        _Backend.FLASH_ATTN_VLLM_V1: 1,
+        _Backend.TRITON_ATTN_VLLM_V1: 2,
+        _Backend.FLEX_ATTENTION: 3,
+        # V0 non-MLA backends
+        # NOTE: backends with V1 versions must match
+        # the numeric values of their V1 counterparts
+        _Backend.FLASH_ATTN: 1,
+        _Backend.XFORMERS: 4,
+
+        # V1 MLA backends
+        _Backend.CUTLASS_MLA: 0,
+        _Backend.FLASHINFER_MLA: 1,
+        _Backend.FLASHMLA_VLLM_V1: 2,
+        _Backend.FLASH_ATTN_MLA: 3,
+        _Backend.TRITON_MLA_VLLM_V1: 4,
+        # V0 MLA backends
+        # NOTE: backends with V1 versions must match
+        # the numeric values of their V1 counterparts
+        _Backend.FLASHMLA: 2,
+        _Backend.TRITON_MLA: 4,
+    }
+    # fmt: on
 
 
 def with_nvml_context(fn: Callable[_P, _R]) -> Callable[_P, _R]:
@@ -198,6 +192,8 @@ class CudaPlatformBase(Platform):
                     envs.VLLM_ATTENTION_BACKEND = "FLASHMLA"
 
             # Adjust block sizes for MLA backends based on their requirements
+            from vllm.attention.backends.registry import (_Backend,
+                                                          backend_to_class)
             backend_enum = _Backend[envs.VLLM_ATTENTION_BACKEND]
             backend_class = backend_to_class(backend_enum)
             if not backend_class.supports_block_size(cache_config.block_size):
@@ -232,7 +228,8 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def get_vit_attn_backend(cls, head_size: int,
-                             dtype: torch.dtype) -> _Backend:
+                             dtype: torch.dtype) -> "_Backend":
+        from vllm.attention.backends.registry import _Backend, backend_to_class
         if dtype not in (torch.float16, torch.bfloat16):
             return _Backend.XFORMERS
 
@@ -250,18 +247,20 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def get_valid_backends(
-            cls, head_size, dtype, kv_cache_dtype, block_size, use_v1, use_mla,
-            has_sink
-    ) -> tuple[list[tuple[_Backend, int]], dict[_Backend, str]]:
+        cls, head_size, dtype, kv_cache_dtype, block_size, use_v1, use_mla,
+        has_sink
+    ) -> tuple[list[tuple["_Backend", int]], dict["_Backend", str]]:
         valid_backends_priorities = []
         invalid_reasons = {}
         device_capability = cls.get_device_capability()
         device_capability_int = device_capability.to_int(
         ) if device_capability is not None else None
+        from vllm.attention.backends.registry import _Backend, backend_to_class
+        backend_priorities = _get_backend_priorities()
         for backend in _Backend:
-            if backend not in BACKEND_PRIORITIES:
+            if backend not in backend_priorities:
                 continue
-            priority = BACKEND_PRIORITIES[backend]
+            priority = backend_priorities[backend]
             backend_class = backend_to_class(backend)
             maybe_invalid_reason = backend_class.validate_configuration(
                 head_size, dtype, kv_cache_dtype, block_size, use_v1, use_mla,
@@ -274,10 +273,13 @@ class CudaPlatformBase(Platform):
         return valid_backends_priorities, invalid_reasons
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
+    def get_attn_backend_cls(cls, selected_backend: "_Backend", head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool, use_mla: bool,
                              has_sink: bool) -> str:
+        from vllm.attention.backends.registry import (_Backend,
+                                                      backend_to_class_str)
+
         # First try checking just the selected backend, if there is one.
         if selected_backend is not None:
             backend_class_str = backend_to_class_str(selected_backend, use_v1)
@@ -404,6 +406,10 @@ class CudaPlatformBase(Platform):
         fp8_attention = kv_cache_dtype.startswith("fp8")
         if not envs.VLLM_ATTENTION_BACKEND:
             return not fp8_attention
+
+        # Lazy imports to avoid circular dependency
+        from vllm.attention.backends.registry import _Backend, backend_to_class
+
         attention_backend = _Backend[envs.VLLM_ATTENTION_BACKEND]
         backend_class = backend_to_class(attention_backend)
         return backend_class.supports_kv_cache_dtype(kv_cache_dtype)
