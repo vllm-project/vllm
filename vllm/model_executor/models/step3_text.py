@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Jurassic model."""
 from collections.abc import Iterable
+from itertools import islice
 from typing import Any, Optional
 
 import torch
@@ -34,7 +35,8 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsPP
 from .utils import (PPMissingLayer, is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 logger = init_logger(__name__)
 
@@ -346,8 +348,7 @@ class Step3TextModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for i in range(self.start_layer, self.end_layer):
-            layer = self.layers[i]
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
@@ -386,6 +387,7 @@ class Step3TextForCausalLM(nn.Module, SupportsPP):
                 org_num_embeddings=config.vocab_size,
                 padding_size=DEFAULT_VOCAB_PADDING_SIZE
                 if not lora_config else lora_config.lora_vocab_padding_size,
+                prefix=maybe_prefix(prefix, "lm_head"),
             )
             self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                     config.vocab_size)
