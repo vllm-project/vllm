@@ -147,6 +147,12 @@ class Ernie45ReasoningParser(ReasoningParser):
                 (len(delta_token_ids) > 0 and \
                     delta_token_ids[0] == self.newline_token_id):
                 content = content.lstrip("\n")
+            # remove \n after </think>\n
+            if (len(previous_token_ids) > 1 and \
+                previous_token_ids[-2] == self.think_end_token_id) and \
+                (len(delta_token_ids) > 0 and \
+                    delta_token_ids[0] == self.newline_token_id):
+                content = content.lstrip("\n")
 
             return DeltaMessage(content=content if content else None)
         else:
@@ -189,6 +195,8 @@ class Ernie45ReasoningParser(ReasoningParser):
                 if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
                     content = content[start_idx +
                                       len(self.response_start_token):end_idx]
+                    if content.startswith("\n"):
+                        content = content[1:]
 
             # If the end token is not found, return the model output as is.
             # It should not happen since we already checked for the presence

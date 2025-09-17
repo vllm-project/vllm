@@ -34,6 +34,8 @@ class Ernie45ToolParser(ToolParser):
         self.current_tool_id = -1
         self.streamed_args_for_tool: list[str] = []
         self.think_end_token = "</think>"
+        self.response_start_token: str = "<response>"
+        self.response_end_token: str = "</response>"
         self.tool_call_start_token = "<tool_call>"
         self.tool_call_end_token = "</tool_call>"
         self.tool_calls_start_token = self.tool_call_start_token
@@ -48,10 +50,18 @@ class Ernie45ToolParser(ToolParser):
                 "constructor during construction.")
 
         self.think_end_token_id = self.vocab.get(self.think_end_token)
+        self.response_start_token_id = self.vocab.get(
+            self.response_start_token)
+        self.response_end_token_id = self.vocab.get(self.response_end_token)
         self.tool_call_start_token_id = self.vocab.get(
             self.tool_call_start_token)
         self.tool_call_end_token_id = self.vocab.get(self.tool_call_end_token)
         self.newline_token_id = self.vocab.get(self.newline_token)
+        self.parser_token_ids = [
+            self.think_end_token_id,
+            self.response_start_token_id,
+            self.response_end_token_id,
+        ]
 
         self._buffer = ""
 
@@ -124,7 +134,30 @@ class Ernie45ToolParser(ToolParser):
                     token_id == self.newline_token_id
                     for token_id in previous_token_ids):
                 cur_text = cur_text.strip("\n")
-            return DeltaMessage(content=cur_text)
+
+            # handle <response> </response> when tool_call is not triggered
+            # cur_text === delta_text
+            content = cur_text
+            if self.response_start_token_id in delta_token_ids:
+                content = content.lstrip("\n")
+                response_start_idx = content.find(self.response_start_token)
+                content = content[response_start_idx +
+                                  len(self.response_start_token):]
+                # if have </response>, remove it
+                response_end_idx = content.rfind(self.response_end_token)
+                if response_end_idx != -1:
+                    content = content[:response_end_idx]
+            elif self.response_end_token_id in delta_token_ids:
+                response_end_idx = content.rfind(self.response_end_token)
+                content = content[:response_end_idx]
+            # remove \n after </think> or <response> or </response>
+            if (len(previous_token_ids) > 0 and \
+                previous_token_ids[-1] in self.parser_token_ids) and \
+                (len(delta_token_ids) > 0 and \
+                    delta_token_ids[0] == self.newline_token_id):
+                content = content.lstrip("\n")
+
+            return DeltaMessage(content=content if content else None)
         logger.debug("cur_text = %s", cur_text)
         end_idx = cur_text.find(self.tool_call_end_token)
         if end_idx != -1:
