@@ -14,7 +14,6 @@ from vllm.attention.layer import Attention
 from vllm.attention.selector import get_attn_backend
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.utils import cdiv
 from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
                                               subclass_attention_backend)
@@ -23,9 +22,13 @@ from vllm.v1.kv_cache_interface import CrossAttentionSpec
 logger = init_logger(__name__)
 
 
-def _get_max_encoder_len(vllm_config: VllmConfig) -> int:
-    return MULTIMODAL_REGISTRY.get_encdec_max_encoder_len(
-        vllm_config.model_config)
+def _get_max_encoder_len(vllm_config: "VllmConfig") -> int:
+    """Gets the max number of encoder input tokens from the config.
+    """
+    sc = vllm_config.scheduler_config
+    assert sc and isinstance(sc.max_num_encoder_input_tokens, int), \
+        "max_num_encoder_input_tokens must be int for enc-dec models"
+    return sc.max_num_encoder_input_tokens
 
 
 def _get_cross_slot_mapping(encoder_seq_lens: np.ndarray,
