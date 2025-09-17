@@ -398,7 +398,8 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
                 quant_type_id=scalar_types.float4_e2m1f.id,
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
-                expert_map=expert_map)
+                expert_map=expert_map,
+                workspace=layer.workspace)
 
         # FlashInfer fused experts path
         if self.fused_experts is not None:
@@ -940,7 +941,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 quant_type_id=scalar_types.float8_e4m3fn.id,
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
-                expert_map=expert_map)
+                expert_map=expert_map,
+                workspace=layer.workspace)
 
         assert self.fused_experts_func is not None
 

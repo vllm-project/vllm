@@ -28,6 +28,7 @@ from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)
 
@@ -197,9 +198,11 @@ class SpecDecodeProposer:
         # FIXME: need to consider multiple kv_cache_groups
         assert len(self.runner.attn_groups) == 1
         assert len(self.runner.attn_groups[0]) == 1
-        attn_metadata = self.runner.attn_groups[0][0].metadata_builder\
-            .build_for_drafting(common_attn_metadata=common_attn_metadata,
-                                draft_index=0)
+        ubatch_id = dbo_current_ubatch_id()
+        attn_metadata_builder = \
+            self.runner.attn_groups[0][0].metadata_builders[ubatch_id]
+        attn_metadata = attn_metadata_builder.build_for_drafting(
+            common_attn_metadata=common_attn_metadata, draft_index=0)
 
         # At this moment, we assume all eagle layers belong to the same KV
         # cache group, thus using the same attention metadata.
@@ -245,7 +248,8 @@ class SpecDecodeProposer:
                                  cudagraph_runtime_mode=cudagraph_runtime_mode,
                                  batch_descriptor=batch_descriptor):
             ret_hidden_states = self.model(**model_kwargs)
-            if self.method in ("draft_model", "deepseek_mtp", "ernie_mtp"):
+            if self.method in ("draft_model", "deepseek_mtp", "ernie_mtp",
+                               "qwen3_next_mtp"):
                 last_hidden_states = ret_hidden_states
                 hidden_states = last_hidden_states
             else:
@@ -381,8 +385,10 @@ class SpecDecodeProposer:
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_descriptor):
                 ret_hidden_states = self.model(**model_kwargs)
-            if self.method in ("draft_model", "deepseek_mtp", "ernie_mtp"):
-                hidden_states = last_hidden_states = ret_hidden_states
+            if self.method in ("draft_model", "deepseek_mtp", "ernie_mtp",
+                               "qwen3_next_mtp"):
+                last_hidden_states = ret_hidden_states
+                hidden_states = ret_hidden_states
             else:
                 last_hidden_states, hidden_states = ret_hidden_states
             hidden_states = hidden_states[:batch_size]
@@ -412,8 +418,9 @@ class SpecDecodeProposer:
         hidden_states: torch.Tensor,
         common_attn_metadata: CommonAttentionMetadata,
     ) -> list[torch.Tensor]:
+        ubatch_id = dbo_current_ubatch_id()
         tree_attn_metadata_builder = \
-            self.runner.attn_groups[0][0].metadata_builder
+            self.runner.attn_groups[0][0].metadata_builders[ubatch_id]
         assert isinstance(tree_attn_metadata_builder,
                           TreeAttentionMetadataBuilder)
 
