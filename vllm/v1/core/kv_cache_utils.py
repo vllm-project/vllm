@@ -1214,7 +1214,7 @@ def get_kv_cache_configs(vllm_config: VllmConfig,
         worker.
 
     Returns:
-        The generated KVCacheConfigs for each worker
+        The generated KVCacheConfigs for each worker.
     """
 
     # Check if the available memory is enough for each worker.
