@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import contextlib
+import copy
 import json
 import logging
+import time
 from abc import ABC, abstractmethod
 from contextlib import AsyncExitStack
 from typing import TYPE_CHECKING, Optional, Union
@@ -22,21 +24,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class TurnTokens:
-    """Tracks token counts for a single conversation turn."""
-
-    def __init__(self, input_tokens=0, output_tokens=0):
-        self.input_tokens = input_tokens
-        self.output_tokens = output_tokens
-
-    def reset(self):
-        """Reset counters for a new turn."""
+class TurnMetrics:
+    """Tracks token and toolcall details for a single conversation turn."""
+    def __init__(self):
         self.input_tokens = 0
         self.output_tokens = 0
-
-    def copy(self):
-        """Create a copy of this turn's token counts."""
-        return TurnTokens(self.input_tokens, self.output_tokens)
+        self.cached_input_tokens = 0
+        self.tool_output_tokens = 0
+        self.tool_call_latency_ms = 0
 
 
 class ConversationContext(ABC):
@@ -77,6 +72,7 @@ class SimpleContext(ConversationContext):
         self.num_cached_tokens = 0
         # todo num_reasoning_tokens is not implemented yet.
         self.num_reasoning_tokens = 0
+        self.all_turns = []
 
     def append_output(self, output) -> None:
         self.last_output = output
@@ -126,8 +122,8 @@ class HarmonyContext(ConversationContext):
         self.num_tool_output_tokens = 0
 
         # Turn tracking - replaces multiple individual tracking variables
-        self.current_turn = TurnTokens()
-        self.previous_turn = TurnTokens()
+        self.current_turn = TurnMetrics()
+        self.all_turns: list[TurnMetrics] = []
         self.is_first_turn = True
         self.first_tok_of_message = True  # For streaming support
 
@@ -149,8 +145,8 @@ class HarmonyContext(ConversationContext):
             # Reset current turn output tokens for this turn
             self.current_turn.output_tokens = 0
             self._update_decode_token_usage(output)
-            # Move current turn to previous turn for next turn's calculations
-            self.previous_turn = self.current_turn.copy()
+            # Append current turn to all turn list for next turn's calculations
+            self.all_turns.append(copy.deepcopy(self.current_turn))
             # append_output is called only once before tool calling
             # in non-streaming case
             # so we can append all the parser messages to _messages
@@ -194,12 +190,13 @@ class HarmonyContext(ConversationContext):
         if self.is_first_turn:
             self.is_first_turn = False
         else:
+            previous_turn = self.all_turns[-1]
             # start counting tool after first turn
             # tool tokens = this turn prefill - last turn prefill -
             # last turn decode
             this_turn_tool_tokens = (self.current_turn.input_tokens -
-                                     self.previous_turn.input_tokens -
-                                     self.previous_turn.output_tokens)
+                                    previous_turn.input_tokens -
+                                    previous_turn.output_tokens)
 
             # Handle negative tool token counts (shouldn't happen in normal
             # cases)
@@ -209,15 +206,17 @@ class HarmonyContext(ConversationContext):
                     "(current_input=%d, previous_input=%d, "
                     "previous_output=%d). Setting to 0.",
                     this_turn_tool_tokens, self.current_turn.input_tokens,
-                    self.previous_turn.input_tokens,
-                    self.previous_turn.output_tokens)
+                    previous_turn.input_tokens,
+                    previous_turn.output_tokens)
                 this_turn_tool_tokens = 0
 
             self.num_tool_output_tokens += this_turn_tool_tokens
+            self.current_turn.tool_output_tokens = this_turn_tool_tokens
 
         # Update cached tokens
         if output.num_cached_tokens is not None:
             self.num_cached_tokens += output.num_cached_tokens
+            self.current_turn.cached_input_tokens = output.num_cached_tokens
 
     def _update_decode_token_usage(self, output: RequestOutput) -> int:
         """Update token usage statistics for the decode phase of generation.
@@ -262,15 +261,20 @@ class HarmonyContext(ConversationContext):
         last_msg = self.messages[-1]
         recipient = last_msg.recipient
         if recipient is not None:
-            if recipient.startswith("browser."):
-                return await self.call_search_tool(
-                    self._tool_sessions["browser"], last_msg)
-            elif recipient.startswith("python"):
-                return await self.call_python_tool(
-                    self._tool_sessions["python"], last_msg)
-            elif recipient.startswith("container."):
-                return await self.call_container_tool(
-                    self._tool_sessions["container"], last_msg)
+            start = time.perf_counter()
+            try:
+                if recipient.startswith("browser."):
+                    return await self.call_search_tool(
+                        self._tool_sessions["browser"], last_msg)
+                elif recipient.startswith("python"):
+                    return await self.call_python_tool(
+                        self._tool_sessions["python"], last_msg)
+                elif recipient.startswith("container."):
+                    return await self.call_container_tool(
+                        self._tool_sessions["container"], last_msg)
+            finally:
+                end = time.perf_counter()
+                self.current_turn.tool_call_latency_ms = int((end - start) * 1000) # ms
         raise ValueError("No tool call found")
 
     def render_for_completion(self) -> list[int]:
@@ -411,7 +415,7 @@ class StreamingHarmonyContext(HarmonyContext):
 
             # For streaming, update previous turn when message is complete
             if output.finished:
-                self.previous_turn = self.current_turn.copy()
+                self.all_turns.append(copy.deepcopy(self.current_turn))
             # Check if the current token is part of reasoning content
             self._update_num_reasoning_tokens()
             self.last_tok = tok
