@@ -21,10 +21,7 @@ CONFIG = AutoConfig.from_pretrained(MODEL_NAME)
 
 
 @pytest.fixture(scope="module")
-def default_server_args(
-    zephyr_lora_files,
-    zephyr_lora_added_tokens_files,
-) -> list[str]:
+def default_server_args() -> list[str]:
     return [
         # use half precision for speed and memory savings in CI environment
         "--dtype",

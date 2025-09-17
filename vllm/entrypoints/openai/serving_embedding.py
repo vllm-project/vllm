@@ -76,8 +76,7 @@ class EmbeddingMixin(OpenAIServing):
         try:
             ctx.lora_request = self._maybe_get_adapters(ctx.request)
 
-            tokenizer = await self.engine_client.get_tokenizer(ctx.lora_request
-                                                               )
+            tokenizer = await self.engine_client.get_tokenizer()
             renderer = self._get_renderer(tokenizer)
 
             if isinstance(ctx.request, EmbeddingChatRequest):
@@ -394,8 +393,8 @@ class EmbeddingMixin(OpenAIServing):
     ) -> Optional[ErrorResponse]:
         """Collect and aggregate batch results
         with support for chunked processing.
-        
-        For chunked requests, performs online aggregation to 
+
+        For chunked requests, performs online aggregation to
         minimize memory usage.
         For regular requests, collects results normally.
         """

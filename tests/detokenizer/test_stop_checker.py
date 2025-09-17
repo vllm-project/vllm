@@ -1,10 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from unittest.mock import MagicMock
-
 import pytest
-from transformers import PreTrainedTokenizer
 
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.inputs import token_inputs
@@ -54,10 +51,7 @@ def test_stop_on_eos_token(text_wo_eos: str, eos_token: str, eos_token_id: int,
     - When the EOS token should be ignored, and the sequence continues
     """
 
-    tokenizer = MagicMock(spec=PreTrainedTokenizer)
-    get_tokenizer_for_seq = MagicMock(return_value=tokenizer)
-    stop_checker = StopChecker(max_model_len=1024,
-                               get_tokenizer_for_seq=get_tokenizer_for_seq)
+    stop_checker = StopChecker(max_model_len=1024)
 
     seq = sequence_with_eos(
         text=text_wo_eos,

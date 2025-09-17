@@ -50,10 +50,7 @@ class ClassificationMixin(OpenAIServing):
             return None
 
         try:
-            ctx.lora_request = self._maybe_get_adapters(ctx.request)
-
-            ctx.tokenizer = await self.engine_client.get_tokenizer(
-                ctx.lora_request)
+            ctx.tokenizer = await self.engine_client.get_tokenizer()
 
             renderer = self._get_renderer(ctx.tokenizer)
             ctx.engine_prompts = await renderer.render_prompt(

@@ -18,6 +18,8 @@ SERVER_ARGS = [
     "--enable-lora",
     "--lora-modules",
     f"{LORA_MODEL}={LORA_MODEL}",
+    "--tokenizer",
+    f"{LORA_MODEL}",
 ]
 
 TOOLS = [{

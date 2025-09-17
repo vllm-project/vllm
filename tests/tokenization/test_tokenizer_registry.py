@@ -57,6 +57,10 @@ class TestTokenizer(TokenizerBase):
     def max_token_id(self) -> int:
         raise NotImplementedError()
 
+    @property
+    def truncation_side(self) -> str:
+        raise NotImplementedError()
+
     def __call__(
         self,
         text: Union[str, list[str], list[int]],

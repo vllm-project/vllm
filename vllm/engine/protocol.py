@@ -76,8 +76,7 @@ class EngineClient(ABC):
         include_stop_str_in_output = params.include_stop_str_in_output
 
         preprocessor = await self.get_input_preprocessor()
-        tokenizer_group = preprocessor.get_tokenizer_group()
-        tokenizer = await tokenizer_group.get_lora_tokenizer_async()
+        tokenizer = preprocessor.get_tokenizer()
         eos_token_id = tokenizer.eos_token_id
 
         if is_explicit_encoder_decoder_prompt(prompt):
@@ -260,11 +259,8 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def get_tokenizer(
-        self,
-        lora_request: Optional[LoRARequest] = None,
-    ) -> AnyTokenizer:
-        """Get the appropriate tokenizer for the request"""
+    async def get_tokenizer(self) -> AnyTokenizer:
+        """Get the tokenizer"""
         ...
 
     async def get_io_processor(self) -> IOProcessor:
