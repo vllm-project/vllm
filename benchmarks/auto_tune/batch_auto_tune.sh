@@ -33,7 +33,10 @@ FAILED_RUNS=()
 SCRIPT_START_TIME=$(date +%s)
 
 json_content=$(cat "$INPUT_JSON")
-num_runs=$(echo "$json_content" | jq 'length')
+if ! num_runs=$(echo "$json_content" | jq 'length'); then
+  echo "Error: Invalid JSON in $INPUT_JSON. 'jq' failed to get array length." >&2
+  exit 1
+fi
 
 echo "Found $num_runs benchmark configurations in $INPUT_JSON."
 echo "Starting benchmark runs..."
