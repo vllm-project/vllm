@@ -103,10 +103,7 @@ def select_experts(
                                                dim=-1,
                                                sorted=False)
         if renormalize:
-            sel = topk_logit_vals - topk_logit_vals.max(dim=-1,
-                                                        keepdim=True).values
-            topk_vals = sel.exp()
-            topk_vals = topk_vals / topk_vals.sum(dim=-1, keepdim=True)
+            topk_vals = torch.softmax(topk_logit_vals, dim=-1)
         else:
             logZ = torch.logsumexp(router_logits, dim=-1, keepdim=True)
             topk_vals = (topk_logit_vals - logZ).exp()
