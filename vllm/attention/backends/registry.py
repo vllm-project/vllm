@@ -51,7 +51,7 @@ BACKEND_MAPPING = {
     _Backend.ROCM_FLASH:
     "vllm.attention.backends.rocm_flash_attn.ROCmFlashAttentionBackend",  # noqa: E501
     _Backend.ROCM_AITER_MLA:
-    "vllm.attention.backends.mla.rocm_aiter_mla.AiterMLABackend",  # noqa: E501
+    "vllm.attention.backends.rocm_aiter_mla.AiterMLABackend",  # noqa: E501
     _Backend.ROCM_AITER_MLA_VLLM_V1:
     "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend",  # noqa: E501
     _Backend.ROCM_AITER_FA:
@@ -75,7 +75,7 @@ BACKEND_MAPPING = {
     _Backend.FLASHMLA:
     "vllm.attention.backends.flashmla.FlashMLABackend",  # noqa: E501
     _Backend.FLASHMLA_VLLM_V1:
-    "vllm.v1.attention.backends.flashmla.FlashMLABackend",  # noqa: E501
+    "vllm.v1.attention.backends.mla.flashmla.FlashMLABackend",  # noqa: E501
     _Backend.FLASH_ATTN_MLA:
     "vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend",  # noqa: E501
     _Backend.PALLAS:
