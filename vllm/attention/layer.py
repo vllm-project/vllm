@@ -522,8 +522,7 @@ class MultiHeadAttention(nn.Module):
         use_upstream_fa = False
 
         if current_platform.is_xpu():
-            # currently, only torch_sdpa is supported on xpu
-            self.attn_backend = _Backend.TORCH_SDPA
+            self.attn_backend = _Backend.IPEX
         else:
             self.attn_backend = (
                 backend
@@ -611,7 +610,10 @@ class MultiHeadAttention(nn.Module):
             out = xops.memory_efficient_attention_forward(
                 query, key, value, scale=self.scale
             )
-        elif self.attn_backend == _Backend.TORCH_SDPA:
+        elif (
+            self.attn_backend == _Backend.TORCH_SDPA
+            or self.attn_backend == _Backend.IPEX
+        ):
             query, key, value = (x.transpose(1, 2) for x in (query, key, value))
             out = F.scaled_dot_product_attention(query, key, value, scale=self.scale)
             out = out.transpose(1, 2)

@@ -116,7 +116,9 @@ class XPUPlatform(Platform):
         return device_props.total_memory
 
     @classmethod
-    def get_vit_attn_backend(cls, support_fa: bool = False) -> _Backend:
+    def get_vit_attn_backend(cls, head_size: int, dtype: torch.dtype) -> _Backend:
+        from vllm.attention.backends.registry import _Backend
+
         return _Backend.IPEX
 
     @classmethod

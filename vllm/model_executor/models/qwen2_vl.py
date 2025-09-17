@@ -822,12 +822,11 @@ class Qwen2VisionTransformer(nn.Module):
         if (
             self.attn_backend == _Backend.FLASH_ATTN
             or self.attn_backend == _Backend.ROCM_AITER_FA
+            or self.attn_backend == _Backend.IPEX
         ):
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
         elif self.attn_backend == _Backend.XFORMERS:
             seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
-        elif self.attn_backend == _Backend.IPEX:
-            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
         return max_seqlen, seqlens
 
     def forward(
