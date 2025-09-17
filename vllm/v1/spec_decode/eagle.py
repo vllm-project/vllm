@@ -78,7 +78,6 @@ class EagleProposer:
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE and
                                not self.vllm_config.model_config.enforce_eager)
-
         self.cudagraph_runtime_mode = (CUDAGraphMode.PIECEWISE
                                        if self.use_cuda_graph else
                                        CUDAGraphMode.NONE)
@@ -678,12 +677,14 @@ class EagleProposer:
     def dummy_run(
         self,
         num_tokens: int,
+        use_cudagraphs=True,
     ) -> None:
         with set_forward_context(
                 None,
                 self.vllm_config,
                 num_tokens=num_tokens,
-                cudagraph_runtime_mode=self.cudagraph_runtime_mode,
+                cudagraph_runtime_mode=self.cudagraph_runtime_mode \
+                    if use_cudagraphs else CUDAGraphMode.NONE,
         ):
             if self.is_multimodal_model:
                 input_ids = None
