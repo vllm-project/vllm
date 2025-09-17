@@ -8,21 +8,12 @@ Run `pytest tests/quantization/test_mixed_precision.py`.
 
 import importlib
 import importlib.metadata
-import os
 from dataclasses import dataclass
 
 import huggingface_hub
 import lm_eval
 import pytest
 from packaging import version
-
-
-@pytest.fixture(scope="function", autouse=True)
-def use_v0_only(monkeypatch):
-    """
-    This module relies on V0 internals, so set VLLM_USE_V1=0.
-    """
-    monkeypatch.setenv('VLLM_USE_V1', '0')
 
 
 QUARK_MXFP4_AVAILABLE = importlib.util.find_spec(
@@ -77,8 +68,7 @@ TEST_CONFIGS = {
     not HF_HUB_AMD_ORG_ACCESS,
     reason="Read access to huggingface.co/amd is required for this test.")
 def test_mixed_precision_model_accuracies(model_name: str,
-                                          accuracy_numbers: dict, monkeypatch):
-    monkeypatch.setenv("VLLM_QUARK_EMU_MEM_OPT", "1")
+                                          accuracy_numbers: dict):
 
     results = lm_eval.simple_evaluate(
         model="vllm",
@@ -95,4 +85,3 @@ def test_mixed_precision_model_accuracies(model_name: str,
             and measured_accuracy + rtol > expect_accuracy
         ), f"Expected: {expect_accuracy} |  Measured: {measured_accuracy}"
 
-    del os.environ["VLLM_QUARK_EMU_MEM_OPT"]
