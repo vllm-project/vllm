@@ -47,8 +47,8 @@ def test_model_loading_with_params(vllm_runner, monkeypatch):
         assert model_config.pooler_config.normalize
 
         # asserts on the tokenizer loaded
-        assert model_tokenizer.tokenizer_id == "BAAI/bge-base-en-v1.5"
-        assert model_tokenizer.tokenizer.model_max_length == 512
+        assert model_config.tokenizer == "BAAI/bge-base-en-v1.5"
+        assert model_tokenizer.model_max_length == 512
 
         def check_model(model):
             assert isinstance(model, BertEmbeddingModel)
@@ -87,8 +87,8 @@ def test_roberta_model_loading_with_params(vllm_runner, monkeypatch):
         assert model_config.pooler_config.normalize
 
         # asserts on the tokenizer loaded
-        assert model_tokenizer.tokenizer_id == "intfloat/multilingual-e5-base"
-        assert model_tokenizer.tokenizer.model_max_length == 512
+        assert model_config.tokenizer == "intfloat/multilingual-e5-base"
+        assert model_tokenizer.model_max_length == 512
 
         def check_model(model):
             assert isinstance(model, RobertaEmbeddingModel)
@@ -116,8 +116,7 @@ def test_facebook_roberta_model_loading_with_params(vllm_runner, monkeypatch):
         output = vllm_model.embed("Write a short story about a robot that"
                                   " dreams for the first time.\n")
 
-        model_tokenizer = vllm_model.llm.llm_engine.tokenizer
-        assert model_tokenizer.tokenizer_id == model_name
+        assert vllm_model.llm.llm_engine.model_config.tokenizer == model_name
 
         def check_model(model):
             assert isinstance(model, RobertaEmbeddingModel)
