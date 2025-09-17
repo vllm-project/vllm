@@ -79,9 +79,7 @@ def test_full_graph(
 ):
     model, model_kwargs = model_info
 
-    with monkeypatch.context() as m:
-        # make sure these models can be captured in full graph mode
-        m.setenv("VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE", "1")
+    with monkeypatch.context():
         print(f"MODEL={model}")
 
         run_model(optimization_level, model, model_kwargs)
