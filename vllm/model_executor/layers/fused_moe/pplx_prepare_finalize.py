@@ -95,8 +95,6 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def prepare_async(
         self,
         a1: torch.Tensor,
-        a1_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
@@ -130,8 +128,10 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         repeat_cols = 4
         repeat_rows = 1 if quant_config.per_act_token_quant else a1.size(0)
+        # TODO(bnell): always pass quant_config.a1_scale?
         a1q, a1q_scale = moe_kernel_quantize_input(
-            a1, (None if quant_config.per_act_token_quant else a1_scale),
+            a1, (None if quant_config.per_act_token_quant else
+                 quant_config.a1_scale),
             quant_dtype=quant_config.quant_dtype,
             per_act_token_quant=quant_config.per_act_token_quant,
             block_shape=quant_config.block_shape)
@@ -253,8 +253,6 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def prepare(
         self,
         a1: torch.Tensor,
-        a1_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
@@ -264,8 +262,6 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     ) -> mk.PrepareResultType:
         hook, receiver = self.prepare_async(
             a1,
-            a1_scale,
-            a2_scale,
             topk_weights,
             topk_ids,
             num_experts,
