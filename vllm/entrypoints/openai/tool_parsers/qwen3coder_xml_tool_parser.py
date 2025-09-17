@@ -1007,7 +1007,7 @@ class StreamingXMLToolCallParser:
             # End current XML document
             self.parser.Parse('', True)
         except Exception:
-            logger.warning("Failed to end XML parser after tool call.")
+            pass
 
         # recreate XML parser
         self.parser = ParserCreate()
