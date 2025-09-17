@@ -38,7 +38,7 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
         return self._parser.extract_content_ids(input_ids)
 
     def extract_reasoning_content(
-        self, model_output: str, request: ChatCompletionRequest
+            self, model_output: str, request: ChatCompletionRequest
     ) -> tuple[Optional[str], Optional[str]]:
         return self._parser.extract_reasoning_content(model_output, request)
 
