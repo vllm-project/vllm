@@ -2858,6 +2858,18 @@ class VllmConfig:
             "variable to deepep_low_latency or deepep_high_throughput and "\
             "install the DeepEP kernels."
 
+            cudagraph_mode = self.compilation_config.cudagraph_mode
+            if cudagraph_mode.has_mode(CUDAGraphMode.PIECEWISE):
+                if cudagraph_mode.has_full_cudagraphs():
+                    cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+                else:
+                    cudagraph_mode = CUDAGraphMode.NONE
+                logger.warning(
+                    "Disabling PIECEWISE cudagraphs as they are not supported "\
+                    "with dual batch overlap (dbo) currently. Setting "\
+                    "cudagraph_mode to %s.", cudagraph_mode)
+                self.compilation_config.cudagraph_mode = cudagraph_mode
+
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
 

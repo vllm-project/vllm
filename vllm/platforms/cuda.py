@@ -191,13 +191,12 @@ class CudaPlatformBase(Platform):
         compilation_config = vllm_config.compilation_config
         if (envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
                 and parallel_config.data_parallel_size > 1
-                and compilation_config.cudagraph_mode
-                not in [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE]):
+                and compilation_config.cudagraph_mode.has_full_cudagraphs()):
             logger.info(
                 "Data Parallel with DeepEP high-throughput: using PIECEWISE "
                 "CUDA graphs and excluding MoE ops from capture. Set "
-                "VLLM_ALL2ALL_BACKEND=deepep_low_latency if you need MoE "
-                "graphs captured as well.")
+                "VLLM_ALL2ALL_BACKEND=deepep_low_latency if you need full CUDA "
+                "graphs.")
             compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
     @classmethod
