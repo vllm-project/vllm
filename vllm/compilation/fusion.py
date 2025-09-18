@@ -17,7 +17,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 
 from .inductor_pass import enable_fake_mode
-from .matcher_utils import MatcherQuant, MatcherRMSNorm
+from .matcher_utils import MatcherFusedAddRMSNorm, MatcherQuant, MatcherRMSNorm
 from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 logger = init_logger(__name__)
@@ -92,7 +92,8 @@ class RMSNormQuantPattern:
             f"unsupported fused rmsnorm+quant op for {key}"
         self.FUSED_OP = FUSED_OPS[key]
 
-        self.rmsnorm_matcher = MatcherRMSNorm(epsilon)
+        self.rmsnorm_matcher = MatcherRMSNorm(epsilon) if not key.fused_add \
+            else MatcherFusedAddRMSNorm(epsilon)
         self.quant_matcher = MatcherQuant(key.quant)
 
 
@@ -133,8 +134,8 @@ class RMSNormStaticQuantPattern(RMSNormQuantPattern):
             return at[1]
 
         inputs = [
-            empty_fp32(5, 4),  # input # TODO: rms_input
-            empty_bf16(4, ),  # weight
+            # input, weight
+            *self.rmsnorm_matcher.inputs(),
             empty_fp32(1, 1)  # scale
         ]
         pattern(*inputs)
@@ -157,16 +158,16 @@ class FusedAddRMSNormStaticQuantPattern(RMSNormQuantPattern):
 
     def register(self, pm_pass: PatternMatcherPass):
 
-        def pattern(input: torch.Tensor, residual: torch.Tensor,
-                    weight: torch.Tensor, scale: torch.Tensor):
+        def pattern(input: torch.Tensor, weight: torch.Tensor,
+                    residual: torch.Tensor, scale: torch.Tensor):
             result_rms, residual = self.rmsnorm_matcher(
                 input, weight, residual)
             result, _ = self.quant_matcher(result_rms, scale)
 
             return result, residual
 
-        def replacement(input: torch.Tensor, residual: torch.Tensor,
-                        weight: torch.Tensor, scale: torch.Tensor):
+        def replacement(input: torch.Tensor, weight: torch.Tensor,
+                        residual: torch.Tensor, scale: torch.Tensor):
             # In case we're matching native rms-norm, conversions might be
             # optimized out. We convert here just to be safe.
             input = input.to(dtype=torch.float16)  # TODO model dtype
@@ -185,11 +186,8 @@ class FusedAddRMSNormStaticQuantPattern(RMSNormQuantPattern):
             return at[1], at[2]
 
         inputs = [
-            # TODO: maybe 32bit for torch impl? yes to resolve bug
-            #  TODO dtype doesn't seem to matter? it does matter for what cvts get traced
-            empty_bf16(5, 4),  # input
-            empty_bf16(5, 4),  # residual
-            empty_bf16(4, ),  # weight
+            # input, weight, residual
+            *self.rmsnorm_matcher.inputs(),
             empty_fp32(1, 1)  # scale
         ]
 
@@ -242,15 +240,10 @@ class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
             # result, scale
             return at[1], at[2]
 
-        inputs = [
-            empty_bf16(5, 4),  # input
-            empty_bf16(4),  # weight
-        ]
-
         pm.register_replacement(
             pattern,
             replacement,
-            inputs,
+            self.rmsnorm_matcher.inputs(),
             pm.fwd_only,
             pm_pass,
         )
@@ -272,16 +265,16 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
 
     def register(self, pm_pass: PatternMatcherPass):
 
-        def pattern(input: torch.Tensor, residual: torch.Tensor,
-                    weight: torch.Tensor):
+        def pattern(input: torch.Tensor, weight: torch.Tensor,
+                    residual: torch.Tensor):
             result_rms, residual = self.rmsnorm_matcher(
                 input, weight, residual)
             result, scale = self.quant_matcher(result_rms)
 
             return result, residual, scale
 
-        def replacement(input: torch.Tensor, residual: torch.Tensor,
-                        weight: torch.Tensor):
+        def replacement(input: torch.Tensor, weight: torch.Tensor,
+                        residual: torch.Tensor):
             # In case we're matching native rms-norm, conversions might be
             # optimized out. We convert here just to be safe.
             input = input.to(dtype=torch.float16)  # TODO model dtype
@@ -301,16 +294,10 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
             # result, residual, scale
             return at[1], at[3], at[2]
 
-        inputs = [
-            empty_bf16(5, 4),  # input
-            empty_bf16(5, 4),  # residual
-            empty_bf16(4),  # weight
-        ]
-
         pm.register_replacement(
             pattern,
             replacement,
-            inputs,
+            self.rmsnorm_matcher.inputs(),
             pm.fwd_only,
             pm_pass,
         )
