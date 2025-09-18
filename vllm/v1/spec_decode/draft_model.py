@@ -246,11 +246,12 @@ class DraftModelProposer(SpecDecodeBaseProposer):
     def prepare_inputs(
         self,
         common_attn_metadata: CommonAttentionMetadata,
-        # [batch_size]
-        num_rejected_tokens: torch.Tensor,
+        sampled_token_ids: list[list[int]],
+        num_draft_tokens: list[int],
     ) -> tuple[CommonAttentionMetadata, torch.Tensor]:
         return drafter_prepare_inputs(
             self.token_arange_np,
             common_attn_metadata,
-            num_rejected_tokens,
+            sampled_token_ids,
+            num_draft_tokens,
         )
