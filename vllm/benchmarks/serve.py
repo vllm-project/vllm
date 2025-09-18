@@ -790,6 +790,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         type=str,
         default="openai",
         choices=list(ASYNC_REQUEST_FUNCS.keys()),
+        help="The type of endpoint to use for the benchmark.",
     )
     parser.add_argument(
         "--label",
@@ -803,6 +804,9 @@ def add_cli_args(parser: argparse.ArgumentParser):
         type=str,
         default="vllm",
         choices=list(ASYNC_REQUEST_FUNCS.keys()),
+        deprecated=True,
+        help="'--backend' is deprecated and will be removed in v0.11.0. "
+        "Please use --endpoint-type instead.",
     )
     parser.add_argument(
         "--base-url",
@@ -989,28 +993,28 @@ def add_cli_args(parser: argparse.ArgumentParser):
         type=float,
         default=None,
         help="Top-p sampling parameter. Only has effect on "
-        "openai-compatible backends.",
+        "openai-compatible endpoint types.",
     )
     sampling_group.add_argument(
         "--top-k",
         type=int,
         default=None,
         help="Top-k sampling parameter. Only has effect on "
-        "openai-compatible backends.",
+        "openai-compatible endpoint types.",
     )
     sampling_group.add_argument(
         "--min-p",
         type=float,
         default=None,
         help="Min-p sampling parameter. Only has effect on "
-        "openai-compatible backends.",
+        "openai-compatible endpoint types.",
     )
     sampling_group.add_argument(
         "--temperature",
         type=float,
         default=None,
         help="Temperature sampling parameter. Only has effect on "
-        "openai-compatible backends. If not specified, default to greedy "
+        "openai-compatible endpoint types. If not specified, default to greedy "
         "decoding (i.e. temperature==0.0).",
     )
 
@@ -1155,9 +1159,9 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     }
 
     # Sampling parameters are only supported by openai-compatible backend.
-    if sampling_params and args.backend not in OPENAI_COMPATIBLE_BACKENDS:
+    if sampling_params and args.endpoint_type not in OPENAI_COMPATIBLE_BACKENDS:
         raise ValueError("Sampling parameters are only supported by "
-                         "openai-compatible backends.")
+                         "openai-compatible endpoint types.")
 
     if "temperature" not in sampling_params:
         sampling_params["temperature"] = 0.0  # Default to greedy decoding.
