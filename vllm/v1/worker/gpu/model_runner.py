@@ -320,26 +320,14 @@ class GPUModelRunner:
         logits: torch.Tensor,
         input_batch: InputBatch,
     ) -> SamplerOutput:
+        pos = input_batch.positions[input_batch.logits_indices]
         sampling_metadata = self.req_states.make_sampling_metadata(
-            input_batch.idx_mapping_np)
+            input_batch.idx_mapping_np, pos)
         sampler_output = self.sampler(
             logits=logits,
             sampling_metadata=sampling_metadata,
         )
         return sampler_output
-
-    def compute_prompt_logprobs(
-        self,
-        hidden_states: torch.Tensor,
-        input_batch: InputBatch,
-    ):
-        idx_mapping_np = input_batch.idx_mapping_np
-        needs_prompt_logprobs = self.req_states.needs_prompt_logprobs[
-            idx_mapping_np]
-        if not np.any(needs_prompt_logprobs):
-            # Common case.
-            # No request in the batch needs prompt logprobs.
-            return None
 
     def postprocess(
         self,
@@ -387,9 +375,6 @@ class GPUModelRunner:
         logits = self.model.compute_logits(sample_hidden_states, None)
 
         sampler_output = self.sample(logits, input_batch)
-        prompt_logprobs = self.compute_prompt_logprobs(hidden_states,
-                                                       input_batch)
-
         sampled_token_ids_np, num_sampled_tokens = self.postprocess(
             sampler_output, input_batch)
         req_id_to_index = {

@@ -10,6 +10,9 @@ import torch
 
 from vllm.sampling_params import SamplingParams
 
+_NP_INT64_MIN = np.iinfo(np.int64).min
+_NP_INT64_MAX = np.iinfo(np.int64).max
+
 
 @dataclass
 class SamplingMetadata:
@@ -18,6 +21,9 @@ class SamplingMetadata:
 
     top_p: Optional[torch.Tensor]
     top_k: Optional[torch.Tensor]
+
+    seeds: torch.Tensor
+    pos: torch.Tensor
 
     # None means no logprobs, 0 means sampled token logprobs only
     max_num_logprobs: Optional[int]
@@ -69,6 +75,7 @@ class RequestState:
         self.num_logprobs = np.empty(self.max_num_reqs, dtype=np.int32)
         # -1 means no logprobs are requested.
         self.num_logprobs.fill(-1)
+        self.seeds = np.zeros(self.max_num_reqs, dtype=np.int64)
 
         self.needs_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=bool)
 
@@ -102,6 +109,12 @@ class RequestState:
             top_k = self.vocab_size
         self.top_k[req_idx] = top_k
 
+        if sampling_params.seed is not None:
+            seed = sampling_params.seed
+        else:
+            seed = np.random.randint(_NP_INT64_MIN, _NP_INT64_MAX)
+        self.seeds[req_idx] = seed
+
         if sampling_params.logprobs is not None:
             num_logprobs = sampling_params.logprobs
         else:
@@ -133,6 +146,7 @@ class RequestState:
     def make_sampling_metadata(
         self,
         idx_mapping: np.ndarray,
+        pos: torch.Tensor,
     ) -> SamplingMetadata:
         temperature = self.temperature[idx_mapping]
         temperature = self._copy_np_to_gpu(temperature)
@@ -145,6 +159,9 @@ class RequestState:
         no_top_k = np.all(top_k == self.vocab_size)
         top_k = self._copy_np_to_gpu(top_k) if not no_top_k else None
 
+        seeds = self.seeds[idx_mapping]
+        seeds = self._copy_np_to_gpu(seeds)
+
         num_logprobs = self.num_logprobs[idx_mapping]
         max_num_logprobs = np.max(num_logprobs)
         if max_num_logprobs == -1:
@@ -154,6 +171,8 @@ class RequestState:
             temperature=temperature,
             top_p=top_p,
             top_k=top_k,
+            seeds=seeds,
+            pos=pos,
             max_num_logprobs=max_num_logprobs,
         )
 

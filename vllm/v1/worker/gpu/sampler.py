@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-from typing import Optional
-
 import torch
 import torch.nn as nn
 import triton
@@ -47,8 +44,8 @@ class Sampler(nn.Module):
         sampled = gumbel_sample(
             probs,
             sampling_metadata.temperature,
-            None,  # seeds
-            None,  # pos
+            sampling_metadata.seeds,
+            sampling_metadata.pos,
         )
 
         logprobs_tensors = None
@@ -163,22 +160,27 @@ def _apply_gumbel_kernel(
     probs_ptr,
     probs_stride,
     seeds_ptr,
+    pos_ptr,
     temp_ptr,
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
     EPSILON: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
-    seed = tl.load(seeds_ptr + req_idx)
     temp = tl.load(temp_ptr + req_idx)
 
     if temp < EPSILON:
         # Greedy sampling. Don't apply gumbel noise.
         return
 
+    seed = tl.load(seeds_ptr + req_idx)
+    pos = tl.load(pos_ptr + req_idx)
+    gumbel_seed = seed ^ (pos * 0x9E3779B9)
+    gumbel_seed = gumbel_seed & 0xFFFFFFFF
+
     block_id = tl.program_id(1)
     r_offset = block_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    q = tl.rand(seed, r_offset)
+    q = tl.rand(gumbel_seed, r_offset)
 
     # NOTE(woosuk): This logic makes sure q is not 0.
     RMAX = 0.9999999403953552
@@ -201,34 +203,20 @@ def gumbel_sample(
     # fp32[num_reqs]
     temperature: torch.Tensor,
     # int64[num_reqs]
-    seeds: Optional[torch.Tensor],
+    seeds: torch.Tensor,
     # int64[num_reqs]
-    pos: Optional[torch.Tensor],
+    pos: torch.Tensor,
 ) -> torch.Tensor:
     num_reqs = probs.shape[0]
     vocab_size = probs.shape[1]
-    if seeds is not None:
-        # Per-request seed.
-        assert pos is not None
-        gumbel_seeds = seeds ^ (pos * 0x9E3779B9)
-    else:
-        # Global seed.
-        assert pos is None
-        seed_dtype = torch.int64
-        gumbel_seeds = torch.randint(
-            torch.iinfo(seed_dtype).min,
-            torch.iinfo(seed_dtype).max,
-            (num_reqs, ),
-            dtype=seed_dtype,
-            device=probs.device,
-        )
 
     # Update the probs in-place.
     BLOCK_SIZE = 8192
     _apply_gumbel_kernel[(num_reqs, triton.cdiv(vocab_size, BLOCK_SIZE))](
         probs,
         probs.stride(0),
-        gumbel_seeds,
+        seeds,
+        pos,
         temperature,
         vocab_size,
         BLOCK_SIZE,
