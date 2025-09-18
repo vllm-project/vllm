@@ -84,7 +84,7 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
     - Connection info is passed via KVTransferParams from prefiller to decoder for handshake
 
 - `VLLM_NIXL_ABORT_REQUEST_TIMEOUT`: Auto-release timeout for prefiller's KV cache when decoder unresponsive (seconds) (optional)
-  - When nixl connection is aborted, before decoder reads kv-cache blocks through nixl channel, after this timeout value, prefill will release its kv cache blocks, to avoid holding them indefinitely.
+    - When nixl connection is aborted, before decoder reads kv-cache blocks through nixl channel, after this timeout value, prefill will release its kv cache blocks, to avoid holding them indefinitely.
     - Default: 120
 
 ## Multi-Instance Setup
@@ -149,7 +149,6 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
 !!! tip
     NixlConnector currently does not distinguish `kv_role`; the actual prefiller/decoder roles are determined by the upper-level proxy (e.g., `toy_proxy_server.py` using `--prefiller-hosts` and `--decoder-hosts`).
     Therefore, `kv_role` in `--kv-transfer-config` is effectively a placeholder and does not affect NixlConnector's behavior.
-
 
 ## Example Scripts/Code
 
