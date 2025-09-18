@@ -89,6 +89,7 @@ class UBatchWrapper:
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
         self.comm_stream = torch.cuda.Stream(device=device)
+        # Two ubatch threads plus the main thread
         self.ready_barrier = threading.Barrier(3)
 
         self.cudagraphs: dict[int, CUDAGraphMetaData] = {}
