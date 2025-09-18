@@ -291,7 +291,7 @@ parameters can be specified. Example client command:
 
 ```bash
 vllm bench serve \
-  --endpoint-type vllm \
+  --backend vllm \
   --model NousResearch/Hermes-3-Llama-3.1-8B \
   --endpoint /v1/completions \
   --dataset-name sharegpt \
@@ -461,7 +461,7 @@ vllm serve NousResearch/Hermes-3-Llama-3.1-8B
 
 ```bash
 python3 benchmarks/benchmark_serving_structured_output.py \
-  --endpoint-type vllm \
+  --backend vllm \
   --model NousResearch/Hermes-3-Llama-3.1-8B \
   --dataset json \
   --structured-output-ratio 1.0 \
@@ -473,7 +473,7 @@ python3 benchmarks/benchmark_serving_structured_output.py \
 
 ```bash
 python3 benchmarks/benchmark_serving_structured_output.py \
-  --endpoint-type vllm \
+  --backend vllm \
   --model NousResearch/Hermes-3-Llama-3.1-8B \
   --dataset grammar \
   --structure-type grammar \
@@ -485,7 +485,7 @@ python3 benchmarks/benchmark_serving_structured_output.py \
 
 ```bash
 python3 benchmarks/benchmark_serving_structured_output.py \
-  --endpoint-type vllm \
+  --backend vllm \
   --model NousResearch/Hermes-3-Llama-3.1-8B \
   --dataset regex \
   --request-rate 10 \
@@ -496,7 +496,7 @@ python3 benchmarks/benchmark_serving_structured_output.py \
 
 ```bash
 python3 benchmarks/benchmark_serving_structured_output.py \
-  --endpoint-type vllm \
+  --backend vllm \
   --model NousResearch/Hermes-3-Llama-3.1-8B \
   --dataset choice \
   --request-rate 10 \
@@ -507,7 +507,7 @@ python3 benchmarks/benchmark_serving_structured_output.py \
 
 ```bash
 python3 benchmarks/benchmark_serving_structured_output.py \
-  --endpoint-type vllm \
+  --backend vllm \
   --model NousResearch/Hermes-3-Llama-3.1-8B \
   --dataset xgrammar_bench \
   --request-rate 10 \
