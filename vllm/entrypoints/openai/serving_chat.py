@@ -993,7 +993,7 @@ class OpenAIServingChat(OpenAIServing):
                         # check to make sure we haven't "forgotten" to stream
                         #   any tokens that were generated but previously
                         #   matched by partial json parsing
-                        # only happens if we are NOT using guided decoding
+                        # only happens if we are NOT using structured outputs
                         auto_tools_called = False
                         if tool_parser:
                             auto_tools_called = len(

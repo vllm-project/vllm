@@ -60,9 +60,9 @@ class GuidanceBackend(StructuredOutputBackend):
 
     def __post_init__(self):
         self.disable_any_whitespace = \
-            self.vllm_config.decoding_config.disable_any_whitespace
+            self.vllm_config.structured_outputs_config.disable_any_whitespace
         self.disable_additional_properties = \
-            self.vllm_config.decoding_config.disable_additional_properties
+            self.vllm_config.structured_outputs_config.disable_additional_properties
 
         self.ll_tokenizer = llguidance_hf.from_tokenizer(
             self.tokenizer, self.vocab_size)
