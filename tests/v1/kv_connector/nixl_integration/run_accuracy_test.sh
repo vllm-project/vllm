@@ -93,7 +93,7 @@ run_tests_for_model() {
     --enforce-eager \
     --gpu-memory-utilization 0.2 \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
-    --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_producer\"}'"
+    --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}'"
 
     if [ -n "$model_args" ]; then
     FULL_CMD="$BASE_CMD $model_args"
@@ -128,7 +128,7 @@ run_tests_for_model() {
     --enforce-eager \
     --gpu-memory-utilization 0.2 \
     --tensor-parallel-size $DECODER_TP_SIZE \
-    --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_consumer\"}'"
+    --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}'"
 
     if [ -n "$model_args" ]; then
     FULL_CMD="$BASE_CMD $model_args"
