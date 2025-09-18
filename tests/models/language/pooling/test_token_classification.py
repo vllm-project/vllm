@@ -7,12 +7,7 @@ from transformers import AutoModelForTokenClassification
 from tests.models.utils import softmax
 
 
-@pytest.mark.parametrize(
-    "model",
-    [
-        pytest.param("boltuix/NeuroBERT-NER", ),
-    ],
-)
+@pytest.mark.parametrize("model", ["boltuix/NeuroBERT-NER"])
 # The float32 is required for this tiny model to pass the test.
 @pytest.mark.parametrize("dtype", ["float"])
 @torch.inference_mode
@@ -23,10 +18,7 @@ def test_models(
     model: str,
     dtype: str,
 ) -> None:
-    with vllm_runner(model,
-                     max_model_len=None,
-                     dtype=dtype,
-                     enforce_eager=True) as vllm_model:
+    with vllm_runner(model, max_model_len=None, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.encode(example_prompts)
 
     with hf_runner(model,
