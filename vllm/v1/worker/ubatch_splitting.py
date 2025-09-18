@@ -28,7 +28,7 @@ def should_ubatch_with_num_tokens(
                                                  dp_size, dp_rank)
 
 
-def get_dp_padding_ubatch(
+def coordinate_batch_across_dp(
     num_tokens_unpadded: int,
     num_tokens_padded: int,
     should_attempt_ubatching: bool,
@@ -120,7 +120,7 @@ def ubatch_split(
 
     # Don't microbatch unless every other DP worker is also microbatching
     num_tokens_after_padding = None
-    (should_ubatch, num_tokens_after_padding) = get_dp_padding_ubatch(
+    (should_ubatch, num_tokens_after_padding) = coordinate_batch_across_dp(
         num_tokens_unpadded, num_tokens_padded, should_attempt_ubatching,
         dp_size, dp_rank)
     if not should_ubatch:

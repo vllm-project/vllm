@@ -90,7 +90,8 @@ from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import (
     KVConnectorModelRunnerMixin)
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
-from vllm.v1.worker.ubatch_splitting import get_dp_padding_ubatch, ubatch_split
+from vllm.v1.worker.ubatch_splitting import (coordinate_batch_across_dp,
+                                             ubatch_split)
 from vllm.v1.worker.ubatch_utils import UBatchSlice, UBatchSlices
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 
@@ -956,27 +957,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         query_start_loc = self.query_start_loc.gpu[:num_reqs + 1]
 
         num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
-        ubatch_slices = None
-        if self.vllm_config.parallel_config.enable_dbo:
-            num_tokens_padded = self._get_num_input_tokens(num_tokens_unpadded)
-            ubatch_slices, num_tokens_after_padding = \
-                ubatch_split(max_num_scheduled_tokens,
-                            num_tokens_unpadded,
-                            num_tokens_padded,
-                            self.parallel_config)
-        else:
-            dp_size = self.parallel_config.data_parallel_size
-            dp_rank = self.parallel_config.data_parallel_rank
-            num_tokens_padded = self._get_num_input_tokens(num_tokens_unpadded)
-            should_ubatch, num_tokens_after_padding = get_dp_padding_ubatch(
-                num_tokens_unpadded=num_tokens_unpadded,
-                num_tokens_padded=num_tokens_padded,
-                should_attempt_ubatching=False,
-                dp_size=dp_size,
-                dp_rank=dp_rank,
-            )
-            assert should_ubatch is False
-            assert num_tokens_after_padding is not None
+        num_tokens_padded = self._get_num_input_tokens(num_tokens_unpadded)
+        ubatch_slices, num_tokens_after_padding = \
+            ubatch_split(max_num_scheduled_tokens,
+                        num_tokens_unpadded,
+                        num_tokens_padded,
+                        self.parallel_config)
 
         self.seq_lens.np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
@@ -2731,10 +2717,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.parallel_config.dbo_decode_token_threshold and \
                 allow_microbatching
 
-        (should_ubatch,
-         num_tokens_across_dp) = get_dp_padding_ubatch(num_tokens, num_tokens,
-                                                       should_ubatch, dp_size,
-                                                       dp_rank)
+        (should_ubatch, num_tokens_across_dp) = coordinate_batch_across_dp(
+            num_tokens, num_tokens, should_ubatch, dp_size, dp_rank)
 
         # Currently the dummy run should only be ubatching during
         # cuda graph capture, meaning all DP ranks should already
