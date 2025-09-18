@@ -470,7 +470,7 @@ async def benchmark(
         else:
             request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
     else:
-        raise ValueError(f"Unknown endpoint_type: {endpoint_type}")
+        raise ValueError(f"Unknown backend: {endpoint_type}")
 
     # Reuses connections across requests to reduce TLS handshake overhead.
     connector = aiohttp.TCPConnector(
