@@ -1084,14 +1084,15 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     random.seed(args.seed)
     np.random.seed(args.seed)
 
+    endpoint_type = args.endpoint_type
     if args.backend is not None:
         warnings.warn(
             "'--backend' is deprecated and will be removed in v0.11.0. "
-            "Please use --endpoint-type instead. Setting --endpoint-type to "
+            "Please use `--endpoint-type` instead. Setting endpoint type to "
             f"{args.backend}.",
             stacklevel=2,
         )
-        args.endpoint_type = args.backend
+        endpoint_type = args.backend
     # Validate ramp-up arguments
     if args.ramp_up_strategy is not None:
         if args.request_rate != float("inf"):
@@ -1114,7 +1115,6 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             raise ValueError(
                 "For exponential ramp-up, the start RPS cannot be 0.")
 
-    endpoint_type = args.endpoint_type
     label = args.label
     model_id = args.model
     model_name = args.served_model_name
