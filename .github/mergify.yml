@@ -171,7 +171,7 @@ pull_request_rules:
       - files=examples/online_serving/openai_chat_completion_structured_outputs.py
       - files=examples/online_serving/openai_chat_completion_structured_outputs_with_reasoning.py
       - files~=^tests/v1/structured_output/
-      - files=tests/v1/entrypoints/llm/test_guided_generate.py
+      - files=tests/v1/entrypoints/llm/test_struct_output_generate.py
       - files~=^vllm/v1/structured_output/
   actions:
     label:
