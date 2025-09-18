@@ -56,6 +56,15 @@ SYMM_MEM_ALL_REDUCE_MAX_SIZES = {
     }
 }
 
+NCCL_SYMM_MEM_ALL_REDUCE_CONFIG = {
+    "min_world_size": 4,
+    "thresholds": {
+        4: 2 * MiB,  # 2 MB
+        8: 8 * MiB,  # 8 MB
+    },
+    "always_use_above_world_size": 8  # Always use symm mem for world_size > 8
+}
+
 
 def producer(batch_src: Sequence[int],
              producer_queue,
