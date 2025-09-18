@@ -29,8 +29,6 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             max_loras: int,
             lora_config: LoRAConfig,
             model_config: Optional[PretrainedConfig] = None) -> None:
-        self.embeddings_slice = None
-        self.embeddings_weights = None
         self.lora_a_stacked = torch.zeros(
             (
                 max_loras,
@@ -73,7 +71,6 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         self.lora_b_stacked[index,
                             0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
                                 lora_b.T, non_blocking=True)
-        # embeddings_tensor parameter is no longer used
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         added_tokens_mask = torch.where(x > self.base_layer.org_vocab_size - 1,

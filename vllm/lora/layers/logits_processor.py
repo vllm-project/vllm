@@ -138,7 +138,6 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         self.lora_b_stacked[index,
                             0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
                                 lora_b.T, non_blocking=True)
-        # embeddings_tensor parameter is no longer used
 
     def _get_logits(
         self,
@@ -179,10 +178,8 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         indices_padded = self.punica_wrapper.sampler_indices_padded
 
         if current_platform.is_tpu() or current_platform.is_xpu():
-            indices_padded = indices_padded[:logits.size(0)]
-
-        # Continue with the base logits without additional vocabulary
-        # No additional vocabulary assignment needed
+            indices_padded = indices_padded[:logits.size(0)]       # Continue with the base logits without additional vocabulary
+        
 
         lora_output: Optional[
             torch.Tensor] = self.punica_wrapper.add_lora_logits(

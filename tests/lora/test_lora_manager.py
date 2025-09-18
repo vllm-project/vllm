@@ -59,7 +59,6 @@ def test_from_lora_tensors(sql_lora_files, device):
         assert (lora.lora_a.shape[1] == lora.lora_b.shape[0]
                 ), f"{lora.lora_a.shape=}, {lora.lora_b.shape=}"
         assert lora.lora_a.shape[1] == 8
-        # No embeddings tensor since additional vocabulary is removed
         assert lora.embeddings_tensor is None
 
 
