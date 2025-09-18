@@ -192,6 +192,9 @@ class CudaPlatformBase(Platform):
         if (envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
                 and parallel_config.data_parallel_size > 1
                 and compilation_config.cudagraph_mode != CUDAGraphMode.NONE):
+            # TODO: Piecewise Cuda graph might be enabled
+            # if torch compile cache key issue fixed
+            # See https://github.com/vllm-project/vllm/pull/25093
             logger.info(
                 "Data Parallel: disabling cudagraphs since DP "
                 "with DeepEP high-throughput kernels are not CUDA Graph "
