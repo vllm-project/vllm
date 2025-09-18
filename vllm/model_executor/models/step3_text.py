@@ -10,10 +10,13 @@ from torch import nn
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import AFDConfig, CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (get_pp_group,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
+from vllm.distributed.afd_transfer.afd_connector.metadata import (
+    AFDConnectorMetadata)
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -206,11 +209,13 @@ class Step3TextDecoderLayer(nn.Module):
                  config: ModelConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
+                 afd_config: Optional[AFDConfig] = None,
                  prefix: str = "") -> None:
         super().__init__()
         config = config.hf_config
         self.hidden_size = config.hidden_size
         rope_scaling = getattr(config, "rope_scaling", None)
+        self.layer_idx = int(prefix.split("layers.")[1].split(".")[0])
 
         self.self_attn = Step3TextAttention(
             hidden_size=self.hidden_size,
@@ -226,17 +231,15 @@ class Step3TextDecoderLayer(nn.Module):
             rope_scaling=rope_scaling,
             prefix=f"{prefix}.self_attn")
 
-        layer_idx = int(prefix.split("layers.")[1].split(".")[0])
         moe_layers_enum = getattr(config, "moe_layers_enum", None)
         if moe_layers_enum is not None:
             moe_layers_idx = [
                 int(i) for i in moe_layers_enum.strip().split(',')
             ]
         else:
-            # Default to 1dense.
             moe_layers_idx = [i for i in range(1, config.num_hidden_layers)]
 
-        if layer_idx in moe_layers_idx:
+        if self.layer_idx in moe_layers_idx:
             self.moe = FusedMoEBlock(config=config,
                                      quant_config=quant_config,
                                      prefix=f"{prefix}.moe")
@@ -259,33 +262,151 @@ class Step3TextDecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
 
-    def forward(
-            self, positions: torch.Tensor, hidden_states: torch.Tensor,
-            residual: Optional[torch.Tensor]
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        self.graph_capture_active: bool = False
+        self.should_capture_graph: bool = (afd_config
+                                           and afd_config.is_attention_server)
+        self.graph_attn_runners_by_stage: dict[int, dict[
+            int, tuple[torch.cuda.CUDAGraph, torch.Tensor, torch.Tensor,
+                       Optional[torch.Tensor], torch.Tensor,
+                       Optional[torch.Tensor]]]] = {}
+        self.graph_capture_sizes: list[int] = []
+
+    def _capture_cuda_graph_for_size(self, *, stage_idx: int, num_tokens: int,
+                                     device: torch.device,
+                                     hs_dtype: torch.dtype,
+                                     pos_dtype: torch.dtype) -> None:
+        if not self.graph_capture_active:
+            return
+        stage_graphs = self.graph_attn_runners_by_stage.setdefault(
+            stage_idx, {})
+        if num_tokens in stage_graphs:
+            return
+
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.stream(stream):
+            static_positions = torch.zeros(num_tokens,
+                                           dtype=pos_dtype,
+                                           device=device)
+            static_hidden_states = torch.empty((num_tokens, self.hidden_size),
+                                               dtype=hs_dtype,
+                                               device=device)
+            static_residual = torch.empty(
+                (num_tokens, self.hidden_size), dtype=hs_dtype,
+                device=device) if self.layer_idx > 0 else None
+
+            self._compute_attn_output(static_hidden_states, static_residual,
+                                      static_positions)
+
+            with torch.cuda.graph(graph, stream=stream):
+                static_hs_out, static_residual_out = self._compute_attn_output(
+                    static_hidden_states, static_residual, static_positions)
+
+        torch.cuda.current_stream().wait_stream(stream)
+        stage_graphs[num_tokens] = (graph, static_positions,
+                                    static_hidden_states, static_residual,
+                                    static_hs_out, static_residual_out)
+        if num_tokens not in self.graph_capture_sizes:
+            self.graph_capture_sizes.append(num_tokens)
+            self.graph_capture_sizes.sort()
+
+    def _ensure_graph_for_size(self, *, stage_idx: int, size: int,
+                               device: torch.device, hs_dtype: torch.dtype,
+                               pos_dtype: torch.dtype) -> None:
+        if not self.graph_capture_active:
+            return
+        stage_graphs = self.graph_attn_runners_by_stage.get(stage_idx)
+        if stage_graphs is None or size not in stage_graphs:
+            self._capture_cuda_graph_for_size(stage_idx=stage_idx,
+                                              num_tokens=size,
+                                              device=device,
+                                              hs_dtype=hs_dtype,
+                                              pos_dtype=pos_dtype)
+
+    def compute_ffn_output(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if self.use_moe:
+            share_output = self.share_expert(hidden_states)
+            moe_output = self.moe(hidden_states)
+            return share_output + moe_output
+        return self.mlp(hidden_states)
+
+    def _compute_attn_output(
+            self, hidden_states: torch.Tensor,
+            residual: Optional[torch.Tensor],
+            positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if residual is None:
-            residual = hidden_states
+            residual = hidden_states.clone()
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
 
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
-
+        hidden_states = self.self_attn(positions=positions,
+                                       hidden_states=hidden_states)
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
-
-        if self.use_moe:
-            share_output = self.share_expert(hidden_states)
-            moe_output = self.moe(hidden_states)
-            hidden_states = share_output + moe_output
-        else:
-            hidden_states = self.mlp(hidden_states)
-
         return hidden_states, residual
+
+    def compute_attn_output(
+            self, hidden_states: torch.Tensor,
+            residual: Optional[torch.Tensor],
+            positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self.should_capture_graph:
+            return self._compute_attn_output(hidden_states, residual,
+                                             positions)
+
+        device = hidden_states.device
+        hs_dtype = hidden_states.dtype
+        pos_dtype = positions.dtype
+        num_tokens = hidden_states.shape[0]
+        afd_stage_idx = 0
+        forward_ctx = get_forward_context()
+        if forward_ctx.afd_metadata is not None:
+            afd_stage_idx = forward_ctx.afd_metadata.afd_stage_idx
+
+        self._ensure_graph_for_size(stage_idx=afd_stage_idx,
+                                    size=num_tokens,
+                                    device=device,
+                                    hs_dtype=hs_dtype,
+                                    pos_dtype=pos_dtype)
+
+        stage_graphs = self.graph_attn_runners_by_stage.get(afd_stage_idx, {})
+        chosen_size = None
+        for size in self.graph_capture_sizes:
+            if size >= num_tokens and size in stage_graphs:
+                chosen_size = size
+                break
+
+        if chosen_size is None:
+            return self._compute_attn_output(hidden_states, residual,
+                                             positions)
+
+        (graph, static_positions, static_hidden_states, static_residual,
+         static_hs_out, static_residual_out) = stage_graphs[chosen_size]
+
+        static_positions[:num_tokens].copy_(positions)
+        static_hidden_states[:num_tokens].copy_(hidden_states)
+        if residual is not None and static_residual is not None:
+            static_residual[:num_tokens].copy_(residual)
+        graph.replay()
+
+        out_hidden = static_hs_out[:num_tokens].clone()
+        if static_residual_out is not None:
+            out_residual = static_residual_out[:num_tokens].clone()
+        else:
+            out_residual = out_hidden.clone()
+        return out_hidden, out_residual
+
+    def forward(
+            self, positions: torch.Tensor, hidden_states: torch.Tensor,
+            residual: Optional[torch.Tensor]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        hidden_states, residual = self.compute_attn_output(
+            hidden_states, residual, positions)
+        ffn_output = self.compute_ffn_output(hidden_states)
+        return ffn_output, residual
 
 
 @support_torch_compile
@@ -310,11 +431,12 @@ class Step3TextModel(nn.Module):
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: Step3TextDecoderLayer(config=vllm_config.
-                                                 model_config,
-                                                 cache_config=cache_config,
-                                                 quant_config=quant_config,
-                                                 prefix=prefix),
+            lambda prefix: Step3TextDecoderLayer(
+                config=vllm_config.model_config,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                afd_config=vllm_config.afd_config,
+                prefix=prefix),
             prefix=f"{prefix}.layers",
         )
         if get_pp_group().is_last_rank:
@@ -325,6 +447,17 @@ class Step3TextModel(nn.Module):
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(["hidden_states"],
                                                     config.hidden_size))
+
+    def set_graph_capture_mode(self, enabled: bool) -> None:
+        for idx in range(self.start_layer, self.end_layer):
+            layer = self.layers[idx]
+            if hasattr(layer, "graph_capture_active"):
+                layer.graph_capture_active = enabled
+
+    def compute_ffn_output(self, layer_idx: int,
+                           hidden_states: torch.Tensor) -> torch.Tensor:
+        layer = self.layers[layer_idx]
+        return layer.compute_ffn_output(hidden_states)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -347,8 +480,80 @@ class Step3TextModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
-            hidden_states, residual = layer(positions, hidden_states, residual)
+        forward_ctx = get_forward_context()
+        afd_metadata = (forward_ctx.afd_metadata
+                        if forward_ctx is not None else None)
+
+        if afd_metadata is not None:
+            assert residual is None, "PP is not supported with AFD"
+            num_stages = len(afd_metadata.afd_tokens_start_loc) - 1
+            afd_connector = afd_metadata.afd_connector
+
+            stage_hidden_states: list[torch.Tensor] = []
+            stage_residual: list[Optional[torch.Tensor]] = []
+            stage_positions: list[torch.Tensor] = []
+
+            for stage_idx in range(num_stages):
+                start = afd_metadata.afd_tokens_start_loc[stage_idx]
+                end = start + afd_metadata.afd_tokens_lens[stage_idx]
+                stage_hidden_states.append(hidden_states[start:end].clone())
+                stage_residual.append(residual[start:end].clone(
+                ) if residual is not None else None)
+                stage_positions.append(positions[start:end])
+
+            for layer_idx in range(self.start_layer, self.end_layer):
+                layer = self.layers[layer_idx]
+
+                for stage_idx in range(num_stages):
+                    afd_metadata.afd_stage_idx = stage_idx
+
+                    if layer_idx > 0:
+                        stage_hidden_states[stage_idx].copy_(
+                            afd_connector.recv_ffn_output())
+
+                    current_hidden = stage_hidden_states[stage_idx]
+                    current_residual = stage_residual[stage_idx]
+                    current_positions = stage_positions[stage_idx]
+
+                    current_hidden, current_residual = \
+                        layer.compute_attn_output(
+                            current_hidden, current_residual,
+                            current_positions)
+
+                    metadata = AFDConnectorMetadata.create_attention_metadata(
+                        layer_idx=layer_idx,
+                        stage_idx=stage_idx,
+                        seq_len=current_hidden.shape[0],
+                        dtype=current_hidden.dtype,
+                        device=current_hidden.device,
+                    )
+                    afd_connector.send_attn_output(current_hidden, metadata)
+                    stage_residual[stage_idx] = current_residual
+
+            for stage_idx in range(num_stages):
+                recv_hidden = afd_connector.recv_ffn_output()
+                stage_hidden_states[stage_idx].copy_(recv_hidden)
+
+            hidden_states = torch.cat([
+                stage_hidden_states[i][:afd_metadata.afd_tokens_lens[i]]
+                for i in range(num_stages)
+            ],
+                                      dim=0)
+
+            if stage_residual[0] is not None:
+                residual = torch.cat([
+                    stage_residual[i][:afd_metadata.afd_tokens_lens[i]]
+                    if stage_residual[i] is not None else
+                    stage_hidden_states[i][:afd_metadata.afd_tokens_lens[i]]
+                    for i in range(num_stages)
+                ],
+                                     dim=0)
+            else:
+                residual = None
+        else:
+            for layer in islice(self.layers, self.start_layer, self.end_layer):
+                hidden_states, residual = layer(positions, hidden_states,
+                                                residual)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({

@@ -2370,6 +2370,75 @@ class SpeculativeConfig:
 
 @config
 @dataclass
+class AFDConfig:
+    """Configuration for AFD (Attention FFN Disaggregation) distributed
+    computation."""
+
+    afd_connector: str = "dummy"
+    """The AFD connector for vLLM to communicate between attention and FFN
+    nodes. Available connectors: 'dummy', 'stepmesh'"""
+
+    afd_role: Literal["attention", "ffn"] = "attention"
+    """Role of this vLLM instance in AFD. 'attention' for attention workers,
+    'ffn' for FFN servers."""
+
+    afd_port: int = 1239
+    """Port number for stepmesh parameter server communication."""
+
+    afd_host: str = "127.0.0.1"
+    """Host address for stepmesh parameter server communication."""
+
+    num_afd_stages: int = 3
+    """Number of pipeline stages for stage parallelism."""
+
+    num_attention_servers: int = 1
+    """Number of attention servers."""
+
+    num_ffn_servers: int = 1
+    """Number of FFN servers."""
+
+    afd_server_rank: int = 0
+    """Rank of this AFD server."""
+
+    afd_extra_config: dict[str, Any] = field(default_factory=dict)
+    """Extra configuration for specific AFD connectors."""
+
+    def compute_hash(self) -> str:
+        """
+        WARNING: Whenever a new field is added to this config,
+        ensure that it is included in the factors list if
+        it affects the computation graph.
+
+        Provide a hash that uniquely identifies all the configs
+        that affect the structure of the computation
+        graph from input ids/embeddings to the final hidden states,
+        excluding anything before input ids/embeddings and after
+        the final hidden states.
+        """
+        # AFD configuration affects the computation graph structure
+        # as it changes how FFN computation is performed
+        factors: list[Any] = [
+            self.afd_connector,
+            self.afd_role,
+            self.num_afd_stages,
+            self.num_attention_servers,
+            self.num_ffn_servers,
+        ]
+        return hashlib.sha256(str(factors).encode()).hexdigest()
+
+    @property
+    def is_attention_server(self) -> bool:
+        """Check if this instance is configured as an attention server."""
+        return self.afd_role == "attention"
+
+    @property
+    def is_ffn_server(self) -> bool:
+        """Check if this instance is configured as an FFN server."""
+        return self.afd_role == "ffn"
+
+
+@config
+@dataclass
 class PoolerConfig:
     """Controls the behavior of output pooling in pooling models."""
 
@@ -3015,6 +3084,8 @@ class VllmConfig:
     """The configurations for distributed KV cache transfer."""
     kv_events_config: Optional[KVEventsConfig] = None
     """The configurations for event publishing."""
+    afd_config: Optional[AFDConfig] = None
+    """AFD (Attention FFN Disaggregation) configuration."""
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
     # tree config registration.
@@ -3097,6 +3168,10 @@ class VllmConfig:
             vllm_factors.append("None")
         if self.kv_transfer_config:
             vllm_factors.append(self.kv_transfer_config.compute_hash())
+        else:
+            vllm_factors.append("None")
+        if self.afd_config:
+            vllm_factors.append(self.afd_config.compute_hash())
         else:
             vllm_factors.append("None")
         if self.additional_config:

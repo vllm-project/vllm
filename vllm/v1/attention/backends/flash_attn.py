@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashAttention."""
 from dataclasses import dataclass
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 import torch
@@ -30,6 +30,9 @@ from vllm.v1.attention.backends.utils import (AttentionCGSupport,
                                               CommonAttentionMetadata,
                                               get_kv_cache_layout)
 from vllm.v1.kv_cache_interface import AttentionSpec
+
+if TYPE_CHECKING:
+    from vllm.forward_context import AFDMetadata
 
 logger = init_logger(__name__)
 
@@ -182,6 +185,7 @@ class FlashAttentionMetadataBuilder(
         self.parallel_config = vllm_config.parallel_config
         self.cache_config = vllm_config.cache_config
         self.compilation_config = vllm_config.compilation_config
+        self.afd_config = vllm_config.afd_config
 
         self.num_heads_q = self.model_config.get_num_attention_heads(
             self.parallel_config)
@@ -221,10 +225,25 @@ class FlashAttentionMetadataBuilder(
         # populated on first build() call.
         self.aot_sliding_window: Optional[tuple[int, int]] = None
 
+        # Initialize stage buffers for AFD
+        self._stage_buffers: dict[int, dict[str, torch.Tensor]] = {}
+        self._init_stage_buffers(vllm_config, self.aot_schedule)
+
     def build(self,
               common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata,
+              afd_metadata: Optional["AFDMetadata"] = None,
               fast_build: bool = False) -> FlashAttentionMetadata:
+        if afd_metadata is not None:
+            return self._build_with_afd(common_attn_metadata, afd_metadata)
+        else:
+            return self._build(common_prefix_len, common_attn_metadata,
+                               fast_build)
+
+    def _build(self,
+               common_prefix_len: int,
+               common_attn_metadata: CommonAttentionMetadata,
+               fast_build: bool = False) -> FlashAttentionMetadata:
         """
         fast_build disables AOT scheduling, used when there will be few 
         iterations i.e. spec-decode
@@ -360,8 +379,221 @@ class FlashAttentionMetadataBuilder(
             causal=causal)
         return attn_metadata
 
+    def _init_stage_buffers(self, vllm_config: VllmConfig,
+                            aot_schedule: bool) -> dict[str, torch.Tensor]:
+        if vllm_config.afd_config:
+            num_stages = vllm_config.afd_config.num_afd_stages
+            max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+            max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+            stage_max_num_reqs = max_num_seqs // num_stages
+            stage_max_num_tokens = max_num_tokens // num_stages
+            max_model_len = vllm_config.model_config.max_model_len
+            num_speculative_tokens = (
+                vllm_config.speculative_config.num_speculative_tokens
+                if vllm_config.speculative_config else 0)
+            dcp_world_size = (
+                vllm_config.parallel_config.decode_context_parallel_size)
+            stage_max_num_blocks = max(
+                cdiv(max_model_len, self.block_size * dcp_world_size),
+                1 + num_speculative_tokens)
+
+            for stage_idx in range(num_stages):
+                self._stage_buffers[stage_idx] = {
+                    'query_start_loc':
+                    torch.zeros(stage_max_num_reqs + 1,
+                                dtype=torch.int32,
+                                device=self.device),
+                    'seq_lens':
+                    torch.zeros(stage_max_num_reqs,
+                                dtype=torch.int32,
+                                device=self.device),
+                    'block_table':
+                    torch.zeros(stage_max_num_reqs,
+                                stage_max_num_blocks,
+                                dtype=torch.int32,
+                                device=self.device),
+                    'slot_mapping':
+                    torch.zeros(stage_max_num_tokens,
+                                dtype=torch.long,
+                                device=self.device),
+                }
+                if aot_schedule:
+                    self._stage_buffers[stage_idx][
+                        'scheduler_metadata'] = torch.zeros(
+                            stage_max_num_reqs + 1,
+                            dtype=torch.int32,
+                            device=self.device)
+
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         return use_cascade_attention(*args, **kwargs)
+
+    def _build_with_afd(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        afd_metadata: "AFDMetadata",
+    ) -> list[Optional[FlashAttentionMetadata]]:
+        """Split the metadata per AFD stage."""
+
+        query_start_loc = common_attn_metadata.query_start_loc
+        seq_lens = common_attn_metadata.seq_lens
+        seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+        block_table_tensor = common_attn_metadata.block_table_tensor
+        slot_mapping = common_attn_metadata.slot_mapping
+        max_query_len = common_attn_metadata.max_query_len
+        causal = common_attn_metadata.causal
+
+        afd_reqs_start_loc = afd_metadata.afd_reqs_start_loc
+        afd_tokens_start_loc = afd_metadata.afd_tokens_start_loc
+        afd_tokens_lens = afd_metadata.afd_tokens_lens
+        num_stages = len(afd_reqs_start_loc) - 1
+
+        aot_schedule = self.aot_schedule
+
+        if self.aot_sliding_window is None:
+            self.aot_sliding_window = (-1, -1)
+            # For the AOT scheduler we need the sliding window value to be
+            # constant for all layers to. We have to populate this on the first
+            # build() call so the layers are constructed (cannot populate)
+            # in __init__.
+            if aot_schedule:
+                sliding_window_configs = _get_sliding_window_configs(
+                    self.vllm_config)
+                if len(sliding_window_configs) == 1:
+                    sliding_window_config = sliding_window_configs.pop()
+                    if sliding_window_config is not None:
+                        self.aot_sliding_window = sliding_window_config
+                elif len(sliding_window_configs) > 1:
+                    self.aot_schedule = False
+                    aot_schedule = False
+
+        def schedule(batch_size, cu_query_lens, max_query_len, seqlens,
+                     max_seq_len, causal):
+            cache_dtype = self.cache_config.cache_dtype
+            if cache_dtype.startswith("fp8"):
+                qkv_dtype = FlashAttentionBackend.get_fp8_dtype_for_flashattn(
+                    cache_dtype)
+            else:
+                qkv_dtype = self.kv_cache_dtype
+            if aot_schedule:
+                return get_scheduler_metadata(
+                    batch_size=batch_size,
+                    max_seqlen_q=max_query_len,
+                    max_seqlen_k=max_seq_len,
+                    num_heads_q=self.num_heads_q,
+                    num_heads_kv=self.num_heads_kv,
+                    headdim=self.headdim,
+                    cache_seqlens=seqlens,
+                    qkv_dtype=qkv_dtype,
+                    cu_seqlens_q=cu_query_lens,
+                    page_size=self.block_size,
+                    causal=causal,
+                    window_size=self.aot_sliding_window,
+                    num_splits=self.max_num_splits,
+                )
+            return None
+
+        stage_metadatas: list[Optional[FlashAttentionMetadata]] = []
+
+        for stage_idx in range(num_stages):
+            stage_start_req = afd_reqs_start_loc[stage_idx]
+            stage_end_req = afd_reqs_start_loc[stage_idx + 1]
+            stage_start_token = afd_tokens_start_loc[stage_idx]
+            stage_end_token = afd_tokens_start_loc[
+                stage_idx] + afd_tokens_lens[stage_idx]
+
+            stage_num_reqs = stage_end_req - stage_start_req
+            stage_num_actual_tokens = stage_end_token - stage_start_token
+            stage_max_seq_len = int(
+                seq_lens_cpu[stage_start_req:stage_end_req].max())
+
+            stage_max_query_len = min(max_query_len, stage_num_actual_tokens)
+
+            if stage_num_actual_tokens == 0 or stage_num_reqs == 0:
+                stage_metadatas.append(None)
+                continue
+
+            if self.use_full_cuda_graph:
+                stage_buffer = self._stage_buffers[stage_idx]
+
+                stage_query_start_loc_data = query_start_loc[
+                    stage_start_req:stage_end_req +
+                    1] - query_start_loc[stage_start_req]
+                stage_buffer['query_start_loc'][:stage_num_reqs + 1].copy_(
+                    stage_query_start_loc_data)
+                stage_buffer['query_start_loc'][stage_num_reqs + 1:].fill_(
+                    stage_query_start_loc_data[stage_num_reqs].item())
+                stage_query_start_loc = stage_buffer[
+                    'query_start_loc'][:stage_num_reqs + 1]
+
+                stage_seq_lens_data = seq_lens[stage_start_req:stage_end_req]
+                stage_buffer['seq_lens'][:stage_num_reqs].copy_(
+                    stage_seq_lens_data)
+                stage_buffer['seq_lens'][stage_num_reqs:].fill_(0)
+                stage_seq_lens = stage_buffer['seq_lens'][:stage_num_reqs]
+
+                stage_block_table_data = block_table_tensor[
+                    stage_start_req:stage_end_req]
+                stage_buffer['block_table'][:stage_num_reqs].copy_(
+                    stage_block_table_data)
+                stage_block_table_tensor = stage_buffer[
+                    'block_table'][:stage_num_reqs]
+
+                stage_slot_mapping_data = slot_mapping[
+                    stage_start_token:stage_end_token]
+                stage_buffer['slot_mapping'][:stage_num_actual_tokens].copy_(
+                    stage_slot_mapping_data)
+                stage_slot_mapping = stage_buffer[
+                    'slot_mapping'][:stage_num_actual_tokens]
+            else:
+                stage_query_start_loc = query_start_loc[
+                    stage_start_req:stage_end_req +
+                    1] - query_start_loc[stage_start_req]
+                stage_seq_lens = seq_lens[stage_start_req:stage_end_req]
+                stage_block_table_tensor = block_table_tensor[
+                    stage_start_req:stage_end_req]
+                stage_slot_mapping = slot_mapping[
+                    stage_start_token:stage_end_token]
+
+            if aot_schedule:
+                stage_scheduler_metadata = schedule(
+                    batch_size=stage_num_reqs,
+                    cu_query_lens=stage_query_start_loc,
+                    max_query_len=stage_max_query_len,
+                    seqlens=stage_seq_lens,
+                    max_seq_len=stage_max_seq_len,
+                    causal=causal)
+                max_num_splits = 0
+                if self.use_full_cuda_graph:
+                    stage_buffer = self._stage_buffers[stage_idx]
+                    n = stage_scheduler_metadata.shape[0]
+                    stage_buffer['scheduler_metadata'][:n].copy_(
+                        stage_scheduler_metadata)
+                    stage_buffer['scheduler_metadata'][n:].fill_(0)
+                    stage_scheduler_metadata = stage_buffer[
+                        'scheduler_metadata'][:n]
+                    if stage_num_actual_tokens <= self.max_cudagraph_size:
+                        max_num_splits = self.max_num_splits
+
+            stage_attn_metadata = FlashAttentionMetadata(
+                num_actual_tokens=stage_num_actual_tokens,
+                max_query_len=stage_max_query_len,
+                query_start_loc=stage_query_start_loc,
+                max_seq_len=stage_max_seq_len,
+                seq_lens=stage_seq_lens,
+                block_table=stage_block_table_tensor,
+                slot_mapping=stage_slot_mapping,
+                use_cascade=False,
+                common_prefix_len=0,
+                scheduler_metadata=stage_scheduler_metadata,
+                cu_prefix_query_lens=None,
+                prefix_kv_lens=None,
+                suffix_kv_lens=None,
+                prefix_scheduler_metadata=None,
+                max_num_splits=max_num_splits,
+                causal=causal)
+
+            stage_metadatas.append(stage_attn_metadata)
+        return stage_metadatas
 
 
 class FlashAttentionImpl(AttentionImpl):

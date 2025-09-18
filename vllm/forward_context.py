@@ -17,6 +17,7 @@ from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
+    from vllm.distributed.afd_transfer import AFDConnectorBase
 
 logger = init_logger(__name__)
 
@@ -65,8 +66,10 @@ def _compute_chunked_local_num_tokens(num_tokens_across_dp_cpu: list[int],
 
 @dataclass
 class DPMetadata:
-    max_tokens_across_dp_cpu: torch.Tensor
-    cu_tokens_across_dp_cpu: torch.Tensor
+    max_tokens_across_dp_cpu: torch.Tensor  # 1D for normal, 1D for
+    # stage-wise max
+    cu_tokens_across_dp_cpu: torch.Tensor  # 1D for normal, 2D
+    # [num_stages, dp_size] for stage-wise
     local_sizes: Optional[list[int]] = None
 
     @staticmethod
@@ -96,6 +99,47 @@ class DPMetadata:
                                          dtype=torch.int32)
         dist.all_reduce(num_tokens_tensor, group=group)
         return num_tokens_tensor.cpu()
+
+    @staticmethod
+    def num_stage_tokens_across_dp(
+            num_stage_tokens: list[int], dp_size: int,
+            dp_rank: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Gather the stage token counts across all DP ranks.
+        Args:
+            num_stage_tokens: list of token counts per stage for current rank
+            dp_size: number of DP ranks
+            dp_rank: current DP rank
+        Returns:
+            stage_tokens_across_dp_cpu: [num_stages, dp_size] tensor
+            max_stage_tokens_across_dp_cpu: [num_stages] tensor with max
+            tokens per stage
+        """
+        from vllm.distributed.parallel_state import get_dp_group
+        device = current_platform.device_type
+        group = get_dp_group().device_group
+
+        if envs.VLLM_DISABLE_NCCL_FOR_DP_SYNCHRONIZATION:
+            device = "cpu"
+            group = get_dp_group().cpu_group
+
+        num_stages = len(num_stage_tokens)
+        stage_tokens_across_dp = torch.zeros((num_stages, dp_size),
+                                             device=device,
+                                             dtype=torch.int32)
+        stage_tokens_across_dp[:, dp_rank] = torch.tensor(num_stage_tokens,
+                                                          device=device,
+                                                          dtype=torch.int32)
+
+        # AllReduce to gather from all ranks
+        dist.all_reduce(stage_tokens_across_dp, group=group)
+        stage_tokens_across_dp_cpu = stage_tokens_across_dp.cpu()
+
+        # Compute max tokens per stage
+        max_stage_tokens_across_dp_cpu = torch.max(stage_tokens_across_dp_cpu,
+                                                   dim=1)[0]
+
+        return stage_tokens_across_dp_cpu, max_stage_tokens_across_dp_cpu
 
     @staticmethod
     def make(
@@ -172,6 +216,15 @@ class DPMetadata:
 
 
 @dataclass
+class AFDMetadata:
+    afd_tokens_start_loc: list[int]
+    afd_reqs_start_loc: list[int]
+    afd_stage_idx: int
+    afd_connector: "AFDConnectorBase"
+    afd_tokens_lens: list[int]  # padded lengths for tensor slicing
+
+
+@dataclass
 class ForwardContext:
     # copy from vllm_config.compilation_config.static_forward_context
     no_compile_layers: dict[str, Any]
@@ -186,6 +239,7 @@ class ForwardContext:
     virtual_engine: int  # set dynamically for each forward pass
     # set dynamically for each forward pass
     dp_metadata: Optional[DPMetadata] = None
+    afd_metadata: Optional[AFDMetadata] = None
     # determine the cudagraph style at runtime to be FULL, PIECEWISE, or NONE.
     # by default NONE, no cudagraph is used.
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE
@@ -216,7 +270,8 @@ def set_forward_context(
         num_tokens: Optional[int] = None,
         num_tokens_across_dp: Optional[torch.Tensor] = None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-        batch_descriptor: Optional[BatchDescriptor] = None):
+        batch_descriptor: Optional[BatchDescriptor] = None,
+        afd_metadata: Optional[AFDMetadata] = None):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     Here we can inject common logic for every model forward pass.
@@ -240,6 +295,7 @@ def set_forward_context(
         virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
         dp_metadata=dp_metadata,
+        afd_metadata=afd_metadata,
         cudagraph_runtime_mode=cudagraph_runtime_mode,
         batch_descriptor=batch_descriptor,
     )

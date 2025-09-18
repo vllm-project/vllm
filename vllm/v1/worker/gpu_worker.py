@@ -31,6 +31,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
                              DraftTokenIds, ModelRunnerOutput)
 from vllm.v1.utils import report_usage_stats
+from vllm.v1.worker.gpu_ffn_model_runner import GPUFFNModelRunner
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import WorkerBase
@@ -199,8 +200,13 @@ class Worker(WorkerBase):
         set_random_seed(self.model_config.seed)
 
         # Construct the model runner
-        self.model_runner: GPUModelRunner = GPUModelRunner(
-            self.vllm_config, self.device)
+        self.model_runner: GPUModelRunner | GPUFFNModelRunner
+        if (self.vllm_config.afd_config
+                and self.vllm_config.afd_config.is_ffn_server):
+            self.model_runner = GPUFFNModelRunner(self.vllm_config,
+                                                  self.device)
+        else:
+            self.model_runner = GPUModelRunner(self.vllm_config, self.device)
 
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
@@ -425,8 +431,18 @@ class Worker(WorkerBase):
     @torch.inference_mode()
     def execute_model(
         self,
-        scheduler_output: "SchedulerOutput",
+        scheduler_output: Optional["SchedulerOutput"] = None,
     ) -> Optional[Union[ModelRunnerOutput, AsyncModelRunnerOutput]]:
+        # FFN server mode: direct execution without pipeline parallelism
+        if (self.vllm_config.afd_config
+                and self.vllm_config.afd_config.is_ffn_server):
+            return self.model_runner.execute_model(scheduler_output)
+
+        if scheduler_output is None:
+            raise ValueError(
+                "scheduler_output is required in normal inference mode")
+
+        # Normal inference mode
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -504,6 +520,53 @@ class Worker(WorkerBase):
     def check_health(self) -> None:
         # worker will always be healthy as long as it's running.
         return
+
+    def start_ffn_server_loop(self) -> None:
+        """Start FFN server loop for AFD FFN workers"""
+        if not (self.vllm_config.afd_config
+                and self.vllm_config.afd_config.is_ffn_server):
+            return
+
+        self.model_runner.capture_model()
+        self.model_runner.initialize_afd_connector()
+
+        if self.profiler:
+            self.profiler.start()
+            for _ in range(1000):  # FIXME: hardcoded profiler iterations
+                self.model_runner.execute_model(scheduler_output=None)
+            torch.cuda.synchronize()  # Ensure GPU operations complete
+            self.profiler.stop()
+            print(self.profiler.key_averages().table(
+                sort_by="self_cuda_time_total"))
+
+        import threading
+        self._ffn_shutdown_event = threading.Event()
+
+        def ffn_worker_loop():
+            # Set CUDA device for this thread (thread-local context)
+            torch.cuda.set_device(self.device)
+            logger.info("FFN worker loop started")
+
+            try:
+                while not self._ffn_shutdown_event.is_set():
+                    # Execute FFN computation
+                    self.model_runner.execute_model(scheduler_output=None)
+            except Exception as e:
+                logger.error("FFN worker loop error: %s", e)
+                raise
+
+        self._ffn_thread = threading.Thread(target=ffn_worker_loop,
+                                            daemon=True)
+        self._ffn_thread.start()
+        logger.info("FFN server loop started in worker")
+
+    def stop_ffn_server_loop(self) -> None:
+        """Stop FFN server loop"""
+        if hasattr(self, '_ffn_shutdown_event'):
+            self._ffn_shutdown_event.set()
+            if hasattr(self, '_ffn_thread'):
+                self._ffn_thread.join(timeout=5)
+            logger.info("FFN server loop stopped")
 
     def _eplb_before_scale_down(self, old_ep_size: int,
                                 new_ep_size: int) -> None:
