@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 import tempfile
 from typing import Any, Optional, Union
 
@@ -10,7 +11,9 @@ import pytest
 import torch
 
 from tests.quantization.utils import is_quant_method_supported
+from tests.v1.attention.utils import _Backend
 from vllm import LLM, SamplingParams
+from vllm.attention.selector import global_force_attn_backend_context_manager
 from vllm.config import (CompilationConfig, CompilationLevel, CUDAGraphMode,
                          PassConfig)
 from vllm.platforms import current_platform
@@ -131,6 +134,37 @@ def test_custom_compile_config(
     model, model_kwargs = model_info
     print(f"MODEL={model}")
     run_model(compilation_config, model, model_kwargs)
+
+
+@pytest.mark.parametrize("model", [
+    "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
+    "nvidia/Llama-4-Scout-17B-16E-Instruct-FP4",
+])
+def test_inductor_graph_partition_attn_fusion(model, caplog_vllm):
+    if not is_torch_equal_or_newer("2.9.0.dev"):
+        pytest.skip("inductor graph partition is only available "
+                    "in PyTorch 2.9+")
+
+    print(f"MODEL={model}")
+
+    compilation_config = CompilationConfig(
+        level=CompilationLevel.PIECEWISE,
+        use_inductor_graph_partition=True,
+        cudagraph_mode=CUDAGraphMode.PIECEWISE,
+        compile_sizes=[1, 2],
+        custom_ops=["+quant_fp8"],
+        pass_config=PassConfig(enable_attn_fusion=True, enable_noop=True),
+    )
+    model_kwargs = {
+        "kv_cache_dtype": "fp8",
+        "max_model_len": 1024,
+    }
+    with caplog_vllm.at_level(
+            logging.DEBUG), global_force_attn_backend_context_manager(
+                _Backend.FLASHINFER):
+        run_model(compilation_config, model, model_kwargs)
+
+    assert ("Fused quantization onto 1 attention nodes" in caplog_vllm.text)
 
 
 def run_model(compile_config: Union[int, CompilationConfig], model: str,

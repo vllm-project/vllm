@@ -57,6 +57,7 @@ def _run_simple_model(
     expected_num_piecewise_graphs_seen,
     expected_num_piecewise_capturable_graphs_seen,
     expected_num_backend_compilations,
+    expected_num_cudagraph_captured,
 ):
     vllm_config = VllmConfig(compilation_config=CompilationConfig(
         level=CompilationLevel.PIECEWISE,
@@ -78,8 +79,7 @@ def _run_simple_model(
             num_piecewise_capturable_graphs_seen=
             expected_num_piecewise_capturable_graphs_seen,
             num_backend_compilations=expected_num_backend_compilations,
-            num_cudagraph_captured=
-            6,  # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
+            num_cudagraph_captured=expected_num_cudagraph_captured,
     ), set_forward_context(None,
                            vllm_config=vllm_config):  # background context
         # warm up with background context
@@ -123,6 +123,8 @@ def test_simple_piecewise_compile(use_inductor):
         expected_num_piecewise_capturable_graphs_seen=3,  # 1 + num_layers
         expected_num_backend_compilations=
         3,  # num_piecewise_capturable_graphs_seen
+        expected_num_cudagraph_captured=
+        6,  # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
     )
 
 
@@ -142,4 +144,7 @@ def test_simple_inductor_graph_partition(splitting_ops):
         1,  # since not splitting at fx graph level
         expected_num_backend_compilations=
         1,  # since not splitting at fx graph level
+        expected_num_cudagraph_captured=
+        6,  # inductor graph partition still captures 6
+        # graph, same as fx graph partition.
     )
