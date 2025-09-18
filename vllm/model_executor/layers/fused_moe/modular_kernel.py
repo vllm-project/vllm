@@ -177,8 +177,6 @@ class FusedMoEPrepareAndFinalize(ABC):
     def prepare(
         self,
         a1: torch.Tensor,
-        a1_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
@@ -189,9 +187,6 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         Perform any quantization (and/or) dispatching needed for this kernel.
         - a1: The (unquantized) input to the MoE layer.
-        - a1_scale: Optional scales for a1
-        - a2_scale: Optional scales for the second MoE gemm.  Required to make
-          sure the quantization is consistent for both gemms.
         - topk_ids: The topk ids.
         - topk_weights: The topk weights.
         - num_experts: The total number of experts in the global expert space.
@@ -199,10 +194,11 @@ class FusedMoEPrepareAndFinalize(ABC):
           space to the local expert space of the expert parallel shard.
         - apply_router_weight_on_input: When True, apply the weights to the
           activations, before quantization + dispatching.
+        - quant_config: Quantization info provided by the fused experts.
 
         Returns a tuple of:
         - quantized + dispatched a.
-        - quantized + dispatched a1_scales.
+        - Optional quantized + dispatched a1_scales.
         - Optional ExpertTokensMetadata containing gpu/cpu tensors
           as big as the number of local experts with the information about the
           number of tokens assigned to each local expert.
@@ -213,15 +209,14 @@ class FusedMoEPrepareAndFinalize(ABC):
 
     def supports_async(self) -> bool:
         """
-        Indicates whether or not this class implements prepare_async.
+        Indicates whether or not this class implements prepare_async and
+        finalize_async.
         """
         return False
 
     def prepare_async(
         self,
         a1: torch.Tensor,
-        a1_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
@@ -281,6 +276,42 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         raise NotImplementedError
 
+    def finalize_async(
+        self,
+        output: torch.Tensor,
+        fused_expert_output: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        apply_router_weight_on_input: bool,
+        weight_and_reduce_impl: TopKWeightAndReduce,
+    ) -> Callable:
+        """
+        Perform any combine plus apply weights and perform a reduction on the
+        fused experts output but do not wait for results from other workers.
+        - output: The output tensor, written in place.  Must be (M, K) shape.
+        - fused_expert_output: The unweighted, unreduced output of the fused
+          experts, it will have (M, topk, K) shape.
+        - topk_weights: The weights to be applied to the fused_experts_output.
+        - topk_ids: The topk_ids.
+        - apply_router_weight_on_input: When False, apply the weights to
+          fused_expert_output.
+        - weight_and_reduce_impl: An optional TopKWeightAndReduce
+          implementation.
+
+        Returns a callback that when invoked waits for results from other
+        workers and has the same return signature as `finalize`, e.g.
+
+        receiver = obj.finalize_async(output, ...)
+        ... output not valid yet ...
+        receiver()
+        ... output valid here ...
+
+        is equivalent to:
+
+        obj.finalize(output, ...)
+        """
+        raise NotImplementedError
+
     @property
     @abstractmethod
     def activation_format(self) -> FusedMoEActivationFormat:
@@ -316,6 +347,7 @@ class FusedMoEPrepareAndFinalize(ABC):
         raise NotImplementedError
 
 
+# TODO: add supported activations method (return string)
 class FusedMoEPermuteExpertsUnpermute(ABC):
     """
     An abstract base class for the [Permute-Experts-Unpermute] step described
@@ -324,12 +356,12 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
 
     def __init__(
         self,
-        quant_config: Optional[FusedMoEQuantConfig],
+        quant_config: FusedMoEQuantConfig,
     ):
-        if quant_config is not None:
-            self.quant_config = quant_config
-        else:
-            self.quant_config = FusedMoEQuantConfig()
+        """
+        quant_config: Quantization parameters for this experts instance.
+        """
+        self.quant_config = quant_config
 
     @property
     @abstractmethod
@@ -340,6 +372,11 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         for the 'apply' method.
         """
         raise NotImplementedError
+
+    #
+    # Various helpers for accessing quantization parameters from the
+    # quant_config.
+    #
 
     @property
     def quant_dtype(self) -> Optional[torch.dtype]:
@@ -356,6 +393,54 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
     @property
     def per_out_ch_quant(self) -> bool:
         return self.quant_config.per_out_ch_quant
+
+    @property
+    def a1_scale(self) -> Optional[torch.Tensor]:
+        return self.quant_config.a1_scale
+
+    @property
+    def a2_scale(self) -> Optional[torch.Tensor]:
+        return self.quant_config.a2_scale
+
+    @property
+    def a1_gscale(self) -> Optional[torch.Tensor]:
+        return self.quant_config.a1_gscale
+
+    @property
+    def a2_gscale(self) -> Optional[torch.Tensor]:
+        return self.quant_config.a2_gscale
+
+    @property
+    def w1_scale(self) -> Optional[torch.Tensor]:
+        return self.quant_config.w1_scale
+
+    @property
+    def w2_scale(self) -> Optional[torch.Tensor]:
+        return self.quant_config.w2_scale
+
+    @property
+    def w1_zp(self) -> Optional[torch.Tensor]:
+        return self.quant_config.w1_zp
+
+    @property
+    def w2_zp(self) -> Optional[torch.Tensor]:
+        return self.quant_config.w2_zp
+
+    @property
+    def w1_bias(self) -> Optional[torch.Tensor]:
+        return self.quant_config.w1_bias
+
+    @property
+    def w2_bias(self) -> Optional[torch.Tensor]:
+        return self.quant_config.w2_bias
+
+    @property
+    def g1_alphas(self) -> Optional[torch.Tensor]:
+        return self.quant_config.g1_alphas
+
+    @property
+    def g2_alphas(self) -> Optional[torch.Tensor]:
+        return self.quant_config.g2_alphas
 
     # TODO (bnell): make this return a CHUNK_SIZE or None instead?
     @abstractmethod
@@ -433,12 +518,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         activation: str,
         global_num_experts: int,
         expert_map: Optional[torch.Tensor],
-        w1_scale: Optional[torch.Tensor],
-        w2_scale: Optional[torch.Tensor],
-        w1_zp: Optional[torch.Tensor],
-        w2_zp: Optional[torch.Tensor],
         a1q_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
         expert_tokens_meta: Optional[ExpertTokensMetadata],
@@ -455,7 +535,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         - w1 (torch.Tensor): The first set of expert weights.
         - w2 (torch.Tensor): The second set of expert weights.
         - topk_weights: A map of row to expert weights. Some implementations
-          choose to do weight application. 
+          choose to do weight application.
         - topk_ids (torch.Tensor): A map of row to expert id.
         - activation (str): The activation function to apply after the first
           MoE layer.
@@ -464,15 +544,9 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
           from the global expert space to the local expert space of the expert
           parallel shard.
-        - w1_scale (Optional[torch.Tensor]): Optional scale to be used for w1.
-        - w2_scale (Optional[torch.Tensor]): Optional scale to be used for w2.
-        - w1_zp (Optional[torch.Tensor]): Optional zero points to be used for
-          w1.
-        - w2_zp (Optional[torch.Tensor]): Optional zero points to be used for
-          w2.
         - a1q_scale (Optional[torch.Tensor]): Optional quantized scale to be
-          used for a1.
-        - a2_scale (Optional[torch.Tensor]): Optional scale to be used for a2.
+          used for a1.  Result of quantization from prepare/finalize and not
+          from the FusedMoEQuantConfig.
         - workspace13 (torch.Tensor): A scratch tensor used for gemm outputs
           must be large enough to hold output of either MoE gemm.
         - workspace2 (torch.Tensor): A scratch tensor used for the activation
@@ -559,12 +633,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         global_num_experts: int,
         local_num_experts: int,
         expert_map: Optional[torch.Tensor],
-        w1_scale: Optional[torch.Tensor],
-        w2_scale: Optional[torch.Tensor],
-        w1_zp: Optional[torch.Tensor],
-        w2_zp: Optional[torch.Tensor],
         a1q_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
         expert_tokens_meta: Optional[ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
     ) -> torch.Tensor:
@@ -601,12 +670,7 @@ class FusedMoEModularKernel(torch.nn.Module):
             activation=activation,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            w1_zp=w1_zp,
-            w2_zp=w2_zp,
             a1q_scale=a1q_scale,
-            a2_scale=a2_scale,
             workspace13=workspace13,
             workspace2=workspace2,
             expert_tokens_meta=expert_tokens_meta,
@@ -627,12 +691,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         global_num_experts: int,
         local_num_experts: int,
         expert_map: Optional[torch.Tensor],
-        w1_scale: Optional[torch.Tensor],
-        w2_scale: Optional[torch.Tensor],
-        w1_zp: Optional[torch.Tensor],
-        w2_zp: Optional[torch.Tensor],
         a1q_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
         expert_tokens_meta: Optional[ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
     ) -> torch.Tensor:
@@ -658,12 +717,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                 global_num_experts=global_num_experts,
                 local_num_experts=local_num_experts,
                 expert_map=expert_map,
-                w1_scale=w1_scale,
-                w2_scale=w2_scale,
-                w1_zp=w1_zp,
-                w2_zp=w2_zp,
                 a1q_scale=a1q_scale,
-                a2_scale=a2_scale,
                 expert_tokens_meta=expert_tokens_meta,
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
@@ -685,9 +739,13 @@ class FusedMoEModularKernel(torch.nn.Module):
                    Optional[torch.Tensor], torch.Tensor, torch.Tensor]:
             s = chunk_idx * CHUNK_SIZE
             e = min(s + CHUNK_SIZE, M)
-            return (a1q[s:e], _chunk_scales(a1q_scale, s, e),
-                    _chunk_scales(a2_scale, s,
-                                  e), topk_ids[s:e], topk_weights[s:e])
+            return (
+                a1q[s:e],
+                _chunk_scales(a1q_scale, s, e),
+                _chunk_scales(self.fused_experts.a2_scale, s, e),
+                topk_ids[s:e],
+                topk_weights[s:e],
+            )
 
         def slice_output_tensor(chunk_idx: int) -> torch.Tensor:
             assert fused_out.size(0) % M == 0, (
@@ -744,12 +802,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                 global_num_experts=global_num_experts,
                 local_num_experts=local_num_experts,
                 expert_map=expert_map,
-                w1_scale=w1_scale,
-                w2_scale=w2_scale,
-                w1_zp=w1_zp,
-                w2_zp=w2_zp,
                 a1q_scale=c_a1q_scale,
-                a2_scale=c_a2_scale,
                 expert_tokens_meta=c_expert_tokens_meta,
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
@@ -767,12 +820,6 @@ class FusedMoEModularKernel(torch.nn.Module):
         activation: str = "silu",
         global_num_experts: int = -1,
         expert_map: Optional[torch.Tensor] = None,
-        w1_scale: Optional[torch.Tensor] = None,
-        w2_scale: Optional[torch.Tensor] = None,
-        w1_zp: Optional[torch.Tensor] = None,
-        w2_zp: Optional[torch.Tensor] = None,
-        a1_scale: Optional[torch.Tensor] = None,
-        a2_scale: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """
@@ -795,14 +842,6 @@ class FusedMoEModularKernel(torch.nn.Module):
         - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
           from the global expert space to the local expert space of the expert
           parallel shard.
-        - w1_scale (Optional[torch.Tensor]): Optional scale to be used for w1.
-        - w2_scale (Optional[torch.Tensor]): Optional scale to be used for w2.
-        - w1_zp (Optional[torch.Tensor]): Optional zero points to be used for
-          w1.
-        - w2_zp (Optional[torch.Tensor]): Optional zero points to be used for
-          w2.
-        - a1_scale (Optional[torch.Tensor]): Optional scale to be used for a1.
-        - a2_scale (Optional[torch.Tensor]): Optional scale to be used for a2.
         - apply_router_weight_on_input (bool): When true, the topk weights are
           applied directly on the inputs. This is only applicable when topk is
           1.
@@ -812,28 +851,23 @@ class FusedMoEModularKernel(torch.nn.Module):
         """
 
         a1 = hidden_states
-        output = a1 if inplace else torch.zeros_like(a1)
+        if inplace and self.shared_experts is None:
+            output = a1
+        else:
+            output = torch.zeros_like(a1)
 
         local_num_experts = w1.size(0)
         if global_num_experts == -1:
             global_num_experts = local_num_experts
-
-        shared_output: torch.Tensor
 
         if not self.prepare_finalize.supports_async():
             # We shouldn't be running an a2a kernel that doesn't
             # support async prepare/finalize
             assert not dbo_enabled()
 
-            # Run shared experts serially with dispatch.
-            if self.shared_experts is not None:
-                shared_output = self.shared_experts(a1)
-
             (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
              _expert_topk_weights) = self.prepare_finalize.prepare(
                  a1,
-                 a1_scale,
-                 a2_scale,
                  topk_weights,
                  topk_ids,
                  global_num_experts,
@@ -846,8 +880,6 @@ class FusedMoEModularKernel(torch.nn.Module):
             dbo_maybe_run_recv_hook()
             hook, receiver = self.prepare_finalize.prepare_async(
                 a1,
-                a1_scale,
-                a2_scale,
                 topk_weights,
                 topk_ids,
                 global_num_experts,
@@ -855,9 +887,6 @@ class FusedMoEModularKernel(torch.nn.Module):
                 apply_router_weight_on_input,
                 self.fused_experts.quant_config,
             )
-
-            if self.shared_experts is not None:
-                shared_output = self.shared_experts(a1)
 
             # If DBO is being used, register the hook with the ubatch context
             # and call it in dbo_maybe_run_recv_hook instead of passing it to
@@ -897,26 +926,47 @@ class FusedMoEModularKernel(torch.nn.Module):
                 global_num_experts=global_num_experts,
                 local_num_experts=local_num_experts,
                 expert_map=expert_map,
-                w1_scale=w1_scale,
-                w2_scale=w2_scale,
-                w1_zp=w1_zp,
-                w2_zp=w2_zp,
                 a1q_scale=a1q_scale,
-                a2_scale=a2_scale,
                 expert_tokens_meta=expert_tokens_meta,
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
 
-        self.prepare_finalize.finalize(
-            output,
-            fused_out,
-            topk_weights,
-            topk_ids,
-            apply_router_weight_on_input,
-            self.fused_experts.finalize_weight_and_reduce_impl(),
-        )
+        shared_output: Optional[torch.Tensor] = None
+
+        if not self.prepare_finalize.supports_async():
+            assert not dbo_enabled()
+
+            self.prepare_finalize.finalize(
+                output,
+                fused_out,
+                topk_weights,
+                topk_ids,
+                apply_router_weight_on_input,
+                self.fused_experts.finalize_weight_and_reduce_impl(),
+            )
+            if self.shared_experts is not None:
+                shared_output = self.shared_experts(a1)
+        else:
+            recv_hook = self.prepare_finalize.finalize_async(
+                output,
+                fused_out,
+                topk_weights,
+                topk_ids,
+                apply_router_weight_on_input,
+                self.fused_experts.finalize_weight_and_reduce_impl(),
+            )
+
+            if self.shared_experts is not None:
+                shared_output = self.shared_experts(a1)
+
+            assert recv_hook is not None
+            dbo_register_recv_hook(recv_hook)
+            dbo_yield()
+            if not dbo_enabled():
+                recv_hook()
 
         if self.shared_experts is None:
             return output
         else:
+            assert shared_output is not None
             return shared_output, output
