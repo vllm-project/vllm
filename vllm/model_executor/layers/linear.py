@@ -384,7 +384,7 @@ class ReplicatedLinear(LinearBase):
         from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
         from vllm.model_executor.layers.quantization.quark.schemes.quark_w4a4_mxfp4 import (  # noqa: E501
             QuarkW4A4MXFP4)
-        if isinstance(self.quant_method, Fp8LinearMethod, QuarkW4A4MXFP4):
+        if isinstance(self.quant_method, (Fp8LinearMethod, QuarkW4A4MXFP4)):
             output = self.quant_method.apply(self,
                                              x,
                                              bias,
@@ -562,7 +562,7 @@ class ColumnParallelLinear(LinearBase):
         from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
         from vllm.model_executor.layers.quantization.quark.schemes.quark_w4a4_mxfp4 import (  # noqa: E501
             QuarkW4A4MXFP4)
-        if isinstance(self.quant_method, Fp8LinearMethod, QuarkW4A4MXFP4):
+        if isinstance(self.quant_method, (Fp8LinearMethod, QuarkW4A4MXFP4)):
             output_parallel = self.quant_method.apply(
                 self, input_, bias, x_quant_scales=x_quant_scales)
         else:
@@ -1374,7 +1374,7 @@ class RowParallelLinear(LinearBase):
         from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
         from vllm.model_executor.layers.quantization.quark.schemes.quark_w4a4_mxfp4 import (  # noqa: E501
             QuarkW4A4MXFP4)
-        if isinstance(self.quant_method, Fp8LinearMethod, QuarkW4A4MXFP4):
+        if isinstance(self.quant_method, (Fp8LinearMethod, QuarkW4A4MXFP4)):
             output_parallel = self.quant_method.apply(
                 self, input_parallel, bias_, x_quant_scales=x_quant_scales)
         else:
