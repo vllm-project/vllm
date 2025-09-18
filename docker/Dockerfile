@@ -212,9 +212,9 @@ COPY --chmod=755 tools/setup_sccache.sh /usr/local/bin/setup_sccache.sh
 # if USE_SCCACHE is set, use sccache to speed up compilation
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=.git,target=.git \
-    /usr/local/bin/setup_sccache.sh \
+    /usr/local/bin/setup_sccache.sh && \
     if [ "$USE_SCCACHE" = "1" ]; then \
-      export CMAKE_BUILD_TYPE=Release \
+      CMAKE_BUILD_TYPE=Release \
       VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" \
       VLLM_MAIN_CUDA_VERSION="${VLLM_MAIN_CUDA_VERSION}" \
       VLLM_DOCKER_BUILD_CONTEXT=1 \
@@ -232,8 +232,8 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
         # Clean any existing CMake artifacts
         rm -rf .deps && \
         mkdir -p .deps && \
-        export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" \
-        export VLLM_DOCKER_BUILD_CONTEXT=1 \
+        VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" \
+        VLLM_DOCKER_BUILD_CONTEXT=1 \
         python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38; \
     fi
 
