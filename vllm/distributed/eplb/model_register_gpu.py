@@ -5,7 +5,11 @@ import types
 
 import torch
 from vllm.model_executor.layers.fused_moe import FusedMoE
-
+from vllm.model_executor.models.utils import (PPMissingLayer, is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
+import typing
+from typing import Callable
 def set_eplb_state(
     self,
     expert_load_view: torch.Tensor,
@@ -50,6 +54,55 @@ def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         num_experts=self.config.n_routed_experts
         num_redundant_experts=self.num_redundant_experts)
 
+def load_expert_weight(self, mapping, loaded_weight, params_dict):
+    ignore_suffixes = (".bias", "_bias", ".k_scale", "_k_scale",
+                        ".v_scale", "_v_scale", ".weight_scale",
+                        "_weight_scale", ".input_scale", "_input_scale")
+
+    is_continue = False
+    is_expert_weight = False
+    success = False
+
+    param_name, weight_name, expert_id, shard_id = mapping
+    if weight_name not in name:
+        is_continue = True
+        return is_continue, is_expert_weight, success
+
+    # Anyway, this is an expert weight and should not be
+    # attempted to load as other weights later
+    is_expert_weight = True
+
+    # Do not modify `name` since the loop may continue here
+    # Instead, create a new variable
+    name_mapped = name.replace(weight_name, param_name)
+
+    if is_pp_missing_parameter(name_mapped, self):
+        is_continue = True
+        return is_continue, is_expert_weight, success
+
+    # Skip loading extra parameters for GPTQ/modelopt models.
+    if name_mapped.endswith(
+            ignore_suffixes
+    ) and name_mapped not in params_dict:
+        is_continue = True
+        return is_continue, is_expert_weight, success
+
+    param = params_dict[name_mapped]
+    # We should ask the weight loader to return success or not
+    # here since otherwise we may skip experts with other
+    # available replicas.
+    weight_loader = typing.cast(Callable[..., bool],
+                                param.weight_loader)
+    success = weight_loader(param,
+                            loaded_weight,
+                            name_mapped,
+                            shard_id=shard_id,
+                            expert_id=expert_id,
+                            return_success=True)
+    if success:
+        name = name_mapped
+        return is_continue, is_expert_weight, success
+
 def model_register(model):
     """
     Registers custom methods related to Expert Parallel Load Balancing (EPLB)
@@ -60,7 +113,8 @@ def model_register(model):
         model: The vLLM model instance to which the methods will be added.
     """
     model.set_eplb_state = types.MethodType(set_eplb_state, model)
+    model.load_expert_weight = types.MethodType(load_expert_weight, model)
     model.update_physical_experts_metadata = \
-        types.MethodType(update_physical_experts_metadata, model)
+        types.MethodType(update_physical_experts_metadata, model) 
     model.model.get_expert_mapping = \
         types.MethodType(get_expert_mapping, model.model)
