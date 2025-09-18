@@ -47,6 +47,16 @@ def wikitext_ppl_test(hf_runner,
         vllm_extra_kwargs["hf_overrides"][
             "head_dtype"] = ci_envs.VLLM_CI_HEAD_DTYPE
 
+    # Allow changing tp size used by vllm in tests
+    if ci_envs.VLLM_CI_TP_SIZE > 1:
+        vllm_extra_kwargs.pop("tensor_parallel_size", None)
+        vllm_extra_kwargs["tensor_parallel_size"] = ci_envs.VLLM_CI_TP_SIZE
+
+    # Allow changing pp size used by vllm in tests
+    if ci_envs.VLLM_CI_PP_DTYPE > 1:
+        vllm_extra_kwargs.pop("pipeline_parallel_size", None)
+        vllm_extra_kwargs["pipeline_parallel_size"] = ci_envs.VLLM_CI_PP_DTYPE
+
     with vllm_runner(model_info.name,
                      gpu_memory_utilization=0.7,
                      max_model_len=max_length,

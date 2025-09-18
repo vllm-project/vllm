@@ -12,6 +12,8 @@ if TYPE_CHECKING:
     VLLM_CI_DTYPE: Optional[str] = None
     VLLM_CI_HEAD_DTYPE: Optional[str] = None
     VLLM_CI_HF_DTYPE: Optional[str] = None
+    VLLM_CI_TP_SIZE: int = 1
+    VLLM_CI_PP_DTYPE: int = 1
 
 environment_variables: dict[str, Callable[[], Any]] = {
     # A model family has many models with the same architecture.
@@ -24,6 +26,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_CI_HEAD_DTYPE": lambda: os.getenv("VLLM_CI_HEAD_DTYPE", None),
     # Allow changing the head dtype used by transformers in tests
     "VLLM_CI_HF_DTYPE": lambda: os.getenv("VLLM_CI_HF_DTYPE", None),
+    # Allow changing tp size used by vllm in tests
+    "VLLM_CI_TP_SIZE": lambda: int(os.getenv("VLLM_CI_TP_SIZE", 1)),
+    # Allow changing pp size used by vllm in tests
+    "VLLM_CI_PP_DTYPE": lambda: int(os.getenv("VLLM_CI_PP_DTYPE", 1)),
 }
 
 
