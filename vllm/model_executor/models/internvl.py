@@ -1035,6 +1035,8 @@ class InternVLMultiModalProcessor(
 class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
                         SupportsLoRA):
 
+    supports_encoder_tp_data = True
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
         if modality.startswith("image"):
@@ -1053,6 +1055,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
 
         self.config = config
         self.multimodal_config = multimodal_config
+        self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         self._patch_quant_config(config, quant_config)
 
         image_size = config.force_image_size or config.vision_config.image_size
@@ -1120,7 +1123,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
                 quant_config=quant_config,
                 num_hidden_layers_override=num_hidden_layers,
                 prefix=prefix,
-            )
+                use_data_parallel=self.use_data_parallel)
         else:
             return InternVisionPatchModel(config.vision_config)
 
