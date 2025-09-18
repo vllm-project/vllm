@@ -51,9 +51,8 @@ class GPUModelRunner:
         self.device = device
         self.pin_memory = is_pin_memory_available()
         self.dtype = self.model_config.dtype
-        if self.cache_config.cache_dtype == "auto":
-            self.kv_cache_dtype = self.dtype
-        else:
+        self.kv_cache_dtype = self.dtype
+        if self.cache_config.cache_dtype != "auto":
             # Quantized KV cache.
             self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
                 self.cache_config.cache_dtype]
@@ -97,9 +96,6 @@ class GPUModelRunner:
                     time_after_load - time_before_load)
 
     def profile_run(self):
-        pass
-
-    def maybe_remove_all_loras(self, lora_config):
         pass
 
     def get_kv_cache_spec(self):
@@ -269,6 +265,7 @@ class GPUModelRunner:
         slot_mappings = self.block_tables.compute_slot_mappings(
             query_start_loc_gpu, positions.gpu[:num_tokens])
         logits_indices = query_start_loc_gpu[1:] - 1
+        num_logits_indices = logits_indices.size(0)
 
         # Layer name -> attention metadata.
         attn_metadata: dict[str, Any] = {}
@@ -290,7 +287,7 @@ class GPUModelRunner:
                 block_table_tensor=block_table,
                 slot_mapping=slot_mapping,
                 logits_indices_padded=None,
-                num_logits_indices=logits_indices.size(0),
+                num_logits_indices=num_logits_indices,
                 causal=True,
                 encoder_seq_lens=None,
             )
