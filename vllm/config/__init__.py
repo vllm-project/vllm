@@ -28,6 +28,8 @@ from typing_extensions import assert_never, runtime_checkable
 
 import vllm.envs as envs
 from vllm import version
+from vllm.config.attention import (MultiCascadeAllocateMethod,
+                                   MultiCascadeConfig)
 from vllm.config.cache import (BlockSize, CacheConfig, CacheDType, MambaDType,
                                PrefixCachingHashAlgo)
 from vllm.config.compilation import (CompilationConfig, CompilationLevel,
@@ -377,6 +379,10 @@ class ModelConfig:
     disable_multi_cascade_attn: bool = False
     """Disable multi-cascade attention for V1. Multi-cascade attention is useful
     when serving requests with multiple common prefixes in the same batch."""
+    multi_cascade_config: MultiCascadeConfig = field(
+        default_factory=MultiCascadeConfig)
+    """Multi-cascade config which controls behaviour of request grouping when
+    multi-cascade attention is enabled."""
     skip_tokenizer_init: bool = False
     """Skip initialization of tokenizer and detokenizer. Expects valid
     `prompt_token_ids` and `None` for prompt from the input. The generated
@@ -415,14 +421,6 @@ class ModelConfig:
     """Initialize non-default pooling config or override default pooling config
     for the pooling model. e.g. `{"pooling_type": "mean", "normalize": false}`.
     """
-    multi_cascade_config: "KVAlignedConfig" = field(
-        default_factory="KVAlignedConfig")
-    """Multi-cascade config which controls behaviour of request grouping when
-    multi-cascade attention is enabled."""
-    override_multi_cascade_config: Optional[Union[dict,
-                                                  "KVAlignedConfig"]] = None
-    """Initialize non-default multi-cascade config or override default
-    multi-cascade config."""
 
     logits_processor_pattern: Optional[str] = None
     """Optional regex pattern specifying valid logits processor qualified names
@@ -744,8 +742,6 @@ class ModelConfig:
             revision=self.revision,
         )
 
-        self.multi_cascade_config = self._init_multi_cascade_config()
-
         # Interleaved attention is not supported by some backends in V0
         if (not self.disable_sliding_window
                 and is_interleaved(self.hf_text_config)
@@ -918,14 +914,6 @@ class ModelConfig:
             return pooler_config
 
         return None
-
-    def _init_multi_cascade_config(self) -> "KVAlignedConfig":
-        if isinstance(self.override_multi_cascade_config, dict):
-            self.override_multi_cascade_config = KVAlignedConfig(
-                **self.override_multi_cascade_config)
-        multi_cascade_config = (self.override_multi_cascade_config
-                                or KVAlignedConfig())
-        return multi_cascade_config
 
     def _verify_tokenizer_mode(self) -> None:
         tokenizer_mode = cast(TokenizerMode, self.tokenizer_mode.lower())
@@ -1954,40 +1942,6 @@ class PoolerConfig:
         hash_str = hashlib.md5(str(factors).encode(),
                                usedforsecurity=False).hexdigest()
         return hash_str
-
-
-@config
-@dataclass
-class KVAlignedGroupingConfig:
-    """Methods for grouping requests for multi-cascade
-    attention."""
-
-    LEAF_PASS: str = "leaf_pass"
-    """Only group requests if their latest KVCacheBlock 
-    is the same."""
-
-    FULL_PASS: str = "full_pass"
-    """Group requests even if they share a partially 
-    common prefix. Takes longer than leaf_pass but results
-    in larger groups."""
-
-
-@config
-@dataclass
-class KVAlignedConfig:
-    """Contains configurations for deciding how to schedule
-    multi-cascade attention."""
-
-    absorption_threshold: float = 0.8
-    """Threshold parameter that specifies whether to 
-    group more leaves with lower prefix length (low
-    absorption threshold), or fewer leaves with higher 
-    common prefix length (higher absorption threshold)."""
-
-    allocate_method = KVAlignedGroupingConfig.LEAF_PASS
-    """Method used to group requests with common prefixes. 
-    Logic behind grouping is in vllm.v1.core.multi_cascade_manager.
-    Defaults to leaf_pass."""
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {

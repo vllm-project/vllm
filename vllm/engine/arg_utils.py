@@ -27,11 +27,12 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          EPLBConfig, HfOverrides, KVEventsConfig,
                          KVTransferConfig, LoadConfig, LogprobsMode,
                          LoRAConfig, MambaDType, MMEncoderTPMode, ModelConfig,
-                         ModelDType, ModelImpl, ObservabilityConfig,
-                         ParallelConfig, PoolerConfig, PrefixCachingHashAlgo,
-                         RunnerOption, SchedulerConfig, SchedulerPolicy,
-                         SpeculativeConfig, StructuredOutputsConfig,
-                         TaskOption, TokenizerMode, VllmConfig, get_attr_docs)
+                         ModelDType, ModelImpl, MultiCascadeConfig,
+                         ObservabilityConfig, ParallelConfig, PoolerConfig,
+                         PrefixCachingHashAlgo, RunnerOption, SchedulerConfig,
+                         SchedulerPolicy, SpeculativeConfig,
+                         StructuredOutputsConfig, TaskOption, TokenizerMode,
+                         VllmConfig, get_attr_docs)
 from vllm.config.multimodal import MMCacheType, MultiModalConfig
 from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.config.utils import get_field
@@ -347,6 +348,8 @@ class EngineArgs:
     disable_sliding_window: bool = ModelConfig.disable_sliding_window
     disable_cascade_attn: bool = ModelConfig.disable_cascade_attn
     disable_multi_cascade_attn: bool = ModelConfig.disable_multi_cascade_attn
+    multi_cascade_config: MultiCascadeConfig = \
+        get_field(ModelConfig, "multi_cascade_config")
     swap_space: float = CacheConfig.swap_space
     cpu_offload_gb: float = CacheConfig.cpu_offload_gb
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
@@ -557,6 +560,8 @@ class EngineArgs:
                                  **model_kwargs["disable_cascade_attn"])
         model_group.add_argument("--disable-multi-cascade-attn",
                                  **model_kwargs["disable_multi_cascade_attn"])
+        model_group.add_argument("--multi-cascade-config",
+                                 **model_kwargs["multi_cascade_config"])
         model_group.add_argument("--skip-tokenizer-init",
                                  **model_kwargs["skip_tokenizer_init"])
         model_group.add_argument("--enable-prompt-embeds",
@@ -585,9 +590,6 @@ class EngineArgs:
                                  **model_kwargs["hf_overrides"])
         model_group.add_argument("--override-pooler-config",
                                  **model_kwargs["override_pooler_config"])
-        model_group.add_argument(
-            "--override-multi-cascade-config",
-            **model_kwargs["override_multi_cascade_config"])
         model_group.add_argument("--logits-processor-pattern",
                                  **model_kwargs["logits_processor_pattern"])
         model_group.add_argument("--generation-config",
@@ -1026,6 +1028,7 @@ class EngineArgs:
             disable_sliding_window=self.disable_sliding_window,
             disable_cascade_attn=self.disable_cascade_attn,
             disable_multi_cascade_attn=self.disable_multi_cascade_attn,
+            multi_cascade_config=self.multi_cascade_config,
             skip_tokenizer_init=self.skip_tokenizer_init,
             enable_prompt_embeds=self.enable_prompt_embeds,
             served_model_name=self.served_model_name,
