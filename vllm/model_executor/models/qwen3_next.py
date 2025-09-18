@@ -35,6 +35,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.layers.mamba.mamba2_metadata import update_metadata
 from vllm.model_executor.layers.mamba.mamba_mixer2 import (
     mamba_v2_sharded_weight_loader)
 from vllm.model_executor.layers.mamba.mamba_utils import (
@@ -414,6 +415,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
 
         assert isinstance(attn_metadata, dict)
         attn_metadata = attn_metadata[self.prefix]
+        conv_metadata = attn_metadata
         assert isinstance(attn_metadata, GDNAttentionMetadata)
         has_initial_state = attn_metadata.has_initial_state
         spec_query_start_loc = attn_metadata.spec_query_start_loc
@@ -475,10 +477,15 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
 
         # 2.2: process the remaining part
         if attn_metadata.num_prefills > 0:
+            mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
+            if conv_metadata.cu_seqlen is None:
+                conv_metadata = update_metadata(mixed_qkv_non_spec_T,
+                                                non_spec_query_start_loc,
+                                                conv_metadata)
             # - "cache_indices" updates the conv_state cache in positions
             #   pointed to by "mamba_cache_params.state_indices_tensor"
             mixed_qkv_non_spec = causal_conv1d_fn(
-                mixed_qkv_non_spec.transpose(0, 1),
+                mixed_qkv_non_spec_T,
                 conv_weights,
                 self.conv1d.bias,
                 activation=self.activation,
@@ -486,6 +493,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 has_initial_state=has_initial_state,
                 cache_indices=non_spec_state_indices_tensor,
                 query_start_loc=non_spec_query_start_loc,
+                metadata=conv_metadata,
             ).transpose(0, 1)
         elif attn_metadata.num_decodes > 0:
             mixed_qkv_non_spec = causal_conv1d_update(
