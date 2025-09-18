@@ -870,8 +870,18 @@ class EngineCoreProc(EngineCore):
                     # (RequestType, RequestData)
                     type_frame, *data_frames = input_socket.recv_multipart(
                         copy=False)
-                    request_type = EngineCoreRequestType(
-                        bytes(type_frame.buffer))
+                    raw_type = bytes(type_frame.buffer)
+
+                    # Check if request type is valid
+                    if raw_type not in EngineCoreRequestType._value2member_map_:
+                        # If type is a stray coordinator control token, ignore
+                        if raw_type == b"READY":
+                            logger.debug("Ignoring stray READY on input socket.")
+                            continue
+                        # Surface unexpected types
+                        raise ValueError(f"Unexpected request type on input socket: {raw_type!r}")
+
+                    request_type = EngineCoreRequestType(raw_type)
 
                     # Deserialize the request data.
                     if request_type == EngineCoreRequestType.ADD:
