@@ -522,7 +522,6 @@ class OpenAIServingChat(OpenAIServing):
             reasoning_end_arr = [False] * num_choices
         else:
             all_previous_token_ids = None
-            reasoning_end_arr = None
 
         try:
             if self.reasoning_parser:
@@ -680,7 +679,7 @@ class OpenAIServingChat(OpenAIServing):
                     delta_message: Optional[DeltaMessage]
 
                     # just update previous_texts and previous_token_ids
-                    if (tool_choice_auto or self.reasoning_parser):
+                    if tool_choice_auto or self.reasoning_parser:
                         assert previous_texts is not None
                         assert all_previous_token_ids is not None
                         previous_text = previous_texts[i]
@@ -850,7 +849,6 @@ class OpenAIServingChat(OpenAIServing):
                                     is not None):
                                 history_tool_call_cnt += 1
                                 tools_streamed[i] = True
-
 
                     # handle streaming deltas for tools with "auto" tool choice
                     # and reasoning parser
