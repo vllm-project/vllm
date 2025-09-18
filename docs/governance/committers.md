@@ -100,7 +100,7 @@ If you have PRs touching the area, please ping the area owner for review.
 - Model Interface: The `nn.Module` interface and implementation for various models
     - @zhuohan123, @mgoin, @simon-mo, @houseroad, @ywang96 (multimodality), @jeejeelee (lora)
 - Logits Processors / Sampler: The provided sampler class and pluggable logits processors
-    - @njhill, @houseroad
+    - @njhill, @houseroad, @22quinn
 - Custom Layers: Utility layers in vLLM such as rotary embedding and rms norms
     - @ProExpertProg
 - Attention: Attention interface for paged attention
@@ -174,3 +174,7 @@ If you have PRs touching the area, please ping the area owner for review.
 - AMD GPU: @gshtras
 - Intel CPU/GPU: @jikunshang, @bigPYJ1151
 - Google TPU: @yaochengji
+
+### Ecosystem Projects
+
+- Ascend NPU: [@wangxiyuan](https://github.com/wangxiyuan) and [see more details](https://vllm-ascend.readthedocs.io/en/latest/community/contributors.html#maintainers)
