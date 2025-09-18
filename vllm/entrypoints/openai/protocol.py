@@ -18,10 +18,19 @@ from openai.types.chat.chat_completion_audio import (
 from openai.types.chat.chat_completion_message import (
     Annotation as OpenAIAnnotation)
 # yapf: enable
-from openai.types.responses import (ResponseFunctionToolCall,
-                                    ResponseInputItemParam, ResponseOutputItem,
-                                    ResponsePrompt, ResponseReasoningItem,
-                                    ResponseStatus)
+from openai.types.responses import (
+    ResponseCodeInterpreterCallCodeDeltaEvent,
+    ResponseCodeInterpreterCallCodeDoneEvent,
+    ResponseCodeInterpreterCallCompletedEvent,
+    ResponseCodeInterpreterCallInProgressEvent,
+    ResponseCodeInterpreterCallInterpretingEvent, ResponseCompletedEvent,
+    ResponseContentPartAddedEvent, ResponseContentPartDoneEvent,
+    ResponseCreatedEvent, ResponseFunctionToolCall, ResponseInProgressEvent,
+    ResponseInputItemParam, ResponseOutputItem, ResponseOutputItemAddedEvent,
+    ResponseOutputItemDoneEvent, ResponsePrompt, ResponseReasoningItem,
+    ResponseReasoningTextDeltaEvent, ResponseReasoningTextDoneEvent,
+    ResponseStatus, ResponseWebSearchCallCompletedEvent,
+    ResponseWebSearchCallInProgressEvent, ResponseWebSearchCallSearchingEvent)
 
 # Backward compatibility for OpenAI client versions
 try:  # For older openai versions (< 1.100.0)
@@ -30,7 +39,7 @@ except ImportError:  # For newer openai versions (>= 1.100.0)
     from openai.types.responses import (ResponseFormatTextConfig as
                                         ResponseTextConfig)
 
-from openai.types.responses.response import ToolChoice
+from openai.types.responses.response import IncompleteDetails, ToolChoice
 from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
 from pydantic import (BaseModel, ConfigDict, Field, TypeAdapter,
@@ -250,6 +259,26 @@ def get_logits_processors(processors: Optional[LogitsProcessors],
 ResponseInputOutputItem: TypeAlias = Union[ResponseInputItemParam,
                                            ResponseReasoningItem,
                                            ResponseFunctionToolCall]
+
+StreamingResponsesResponse: TypeAlias = Union[
+    ResponseCreatedEvent,
+    ResponseInProgressEvent,
+    ResponseCompletedEvent,
+    ResponseOutputItemAddedEvent,
+    ResponseOutputItemDoneEvent,
+    ResponseContentPartAddedEvent,
+    ResponseContentPartDoneEvent,
+    ResponseReasoningTextDeltaEvent,
+    ResponseReasoningTextDoneEvent,
+    ResponseCodeInterpreterCallInProgressEvent,
+    ResponseCodeInterpreterCallCodeDeltaEvent,
+    ResponseWebSearchCallInProgressEvent,
+    ResponseWebSearchCallSearchingEvent,
+    ResponseWebSearchCallCompletedEvent,
+    ResponseCodeInterpreterCallCodeDoneEvent,
+    ResponseCodeInterpreterCallInterpretingEvent,
+    ResponseCodeInterpreterCallCompletedEvent,
+]
 
 
 class ResponsesRequest(OpenAIBaseModel):
@@ -822,13 +851,17 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @classmethod
     def check_logprobs(cls, data):
         if (prompt_logprobs := data.get("prompt_logprobs")) is not None:
-            if data.get("stream") and prompt_logprobs > 0:
+            if data.get("stream") and (prompt_logprobs > 0
+                                       or prompt_logprobs == -1):
                 raise ValueError(
                     "`prompt_logprobs` are not available when `stream=True`.")
 
-            if prompt_logprobs < 0:
-                raise ValueError("`prompt_logprobs` must be a positive value.")
-
+            if prompt_logprobs < 0 and prompt_logprobs != -1:
+                raise ValueError(
+                    "`prompt_logprobs` must be a positive value or -1.")
+            if prompt_logprobs == -1 and not envs.VLLM_USE_V1:
+                raise ValueError("`prompt_logprobs=-1` is only supported with "
+                                 "vLLM engine V1.")
         if (top_logprobs := data.get("top_logprobs")) is not None:
             if top_logprobs < 0:
                 raise ValueError("`top_logprobs` must be a positive value.")
@@ -1246,13 +1279,17 @@ class CompletionRequest(OpenAIBaseModel):
     @classmethod
     def check_logprobs(cls, data):
         if (prompt_logprobs := data.get("prompt_logprobs")) is not None:
-            if data.get("stream") and prompt_logprobs > 0:
+            if data.get("stream") and (prompt_logprobs > 0
+                                       or prompt_logprobs == -1):
                 raise ValueError(
                     "`prompt_logprobs` are not available when `stream=True`.")
 
-            if prompt_logprobs < 0:
-                raise ValueError("`prompt_logprobs` must be a positive value.")
-
+            if prompt_logprobs < 0 and prompt_logprobs != -1:
+                raise ValueError(
+                    "`prompt_logprobs` must be a positive value or -1.")
+            if prompt_logprobs == -1 and not envs.VLLM_USE_V1:
+                raise ValueError("`prompt_logprobs=-1` is only supported with "
+                                 "vLLM engine V1.")
         if (logprobs := data.get("logprobs")) is not None and logprobs < 0:
             raise ValueError("`logprobs` must be a positive value.")
 
@@ -1868,7 +1905,7 @@ class ResponsesResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"resp_{random_uuid()}")
     created_at: int = Field(default_factory=lambda: int(time.time()))
     # error: Optional[ResponseError] = None
-    # incomplete_details: Optional[IncompleteDetails] = None
+    incomplete_details: Optional[IncompleteDetails] = None
     instructions: Optional[str] = None
     metadata: Optional[Metadata] = None
     model: str
@@ -1904,9 +1941,18 @@ class ResponsesResponse(OpenAIBaseModel):
         status: ResponseStatus,
         usage: Optional[ResponseUsage] = None,
     ) -> "ResponsesResponse":
+
+        incomplete_details: Optional[IncompleteDetails] = None
+        if status == 'incomplete':
+            incomplete_details = IncompleteDetails(reason='max_output_tokens')
+        # TODO: implement the other reason for incomplete_details,
+        # which is content_filter
+        # incomplete_details = IncompleteDetails(reason='content_filter')
+
         return cls(
             id=request.request_id,
             created_at=created_time,
+            incomplete_details=incomplete_details,
             instructions=request.instructions,
             metadata=request.metadata,
             model=model_name,
@@ -2109,7 +2155,7 @@ class DetokenizeResponse(OpenAIBaseModel):
 
 class TokenizerInfoResponse(OpenAIBaseModel):
     """
-    Response containing tokenizer configuration 
+    Response containing tokenizer configuration
     equivalent to tokenizer_config.json
     """
 
@@ -2199,7 +2245,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     to_language: Optional[str] = None
     """The language of the output audio we transcribe to.
 
-    Please note that this is not currently used by supported models at this 
+    Please note that this is not currently used by supported models at this
     time, but it is a placeholder for future use, matching translation api.
     """
 
