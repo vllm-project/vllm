@@ -875,12 +875,12 @@ class Scheduler(SchedulerInterface):
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: Optional[SpecDecodingStats] = None
 
-        recovered_req_ids = None
+        affected_req_ids = None
         if kv_connector_output and kv_connector_output.invalid_block_ids:
             # These blocks contain externally computed tokens that failed to
             # load. Identify affected requests and adjust their computed token
             # count to trigger recomputation of the invalid blocks.
-            recovered_req_ids = self._handle_invalid_blocks(
+            affected_req_ids = self._handle_invalid_blocks(
                 kv_connector_output.invalid_block_ids)
 
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
@@ -890,7 +890,7 @@ class Scheduler(SchedulerInterface):
         stopped_preempted_reqs: set[Request] = set()
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
-            if recovered_req_ids and req_id in recovered_req_ids:
+            if affected_req_ids and req_id in affected_req_ids:
                 # Skip requests that were recovered from KV load failure
                 continue
             request = self.requests.get(req_id)
