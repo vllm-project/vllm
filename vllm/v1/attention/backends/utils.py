@@ -122,6 +122,10 @@ def _make_metadata_with_slice(
     assert start_locs[last_req] <= last_tok < start_locs[last_req+1], \
         "Token slice end outside of last request"
 
+    # If the "middle" request has tokens in both ubatches, we have to split it.
+    # If ubatch_slice is the first ubatch then we will be splitting the last
+    # request. If it's the second microbatch, then we will be splitting the
+    # first request
     splits_first_request = first_tok > start_locs[first_req]
     splits_last_request = last_tok < start_locs[last_req + 1] - 1
 

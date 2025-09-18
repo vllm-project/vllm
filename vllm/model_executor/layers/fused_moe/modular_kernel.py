@@ -600,9 +600,6 @@ class FusedMoEModularKernel(torch.nn.Module):
     layer due to any layer specific state that may be used by the component
     objects.
     """
-    fused_out_buffer = SharedResizableBuffer()
-    workspace13_buffer = SharedResizableBuffer()
-    workspace2_buffer = SharedResizableBuffer()
 
     class SharedBuffers:
 
@@ -611,6 +608,14 @@ class FusedMoEModularKernel(torch.nn.Module):
             self.workspace13 = SharedResizableBuffer()
             self.workspace2 = SharedResizableBuffer()
 
+    # Persistent buffers that are shared across `FusedMoEModularKernel`
+    # instances (layers), to save memory and allocattions.
+    #
+    # We have two sets of buffers to support dual batch overlap (DBO) where each
+    # microbatch (ubatch) should use its own set of buffers to avoid
+    # cross-ubatch contimination.
+    # NOTE that memory is lazily allocated for these buffers, meaning that if
+    # DBO isn't being used, the second SharedBuffers will be empty.
     shared_buffers: list[SharedBuffers] = [SharedBuffers(), SharedBuffers()]
 
     def __init__(

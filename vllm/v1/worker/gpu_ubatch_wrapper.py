@@ -43,6 +43,22 @@ class SMControlContextManager:
 
     def __init__(self, comm_sms: int, set_comm_sms: Callable[[int], None],
                  set_compute_sms: Callable[[int], None]):
+        """
+        Context manager for controlling SM (Streaming Multiprocessor) 
+        allocation. Upon entering the context, it sets the number of SMs
+        allocated for communication and computation to comm_sms and
+        total_sms - comm_sms respectively. Upon exiting, it restores the
+        allocation to use all available SMs (i.e. total_sms).
+
+        Args:
+            comm_sms (int): The number of SMs to allocate for communication. 
+                (The remainder will be used for computation.)
+            set_comm_sms (Callable[[int], None]): 
+                A function that sets the number of SMs for communication.
+            set_compute_sms (Callable[[int], None]): 
+                A function that sets the number of SMs for computation.
+        """
+
         assert current_platform.is_cuda(), \
             "SM control is currently only supported on CUDA"
 
@@ -75,8 +91,6 @@ class UBatchWrapper:
         self.comm_stream = torch.cuda.Stream(device=device)
         self.ready_barrier = threading.Barrier(3)
 
-        self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
-
         self.cudagraphs: dict[int, CUDAGraphMetaData] = {}
 
         self.cudagraph_wrapper = None
@@ -86,10 +100,16 @@ class UBatchWrapper:
                 runnable, vllm_config, runtime_mode=runtime_mode)
             self.graph_pool = current_platform.get_global_graph_pool()
 
+        self.sm_control = self._create_sm_control_context(vllm_config)
+
+    @staticmethod
+    def _create_sm_control_context(vllm_config: VllmConfig):
         comm_sms = envs.VLLM_DBO_COMM_SMS
 
         set_comm_sms = lambda sms: None
         if vllm_config.parallel_config.enable_expert_parallel:
+            # Currently only DeepEP highthroughput supports SM control so this
+            # only affects that case.
             all2all_manager = get_ep_group(
             ).device_communicator.all2all_manager
 
@@ -105,10 +125,9 @@ class UBatchWrapper:
             import deep_gemm as dg
             set_compute_sms = lambda sms: dg.set_num_sms(sms)
 
-        self.sm_control = SMControlContextManager(
-            comm_sms=comm_sms,
-            set_comm_sms=set_comm_sms,
-            set_compute_sms=set_compute_sms)
+        return SMControlContextManager(comm_sms=comm_sms,
+                                       set_comm_sms=set_comm_sms,
+                                       set_compute_sms=set_compute_sms)
 
     def __getattr__(self, key: str):
         # allow accessing the attributes of the runnable.
