@@ -14,7 +14,7 @@ from transformers.models.qwen2_vl import Qwen2VLProcessor
 from vllm.attention.layer import check_upstream_fa_availability
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+from vllm.model_executor.layers.linear import (ColumnParallelLinear, QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
@@ -231,11 +231,12 @@ class DotsVisionAttention(nn.Module):
             num_heads, self.tp_size)
 
         # qkv/proj follow Qwen2-VL style; bias controlled by arg
-        self.qkv = ColumnParallelLinear(input_size=dim,
-                                        output_size=3 * dim,
-                                        bias=bias,
-                                        quant_config=quant_config,
-                                        prefix=f"{prefix}.qkv")
+        self.qkv = QKVParallelLinear(hidden_size=dim,
+                                     head_size=dim // num_heads,
+                                     total_num_heads=num_heads,
+                                     bias=bias,
+                                     quant_config=quant_config,
+                                     prefix=f"{prefix}.qkv")
         self.proj = RowParallelLinear(input_size=dim,
                                       output_size=dim,
                                       bias=bias,
