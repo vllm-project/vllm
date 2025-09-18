@@ -720,6 +720,15 @@ class FlexAttentionImpl(AttentionImpl):
                 (query, key, value),
             )
 
+            query = query[:, :, :num_actual_tokens, :]
+            if ((key_tensor.size(-2) > num_actual_tokens)
+                    or (value_tensor.size(-2) > num_actual_tokens)):
+                # In the encoder-only model with torch.compile,
+                # qkv might be padded, which might cause exception.
+                # see: https://github.com/vllm-project/vllm/pull/24872#discussion_r2353252290
+                key_tensor = key_tensor[:, :, :num_actual_tokens, :]
+                value_tensor = value_tensor[:, :, :num_actual_tokens, :]
+
         else:
             assert self.attn_type == AttentionType.DECODER
             key_cache, value_cache = kv_cache.unbind(0)
@@ -744,7 +753,8 @@ class FlexAttentionImpl(AttentionImpl):
                 (query, key_cache, value_cache),
             )
 
-        query = query[:, :, :num_actual_tokens, :]
+            query = query[:, :, :num_actual_tokens, :]
+
         # Doesn't work for now -> constraint violation
         # torch._dynamo.try_mark_dynamic(query, 2)
 
