@@ -96,9 +96,24 @@ def kernel_unified_attention_2d(
     USE_FP8: tl.constexpr,  # bool
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
+    ALL_DECODE: tl.constexpr = False, # bool
 ):
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
+
+    tl.assume(kv_head_idx >= 0)
+    tl.assume(q_block_global_idx >= 0)
+    tl.assume(block_table_stride > 0)
+    tl.assume(query_stride_0 > 0)
+    tl.assume(query_stride_1 > 0)
+    tl.assume(output_stride_0 > 0)
+    tl.assume(output_stride_1 > 0)
+    tl.assume(stride_k_cache_0 > 0)
+    tl.assume(stride_k_cache_1 > 0)
+    tl.assume(stride_k_cache_2 > 0)
+    tl.assume(stride_v_cache_0 > 0)
+    tl.assume(stride_v_cache_1 > 0)
+    tl.assume(stride_v_cache_2 > 0)
 
     seq_idx = find_seq_idx(query_start_len_ptr, q_block_global_idx, num_seqs,
                            BLOCK_Q, True)
@@ -128,15 +143,21 @@ def kernel_unified_attention_2d(
     query_offset = (query_offset_0[:, None] * query_stride_0 +
                     query_offset_1[:, None] * query_stride_1 + offs_d[None, :])
 
-    dim_mask = tl.where(offs_d < HEAD_SIZE, 1, 0).to(tl.int1)
-    query_mask_0 = tl.where(query_pos < cur_batch_query_len, 1, 0).to(tl.int1)
-    query_mask_1 = tl.where(query_offset_1 < num_query_heads, 1, 0).to(tl.int1)
+    dim_mask = offs_d < HEAD_SIZE
+    query_mask_0 = query_pos < cur_batch_query_len
+    query_mask_1 = query_offset_1 < num_query_heads
+
+    if ALL_DECODE or BLOCK_M >= num_query_heads:
+        Q_cache_modifier: tl.constexpr = ".cg"
+    else:
+        Q_cache_modifier: tl.constexpr = ""
 
     # Q : (BLOCK_M, HEAD_SIZE_PADDED)
     Q = tl.load(
         query_ptr + query_offset,
         mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
         other=0.0,
+        cache_modifier=Q_cache_modifier,
     )
 
     block_table_offset = seq_idx * block_table_stride
@@ -184,8 +205,17 @@ def kernel_unified_attention_2d(
     # this prefix can be skipped)
     num_tiles = cdiv_fn(max_seq_prefix_len, TILE_SIZE)
 
+    if SLIDING_WINDOW > 0:
+        num_tiles_start = (
+            max_seq_prefix_len - SLIDING_WINDOW - BLOCK_Q - 1
+        ) // TILE_SIZE
+        num_tiles_start = max(0, num_tiles_start)
+    else:
+        num_tiles_start = 0
+
+    KV_cache_modifier: tl.constexpr = ".cg" if ALL_DECODE else ""
     # iterate through tiles
-    for j in range(0, num_tiles):
+    for j in range(num_tiles_start, num_tiles):
         seq_offset = j * TILE_SIZE + offs_t
         tile_mask = seq_offset < max_seq_prefix_len
 
@@ -205,7 +235,8 @@ def kernel_unified_attention_2d(
         # K : (HEAD_SIZE, TILE_SIZE)
         K_load = tl.load(key_cache_ptr + k_offset,
                          mask=dim_mask[:, None] & tile_mask[None, :],
-                         other=0.0)
+                         other=0.0,
+                         cache_modifier=KV_cache_modifier)
 
         if K_load.dtype.is_fp8():
             if Q.dtype.is_fp8():
@@ -218,7 +249,8 @@ def kernel_unified_attention_2d(
         # V : (TILE_SIZE, HEAD_SIZE)
         V_load = tl.load(value_cache_ptr + v_offset,
                          mask=dim_mask[None, :] & tile_mask[:, None],
-                         other=0.0)
+                         other=0.0,
+                         cache_modifier=KV_cache_modifier)
 
         if V_load.dtype.is_fp8():
             if Q.dtype.is_fp8():
@@ -288,7 +320,9 @@ def kernel_unified_attention_2d(
         acc += tl.dot(P.to(V.dtype), V)
 
     # epilogue
-    acc = acc / L[:, None]
+    # This helps the compiler do Newton Raphson on l_i vs on acc which is much larger.
+    one_over_L = 1.0 / L[:, None]
+    acc = acc * one_over_L
     if USE_FP8:
         acc = acc * tl.load(out_scale)
         acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
@@ -350,10 +384,25 @@ def kernel_unified_attention_3d(
         num_seqs: tl.int32,
         BLOCK_M: tl.constexpr,  # int
         NUM_SEGMENTS_PER_SEQ: tl.constexpr,  # int
+        ALL_DECODE: tl.constexpr = False, # bool
 ):
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
     segm_idx = tl.program_id(2)
+
+    tl.assume(kv_head_idx >= 0)
+    tl.assume(q_block_global_idx >= 0)
+    tl.assume(segm_idx >= 0)
+
+    tl.assume(block_table_stride > 0)
+    tl.assume(query_stride_0 > 0)
+    tl.assume(query_stride_1 > 0)
+    tl.assume(stride_k_cache_0 > 0)
+    tl.assume(stride_k_cache_1 > 0)
+    tl.assume(stride_k_cache_2 > 0)
+    tl.assume(stride_v_cache_0 > 0)
+    tl.assume(stride_v_cache_1 > 0)
+    tl.assume(stride_v_cache_2 > 0)
 
     seq_idx = find_seq_idx(query_start_len_ptr, q_block_global_idx, num_seqs,
                            BLOCK_Q, True)
@@ -393,9 +442,9 @@ def kernel_unified_attention_3d(
     query_offset = (query_offset_0[:, None] * query_stride_0 +
                     query_offset_1[:, None] * query_stride_1 + offs_d[None, :])
 
-    dim_mask = tl.where(offs_d < HEAD_SIZE, 1, 0).to(tl.int1)
-    query_mask_0 = tl.where(query_pos < cur_batch_query_len, 1, 0).to(tl.int1)
-    query_mask_1 = tl.where(query_offset_1 < num_query_heads, 1, 0).to(tl.int1)
+    dim_mask = offs_d < HEAD_SIZE
+    query_mask_0 = query_pos < cur_batch_query_len
+    query_mask_1 = query_offset_1 < num_query_heads
 
     # Q : (BLOCK_M, HEAD_SIZE_PADDED)
     Q = tl.load(
@@ -449,6 +498,7 @@ def kernel_unified_attention_3d(
     # this prefix can be skipped)
     num_tiles = cdiv_fn(max_seq_prefix_len, TILE_SIZE)
 
+    KV_cache_modifier: tl.constexpr = ".cg" if ALL_DECODE else ""
     # iterate through tiles within current segment
     for j in range(
             segm_idx * tiles_per_segment,
