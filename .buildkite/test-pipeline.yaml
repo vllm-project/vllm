@@ -280,6 +280,7 @@ steps:
     # split the test to avoid interference
     - pytest -v -s v1/core
     - pytest -v -s v1/executor
+    - pytest -v -s v1/offloading
     - pytest -v -s v1/sample
     - pytest -v -s v1/logits_processors
     - pytest -v -s v1/worker
