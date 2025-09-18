@@ -959,12 +959,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
         ubatch_slices = None
         if self.vllm_config.parallel_config.enable_dbo:
-            num_tokens_padded = num_tokens_unpadded + self.get_local_padding(
-                num_tokens_unpadded)
+            num_tokens_padded = self._get_num_input_tokens(num_tokens_unpadded)
             ubatch_slices, num_tokens_after_padding = \
                 ubatch_split(max_num_scheduled_tokens,
                             num_tokens_unpadded,
-                            num_tokens_padde,
+                            num_tokens_padded,
                             self.vllm_config)
         else:
             num_tokens_padded = self._get_num_input_tokens(num_tokens_unpadded)
@@ -1719,28 +1718,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             is_profile,
             log_stats=self.parallel_config.eplb_config.log_balancedness,
         )
-
-    def get_local_padding(self, num_tokens_unpadded: int) -> int:
-
-        num_tokens_padded = num_tokens_unpadded
-
-        if (self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-                and num_tokens_unpadded <= self.cudagraph_batch_sizes[-1]):
-            # Use piecewise CUDA graphs.
-            # Add padding to the batch size.
-            num_tokens_padded = self.vllm_config.pad_for_cudagraph(
-                num_tokens_unpadded)
-        else:
-            # Eager mode.
-            # Pad tokens to multiple of tensor_parallel_size when
-            # enabled collective fusion for SP
-            tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-            if self.vllm_config.compilation_config.pass_config. \
-                enable_sequence_parallelism and tp_size > 1:
-                num_tokens_padded = round_up(num_tokens_unpadded, tp_size)
-
-        num_pad_tokens = num_tokens_padded - num_tokens_unpadded
-        return num_pad_tokens
 
     # This is where the second ubatch is adjusted to account for the padding.
     # Should be called after attention metadata creation. This just pads
