@@ -169,7 +169,6 @@ steps:
   - tests/v1/test_hybrid_lb_dp.py
   - tests/v1/engine/test_engine_core_client.py
   commands:
-  - export NCCL_DEBUG=INFO
   # test with tp=2 and external_dp=2
   - VLLM_USE_V1=0 torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
   - torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
@@ -515,7 +514,7 @@ steps:
   # since torchao nightly is only compatible with torch nightly currently
   # https://github.com/pytorch/ao/issues/2919, we'll have to skip new torchao tests for now
   # we can only upgrade after this is resolved
-  - pip install --pre torchao==torchao-0.14.0.dev20250917 --index-url https://download.pytorch.org/whl/nightly/cu128
+  - pip install --pre torchao==0.14.0.dev20250917 --index-url https://download.pytorch.org/whl/nightly/cu128
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization
 
 - label: LM Eval Small Models # 53min
@@ -886,7 +885,6 @@ steps:
   - tests/v1/entrypoints/openai/test_multi_api_servers.py
   - vllm/v1/engine/
   commands:
-  - export NCCL_DEBUG=INFO
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/test_async_llm_dp.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/test_external_lb_dp.py
   - DP_SIZE=2 pytest -v -s v1/entrypoints/openai/test_multi_api_servers.py
