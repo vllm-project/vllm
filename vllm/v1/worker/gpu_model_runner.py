@@ -33,8 +33,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.parallel_state import (
     get_pp_group, get_tp_group, graph_capture, is_global_first_rank,
     prepare_communication_buffer_for_model)
-from vllm.forward_context import (BatchDescriptor, DPMetadata,
-                                  set_forward_context)
+from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -968,9 +967,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         else:
             num_tokens_padded = self._get_num_input_tokens(num_tokens_unpadded)
             should_ubatch, num_tokens_after_padding = get_dp_padding_ubatch(
-                num_tokens_unpadded=num_tokens_unpadded, 
-                num_tokens_padded=num_tokens_padded, 
-                should_attempt_ubatching=False, 
+                num_tokens_unpadded=num_tokens_unpadded,
+                num_tokens_padded=num_tokens_padded,
+                should_attempt_ubatching=False,
                 vllm_config=self.vllm_config)
             assert should_ubatch is False
             assert num_tokens_after_padding is not None
@@ -2066,8 +2065,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_input_tokens = int(num_tokens_after_padding[0].item() * 2)
                 self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
             elif num_tokens_after_padding is not None:
-                logger.info(
-                    f"SETTING NUM INPUT TOKENS TO {num_tokens_after_padding}")
                 num_input_tokens = int(num_tokens_after_padding[0].item())
             else:
                 num_input_tokens = self._get_num_input_tokens(
@@ -2722,15 +2719,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         logger.info("DUMMY RUN")
         ubatch_enabled = self.parallel_config.enable_dbo
         num_tokens_across_dp = None
-        num_pad = 0
         should_ubatch = False
         if ubatch_enabled:
             should_ubatch = num_tokens >= \
                 self.parallel_config.dbo_decode_token_threshold and \
                 allow_microbatching
 
-        (should_ubatch, num_tokens_across_dp) = get_dp_padding_ubatch(
-            num_tokens, num_tokens, should_ubatch, self.vllm_config)
+        (should_ubatch,
+         num_tokens_across_dp) = get_dp_padding_ubatch(num_tokens, num_tokens,
+                                                       should_ubatch,
+                                                       self.vllm_config)
 
         # Currently the dummy run should only be ubatching during
         # cuda graph capture, meaning all DP ranks should already
@@ -2739,7 +2737,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if should_ubatch:
             assert int(num_tokens_across_dp[0]) == num_tokens // 2
         else:
-            logger.info(f"NUM TOKENS: {num_tokens} {num_tokens_across_dp}")
             num_tokens = int(num_tokens_across_dp[0])
 
         assert cudagraph_runtime_mode in {
