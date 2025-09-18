@@ -70,7 +70,10 @@ class CachedRequestState:
                     f"Tried to access token index {idx}, but that token was "
                     "provided via prompt_embeds, and its ID is unknown.")
             return self.prompt_token_ids[idx]
-        return self.output_token_ids[idx - self.num_prompt_tokens]
+        elif idx - self.num_prompt_tokens < len(self.output_token_ids):
+            return self.output_token_ids[idx - self.num_prompt_tokens]
+        else:
+            return -1
 
 
 class InputBatch:
