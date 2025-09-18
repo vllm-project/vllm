@@ -1,3 +1,5 @@
+#SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from typing import Union
 
@@ -12,6 +14,7 @@ logger = init_logger(__name__)
 
 
 class BaseUpdator(ABC):
+    
     @abstractmethod
     def step(self, model, is_dummy, is_profile, log_stats):
         """
@@ -51,13 +54,15 @@ class BaseUpdator(ABC):
             rank_mapping: dict[int, int],
     ) -> int:
         """
-        Calculates the number of distinct physical nodes involved in a process group,
-        considering a given rank mapping.
+        Calculates the number of distinct physical nodes involved in a 
+        process group, considering a given rank mapping.
 
         Args:
-            pg: The PyTorch distributed ProcessGroup or a custom StatelessProcessGroup.
-            rank_mapping: A dictionary mapping global ranks to their logical ranks
-                          or a special value like -1 (for pending shutdown).
+            pg: The PyTorch distributed ProcessGroup or 
+                a custom StatelessProcessGroup.
+            rank_mapping: A dictionary mapping global ranks to their 
+                          logical ranks or a special value like -1 
+                          (for pending shutdown).
 
         Returns:
             The total number of distinct physical nodes.

@@ -58,8 +58,9 @@ class EPLBConfig:
 
     enable_async: bool = False
     """
-    If True, enables asynchronous operations for expert load balancing,
-    potentially improving performance by overlapping computation and communication.
+    If True, enables asynchronous operations for 
+    expert load balancing, potentially improving performance 
+    by overlapping computation and communication.
     """
 
 @config

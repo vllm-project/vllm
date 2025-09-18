@@ -1,4 +1,7 @@
-class EplbWeightLoader():
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+class EplbWeightLoader:
+
     def __init__(self, *args):
         self.reqs = list()
         self.layer_id = -1
@@ -6,11 +9,11 @@ class EplbWeightLoader():
         self.comm_op_list = list()
         self.updated_expert_map = None
         self.updated_log2phy_map = None
-    
+
     def set_log2phy_map(self, *args, **kargs):
         pass
 
-    def generate_expert_d2d_transfer_task(self,*args, **kargs):
+    def generate_expert_d2d_transfer_task(self, *args, **kargs):
         pass
 
     def async_expert_weight_transfer(self):
