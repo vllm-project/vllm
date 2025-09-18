@@ -839,7 +839,7 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts,
         self.num_expert_groups = config.n_group
 
         self.moe_layers: list[FusedMoE] = []
-        example_moe = None
+        self.example_moe = None
         for layer in self.model.layers:
             if isinstance(layer, PPMissingLayer):
                 continue
@@ -847,18 +847,18 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts,
             assert isinstance(layer, DeepseekV2DecoderLayer)
             if isinstance(layer.mlp, DeepseekV2MoE):
                 # Pick last one layer since the first ones may be dense layers.
-                example_moe = layer.mlp
+                self.example_moe = layer.mlp
                 self.moe_layers.append(layer.mlp.experts)
 
-        if example_moe is None:
+        if self.example_moe is None:
             raise RuntimeError("No DeepseekV2MoE layer found in model.layers.")
 
-        self.num_logical_experts = example_moe.n_logical_experts
-        self.num_physical_experts = example_moe.n_physical_experts
-        self.num_local_physical_experts = example_moe.n_local_physical_experts
-        self.num_routed_experts = example_moe.n_routed_experts
-        self.num_shared_experts = example_moe.n_shared_experts
-        self.num_redundant_experts = example_moe.n_redundant_experts
+        self.num_logical_experts = self.example_moe.n_logical_experts
+        self.num_physical_experts = self.example_moe.n_physical_experts
+        self.num_local_physical_experts = self.example_moe.n_local_physical_experts
+        self.num_routed_experts = self.example_moe.n_routed_experts
+        self.num_shared_experts = self.example_moe.n_shared_experts
+        self.num_redundant_experts = self.example_moe.n_redundant_experts
 
     def set_eplb_state(
         self,
@@ -929,13 +929,7 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts,
 
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        expert_params_mapping = FusedMoE.make_expert_params_mapping(
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts,
-            num_redundant_experts=self.num_redundant_experts)
-
+        expert_params_mapping = self.model.get_expert_mapping()
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:

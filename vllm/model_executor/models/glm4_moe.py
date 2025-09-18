@@ -471,15 +471,6 @@ class Glm4MoeModel(nn.Module):
                         device=device),
         })
 
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        # Params for weights, fp8 weight scales, fp8 activation scales
-        # (param_name, weight_name, expert_id, shard_id)
-        return FusedMoE.make_expert_params_mapping(
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts)
-
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
@@ -622,7 +613,7 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         self.num_expert_groups = config.n_group
 
         self.moe_layers: list[FusedMoE] = []
-        example_moe = None
+        self.example_moe = None
         for layer in self.model.layers:
             if isinstance(layer, PPMissingLayer):
                 continue
@@ -630,18 +621,18 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
             assert isinstance(layer, Glm4MoeDecoderLayer)
             if isinstance(layer.mlp, Glm4MoE):
                 # Pick last one layer since the first ones may be dense layers.
-                example_moe = layer.mlp
+                self.example_moe = layer.mlp
                 self.moe_layers.append(layer.mlp.experts)
 
-        if example_moe is None:
+        if self.example_moe is None:
             raise RuntimeError("No Glm4MoE layer found in model.layers.")
 
-        self.num_logical_experts = example_moe.n_logical_experts
-        self.num_physical_experts = example_moe.n_physical_experts
-        self.num_local_physical_experts = example_moe.n_local_physical_experts
-        self.num_routed_experts = example_moe.n_routed_experts
-        self.num_shared_experts = example_moe.n_shared_experts
-        self.num_redundant_experts = example_moe.n_redundant_experts
+        self.num_logical_experts = self.example_moe.n_logical_experts
+        self.num_physical_experts = self.example_moe.n_physical_experts
+        self.num_local_physical_experts = self.example_moe.n_local_physical_experts
+        self.num_routed_experts = self.example_moe.n_routed_experts
+        self.num_shared_experts = self.example_moe.n_shared_experts
+        self.num_redundant_experts = self.example_moe.n_redundant_experts
 
     def set_eplb_state(
         self,
