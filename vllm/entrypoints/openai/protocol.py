@@ -669,8 +669,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if prompt_logprobs is None and self.echo:
             prompt_logprobs = self.top_logprobs
 
-        if ((response_format := self.response_format) is not None or
-            (tool_json := self._get_json_schema_from_tool()) is not None):
+        response_format = self.response_format
+        json_schema_from_tool = self._get_json_schema_from_tool()
+        if response_format is not None or json_schema_from_tool is not None:
             # If structured outputs wasn't already enabled,
             # we must enable it for these features to work
             if self.structured_outputs is None:
@@ -693,8 +694,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
                         s_tag_obj)
 
             # Set structured output params for tool calling
-            if tool_json is not None:
-                self.structured_outputs.json = tool_json
+            if json_schema_from_tool is not None:
+                self.structured_outputs.json = json_schema_from_tool
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
