@@ -3029,6 +3029,18 @@ class VllmConfig:
                 SequenceClassificationConfig)
             SequenceClassificationConfig.verify_and_update_config(self)
 
+        if hasattr(self.model_config, "model_weights") and is_runai_obj_uri(
+                self.model_config.model_weights):
+            if self.load_config.load_format == "auto":
+                logger.info("Detected Run:ai model config. "
+                            "Overriding `load_format` to 'runai_streamer'")
+                self.load_config.load_format = "runai_streamer"
+            elif self.load_config.load_format != "runai_streamer":
+                raise ValueError(f"To load a model from S3, 'load_format' "
+                                 f"must be 'runai_streamer', "
+                                 f"but got '{self.load_config.load_format}'. "
+                                 f"Model: {self.model_config.model}")
+
     def __str__(self):
         return (
             f"model={self.model_config.model!r}, "
