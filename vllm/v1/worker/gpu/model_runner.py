@@ -10,20 +10,21 @@ import torch
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, is_pin_memory_available
+from vllm.model_executor.model_loader import get_model_loader
+from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
+                        GiB_bytes, is_pin_memory_available)
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.sampler import SamplerOutput
-from vllm.v1.worker.gpu.attn_utils import get_kv_cache_spec, init_attn_backend, init_kv_cache
-from vllm.v1.worker.utils import bind_kv_cache
+from vllm.v1.worker.gpu.attn_utils import (get_kv_cache_spec,
+                                           init_attn_backend, init_kv_cache)
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import (InputBatch, InputBuffers,
                                             prepare_inputs)
 from vllm.v1.worker.gpu.sampler import Sampler
-from vllm.model_executor.model_loader import get_model_loader
-from vllm.utils import DeviceMemoryProfiler, GiB_bytes
 from vllm.v1.worker.gpu.states import RequestState
+from vllm.v1.worker.utils import bind_kv_cache
 
 logger = init_logger(__name__)
 
@@ -123,7 +124,11 @@ class GPUModelRunner:
             self.device,
         )
 
-        kv_caches = init_kv_cache(self.kv_cache_config, self.attn_backends, self.device)
+        kv_caches = init_kv_cache(
+            self.kv_cache_config,
+            self.attn_backends,
+            self.device,
+        )
         self.kv_caches: list[torch.Tensor] = []
         bind_kv_cache(
             kv_caches,
@@ -134,12 +139,13 @@ class GPUModelRunner:
     def _dummy_run(self, num_tokens: int, *args, **kwargs) -> None:
         return None, None
 
-    def _dummy_sampler_run(self, hidden_states: torch.Tensor, *args, **kwargs) -> None:
+    def _dummy_sampler_run(self, hidden_states: torch.Tensor, *args,
+                           **kwargs) -> None:
         return None
 
     def update_states(self, scheduler_output: SchedulerOutput) -> None:
-        for req_id in scheduler_output.preempted_req_ids:
-            self.req_states.remove_request(req_id)
+        # for req_id in scheduler_output.preempted_req_ids:
+        #     self.req_states.remove_request(req_id)
         for req_id in scheduler_output.finished_req_ids:
             self.req_states.remove_request(req_id)
 
@@ -207,6 +213,9 @@ class GPUModelRunner:
             [scheduler_output.num_scheduled_tokens[i] for i in req_ids],
             dtype=np.int32)
 
+        # TODO(woosuk): Support CUDA graphs.
+        num_tokens_after_padding = num_tokens
+
         idx_mapping_list = [
             self.req_states.req_id_to_index[req_id] for req_id in req_ids
         ]
@@ -251,8 +260,8 @@ class GPUModelRunner:
         num_computed_tokens_np = self.req_states.num_computed_tokens[
             idx_mapping_np]
         num_computed_tokens_cpu = torch.from_numpy(num_computed_tokens_np)
-        num_tokens = self.req_states.num_tokens[idx_mapping_np]
-        is_chunked_prefilling = seq_lens_np < num_tokens
+        is_chunked_prefilling = (seq_lens_np
+                                 < self.req_states.num_tokens[idx_mapping_np])
 
         # Slot mappings: [num_kv_cache_groups, num_tokens]
         slot_mappings = self.block_tables.compute_slot_mappings(
@@ -285,12 +294,12 @@ class GPUModelRunner:
             )
 
             attn_metadata_builder = self.attn_metadata_builders[i]
-            attn_metadata = attn_metadata_builder.build(
+            metadata = attn_metadata_builder.build(
                 common_prefix_len=0,
                 common_attn_metadata=common_attn_metadata,
             )
             for layer_name in kv_cache_spec.layer_names:
-                attn_metadata[layer_name] = attn_metadata
+                attn_metadata[layer_name] = metadata
 
         return InputBatch(
             req_ids=req_ids,
@@ -299,9 +308,10 @@ class GPUModelRunner:
             idx_mapping_np=idx_mapping_np,
             num_scheduled_tokens=num_scheduled_tokens,
             num_tokens=num_tokens,
+            num_tokens_after_padding=num_tokens_after_padding,
             is_chunked_prefilling=is_chunked_prefilling,
-            input_ids=input_ids,
-            positions=positions,
+            input_ids=input_ids.gpu,
+            positions=positions.gpu,
             attn_metadata=attn_metadata,
             logits_indices=logits_indices,
         )
@@ -333,7 +343,8 @@ class GPUModelRunner:
             return None
 
         num_prompt_tokens_scheduled = ...
-        if not np.any((num_prompt_tokens_scheduled > 0) & needs_prompt_logprobs):
+        if not np.any((num_prompt_tokens_scheduled > 0)
+                      & needs_prompt_logprobs):
             # The request already computed prompt logprobs.
             return None
 

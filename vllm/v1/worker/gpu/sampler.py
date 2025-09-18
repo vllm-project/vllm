@@ -123,7 +123,7 @@ def _apply_temp_kernel(
     if temp < EPSILON:
         # Greedy sampling. Don't apply temperature.
         # NOTE(woosuk): In this case, we assume that its logprobs are not used.
-        temp = tl.ones([1], dtype=tl.float32)
+        temp = 1.0
 
     offset = tl.arange(0, BLOCK_SIZE)
     block = block_idx * BLOCK_SIZE + offset

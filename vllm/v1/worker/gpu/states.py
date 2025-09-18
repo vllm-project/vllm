@@ -100,8 +100,8 @@ class RequestState:
             top_k = self.vocab_size
         self.top_k[req_idx] = top_k
 
-        if sampling_params.num_logprobs is not None:
-            num_logprobs = sampling_params.num_logprobs
+        if sampling_params.logprobs is not None:
+            num_logprobs = sampling_params.logprobs
         else:
             num_logprobs = -1
         self.num_logprobs[req_idx] = num_logprobs

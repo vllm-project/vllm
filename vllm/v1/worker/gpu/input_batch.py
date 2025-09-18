@@ -54,6 +54,7 @@ class InputBatch:
     num_scheduled_tokens: np.ndarray
     # sum(num_scheduled_tokens)
     num_tokens: int
+    num_tokens_after_padding: int
     # [num_reqs]
     is_chunked_prefilling: np.ndarray
 

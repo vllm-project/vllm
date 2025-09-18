@@ -335,7 +335,9 @@ class Worker(WorkerBase):
             self.model_runner._dummy_run(size,
                                          skip_eplb=True,
                                          remove_lora=False)
-        self.model_runner.maybe_remove_all_loras(self.model_runner.lora_config)
+        if self.model_runner.lora_config is not None:
+            self.model_runner.maybe_remove_all_loras(
+                self.model_runner.lora_config)
 
         # Warmup and tune the kernels used during model execution before
         # cuda graph capture.
@@ -429,6 +431,9 @@ class Worker(WorkerBase):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> Optional[Union[ModelRunnerOutput, AsyncModelRunnerOutput]]:
+        if len(get_pp_group().ranks) == 1:
+            return self.model_runner.execute_model(scheduler_output)
+
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -447,8 +452,6 @@ class Worker(WorkerBase):
 
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
-        if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput)):
-            return output
 
         assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config
