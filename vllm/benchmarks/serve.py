@@ -855,14 +855,14 @@ def add_cli_args(parser: argparse.ArgumentParser):
         type=str,
         default=None,
         help="The label (prefix) of the benchmark results. If not specified, "
-        "the endpoint type will be used as the label.",
+        "the value of '--backend' will be used as the label.",
     )
     parser.add_argument(
         "--backend",
         type=str,
         default="openai",
         choices=list(ASYNC_REQUEST_FUNCS.keys()),
-        help="The type of backend endpoint to use for the benchmark."
+        help="The type of backend or endpoint to use for the benchmark."
     )
     parser.add_argument(
         "--endpoint-type",
