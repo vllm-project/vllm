@@ -83,6 +83,11 @@ class SpeculativeConfig:
     disable_by_batch_size: Optional[int] = None
     """Disable speculative decoding for new incoming requests when the number
     of enqueued requests is larger than this value, if provided."""
+    disable_padded_drafter_batch: bool = False
+    """Disable input padding for speculative decoding. If set to True,
+    speculative input batches can contain sequences of different lengths,
+    which may only be supported by certain attention backends. This currently
+    only affects the EAGLE method of speculation."""
 
     # Ngram proposer configuration
     prompt_lookup_max: Optional[int] = None

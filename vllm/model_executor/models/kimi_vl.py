@@ -328,6 +328,7 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
                 config.text_config.hidden_size,
                 org_num_embeddings=self.config.text_config.vocab_size,
                 padding_size=DEFAULT_VOCAB_PADDING_SIZE,
+                prefix=maybe_prefix(prefix, "lm_head"),
             )
         else:
             self.lm_head = PPMissingLayer()

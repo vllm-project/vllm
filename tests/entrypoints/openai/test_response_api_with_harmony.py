@@ -364,6 +364,8 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
             events.append(event)
 
         assert len(events) > 0
+        response_completed_event = events[-1]
+        assert len(response_completed_event.response.output) > 0
 
         if background:
             starting_after = 5

@@ -95,8 +95,6 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def prepare_async(
         self,
         a1: torch.Tensor,
-        a1_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
@@ -130,8 +128,10 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         repeat_cols = 4
         repeat_rows = 1 if quant_config.per_act_token_quant else a1.size(0)
+        # TODO(bnell): always pass quant_config.a1_scale?
         a1q, a1q_scale = moe_kernel_quantize_input(
-            a1, (None if quant_config.per_act_token_quant else a1_scale),
+            a1, (None if quant_config.per_act_token_quant else
+                 quant_config.a1_scale),
             quant_dtype=quant_config.quant_dtype,
             per_act_token_quant=quant_config.per_act_token_quant,
             block_shape=quant_config.block_shape)
@@ -253,8 +253,6 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def prepare(
         self,
         a1: torch.Tensor,
-        a1_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
@@ -264,8 +262,6 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     ) -> mk.PrepareResultType:
         hook, receiver = self.prepare_async(
             a1,
-            a1_scale,
-            a2_scale,
             topk_weights,
             topk_ids,
             num_experts,
@@ -276,7 +272,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         hook()
         return receiver()
 
-    def finalize(
+    def finalize_async(
         self,
         output: torch.Tensor,
         fused_expert_output: torch.Tensor,
@@ -284,7 +280,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
-    ) -> None:
+    ) -> Callable:
         assert isinstance(
             weight_and_reduce_impl, TopKWeightAndReduceDelegate
         ), ("Weight application and reduction happens in the combine kernel.")
@@ -307,8 +303,39 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         if apply_router_weight_on_input:
             topk_weights = torch.ones_like(topk_weights)
 
+        topk_ids_u32 = topk_ids.view(dtype=torch.uint32)
+
         self.a2a.combine(out_tokens=output,
-                         indices=topk_ids.view(dtype=torch.uint32),
+                         indices=topk_ids_u32,
                          weights=topk_weights,
                          expert_y=fused_expert_output,
-                         bound_m=bound_m)
+                         bound_m=bound_m,
+                         do_send=True,
+                         do_recv=False)
+
+        return lambda: self.a2a.combine(out_tokens=output,
+                                        indices=topk_ids_u32,
+                                        weights=topk_weights,
+                                        expert_y=fused_expert_output,
+                                        bound_m=bound_m,
+                                        do_send=False,
+                                        do_recv=True)
+
+    def finalize(
+        self,
+        output: torch.Tensor,
+        fused_expert_output: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        apply_router_weight_on_input: bool,
+        weight_and_reduce_impl: mk.TopKWeightAndReduce,
+    ) -> None:
+        receiver = self.finalize_async(
+            output,
+            fused_expert_output,
+            topk_weights,
+            topk_ids,
+            apply_router_weight_on_input,
+            weight_and_reduce_impl,
+        )
+        receiver()
