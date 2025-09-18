@@ -257,26 +257,20 @@ class Worker(WorkerBase):
             if (self.cache_config.enable_pp_prop_kv_cache
                     and pp_group.world_size > 1
                     and envs.VLLM_PP_LAYER_PARTITION):
-                num_hidden_layers = (
-                    self.model_config.hf_text_config.num_hidden_layers)
+                num_hidden_layers = self.model_config.hf_text_config.num_hidden_layers
 
-                layer_counts = []
-                for rank in range(pp_group.world_size):
-                    start_layer, end_layer = get_pp_indices(
-                        num_hidden_layers, rank, pp_group.world_size)
-                    layer_counts.append(end_layer - start_layer)
-
-                local_layers = layer_counts[pp_group.rank_in_group]
-                total_layers = sum(layer_counts)
+                start_layer, end_layer = get_pp_indices(
+                    num_hidden_layers, pp_group.rank_in_group, pp_group.world_size)
+                local_layers = end_layer - start_layer
                 prop_kv_cache_bytes = int(kv_cache_memory_bytes *
-                                          local_layers / total_layers)
+                                          local_layers / num_hidden_layers)
 
                 msg = (f"Initial free memory "
                        f"{GiB(self.init_snapshot.free_memory):.2f} "
                        f"GiB, reserved {GiB(prop_kv_cache_bytes):.2f} GiB "
                        f"for KV cache (proportionally split from "
                        f"{GiB(kv_cache_memory_bytes):.2f} GiB based on "
-                       f"{local_layers}/{total_layers} layers on rank "
+                       f"{local_layers}/{num_hidden_layers} layers on rank "
                        f"{pp_group.rank_in_group}). Skipping memory "
                        f"profiling.")
                 logger.info(msg)
