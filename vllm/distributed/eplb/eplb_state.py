@@ -378,9 +378,7 @@ class EplbState:
             logical_to_physical_map,
             logical_replica_count,
         )
-        expert_buffer = [
-                        torch.empty_like(w) for w in model.expert_weights[0]
-                        ]
+        expert_buffer = [torch.empty_like(w) for w in model.expert_weights[0]]
         return cls(
             physical_to_logical_map,
             logical_to_physical_map,
@@ -489,7 +487,7 @@ class EplbState:
             self.move_to_workspace(model=model,
                                    ep_group=ep_group,
                                    is_profile=is_profile)
-            
+
             # Check if all layers have been processed
             if self.layer_to_transfer >= model.num_moe_layers:
                 self.post_eplb(model, is_profile)
@@ -629,16 +627,15 @@ class EplbState:
                     time_end - time_start,
                 )
         self.rebalanced = True
-        
+
         # Signal async thread to start transferring layers
         if self.is_async:
             self.layer_to_transfer = 0  # Reset for new rearrangement
             self.rearrange_event.set()
-        
+
         return None
 
-
-    def eplb_async_loop(self, 
+    def eplb_async_loop(self,
                         model,
                         rank_mapping: Optional[dict[int, int]] = None,
                         is_profile: bool = False):
@@ -652,35 +649,37 @@ class EplbState:
                 loop.run_until_complete(
                     self.transfer_run_periodically(model=model,
                                                    ep_group=ep_group,
-                                                   is_profile=is_profile, 
+                                                   is_profile=is_profile,
                                                    rank_mapping=rank_mapping))
             except Exception as e:
-                logger.exception("async loop error (Rank %d): %s", rank, 
-                                  str(e))
+                logger.exception("async loop error (Rank %d): %s", rank,
+                                 str(e))
             finally:
                 loop.close()
+
         thread = threading.Thread(target=thread_target, daemon=True)
         thread.start()
         return thread
 
     async def transfer_run_periodically(
-            self, 
-            model, 
+            self,
+            model,
             ep_group: ProcessGroup,
             is_profile: bool = False,
             rank_mapping: Optional[dict[int, int]] = None):
         experts_stream = torch.cuda.Stream()
-        
+
         while not self.shutdown_event.is_set():
             # Wait for rearrangement signal or shutdown
             await asyncio.to_thread(self.rearrange_event.wait)
-            
+
             if self.shutdown_event.is_set():
                 break
-                
+    
             # Process all layers for this rearrangement
             current_num_layers = model.num_moe_layers
-            while self.layer_to_transfer < current_num_layers and not self.shutdown_event.is_set():
+            while self.layer_to_transfer < current_num_layers and not self.shutdown_event.is_set(
+            ):
                 if not self.ep_buffer_ready and self.rebalanced:
                     # get lock
                     assert self.new_physical_to_logical_map is not None
@@ -689,75 +688,48 @@ class EplbState:
                         # Re-check layer_to_transfer after acquiring lock in case it was updated
                         if self.layer_to_transfer >= current_num_layers:
                             break
-                            
+ 
                         for i, w in enumerate(model.expert_weights[0]):
-                            self.expert_buffer[i] = torch.empty_like(w)                   
-                        (
-                        self.is_unchanged,
-                        self.is_received_locally, 
-                        self.experts_recv_loc)=await transfer_layer(
-                            old_global_expert_indices=self.physical_to_logical_map,
-                            new_global_expert_indices=self.
-                            new_physical_to_logical_map,
-                            expert_weights=model.expert_weights,
-                            expert_weights_buffer=self.expert_buffer,
-                            ep_group=ep_group,
-                            is_profile=is_profile,
-                            layer=self.layer_to_transfer,
-                            cuda_stream=experts_stream,
-                            rank_mapping=rank_mapping,
-                        )
+                            self.expert_buffer[i] = torch.empty_like(w)
+                        (self.is_unchanged, self.is_received_locally,
+                         self.experts_recv_loc) = await transfer_layer(
+                             old_global_expert_indices=self.
+                             physical_to_logical_map,
+                             new_global_expert_indices=self.
+                             new_physical_to_logical_map,
+                             expert_weights=model.expert_weights,
+                             expert_weights_buffer=self.expert_buffer,
+                             ep_group=ep_group,
+                             is_profile=is_profile,
+                             layer=self.layer_to_transfer,
+                             cuda_stream=experts_stream,
+                             rank_mapping=rank_mapping,
+                         )
                         self.ep_buffer_ready = 1
                     finally:
                         self.buffer_lock.release()
                 else:
-                    await asyncio.sleep(0.1)  # Shorter sleep for more responsiveness
+                    await asyncio.sleep(0.001)
             
             # Reset for next rearrangement cycle
             self.rearrange_event.clear()
-
-    def shutdown_async_eplb(self) -> None:
-        """
-        Shutdown the async EPLB thread gracefully.
-        """
-        if self.is_async:
-            self.shutdown_event.set()
-            self.rearrange_event.set()  # Wake up the thread so it can see shutdown signal
-
-    def _synchronize_rearrange_completion(self, ep_group: ProcessGroup):
-        """
-        Wait for all ranks to complete ep_buffer_ready=1 (use CPU Gloo group for synchronization).
-        Only when every rank's completion_flag=1 (all_reduce sum equals world_size), will all ranks pass together.
-        """
-        from vllm.distributed.parallel_state import get_ep_group as _get_epg
-        cpu_group = _get_epg().cpu_group
-        rank = cpu_group.rank()
-        world = cpu_group.size()
-
-        flag = torch.tensor((int(self.ep_buffer_ready),), dtype=torch.int32, device="cpu")
-        all_reduce(flag, group=cpu_group)
-        total = int(flag.item())
-        if total == world:
-            return True
-        return False
 
     def move_to_workspace(self,
                           model: MixtureOfExperts,
                           ep_group: ProcessGroup,
                           is_profile: bool = False):
         if not self.buffer_lock.acquire(blocking=False):
-            return 
+            return
         try:
             move_from_buffer(
                 expert_weights=model.expert_weights[self.layer_to_transfer],
                 expert_weights_buffer=self.expert_buffer,
                 is_unchanged=self.is_unchanged,
-                is_received_locally=self.is_received_locally, 
-                experts_recv_loc=self.experts_recv_loc, 
+                is_received_locally=self.is_received_locally,
+                experts_recv_loc=self.experts_recv_loc,
                 new_indices=self.new_physical_to_logical_map[
                     self.layer_to_transfer].tolist(),
-                ep_group=ep_group
-            )
+                ep_group=ep_group)
             # After the main thread consumes, advance layer_to_transfer
             self.layer_to_transfer += 1
             self.ep_buffer_ready = 0
@@ -765,7 +737,9 @@ class EplbState:
             try:
                 self.buffer_lock.release()
             except Exception as e:
-                logger.error(f"Rank {ep_group.rank()}: buffer_lock release failed in move_to_workspace: {e}")
+                logger.error(
+                    f"Rank {ep_group.rank()}: buffer_lock release failed in move_to_workspace: {e}"
+                )
 
     def post_eplb(self,
                   model: MixtureOfExperts,
@@ -793,8 +767,7 @@ class EplbState:
             )
             self.logical_to_physical_map.copy_(
                 self.new_logical_to_physical_map)
-            self.logical_replica_count.copy_(
-                self.new_logical_replica_count)
+            self.logical_replica_count.copy_(self.new_logical_replica_count)
 
     @staticmethod
     def recv_state() -> tuple[torch.Tensor, torch.Tensor]:

@@ -102,13 +102,10 @@ def get_ep_ranks_with_expert(
 
 
 def move_to_buffer(
-    num_local_experts: int,
-    old_indices: Sequence[int],
-    new_indices: Sequence[int],
-    expert_weights: Iterable[torch.Tensor],
-    expert_weights_buffer: Sequence[torch.Tensor],
-    cuda_stream: Optional[torch.cuda.Stream],
-    ep_group: ProcessGroup
+        num_local_experts: int, old_indices: Sequence[int],
+        new_indices: Sequence[int], expert_weights: Iterable[torch.Tensor],
+        expert_weights_buffer: Sequence[torch.Tensor],
+        cuda_stream: Optional[torch.cuda.Stream], ep_group: ProcessGroup
 ) -> tuple[list[bool], list[bool], dict[int, int]]:
     """
     Perform expert weights rearrangement of one layer.
@@ -140,7 +137,7 @@ def move_to_buffer(
                 is_received_locally[dst] = True
                 for weight, buffer in zip(expert_weights,
                                           expert_weights_buffer):
-                    with torch.cuda.stream(cuda_stream):                      
+                    with torch.cuda.stream(cuda_stream):
                         buffer[dst].copy_(weight[src], non_blocking=True)
 
     p2p_ops: list[P2POp] = []
@@ -228,7 +225,7 @@ def move_to_buffer(
 
     # 4. Execute the P2P operations. The real communication happens here.
     if p2p_ops and cuda_stream is not None:
-        with torch.cuda.stream(cuda_stream): 
+        with torch.cuda.stream(cuda_stream):
             reqs = batch_isend_irecv(p2p_ops)
             for req in reqs:
                 req.wait()  
@@ -236,7 +233,7 @@ def move_to_buffer(
         reqs = batch_isend_irecv(p2p_ops)
         for req in reqs:
             req.wait()
-    # wait for the communication to finish   
+    # wait for the communication to finish
     return is_unchanged, is_received_locally, experts_recv_loc
 
 def move_from_buffer(
@@ -251,8 +248,8 @@ def move_from_buffer(
     ep_rank = ep_group.rank()
     num_local_experts = len(is_unchanged)
 
-    local2global = partial(idx_local_to_global, 
-                           local_cnt=num_local_experts, 
+    local2global = partial(idx_local_to_global,
+                           local_cnt=num_local_experts,
                            ep_rank=ep_rank)
 
     for dst in range(num_local_experts):
@@ -270,15 +267,16 @@ def move_from_buffer(
                 weight[dst].copy_(buffer[src], non_blocking=True)
     
 
-async def transfer_layer(old_global_expert_indices: torch.Tensor,
-                         new_global_expert_indices: torch.Tensor,
-                         expert_weights: Sequence[Iterable[torch.Tensor]],
-                         expert_weights_buffer,
-                         ep_group: ProcessGroup,
-                         is_profile: bool = False,
-                         layer: int = 0,
-                         cuda_stream: Optional[torch.cuda.Stream] = None,
-                         rank_mapping=None) -> tuple[list[bool], list[bool], dict[int, int]]:
+async def transfer_layer(
+        old_global_expert_indices: torch.Tensor,
+        new_global_expert_indices: torch.Tensor,
+        expert_weights: Sequence[Iterable[torch.Tensor]],
+        expert_weights_buffer,
+        ep_group: ProcessGroup,
+        is_profile: bool = False,
+        layer: int = 0,
+        cuda_stream: Optional[torch.cuda.Stream] = None,
+        rank_mapping=None) -> tuple[list[bool], list[bool], dict[int, int]]:
     """
     Rearranges the expert weights in place according to the new expert indices.
 
@@ -326,7 +324,6 @@ async def transfer_layer(old_global_expert_indices: torch.Tensor,
     # A buffer to hold the expert weights in one layer during the exchange.
     # NOTE: Currently we assume the same weights across different layers
     # have the same shape.
-    
 
     is_unchanged, is_received_locally, experts_recv_loc = move_to_buffer(
         num_local_experts=num_local_physical_experts,
@@ -335,12 +332,10 @@ async def transfer_layer(old_global_expert_indices: torch.Tensor,
         expert_weights=expert_weights[layer],
         expert_weights_buffer=expert_weights_buffer,
         cuda_stream=cuda_stream,
-        ep_group=ep_group
-    )
+        ep_group=ep_group)
     # NOTE(bowen): We need this synchronize to run, but I don't know why.
     # If you figure out the reason, please let me know -- thank you!
     return is_unchanged, is_received_locally, experts_recv_loc
-    
 
 def rearrange_expert_weights_inplace(
     old_global_expert_indices: torch.Tensor,
@@ -431,18 +426,15 @@ def rearrange_expert_weights_inplace(
             expert_weights=expert_weights[layer],
             expert_weights_buffer=expert_weights_buffer,
             cuda_stream=None,
-            ep_group=ep_group
-        )
+            ep_group=ep_group)
 
-        move_from_buffer(
-            expert_weights=expert_weights[layer],
-            expert_weights_buffer=expert_weights_buffer,
-            is_unchanged=is_unchanged,
-            is_received_locally=is_received_locally, 
-            experts_recv_loc=experts_recv_loc, 
-            new_indices=new_global_expert_indices[layer].tolist(),
-            ep_group=ep_group
-        )
+        move_from_buffer(expert_weights=expert_weights[layer],
+                         expert_weights_buffer=expert_weights_buffer,
+                         is_unchanged=is_unchanged,
+                         is_received_locally=is_received_locally,
+                         experts_recv_loc=experts_recv_loc,
+                         new_indices=new_global_expert_indices[layer].tolist(),
+                         ep_group=ep_group)
 
 def _map_old_expert_indices_with_rank_mapping(
     old_global_expert_indices: torch.Tensor,
