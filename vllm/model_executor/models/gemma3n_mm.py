@@ -461,9 +461,6 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.multimodal_config = multimodal_config
         self.vocab_size = config.text_config.vocab_size
 
-        self.sliding_window = getattr(config.text_config,
-                                      "interleaved_sliding_window", None)
-
         self.vision_tower = AutoModel.from_config(config=config.vision_config)
         self.audio_tower = AutoModel.from_config(config=config.audio_config)
         self.embed_vision = Gemma3nMultimodalEmbedder(config.vision_config,
