@@ -217,12 +217,11 @@ class EagleProposer:
         if mm_embed_inputs:
             is_mm_embed, mm_embeds = mm_embed_inputs
 
-            inputs_embeds_scheduled = _merge_multimodal_embeddings(
+            self.inputs_embeds[:num_tokens] = _merge_multimodal_embeddings(
                 self.input_ids[:num_tokens],
                 is_mm_embed,
                 multimodal_embeddings=mm_embeds,
             )
-            self.inputs_embeds[:num_tokens] = inputs_embeds_scheduled
 
             input_ids = None
             inputs_embeds = self.inputs_embeds[:num_input_tokens]
