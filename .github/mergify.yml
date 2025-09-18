@@ -312,7 +312,7 @@ pull_request_rules:
       - files~=^examples/others/lmcache/
       - files~=^tests/v1/kv_connector/
       - files~=^vllm/distributed/kv_transfer/
-      - title~="(?i)\bP[/]?D\b"
+      - title~=(?i)\bP[/]?D\b
       - title~=(?i)NIXL
       - title~=(?i)LMCache
   actions:
