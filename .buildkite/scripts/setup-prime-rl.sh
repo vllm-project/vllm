@@ -36,9 +36,13 @@ cd "${PRIME_RL_DIR}"
 echo "Installing Prime-RL dependencies..."
 uv sync && uv sync --all-extras
 
+# Remove vllm pin from pyproject.toml
+echo "Removing vllm pin from pyproject.toml..."
+sed -i '/vllm==/d' pyproject.toml
+
 # Install nightly vLLM to override the version in Prime-RL
 echo "Installing nightly vLLM..."
-uv add --index-url https://download.pytorch.org/whl/cu124 vllm-nightly
+uv add vllm --index https://wheels.vllm.ai/nightly
 
 # Verify installation
 echo "Verifying installations..."
