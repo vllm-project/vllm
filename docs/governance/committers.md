@@ -4,7 +4,7 @@ This document lists the current committers of the vLLM project and the core area
 Committers have write access to the vLLM repository and are responsible for reviewing and merging PRs.
 You can also refer to the [CODEOWNERS](https://github.com/vllm-project/vllm/blob/main/.github/CODEOWNERS) file for concrete file-level ownership and reviewers.
 
-## Admin Committers
+## Core Committers
 
 These committers are responsible for the overall governance of the vLLM project with administrative permissions.
 
