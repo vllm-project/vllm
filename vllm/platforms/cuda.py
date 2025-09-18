@@ -46,6 +46,7 @@ class CudaCapability(IntEnum):
     ADA_LOVELACE_89 = 89
     HOPPER_90 = 90
     BLACKWELL_100 = 100
+    JETSON_THOR_110 = 110
     BLACKWELL_RTX_120 = 120
 
 
