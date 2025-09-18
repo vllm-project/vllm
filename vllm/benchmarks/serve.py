@@ -62,7 +62,7 @@ class DeprecatedEndpointTypeAction(argparse.Action):
     def __call__(self, parser, namespace, values, option_string=None):
         warnings.warn(
             "'--endpoint-type' is deprecated and will be removed in v0.11.0. "
-            "Please use `--backend` instead or remove this argument if you "
+            "Please use '--backend' instead or remove this argument if you "
             "have already set it.",
             stacklevel=2,
         )
