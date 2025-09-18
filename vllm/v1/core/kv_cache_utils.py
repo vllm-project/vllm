@@ -754,6 +754,10 @@ def is_kv_cache_type_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
         True if all layers have the same type, False otherwise.
     """
 
+    if not kv_cache_spec:
+        # Encoder-only models do not have KV cache, kv_cache_type can be
+        # regarded as uniform.
+        return True
     try:
         kv_cache_spec_values = list(kv_cache_spec.values())
         _ = kv_cache_spec_values[0].merge(kv_cache_spec_values)

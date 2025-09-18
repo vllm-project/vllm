@@ -67,7 +67,7 @@ class Request:
             # Generative models.
             assert sampling_params.max_tokens is not None
             self.max_tokens = sampling_params.max_tokens
-            if sampling_params.guided_decoding is not None:
+            if sampling_params.structured_outputs is not None:
                 self.status = RequestStatus.WAITING_FOR_FSM
                 self.use_structured_output = True
 

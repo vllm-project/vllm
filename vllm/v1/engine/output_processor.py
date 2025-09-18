@@ -14,7 +14,6 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.tracing import (SpanAttributes, SpanKind, Tracer,
                           extract_trace_context)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
@@ -290,7 +289,7 @@ class RequestState:
 class OutputProcessor:
     """Process EngineCoreOutputs into RequestOutputs."""
 
-    def __init__(self, tokenizer: TokenizerGroup, log_stats: bool):
+    def __init__(self, tokenizer: AnyTokenizer, log_stats: bool):
         self.log_stats = log_stats
         self.tokenizer = tokenizer
         self.request_states: dict[str, RequestState] = {}
@@ -347,10 +346,7 @@ class OutputProcessor:
         if request_id in self.request_states:
             raise ValueError(f"Request id {request_id} already running.")
 
-        tokenizer = None if not self.tokenizer else \
-            self.tokenizer.get_lora_tokenizer(request.lora_request)
-
-        req_state = RequestState.from_new_request(tokenizer=tokenizer,
+        req_state = RequestState.from_new_request(tokenizer=self.tokenizer,
                                                   request=request,
                                                   prompt=prompt,
                                                   parent_req=parent_req,
