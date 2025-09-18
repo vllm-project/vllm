@@ -9,11 +9,13 @@ from typing import ClassVar, Optional
 import regex as re
 import torch
 from torch._dynamo.utils import lazy_format_graph_code
-from torch._inductor.pattern_matcher import PatternMatcherPass
+from torch._inductor.pattern_matcher import (PatternMatcherPass,
+                                             PatternPrettyPrinter)
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
+from ..utils import unique_filepath
 from .inductor_pass import InductorPass
 
 logger = init_logger(__name__)
@@ -66,6 +68,9 @@ class VllmInductorPass(InductorPass):
 class VllmPatternMatcherPass(VllmInductorPass):
     """
     A VllmInductorPass that uses the Inductor pattern matcher.
+    Its main use is providing the dump_patterns utility that dumps the
+    Inductor pattern matcher patterns into a file, which greatly aids debugging.
+
     TODO(luka) move more utilities to this pass.
     """
     matched_count: int = 0
@@ -74,8 +79,12 @@ class VllmPatternMatcherPass(VllmInductorPass):
     _OP_OVERLOAD_PATTERN: ClassVar[re.Pattern] = re.compile(
         r"<OpOverload\(op='([^']*)', overload='([^']*)'\)>")
 
-    _FUNC_PATTERN: ClassVar[re.Pattern] = re.compile(
-        r"<function ([^ ]+) at 0x[0-9a-fA-F]+>")
+    def _replace_op_overloads(self, string: str) -> str:
+        """Replace <OpOverload(..., ...)> with nicer formulations"""
+        return self._OP_OVERLOAD_PATTERN.sub(
+            lambda m: f"torch.ops.{m.group(1)}.{m.group(2)}",
+            string,
+        )
 
     def dump_patterns(self, config: VllmConfig, pm_pass: PatternMatcherPass):
         """
@@ -85,6 +94,8 @@ class VllmPatternMatcherPass(VllmInductorPass):
         This method does its best to print something that looks like Python code
         for easier debugging and potentially navigation. If any errors appear in
         the output, please add to this method.
+
+        TODO(luka): use pattern object to manually produce pattern graph
         """
         debug_dump_path = config.compilation_config.debug_dump_path
         if not debug_dump_path:
@@ -92,18 +103,22 @@ class VllmPatternMatcherPass(VllmInductorPass):
 
         rank = config.parallel_config.rank
         debug_dump_path = Path(debug_dump_path) / f"rank_{rank}"
-        with (debug_dump_path /
-              f"patterns.{self.pass_name}.py").open("w") as f:
+        debug_dump_path.mkdir(parents=True, exist_ok=True)
+
+        file_path = unique_filepath(
+            lambda i: debug_dump_path / f"patterns.{self.pass_name}.{i}.py")
+
+        with file_path.open("w") as f:
             print(
                 f'# This file was produced by VllmPatternMatcherPass.'
                 f'dump_patterns for {self.pass_name}.\n'
                 f'# It does its best to produce valid-Python-looking code but'
                 f' please add to dump_patterns if there are any errors.\n\n'
                 f'from torch._higher_order_ops.auto_functionalize import '
-                f'auto_functionalized\n'
+                f'auto_functionalized as auto_functionalized\n'
                 f'from torch._inductor.pattern_matcher import *',
                 file=f)
-            print("patterns = {", file=f)
+
             for node, patterns in pm_pass.patterns.items():
                 # fix the operator.getitem repr
                 if node[1] == operator.getitem:
@@ -111,23 +126,24 @@ class VllmPatternMatcherPass(VllmInductorPass):
                 else:
                     node_repr = repr(node)
 
-                print(f"{node_repr}: [", file=f)
-                for pattern in patterns:
-                    # Replace <OpOverload(..., ...)> with nicer formulations
-                    pattern_repr = self._OP_OVERLOAD_PATTERN.sub(
-                        lambda m: f"torch.ops.{m.group(1)}.{m.group(2)}",
-                        repr(pattern),
-                    )
-                    # Replace '<function a.<locals>.b at 0x75d...>' with 'a.b'
-                    pattern_repr = self._FUNC_PATTERN.sub(
-                        lambda m: f"'{m.group(1).replace('<locals>.', '')}'",
-                        pattern_repr,
-                    )
+                node_repr = self._replace_op_overloads(node_repr)
 
-                    # also wrap wildcards (and make yapf happy)
-                    print(f"  {pattern_repr.replace('*', '\'*\'')},", file=f)
-                print("]", file=f)
-            print("}", file=f)
+                print(f"\n\n# Patterns for op: {node_repr}", file=f)
+                for i, pattern in enumerate(patterns):
+                    # reserve auto_functionalized ahead of time
+                    pp = PatternPrettyPrinter()
+                    pp.namespace.create_name("auto_functionalized", None)
+
+                    # Assemble pattern
+                    out_node = pp.pretty_print(pattern.pattern)
+                    pattern_repr = "\n".join([f"def pattern_{i}():"] + [
+                        f"{pp.memoized_objs_names[key]} = "
+                        f"{pp.memoized_objs_pp[key]}"
+                        for key in pp.memoized_objs_names
+                    ] + [f"return {out_node}"]).replace("\n", "\n    ")
+
+                    pattern_repr = self._replace_op_overloads(pattern_repr)
+                    print(f"{pattern_repr}\n", file=f)
 
 
 class PrinterInductorPass(VllmInductorPass):
