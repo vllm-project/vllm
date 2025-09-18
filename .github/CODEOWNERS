@@ -41,7 +41,6 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 
 # Test ownership
 /.buildkite/lm-eval-harness @mgoin @simon-mo
-/tests/async_engine @njhill @robertgshaw2-redhat @simon-mo
 /tests/distributed/test_multi_node_assignment.py @youkaichao
 /tests/distributed/test_pipeline_parallel.py @youkaichao
 /tests/distributed/test_same_node.py @youkaichao
@@ -50,7 +49,6 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /tests/kernels @mgoin @tlrmchlsmth @WoosukKwon @yewentao256
 /tests/models @DarkLight1337 @ywang96
 /tests/multimodal @DarkLight1337 @ywang96 @NickLucche
-/tests/prefix_caching @comaniac @KuntaiDu
 /tests/quantization @mgoin @robertgshaw2-redhat @yewentao256
 /tests/test_inputs.py @DarkLight1337 @ywang96
 /tests/v1/entrypoints/llm/test_struct_output_generate.py @mgoin @russellb @aarnphm
