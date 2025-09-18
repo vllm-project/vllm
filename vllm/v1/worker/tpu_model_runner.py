@@ -953,7 +953,9 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         input_ids: torch.Tensor,
         mm_embed_inputs: Optional[tuple[torch.Tensor, list[torch.Tensor]]],
     ):
-        if mm_embed_inputs:
+        if self.supports_mm_inputs:
+            assert mm_embed_inputs is not None, (
+                "Multi-modal embeddings should be passed from model runner")
             is_mm_embed, mm_embeds = mm_embed_inputs
 
             # NOTE(woosuk): To unify token ids and soft tokens (vision
