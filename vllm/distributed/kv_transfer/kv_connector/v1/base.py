@@ -274,14 +274,21 @@ class KVConnectorBase_V1(ABC):
 
         Returns:
             A tuple with the following elements:
-                - An optional number of tokens that can be loaded from the 
-                  external KV cache beyond what is already computed. 
+                - An optional number of tokens that can be loaded from the
+                  external KV cache beyond what is already computed.
                   If None, it means that the connector needs more time to
                   determine the number of matched tokens, and the scheduler
                   should query for this request again later.
                 - `True` if external KV cache tokens will be loaded
                   asynchronously (between scheduler steps). Must be
                   'False' if the first element is 0.
+
+        Notes:
+            The connector should only consider the largest prefix of prompt-
+            tokens for which KV cache is actually available at the time of the
+            call. If the cache cannot be loaded for some tokens (e.g., due to
+            connectivity issues or eviction), those tokens must not be taken
+            into account.
         """
         pass
 
