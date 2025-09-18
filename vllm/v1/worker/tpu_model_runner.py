@@ -934,7 +934,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 assert pos_info.is_embed is None, "Expected all positions to"\
                 " be contiguous and embeddings."
 
-                req_start_pos = req_start_idx + start_pos
+                req_start_pos = req_start_idx + start_pos - num_computed_tokens
                 is_mm_embed[req_start_pos+start_idx:req_start_pos + end_idx] \
                     = True
 

@@ -1505,6 +1505,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_state = self.requests[req_id]
             num_computed_tokens = \
                 req_state.num_computed_tokens + shift_computed_tokens
+
             for mm_feature in req_state.mm_features:
                 pos_info = mm_feature.mm_position
                 start_pos = pos_info.offset
@@ -1537,25 +1538,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 if (is_embed := pos_info.is_embed) is not None:
                     is_embed = is_embed[start_idx:end_idx]
 
-                req_start_pos = req_start_idx + start_pos
+                req_start_pos = req_start_idx + start_pos - num_computed_tokens
                 is_mm_embed[req_start_pos+start_idx:req_start_pos + end_idx] \
                     = True if is_embed is None else is_embed
-                print("req_start_pos", req_start_pos)
-                print("set", req_start_pos + start_idx, ":",
-                      req_start_pos + end_idx, "to",
-                      True if is_embed is None else is_embed)
-                print((is_mm_embed[:-1] != is_mm_embed[1:]).nonzero() + 1)
-                # For tests/models/multimodal/generation/test_common.py::test_custom_inputs_models[llava-test_case3],
-                # the expected output for the first item is:
-                # tensor([[   5],
-                #         [1157]])
-                # the expected output for the second item is:
-                # tensor([[   6],
-                #         [1158],
-                #         [1171],
-                #         [2904],
-                #         [2922],
-                #         [3498]])
 
                 mm_embeds_item = gather_mm_placeholders(
                     encoder_output[start_idx:end_idx],
@@ -1566,7 +1551,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_start_idx += num_scheduled_tokens
 
         is_mm_embed = self.is_mm_embed.copy_to_gpu(total_num_scheduled_tokens)
-        print("total_num_scheduled_tokens", total_num_scheduled_tokens)
 
         return is_mm_embed, mm_embeds
 
