@@ -598,7 +598,8 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
 
         _tensor_parallel(self.model)
 
-    def create_attention_instances(self) -> dict[int, Attention]:
+    def create_attention_instances(
+            self) -> dict[int, Union[Attention, EncoderOnlyAttention]]:
         """
         Create `Attention` (or `EncoderOnlyAttention`)
         instances to inform KV cache allocation.
