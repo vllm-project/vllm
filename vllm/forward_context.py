@@ -156,6 +156,7 @@ class DPMetadata:
         num_tokens_across_dp: torch.Tensor,
     ) -> "DPMetadata":
 
+        assert num_tokens_across_dp is not None
         assert parallel_config.data_parallel_size > 1
         dp_rank = parallel_config.data_parallel_rank
         if attn_metadata is not None and hasattr(attn_metadata,
