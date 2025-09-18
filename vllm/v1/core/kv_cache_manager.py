@@ -296,7 +296,8 @@ class KVCacheManager:
         num_computed_tokens = (request.num_computed_tokens +
                                num_new_computed_tokens)
         num_tokens_need_slot = min(
-            num_computed_tokens + num_new_tokens + num_lookahead_tokens,
+            num_computed_tokens + num_new_tokens + num_lookahead_tokens +\
+            num_extra_tokens_from_connector,
             self.max_model_len)
 
         num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
@@ -327,10 +328,10 @@ class KVCacheManager:
                                                       new_computed_block_list)
 
         if num_extra_tokens_from_connector > 0:
-            new_blocks_for_connector = self.coordinator.allocate_new_blocks_for_connector(
+            self.coordinator.allocate_new_blocks_for_connector(
                 request.request_id,
                 num_computed_tokens + num_extra_tokens_from_connector)
-            # TODO: merge new_blocks_for_connector with new_blocks
+            # TODO: merge the new blocks for connector with new_blocks below
 
         new_blocks = self.coordinator.allocate_new_blocks(
             request.request_id, num_tokens_need_slot, num_encoder_tokens)

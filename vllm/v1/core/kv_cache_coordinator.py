@@ -121,12 +121,11 @@ class KVCacheCoordinator(ABC):
                     manager, CrossAttentionManager) else num_tokens)
             for manager in self.single_type_managers)
 
-    def allocate_new_blocks_for_connector(
-            self, request_id: str,
-            total_computed_tokens: int) -> tuple[list[KVCacheBlock], ...]:
+    def allocate_new_blocks_for_connector(self, request_id: str,
+                                          total_computed_tokens: int) -> None:
         """
-        Allocate new blocks for the request to give it at least `total_computed_tokens` 
-        token slots.
+        Allocate new blocks for the request to give it at least 
+        `total_computed_tokens` token slots.
         """
         for manager in self.single_type_managers:
             manager.allocate_new_blocks_for_connector(request_id,

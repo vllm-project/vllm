@@ -4,6 +4,7 @@ import itertools
 from abc import ABC, abstractmethod
 from collections import defaultdict
 
+from vllm.logger import init_logger
 from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
@@ -12,6 +13,8 @@ from vllm.v1.kv_cache_interface import (ChunkedLocalAttentionSpec,
                                         KVCacheSpec, MambaSpec,
                                         SlidingWindowSpec)
 from vllm.v1.request import Request
+
+logger = init_logger(__name__)
 
 
 class SingleTypeKVCacheManager(ABC):
@@ -84,7 +87,8 @@ class SingleTypeKVCacheManager(ABC):
         # free queue and ref_cnt == 0), it will be changed from a free block
         # to a computed block when the request is allocated, so we also count
         # it as needed to be allocated.
-        # Note: overestimate when both new_computed_blocks and external tokens exists.
+        # Note: overestimate when both new_computed_blocks and external tokens
+        # exists.
         num_evictable_computed_blocks = sum(
             blk.ref_cnt == 0 and not blk.is_null
             for blk in new_computed_blocks)
@@ -138,13 +142,17 @@ class SingleTypeKVCacheManager(ABC):
     def allocate_new_blocks_for_connector(self, request_id: str,
                                           total_computed_tokens: int) -> None:
         """
-        Allocate new blocks for the request to give it at least `num_computed_tokens` 
-        token slots.
+        Allocate new blocks for the request to give it at least 
+        `num_computed_tokens` token slots.
         """
         num_skipped_token = self.get_num_skipped_token(total_computed_tokens)
         req_to_blocks = self.req_to_blocks[request_id]
         if num_skipped_token > 0:
-            for i in range(num_skipped_token // self.block_size - 1, -1, -1):
+            # NOTE(Kuntai): In connector case, `num_skipped_token` can be longer
+            # than the tokens that the request has. So we take a min here.
+            tail_idx = min(num_skipped_token // self.block_size - 1,
+                           len(req_to_blocks) - 1)
+            for i in range(tail_idx, -1, -1):
                 if req_to_blocks[i] == self._null_block:
                     break
                 # TODO: batch the call of free_blocks
@@ -207,9 +215,10 @@ class SingleTypeKVCacheManager(ABC):
         """
         # Remove the blocks that are no longer be in the sliding window and
         # skipped during the attention computation.
-        last_useful_token = self.get_first_useful_token(num_computed_tokens)
+        last_useful_token = self.get_num_skipped_token(num_computed_tokens)
         if last_useful_token <= 0:
-            # TODO: update comment. this is the fast path for full attention
+            # This indicates that ALL tokens are inside attention window.
+            # Thus we do not need to free any blocks outside attention window.
             return
         last_useful_block = last_useful_token // self.block_size
         blocks = self.req_to_blocks[request_id]
@@ -417,7 +426,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         """
         Get the last useful token for the request.
         """
-        return num_computed_tokens - self.sliding_window + 1  # need to rethink whether +1 / -1
+        return num_computed_tokens - self.sliding_window + 1
 
     def get_num_common_prefix_blocks(self, request_id: str,
                                      num_running_requests: int) -> int:
@@ -512,8 +521,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
                 break
         return computed_blocks
 
-    def get_num_skipped_token(self, request_id: str,
-                              num_computed_tokens: int) -> None:
+    def get_num_skipped_token(self, num_computed_tokens: int) -> int:
         # Remove the blocks that are no longer be in the chunked attention
         # window and skipped during the attention computation.
 
@@ -563,9 +571,9 @@ class MambaManager(SingleTypeKVCacheManager):
                                      num_running_requests: int) -> int:
         return 0
 
-    def get_num_blocks_to_allocate(
-            self, request_id: str, num_tokens: int,
-            new_computed_blocks: list[KVCacheBlock]) -> int:
+    def get_num_blocks_to_allocate(self, request_id: str, num_tokens: int,
+                                   new_computed_blocks: list[KVCacheBlock],
+                                   total_computed_tokens: int) -> int:
         """
         Get the number of blocks needed to be allocated for the request.
         Args:
@@ -574,9 +582,17 @@ class MambaManager(SingleTypeKVCacheManager):
                 tokens that are already allocated).
             new_computed_blocks: The new computed blocks just hitting the
                 prefix caching.
+            total_computed_tokens: Include both local and external tokens.
         Returns:
             The number of blocks
         """
+
+        # TODO(Kuntai): handle the case where `total_computed_tokens > 0`
+        if total_computed_tokens > 0:
+            logger.warning_once(
+                "Currently Mamba GPU memory allocator may cause"
+                " memory waste when total_computed_tokens"
+                " is greater than 0.")
 
         assert isinstance(self.kv_cache_spec, MambaSpec)
         if self.kv_cache_spec.num_speculative_blocks > 0:
