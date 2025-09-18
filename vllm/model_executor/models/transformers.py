@@ -27,8 +27,7 @@ from transformers import (AutoModel, BatchFeature, PretrainedConfig,
                           PreTrainedModel)
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
-from vllm.attention import Attention
-from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
+from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, VllmConfig)
@@ -598,11 +597,9 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
 
         _tensor_parallel(self.model)
 
-    def create_attention_instances(
-            self) -> dict[int, Union[Attention, EncoderOnlyAttention]]:
+    def create_attention_instances(self) -> dict[int, Attention]:
         """
-        Create `Attention` (or `EncoderOnlyAttention`)
-        instances to inform KV cache allocation.
+        Create `Attention` instances to inform KV cache allocation.
         """
         # TODO(hmellor): Better way to detect encoder models
         # In encoder models, the attention layers will have `is_causal=False`
@@ -610,6 +607,9 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         # vLLM does not support encoder-decoder models, so if any encoder layer
         # is found, we assume the whole model is an encoder model
         is_encoder_model = any(is_encoder(m) for m in self.model.modules())
+        attn_type = (AttentionType.ENCODER_ONLY
+                     if is_encoder_model else AttentionType.DECODER)
+
         # Check minimum transformers version for encoder models support
         if is_encoder_model:
             import transformers
@@ -620,8 +620,6 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                 raise ValueError(
                     "Encoder models with the Transformers backend require "
                     f"transformers>={required}, but got {installed}")
-
-        attention_cls = EncoderOnlyAttention if is_encoder_model else Attention
 
         num_heads = self.model_config.get_num_attention_heads(
             self.parallel_config)
@@ -638,7 +636,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                     and self.config.layer_types[i] == "sliding_attention"):
                 per_layer_sliding_window = self.config.sliding_window
 
-            attention_instances[i] = attention_cls(
+            attention_instances[i] = Attention(
                 num_heads=num_heads,
                 head_size=head_size,
                 # NOTE: We use Llama scale as default, if it's set by
@@ -648,7 +646,8 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                 cache_config=self.cache_config,
                 quant_config=self.quant_config,
                 per_layer_sliding_window=per_layer_sliding_window,
-                prefix=f"{i}.attn")
+                prefix=f"{i}.attn",
+                attn_type=attn_type)
         return attention_instances
 
     def init_parameters(self, module: nn.Module):
