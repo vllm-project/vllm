@@ -47,7 +47,6 @@ from .rebalance_execute import (move_from_buffer,
                                 rearrange_expert_weights_inplace,
                                 transfer_layer)
 
-
 logger = init_logger(__name__)
 
 
@@ -642,6 +641,7 @@ class EplbState:
 
         ep_group = get_ep_group().device_group
         rank = ep_group.rank()
+
         def thread_target():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -675,7 +675,7 @@ class EplbState:
 
             if self.shutdown_event.is_set():
                 break
-    
+
             # Process all layers for this rearrangement
             current_num_layers = model.num_moe_layers
             while self.layer_to_transfer < current_num_layers and not self.shutdown_event.is_set(
@@ -688,7 +688,7 @@ class EplbState:
                         # Re-check layer_to_transfer after acquiring lock in case it was updated
                         if self.layer_to_transfer >= current_num_layers:
                             break
- 
+
                         for i, w in enumerate(model.expert_weights[0]):
                             self.expert_buffer[i] = torch.empty_like(w)
                         (self.is_unchanged, self.is_received_locally,
@@ -797,6 +797,7 @@ class EplbState:
                                     group_src=0)
 
         return global_expert_load, old_global_expert_indices
+
 
 def _node_count_with_rank_mapping(
     pg: Union[ProcessGroup, StatelessProcessGroup],
