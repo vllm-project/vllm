@@ -148,9 +148,10 @@ def main():
         for d in range(1, depth + 1):
             for path in itertools.product(range(branching), repeat=d):
                 spec_token_tree.append(path)
-        # override num_spec_tokens
-        args.num_spec_tokens = len(spec_token_tree)
-        print(f'Overriding num_spec_tokens to be {args.num_spec_tokens}')
+        if args.num_spec_tokens is None:
+            args.num_spec_tokens = len(spec_token_tree)
+        print(spec_token_tree)
+        assert args.num_spec_tokens == len(spec_token_tree), f'expected `len(spec_token_tree) == num_spec_tokens` but got {len(spec_token_tree)=} and {args.num_spec_tokens=}'
         spec_token_tree_str = str(sorted(spec_token_tree, key=lambda t: (len(t), t)))
     else:
         spec_token_tree_str = None
@@ -238,8 +239,8 @@ def main():
         return
 
     output_tokens = sum(len(output.outputs[0].token_ids) for output in outputs)
-    input_time_sec = 0.0
-    output_time_sec = 0.0
+    input_time = 0.0
+    output_time = 0.0
     drafts = 0
     draft_tokens = 0
     accepted_tokens = 0
@@ -266,21 +267,21 @@ def main():
             input_tokens += metric.value
         elif metric.name == "vllm:request_prefill_time_seconds":
             assert isinstance(metric, Histogram)
-            input_time_sec += metric.sum
+            input_time += metric.sum
         elif metric.name == "vllm:request_decode_time_seconds":
             assert isinstance(metric, Histogram)
-            output_time_sec += metric.sum
+            output_time += metric.sum
         elif metric.name == "vllm:request_success":
             assert isinstance(metric, Counter)
             requests += metric.value
 
     # Calculate metrics
     tokens = input_tokens + output_tokens
-    time_sec = input_time_sec + output_time_sec
+    total_time = input_time + output_time # measured in seconds
 
-    input_speed = input_tokens / input_time_sec if input_time_sec > 0 else 0
-    output_speed = output_tokens / output_time_sec if output_time_sec > 0 else 0
-    overall_speed = tokens / time_sec
+    input_throughput = input_tokens / input_time if input_time > 0 else 0
+    output_throughput = output_tokens / output_time if output_time > 0 else 0
+    total_throughput = tokens / total_time
 
     acceptance_length = 1 + (accepted_tokens / drafts) if drafts > 0 else 1
     draft_utilization_rate = accepted_tokens / draft_tokens * 100 if draft_tokens > 0 else 0
@@ -293,9 +294,9 @@ def main():
 
     stats = {
         "input_tokens": input_tokens, "output_tokens": output_tokens,
-        "input_time_sec": input_time_sec, "output_time_sec": output_time_sec, "total_time_sec": time_sec,
+        "input_time": input_time, "output_time": output_time, "total_time": total_time,
         "drafter_forward_time": drafter_forward_time, "target_forward_time": target_forward_time, "forward_ratio": forward_ratio,
-        "input_speed": input_speed, "output_speed": output_speed, "overall_speed": overall_speed,
+        "input_throughput": input_throughput, "output_throughput": output_throughput, "total_throughput": total_throughput,
         "drafts": drafts, "draft_tokens": draft_tokens, "draft_utilization_rate": draft_utilization_rate,
         "accepted_tokens": accepted_tokens, "acceptance_length": acceptance_length
     }
