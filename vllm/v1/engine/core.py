@@ -876,10 +876,13 @@ class EngineCoreProc(EngineCore):
                     if raw_type not in EngineCoreRequestType._value2member_map_:
                         # If type is a stray coordinator control token, ignore
                         if raw_type == b"READY":
-                            logger.debug("Ignoring stray READY on input socket.")
+                            logger.debug(
+                                "Ignoring stray READY on input socket.")
                             continue
                         # Surface unexpected types
-                        raise ValueError(f"Unexpected request type on input socket: {raw_type!r}")
+                        raise ValueError(
+                            f"Unexpected request type on input socket: "
+                            f"{raw_type!r}")
 
                     request_type = EngineCoreRequestType(raw_type)
 
