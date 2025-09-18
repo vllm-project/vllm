@@ -19,6 +19,7 @@ from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models.utils import _merge_multimodal_embeddings
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
@@ -76,8 +77,10 @@ class EagleProposer:
         # hidden size (e.g., Llama 3.3 70B).
         self.hidden_size = self.draft_model_config.get_hidden_size()
 
-        self.is_multimodal_model = vllm_config.model_config \
-            .is_multimodal_model
+        # Multi-modal data support
+        self.mm_registry = MULTIMODAL_REGISTRY
+        self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
+            vllm_config.model_config)
 
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE and
@@ -214,7 +217,9 @@ class EagleProposer:
         self.positions[:num_tokens] = target_positions
         self.hidden_states[:num_tokens] = target_hidden_states
 
-        if mm_embed_inputs:
+        if self.supports_mm_inputs:
+            assert mm_embed_inputs is not None, (
+                "Multi-modal embeddings should be passed from model runner")
             is_mm_embed, mm_embeds = mm_embed_inputs
 
             self.inputs_embeds[:num_tokens] = _merge_multimodal_embeddings(
@@ -346,7 +351,7 @@ class EagleProposer:
             self.input_ids[:batch_size] = input_ids
             self.positions[:batch_size] = clamped_positions
             self.hidden_states[:batch_size] = hidden_states
-            if mm_embed_inputs:
+            if self.supports_mm_inputs:
                 self.inputs_embeds[:batch_size] = \
                     self.model.get_input_embeddings(input_ids)
 
@@ -861,7 +866,7 @@ class EagleProposer:
     ) -> None:
         with set_forward_context(None, self.vllm_config,
                                  num_tokens=num_tokens):
-            if self.is_multimodal_model:
+            if self.supports_mm_inputs:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds[:num_tokens]
             else:
