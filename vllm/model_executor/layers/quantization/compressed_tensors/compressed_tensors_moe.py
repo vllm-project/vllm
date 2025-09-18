@@ -1923,6 +1923,12 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
                 layer, "w2_bias",
                 torch.nn.Parameter(torch.empty(0), requires_grad=False))
 
+    def get_fused_moe_quant_config(
+            self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
+        # CPU dynamic 4-bit MoE path does not use modular kernels or
+        # fused_experts; quant config is not needed.
+        return None
+
     def apply(
         self,
         layer: torch.nn.Module,
