@@ -28,6 +28,7 @@ from transformers import (AutoModel, BatchFeature, PretrainedConfig,
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 from vllm.attention import Attention
+from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, VllmConfig)
@@ -599,8 +600,16 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
 
     def create_attention_instances(self) -> dict[int, Attention]:
         """
-        Create `Attention` instances to inform KV cache allocation.
+        Create `Attention` (or `EncoderOnlyAttention`)
+        instances to inform KV cache allocation.
         """
+        # In encoder models, the attention layers will have `is_causal=False`
+        is_encoder = lambda m: not getattr(m, "is_causal", True)
+        # vLLM does not support encoder-decoder models, so if any encoder layer
+        # is found, we assume the whole model is an encoder model
+        is_encoder_model = any(is_encoder(m) for m in self.model.modules())
+        attention_cls = EncoderOnlyAttention if is_encoder_model else Attention
+
         num_heads = self.model_config.get_num_attention_heads(
             self.parallel_config)
         head_size = self.model_config.get_head_size()
@@ -616,7 +625,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                     and self.config.layer_types[i] == "sliding_attention"):
                 per_layer_sliding_window = self.config.sliding_window
 
-            attention_instances[i] = Attention(
+            attention_instances[i] = attention_cls(
                 num_heads=num_heads,
                 head_size=head_size,
                 # NOTE: We use Llama scale as default, if it's set by
