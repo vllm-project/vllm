@@ -524,20 +524,12 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             if inter_data.mrope_input_positions is None:
                 inter_data.mrope_input_positions = [None] * inter_data.n_seqs
 
-            if supports_mrope(self.runner.model):
-                inter_data.mrope_input_positions[
-                    seq_idx] = self.runner.model.get_mrope_input_positions(
-                        seq_data.mrope_position_delta,
-                        context_len,
-                        seq_len,
-                    )
-            else:
-                inter_data.mrope_input_positions[
-                    seq_idx] = MRotaryEmbedding.get_next_input_positions(
-                        seq_data.mrope_position_delta,
-                        context_len,
-                        seq_len,
-                    )
+            inter_data.mrope_input_positions[
+                seq_idx] = MRotaryEmbedding.get_next_input_positions(
+                    seq_data.mrope_position_delta,
+                    context_len,
+                    seq_len,
+                )
 
     def _compute_for_prefix_cache_hit(
             self, inter_data: InterDataForSeqGroup, seq_idx: int,

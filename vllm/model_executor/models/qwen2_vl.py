@@ -1129,7 +1129,6 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         if second_per_grid_ts is None:
             second_per_grid_ts = []
 
-        hf_config = self.config
         image_token_id = hf_config.image_token_id
         video_token_id = hf_config.video_token_id
         vision_start_token_id = hf_config.vision_start_token_id
