@@ -441,6 +441,7 @@ class EngineArgs:
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: Union[str, Type[object]] = SchedulerConfig.scheduler_cls
 
+    pooler_config: Optional[PoolerConfig] = ModelConfig.pooler_config
     override_pooler_config: Optional[Union[dict, PoolerConfig]] = \
         ModelConfig.override_pooler_config
     compilation_config: CompilationConfig = \
@@ -579,8 +580,11 @@ class EngineArgs:
                                  help=model_kwargs["hf_token"]["help"])
         model_group.add_argument("--hf-overrides",
                                  **model_kwargs["hf_overrides"])
+        model_group.add_argument("--pooler-config",
+                                 **model_kwargs["pooler_config"])
         model_group.add_argument("--override-pooler-config",
-                                 **model_kwargs["override_pooler_config"])
+                                 **model_kwargs["override_pooler_config"],
+                                 deprecated=True)
         model_group.add_argument("--logits-processor-pattern",
                                  **model_kwargs["logits_processor_pattern"])
         model_group.add_argument("--generation-config",
@@ -1031,6 +1035,7 @@ class EngineArgs:
             mm_shm_cache_max_object_size_mb=self.
             mm_shm_cache_max_object_size_mb,
             mm_encoder_tp_mode=self.mm_encoder_tp_mode,
+            pooler_config=self.pooler_config,
             override_pooler_config=self.override_pooler_config,
             logits_processor_pattern=self.logits_processor_pattern,
             generation_config=self.generation_config,
