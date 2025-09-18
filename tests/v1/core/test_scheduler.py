@@ -10,7 +10,7 @@ from vllm.config import (CacheConfig, KVTransferConfig, ModelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
 from vllm.multimodal.inputs import (MultiModalFeatureSpec,
                                     MultiModalKwargsItem, PlaceholderRange)
-from vllm.sampling_params import GuidedDecodingParams, SamplingParams
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
@@ -1796,11 +1796,11 @@ def test_schedule_skip_tokenizer_init():
 
 def test_schedule_skip_tokenizer_init_structured_output_request():
     scheduler = create_scheduler(skip_tokenizer_init=True)
-    guided_params = GuidedDecodingParams(regex="[0-9]+")
+    structured_outputs_params = StructuredOutputsParams(regex="[0-9]+")
     sampling_params = SamplingParams(
         ignore_eos=False,
         max_tokens=16,
-        guided_decoding=guided_params,
+        structured_outputs=structured_outputs_params,
     )
     request = Request(
         request_id="0",
