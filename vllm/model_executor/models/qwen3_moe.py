@@ -170,8 +170,9 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         return quant_config
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        # NOTE: hidden_states can have either 1D or 2D shape.
-        orig_shape = hidden_states.shape
+        assert hidden_states.dim(
+        ) <= 2, "Qwen3MoeSparseMoeBlock only supports 1D or 2D inputs"
+        is_input_1d = hidden_states.dim() == 1
         hidden_dim = hidden_states.shape[-1]
         hidden_states = hidden_states.view(-1, hidden_dim)
 
@@ -180,7 +181,9 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         final_hidden_states = self.experts(hidden_states=hidden_states,
                                            router_logits=router_logits)
 
-        return final_hidden_states.view(orig_shape)
+        # return to 1d if input is 1d
+        return final_hidden_states.squeeze(0) if is_input_1d else \
+            final_hidden_states
 
 
 class Qwen3MoeAttention(nn.Module):
@@ -375,7 +378,7 @@ class Qwen3MoeModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_config.get_text_config()
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
@@ -602,7 +605,8 @@ class Qwen3MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA,
                                    prefix=maybe_prefix(prefix, "model"))
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
-                                      quant_config=quant_config)
+                                      quant_config=quant_config,
+                                      prefix=maybe_prefix(prefix, "lm_head"))
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
