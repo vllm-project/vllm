@@ -47,7 +47,6 @@ from vllm.model_executor.layers.quantization.gptq import GPTQConfig
 from vllm.model_executor.layers.quantization.gptq_marlin import (
     GPTQMarlinConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.platforms import current_platform
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -56,6 +55,7 @@ from vllm.model_executor.models.mamba_cache import MambaCacheParams
 from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import Qwen3NextConfig
 from vllm.triton_utils import tl, triton
@@ -1080,7 +1080,8 @@ class Qwen3NextForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
             padding_size=DEFAULT_VOCAB_PADDING_SIZE
             # We need bigger padding if using lora for kernel
             # compatibility
-            if not lora_config else current_platform.get_lora_vocab_padding_size(),
+            if not lora_config else
+            current_platform.get_lora_vocab_padding_size(),
             prefix=maybe_prefix(prefix, "lm_head"))
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)

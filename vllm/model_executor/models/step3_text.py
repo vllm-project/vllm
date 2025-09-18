@@ -27,11 +27,11 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
-from vllm.platforms import current_platform
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsPP
@@ -384,8 +384,8 @@ class Step3TextForCausalLM(nn.Module, SupportsPP):
                 self.unpadded_vocab_size,
                 config.hidden_size,
                 org_num_embeddings=config.vocab_size,
-                padding_size=DEFAULT_VOCAB_PADDING_SIZE
-                if not lora_config else current_platform.get_lora_vocab_padding_size(),
+                padding_size=DEFAULT_VOCAB_PADDING_SIZE if not lora_config else
+                current_platform.get_lora_vocab_padding_size(),
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
             self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,

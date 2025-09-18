@@ -36,13 +36,13 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator, MambaStateShapeCalculator)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.platforms import current_platform
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
                                                     MambaCacheParams)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import HasInnerState, IsHybrid
@@ -937,7 +937,8 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
             padding_size=DEFAULT_VOCAB_PADDING_SIZE
             # We need bigger padding if using lora for kernel
             # compatibility
-            if not lora_config else current_platform.get_lora_vocab_padding_size(),
+            if not lora_config else
+            current_platform.get_lora_vocab_padding_size(),
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         # Tie weights with input embeddings if using same dimensions
