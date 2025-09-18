@@ -49,10 +49,9 @@ class IncrementalDetokenizer:
         if self.multi_stop_token_ids:
             stop = self.check_stop_token_ids(new_token_ids)
             if stop is not None:
-                stop_string, truncate_to = stop
-                if truncate_to != -1:
-                    self.output_text = self.output_text[:truncate_to]
-                    self.token_ids = self.token_ids[:truncate_to]
+                # No need to truncate token_ids
+                stop_string = stop[0]
+
         return stop_string
 
     def get_next_output_text(self, finished: bool, delta: bool) -> str:
@@ -60,21 +59,32 @@ class IncrementalDetokenizer:
 
     def check_stop_token_ids(
             self, new_token_ids: list[int]) -> Optional[tuple[str, int]]:
+        stop_index = -1
         for stop_token_group in self.multi_stop_token_ids:
-            stop_tokens_len = len(stop_token_group)
-            stop_index = -1
-            # TODO: does not support new_token_ids > 1
-            if (len(self.output_token_ids) >= stop_tokens_len
-                    and self.output_token_ids[-stop_tokens_len:]
-                    == stop_token_group):
-                stop_index = len(self.output_token_ids) - stop_tokens_len
+            st_len = len(stop_token_group)
+            ot_len = len(self.output_token_ids)
+            if st_len > ot_len:
+                continue
+
+            # Avoid searching beyond what's necessary
+            search_start_index = len(
+                self.output_token_ids) - len(new_token_ids) - st_len + 1
+
+            for i in range(search_start_index, ot_len):
+                # TODO(sarck): optimize sublist search further
+                if (self.output_token_ids[i] == stop_token_group[0]
+                        and self.output_token_ids[i:i + st_len]
+                        == stop_token_group):
+                    stop_index = i
+                    break
+
             if stop_index == -1:
                 continue
 
             if self.include_stop_str_in_output:
                 # Truncate to end of stop string.
-                stop_index += stop_tokens_len
-                if stop_index >= len(self.output_token_ids):
+                stop_index += st_len
+                if stop_index >= ot_len:
                     # No truncation required.
                     return str(stop_token_group), -1
 
@@ -131,7 +141,7 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
 
         # Generation data
         self.output_text = ""
-        self.output_text_lengths = []
+        self.output_text_lengths: list[int] = []
 
     def update(self, new_token_ids: list[int],
                stop_terminated: bool) -> Optional[str]:
@@ -178,8 +188,8 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
             stop = self.check_stop_token_ids(new_token_ids)
             if stop is not None:
                 stop_string, truncate_to = stop
-                if truncate_to != -1:
-                    self.token_ids = self.token_ids[:truncate_to]
+                if not self.include_stop_str_in_output and truncate_to != -1:
+                    # only truncate output text
                     new_output_len = (self.output_text_lengths[truncate_to - 1]
                                       if truncate_to > 0 else 0)
                     self.output_text = self.output_text[:new_output_len]
