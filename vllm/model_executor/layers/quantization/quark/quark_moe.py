@@ -4,9 +4,11 @@
 from typing import Any, Callable, Optional, Union
 
 import torch
+from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
                                                   FusedMoEMethodBase,
@@ -19,7 +21,7 @@ from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_moe_fp8_layer_for_marlin)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-    OCP_MX_BLOCK_SIZE)
+    OCP_MX_BLOCK_SIZE, _swizzle_mxfp4)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -27,12 +29,11 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.utils import round_up
 
 logger = init_logger(__name__)
 
-__all__ = [
-    "QuarkMoEMethod", "QuarkW8A8Fp8MoEMethod", "QuarkW4A4MXFp4MoEMethod"
-]
+__all__ = ["QuarkMoEMethod", "QuarkW8A8Fp8MoEMethod", "QuarkW4MXFp4MoEMethod"]
 
 
 class QuarkMoEMethod(FusedMoEMethodBase):
@@ -60,8 +61,16 @@ class QuarkMoEMethod(FusedMoEMethodBase):
             return QuarkW8A8Fp8MoEMethod(weight_config, input_config,
                                          module.moe_config)
         elif quant_config._is_mx_fp4(weight_config, input_config):
-            return QuarkW4A4MXFp4MoEMethod(weight_config, input_config,
-                                           module.moe_config)
+            from vllm.config import get_current_vllm_config
+            vllm_config = get_current_vllm_config()
+            model_type = getattr(vllm_config.model_config.hf_config,
+                                 "model_type", None)
+            if model_type == "gpt_oss":
+                return QuarkW4MXFp4MoEMethod_OSS(weight_config, input_config,
+                                                 module.moe_config)
+            else:
+                return QuarkW4MXFp4MoEMethod(weight_config, input_config,
+                                             module.moe_config)
         else:
             raise RuntimeError("Unsupported FusedMoe scheme")
 
@@ -389,7 +398,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             quant_config=self.moe_quant_config)
 
 
-class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
+class QuarkW4MXFp4MoEMethod(QuarkMoEMethod):
 
     def __init__(
         self,
@@ -414,7 +423,7 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
 
         if self.static_input_scales:
             raise NotImplementedError(
-                "QuarkW4A4MXFp4MoEMethod with static input scales is currently "
+                "QuarkW4MXFp4MoEMethod with static input scales is currently "
                 "not implemented. Please open an issue.")
 
         if not current_platform.supports_mx():
@@ -527,7 +536,7 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
 
         if enable_eplb:
             raise NotImplementedError(
-                "EPLB not supported for `QuarkW4A4MXFp4MoEMethod` yet.")
+                "EPLB not supported for `QuarkW4MXFp4MoEMethod` yet.")
 
         from vllm.model_executor.layers.fused_moe import fused_experts
 
@@ -559,3 +568,275 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
             quant_config=self.moe_quant_config,
         )
         return out
+
+
+class QuarkW4MXFp4MoEMethod_OSS(QuarkMoEMethod):
+
+    def __init__(
+        self,
+        weight_config: dict[str, Any],
+        input_config: dict[str, Any],
+        moe: FusedMoEConfig,
+    ):
+        super().__init__(moe)
+        self.weight_quant = weight_config
+        self.input_quant = input_config
+
+        weight_qscheme = self.weight_quant.get("qscheme")
+        input_qscheme = self.input_quant.get("qscheme")
+        if not (weight_qscheme == "per_group"):
+            raise ValueError(
+                "For MX(FP4) Fused MoE layers, only per-group scales "
+                "for weights and activations are supported. Found "
+                f"{weight_qscheme}, {input_qscheme}")  # noqa E501
+
+        self.static_input_scales = not self.input_quant.get("is_dynamic")
+        if not current_platform.supports_mx():
+            self.emulate = True
+            logger.warning_once(
+                "The current platform does not support native MXFP4 "
+                "computation. Simulated weight dequantization and activation "
+                "QDQ (quantize and dequantize) will be used, with the linear "
+                "layers computed in high precision.")
+        else:
+            self.emulate = True
+            logger.warning_once(
+                "The current platform supports native MXFP4 "
+                "computation, but kernels are not yet integrated in vLLM. "
+                "Simulated weight dequantization and activation "
+                "QDQ (quantize and dequantize) will be used, with the linear "
+                "layers computed in high precision.")
+
+    def create_weights(self, layer: torch.nn.Module, num_experts: int,
+                       hidden_size: int, intermediate_size_per_partition: int,
+                       params_dtype: torch.dtype, **extra_weight_attrs):
+        self.num_experts = num_experts
+        # Add the quantization method used (per tensor/grouped/channel)
+        # to ensure the weight scales are loaded in properly
+        extra_weight_attrs.update(
+            {"quant_method": FusedMoeWeightScaleSupported.BLOCK.value})
+        mxfp4_block = 32
+        weight_dtype = torch.uint8
+        weight_scale_dtype = torch.uint8
+        per_tensor_fp8_act_scale_dtype = torch.bfloat16
+        self.intermediate_size_per_partition = intermediate_size_per_partition
+        intermediate_size_per_partition_after_pad = \
+            intermediate_size_per_partition
+
+        if current_platform.is_rocm():
+            intermediate_size_per_partition_after_pad = round_up(
+                intermediate_size_per_partition, 128)  # 2880 -> 2944
+        else:
+            intermediate_size_per_partition_after_pad = round_up(
+                intermediate_size_per_partition, 64)
+        # Fused gate_up_proj (column parallel)
+        w13_weight = torch.nn.Parameter(
+            torch.zeros(
+                num_experts,
+                2 * intermediate_size_per_partition_after_pad,
+                hidden_size // 2,
+                dtype=weight_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight", w13_weight)
+        set_weight_attrs(w13_weight, extra_weight_attrs)
+
+        w13_weight_scale = torch.nn.Parameter(
+            torch.zeros(
+                num_experts,
+                2 * intermediate_size_per_partition_after_pad,
+                hidden_size // mxfp4_block,
+                dtype=weight_scale_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight_scale", w13_weight_scale)
+        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
+
+        w13_bias = torch.nn.Parameter(
+            torch.zeros(
+                num_experts,
+                2 * intermediate_size_per_partition_after_pad,
+                dtype=torch.bfloat16,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_bias", w13_bias)
+        set_weight_attrs(w13_bias, extra_weight_attrs)
+
+        # down_proj (row parallel)
+        w2_weight = torch.nn.Parameter(
+            torch.zeros(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition_after_pad // 2,
+                dtype=weight_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight", w2_weight)
+        set_weight_attrs(w2_weight, extra_weight_attrs)
+
+        w2_weight_scale = torch.nn.Parameter(
+            torch.zeros(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition_after_pad // mxfp4_block,
+                dtype=weight_scale_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight_scale", w2_weight_scale)
+        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+
+        w2_bias = torch.nn.Parameter(
+            torch.zeros(
+                num_experts,
+                hidden_size,
+                dtype=torch.bfloat16,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_bias", w2_bias)
+        set_weight_attrs(w2_bias, extra_weight_attrs)
+        if self.static_input_scales:
+            w13_input_scale = torch.nn.Parameter(
+                torch.zeros(
+                    num_experts,
+                    dtype=per_tensor_fp8_act_scale_dtype,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w13_input_scale", w13_input_scale)
+            set_weight_attrs(w13_input_scale, extra_weight_attrs)
+            w2_input_scale = torch.nn.Parameter(
+                torch.zeros(
+                    num_experts,
+                    dtype=per_tensor_fp8_act_scale_dtype,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w2_input_scale", w2_input_scale)
+            set_weight_attrs(w2_input_scale, extra_weight_attrs)
+
+    def process_weights_after_loading(self, layer):
+
+        from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
+
+        w13_bias = layer.w13_bias.to(torch.float32)
+        w2_bias = layer.w2_bias.to(torch.float32)
+
+        layer.w13_bias = Parameter(w13_bias, requires_grad=False)
+        layer.w2_bias = Parameter(w2_bias, requires_grad=False)
+
+        # FIXME warp need to be adjusted based on batch size
+        # only apply to  batched mode
+        if self.moe.use_ep:
+            num_warps = 4 if envs.VLLM_MOE_DP_CHUNK_SIZE <= 512 else 8
+        else:
+            num_warps = 8
+
+        w13_weight, w13_flex, w13_scale = _swizzle_mxfp4(
+            layer.w13_weight, layer.w13_weight_scale, num_warps)
+        w2_weight, w2_flex, w2_scale = _swizzle_mxfp4(layer.w2_weight,
+                                                      layer.w2_weight_scale,
+                                                      num_warps)
+
+        self.w13_weight_triton_tensor = w13_weight
+        self.w2_weight_triton_tensor = w2_weight
+
+        # need to delete the original weights to save memory on single GPU
+        del layer.w13_weight
+        del layer.w2_weight
+        layer.w13_weight = None
+        layer.w2_weight = None
+        torch.cuda.empty_cache()
+
+        if self.static_input_scales:  # wmxfp4 a fp8 pertensor
+            if (layer.w13_input_scale is None or layer.w2_input_scale is None):
+                raise ValueError(
+                    "QuantConfig has static quantization, but found "
+                    "activation scales are None.")
+            if (not all_close_1d(layer.w13_input_scale)
+                    or not all_close_1d(layer.w2_input_scale)):
+                logger.warning_once(
+                    "Found input_scales that are not equal for "
+                    "fp8 MoE layer. Using the maximum across experts "
+                    "for each layer.")
+            # layer.w13_input_scale = torch.nn.Parameter(
+            #     layer.w13_input_scale.max(), requires_grad=False)
+            # layer.w2_input_scale = torch.nn.Parameter(
+            #     layer.w2_input_scale.max(), requires_grad=False)
+
+            layer.w13_input_scale = torch.nn.Parameter(
+                layer.w13_input_scale.max().to(torch.float32),
+                requires_grad=False)
+            layer.w2_input_scale = torch.nn.Parameter(
+                layer.w2_input_scale.max().to(torch.float32),
+                requires_grad=False)
+
+            from triton_kernels.numerics import InFlexData
+            lhs_data13 = InFlexData(scale=layer.w13_input_scale)
+            lhs_data2 = InFlexData(scale=layer.w2_input_scale)
+
+            self.w13_precision_config = PrecisionConfig(
+                weight_scale=w13_scale,
+                flex_ctx=FlexCtx(rhs_data=w13_flex, lhs_data=lhs_data13))
+            self.w2_precision_config = PrecisionConfig(weight_scale=w2_scale,
+                                                       flex_ctx=FlexCtx(
+                                                           rhs_data=w2_flex,
+                                                           lhs_data=lhs_data2))
+        else:
+            self.w13_precision_config = PrecisionConfig(
+                weight_scale=w13_scale, flex_ctx=FlexCtx(rhs_data=w13_flex))
+            self.w2_precision_config = PrecisionConfig(
+                weight_scale=w2_scale, flex_ctx=FlexCtx(rhs_data=w2_flex))
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        top_k: int,
+        renormalize: bool,
+        use_grouped_topk: bool = False,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
+        e_score_correction_bias: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
+        activation: str = "silu",
+        enable_eplb: bool = False,
+        expert_load_view: Optional[torch.Tensor] = None,
+        logical_to_physical_map: Optional[torch.Tensor] = None,
+        logical_replica_count: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        assert self.fused_experts is None
+
+        if enable_eplb:
+            raise NotImplementedError(
+                "EPLB not supported for `QuarkW4MXFp4MoEMethod_OSS` yet.")
+
+        from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (  # noqa: E501
+            triton_kernel_moe_forward)
+
+        return triton_kernel_moe_forward(
+            hidden_states=x,
+            w1=self.w13_weight_triton_tensor,
+            w2=self.w2_weight_triton_tensor,
+            gating_output=router_logits,
+            topk=top_k,
+            renormalize=renormalize,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
+            w1_bias=layer.w13_bias,
+            w2_bias=layer.w2_bias,
+            w1_precision=self.w13_precision_config,
+            w2_precision=self.w2_precision_config,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+        )

@@ -864,7 +864,8 @@ class FusedMoE(CustomOp):
         self.global_num_experts = num_experts + num_redundant_experts
 
         # we are padding globally so EP buffer allocation works
-        if quant_config and quant_config.get_name() == "mxfp4":
+        self._is_mxfp4 = self.is_mxfp4_quant(quant_config=quant_config)
+        if self._is_mxfp4:
             from vllm.model_executor.layers.quantization.mxfp4 import (
                 Mxfp4Backend, get_mxfp4_backend)
             current_mxfp4_backend = get_mxfp4_backend()
@@ -1271,16 +1272,47 @@ class FusedMoE(CustomOp):
                       expert_id: int,
                       return_success: bool = False) -> Optional[bool]:
 
-        if self.quant_config and self.quant_config.get_name() == "mxfp4":
-            # (FIXME) for gpt-oss all experts are combined
-            if "bias" in weight_name:
-                dim1 = loaded_weight.shape[1]
-                param.data[:, :dim1].copy_(loaded_weight)
-            else:
-                dim1 = loaded_weight.shape[1]
-                dim2 = loaded_weight.shape[2]
-                param.data[:, :dim1, :dim2].copy_(loaded_weight)
-            return True if return_success else None
+        if self._is_mxfp4:
+            if self.quant_config.get_name() == "mxfp4":
+                # (FIXME) for gpt-oss all experts are combined
+                if "bias" in weight_name:
+                    dim1 = loaded_weight.shape[1]
+                    param.data[:, :dim1].copy_(loaded_weight)
+                else:
+                    dim1 = loaded_weight.shape[1]
+                    dim2 = loaded_weight.shape[2]
+                    param.data[:, :dim1, :dim2].copy_(loaded_weight)
+                return True if return_success else None
+            elif self.quant_config.get_name() == "quark":
+                # When self._is_mxfp4 is true, model_dtype must be gpt_oss
+                expert_data = param.data[expert_id]
+                if "input_scale" in weight_name:
+                    assert loaded_weight.numel() == 1
+                    expert_data.data.copy_(loaded_weight)
+                    return True if return_success else None
+
+                shard_dim = 0 if shard_id in (
+                    "w1", "w3") or "bias" in weight_name else 1
+                if shard_id == "w2":
+                    shard_size = loaded_weight.shape[shard_dim] // self.tp_size
+                    loaded_weight = loaded_weight.narrow(
+                        shard_dim, shard_size * self.tp_rank, shard_size)
+                    if "bias" in weight_name:
+                        dim1 = loaded_weight.shape[0]
+                        expert_data.data[:dim1].copy_(loaded_weight)
+                    else:
+                        dim1 = loaded_weight.shape[0]
+                        dim2 = loaded_weight.shape[1]
+                        expert_data.data[:dim1, :dim2].copy_(loaded_weight)
+                elif shard_id is None:
+                    if "bias" in weight_name:
+                        dim1 = loaded_weight.shape[0]
+                        expert_data.data[:dim1].copy_(loaded_weight)
+                    else:
+                        dim1 = loaded_weight.shape[0]
+                        dim2 = loaded_weight.shape[1]
+                        expert_data.data[:dim1, :dim2].copy_(loaded_weight)
+                return True if return_success else None
 
         expert_id = self._map_global_expert_id_to_local_expert_id(expert_id)
         if expert_id == -1:
@@ -2002,6 +2034,22 @@ class FusedMoE(CustomOp):
         s += f", scoring_func='{self.scoring_func}', activation='{self.activation}'"  # noqa: E501
 
         return s
+
+    def is_mxfp4_quant(self,
+                       quant_config: Optional[QuantizationConfig] = None
+                       ) -> bool:
+        name = quant_config.get_name() if quant_config else None
+        if name == "mxfp4":
+            return True
+        elif name == "quark":
+            from vllm.config import get_current_vllm_config
+            vllm_config = get_current_vllm_config()
+            model_type = getattr(vllm_config.model_config.hf_config,
+                                 "model_type", None)
+            # Padding for triton kernel only is enabled when it is gpt_oss
+            return quant_config.is_global_mxfp4 and model_type == "gpt_oss"
+        else:
+            return False
 
 
 def moe_forward(

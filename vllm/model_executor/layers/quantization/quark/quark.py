@@ -41,6 +41,17 @@ class QuarkConfig(QuantizationConfig):
         self.kv_cache_group = kv_cache_group
         self.kv_cache_config = kv_cache_config
         self.pack_method = pack_method
+        self._is_global_mxfp4()
+
+    def _is_global_mxfp4(self):
+        # Check if it is MXFP4 to determine if pre-padding should be applied.
+        # This must be created during the initialization of moe.
+        global_quant_config = cast(
+            dict[str, Any], self.quant_config.get("global_quant_config"))
+        weight_quant = global_quant_config.get("weight")
+        input_quant = global_quant_config.get("input_tensors")
+        self.is_global_mxfp4 = self._is_mx_fp4(weight_quant=weight_quant,
+                                               input_quant=input_quant)
 
     def get_linear_method(self) -> "QuarkLinearMethod":
         return QuarkLinearMethod(self)
@@ -212,44 +223,41 @@ class QuarkConfig(QuantizationConfig):
 
     def _is_mx_fp4(self, weight_quant: Optional[dict[str, Any]],
                    input_quant: Optional[dict[str, Any]]) -> bool:
-        # Confirm weights and input quantized.
-        if weight_quant is None or input_quant is None:
+        # Confirm weights quantized.
+        if weight_quant is None:
             logger.debug("Quark model is not in MX-FP4 format: "
-                         "weight_quant or input_quant not set")
+                         "weight_quant not set")
             return False
 
-        # Input and weight dtype needs to be fp4.
-        if weight_quant.get("dtype") != "fp4" or input_quant.get(
-                "dtype") != "fp4":
-            logger.debug("Quark model is not in MX-FP4 format: dtype not fp4")
+        # Weight dtype needs to be fp4.
+        if weight_quant.get("dtype") != "fp4":
+            logger.debug(
+                "Quark model is not in MX-FP4 format: weight dtype not fp4")
             return False
 
-        # Input and weight qscheme needs to be per group.
-        if weight_quant.get("qscheme") != "per_group" or input_quant.get(
-                "qscheme") != "per_group":
+        # Weight qscheme needs to be per group.
+        if weight_quant.get("qscheme") != "per_group":
             logger.debug("Quark model is not in MX-FP4 format: not per_group")
             return False
 
         # Input and weight group size needs to be 32.
-        if weight_quant.get("group_size") != 32 or input_quant.get(
-                "group_size") != 32:
+        if weight_quant.get("group_size") != 32:
             logger.debug(
                 "Quark model is not in MX-FP4 format: not group_size=32")
             return False
 
-        # Activations need to use dynamic quantization.
-        if input_quant.get("is_dynamic") is False:
-            logger.debug(
-                "Quark model is not in MX-FP4 format: not activation dynamic")
-            return False
-
         # Activations and weight scales need to be in e8m0 format.
-        if weight_quant.get("scale_format") != "e8m0" or input_quant.get(
-                "scale_format") != "e8m0":
+        if weight_quant.get("scale_format") != "e8m0":
             logger.debug(
                 "Quark model is not in MX-FP4 format: not scale_format e8m0")
             return False
 
+        # Input dtype needs to be one of {'fp4', 'fp6_e2m3', 'fp8_e4m3'}.
+        if input_quant.get("dtype") not in ("fp4", "fp6_e2m3", "fp8_e4m3"):
+            logger.debug(
+                "Quark model is not in MX-FP4 format: expected input dtype "
+                "to be one of {'fp4', 'fp6_e2m3', 'fp8_e4m3'}")
+            return False
         return True
 
     def _find_matched_config(self, layer_name: str,
