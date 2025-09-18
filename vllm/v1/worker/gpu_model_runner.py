@@ -2472,6 +2472,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     target_token_ids=target_token_ids,
                     target_positions=target_positions,
                     next_token_ids=next_token_ids,
+                    last_token_indices=token_indices_to_sample,
                     common_attn_metadata=common_attn_metadata,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_descriptor,

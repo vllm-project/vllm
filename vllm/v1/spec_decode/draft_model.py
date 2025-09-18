@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import replace
-from typing import Any
+from typing import Any, Optional
 
 import torch
 
@@ -12,8 +12,7 @@ from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.attention.backends.tree_attn import TreeAttentionMetadata
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
-from vllm.v1.spec_decode.eagle import (PADDING_SLOT_ID, SpecDecodeBaseProposer,
-                                       drafter_prepare_inputs)
+from vllm.v1.spec_decode.eagle import PADDING_SLOT_ID, SpecDecodeBaseProposer
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 
@@ -65,13 +64,15 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         target_positions: torch.Tensor,
         # [batch_size]
         next_token_ids: torch.Tensor,
+        last_token_indices: Optional[torch.Tensor],
         common_attn_metadata: CommonAttentionMetadata,
         cudagraph_runtime_mode: CUDAGraphMode,
         batch_descriptor: BatchDescriptor,
     ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
-        last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
+        if last_token_indices is None:
+            last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
 
         self.input_ids[:num_tokens] = target_token_ids
 
@@ -241,17 +242,3 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
             target_attn_layer_names)
         self.attn_layer_names = list(draft_attn_layer_names)
-
-    # Copied from eagle.py
-    def prepare_inputs(
-        self,
-        common_attn_metadata: CommonAttentionMetadata,
-        sampled_token_ids: list[list[int]],
-        num_draft_tokens: list[int],
-    ) -> tuple[CommonAttentionMetadata, torch.Tensor]:
-        return drafter_prepare_inputs(
-            self.token_arange_np,
-            common_attn_metadata,
-            sampled_token_ids,
-            num_draft_tokens,
-        )
