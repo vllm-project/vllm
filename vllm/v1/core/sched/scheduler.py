@@ -1374,9 +1374,9 @@ class Scheduler(SchedulerInterface):
                     continue
 
                 marked_invalid_block = True
-                total_affected_tokens += req_num_computed_tokens
                 request.num_computed_tokens = idx * self.block_size
-                total_affected_tokens -= request.num_computed_tokens
+                total_affected_tokens += (req_num_computed_tokens -
+                                          request.num_computed_tokens)
 
             if is_affected:
                 if not marked_invalid_block:
