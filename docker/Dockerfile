@@ -212,12 +212,12 @@ COPY --chmod=755 tools/setup_sccache.sh /usr/local/bin/setup_sccache.sh
 # if USE_SCCACHE is set, use sccache to speed up compilation
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=.git,target=.git \
-    /usr/local/bin/setup_sccache.sh && \
+    /usr/local/bin/setup_sccache.sh \
     if [ "$USE_SCCACHE" = "1" ]; then \
       export CMAKE_BUILD_TYPE=Release \
       VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" \
       VLLM_MAIN_CUDA_VERSION="${VLLM_MAIN_CUDA_VERSION}" \
-      VLLM_DOCKER_BUILD_CONTEXT=1 && \
+      VLLM_DOCKER_BUILD_CONTEXT=1 \
       python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38; \
       sccache --show-stats; \
     fi
@@ -232,8 +232,8 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
         # Clean any existing CMake artifacts
         rm -rf .deps && \
         mkdir -p .deps && \
-        export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" && \
-        export VLLM_DOCKER_BUILD_CONTEXT=1 && \
+        export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" \
+        export VLLM_DOCKER_BUILD_CONTEXT=1 \
         python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38; \
     fi
 
@@ -305,16 +305,16 @@ BASH
 
 # Install DeepGEMM from source
 ARG DEEPGEMM_GIT_REF
-COPY tools/install_deepgemm.sh /tmp/install_deepgemm.sh
+COPY --chmod=755 tools/install_deepgemm.sh /tmp/install_deepgemm.sh
 RUN --mount=type=cache,target=/root/.cache/uv \
     VLLM_DOCKER_BUILD_CONTEXT=1 /tmp/install_deepgemm.sh --cuda-version "${CUDA_VERSION}" ${DEEPGEMM_GIT_REF:+--ref "$DEEPGEMM_GIT_REF"} --wheel-dir /tmp/deepgemm/dist
 
 # Install EP kernels(pplx-kernels and DeepEP)
-COPY tools/ep_kernels/install_python_libraries.sh install_python_libraries.sh
+COPY --chmod=755 tools/ep_kernels/install_python_libraries.sh install_python_libraries.sh
 ENV CUDA_HOME=/usr/local/cuda
 RUN --mount=type=cache,target=/root/.cache/uv \
     export TORCH_CUDA_ARCH_LIST='9.0a+PTX' \
-    && bash install_python_libraries.sh /tmp/ep_kernels_workspace wheel
+    ./install_python_libraries.sh /tmp/ep_kernels_workspace wheel
 
 #################### EXTENSION Build IMAGE ####################
 
