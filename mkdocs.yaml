@@ -79,6 +79,7 @@ plugins:
         - "re:vllm\\._.*"  # Internal modules
         - "vllm.third_party"
         - "vllm.vllm_flash_attn"
+        - !ENV [API_AUTONAV_EXCLUDE, ""]
   - mkdocstrings:
       handlers:
         python:
