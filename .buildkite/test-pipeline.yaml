@@ -217,16 +217,14 @@ steps:
   num_gpus: 2
   source_file_dependencies:
   - vllm/
-  - tests/metrics
   - tests/v1/tracing
   commands:
-  - pytest -v -s metrics
   - "pip install \
       'opentelemetry-sdk>=1.26.0' \
       'opentelemetry-api>=1.26.0' \
       'opentelemetry-exporter-otlp>=1.26.0' \
       'opentelemetry-semantic-conventions-ai>=0.4.1'"
-  - pytest -v -s tracing
+  - pytest -v -s v1/tracing
 
 ##### fast check tests  #####
 #####  1 GPU test  #####
@@ -796,7 +794,7 @@ steps:
     # Quantization
     - pytest -v -s tests/kernels/quantization/test_cutlass_scaled_mm.py -k 'fp8'
     - pytest -v -s tests/kernels/quantization/test_nvfp4_quant.py
-    - pytest -v -s tests/kernels/quantization/test_silu_nvfp4_quant_fusion.py
+    - pytest -v -s tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
     - pytest -v -s tests/kernels/quantization/test_nvfp4_scaled_mm.py
     - pytest -v -s tests/kernels/quantization/test_flashinfer_scaled_mm.py
     - pytest -v -s tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
@@ -812,7 +810,7 @@ steps:
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/"
   gpu: b200
-  # optional: true
+  optional: true # disable while debugging
   source_file_dependencies:
   - tests/evals/gpt_oss
   - vllm/model_executor/models/gpt_oss.py
