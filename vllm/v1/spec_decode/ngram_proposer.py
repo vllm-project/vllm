@@ -86,9 +86,10 @@ class NgramProposer:
             # may slow down due to overhead.
             total_tokens = np.sum(num_tokens_no_spec)
             if total_tokens >= 8192:
-                set_num_threads(
-                    max(1, min(self.num_numba_thread_available,
-                            num_ngram_requests)))
+                final_num_threads = max(
+                    1, min(self.num_numba_thread_available,
+                           num_ngram_requests))
+                set_num_threads(final_num_threads)
             else:
                 set_num_threads(1)
 
@@ -97,7 +98,7 @@ class NgramProposer:
                                 self.max_model_len, self.k,
                                 self.valid_ngram_draft,
                                 self.valid_ngram_num_drafts)
-            
+
             # Restore original number of threads.
             set_num_threads(original_num_numba_threads)
 
