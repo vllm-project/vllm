@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import Optional
 
 import numba
 import numba.types as types
@@ -130,16 +130,6 @@ class RequestState:
         # For now, only support prompt logprobs for the prompt tokens.
         needs_prompt_logprobs = sampling_params.prompt_logprobs is not None
         self.needs_prompt_logprobs[req_idx] = needs_prompt_logprobs
-
-    def append_token_ids(
-        self,
-        req_idx: int,
-        token_ids: Union[list[int], np.ndarray],
-    ) -> None:
-        start_idx = self.num_tokens[req_idx]
-        end_idx = start_idx + len(token_ids)
-        self.token_ids[req_idx, start_idx:end_idx] = token_ids
-        self.num_tokens[req_idx] = end_idx
 
     def remove_request(self, req_id: str) -> None:
         req_idx = self.req_id_to_index.pop(req_id, None)
