@@ -1064,6 +1064,11 @@ class LLMEngine:
                 if seq_group_meta.do_sample:
                     self.output_processor.process_outputs(
                         seq_group, output, is_async)
+            elif self.model_config.model_part == "middle":
+                if not is_async:
+                    seq = seq_group.first_seq
+                    seq.append_token_id(0, {0: Logprob(0.0)},
+                                            torch.zeros((self.model_config.get_hidden_size(),), device="cuda:0"))
             else:
                 seq_group.pooled_data = output[0].data
             if seq_group.is_finished():
@@ -1295,85 +1300,85 @@ class LLMEngine:
             seq.append_token_id(token, {token: Logprob(0.0)},
                                         )
     
-    def advance_to_next_step_dec_block(self,
-                             output: Union[SamplerOutput, PoolerOutput],
-                             seq_group_metadata_list: List[SequenceGroupMetadata],
-                             scheduled_seq_groups: List[ScheduledSequenceGroup]) -> None:
-        """Advance the sequences to the next step with the given data.
-        This is used for middle block execution, where the model output is
-        already available and we need to append it to the sequences.
-        """
-        # if not isinstance(token, int):
-        #     raise TypeError(
-        #         f"token must be an int, got {type(token)}")
+    # def advance_to_next_step_dec_block(self,
+    #                          output: Union[SamplerOutput, PoolerOutput],
+    #                          seq_group_metadata_list: List[SequenceGroupMetadata],
+    #                          scheduled_seq_groups: List[ScheduledSequenceGroup]) -> None:
+    #     """Advance the sequences to the next step with the given data.
+    #     This is used for middle block execution, where the model output is
+    #     already available and we need to append it to the sequences.
+    #     """
+    #     # if not isinstance(token, int):
+    #     #     raise TypeError(
+    #     #         f"token must be an int, got {type(token)}")
         
-        for seq_group_metadata, sequence_group_outputs, scheduled_seq_group in \
-            zip(seq_group_metadata_list, output, scheduled_seq_groups):
-            seq_group = scheduled_seq_group.seq_group
+    #     for seq_group_metadata, sequence_group_outputs, scheduled_seq_group in \
+    #         zip(seq_group_metadata_list, output, scheduled_seq_groups):
+    #         seq_group = scheduled_seq_group.seq_group
 
-            # Update prompt embeds using the data
-            seq = seq_group.seqs[0]
-            # seq.append_input_embeds(data)
-            # seq.data._stage = SequenceStage.DECODE
+    #         # Update prompt embeds using the data
+    #         seq = seq_group.seqs[0]
+    #         # seq.append_input_embeds(data)
+    #         # seq.data._stage = SequenceStage.DECODE
             
-            if seq_group.is_finished():
-                continue
+    #         if seq_group.is_finished():
+    #             continue
 
-            if self.scheduler_config.is_multi_step:
-                # Updates happen only if the sequence is prefill
-                self._update_num_computed_tokens_for_multi_step_prefill(
-                    seq_group, seq_group_metadata,
-                    seq_group.state.num_steps == 1)
-            else:
-                token_chunk_size = (seq_group_metadata.token_chunk_size
-                                    if seq_group_metadata.token_chunk_size
-                                    is not None else 0)
-                seq_group.update_num_computed_tokens(token_chunk_size)
-            # seq.append_token_id(token, {token: Logprob(0.0)},
-            #                             input_embeds)
-            if seq_group_metadata.do_sample and not isinstance(output, PoolerOutput):
-                assert len(sequence_group_outputs.samples) == 1, (
-                    "Async output processor expects a single sample"
-                    " (i.e sampling_params.n == 1)")
-                sample = sequence_group_outputs.samples[0]
+    #         if self.scheduler_config.is_multi_step:
+    #             # Updates happen only if the sequence is prefill
+    #             self._update_num_computed_tokens_for_multi_step_prefill(
+    #                 seq_group, seq_group_metadata,
+    #                 seq_group.state.num_steps == 1)
+    #         else:
+    #             token_chunk_size = (seq_group_metadata.token_chunk_size
+    #                                 if seq_group_metadata.token_chunk_size
+    #                                 is not None else 0)
+    #             seq_group.update_num_computed_tokens(token_chunk_size)
+    #         # seq.append_token_id(token, {token: Logprob(0.0)},
+    #         #                             input_embeds)
+    #         if seq_group_metadata.do_sample and not isinstance(output, PoolerOutput):
+    #             assert len(sequence_group_outputs.samples) == 1, (
+    #                 "Async output processor expects a single sample"
+    #                 " (i.e sampling_params.n == 1)")
+    #             sample = sequence_group_outputs.samples[0]
 
-                assert len(seq_group.seqs) == 1
-                seq = seq_group.seqs[0]
+    #             assert len(seq_group.seqs) == 1
+    #             seq = seq_group.seqs[0]
 
-                if self.scheduler_config.is_multi_step:
-                    is_prefill_append = seq.data.get_num_uncomputed_tokens(
-                    ) == 0
-                    seq.append_token_id(sample.output_token, sample.logprobs)
+    #             if self.scheduler_config.is_multi_step:
+    #                 is_prefill_append = seq.data.get_num_uncomputed_tokens(
+    #                 ) == 0
+    #                 seq.append_token_id(sample.output_token, sample.logprobs)
                                         
-                    if not is_prefill_append:
-                        seq_group.update_num_computed_tokens(1)
-                else:
-                    seq.append_token_id(sample.output_token, sample.logprobs)
-    def append_input_embed_to_next_step_dec_block(self,
-                             data: torch.Tensor,
-                             seq_group_metadata_list: List[SequenceGroupMetadata],
-                             scheduled_seq_groups: List[ScheduledSequenceGroup]) -> None:
-        """Advance the sequences to the next step with the given data.
-        This is used for middle block execution, where the model output is
-        already available and we need to append it to the sequences.
-        """
-        if not isinstance(data, torch.Tensor):
-            raise TypeError(
-                f"data must be a torch.Tensor, got {type(data)}")
-        for seq_group_metadata, scheduled_seq_group in \
-            zip(seq_group_metadata_list, scheduled_seq_groups):
-            seq_group = scheduled_seq_group.seq_group
+    #                 if not is_prefill_append:
+    #                     seq_group.update_num_computed_tokens(1)
+    #             else:
+    #                 seq.append_token_id(sample.output_token, sample.logprobs)
+    # def append_input_embed_to_next_step_dec_block(self,
+    #                          data: torch.Tensor,
+    #                          seq_group_metadata_list: List[SequenceGroupMetadata],
+    #                          scheduled_seq_groups: List[ScheduledSequenceGroup]) -> None:
+    #     """Advance the sequences to the next step with the given data.
+    #     This is used for middle block execution, where the model output is
+    #     already available and we need to append it to the sequences.
+    #     """
+    #     if not isinstance(data, torch.Tensor):
+    #         raise TypeError(
+    #             f"data must be a torch.Tensor, got {type(data)}")
+    #     for seq_group_metadata, scheduled_seq_group in \
+    #         zip(seq_group_metadata_list, scheduled_seq_groups):
+    #         seq_group = scheduled_seq_group.seq_group
 
-            # Update prompt embeds using the data
-            seq = seq_group.seqs[0]
-            # seq.append_input_embeds(data)
-            # seq.data._stage = SequenceStage.DECODE
+    #         # Update prompt embeds using the data
+    #         seq = seq_group.seqs[0]
+    #         # seq.append_input_embeds(data)
+    #         # seq.data._stage = SequenceStage.DECODE
             
-            if seq_group.is_finished():
-                continue
+    #         if seq_group.is_finished():
+    #             continue
 
         
-            seq.append_input_embeds(data)
+    #         seq.append_input_embeds(data)
     def finish_sequence_group(
         self,
         scheduled_seq_groups: List[ScheduledSequenceGroup],
@@ -1390,7 +1395,7 @@ class LLMEngine:
         for scheduler in self.scheduler:
                 scheduler.free_finished_seq_groups()
 
-    def step(self) -> List[Union[RequestOutput, PoolingRequestOutput]]:
+    def step(self, intermediate_tensors: Optional[IntermediateTensors] = None) -> List[Union[RequestOutput, PoolingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
 
         <figure markdown="span">
@@ -1532,7 +1537,7 @@ class LLMEngine:
 
             try:
                 outputs = self.model_executor.execute_model(
-                    execute_model_req=execute_model_req)
+                    execute_model_req=execute_model_req, intermediate_tensors=intermediate_tensors)
                 self._skip_scheduling_next_step = False
                 # print(f"Outputs: {outputs}")
             except InputProcessingError as e:
@@ -1590,15 +1595,20 @@ class LLMEngine:
                     "Async postprocessor expects only a single output set")
                 # print(f"Seq group metadata list: {seq_group_metadata_list}")
                 # print(f"Scheduler outputs: {scheduler_outputs}")
-                if self.model_config.model_part in ("full"):
+                if self.model_config.model_part in ("full", "decoder"):
                     self._advance_to_next_step(
                         outputs[0], seq_group_metadata_list,
                         scheduler_outputs.scheduled_seq_groups)
-                elif self.model_config.model_part in ("decoder"):
-                    self.advance_to_next_step_dec_block(
-                        outputs[0],
+                elif self.model_config.model_part in ("middle", ):
+                    self.advance_to_next_step_middle_block(
+                        torch.zeros(self.model_config.get_hidden_size(), device="cuda:0"),
                         seq_group_metadata_list,
                         scheduler_outputs.scheduled_seq_groups)
+                # elif self.model_config.model_part in ("decoder"):
+                #     self.advance_to_next_step_dec_block(
+                #         outputs[0],
+                #         seq_group_metadata_list,
+                #         scheduler_outputs.scheduled_seq_groups)
                 # else:
                 #     # For middle blocks, we need to advance the sequences
                 #     # to the next step with the given data.
@@ -1633,14 +1643,19 @@ class LLMEngine:
             logger.debug("Stopping remote worker execution loop.")
             self.model_executor.stop_remote_worker_execution_loop()
 
-        if self.model_config.model_part in ("encoder", "middle", "decoder"):
-            # If the model has middle blocks, we need to return the outputs
-            # for the middle blocks.
-            if len(ctx.output_queue) > 0:
-                # Process the outputs for the middle blocks
-                self._process_model_outputs(ctx=ctx)
-            return ctx.request_outputs, seq_group_metadata_list, scheduler_outputs.scheduled_seq_groups
-
+        # if self.model_config.model_part in ("middle",):
+        #     # If the model has middle blocks, we need to return the outputs
+        #     # for the middle blocks.
+        #     self.advance_to_next_step_middle_block(
+        #                 torch.randn(5120, device="cuda:0"),
+        #                 seq_group_metadata_list,
+        #                 scheduler_outputs.scheduled_seq_groups)
+        #     if len(ctx.output_queue) > 0:
+        #         # Process the outputs for the middle blocks
+        #         self._process_model_outputs(ctx=ctx)
+            # return ctx.request_outputs, seq_group_metadata_list, scheduler_outputs.scheduled_seq_groups
+        if self.model_config.model_part in ("middle",):
+            return outputs
         return ctx.request_outputs
 
     def _abort_and_cache_schedule(

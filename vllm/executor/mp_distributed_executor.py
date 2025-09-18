@@ -135,14 +135,15 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
             worker_monitor.close()
 
     def _driver_execute_model(
-        self, execute_model_req: Optional[ExecuteModelRequest]
+        self, execute_model_req: Optional[ExecuteModelRequest],
+        intermediate_tensors: Optional[IntermediateTensors] = None
     ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         """Run execute_model in the driver worker.
 
         Passing None will cause the driver to stop the model execution
         loop running in each of the remote workers.
         """
-        return self.driver_worker.execute_model(execute_model_req)
+        return self.driver_worker.execute_model(execute_model_req, intermediate_tensors)
 
     def _run_workers(
         self,
@@ -204,10 +205,11 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
 
     async def _driver_execute_model_async(
         self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
+        execute_model_req: Optional[ExecuteModelRequest] = None,
+        intermediate_tensors: Optional[IntermediateTensors] = None
     ) -> Union[List[SamplerOutput], IntermediateTensors]:
         if not self.tp_driver_workers:
-            return await self.driver_exec_model(execute_model_req)
+            return await self.driver_exec_model(execute_model_req, intermediate_tensors)
 
         if self.pp_locks is None:
             # This locks each pipeline parallel stage so multiple virtual
@@ -230,7 +232,8 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
                 asyncio.create_task(
                     _run_task_with_lock(driver_worker.execute_method_async,
                                         self.pp_locks[pp_rank],
-                                        "execute_model", execute_model_req)))
+                                        "execute_model", execute_model_req,
+                                        intermediate_tensors)))
         results = await asyncio.gather(*tasks)
 
         # Only the last PP stage has the final results.
