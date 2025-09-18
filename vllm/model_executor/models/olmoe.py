@@ -15,6 +15,7 @@
 """Inference-only OLMoE model compatible with HuggingFace weights."""
 from collections.abc import Iterable
 from functools import partial
+from itertools import islice
 from typing import Any, Optional, Union
 
 import torch
@@ -314,7 +315,7 @@ class OlmoeModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in self.layers[self.start_layer:self.end_layer]:
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
@@ -449,7 +450,8 @@ class OlmoeForCausalLM(nn.Module, SupportsPP):
                                 prefix=maybe_prefix(prefix, "model"))
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
-                                      quant_config=quant_config)
+                                      quant_config=quant_config,
+                                      prefix=maybe_prefix(prefix, "lm_head"))
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
         self.make_empty_intermediate_tensors = (

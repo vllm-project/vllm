@@ -48,7 +48,7 @@ uv pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VE
 
 #### Install the latest code
 
-LLM inference is a fast-evolving field, and the latest code may contain bug fixes, performance improvements, and new features that are not released yet. To allow users to try the latest code without waiting for the next release, vLLM provides wheels for Linux running on a x86 platform with CUDA 12 for every commit since `v0.5.3`.
+LLM inference is a fast-evolving field, and the latest code may contain bug fixes, performance improvements, and new features that are not released yet. To allow users to try the latest code without waiting for the next release, vLLM provides wheels for Linux running on an x86 platform with CUDA 12 for every commit since `v0.5.3`.
 
 ```bash
 uv pip install -U vllm \
@@ -168,11 +168,23 @@ There are scenarios where the PyTorch dependency cannot be easily installed with
 To build vLLM using an existing PyTorch installation:
 
 ```bash
+# install PyTorch first, either from PyPI or from source
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
 python use_existing_torch.py
 uv pip install -r requirements/build.txt
 uv pip install --no-build-isolation -e .
+```
+
+Alternatively: if you are exclusively using `uv` to create and manage virtual environments, it has [a unique mechanism](https://docs.astral.sh/uv/concepts/projects/config/#disabling-build-isolation)
+for disabling build isolation for specific packages. vLLM can leverage this mechanism to specify `torch` as the package to disable build isolation for:
+
+```bash
+# install PyTorch first, either from PyPI or from source
+git clone https://github.com/vllm-project/vllm.git
+cd vllm
+# pip install -e . does not work directly, only uv can do this
+uv pip install -e .
 ```
 
 ##### Use the local cutlass for compilation

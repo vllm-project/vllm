@@ -507,8 +507,10 @@ def merge_multimodal_embeddings(
         This updates ``inputs_embeds`` in place.
     """
     if isinstance(placeholder_token_id, list):
-        placeholder_token_id = torch.tensor(placeholder_token_id,
-                                            device=input_ids.device)
+        placeholder_token_id = torch.tensor(
+            placeholder_token_id,
+            pin_memory=is_pin_memory_available()).to(device=input_ids.device,
+                                                     non_blocking=True)
         return _merge_multimodal_embeddings(
             inputs_embeds,
             torch.isin(input_ids, placeholder_token_id),
@@ -759,3 +761,10 @@ def fast_topk(values: torch.Tensor, topk: int,
     else:
         # Use topk for efficiency with larger k values
         return torch.topk(values, topk, dim=dim)
+
+
+def get_model_hidden_size(hf_config: PretrainedConfig) -> int:
+    if hasattr(hf_config, "hidden_size"):
+        return hf_config.hidden_size
+    text_config = hf_config.get_text_config()
+    return text_config.hidden_size

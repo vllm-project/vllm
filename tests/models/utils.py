@@ -3,7 +3,8 @@
 
 import warnings
 from collections.abc import Sequence
-from typing import Any, NamedTuple, Optional, Union
+from dataclasses import dataclass
+from typing import Any, Optional, Union
 
 import torch
 import torch.nn.functional as F
@@ -293,6 +294,8 @@ def build_model_context(
         limit_mm_per_prompt=limit_mm_per_prompt,
         mm_processor_cache_gb=mm_processor_cache_gb,
         hf_overrides=model_info.hf_overrides,
+        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        enforce_eager=model_info.enforce_eager,
         **model_config_kwargs,
     )
     return InputContext(model_config)
@@ -339,38 +342,53 @@ def softmax(data):
         return F.softmax(data, dim=-1)
 
 
-class EmbedModelInfo(NamedTuple):
+@dataclass
+class ModelInfo:
     name: str
-    is_matryoshka: bool = False
-    matryoshka_dimensions: Optional[list[int]] = None
     architecture: str = ""
     dtype: str = "auto"
+    hf_dtype: str = "float32"
+    hf_overrides: Optional[dict[str, Any]] = None
     default_pooling_type: str = ""
     enable_test: bool = True
 
 
+@dataclass
+class EmbedModelInfo(ModelInfo):
+    mteb_score: Optional[float] = None
+    is_matryoshka: bool = False
+    matryoshka_dimensions: Optional[list[int]] = None
+
+
+@dataclass
 class CLSPoolingEmbedModelInfo(EmbedModelInfo):
     default_pooling_type: str = "CLS"
 
 
+@dataclass
 class LASTPoolingEmbedModelInfo(EmbedModelInfo):
     default_pooling_type: str = "LAST"
 
 
-class RerankModelInfo(NamedTuple):
-    name: str
-    architecture: str = ""
-    dtype: str = "auto"
-    default_pooling_type: str = ""
-    enable_test: bool = True
+@dataclass
+class RerankModelInfo(ModelInfo):
+    mteb_score: Optional[float] = None
 
 
+@dataclass
 class CLSPoolingRerankModelInfo(RerankModelInfo):
     default_pooling_type: str = "CLS"
 
 
+@dataclass
 class LASTPoolingRerankModelInfo(RerankModelInfo):
     default_pooling_type: str = "LAST"
+
+
+@dataclass
+class GenerateModelInfo(ModelInfo):
+    hf_dtype: str = "auto"
+    hf_ppl: Optional[float] = None
 
 
 def dummy_hf_overrides(
@@ -378,6 +396,7 @@ def dummy_hf_overrides(
     *,
     model_arch: str = "",
     exist_overrides: Optional[dict[str, Any]] = None,
+    use_original_num_layers: bool = False,
 ) -> PretrainedConfig:
     """
     Dummy HF overrides function used to create dummy model
@@ -394,10 +413,18 @@ def dummy_hf_overrides(
 
     # we use three layers for Gemma-3n to check
     # both normal layer and kv_shared_layer
-    num_hidden_layers = (3 if model_arch == "Gemma3nForConditionalGeneration"
-                         else 1)
+    if use_original_num_layers:
+        # Use the original number of layers from the config
+        num_layers = getattr(text_config, 'num_layers', 1)
+        num_hidden_layers = getattr(text_config, 'num_hidden_layers', 1)
+    else:
+        # Use minimal layers for testing
+        num_layers = 1
+        num_hidden_layers = (3 if model_arch
+                             == "Gemma3nForConditionalGeneration" else 1)
+
     text_config.update({
-        "num_layers": 1,
+        "num_layers": num_layers,
         "num_hidden_layers": num_hidden_layers,
         "num_experts": num_experts,
         "num_experts_per_tok": 2,

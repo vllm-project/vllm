@@ -24,6 +24,7 @@
 # limitations under the License.
 """Inference-only LLaMA model compatible with HuggingFace weights."""
 from collections.abc import Iterable
+from itertools import islice
 from typing import Any, Optional, Union
 
 import torch
@@ -31,6 +32,7 @@ from torch import nn
 from transformers import LlamaConfig
 
 from vllm.attention import Attention, AttentionType
+from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -169,11 +171,29 @@ class LlamaAttention(nn.Module):
 
         sliding_window = None
         if layer_types := getattr(config, "layer_types", None):
-            is_sliding = layer_types[layer_idx] == "sliding_attention"
+            # Fix for Eagle3 compatibility:
+            # for draft models, subtract target layer count
+            # to get draft-relative layer index starting from 0
+            if hasattr(config, 'target_layer_count'):
+                # This is a draft model,
+                # adjust layer_idx to be relative to draft layers
+                effective_layer_idx = layer_idx - config.target_layer_count
+            else:
+                # This is a target model, use layer_idx directly
+                effective_layer_idx = layer_idx
+            assert effective_layer_idx < len(layer_types), \
+                f"effective_layer_idx: {effective_layer_idx} \
+                is out of bounds for layer_types: {layer_types}"
+
+            is_sliding = layer_types[
+                effective_layer_idx] == "sliding_attention"
             if is_sliding:
                 sliding_window = config.sliding_window
 
-        self.attn = Attention(
+        attn_cls = (EncoderOnlyAttention
+                    if attn_type == AttentionType.ENCODER_ONLY else Attention)
+
+        self.attn = attn_cls(
             self.num_heads,
             self.head_dim,
             self.scaling,
@@ -349,7 +369,7 @@ class LlamaModel(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
-        self.aux_hidden_state_layers: tuple[int] = tuple()
+        self.aux_hidden_state_layers = tuple[int, ...]()
 
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
@@ -379,7 +399,7 @@ class LlamaModel(nn.Module):
 
         aux_hidden_states = []
         for idx, layer in enumerate(
-                self.layers[self.start_layer:self.end_layer]):
+                islice(self.layers, self.start_layer, self.end_layer)):
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states + residual)
             hidden_states, residual = layer(positions, hidden_states, residual)
@@ -549,10 +569,10 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
-    def set_aux_hidden_state_layers(self, layers: tuple[int]) -> None:
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.model.aux_hidden_state_layers = layers
 
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int]:
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
         num_layers = len(self.model.layers)
         return (2, num_layers // 2, num_layers - 3)
 
@@ -606,9 +626,8 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         loaded_weight: torch.Tensor,
     ) -> tuple[str, torch.Tensor]:
 
-        def permute(w: torch.Tensor, n_heads: int):
+        def permute(w: torch.Tensor, n_heads: int, attn_out: int):
             attn_in = self.config.head_dim * n_heads
-            attn_out = self.config.hidden_size
 
             return w.view(n_heads, attn_in // n_heads // 2, 2,
                           attn_out).transpose(1, 2).reshape(attn_in, attn_out)
@@ -617,12 +636,24 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         modules = name.split(".")
 
         # rotary embeds should be sliced
+        # If using quantized model in mistral format,
+        # quantization scales (qscale_weight) also need to be sliced
         if "wk" in modules and modules[-1] == "weight":
             loaded_weight = permute(loaded_weight,
-                                    self.config.num_key_value_heads)
+                                    self.config.num_key_value_heads,
+                                    self.config.hidden_size)
+        elif "wk" in modules and modules[
+                -1] == "qscale_weight" and loaded_weight.numel() > 1:
+            loaded_weight = permute(loaded_weight,
+                                    self.config.num_key_value_heads, 1)
         elif "wq" in modules and modules[-1] == "weight":
             loaded_weight = permute(loaded_weight,
-                                    self.config.num_attention_heads)
+                                    self.config.num_attention_heads,
+                                    self.config.hidden_size)
+        elif "wq" in modules and modules[
+                -1] == "qscale_weight" and loaded_weight.numel() > 1:
+            loaded_weight = permute(loaded_weight,
+                                    self.config.num_attention_heads, 1)
 
         num_modules = len(modules)
         for i in range(num_modules):

@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
 import torch.distributed as dist
 
+from vllm.distributed import get_dp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.utils import has_deep_ep, has_pplx
@@ -12,11 +13,6 @@ from vllm.utils import has_deep_ep, has_pplx
 from .base_device_communicator import All2AllManagerBase, Cache
 
 logger = init_logger(__name__)
-
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
-else:
-    FusedMoE = None
 
 
 class NaiveAll2AllManager(All2AllManagerBase):
@@ -68,6 +64,44 @@ class NaiveAll2AllManager(All2AllManagerBase):
 
         all_hidden_states = self.dp_group.all_reduce(hidden_states)
         hidden_states = all_hidden_states[start:end, :]
+        return hidden_states
+
+    def destroy(self):
+        pass
+
+
+class AgRsAll2AllManager(All2AllManagerBase):
+    """
+    An implementation of all2all communication based on
+    all-gather (dispatch) and reduce-scatter (combine).
+    """
+
+    def __init__(self, cpu_group):
+        super().__init__(cpu_group)
+
+    def dispatch(self, hidden_states: torch.Tensor,
+                 router_logits: torch.Tensor):
+        """
+        Gather hidden_states and router_logits from all dp ranks.
+        """
+        sizes = get_forward_context(
+        ).dp_metadata.get_chunk_sizes_across_dp_rank()
+        hidden_states, router_logits = get_dp_group().all_gatherv(
+            [hidden_states, router_logits],
+            dim=0,
+            sizes=sizes,
+        )
+        return hidden_states, router_logits
+
+    def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """
+        Reduce-scatter hidden_states across all dp ranks.
+        """
+        sizes = get_forward_context(
+        ).dp_metadata.get_chunk_sizes_across_dp_rank()
+        hidden_states = get_dp_group().reduce_scatterv(hidden_states,
+                                                       dim=0,
+                                                       sizes=sizes)
         return hidden_states
 
     def destroy(self):
@@ -256,9 +290,4 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         logger.debug("DeepEP all2all args %s", buffer_kwargs)
         handle: deep_ep.Buffer = self.handle_cache.get_or_create(
             buffer_kwargs, deep_ep.Buffer)
-        # It is dangerous to set num sms outside this function. num_sms is not
-        # a part of the hash-key that identifies this object. If we are in a
-        # situation where we make objects with different num_sms, the hash key
-        # in get_or_create must be updated.
-        handle.set_num_sms(self.num_sms)
         return handle

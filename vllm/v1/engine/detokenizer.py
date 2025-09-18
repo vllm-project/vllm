@@ -121,12 +121,9 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
                     self.output_token_ids) <= self.min_tokens:
                 stop_check_offset = len(self.output_text)
 
-        if stop_terminated:
-            if skipped_stop_token_id is not None:
-                # Cleanup after skipping detokenization.
-                self.token_ids.append(skipped_stop_token_id)
-            # Stop token triggered; skip stop string check.
-            return None
+        if skipped_stop_token_id is not None:
+            # Cleanup after skipping detokenization.
+            self.token_ids.append(skipped_stop_token_id)
 
         # 2) Evaluate stop strings.
         stop_string = None
@@ -233,8 +230,13 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
     def _protected_step(self, next_token_id: int) -> Optional[str]:
         try:
             token = self.stream.step(self.tokenizer, next_token_id)
+        except OverflowError:
+            # Handle rare observed overflow, still to be diagnosed.
+            # See https://github.com/vllm-project/vllm/issues/21951.
+            logger.exception("Encountered invalid token id: %d", next_token_id)
+            token = None
         except Exception as e:
-            if str(e) != INVALID_PREFIX_ERR_MSG:
+            if not str(e).startswith(INVALID_PREFIX_ERR_MSG):
                 raise e
             # Recover from edge case where tokenizer can produce non-monotonic,
             # invalid UTF-8 output, which breaks the internal state of
@@ -243,7 +245,8 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
             logger.warning(
                 "Encountered invalid prefix detokenization error"
                 " for request %s, resetting decode stream.", self.request_id)
-            self.stream = DecodeStream(self.skip_special_tokens)
+            self.stream = DecodeStream(
+                skip_special_tokens=self.skip_special_tokens)
             token = self.stream.step(self.tokenizer, next_token_id)
         return token
 

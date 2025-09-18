@@ -271,7 +271,7 @@ def split_graph(graph: fx.GraphModule,
         outputs.append(
             SplitItem(name, graph_id, (graph_id in split_op_graphs), module))
 
-    # sort by intetger graph_id, rather than string name
+    # sort by integer graph_id, rather than string name
     outputs.sort(key=lambda x: x.graph_id)
 
     return split_gm, outputs
@@ -294,13 +294,12 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
 
     def __init__(self, module: torch.fx.GraphModule,
                  compile_submod_names: list[str], vllm_config: VllmConfig,
-                 graph_pool, vllm_backend: "VllmBackend"):
+                 vllm_backend: "VllmBackend"):
         super().__init__(module)
         from torch._guards import detect_fake_mode
         self.fake_mode = detect_fake_mode()
         self.compile_submod_names = compile_submod_names
         self.compilation_config = vllm_config.compilation_config
-        self.graph_pool = graph_pool
         self.vllm_config = vllm_config
         self.vllm_backend = vllm_backend
         # When True, it annoyingly dumps the torch.fx.Graph on errors.
@@ -359,7 +358,6 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                     runnable=piecewise_backend,
                     vllm_config=self.vllm_config,
                     runtime_mode=CUDAGraphMode.PIECEWISE,
-                    graph_pool=self.graph_pool,
                     cudagraph_options=CUDAGraphOptions(
                         debug_log_enable=piecewise_backend.is_first_graph,
                         gc_disable=not piecewise_backend.is_first_graph,
@@ -405,7 +403,6 @@ class VllmBackend:
 
     vllm_config: VllmConfig
     compilation_config: CompilationConfig
-    graph_pool: Any
     _called: bool = False
     # the graph we compiled
     graph: fx.GraphModule
@@ -427,18 +424,11 @@ class VllmBackend:
 
         # if the model is initialized with a non-empty prefix,
         # then usually it's enough to use that prefix,
-        # e.g. launguage_model, vision_model, etc.
+        # e.g. language_model, vision_model, etc.
         # when multiple parts are initialized as independent
         # models, we need to use the model_tag to distinguish
         # them, e.g. backbone (default), eagle_head, etc.
         self.prefix = prefix or model_tag
-
-        global_graph_pool = current_platform.get_global_graph_pool()
-
-        # TODO: in the future, if we want to use multiple
-        # streams, it might not be safe to share a global pool.
-        # only investigate this when we use multiple streams
-        self.graph_pool = global_graph_pool
 
         # Passes to run on the graph post-grad.
         self.post_grad_pass_manager = PostGradPassManager()
@@ -464,11 +454,12 @@ class VllmBackend:
         inductor_config = config.inductor_compile_config
         PASS_KEY = "post_grad_custom_post_pass"
         if PASS_KEY in inductor_config:
-            # Config should automatically wrap all inductor passes
             if isinstance(inductor_config[PASS_KEY], PostGradPassManager):
+                # PassManager already added to config, make sure it's correct
                 assert (inductor_config[PASS_KEY].uuid() ==
                         self.post_grad_pass_manager.uuid())
             else:
+                # Config should automatically wrap all inductor passes
                 assert isinstance(inductor_config[PASS_KEY], InductorPass)
                 self.post_grad_pass_manager.add(inductor_config[PASS_KEY])
         inductor_config[PASS_KEY] = self.post_grad_pass_manager
@@ -484,7 +475,7 @@ class VllmBackend:
 
             factors = []
             # 0. factors come from the env, for example, The values of
-            # VLLM_PP_LAYER_PARTITION will affects the computation graph.
+            # VLLM_PP_LAYER_PARTITION will affect the computation graph.
             env_hash = envs.compute_hash()
             factors.append(env_hash)
 
@@ -586,7 +577,7 @@ class VllmBackend:
         # propagate the split graph to the piecewise backend,
         # compile submodules with symbolic shapes
         PiecewiseCompileInterpreter(self.split_gm, submod_names_to_compile,
-                                    self.vllm_config, self.graph_pool,
+                                    self.vllm_config,
                                     self).run(*example_inputs)
 
         graph_path = os.path.join(local_cache_dir, "computation_graph.py")

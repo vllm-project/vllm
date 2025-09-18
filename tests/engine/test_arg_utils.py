@@ -167,7 +167,7 @@ def test_get_kwargs():
     # dict should have json tip in help
     json_tip = "Should either be a valid JSON string or JSON keys"
     assert json_tip in kwargs["json_tip"]["help"]
-    # nested config should should construct the nested config
+    # nested config should construct the nested config
     assert kwargs["nested_config"]["type"]('{"field": 2}') == NestedConfig(2)
 
 
@@ -286,15 +286,6 @@ def test_prefix_cache_default():
             }
         },
         "mm-processor-kwargs"
-    ),
-    (
-        '{"cast_logits_dtype":"bfloat16","sequence_parallel_norm":true,"sequence_parallel_norm_threshold":2048}',
-        {
-            "cast_logits_dtype": "bfloat16",
-            "sequence_parallel_norm": True,
-            "sequence_parallel_norm_threshold": 2048,
-        },
-        "override-neuron-config"
     ),
 ])
 # yapf: enable

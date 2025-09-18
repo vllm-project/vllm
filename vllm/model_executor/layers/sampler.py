@@ -13,14 +13,14 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
+from vllm.logprobs import Logprob, PromptLogprobs, SampleLogprobs
 from vllm.model_executor.layers.utils import apply_penalties
 from vllm.model_executor.sampling_metadata import (SamplingMetadata,
                                                    SamplingTensors,
                                                    SequenceGroupToSample)
 from vllm.sampling_params import SamplingType
 from vllm.sequence import (VLLM_INVALID_TOKEN_ID,
-                           CompletionSequenceGroupOutput, Logprob,
-                           PromptLogprobs, SampleLogprobs, SequenceOutput)
+                           CompletionSequenceGroupOutput, SequenceOutput)
 
 if envs.VLLM_USE_FLASHINFER_SAMPLER and find_spec("flashinfer"):
     # yapf: disable
@@ -649,7 +649,7 @@ def _sample_with_torch(
     else:
         sampled_token_ids_tensor = None
 
-    # Counterintiutively, having two loops here is actually faster.
+    # Counterintuitively, having two loops here is actually faster.
     # The first loop can run without waiting on GPU<->CPU sync.
     for sampling_type in SamplingType:
         sample_indices = categorized_sample_indices[sampling_type]

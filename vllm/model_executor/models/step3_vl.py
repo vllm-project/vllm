@@ -16,19 +16,19 @@ from torchvision import transforms
 from torchvision.transforms.functional import InterpolationMode
 from transformers import BatchFeature, PretrainedConfig, TensorType
 
+from vllm.attention.layer import MultiHeadAttention
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
-                                               ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs, NestedTensors)
+                                    MultiModalKwargsItems, NestedTensors)
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
@@ -520,20 +520,18 @@ class Step3VLMultiModalProcessor(BaseMultiModalProcessor[Step3VLProcessingInfo]
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, Any],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_placeholder_token_id = hf_processor.image_token_id
-        batch_num_patches = out_mm_kwargs["num_patches"].tolist()
 
         def get_replacement_step1o(item_idx: int):
-            img_out = out_mm_kwargs.get_item("image", item_idx)
-            num_patches = batch_num_patches[item_idx]
+            out_item = out_mm_kwargs["image"][item_idx]
+            num_patches = int(out_item["num_patches"].data)
             if num_patches > 0:
-                patch_newline_mask = img_out["patch_newline_mask"].data.tolist(
-                )
+                patch_newline_mask = out_item["patch_newline_mask"].data
                 image_repl_ids = hf_processor._get_image_repl_features(
-                    1, num_patches, patch_newline_mask)[1]
+                    1, num_patches, patch_newline_mask.tolist())[1]
             else:
                 image_repl_ids = hf_processor._get_image_repl_features(
                     1, 0, None)[1]
@@ -669,39 +667,25 @@ class Step3VisionAttention(nn.Module):
 
         self.q_size = self.num_heads * self.head_dim
 
-        if use_data_parallel:
-            self.qkv_proj = ReplicatedLinear(
-                self.embed_dim,
-                3 * self.q_size,
-                bias=True,
-                quant_config=quant_config,
-                prefix=prefix,
-            )
-            self.out_proj = ReplicatedLinear(
-                self.total_num_heads * self.head_dim,
-                self.embed_dim,
-                bias=True,
-                quant_config=quant_config,
-                prefix=prefix,
-            )
-        else:
-            self.qkv_proj = QKVParallelLinear(
-                self.embed_dim,
-                self.head_dim,
-                self.total_num_heads,
-                bias=True,
-                quant_config=quant_config,
-                prefix=prefix,
-            )
-            self.out_proj = RowParallelLinear(self.embed_dim,
-                                              self.embed_dim,
-                                              bias=True,
-                                              quant_config=quant_config,
-                                              prefix=prefix)
+        self.qkv_proj = QKVParallelLinear(
+            self.embed_dim,
+            self.head_dim,
+            self.total_num_heads,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
+            disable_tp=use_data_parallel,
+        )
+        self.out_proj = RowParallelLinear(self.embed_dim,
+                                          self.embed_dim,
+                                          bias=True,
+                                          quant_config=quant_config,
+                                          prefix=f"{prefix}.out_proj",
+                                          disable_tp=use_data_parallel)
 
-    def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads,
-                           self.head_dim).transpose(1, 2).contiguous()
+        # Use unified MultiHeadAttention with automatic backend selection
+        self.attn = MultiHeadAttention(self.num_heads, self.head_dim,
+                                       self.scale)
 
     def forward(
         self,
@@ -713,19 +697,9 @@ class Step3VisionAttention(nn.Module):
         # get query proj
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
-        q = q.view(bsz, tgt_len, self.num_heads, self.head_dim)
-        k = k.view(bsz, tgt_len, self.num_heads, self.head_dim)
-        v = v.view(bsz, tgt_len, self.num_heads, self.head_dim)
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-        attn_output = F.scaled_dot_product_attention(q,
-                                                     k,
-                                                     v,
-                                                     scale=self.scale,
-                                                     is_causal=False)
-        attn_output = attn_output.transpose(1, 2).reshape(
-            bsz, tgt_len, self.num_heads * self.head_dim)
+
+        # Use unified MultiHeadAttention with automatic backend selection
+        attn_output = self.attn(q, k, v)
 
         attn_output, _ = self.out_proj(attn_output)
 
@@ -742,20 +716,18 @@ class Step3VisionMLP(nn.Module):
         super().__init__()
         self.config = config
         self.activation_fn = get_act_fn(config.hidden_act)
-        cls_fc1 = (ReplicatedLinear
-                   if use_data_parallel else ColumnParallelLinear)
-        self.fc1 = cls_fc1(config.hidden_size,
-                           config.intermediate_size,
-                           bias=True,
-                           quant_config=quant_config,
-                           prefix=prefix)
-        cls_fc2 = (ReplicatedLinear
-                   if use_data_parallel else RowParallelLinear)
-        self.fc2 = cls_fc2(config.intermediate_size,
-                           config.hidden_size,
-                           bias=True,
-                           quant_config=quant_config,
-                           prefix=prefix)
+        self.fc1 = ColumnParallelLinear(config.hidden_size,
+                                        config.intermediate_size,
+                                        bias=True,
+                                        quant_config=quant_config,
+                                        prefix=f"{prefix}.fc1",
+                                        disable_tp=use_data_parallel)
+        self.fc2 = RowParallelLinear(config.intermediate_size,
+                                     config.hidden_size,
+                                     bias=True,
+                                     quant_config=quant_config,
+                                     prefix=f"{prefix}.fc2",
+                                     disable_tp=use_data_parallel)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.fc1(hidden_states)
@@ -869,6 +841,8 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         "lm_head.": "language_model.lm_head.",
     })
 
+    supports_encoder_tp_data = True
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
         if modality.startswith("image"):
@@ -884,8 +858,7 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         self.config = config
         self.multimodal_config = multimodal_config
-        self.use_data_parallel = (vllm_config.parallel_config.
-                                  enable_multimodal_encoder_data_parallel)
+        self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
         if multimodal_config.get_limit_per_prompt("image"):
             self.vision_model = Step3VisionTransformer(

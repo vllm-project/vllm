@@ -12,6 +12,8 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_group_quant_int8, per_token_quant_int8)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     quant_dequant_mxfp4)
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    mxfp8_quantize)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv
@@ -177,6 +179,18 @@ def _mxfp4_quantize(
     return A, None
 
 
+def _mxfp8_quantize(
+    A: torch.Tensor,
+    A_scale: Optional[torch.Tensor],
+    per_act_token_quant: bool,
+    block_shape: Optional[list[int]] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    assert A_scale is None
+    assert not per_act_token_quant
+    assert block_shape is None
+    return mxfp8_quantize(A)
+
+
 def moe_kernel_quantize_input(
     A: torch.Tensor,
     A_scale: Optional[torch.Tensor],
@@ -195,6 +209,8 @@ def moe_kernel_quantize_input(
                              is_sf_swizzled_layout=is_fp4_scale_swizzled)
     elif quant_dtype == "mxfp4":
         return _mxfp4_quantize(A, A_scale, per_act_token_quant, block_shape)
+    elif quant_dtype == "mxfp8":
+        return _mxfp8_quantize(A, A_scale, per_act_token_quant, block_shape)
     else:
         return A, A_scale
 
@@ -252,3 +268,7 @@ def _validate_scale_shape(
         assert block_shape is not None
         expected = (a.shape[0], cdiv(a.shape[1], block_shape[1]))
         assert a_scale.shape == expected, f"{a_scale.shape} == {expected}"
+
+
+def activation_without_mul(activation: str) -> str:
+    return activation + "_no_mul"

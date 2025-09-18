@@ -24,6 +24,9 @@ from .registry import HF_EXAMPLE_MODELS
 
 @pytest.mark.parametrize("model_arch", ModelRegistry.get_supported_archs())
 def test_registry_imports(model_arch):
+    # Skip if transformers version is incompatible
+    model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
+    model_info.check_transformers_version(on_fail="skip")
     # Ensure all model classes can be imported successfully
     model_cls = ModelRegistry._try_load_model_cls(model_arch)
     assert model_cls is not None
@@ -47,7 +50,6 @@ def test_registry_imports(model_arch):
 @create_new_process_for_each_test()
 @pytest.mark.parametrize("model_arch,is_mm,init_cuda,is_ce", [
     ("LlamaForCausalLM", False, False, False),
-    ("MllamaForConditionalGeneration", True, False, False),
     ("LlavaForConditionalGeneration", True, True, False),
     ("BertForSequenceClassification", False, False, True),
     ("RobertaForSequenceClassification", False, False, True),

@@ -8,15 +8,13 @@ import requests
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 from ...utils import RemoteOpenAIServer
-from .test_completion import zephyr_lora_added_tokens_files  # noqa: F401
-from .test_completion import zephyr_lora_files  # noqa: F401
 
 # any model with a chat template should work here
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 
 
 @pytest.fixture(scope="module")
-def server(zephyr_lora_added_tokens_files: str):  # noqa: F811
+def server():
     args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -26,12 +24,6 @@ def server(zephyr_lora_added_tokens_files: str):  # noqa: F811
         "--enforce-eager",
         "--max-num-seqs",
         "128",
-        # lora config
-        "--enable-lora",
-        "--lora-modules",
-        f"zephyr-lora2={zephyr_lora_added_tokens_files}",
-        "--max-lora-rank",
-        "64",
         "--enable-tokenizer-info-endpoint",
     ]
 
@@ -40,10 +32,8 @@ def server(zephyr_lora_added_tokens_files: str):  # noqa: F811
 
 
 @pytest.fixture(scope="module")
-def tokenizer_name(model_name: str,
-                   zephyr_lora_added_tokens_files: str):  # noqa: F811
-    return zephyr_lora_added_tokens_files if (
-        model_name == "zephyr-lora2") else model_name
+def tokenizer_name(model_name: str):
+    return model_name
 
 
 @pytest_asyncio.fixture
@@ -55,7 +45,7 @@ async def client(server):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name,tokenizer_name",
-    [(MODEL_NAME, MODEL_NAME), ("zephyr-lora2", "zephyr-lora2")],
+    [(MODEL_NAME, MODEL_NAME)],
     indirect=["tokenizer_name"],
 )
 async def test_tokenize_completions(
@@ -88,7 +78,7 @@ async def test_tokenize_completions(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name,tokenizer_name",
-    [(MODEL_NAME, MODEL_NAME), ("zephyr-lora2", "zephyr-lora2")],
+    [(MODEL_NAME, MODEL_NAME)],
     indirect=["tokenizer_name"],
 )
 async def test_tokenize_chat(
@@ -150,7 +140,7 @@ async def test_tokenize_chat(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name,tokenizer_name",
-    [(MODEL_NAME, MODEL_NAME), ("zephyr-lora2", "zephyr-lora2")],
+    [(MODEL_NAME, MODEL_NAME)],
     indirect=["tokenizer_name"],
 )
 async def test_tokenize_chat_with_tools(
@@ -227,7 +217,7 @@ async def test_tokenize_chat_with_tools(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name, tokenizer_name",
-    [(MODEL_NAME, MODEL_NAME), ("zephyr-lora2", "zephyr-lora2")],
+    [(MODEL_NAME, MODEL_NAME)],
     indirect=["tokenizer_name"],
 )
 async def test_tokenize_with_return_token_strs(
@@ -262,7 +252,7 @@ async def test_tokenize_with_return_token_strs(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name,tokenizer_name",
-    [(MODEL_NAME, MODEL_NAME), ("zephyr-lora2", "zephyr-lora2")],
+    [(MODEL_NAME, MODEL_NAME)],
     indirect=["tokenizer_name"],
 )
 async def test_detokenize(
@@ -289,7 +279,7 @@ async def test_detokenize(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name,tokenizer_name",
-    [(MODEL_NAME, MODEL_NAME), ("zephyr-lora2", "zephyr-lora2")],
+    [(MODEL_NAME, MODEL_NAME)],
     indirect=["tokenizer_name"],
 )
 async def test_tokenizer_info_basic(

@@ -55,7 +55,7 @@ class OvisProcessorKwargs(ProcessingKwargs, total=False):   # type: ignore[call-
 
 class OvisProcessor(ProcessorMixin):
     r"""
-    Constructs a Ovis processor which wraps a Ovis image processor and a Qwen2 tokenizer into a single processor.
+    Constructs an Ovis processor which wraps an Ovis image processor and a Qwen2 tokenizer into a single processor.
     [`OvisProcessor`] offers all the functionalities of [`Qwen2VLImageProcessor`] and [`Qwen2TokenizerFast`]. See the
     [`~OvisProcessor.__call__`] and [`~OvisProcessor.decode`] for more information.
     Args:

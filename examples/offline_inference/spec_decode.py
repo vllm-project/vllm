@@ -5,6 +5,7 @@ from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
 from vllm.benchmarks.datasets import add_dataset_parser, get_samples
+from vllm.inputs import TokensPrompt
 from vllm.v1.metrics.reader import Counter, Vector
 
 try:
@@ -52,7 +53,6 @@ def parse_args():
         "--method",
         type=str,
         default="eagle",
-        choices=["ngram", "eagle", "eagle3", "mtp"],
     )
     parser.add_argument("--num-spec-tokens", type=int, default=2)
     parser.add_argument("--prompt-lookup-max", type=int, default=5)
@@ -117,6 +117,11 @@ def main():
             "prompt_lookup_max": args.prompt_lookup_max,
             "prompt_lookup_min": args.prompt_lookup_min,
         }
+    elif args.method.endswith("mtp"):
+        speculative_config = {
+            "method": args.method,
+            "num_speculative_tokens": args.num_spec_tokens,
+        }
     else:
         raise ValueError(f"unknown method: {args.method}")
 
@@ -137,7 +142,8 @@ def main():
     sampling_params = SamplingParams(temperature=args.temp, max_tokens=args.output_len)
     if not args.custom_mm_prompts:
         outputs = llm.generate(
-            prompt_token_ids=prompt_ids, sampling_params=sampling_params
+            [TokensPrompt(prompt_token_ids=x) for x in prompt_ids],
+            sampling_params=sampling_params,
         )
     else:
         outputs = llm.chat(prompts, sampling_params=sampling_params)

@@ -84,7 +84,7 @@ class XPUWorker(Worker):
         """Profiles the peak memory usage of the model to determine how many
         KV blocks may be allocated without OOMs.
         The engine will first conduct a profiling of the existing memory usage.
-        Then, it calculate the maximum possible number of GPU and CPU blocks
+        Then, it calculates the maximum possible number of GPU and CPU blocks
         that can be allocated with the remaining free memory.
         .. tip::
             You may limit the usage of GPU memory
@@ -145,6 +145,7 @@ class XPUWorker(Worker):
         ):
             self.device = torch.device(f"xpu:{self.local_rank}")
             current_platform.set_device(self.device)
+            current_platform.check_if_supports_dtype(self.model_config.dtype)
             torch.xpu.empty_cache()
             self.init_gpu_memory = torch.xpu.get_device_properties(
                 self.local_rank).total_memory

@@ -178,8 +178,8 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
                          logits_soft_cap, attn_type,
                          kv_sharing_target_layer_name, **mla_args)
 
-        assert is_flashmla_supported(), \
-            "FlashMLA is not supported on this device"
+        is_supported, reason = is_flashmla_supported()
+        assert is_supported, reason
 
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):

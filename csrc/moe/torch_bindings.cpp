@@ -78,6 +78,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "output_tensor) -> ()");
   m.impl("shuffle_rows", torch::kCUDA, &shuffle_rows);
 
+  // Apply grouped topk routing to select experts.
+  m.def(
+      "grouped_topk(Tensor scores, Tensor scores_with_bias, int n_group, int "
+      "topk_group, int topk, bool renormalize, float "
+      "routed_scaling_factor) -> (Tensor, Tensor)");
+  m.impl("grouped_topk", torch::kCUDA, &grouped_topk);
 #endif
 }
 

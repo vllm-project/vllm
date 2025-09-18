@@ -3,14 +3,14 @@
 
 import io
 
-# imports for guided decoding tests
+# imports for structured outputs tests
 import openai
 import pybase64
 import pytest
 import regex as re
 import torch
 
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.renderer import BaseRenderer
 
 from ...utils import RemoteOpenAIServer
 
@@ -27,12 +27,16 @@ async def test_empty_prompt():
     with RemoteOpenAIServer(model_name, server_args) as remote_server:
         client = remote_server.get_async_client()
 
-        with pytest.raises(openai.BadRequestError,
-                           match="decoder prompt cannot be empty"):
+        with pytest.raises(
+                openai.BadRequestError,
+                match=
+                "Either prompt or prompt_embeds must be provided and non-empty."
+        ):
             await client.completions.create(model=model_name,
                                             prompt="",
                                             max_tokens=5,
-                                            temperature=0.0)
+                                            temperature=0.0,
+                                            extra_body={"prompt_embeds": []})
 
 
 @pytest.mark.asyncio
@@ -83,7 +87,7 @@ def test_load_prompt_embeds(dtype: torch.dtype, layout: torch.layout,
     buffer.seek(0)
     encoded_tensor = pybase64.b64encode(buffer.getvalue())
 
-    loaded_prompt_embeds = OpenAIServing._load_prompt_embeds(encoded_tensor)
+    loaded_prompt_embeds = BaseRenderer.load_prompt_embeds(encoded_tensor)
     assert len(loaded_prompt_embeds) == 1
     loaded_tensor = loaded_prompt_embeds[0]["prompt_embeds"]
     assert loaded_tensor.device.type == "cpu"

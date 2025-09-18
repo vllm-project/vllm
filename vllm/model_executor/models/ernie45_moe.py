@@ -23,6 +23,7 @@
 # limitations under the License.
 """Inference-only ErineMoE model compatible with HuggingFace weights."""
 from collections.abc import Iterable
+from itertools import islice
 from typing import Any, Optional, Union
 
 import torch
@@ -419,8 +420,7 @@ class Ernie4_5_MoeModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for i in range(self.start_layer, self.end_layer):
-            layer = self.layers[i]
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
@@ -562,7 +562,9 @@ class Ernie4_5_MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(config.vocab_size,
                                           config.hidden_size,
-                                          quant_config=quant_config)
+                                          quant_config=quant_config,
+                                          prefix=maybe_prefix(
+                                              prefix, "lm_head"))
         else:
             self.lm_head = PPMissingLayer()
 

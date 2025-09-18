@@ -734,6 +734,7 @@ class DifferentialFlashAttentionImpl(AttentionImpl):
                     window_size=self.sliding_window,
                     alibi_slopes=self.alibi_slopes,
                     softcap=self.logits_soft_cap,
+                    fa_version=self.vllm_flash_attn_version,
                 )
                 assert prefill_output.shape == output[:
                                                       num_prefill_tokens].shape
@@ -755,6 +756,7 @@ class DifferentialFlashAttentionImpl(AttentionImpl):
                     window_size=self.sliding_window,
                     alibi_slopes=self.alibi_slopes,
                     softcap=self.logits_soft_cap,
+                    fa_version=self.vllm_flash_attn_version,
                 ).squeeze(1)
             except Exception as e:
                 logger.error("Error in PagedAttention.forward_decode: %s",
@@ -787,6 +789,7 @@ class DifferentialFlashAttentionImpl(AttentionImpl):
             window_size=self.sliding_window,
             alibi_slopes=self.alibi_slopes,
             softcap=self.logits_soft_cap,
+            fa_version=self.vllm_flash_attn_version,
         ).squeeze(1)
         return output
 
@@ -800,23 +803,33 @@ class DifferentialFlashAttentionImpl(AttentionImpl):
         attn_metadata: DifferentialFlashAttentionMetadata,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
+        output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 
         Args:
-            query: shape = [num_tokens, num_heads, head_size]
-            key: shape = [num_tokens, num_kv_heads, head_size]
-            value: shape = [num_tokens, num_kv_heads, head_size]
-            output: shape = [num_tokens, num_heads, head_size]
-            kv_cache = [2, num_blocks, block_size, num_kv_heads, head_size]
+            layer: Attention layer instance.
+            q: Query tensor with shape = [num_tokens, num_heads, head_size]
+            k: Key tensor with shape = [num_tokens, num_kv_heads, head_size]
+            v: Value tensor with shape = [num_tokens, num_kv_heads, head_size]
+            kv_cache: KV cache tensor with shape 
+                [2, num_blocks, block_size, num_kv_heads, head_size].
                 NOTE: kv_cache will be an empty tensor with shape [0]
                 for profiling run.
             attn_metadata: Metadata for attention.
+            output: Output tensor with shape [num_tokens, num_heads, head_size]
+            output_scale: Optional output scale tensor.
+            output_block_scale: Optional output block scale tensor.
         NOTE: It in-place updates the output tensor.
         NOTE: FP8 quantization, flash-attn expect the size of
               {q,k,v}_descale to be (num_sequences, num_kv_heads).
               We use torch's .expand() to avoid duplicating values
         """
+        if output_scale is not None or output_block_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported"
+                " for DifferentialFlashAttentionImpl")
+
         if self.lambda_full is None:
             self.lambda_init = self.differential_flash_attention_config[
                 "lambda_init"]

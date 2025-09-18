@@ -16,6 +16,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from collections.abc import Iterable
+from itertools import islice
 from typing import Optional, Union
 
 import torch
@@ -23,7 +24,7 @@ import torch.nn.functional as F
 from torch import nn
 from transformers import Gemma3TextConfig
 
-from vllm.attention import Attention
+from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -43,6 +44,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
+from ...attention.layers.encoder_only_attention import EncoderOnlyAttention
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, extract_layer_index,
                     is_pp_missing_parameter,
@@ -168,16 +170,24 @@ class Gemma3Attention(nn.Module):
             rope_scaling=self.rope_scaling,
         )
 
-        # Initialize the attention.
-        self.attn = Attention(self.num_heads,
-                              self.head_dim,
-                              self.scaling,
-                              num_kv_heads=self.num_kv_heads,
-                              cache_config=cache_config,
-                              quant_config=quant_config,
-                              logits_soft_cap=attn_logits_soft_cap,
-                              per_layer_sliding_window=sliding_window,
-                              prefix=f"{prefix}.attn")
+        if getattr(config, "is_causal", True):
+            attn_type = AttentionType.DECODER
+        else:
+            attn_type = AttentionType.ENCODER_ONLY
+
+        attn_cls = (EncoderOnlyAttention
+                    if attn_type == AttentionType.ENCODER_ONLY else Attention)
+
+        self.attn = attn_cls(self.num_heads,
+                             self.head_dim,
+                             self.scaling,
+                             num_kv_heads=self.num_kv_heads,
+                             cache_config=cache_config,
+                             quant_config=quant_config,
+                             attn_type=attn_type,
+                             logits_soft_cap=attn_logits_soft_cap,
+                             per_layer_sliding_window=sliding_window,
+                             prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -398,7 +408,7 @@ class Gemma3Model(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        for layer in self.layers[self.start_layer:self.end_layer]:
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(
                 positions,
                 hidden_states,

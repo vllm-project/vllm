@@ -9,8 +9,6 @@ from contextlib import suppress
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
-# downloading lora to test lora requests
-from huggingface_hub import snapshot_download
 
 from ...utils import RemoteOpenAIServer
 
@@ -18,7 +16,6 @@ from ...utils import RemoteOpenAIServer
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 # technically this needs Mistral-7B-v0.1 as base, but we're not testing
 # generation quality here
-LORA_NAME = "typeof/zephyr-7b-beta-lora"
 
 BADREQUEST_CASES = [
     (
@@ -49,11 +46,6 @@ BADREQUEST_CASES = [
 
 
 @pytest.fixture(scope="module")
-def zephyr_lora_files():
-    return snapshot_download(repo_id=LORA_NAME)
-
-
-@pytest.fixture(scope="module")
 def monkeypatch_module():
     from _pytest.monkeypatch import MonkeyPatch
     mpatch = MonkeyPatch()
@@ -75,12 +67,6 @@ def server_with_lora_modules_json(request, monkeypatch_module,
         "base_model_name": MODEL_NAME
     }
 
-    lora_module_2 = {
-        "name": "zephyr-lora2",
-        "path": zephyr_lora_files,
-        "base_model_name": MODEL_NAME
-    }
-
     args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -92,7 +78,6 @@ def server_with_lora_modules_json(request, monkeypatch_module,
         "--enable-lora",
         "--lora-modules",
         json.dumps(lora_module_1),
-        json.dumps(lora_module_2),
         "--max-lora-rank",
         "64",
         "--max-cpu-loras",
@@ -129,7 +114,6 @@ async def test_static_lora_lineage(client: openai.AsyncOpenAI,
                for lora_model in lora_models)
     assert all(lora_model.parent == MODEL_NAME for lora_model in lora_models)
     assert lora_models[0].id == "zephyr-lora"
-    assert lora_models[1].id == "zephyr-lora2"
 
 
 @pytest.mark.asyncio
@@ -217,7 +201,7 @@ async def test_dynamic_lora_badrequests(client: openai.AsyncOpenAI, tmp_path,
 @pytest.mark.asyncio
 async def test_multiple_lora_adapters(client: openai.AsyncOpenAI, tmp_path,
                                       zephyr_lora_files):
-    """Validate that many loras can be dynamically registered and inferenced 
+    """Validate that many loras can be dynamically registered and inferenced
     with concurrently"""
 
     # This test file configures the server with --max-cpu-loras=2 and this test

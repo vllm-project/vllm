@@ -133,7 +133,7 @@ completion = client.chat.completions.create(
         {"role": "user", "content": "Classify this sentiment: vLLM is wonderful!"}
     ],
     extra_body={
-        "guided_choice": ["positive", "negative"]
+        "structured_outputs": {"choice": ["positive", "negative"]}
     }
 )
 ```
@@ -239,7 +239,7 @@ you can use the [official OpenAI Python client](https://github.com/openai/openai
 If the model has a [chat template][chat-template], you can replace `inputs` with a list of `messages` (same schema as [Chat API][chat-api])
 which will be treated as a single prompt to the model.
 
-Code example: <gh-file:examples/online_serving/openai_embedding_client.py>
+Code example: <gh-file:examples/online_serving/pooling/openai_embedding_client.py>
 
 #### Multi-modal inputs
 
@@ -313,14 +313,15 @@ and passing a list of `messages` in the request. Refer to the examples below for
         `MrLight/dse-qwen2-2b-mrl-v1` requires a placeholder image of the minimum image size for text query embeddings. See the full code
         example below for details.
 
-Full example: <gh-file:examples/online_serving/openai_chat_embedding_client_for_multimodal.py>
+Full example: <gh-file:examples/online_serving/pooling/openai_chat_embedding_client_for_multimodal.py>
 
 #### Extra parameters
 
-The following [pooling parameters][pooling-params] are supported.
+The following [pooling parameters][vllm.PoolingParams] are supported.
 
 ```python
---8<-- "vllm/entrypoints/openai/protocol.py:embedding-pooling-params"
+--8<-- "vllm/pooling_params.py:common-pooling-params"
+--8<-- "vllm/pooling_params.py:embedding-pooling-params"
 ```
 
 The following extra parameters are supported by default:
@@ -374,7 +375,7 @@ The following extra parameters are supported:
     ```python
     --8<-- "vllm/entrypoints/openai/protocol.py:transcription-extra-params"
     ```
-  
+
 [](){ #translations-api }
 
 ### Translations API
@@ -421,7 +422,7 @@ Our Pooling API encodes input prompts using a [pooling model](../models/pooling_
 
 The input format is the same as [Embeddings API][embeddings-api], but the output data can contain an arbitrary nested list, not just a 1-D list of floats.
 
-Code example: <gh-file:examples/online_serving/openai_pooling_client.py>
+Code example: <gh-file:examples/online_serving/pooling/openai_pooling_client.py>
 
 [](){ #classification-api }
 
@@ -431,7 +432,7 @@ Our Classification API directly supports Hugging Face sequence-classification mo
 
 We automatically wrap any other transformer via `as_seq_cls_model()`, which pools on the last token, attaches a `RowParallelLinear` head, and applies a softmax to produce per-class probabilities.
 
-Code example: <gh-file:examples/online_serving/openai_classification_client.py>
+Code example: <gh-file:examples/online_serving/pooling/openai_classification_client.py>
 
 #### Example Requests
 
@@ -527,10 +528,11 @@ curl -v "http://127.0.0.1:8000/classify" \
 
 #### Extra parameters
 
-The following [pooling parameters][pooling-params] are supported.
+The following [pooling parameters][vllm.PoolingParams] are supported.
 
 ```python
---8<-- "vllm/entrypoints/openai/protocol.py:classification-pooling-params"
+--8<-- "vllm/pooling_params.py:common-pooling-params"
+--8<-- "vllm/pooling_params.py:classification-pooling-params"
 ```
 
 The following extra parameters are supported:
@@ -733,10 +735,11 @@ Full example: <gh-file:examples/online_serving/openai_cross_encoder_score_for_mu
 
 #### Extra parameters
 
-The following [pooling parameters][pooling-params] are supported.
+The following [pooling parameters][vllm.PoolingParams] are supported.
 
 ```python
---8<-- "vllm/entrypoints/openai/protocol.py:score-pooling-params"
+--8<-- "vllm/pooling_params.py:common-pooling-params"
+--8<-- "vllm/pooling_params.py:classification-pooling-params"
 ```
 
 The following extra parameters are supported:
@@ -760,7 +763,7 @@ endpoints are compatible with both [Jina AI's re-rank API interface](https://jin
 [Cohere's re-rank API interface](https://docs.cohere.com/v2/reference/rerank) to ensure compatibility with
 popular open-source tools.
 
-Code example: <gh-file:examples/online_serving/jinaai_rerank_client.py>
+Code example: <gh-file:examples/online_serving/pooling/jinaai_rerank_client.py>
 
 #### Example Request
 
@@ -815,10 +818,11 @@ Result documents will be sorted by relevance, and the `index` property can be us
 
 #### Extra parameters
 
-The following [pooling parameters][pooling-params] are supported.
+The following [pooling parameters][vllm.PoolingParams] are supported.
 
 ```python
---8<-- "vllm/entrypoints/openai/protocol.py:rerank-pooling-params"
+--8<-- "vllm/pooling_params.py:common-pooling-params"
+--8<-- "vllm/pooling_params.py:classification-pooling-params"
 ```
 
 The following extra parameters are supported:

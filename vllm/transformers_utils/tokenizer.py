@@ -7,12 +7,12 @@ import os
 import warnings
 from functools import lru_cache
 from pathlib import Path
-from types import MethodType
 from typing import TYPE_CHECKING, Any, Optional, Union
 
 import huggingface_hub
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
+from typing_extensions import assert_never
 
 from vllm import envs
 from vllm.logger import init_logger
@@ -20,7 +20,6 @@ from vllm.transformers_utils.config import (
     get_sentence_transformer_tokenizer_config)
 from vllm.transformers_utils.tokenizers import MistralTokenizer
 from vllm.transformers_utils.utils import check_gguf_file
-from vllm.utils import make_async
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -50,12 +49,11 @@ def decode_tokens(
     `skip_special_tokens=None` means to use the backend's default
     settings.
     """
-    decode_method = getattr(tokenizer, "_decode", tokenizer.decode)
     if skip_special_tokens is not None:
-        return decode_method(token_ids,
-                             skip_special_tokens=skip_special_tokens)
+        return tokenizer.decode(token_ids,
+                                skip_special_tokens=skip_special_tokens)
 
-    return decode_method(token_ids)
+    return tokenizer.decode(token_ids)
 
 
 def encode_tokens(
@@ -142,26 +140,6 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
 
     cached_tokenizer.__class__ = CachedTokenizer
     return cached_tokenizer
-
-
-def patch_padding_side(tokenizer: PreTrainedTokenizer) -> None:
-    """Patch _pad method to accept `padding_side` for older tokenizers."""
-    orig_pad = tokenizer._pad
-
-    def _pad(
-        self: PreTrainedTokenizer,
-        *args,
-        padding_side: Optional[str] = None,
-        **kwargs,
-    ):
-        if padding_side is not None and padding_side != self.padding_side:
-            msg = ("`padding_side` argument is not supported by "
-                   f"{type(tokenizer).__name__} and will be ignored.")
-            warnings.warn(msg, stacklevel=2)
-
-        return orig_pad(*args, **kwargs)
-
-    tokenizer._pad = MethodType(_pad, tokenizer)
 
 
 def get_tokenizer(
@@ -271,12 +249,6 @@ def get_tokenizer(
             }
             tokenizer.add_special_tokens(special_tokens_map)
 
-        # NOTE: We can remove this after https://github.com/zai-org/ChatGLM3/issues/1324
-        if type(tokenizer).__name__ in ("ChatGLMTokenizer",
-                                        "ChatGLM4Tokenizer"):
-            assert isinstance(tokenizer, PreTrainedTokenizer)
-            patch_padding_side(tokenizer)
-
         if not isinstance(tokenizer, PreTrainedTokenizerFast):
             logger.warning(
                 "Using a slow tokenizer. This might cause a significant "
@@ -302,20 +274,19 @@ def cached_tokenizer_from_config(
     )
 
 
-def get_lora_tokenizer(lora_request: LoRARequest, *args,
-                       **kwargs) -> Optional[AnyTokenizer]:
-    if lora_request is None:
-        return None
-    try:
-        tokenizer = get_tokenizer(lora_request.lora_path, *args, **kwargs)
-    except Exception as e:
-        # No tokenizer was found in the LoRA folder,
-        # use base model tokenizer
-        logger.warning(
-            "No tokenizer found in %s, using base model tokenizer instead. "
-            "(Exception: %s)", lora_request.lora_path, e)
-        tokenizer = None
-    return tokenizer
+def init_tokenizer_from_configs(model_config: ModelConfig):
+    runner_type = model_config.runner_type
+    if runner_type == "generate" or runner_type == "draft":
+        truncation_side = "left"
+    elif runner_type == "pooling":
+        truncation_side = "right"
+    else:
+        assert_never(runner_type)
 
-
-get_lora_tokenizer_async = make_async(get_lora_tokenizer)
+    return get_tokenizer(
+        model_config.tokenizer,
+        tokenizer_mode=model_config.tokenizer_mode,
+        trust_remote_code=model_config.trust_remote_code,
+        revision=model_config.tokenizer_revision,
+        truncation_side=truncation_side,
+    )

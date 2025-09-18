@@ -19,7 +19,7 @@ Run a model in generation mode via the option `--runner generate`.
 ## Offline Inference
 
 The [LLM][vllm.LLM] class provides various methods for offline inference.
-See [configuration](../api/summary.md#configuration) for a list of options when initializing the model.
+See [configuration](../api/README.md#configuration) for a list of options when initializing the model.
 
 ### `LLM.generate`
 
