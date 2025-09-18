@@ -62,8 +62,8 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /tests/v1/offloading @ApostaC
 
 # Transformers backend
-vllm/model_executor/models/transformers.py @hmellor
-tests/models/test_transformers.py @hmellor
+/vllm/model_executor/models/transformers.py @hmellor
+/tests/models/test_transformers.py @hmellor
 
 # Docs
 /docs @hmellor
