@@ -30,6 +30,7 @@ from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
                                                     clamp_prompt_logprobs)
 # yapf: enable
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.renderer import RenderConfig
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.inputs.data import (EmbedsPrompt, TokensPrompt, is_embeds_prompt,
                               is_tokens_prompt)
@@ -111,6 +112,11 @@ class OpenAIServingCompletion(OpenAIServing):
             return self.create_error_response(
                 "Echo is unsupported with prompt embeds.")
 
+        if (request.prompt_logprobs is not None
+                and request.prompt_embeds is not None):
+            return self.create_error_response(
+                "prompt_logprobs is not compatible with prompt embeds.")
+
         request_id = (
             f"cmpl-"
             f"{self._base_request_id(raw_request, request.request_id)}")
@@ -126,21 +132,13 @@ class OpenAIServingCompletion(OpenAIServing):
             if self.model_config.skip_tokenizer_init:
                 tokenizer = None
             else:
-                tokenizer = await self.engine_client.get_tokenizer(lora_request
-                                                                   )
+                tokenizer = await self.engine_client.get_tokenizer()
             renderer = self._get_renderer(tokenizer)
-            max_input_tokens_len = self.max_model_len - (request.max_tokens
-                                                         or 0)
 
             engine_prompts = await renderer.render_prompt_and_embeds(
                 prompt_or_prompts=request.prompt,
                 prompt_embeds=request.prompt_embeds,
-                max_length=max_input_tokens_len,
-                truncate_prompt_tokens=request.truncate_prompt_tokens,
-                add_special_tokens=request.add_special_tokens,
-                cache_salt=request.cache_salt,
-                needs_detokenization=bool(request.echo
-                                          and not request.return_token_ids),
+                config=self._build_render_config(request),
             )
         except ValueError as e:
             logger.exception("Error in preprocessing prompt inputs")
@@ -238,7 +236,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
         result_generator = merge_async_iterators(*generators)
 
-        model_name = self._get_model_name(request.model, lora_request)
+        model_name = self.models.model_name(lora_request)
         num_prompts = len(engine_prompts)
 
         # Similar to the OpenAI API, when n != best_of, we do not stream the
@@ -676,4 +674,19 @@ class OpenAIServingCompletion(OpenAIServing):
             token_logprobs=out_token_logprobs,
             tokens=out_tokens,
             top_logprobs=out_top_logprobs,
+        )
+
+    def _build_render_config(
+        self,
+        request: CompletionRequest,
+        max_input_length: Optional[int] = None,
+    ) -> RenderConfig:
+        max_input_tokens_len = self.max_model_len - (request.max_tokens or 0)
+        return RenderConfig(
+            max_length=max_input_tokens_len,
+            truncate_prompt_tokens=request.truncate_prompt_tokens,
+            add_special_tokens=request.add_special_tokens,
+            cache_salt=request.cache_salt,
+            needs_detokenization=bool(request.echo
+                                      and not request.return_token_ids),
         )

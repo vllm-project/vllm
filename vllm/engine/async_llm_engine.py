@@ -10,8 +10,8 @@ from typing import (Any, AsyncGenerator, Callable, Dict, Iterable, List,
 from weakref import ReferenceType
 
 import vllm.envs as envs
-from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, VllmConfig)
+from vllm.config import (LoRAConfig, ModelConfig, ParallelConfig,
+                         SchedulerConfig, VllmConfig)
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_timeout import asyncio_timeout
@@ -389,11 +389,8 @@ class _AsyncLLMEngine(LLMEngine):
         """Stop the remote worker execution loop."""
         await self.model_executor.stop_remote_worker_execution_loop_async()
 
-    async def get_tokenizer_async(self,
-                                  lora_request: Optional[LoRARequest] = None
-                                  ) -> AnyTokenizer:
-        return await (
-            self.get_tokenizer_group().get_lora_tokenizer_async(lora_request))
+    async def get_tokenizer_async(self) -> AnyTokenizer:
+        return self.get_tokenizer()
 
     async def add_request_async(
         self,
@@ -434,7 +431,6 @@ class _AsyncLLMEngine(LLMEngine):
 
         processed_inputs = await self.input_preprocessor.preprocess_async(
             prompt,
-            lora_request=lora_request,
             tokenization_kwargs=tokenization_kwargs,
         )
 
@@ -613,11 +609,8 @@ class AsyncLLMEngine(EngineClient):
     async def get_input_preprocessor(self) -> InputPreprocessor:
         return self.engine.input_preprocessor
 
-    async def get_tokenizer(
-        self,
-        lora_request: Optional[LoRARequest] = None,
-    ) -> AnyTokenizer:
-        return await self.engine.get_tokenizer_async(lora_request)
+    async def get_tokenizer(self) -> AnyTokenizer:
+        return self.engine.get_tokenizer()
 
     def start_background_loop(self) -> None:
         """Start the background loop."""
@@ -960,10 +953,6 @@ class AsyncLLMEngine(EngineClient):
     async def get_parallel_config(self) -> ParallelConfig:
         """Get the parallel configuration of the vLLM engine."""
         return self.engine.get_parallel_config()
-
-    async def get_decoding_config(self) -> DecodingConfig:
-        """Get the decoding configuration of the vLLM engine."""
-        return self.engine.get_decoding_config()
 
     async def get_scheduler_config(self) -> SchedulerConfig:
         """Get the scheduling configuration of the vLLM engine."""
