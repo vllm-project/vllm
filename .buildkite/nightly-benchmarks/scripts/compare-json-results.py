@@ -263,6 +263,13 @@ if __name__ == "__main__":
         default="# of max concurrency.",
         help="column name to use as X Axis in comparison graph",
     )
+    parser.add_argument(
+        "-l",
+        "--latency",
+        type=str,
+        default="p99",
+        help="take median|p99 for latency like TTFT/TPOT",
+    )
     parser.add_argument("--ttft-max-ms", type=float, default=3000.0,
                     help="Reference limit for TTFT plots (ms)")
     parser.add_argument("--tpot-max-ms", type=float, default=150.0,
@@ -283,18 +290,22 @@ if __name__ == "__main__":
         "# of max concurrency.",
         "qps",
     ]
-    #data_cols_to_compare = ["Output Tput (tok/s)", "Median TTFT (ms)", "Median"]
-    #html_msgs_for_data_cols = [
-    #    "Compare Output Tokens /n",
-    #    "Median TTFT /n",
-    #    "Median TPOT /n",
-    #]
-    data_cols_to_compare = ["Output Tput (tok/s)", "P99 TTFT (ms)", "P99"]
-    html_msgs_for_data_cols = [
-        "Compare Output Tokens /n",
-        "P99 TTFT /n",
-        "P99 TPOT /n",
-    ]
+
+    if "median" in args.latency:
+        data_cols_to_compare = ["Output Tput (tok/s)", "Median TTFT (ms)", "Median"]
+        html_msgs_for_data_cols = [
+            "Compare Output Tokens /n",
+            "Median TTFT /n",
+            "Median TPOT /n",
+        ]
+        drop_column = "P99"
+    elif "p99" in args.latency:
+        data_cols_to_compare = ["Output Tput (tok/s)", "P99 TTFT (ms)", "P99"]
+        html_msgs_for_data_cols = [
+            "Compare Output Tokens /n",
+            "P99 TTFT /n",
+            "P99 TPOT /n",
+        ]
 
     if len(args.file) == 1:
         files = split_json_by_tp_pp(args.file[0], output_root="splits")
