@@ -227,7 +227,7 @@ def move_to_buffer(
         with torch.cuda.stream(cuda_stream):
             reqs = batch_isend_irecv(p2p_ops)
             for req in reqs:
-                req.wait() 
+                req.wait()
     elif p2p_ops:
         reqs = batch_isend_irecv(p2p_ops)
         for req in reqs:
@@ -419,7 +419,7 @@ def rearrange_expert_weights_inplace(
         # NOTE(bowen): We need this synchronize to run, but I don't know why.
         # If you figure out the reason, please let me know -- thank you!
         torch.cuda.synchronize()
-        
+
         is_unchanged, is_received_locally, experts_recv_loc = move_to_buffer(
             num_local_experts=num_local_physical_experts,
             old_indices=old_global_expert_indices[layer].tolist(),

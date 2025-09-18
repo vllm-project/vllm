@@ -710,7 +710,7 @@ class EplbState:
                         self.buffer_lock.release()
                 else:
                     await asyncio.sleep(0.001)
-            
+
             # Reset for next rearrangement cycle
             self.rearrange_event.clear()
 
