@@ -249,7 +249,7 @@ class CudaPlatformBase(Platform):
     def get_valid_backends(
         cls, head_size, dtype, kv_cache_dtype, block_size, use_v1, use_mla,
         has_sink
-    ) -> tuple[list[tuple["_Backend", int]], dict["_Backend", str]]:
+    ) -> tuple[list[tuple["_Backend", int]], dict["_Backend", list[str]]]:
         valid_backends_priorities = []
         invalid_reasons = {}
         device_capability = cls.get_device_capability()
@@ -262,13 +262,13 @@ class CudaPlatformBase(Platform):
                 continue
             priority = backend_priorities[backend]
             backend_class = backend_to_class(backend)
-            maybe_invalid_reason = backend_class.validate_configuration(
+            invalid_reasons_i = backend_class.validate_configuration(
                 head_size, dtype, kv_cache_dtype, block_size, use_v1, use_mla,
                 has_sink, device_capability_int)
-            if maybe_invalid_reason is None:
-                valid_backends_priorities.append((backend, priority))
+            if invalid_reasons_i:
+                invalid_reasons[backend] = invalid_reasons_i
             else:
-                invalid_reasons[backend] = maybe_invalid_reason
+                valid_backends_priorities.append((backend, priority))
 
         return valid_backends_priorities, invalid_reasons
 
@@ -304,12 +304,15 @@ class CudaPlatformBase(Platform):
             has_sink)
 
         if len(valid_backends_priorities) == 0:
+            reasons_str = "{" + ", ".join(
+                f"{backend.name}: [{', '.join(reasons)}]"
+                for backend, reasons in invalid_reasons.items()) + "}"
             raise ValueError(
                 f"No valid attention backend from priority list for "
                 f"{cls.device_name} with head_size: {head_size}, "
                 f"dtype: {dtype}, kv_cache_dtype: {kv_cache_dtype}, "
                 f"use_v1: {use_v1}, use_mla: {use_mla}, has_sink: {has_sink}. "
-                f"Reasons: {invalid_reasons}")
+                f"Reasons: {reasons_str}")
 
         # We have found some valid backends. Select the one with the
         # highest priority.

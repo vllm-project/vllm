@@ -97,8 +97,11 @@ class FlashAttentionBackend(AttentionBackend):
         return [torch.float16, torch.bfloat16]
 
     @classmethod
-    def get_supported_kv_cache_dtypes(cls) -> list[Optional[str]]:
-        return ["auto", "fp16", "bf16", "fp8", "fp8_e4m3"]
+    def supports_kv_cache_dtype(cls, kv_cache_dtype: Optional[str]) -> bool:
+        if kv_cache_dtype is not None \
+           and kv_cache_dtype.startswith("fp8"):
+            return flash_attn_supports_fp8()
+        return kv_cache_dtype in [None, "auto", "fp16", "bf16"]
 
     @classmethod
     def supports_block_size(cls, block_size: int) -> bool:
@@ -124,13 +127,10 @@ class FlashAttentionBackend(AttentionBackend):
     def supports_combination(cls, head_size: int, dtype: torch.dtype,
                              kv_cache_dtype: Optional[str], block_size: int,
                              use_v1: bool, use_mla: bool, has_sink: bool,
-                             device_capability: int) -> bool:
+                             device_capability: int) -> Optional[str]:
         if has_sink and device_capability < 90:
-            return False
-        if kv_cache_dtype is not None \
-           and kv_cache_dtype.startswith("fp8"):
-            return flash_attn_supports_fp8()
-        return True
+            return "sink not supported on compute capability < 9.0"
+        return None
 
 
 @dataclass
