@@ -80,7 +80,7 @@ def compile_nccl_allocator():
             verbose=envs.VLLM_LOGGING_LEVEL == "DEBUG",
             is_python_module=False,
             build_directory=out_dir,
-            extra_include_paths=envs.VLLM_NCCL_INCLUDE_PATH,
+            extra_include_paths=[envs.VLLM_NCCL_INCLUDE_PATH],
         )
         _allocator_wrapper = CUDAPluggableAllocator(
             f"{out_dir}/{nccl_allocator_libname}.so",
@@ -94,7 +94,8 @@ def compile_nccl_allocator():
             "Failed to compile NCCL memory allocator. "
             "Symmetric memory will be disabled. "
             "This is expected if NCCL headers are not available. "
-            "optionally set VLLM_NCCL_INCLUDE_PATH to point to NCCL header."
+            "optionally set VLLM_NCCL_INCLUDE_PATH to point to a directory "
+            "containing the NCCL header. "
             "Error: %s", str(e))
 
 

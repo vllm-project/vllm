@@ -143,19 +143,22 @@ class PyNcclCommunicator:
 
     def should_nccl_symm_mem_allreduce(self,
                                        input_tensor: torch.Tensor) -> bool:
+        from vllm.distributed.device_communicators.all_reduce_utils import (
+            NCCL_SYMM_MEM_ALL_REDUCE_CONFIG)
         from vllm.distributed.device_communicators.pynccl_allocator import (
             is_symmetric_memory_enabled)
         if not is_symmetric_memory_enabled():
             return False
-        if self.world_size < 4:
+        if self.world_size < NCCL_SYMM_MEM_ALL_REDUCE_CONFIG["min_world_size"]:
             return False
-        if (self.world_size == 4
-                and input_tensor.numel() > 2 * 1024 * 1024):  # 2 MB
+
+        threshold = NCCL_SYMM_MEM_ALL_REDUCE_CONFIG["thresholds"].get(
+            self.world_size)
+        if threshold is not None and input_tensor.numel() > threshold:
             return True
-        if (self.world_size == 8
-                and input_tensor.numel() > 8 * 1024 * 1024):  # 8 MB
-            return True
-        return self.world_size > 8
+
+        return self.world_size > NCCL_SYMM_MEM_ALL_REDUCE_CONFIG[
+            "always_use_above_world_size"]
 
     def all_reduce(self,
                    in_tensor: torch.Tensor,

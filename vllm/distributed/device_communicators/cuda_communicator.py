@@ -149,7 +149,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
             # when we run the model, allreduce only happens for the TP
             # group, where we always have either custom allreduce or pynccl.
             out = input_.clone()
-            print("doing torch dist all reduce")
             torch.distributed.all_reduce(out, group=self.device_group)
         return out
 
