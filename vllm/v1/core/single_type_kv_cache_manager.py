@@ -77,10 +77,12 @@ class SingleTypeKVCacheManager(ABC):
         """
 
         num_required_blocks = cdiv(num_tokens, self.block_size)
-        num_skipped_token = self.get_num_skipped_token(total_computed_tokens)
+        last_useful_token = self.get_last_useful_token(total_computed_tokens)
         num_allocated_or_skipped_blocks = max(
             len(new_computed_blocks) + len(self.req_to_blocks[request_id]),
-            num_skipped_token // self.block_size)
+            # -1 because we can only free blocks BEFORE the block of
+            # last useful token.
+            last_useful_token // self.block_size - 1)
         num_new_blocks = num_required_blocks - num_allocated_or_skipped_blocks
 
         # If a computed block of a request is an eviction candidate (in the
@@ -145,21 +147,23 @@ class SingleTypeKVCacheManager(ABC):
         Allocate new blocks for the request to give it at least 
         `num_computed_tokens` token slots.
         """
-        num_skipped_token = self.get_num_skipped_token(total_computed_tokens)
+        last_useful_token = self.get_last_useful_token(total_computed_tokens)
         req_to_blocks = self.req_to_blocks[request_id]
-        if num_skipped_token > 0:
+        if last_useful_token > 0:
             # NOTE(Kuntai): In connector case, `num_skipped_token` can be longer
             # than the tokens that the request has. So we take a min here.
-            tail_idx = min(num_skipped_token // self.block_size - 1,
-                           len(req_to_blocks) - 1)
-            for i in range(tail_idx, -1, -1):
+            # Here we use -1, because we want to get the last block BEFORE
+            # the latest useful tokens.
+            tail_idx = min(last_useful_token // self.block_size - 1,
+                           len(req_to_blocks))
+            for i in range(tail_idx - 1, -1, -1):
                 if req_to_blocks[i] == self._null_block:
                     break
                 # TODO: batch the call of free_blocks
                 self.block_pool.free_blocks([req_to_blocks[i]])
                 req_to_blocks[i] = self._null_block
             for i in range(len(req_to_blocks),
-                           num_skipped_token // self.block_size):
+                           last_useful_token // self.block_size):
                 req_to_blocks.append(self._null_block)
         self.allocate_new_blocks(request_id, total_computed_tokens)
 
@@ -215,7 +219,7 @@ class SingleTypeKVCacheManager(ABC):
         """
         # Remove the blocks that are no longer be in the sliding window and
         # skipped during the attention computation.
-        last_useful_token = self.get_num_skipped_token(num_computed_tokens)
+        last_useful_token = self.get_last_useful_token(num_computed_tokens)
         if last_useful_token <= 0:
             # This indicates that ALL tokens are inside attention window.
             # Thus we do not need to free any blocks outside attention window.
@@ -294,9 +298,9 @@ class SingleTypeKVCacheManager(ABC):
 
         raise NotImplementedError
 
-    def get_num_skipped_token(self, num_computed_tokens: int) -> int:
+    def get_last_useful_token(self, num_computed_tokens: int) -> int:
         """
-        Get the last useful token for the request.
+        Get the last token (leftmost token) index that is inside attn window.
         """
         return 0
 
@@ -422,7 +426,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                 computed.pop()
         return computed_blocks
 
-    def get_num_skipped_token(self, num_computed_tokens: int) -> int:
+    def get_last_useful_token(self, num_computed_tokens: int) -> int:
         """
         Get the last useful token for the request.
         """
@@ -521,7 +525,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
                 break
         return computed_blocks
 
-    def get_num_skipped_token(self, num_computed_tokens: int) -> int:
+    def get_last_useful_token(self, num_computed_tokens: int) -> int:
         # Remove the blocks that are no longer be in the chunked attention
         # window and skipped during the attention computation.
 
