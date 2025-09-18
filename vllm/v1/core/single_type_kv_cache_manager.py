@@ -562,13 +562,14 @@ class MambaManager(SingleTypeKVCacheManager):
     def get_num_blocks_to_allocate(
             self, request_id: str, num_tokens: int,
             new_computed_blocks: list[KVCacheBlock]) -> int:
+        # Allocate extra `num_speculative_blocks` blocks for
+        # speculative decoding (MTP/EAGLE) with linear attention.
         assert isinstance(self.kv_cache_spec, MambaSpec)
-        # Mamba does not support prefix caching
-        assert len(new_computed_blocks) == 0
-        num_blocks_needed = 1 + self.kv_cache_spec.num_speculative_blocks
-        num_allocated_blocks = len(self.req_to_blocks[request_id])
-        assert num_allocated_blocks <= num_blocks_needed
-        return num_blocks_needed - num_allocated_blocks
+        if self.kv_cache_spec.num_speculative_blocks > 0:
+            num_tokens += (self.kv_cache_spec.block_size *
+                           self.kv_cache_spec.num_speculative_blocks)
+        return super().get_num_blocks_to_allocate(request_id, num_tokens,
+                                                  new_computed_blocks)
 
     def allocate_new_blocks(self, request_id: str,
                             num_tokens: int) -> list[KVCacheBlock]:
