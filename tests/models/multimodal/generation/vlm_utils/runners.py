@@ -91,7 +91,7 @@ def run_video_test(
     assert test_case.num_video_frames is not None
     inputs = builders.build_video_inputs_from_test_info(
         model_test_info, video_assets, test_case.size_wrapper,
-        test_case.num_video_frames)
+        test_case.num_video_frames, test_case.needs_video_metadata)
 
     core.run_test(
         hf_runner=hf_runner,

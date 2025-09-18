@@ -143,6 +143,7 @@ class VLMTestInfo(NamedTuple):
     distributed_executor_backend: Optional[Union[str, Iterable[str]]] = None
     # Only expanded in video tests
     num_video_frames: Union[int, tuple[int]] = 16
+    needs_video_metadata: bool = False
 
     # Fixed image sizes / image size factors; most tests use image_size_factors
     # The values provided for these two fields will be stacked and expanded
@@ -199,5 +200,6 @@ class ExpandableVLMTestArgs(NamedTuple):
     size_wrapper: Optional[ImageSizeWrapper] = None
     # Video only
     num_video_frames: Optional[int] = None
+    needs_video_metadata: bool = False
     # Custom inputs only
     custom_test_opts: Optional[CustomTestOptions] = None
