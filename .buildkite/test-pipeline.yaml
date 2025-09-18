@@ -46,22 +46,18 @@ steps:
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - vllm/
-  - tests/async_engine
   - tests/test_inputs.py
   - tests/test_outputs.py
   - tests/multimodal
   - tests/utils_
-  - tests/worker
   - tests/standalone_tests/lazy_imports.py
   - tests/transformers_utils
   commands:
   - python3 standalone_tests/lazy_imports.py
-  - pytest -v -s async_engine # AsyncLLMEngine
   - pytest -v -s test_inputs.py
   - pytest -v -s test_outputs.py
   - pytest -v -s multimodal
   - pytest -v -s utils_ # Utils
-  - pytest -v -s worker # Worker
   - pytest -v -s transformers_utils # transformers_utils
 
 - label: Python-only Installation Test # 10min
@@ -82,14 +78,12 @@ steps:
   - vllm/
   - tests/basic_correctness/test_basic_correctness
   - tests/basic_correctness/test_cpu_offload
-  - tests/basic_correctness/test_preemption
   - tests/basic_correctness/test_cumem.py
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s basic_correctness/test_cumem.py
   - pytest -v -s basic_correctness/test_basic_correctness.py
   - pytest -v -s basic_correctness/test_cpu_offload.py
-  - VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py
 
 - label: Entrypoints Unit Tests # 5min
   timeout_in_minutes: 10
