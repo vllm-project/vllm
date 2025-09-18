@@ -283,11 +283,17 @@ if __name__ == "__main__":
         "# of max concurrency.",
         "qps",
     ]
-    data_cols_to_compare = ["Output Tput (tok/s)", "Median TTFT (ms)", "Median"]
+    #data_cols_to_compare = ["Output Tput (tok/s)", "Median TTFT (ms)", "Median"]
+    #html_msgs_for_data_cols = [
+    #    "Compare Output Tokens /n",
+    #    "Median TTFT /n",
+    #    "Median TPOT /n",
+    #]
+    data_cols_to_compare = ["Output Tput (tok/s)", "P99 TTFT (ms)", "P99"]
     html_msgs_for_data_cols = [
         "Compare Output Tokens /n",
-        "Median TTFT /n",
-        "Median TPOT /n",
+        "P99 TTFT /n",
+        "P99 TPOT /n",
     ]
 
     if len(args.file) == 1:
@@ -300,7 +306,7 @@ if __name__ == "__main__":
     plot = args.plot
     # For Plot feature, assign y axis from one of info_cols
     y_axis_index = info_cols.index(args.xaxis) if args.xaxis in info_cols else 6
-    with open("perf_comparison.html", "w") as text_file:
+    with open("perf_comparison.html", "a") as text_file:
         for i in range(len(data_cols_to_compare)):
             output_df, raw_data_cols = compare_data_columns(
                 files,
@@ -338,7 +344,7 @@ if __name__ == "__main__":
                 elif "ttft" in metric_name:
                     styler = _highlight_threshold(group, args.ttft_max_ms)
                     html = styler.to_html(table_attributes='border="1" class="dataframe"')
-                elif "tpot" in metric_name or "median" in metric_name:
+                elif "tpot" in metric_name or "median" in metric_name or "p99" in metric_name:
                     styler = _highlight_threshold(group, args.tpot_max_ms)
                     html = styler.to_html(table_attributes='border="1" class="dataframe"')
                 
@@ -373,7 +379,7 @@ if __name__ == "__main__":
                         # ---- Add threshold lines based on metric name ----
                         if "ttft" in metric_name:
                             _add_limit_line(fig, args.ttft_max_ms, "TTFT limit")
-                        elif "tpot" in metric_name or "median" in metric_name:
+                        elif "tpot" in metric_name or "median" in metric_name or "p99" in metric_name :
                             _add_limit_line(fig, args.tpot_max_ms, "TPOT limit")
 
                         # Export to HTML
