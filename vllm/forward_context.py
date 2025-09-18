@@ -8,13 +8,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
 
 import torch
-import torch.distributed as dist
 
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
-from vllm.v1.worker.ubatch_utils import UBatchSlices, is_second_ubatch_empty
+from vllm.v1.worker.ubatch_utils import UBatchSlices
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -69,84 +67,6 @@ class DPMetadata:
     max_tokens_across_dp_cpu: torch.Tensor
     cu_tokens_across_dp_cpu: torch.Tensor
     local_sizes: Optional[list[int]] = None
-
-    @staticmethod
-    def num_tokens_across_dp(num_tokens: int, dp_size: int,
-                             dp_rank: int) -> torch.Tensor:
-        """
-        Gather the num_tokens across all DP ranks and return results in a
-        CPU tensor of size dp_size.
-        """
-        from vllm.distributed.parallel_state import get_dp_group
-        device = current_platform.device_type
-        group = get_dp_group().device_group
-
-        # Transfering this tensor from GPU to CPU will introduce a GPU sync
-        # point that could adversely affect performance of vllm with asynch
-        # scheduling. This environment variable exists to quickly disable
-        # this optimization if we run into this case.
-        if envs.VLLM_DISABLE_NCCL_FOR_DP_SYNCHRONIZATION:
-            logger.info_once(
-                "Using CPU all reduce to syncronize DP padding between ranks.")
-            device = "cpu"
-            group = get_dp_group().cpu_group
-        num_tokens_across_dp = [0] * dp_size
-        num_tokens_across_dp[dp_rank] = num_tokens
-        num_tokens_tensor = torch.tensor(num_tokens_across_dp,
-                                         device=device,
-                                         dtype=torch.int32)
-        dist.all_reduce(num_tokens_tensor, group=group)
-        return num_tokens_tensor.cpu()
-
-    @staticmethod
-    def coordinate_batch_across_dp(
-            should_ubatch: bool, orig_num_tokens_per_ubatch: int,
-            padded_num_tokens_per_ubatch: int, dp_size: int,
-            dp_rank: int) -> tuple[bool, Optional[torch.Tensor]]:
-        """
-        1. Decides if each DP rank is going to microbatch. Either all ranks
-        run with microbatching or none of them do. If this function decides
-        not to run with microbatching. It will "abort" meaning that no padding
-        information will be returned to the caller. It will return (False, None)
-
-        2. Determines the total number of tokens that each rank will run.
-        All ranks will be padded out so that the run with the same number
-        of tokens
-
-        Returns: tuple[
-            should_ubatch: Are all DP ranks going to microbatch
-            num_tokens_after_padding: A tensor containing the total number of
-            tokens per-microbatch for each DP rank including padding. Will be
-            None if should_ubatch if False
-        ]
-        """
-
-        device = current_platform.device_type
-        tensor = torch.zeros(3, dp_size, device=device, dtype=torch.int32)
-        tensor[0][dp_rank] = orig_num_tokens_per_ubatch
-        tensor[1][dp_rank] = padded_num_tokens_per_ubatch
-        tensor[2][dp_rank] = 1 if should_ubatch else 0
-
-        from vllm.distributed.parallel_state import get_dp_group
-        dist.all_reduce(tensor, group=get_dp_group().device_group)
-
-        result: bool = bool(torch.all(tensor[2] == 1).item())
-
-        orig_num_tokens_tensor = tensor[0, :]
-        padded_num_tokens_tensor = tensor[1, :]
-
-        if not result:
-            return result, padded_num_tokens_tensor.cpu() * 2
-
-        # If the DP ranks are planning to ubatch, make sure that
-        # there are no "empty" second ubatches
-        orig_min_num_tokens = int(orig_num_tokens_tensor.min().item())
-        padded_max_num_tokens = int(padded_num_tokens_tensor.max().item())
-        if is_second_ubatch_empty(orig_min_num_tokens, padded_max_num_tokens):
-            logger.debug("Aborting ubatching %s %s", orig_min_num_tokens,
-                         padded_max_num_tokens)
-            return False, padded_num_tokens_tensor.cpu() * 2
-        return result, padded_num_tokens_tensor.cpu()
 
     @staticmethod
     def make(

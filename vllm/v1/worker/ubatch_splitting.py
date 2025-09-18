@@ -6,11 +6,11 @@ from typing import Optional
 import torch
 
 from vllm.config import ParallelConfig
-from vllm.forward_context import DPMetadata
 from vllm.logger import init_logger
 from vllm.utils import round_up
 from vllm.v1.worker.ubatch_utils import (UBatchSlice, UBatchSlices,
                                          is_second_ubatch_empty)
+from vllm.v1.worker.utils import ar_coordinate_batch_across_dp
 
 logger = init_logger(__name__)
 
@@ -22,10 +22,10 @@ def should_ubatch_with_num_tokens(
     dp_size: int,
     dp_rank: int,
 ) -> tuple[bool, Optional[torch.Tensor]]:
-    return DPMetadata.coordinate_batch_across_dp(should_ubatch,
-                                                 orig_num_tokens_per_ubatch,
-                                                 padded_num_tokens_per_ubatch,
-                                                 dp_size, dp_rank)
+    return ar_coordinate_batch_across_dp(should_ubatch,
+                                         orig_num_tokens_per_ubatch,
+                                         padded_num_tokens_per_ubatch, dp_size,
+                                         dp_rank)
 
 
 def coordinate_batch_across_dp(
