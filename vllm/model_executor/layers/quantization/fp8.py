@@ -18,8 +18,6 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig, fp8_w8a8_moe_quant_config)
-from vllm.model_executor.layers.fused_moe.fused_moe import (
-    zero_experts_compute_triton)
 from vllm.model_executor.layers.fused_moe.layer import (
     UnquantizedFusedMoEMethod)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
@@ -972,7 +970,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     topk_group=topk_group,
                     apply_router_weight_on_input=apply_router_weight_on_input)
 
-        topk_weights, topk_ids = FusedMoE.select_experts(
+        zero_expert_num = getattr(layer, 'zero_expert_num', 0)
+        zero_expert_type = getattr(layer, 'zero_expert_type', None)
+
+        select_result = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
             use_grouped_topk=use_grouped_topk,
@@ -990,23 +991,17 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             expert_load_view=expert_load_view,
             logical_to_physical_map=logical_to_physical_map,
             logical_replica_count=logical_replica_count,
+            global_num_experts=global_num_experts,
+            zero_expert_num=zero_expert_num,
+            zero_expert_type=zero_expert_type,
         )
 
-        #
-        # Note: the order of checks is important since self.fused_experts
-        # can override fused_experts or cutlass but not rocm or marlin.
-        #
-        zero_expert_num = getattr(layer, 'zero_expert_num', 0)
-        zero_expert_type = getattr(layer, 'zero_expert_type', None)
-        zero_expert_result = None
-        if zero_expert_num != 0 and zero_expert_type is not None:
-            zero_expert_result = zero_experts_compute_triton(
-                expert_indices=topk_ids,
-                expert_scales=topk_weights,
-                num_experts=global_num_experts,
-                zero_expert_type=zero_expert_type,
-                hidden_states=x,
-            )
+        if len(select_result) == 3:
+            topk_weights, topk_ids, zero_expert_result = select_result
+        else:
+            topk_weights, topk_ids = select_result
+            zero_expert_result = None
+
         if self.rocm_aiter_moe_enabled:
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
                 rocm_aiter_fused_experts)

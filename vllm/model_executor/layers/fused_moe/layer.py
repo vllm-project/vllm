@@ -498,7 +498,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
 
-        topk_weights, topk_ids = FusedMoE.select_experts(
+        zero_expert_num = getattr(layer, 'zero_expert_num', 0)
+        zero_expert_type = getattr(layer, 'zero_expert_type', None)
+
+        select_result = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
             use_grouped_topk=use_grouped_topk,
@@ -515,19 +518,16 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             expert_map=expert_map,
             expert_load_view=expert_load_view,
             logical_to_physical_map=logical_to_physical_map,
-            logical_replica_count=logical_replica_count)
+            logical_replica_count=logical_replica_count,
+            global_num_experts=global_num_experts,
+            zero_expert_num=zero_expert_num,
+            zero_expert_type=zero_expert_type)
 
-        zero_expert_num = getattr(layer, 'zero_expert_num', 0)
-        zero_expert_type = getattr(layer, 'zero_expert_type', None)
-        zero_expert_result = None
-        if zero_expert_num != 0 and zero_expert_type is not None:
-            zero_expert_result = zero_experts_compute_triton(
-                expert_indices=topk_ids,
-                expert_scales=topk_weights,
-                num_experts=global_num_experts,
-                zero_expert_type=zero_expert_type,
-                hidden_states=x,
-            )
+        if len(select_result) == 3:
+            topk_weights, topk_ids, zero_expert_result = select_result
+        else:
+            topk_weights, topk_ids = select_result
+            zero_expert_result = None
 
         if self.rocm_aiter_moe_enabled:
             assert self.fused_experts is None
@@ -1578,14 +1578,26 @@ class FusedMoE(CustomOp):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Zero expert parameters
+        global_num_experts: Optional[int] = None,
+        zero_expert_num: Optional[int] = None,
+        zero_expert_type: Optional[str] = None,
+    ) -> Union[tuple[torch.Tensor, torch.Tensor], tuple[
+            torch.Tensor, torch.Tensor, torch.Tensor]]:
         """
         Route the input hidden states to the top-k experts based on the
         router logits.
 
         Returns:
-            (topk_weights, topk_ids) (tuple[torch.Tensor, torch.Tensor]):
-            The weights and *global physical* expert ids of the top-k experts.
+            When zero experts are not used:
+                (topk_weights, topk_ids) (tuple[torch.Tensor, torch.Tensor]):
+                The weights and *global physical* expert ids of the top-k
+                experts.
+
+            When zero experts are used:
+                (topk_weights, topk_ids, zero_expert_result) 
+                (tuple[torch.Tensor, torch.Tensor, torch.Tensor]):
+                The weights, expert ids, and zero expert computation result.
 
             **Compatibility**: When EPLB is not enabled, the returned ids are
             equivalent to global logical ids, so should be compatible with
@@ -1704,7 +1716,19 @@ class FusedMoE(CustomOp):
 
         assert topk_ids.dtype == indices_type or indices_type is None
 
-        return topk_weights, topk_ids
+        # Compute zero expert result if needed
+        if (zero_expert_num is not None and zero_expert_num > 0
+                and zero_expert_type is not None):
+            zero_expert_result = zero_experts_compute_triton(
+                expert_indices=topk_ids,
+                expert_scales=topk_weights,
+                num_experts=global_num_experts,
+                zero_expert_type=zero_expert_type,
+                hidden_states=hidden_states,
+            )
+            return topk_weights, topk_ids, zero_expert_result
+        else:
+            return topk_weights, topk_ids
 
     def must_reduce_shared_expert_outputs(self) -> bool:
         """
