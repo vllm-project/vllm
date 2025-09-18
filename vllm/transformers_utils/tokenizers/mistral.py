@@ -476,9 +476,9 @@ class MistralTokenizer(TokenizerBase):
 
     def convert_ids_to_tokens(
         self,
-        ids: list[int],
+        ids: Union[int, list[int]],
         skip_special_tokens: bool = True,
-    ) -> list[str]:
+    ) -> Union[str, list[str]]:
         from mistral_common.tokens.tokenizers.base import SpecialTokens
         from mistral_common.tokens.tokenizers.instruct import (
             InstructTokenizerV13)
@@ -490,6 +490,7 @@ class MistralTokenizer(TokenizerBase):
 
         assert self.is_tekken or self.is_spm, type(self.tokenizer)
 
+        non_skip_special_tokens = None
         if self.is_tekken:
             # skip special tokens except tool call and think tokens
             non_skip_special_tokens = {
@@ -500,22 +501,30 @@ class MistralTokenizer(TokenizerBase):
                     non_skip_special_tokens.add(self.instruct.BEGIN_THINK)
                 if self.instruct.END_THINK:
                     non_skip_special_tokens.add(self.instruct.END_THINK)
-            ids = [
-                i for i in ids if i > self.tokenizer.num_special_tokens
-                or i in non_skip_special_tokens
-            ]
 
-        tokens = [self.tokenizer.id_to_piece(id) for id in ids]
+        if isinstance(ids, int):
+            return self._convert_id_to_token(ids, non_skip_special_tokens)
 
-        if any("�" in t for t in tokens) and self.is_tekken:
+        tokens = [
+            self._convert_id_to_token(i, non_skip_special_tokens) for i in ids
+            if self._convert_id_to_token(i, non_skip_special_tokens) != ""
+        ]
+        return tokens
+
+    def _convert_id_to_token(self, id: int,
+                             non_skip_special_tokens: Union[set, None]) -> str:
+        if (self.is_tekken and id <= self.tokenizer.num_special_tokens
+                and non_skip_special_tokens is not None
+                and id not in non_skip_special_tokens):
+            return ""  # skip this token
+
+        token = self.tokenizer.id_to_piece(id)
+        if "�" in token and self.is_tekken:
             # if a decoded token contains the replacement character, then the
             # token has an incomplete UTF-8 character so we must use bytes
             # See: https://github.com/vllm-project/vllm/pull/8640
             #      https://github.com/vllm-project/vllm/pull/9625
             # if underlying tokenizeir is sentencepiece, we just add "�"
-            tokens = [
-                self.tokenizer.id_to_byte_piece(id, self._special_token_policy)
-                for id in ids
-            ]
-
-        return tokens
+            token = self.tokenizer.id_to_byte_piece(id,
+                                                    self._special_token_policy)
+        return token
