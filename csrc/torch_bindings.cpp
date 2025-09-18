@@ -510,13 +510,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("cutlass_sparse_compress(Tensor a) -> Tensor[]");
   ops.impl("cutlass_sparse_compress", &cutlass_sparse_compress);
 
-  // CUTLASS MLA decode
-  ops.def(
-      "cutlass_mla_decode(Tensor! out, Tensor q_nope, Tensor q_pe,"
-      "                   Tensor kv_c_and_k_pe_cache, Tensor seq_lens,"
-      "                   Tensor page_table, float scale) -> ()");
-  ops.impl("cutlass_mla_decode", torch::kCUDA, &cutlass_mla_decode);
-
   // SM100 CUTLASS MLA decode
   ops.def(
       "sm100_cutlass_mla_decode(Tensor! out, Tensor! lse, Tensor q_nope,"
@@ -612,6 +605,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor! ssm_states,"
       "int pad_slot_id) -> ()");
   ops.impl("selective_scan_fwd", torch::kCUDA, &selective_scan_fwd);
+
+  // Hadamard transforms
+  ops.def("hadacore_transform(Tensor! x, bool inplace) -> Tensor");
 
 #ifndef USE_ROCM
   // Compute per-token-group FP8 quantized tensor and scaling factor.

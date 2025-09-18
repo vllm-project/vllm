@@ -183,15 +183,13 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def prepare_async(
         self,
         a1: torch.Tensor,
-        a1_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-    ) -> Callable:
+    ) -> tuple[Callable, mk.ReceiverType]:
 
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)
@@ -204,7 +202,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             # Quant and Dispatch
             a1q, a1q_scale = moe_kernel_quantize_input(
                 a1,
-                a1_scale,
+                quant_config.a1_scale,
                 quant_dtype=quant_config.quant_dtype,
                 per_act_token_quant=quant_config.per_act_token_quant,
                 block_shape=quant_config.block_shape,
@@ -215,21 +213,20 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         else:
             a1q = a1
             a1q_scale = None
-            a1_post_scale = a1_scale
+            a1_post_scale = quant_config.a1_scale
 
-        return self._do_dispatch(tokens=a1q,
-                                 token_scales=a1q_scale,
-                                 rank_topk_ids=topk_ids,
-                                 rank_topk_weights=topk_weights,
-                                 num_experts=num_experts,
-                                 a1_scale=a1_post_scale,
-                                 quant_config=quant_config)
+        return (lambda *args: None,
+                self._do_dispatch(tokens=a1q,
+                                  token_scales=a1q_scale,
+                                  rank_topk_ids=topk_ids,
+                                  rank_topk_weights=topk_weights,
+                                  num_experts=num_experts,
+                                  a1_scale=a1_post_scale,
+                                  quant_config=quant_config))
 
     def prepare(
         self,
         a1: torch.Tensor,
-        a1_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
@@ -237,10 +234,10 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
-        receiver = self.prepare_async(a1, a1_scale, a2_scale, topk_weights,
-                                      topk_ids, num_experts, expert_map,
-                                      apply_router_weight_on_input,
-                                      quant_config)
+        (_, receiver) = self.prepare_async(a1, topk_weights, topk_ids,
+                                           num_experts, expert_map,
+                                           apply_router_weight_on_input,
+                                           quant_config)
         return receiver()
 
     def finalize(
