@@ -804,7 +804,6 @@ def add_cli_args(parser: argparse.ArgumentParser):
         type=str,
         default="vllm",
         choices=list(ASYNC_REQUEST_FUNCS.keys()),
-        deprecated=True,
         help="'--backend' is deprecated and will be removed in v0.11.0. "
         "Please use --endpoint-type instead.",
     )
@@ -1085,6 +1084,14 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     random.seed(args.seed)
     np.random.seed(args.seed)
 
+    if args.backend is not None:
+        warnings.warn(
+            "'--backend' is deprecated and will be removed in v0.11.0. "
+            "Please use --endpoint-type instead. Setting --endpoint-type to "
+            f"{args.backend}.",
+            stacklevel=2,
+        )
+        args.endpoint_type = args.backend
     # Validate ramp-up arguments
     if args.ramp_up_strategy is not None:
         if args.request_rate != float("inf"):
