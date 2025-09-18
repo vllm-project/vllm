@@ -927,11 +927,13 @@ def causal_conv1d_update(
     validate_data=False,
 ):
     """
-    x: (batch, dim) or (batch, dim, seqlen) or (num_tokens, dim)
-        [shape=2: single token prediction]
-        [shape=3: single or multiple tokens prediction]
-        [shape=2 with num_tokens: continuous batching, where num_tokens is the
-                                  total tokens of all sequences in that batch]
+    x: Input tensor which can take the following shapes:
+
+    - `[batch, dim]` - single token prediction
+    - `[batch, dim, seqlen]` - single or multiple tokens prediction
+    - `[num_tokens, dim]` - continuous batching, where num_tokens is
+        the total tokens of all sequences in that batch
+
     conv_state: (..., dim, state_len), where state_len >= width - 1
     weight: (dim, width)
     bias: (dim,)
