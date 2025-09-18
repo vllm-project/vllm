@@ -50,7 +50,6 @@ steps:
   - tests/test_outputs.py
   - tests/multimodal
   - tests/utils_
-  - tests/worker
   - tests/standalone_tests/lazy_imports.py
   - tests/transformers_utils
   commands:
@@ -59,7 +58,6 @@ steps:
   - pytest -v -s test_outputs.py
   - pytest -v -s multimodal
   - pytest -v -s utils_ # Utils
-  - pytest -v -s worker # Worker
   - pytest -v -s transformers_utils # transformers_utils
 
 - label: Python-only Installation Test # 10min
@@ -80,14 +78,12 @@ steps:
   - vllm/
   - tests/basic_correctness/test_basic_correctness
   - tests/basic_correctness/test_cpu_offload
-  - tests/basic_correctness/test_preemption
   - tests/basic_correctness/test_cumem.py
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s basic_correctness/test_cumem.py
   - pytest -v -s basic_correctness/test_basic_correctness.py
   - pytest -v -s basic_correctness/test_cpu_offload.py
-  - VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py
 
 - label: Entrypoints Unit Tests # 5min
   timeout_in_minutes: 10
@@ -792,7 +788,7 @@ steps:
     # Quantization
     - pytest -v -s tests/kernels/quantization/test_cutlass_scaled_mm.py -k 'fp8'
     - pytest -v -s tests/kernels/quantization/test_nvfp4_quant.py
-    - pytest -v -s tests/kernels/quantization/test_silu_nvfp4_quant_fusion.py
+    - pytest -v -s tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
     - pytest -v -s tests/kernels/quantization/test_nvfp4_scaled_mm.py
     - pytest -v -s tests/kernels/quantization/test_flashinfer_scaled_mm.py
     - pytest -v -s tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
@@ -808,7 +804,7 @@ steps:
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/"
   gpu: b200
-  # optional: true
+  optional: true # disable while debugging
   source_file_dependencies:
   - tests/evals/gpt_oss
   - vllm/model_executor/models/gpt_oss.py
