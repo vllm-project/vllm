@@ -167,12 +167,6 @@ if [[ $commands == *" entrypoints/llm "* ]]; then
   --ignore=entrypoints/llm/test_prompt_validation.py "}
 fi
 
-#Obsolete currently
-##ignore certain Entrypoints/llm tests
-#if [[ $commands == *" && pytest -v -s entrypoints/llm/test_guided_generate.py"* ]]; then
-#  commands=${commands//" && pytest -v -s entrypoints/llm/test_guided_generate.py"/" "}
-#fi
-
 # --ignore=entrypoints/openai/test_encoder_decoder.py \
 # --ignore=entrypoints/openai/test_embedding.py \
 # --ignore=entrypoints/openai/test_oot_registration.py
