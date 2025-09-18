@@ -175,6 +175,7 @@ Regardless, you need to set `mm_encoder_tp_mode="data"` in engine arguments to u
 Known supported models:
 
 - GLM-4.5V GLM-4.1V (<gh-pr:23168>)
+- InternVL (<gh-pr:23909>)
 - Kimi-VL (<gh-pr:23817>)
 - Llama4 (<gh-pr:18368>)
 - MiniCPM-V-2.5 or above (<gh-pr:23327>, <gh-pr:23948>)
