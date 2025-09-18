@@ -79,7 +79,7 @@ Then run the benchmarking script
 # download dataset
 # wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
 vllm bench serve \
-  --backend vllm \
+  --endpoint-type vllm \
   --model NousResearch/Hermes-3-Llama-3.1-8B \
   --endpoint /v1/completions \
   --dataset-name sharegpt \
@@ -131,7 +131,7 @@ VLLM_USE_V1=1 vllm serve meta-llama/Llama-3.1-8B-Instruct
 ```bash
 # run benchmarking script
 vllm bench serve --port 9001 --save-result --save-detailed \
-  --backend vllm \
+  --endpoint-type vllm \
   --model meta-llama/Llama-3.1-8B-Instruct \
   --endpoint /v1/completions \
   --dataset-name custom \
@@ -155,7 +155,7 @@ vllm serve Qwen/Qwen2-VL-7B-Instruct
 
 ```bash
 vllm bench serve \
-  --backend openai-chat \
+  --endpoint-type openai-chat \
   --endpoint-type openai-chat \
   --model Qwen/Qwen2-VL-7B-Instruct \
   --endpoint /v1/chat/completions \
@@ -229,7 +229,7 @@ vllm serve Qwen/Qwen2-VL-7B-Instruct
 
 ```bash
 vllm bench serve \
-  --backend openai-chat \
+  --endpoint-type openai-chat \
   --endpoint-type openai-chat \
   --model Qwen/Qwen2-VL-7B-Instruct \
   --endpoint /v1/chat/completions \
@@ -244,7 +244,7 @@ vllm bench serve \
 
 ```bash
 vllm bench serve \
-  --backend openai-chat \
+  --endpoint-type openai-chat \
   --endpoint-type openai-chat \
   --model Qwen/Qwen2-VL-7B-Instruct \
   --endpoint /v1/chat/completions \
@@ -294,7 +294,7 @@ parameters can be specified. Example client command:
 
 ```bash
 vllm bench serve \
-  --backend vllm \
+  --endpoint-type vllm \
   --model NousResearch/Hermes-3-Llama-3.1-8B \
   --endpoint /v1/completions \
   --dataset-name sharegpt \
@@ -350,7 +350,7 @@ Total num output tokens:  1500
 ```bash
 vllm bench throughput \
   --model Qwen/Qwen2-VL-7B-Instruct \
-  --backend vllm-chat \
+  --endpoint-type openai-chat \
   --dataset-name hf \
   --dataset-path lmarena-ai/VisionArena-Chat \
   --num-prompts 1000 \
@@ -396,7 +396,7 @@ Total num output tokens:  204800
 ```bash
 vllm bench throughput \
   --model Qwen/Qwen2-VL-7B-Instruct \
-  --backend vllm-chat \
+  --endpoint-type openai-chat \
   --dataset-name hf \
   --dataset-path lmms-lab/LLaVA-OneVision-Data \
   --hf-split train \
@@ -409,7 +409,7 @@ vllm bench throughput \
 ```bash
 vllm bench throughput \
   --model Qwen/Qwen2-VL-7B-Instruct \
-  --backend vllm-chat \
+  --endpoint-type openai-chat \
   --dataset-name hf \
   --dataset-path Aeala/ShareGPT_Vicuna_unfiltered \
   --hf-split train \
@@ -421,7 +421,7 @@ vllm bench throughput \
 ```bash
 vllm bench throughput \
   --model Qwen/QwQ-32B \
-  --backend vllm \
+  --endpoint-type vllm \
   --dataset-name hf \
   --dataset-path AI-MO/aimo-validation-aime \
   --hf-split train \
@@ -435,7 +435,7 @@ Benchmark with LoRA adapters:
 # wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
 vllm bench throughput \
   --model meta-llama/Llama-2-7b-hf \
-  --backend vllm \
+  --endpoint-type vllm \
   --dataset_path <your data path>/ShareGPT_V3_unfiltered_cleaned_split.json \
   --dataset_name sharegpt \
   --num-prompts 10 \
@@ -464,7 +464,7 @@ vllm serve NousResearch/Hermes-3-Llama-3.1-8B
 
 ```bash
 python3 benchmarks/benchmark_serving_structured_output.py \
-  --backend vllm \
+  --endpoint-type vllm \
   --model NousResearch/Hermes-3-Llama-3.1-8B \
   --dataset json \
   --structured-output-ratio 1.0 \
@@ -476,7 +476,7 @@ python3 benchmarks/benchmark_serving_structured_output.py \
 
 ```bash
 python3 benchmarks/benchmark_serving_structured_output.py \
-  --backend vllm \
+  --endpoint-type vllm \
   --model NousResearch/Hermes-3-Llama-3.1-8B \
   --dataset grammar \
   --structure-type grammar \
@@ -488,7 +488,7 @@ python3 benchmarks/benchmark_serving_structured_output.py \
 
 ```bash
 python3 benchmarks/benchmark_serving_structured_output.py \
-  --backend vllm \
+  --endpoint-type vllm \
   --model NousResearch/Hermes-3-Llama-3.1-8B \
   --dataset regex \
   --request-rate 10 \
@@ -499,7 +499,7 @@ python3 benchmarks/benchmark_serving_structured_output.py \
 
 ```bash
 python3 benchmarks/benchmark_serving_structured_output.py \
-  --backend vllm \
+  --endpoint-type vllm \
   --model NousResearch/Hermes-3-Llama-3.1-8B \
   --dataset choice \
   --request-rate 10 \
@@ -510,7 +510,7 @@ python3 benchmarks/benchmark_serving_structured_output.py \
 
 ```bash
 python3 benchmarks/benchmark_serving_structured_output.py \
-  --backend vllm \
+  --endpoint-type vllm \
   --model NousResearch/Hermes-3-Llama-3.1-8B \
   --dataset xgrammar_bench \
   --request-rate 10 \
@@ -608,7 +608,7 @@ python3 benchmarks/benchmark_prefix_caching.py \
 
 ```bash
 vllm bench serve \
-  --backend openai \
+  --endpoint-type openai \
   --model meta-llama/Llama-2-7b-chat-hf \
   --dataset-name prefix_repetition \
   --num-prompts 100 \
@@ -675,7 +675,7 @@ Send requests with images:
 
 ```bash
 vllm bench serve \
-  --backend openai-chat \
+  --endpoint-type openai-chat \
   --model Qwen/Qwen2.5-VL-7B-Instruct \
   --dataset-name sharegpt \
   --dataset-path /path/to/ShareGPT4V/sharegpt4v_instruct_gpt4-vision_cap100k.json \
@@ -702,7 +702,7 @@ Send requests with videos:
 
 ```bash
 vllm bench serve \
-  --backend openai-chat \
+  --endpoint-type openai-chat \
   --model Qwen/Qwen2.5-VL-7B-Instruct \
   --dataset-name sharegpt \
   --dataset-path /path/to/ShareGPT4Video/llava_v1_5_mix665k_with_video_chatgpt72k_share4video28k.json \
@@ -719,7 +719,7 @@ Generate synthetic image inputs alongside random text prompts to stress-test vis
 
 Notes:
 
-- Works only with online benchmark via the OpenAI  backend (`--backend openai-chat`) and endpoint `/v1/chat/completions`.
+- Works only with online benchmark via the OpenAI  backend (`--endpoint-type openai-chat`) and endpoint `/v1/chat/completions`.
 - Video sampling is not yet implemented.
 
 Start the server (example):
@@ -738,7 +738,7 @@ Ex.1: Fixed number of items and a single image resolution, enforcing generation 
 
 ```bash
 vllm bench serve \
-  --backend openai-chat \
+  --endpoint-type openai-chat \
   --model Qwen/Qwen2.5-VL-3B-Instruct \
   --endpoint /v1/chat/completions \
   --dataset-name random-mm \
