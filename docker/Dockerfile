@@ -213,7 +213,7 @@ COPY --chmod=755 tools/setup_sccache.sh /usr/local/bin/setup_sccache.sh
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=.git,target=.git bash -e <<'BASH'
     if [ "${USE_SCCACHE:-}" = "1" ]; then
-        /usr/local/bin/setup_sccache.sh
+        . /usr/local/bin/setup_sccache.sh
         export CMAKE_BUILD_TYPE=Release
         export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}"
         export VLLM_MAIN_CUDA_VERSION="${VLLM_MAIN_CUDA_VERSION}"
@@ -273,7 +273,7 @@ ARG FLASHINFER_GIT_REF="v0.3.1"
 ARG FLASHINFER_AOT_COMPILE=false
 
 RUN --mount=type=cache,target=/root/.cache/uv bash -e <<'BASH'
-    /usr/local/bin/setup_sccache.sh
+    . /usr/local/bin/setup_sccache.sh
     git clone --depth 1 --recursive --branch "${FLASHINFER_GIT_REF}" "${FLASHINFER_GIT_REPO}" /tmp/flashinfer
     cd /tmp/flashinfer
     if [ "${FLASHINFER_AOT_COMPILE}" = "true" ]; then
