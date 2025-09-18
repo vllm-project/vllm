@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
-from typing import Any, Callable
+from typing import Any, Callable, Dict, Optional
 
 import torch.fx as fx
 
@@ -24,14 +24,20 @@ class ConcreteSizeEntry:
 
 class PiecewiseBackend:
 
-    def __init__(self, graph: fx.GraphModule, vllm_config: VllmConfig,
-                 piecewise_compile_index: int, total_piecewise_compiles: int,
-                 sym_shape_indices: list[int],
-                 compiled_graph_for_general_shape: Callable,
-                 vllm_backend: VllmBackend):
+    def __init__(
+        self,
+        graph: fx.GraphModule,
+        vllm_config: VllmConfig,
+        piecewise_compile_index: int,
+        total_piecewise_compiles: int,
+        sym_shape_indices: list[int],
+        compiled_graph_for_general_shape: Callable,
+        vllm_backend: VllmBackend,
+        get_compiled_graph_for_size: Optional[Callable] = None,
+    ):
         """
         The backend for piecewise compilation.
-        It mainly handles the compilation of static shapes and 
+        It mainly handles the compilation of static shapes and
         dispatching based on runtime shape.
 
         We will compile `self.graph` once for the general shape,
@@ -44,20 +50,20 @@ class PiecewiseBackend:
         self.piecewise_compile_index = piecewise_compile_index
         self.total_piecewise_compiles = total_piecewise_compiles
         self.vllm_backend = vllm_backend
+        self.get_compiled_graph_for_size = get_compiled_graph_for_size
 
         self.is_first_graph = piecewise_compile_index == 0
-        self.is_last_graph = (
-            piecewise_compile_index == total_piecewise_compiles - 1)
+        self.is_last_graph = piecewise_compile_index == total_piecewise_compiles - 1
 
         self.is_full_graph = total_piecewise_compiles == 1
 
+        # self.vllm_config.scheduler_config.max_num_batched_tokens should already be _None
         self.compile_sizes: set[int] = set(
-            self.compilation_config.compile_sizes)
+            self.compilation_config.compile_sizes.copy())
 
         self.first_run_finished = False
 
         self.compiled_graph_for_general_shape = compiled_graph_for_general_shape  # noqa
-
         self.sym_shape_indices = sym_shape_indices
 
         self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
@@ -76,6 +82,44 @@ class PiecewiseBackend:
                 runnable=self.compiled_graph_for_general_shape,
             )
 
+        self.populate_precompiled_entries()
+
+    def populate_precompiled_entries(self):
+        if self.get_compiled_graph_for_size is None:
+            return
+
+        for shape, entry in self.concrete_size_entries.items():
+            if entry.compiled:
+                continue
+            entry.runnable = self.get_compiled_graph_wrapper(
+                self.get_compiled_graph_for_size(str(shape)))
+            entry.compiled = True
+            logger.debug(
+                "setting runnable for shape %s to precompiled graph wrapper",
+                shape)
+            self.to_be_compiled_sizes.remove(shape)
+
+        # finished compilations for all required shapes
+        if self.is_last_graph and not self.to_be_compiled_sizes:
+            self.check_for_ending_compilation()
+
+    def get_compiled_graph_wrapper(self, compiled_graph):
+        from torch._inductor.compile_fx import graph_returns_tuple
+
+        returns_tuple = graph_returns_tuple(self.graph)
+
+        def compiled_graph_wrapper(*args):
+            graph_output = compiled_graph(*args)
+            # unpack the tuple if needed
+            # TODO(rzou): the implication is that we're not
+            # reading the python bytecode correctly in vLLM?
+            if returns_tuple:
+                return graph_output
+            else:
+                return graph_output[0]
+
+        return compiled_graph_wrapper
+
     def check_for_ending_compilation(self):
         if self.is_last_graph and not self.to_be_compiled_sizes:
             # no specific sizes to compile
@@ -83,10 +127,41 @@ class PiecewiseBackend:
             self.vllm_backend.compiler_manager.save_to_file()
             end_monitoring_torch_compile(self.vllm_config)
 
+    # return mapping from shape ("None" for general shape) --> bytes
+    def to_bytes(self) -> Dict[str, bytes]:
+        if not hasattr(self.compiled_graph_for_general_shape, "to_bytes"):
+            return {}
+
+        out = {
+            "None": self.compiled_graph_for_general_shape.to_bytes()
+        }  # type: ignore[attr-defined]
+
+        for entry in self.concrete_size_entries.values():
+            if not entry.compiled:
+                logger.debug(
+                    "entry with shape %s not compiled, so cannot get its bytes",
+                    entry.runtime_shape,
+                )
+                continue
+            out[str(entry.runtime_shape)] = entry.runnable.to_bytes(
+            )  # type: ignore[attr-defined]
+
+        return out
+
     def __call__(self, *args) -> Any:
+        logger.debug(
+            "calling piecewise backend on runtime_shape %s with remaining compile sizes %s",
+            args[self.sym_shape_indices[0]],
+            self.to_be_compiled_sizes,
+        )
+
         if not self.first_run_finished:
             self.first_run_finished = True
             self.check_for_ending_compilation()
+            # todo don't wrap every time
+            if self.get_compiled_graph_for_size is not None:
+                self.compiled_graph_for_general_shape = self.get_compiled_graph_wrapper(
+                    self.compiled_graph_for_general_shape)
             return self.compiled_graph_for_general_shape(*args)
 
         runtime_shape = args[self.sym_shape_indices[0]]
@@ -98,9 +173,17 @@ class PiecewiseBackend:
         entry = self.concrete_size_entries[runtime_shape]
 
         if not entry.compiled:
+            assert self.get_compiled_graph_for_size is None
             entry.compiled = True
             self.to_be_compiled_sizes.remove(runtime_shape)
             # args are real arguments
+
+            logger.debug(
+                "compiling runnable for piecewise backend backend on runtime_shape %s with remaining compile sizes %s",
+                args[self.sym_shape_indices[0]],
+                self.to_be_compiled_sizes,
+            )
+
             entry.runnable = self.vllm_backend.compiler_manager.compile(
                 self.graph,
                 args,

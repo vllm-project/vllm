@@ -210,6 +210,12 @@ class InductorStandaloneAdaptor(CompilerInterface):
                 dynamic_shapes=dynamic_shapes,
                 options={"config_patches": current_config})
 
+        if envs.VLLM_USE_AOT_COMPILE:
+            # just return the compiled graph and a key
+            # since we can serialize the bytes using to_bytes
+            # and reload it using the key when reading
+            return compiled_graph, None
+
         # Save the compiled artifact to disk in the specified path
         assert key is not None
         path = os.path.join(self.cache_dir, key)
