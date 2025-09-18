@@ -1072,7 +1072,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     self.lora_config,
                     self.device,
                     self.model.embedding_modules,
-                    self.model.embedding_padding_modules,
                     max_position_embeddings=text_config.
                     max_position_embeddings,
                 )

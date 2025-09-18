@@ -23,6 +23,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator, MambaStateShapeCalculator)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.platforms import current_platform
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -105,9 +106,7 @@ class Mamba2Model(nn.Module):
         assert not is_lora_enabled
 
         self.config = config
-        lora_vocab = ((lora_config.lora_extra_vocab_size *
-                       (lora_config.max_loras or 1)) if lora_config else 0)
-        self.vocab_size = config.vocab_size + lora_vocab
+        self.vocab_size = config.vocab_size
         self.org_vocab_size = config.vocab_size
 
         self.embeddings = VocabParallelEmbedding(
@@ -267,8 +266,6 @@ class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
         self.backbone = Mamba2Model(vllm_config=vllm_config,
                                     prefix=maybe_prefix(prefix, "backbone"))
         self.unpadded_vocab_size = config.vocab_size
-        if lora_config:
-            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
 
         self.lm_head = ParallelLMHead(
             self.unpadded_vocab_size,
@@ -277,7 +274,7 @@ class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
             padding_size=DEFAULT_VOCAB_PADDING_SIZE
             # We need bigger padding if using lora for kernel
             # compatibility
-            if not lora_config else lora_config.lora_vocab_padding_size,
+            if not lora_config else current_platform.get_lora_vocab_padding_size(),
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if config.tie_word_embeddings:
