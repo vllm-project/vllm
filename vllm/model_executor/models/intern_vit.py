@@ -25,9 +25,11 @@ from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
+                                               ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.multimodal.utils import run_dp_sharded_vision_model
 
 NORM2FN = {
     'rms_norm': RMSNorm,
@@ -137,6 +139,7 @@ class InternParallelAttention(nn.Module):
         *,
         num_dummy_heads: int = 0,
         prefix: str = "",
+        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
 
@@ -150,8 +153,10 @@ class InternParallelAttention(nn.Module):
                 f'(got `embed_dim`: {self.embed_dim} and `num_heads`:'
                 f' {self.num_heads}).')
 
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.tp_rank = get_tensor_model_parallel_rank()
+        self.tp_size = (1 if use_data_parallel else
+                        get_tensor_model_parallel_world_size())
+        self.tp_rank = (0 if use_data_parallel else
+                        get_tensor_model_parallel_rank())
 
         # Additional dummy heads are used to enable TP for common GPU counts.
         self.dummy_dim = (num_dummy_heads + self.num_heads) * self.head_dim
@@ -159,14 +164,23 @@ class InternParallelAttention(nn.Module):
                                               self.tp_size)
 
         self.scale = self.head_dim**-0.5
-        self.qkv = QKVParallelLinear(
-            self.embed_dim,
-            self.head_dim,
-            num_dummy_heads + self.num_heads,
-            bias=config.qkv_bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.qkv",
-        )
+        if use_data_parallel:
+            self.qkv = ReplicatedLinear(
+                self.embed_dim,
+                3 * self.head_dim * self.num_heads,
+                bias=config.qkv_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.qkv",
+            )
+        else:
+            self.qkv = QKVParallelLinear(
+                self.embed_dim,
+                self.head_dim,
+                num_dummy_heads + self.num_heads,
+                bias=config.qkv_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.qkv",
+            )
 
         self.qk_normalization = config.qk_normalization
 
@@ -178,12 +192,20 @@ class InternParallelAttention(nn.Module):
                                   eps=config.layer_norm_eps,
                                   var_hidden_size=self.embed_dim)
 
-        self.proj = RowParallelLinear(
-            self.dummy_dim,
-            self.embed_dim,
-            quant_config=quant_config,
-            prefix=f"{prefix}.proj",
-        )
+        if use_data_parallel:
+            self.proj = ReplicatedLinear(
+                self.dummy_dim,
+                self.embed_dim,
+                quant_config=quant_config,
+                prefix=f"{prefix}.proj",
+            )
+        else:
+            self.proj = RowParallelLinear(
+                self.dummy_dim,
+                self.embed_dim,
+                quant_config=quant_config,
+                prefix=f"{prefix}.proj",
+            )
 
         self.attn = MultiHeadAttention(self.num_heads_per_partition,
                                        self.head_dim, self.scale)
@@ -287,21 +309,26 @@ class InternMLP(nn.Module):
         config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
 
         self.config = config
         self.activation_fn = get_act_fn(config.hidden_act)
-        self.fc1 = ColumnParallelLinear(config.hidden_size,
-                                        config.intermediate_size,
-                                        bias=True,
-                                        quant_config=quant_config,
-                                        prefix=f"{prefix}.fc1")
-        self.fc2 = RowParallelLinear(config.intermediate_size,
-                                     config.hidden_size,
-                                     bias=True,
-                                     quant_config=quant_config,
-                                     prefix=f"{prefix}.fc2")
+        cls_fc1 = (ReplicatedLinear
+                   if use_data_parallel else ColumnParallelLinear)
+        self.fc1 = cls_fc1(config.hidden_size,
+                           config.intermediate_size,
+                           bias=True,
+                           quant_config=quant_config,
+                           prefix=f"{prefix}.fc1")
+        cls_fc2 = (ReplicatedLinear
+                   if use_data_parallel else RowParallelLinear)
+        self.fc2 = cls_fc2(config.intermediate_size,
+                           config.hidden_size,
+                           bias=True,
+                           quant_config=quant_config,
+                           prefix=f"{prefix}.fc2")
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.fc1(hidden_states)
@@ -320,6 +347,7 @@ class InternVisionEncoderLayer(nn.Module):
         *,
         num_dummy_heads: int = 0,
         prefix: str = "",
+        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
 
@@ -330,11 +358,13 @@ class InternVisionEncoderLayer(nn.Module):
         self.attn = self._init_attn(config,
                                     quant_config,
                                     num_dummy_heads=num_dummy_heads,
-                                    prefix=f"{prefix}.attn")
+                                    prefix=f"{prefix}.attn",
+                                    use_data_parallel=use_data_parallel)
 
         self.mlp = InternMLP(config,
                              quant_config=quant_config,
-                             prefix=f"{prefix}.mlp")
+                             prefix=f"{prefix}.mlp",
+                             use_data_parallel=use_data_parallel)
         self.norm1 = NORM2FN[self.norm_type](self.embed_dim,
                                              eps=config.layer_norm_eps)
         self.norm2 = NORM2FN[self.norm_type](self.embed_dim,
@@ -352,16 +382,20 @@ class InternVisionEncoderLayer(nn.Module):
         *,
         num_dummy_heads: int,
         prefix: str = "",
+        use_data_parallel: bool = False,
     ):
         # fallback to sdpa attention if tp unavailable
-        tp_size = get_tensor_model_parallel_world_size()
+        # tp_size = get_tensor_model_parallel_world_size()
+        tp_size = (1 if use_data_parallel else
+                   get_tensor_model_parallel_world_size())
         num_heads = config.num_attention_heads
 
         if (num_heads + num_dummy_heads) % tp_size == 0:
             return InternParallelAttention(config,
                                            quant_config=quant_config,
                                            num_dummy_heads=num_dummy_heads,
-                                           prefix=prefix)
+                                           prefix=prefix,
+                                           use_data_parallel=use_data_parallel)
 
         return InternSdpaAttention(config, num_dummy_heads=num_dummy_heads)
 
@@ -388,6 +422,7 @@ class InternVisionEncoder(nn.Module):
         num_hidden_layers_override: Optional[int] = None,
         num_dummy_heads: int = 0,
         prefix: str = "",
+        use_data_parallel: bool = False,
     ):
         super().__init__()
 
@@ -402,7 +437,8 @@ class InternVisionEncoder(nn.Module):
             InternVisionEncoderLayer(config,
                                      quant_config,
                                      num_dummy_heads=num_dummy_heads,
-                                     prefix=f"{prefix}.layers.{layer_idx}")
+                                     prefix=f"{prefix}.layers.{layer_idx}",
+                                     use_data_parallel=use_data_parallel)
             for layer_idx in range(num_hidden_layers)
         ])
 
@@ -429,10 +465,12 @@ class InternVisionModel(nn.Module):
         num_hidden_layers_override: Optional[int] = None,
         num_dummy_heads: int = 0,
         prefix: str = "",
+        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
 
         self.config = config
+        self.use_data_parallel = use_data_parallel
 
         self.embeddings = InternVisionEmbeddings(config)
         self.encoder = InternVisionEncoder(
@@ -441,6 +479,7 @@ class InternVisionModel(nn.Module):
             num_hidden_layers_override=num_hidden_layers_override,
             num_dummy_heads=num_dummy_heads,
             prefix=f"{prefix}.encoder",
+            use_data_parallel=use_data_parallel,
         )
 
     def get_input_embeddings(self):
@@ -464,7 +503,11 @@ class InternVisionModel(nn.Module):
                 raise ValueError(
                     f'wrong pixel_values size: {pixel_values.shape}')
 
-        encoder_outputs = self.encoder(inputs_embeds=hidden_states)
+        if self.use_data_parallel:
+            encoder_outputs = run_dp_sharded_vision_model(
+                hidden_states, self.encoder)
+        else:
+            encoder_outputs = self.encoder(inputs_embeds=hidden_states)
 
         return encoder_outputs
 
