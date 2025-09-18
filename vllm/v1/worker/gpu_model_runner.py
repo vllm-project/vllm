@@ -105,6 +105,7 @@ if TYPE_CHECKING:
 
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.structured_output import GrammarBitmaskPlaceholder
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
@@ -1603,9 +1604,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         logits: torch.Tensor,
     ):
-        grammar_bitmask = scheduler_output.grammar_bitmask
-        if grammar_bitmask is None:
-            return
+        grammar_bitmask_placeholder: GrammarBitmaskPlaceholder = \
+            scheduler_output.grammar_bitmask
+        grammar_bitmask: np.ndarray = grammar_bitmask_placeholder.result()
 
         # We receive the structured output bitmask from the scheduler,
         # compacted to contain bitmasks only for structured output requests.

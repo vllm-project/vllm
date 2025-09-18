@@ -5,53 +5,36 @@ from __future__ import annotations
 import dataclasses
 import functools
 import json
-from concurrent.futures import Future
-from concurrent.futures._base import TimeoutError
-from typing import Optional, Union, cast
+from typing import Callable, Optional
 
 from vllm.sampling_params import SamplingParams
-from vllm.v1.structured_output.backend_types import (StructuredOutputGrammar,
-                                                     StructuredOutputKey,
+from vllm.v1.structured_output.backend_types import (StructuredOutputKey,
                                                      StructuredOutputOptions)
+
+
+class FutureGrammar:
+
+    def __init__(self, call_back: Callable[[str], bool], request_id: str):
+        self.call_back = call_back
+        self.request_id = request_id
+
+    def done(self):
+        if self.call_back is None:
+            return False
+        return self.call_back(self.request_id)
 
 
 @dataclasses.dataclass
 class StructuredOutputRequest:
-
     sampling_params: SamplingParams
-    _grammar: Optional[Union[Future[StructuredOutputGrammar],
-                             StructuredOutputGrammar]] = None
+    compiled_grammar: Optional[FutureGrammar] = None
     reasoning_ended: Optional[bool] = None
-
-    def _check_grammar_completion(self) -> bool:
-        # NOTE: We have to lazy import to gate circular imports
-        from vllm.v1.request import RequestStatus
-
-        if isinstance(self._grammar, Future):
-            try:
-                # We will check whether the future is ready within 100 us
-                self._grammar = self._grammar.result(timeout=0.0001)
-                self.status = RequestStatus.WAITING
-            except TimeoutError:
-                return False
-        return True
 
     @property
     def is_grammar_ready(self) -> bool:
-        return self._check_grammar_completion()
-
-    @property
-    def grammar(self) -> Optional[StructuredOutputGrammar]:
-        completed = self._check_grammar_completion()
-        return cast(Optional[StructuredOutputGrammar],
-                    self._grammar) if completed else None
-
-    @grammar.setter
-    def grammar(
-        self, grammar: Union[StructuredOutputGrammar,
-                             Future[StructuredOutputGrammar]]
-    ) -> None:
-        self._grammar = grammar
+        if self.compiled_grammar is None:
+            return False
+        return self.compiled_grammar.done()
 
     @functools.cached_property
     def structured_output_key(self) -> StructuredOutputKey:
