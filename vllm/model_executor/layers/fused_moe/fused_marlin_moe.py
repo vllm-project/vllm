@@ -161,6 +161,9 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
     if activation == "silu":
         torch.ops._C.silu_and_mul(intermediate_cache2,
                                   intermediate_cache1.view(-1, 2 * N))
+    elif activation == "gelu":
+        torch.ops._C.gelu_and_mul(intermediate_cache2,
+                                  intermediate_cache1.view(-1, 2 * N))
     elif activation == "swigluoai":
         # alpha = 1.702, limit = 7.0
         torch.ops._C.swigluoai_and_mul(intermediate_cache2,

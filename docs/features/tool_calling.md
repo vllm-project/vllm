@@ -71,7 +71,7 @@ This example demonstrates:
 * Making a request with `tool_choice="auto"`
 * Handling the structured response and executing the corresponding function
 
-You can also specify a particular function using named function calling by setting `tool_choice={"type": "function", "function": {"name": "get_weather"}}`. Note that this will use the guided decoding backend - so the first time this is used, there will be several seconds of latency (or more) as the FSM is compiled for the first time before it is cached for subsequent requests.
+You can also specify a particular function using named function calling by setting `tool_choice={"type": "function", "function": {"name": "get_weather"}}`. Note that this will use the structured outputs backend - so the first time this is used, there will be several seconds of latency (or more) as the FSM is compiled for the first time before it is cached for subsequent requests.
 
 Remember that it's the caller's responsibility to:
 
@@ -83,19 +83,18 @@ For more advanced usage, including parallel tool calls and different model-speci
 
 ## Named Function Calling
 
-vLLM supports named function calling in the chat completion API by default. It does so using Outlines through guided decoding, so this is
-enabled by default and will work with any supported model. You are guaranteed a validly-parsable function call - not a
+vLLM supports named function calling in the chat completion API by default. This should work with most structured outputs backends supported by vLLM. You are guaranteed a validly-parsable function call - not a
 high-quality one.
 
-vLLM will use guided decoding to ensure the response matches the tool parameter object defined by the JSON schema in the `tools` parameter.
-For best results, we recommend ensuring that the expected output format / schema is specified in the prompt to ensure that the model's intended generation is aligned with the schema that it's being forced to generate by the guided decoding backend.
+vLLM will use structured outputs to ensure the response matches the tool parameter object defined by the JSON schema in the `tools` parameter.
+For best results, we recommend ensuring that the expected output format / schema is specified in the prompt to ensure that the model's intended generation is aligned with the schema that it's being forced to generate by the structured outputs backend.
 
 To use a named function, you need to define the functions in the `tools` parameter of the chat completion request, and
 specify the `name` of one of the tools in the `tool_choice` parameter of the chat completion request.
 
 ## Required Function Calling
 
-vLLM supports the `tool_choice='required'` option in the chat completion API. Similar to the named function calling, it also uses guided decoding, so this is enabled by default and will work with any supported model. The guided decoding features for `tool_choice='required'` (such as JSON schema with `anyOf`) are currently only supported in the V0 engine with the guided decoding backend `outlines`. However, support for alternative decoding backends are on the [roadmap](../usage/v1_guide.md#features) for the V1 engine.
+vLLM supports the `tool_choice='required'` option in the chat completion API. Similar to the named function calling, it also uses structured outputs, so this is enabled by default and will work with any supported model. However, support for alternative decoding backends are on the [roadmap](../usage/v1_guide.md#features) for the V1 engine.
 
 When tool_choice='required' is set, the model is guaranteed to generate one or more tool calls based on the specified tool list in the `tools` parameter. The number of tool calls depends on the user's query. The output format strictly follows the schema defined in the `tools` parameter.
 
@@ -169,7 +168,7 @@ All Llama 3.1, 3.2 and 4 models should be supported.
 
 The tool calling that is supported is the [JSON-based tool calling](https://llama.meta.com/docs/model-cards-and-prompt-formats/llama3_1/#json-based-tool-calling). For [pythonic tool calling](https://github.com/meta-llama/llama-models/blob/main/models/llama3_2/text_prompt_format.md#zero-shot-function-calling) introduced by the Llama-3.2 models, see the `pythonic` tool parser below. As for Llama 4 models, it is recommended to use the `llama4_pythonic` tool parser.
 
-Other tool calling formats like the built in python tool calling or custom tool calling are not supported.
+Other tool calling formats like the built-in python tool calling or custom tool calling are not supported.
 
 Known issues:
 
@@ -310,6 +309,15 @@ Flags:
 
 * For non-reasoning: `--tool-call-parser hunyuan_a13b`
 * For reasoning: `--tool-call-parser hunyuan_a13b --reasoning-parser hunyuan_a13b --enable_reasoning`
+
+### GLM-4.5 Models (`glm45`)
+
+Supported models:
+
+* `ZhipuAI/GLM-4.5`
+* `ZhipuAI/GLM-4.5-Air`
+
+Flags: `--tool-call-parser glm45`
 
 ### Models with Pythonic Tool Calls (`pythonic`)
 

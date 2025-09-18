@@ -5,8 +5,8 @@ import enum
 import functools
 from abc import abstractmethod
 from dataclasses import dataclass, fields, make_dataclass
-from typing import (TYPE_CHECKING, Any, ClassVar, Generic, Optional, Protocol,
-                    TypeVar)
+from typing import (TYPE_CHECKING, Any, ClassVar, Generic, Literal, Optional,
+                    Protocol, TypeVar, Union, get_args)
 
 import numpy as np
 import torch
@@ -28,9 +28,15 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_kv_connector_cache_layout)
 from vllm.logger import init_logger
 from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.worker.ubatch_utils import UBatchSlice
 
 logger = init_logger(__name__)
-_KV_CACHE_LAYOUT_OVERRIDE = None
+KVCacheLayoutType = Literal["NHD", "HND"]
+_KV_CACHE_LAYOUT_OVERRIDE: Union[KVCacheLayoutType, None] = None
+
+
+def is_valid_kv_cache_layout(value: str) -> bool:
+    return value in get_args(KVCacheLayoutType)
 
 
 @dataclass
@@ -72,11 +78,8 @@ class CommonAttentionMetadata:
     logits_indices_padded: Optional[torch.Tensor] = None
     num_logits_indices: Optional[int] = None
 
-
-@dataclass
-class UbatchSlice:
-    request_slice: slice
-    token_slice: slice
+    # Needed by CrossAttentionBuilder
+    encoder_seq_lens: Optional[np.ndarray] = None
 
 
 def slice_query_start_locs(
@@ -95,7 +98,7 @@ def slice_query_start_locs(
 
 
 def _make_metadata_with_slice(
-        ubatch_slice: UbatchSlice,
+        ubatch_slice: UBatchSlice,
         attn_metadata: CommonAttentionMetadata) -> CommonAttentionMetadata:
     """
     This function creates a new CommonAttentionMetadata that corresponds to 
@@ -125,6 +128,11 @@ def _make_metadata_with_slice(
         torch.max(torch.abs(query_start_loc_cpu[1:] -
                             query_start_loc_cpu[:-1])).item())
 
+    # This is to account for the case where we are in a dummy
+    # run and query_start_loc_cpu is full of 0s
+    if max_query_len == 0:
+        max_query_len = attn_metadata.max_query_len
+
     block_table_tensor = attn_metadata.block_table_tensor[request_slice]
     slot_mapping = attn_metadata.slot_mapping[token_slice]
 
@@ -144,12 +152,12 @@ def _make_metadata_with_slice(
 
 
 def split_attn_metadata(
-    ubatch_slices: list[UbatchSlice],
+    ubatch_slices: list[UBatchSlice],
     common_attn_metadata: CommonAttentionMetadata,
 ) -> list[CommonAttentionMetadata]:
     """
     Creates a new CommonAttentionMetadata instance that corresponds to the 
-    requests for each UbatchSlice in ubatch_slices.
+    requests for each UBatchSlice in ubatch_slices.
 
     Note: This function does not modify common_attn_metadata
     """
@@ -193,6 +201,9 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
         self.kv_cache_spec = kv_cache_spec
+        self.layer_names = layer_names
+        self.vllm_config = vllm_config
+        self.device = device
 
     @abstractmethod
     def build(self,
@@ -290,12 +301,13 @@ def get_kv_cache_layout():
     if cache_layout is None:
         cache_layout = get_kv_connector_cache_layout()
     else:
+        assert is_valid_kv_cache_layout(cache_layout)
         logger.info_once("`VLLM_KV_CACHE_LAYOUT` environment variable " \
         "detected. Setting KV cache layout to %s.", cache_layout)
     return cache_layout
 
 
-def set_kv_cache_layout(cache_layout: str):
+def set_kv_cache_layout(cache_layout: KVCacheLayoutType):
     global _KV_CACHE_LAYOUT_OVERRIDE
     _KV_CACHE_LAYOUT_OVERRIDE = cache_layout
 
@@ -542,7 +554,14 @@ def make_local_attention_virtual_batches(
                                                    1)
     batch_indices = np.repeat(np.arange(actual_batch_size, dtype=np.int32),
                               local_blocks * pages_per_local_batch)
-    block_table_local = block_table[batch_indices, block_indices]\
+
+    # NOTE: https://github.com/pytorch/pytorch/pull/160256 causes performance
+    # regression when using numpy arrays (batch and block indices) to index into
+    # torch tensor (block_table). As a workaround, convert numpy arrays to torch
+    # tensor first, which recovers perf.
+    batch_indices_torch = torch.from_numpy(batch_indices)
+    block_indices_torch = torch.from_numpy(block_indices)
+    block_table_local = block_table[batch_indices_torch, block_indices_torch]\
         .view(virtual_batches, -1)
 
     query_start_loc_cpu = torch.from_numpy(cu_seqlens_q_local)
@@ -709,7 +728,7 @@ def reorder_batch_to_split_decodes_and_prefills(
 
     for i, req_id in enumerate(input_batch.req_ids):
         num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-        # for now treat 1 scheduled token as "decode" even if its not,
+        # for now treat 1 scheduled token as "decode" even if it's not,
         # we should update this to something like < 8 in the future but
         # currently the TritonMLA._forward_decode only supports
         # num_tokens = 1
