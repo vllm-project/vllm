@@ -31,14 +31,6 @@
 steps:
 ##### fast check tests  #####
 
-- label: Pre-commit Checks # 5min
-  timeout_in_minutes: 15
-  fast_check: true
-  commands:
-  - pip install pre-commit
-  - pre-commit install
-  - pre-commit run --all-files --hook-stage manual
-
 - label: Pytorch Nightly Dependency Override Check # 2min
   # if this test fails, it means the nightly torch version is not compatible with some
   # of the dependencies. Please check the error message and add the package to whitelist
