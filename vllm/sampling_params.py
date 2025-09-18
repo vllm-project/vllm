@@ -81,7 +81,13 @@ class SamplingParams(
     """
 
     n: int = 1
-    """Number of output sequences to return for the given prompt."""
+    """Number of outputs to return for the given prompt request.
+
+    NOTE:
+        `AsyncLLM` streams outputs by default. When `n > 1`, all `n` outputs
+        are generated and streamed cumulatively per request. To see all `n`
+        outputs upon completion, use `output_kind=RequestOutputKind.FINAL_ONLY`
+        in `SamplingParams`."""
     best_of: Optional[int] = None
     """Number of output sequences that are generated from the prompt. From
     these `best_of` sequences, the top `n` sequences are returned. `best_of`
