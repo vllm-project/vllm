@@ -85,7 +85,7 @@ def _moe_problem_size(
         M = a1.size(0)
     else:
         assert a1.dim() == 3
-        #assert a1.size(0) == E, f"{a1.size(0)} == {E}"
+        assert a1.size(0) == E, f"{a1.size(0)} == {E}"
         M = a1.size(1)  # This is max_num_tokens
 
     assert topk_ids.dim() == 2
@@ -536,11 +536,12 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         global_num_experts: int,
         expert_map: Optional[torch.Tensor],
         a1q_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
         expert_tokens_meta: Optional[ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
-    ):
+    ) -> None:
         """
         This function computes the intermediate result of a Mixture of Experts
         (MoE) layer using two sets of weights, w1 and w2.
@@ -674,12 +675,12 @@ class FusedMoEModularKernel(torch.nn.Module):
 
         # We can reuse the memory between cache1 and cache3 because by the
         # time we need cache3, we're done with cache1.
-        workspace13 = torch.zeros(prod(workspace13_shape),
-                                  device=device,
-                                  dtype=workspace_dtype)
-        workspace2 = torch.zeros(prod(workspace2_shape),
-                                 device=device,
-                                 dtype=workspace_dtype)
+        workspace13 = self.workspace13_buffer.get(workspace13_shape,
+                                                  device=device,
+                                                  dtype=workspace_dtype)
+        workspace2 = self.workspace2_buffer.get(workspace2_shape,
+                                                device=device,
+                                                dtype=workspace_dtype)
 
         # Construct the entire output that can then be processed in chunks.
         if num_chunks == 1 and prod(workspace13_shape) >= prod(
@@ -687,9 +688,9 @@ class FusedMoEModularKernel(torch.nn.Module):
             # Reuse workspace13 for the output in the non-chunked case.
             fused_out = _resize_cache(workspace13, fused_out_shape)
         else:
-            fused_out = torch.empty(fused_out_shape,
-                                    device=device,
-                                    dtype=out_dtype)
+            fused_out = self.fused_out_buffer.get(fused_out_shape,
+                                                  device=device,
+                                                  dtype=out_dtype)
 
         return workspace13, workspace2, fused_out
 
@@ -785,7 +786,10 @@ class FusedMoEModularKernel(torch.nn.Module):
         - torch.Tensor: The output tensor after applying the MoE layer.
         """
 
-        output = hidden_states if inplace else torch.zeros_like(hidden_states)
+        if inplace and self.shared_experts is None:
+            output = hidden_states
+        else:
+            output = torch.zeros_like(hidden_states)
 
         local_num_experts = w1.size(0)
         if global_num_experts == -1:
@@ -799,8 +803,6 @@ class FusedMoEModularKernel(torch.nn.Module):
             (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
              _expert_topk_weights) = self.prepare_finalize.prepare(
                  hidden_states,
-                 a1_scale,
-                 a2_scale,
                  topk_weights,
                  topk_ids,
                  global_num_experts,
@@ -810,10 +812,9 @@ class FusedMoEModularKernel(torch.nn.Module):
              )
         else:
             # Overlap shared expert compute with all2all dispatch.
-            receiver = self.prepare_finalize.prepare_async(
+            dbo_maybe_run_recv_hook()
+            hook, receiver = self.prepare_finalize.prepare_async(
                 hidden_states,
-                a1_scale,
-                a2_scale,
                 topk_weights,
                 topk_ids,
                 global_num_experts,
@@ -838,6 +839,8 @@ class FusedMoEModularKernel(torch.nn.Module):
         topk_weights = (topk_weights if _expert_topk_weights is None else
                         _expert_topk_weights)
 
+        fused_out = None
+
         if a1q.numel() == 0:
             # This happens when none of the tokens from the all2all reach this
             # EP rank. Also, note that this is only relevant for CUDAGraph
@@ -853,7 +856,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                 CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
                 num_chunks = cdiv(M, CHUNK_SIZE)
             else:
-                CHUNK_SIZE = M #a1q.size(0)
+                CHUNK_SIZE = M  #a1q.size(0)
                 num_chunks = 1
 
             def input_chunk_range(chunk_idx: int) -> tuple[int, int]:
@@ -892,12 +895,8 @@ class FusedMoEModularKernel(torch.nn.Module):
                     activation=activation,
                     global_num_experts=global_num_experts,
                     expert_map=expert_map,
-                    w1_scale=w1_scale,
-                    w2_scale=w2_scale,
-                    w1_zp=w1_zp,
-                    w2_zp=w2_zp,
                     a1q_scale=_chunk_scales(a1q_scale, s, e),
-                    a2_scale=_chunk_scales(a2_scale, e, e),
+                    a2_scale=_chunk_scales(self.fused_experts.a2_scale, e, e),
                     workspace13=workspace13,
                     workspace2=workspace2,
                     expert_tokens_meta=c_expert_tokens_meta,
@@ -918,7 +917,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                 self.fused_experts.finalize_weight_and_reduce_impl(),
             )
             if self.shared_experts is not None:
-                shared_output = self.shared_experts(a1)
+                shared_output = self.shared_experts(hidden_states)
         else:
             recv_hook = self.prepare_finalize.finalize_async(
                 output,
@@ -930,7 +929,7 @@ class FusedMoEModularKernel(torch.nn.Module):
             )
 
             if self.shared_experts is not None:
-                shared_output = self.shared_experts(a1)
+                shared_output = self.shared_experts(hidden_states)
 
             assert recv_hook is not None
             dbo_register_recv_hook(recv_hook)
