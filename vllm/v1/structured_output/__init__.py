@@ -61,11 +61,11 @@ class StructuredOutputManager:
             self.executor = ThreadPoolExecutor(max_workers=max_workers)
             self.tokenizer = init_tokenizer_from_configs(
                 model_config=self.vllm_config.model_config)
-            reasoning_backend = \
-                    self.vllm_config.decoding_config.reasoning_backend
-            if reasoning_backend:
+            reasoning_parser = \
+                    self.vllm_config.structured_outputs_config.reasoning_parser
+            if reasoning_parser:
                 reasoner_cls = ReasoningParserManager.get_reasoning_parser(
-                    reasoning_backend)
+                    reasoning_parser)
                 self.reasoner = reasoner_cls(tokenizer=self.tokenizer)
 
     def grammar_init(self, request: Request) -> None:
@@ -74,15 +74,16 @@ class StructuredOutputManager:
 
         if TYPE_CHECKING:
             assert request.sampling_params is not None and \
-                request.sampling_params.guided_decoding is not None
+                request.sampling_params.structured_outputs is not None
 
         # Initialize the backend the first time it is needed.
         #
         # NOTE: We only support a single backend. We do NOT support different
         # backends on a per-request basis in V1 (for now, anyway...).
+        # _backend is set in Processor._validate_structured_output
         if self.backend is None:
             assert request.sampling_params is not None
-            backend = request.sampling_params.guided_decoding.backend
+            backend = request.sampling_params.structured_outputs._backend
             vocab_size = self.vllm_config.model_config.get_vocab_size()
             if backend == "xgrammar":
                 self.backend = XgrammarBackend(

@@ -16,9 +16,8 @@ import torch
 from typing_extensions import TypeVar
 
 import vllm.envs as envs
-from vllm.config import (DecodingConfig, ModelConfig, ObservabilityConfig,
+from vllm.config import (LoRAConfig, ModelConfig, ObservabilityConfig,
                          ParallelConfig, SchedulerConfig, VllmConfig)
-from vllm.config.lora import LoRAConfig
 from vllm.core.scheduler import ScheduledSequenceGroup, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase, Stats
@@ -213,8 +212,7 @@ class LLMEngine:
         self.device_config = vllm_config.device_config
         self.speculative_config = vllm_config.speculative_config  # noqa
         self.load_config = vllm_config.load_config
-        self.decoding_config = vllm_config.decoding_config or DecodingConfig(  # noqa
-        )
+        self.structured_outputs_config = vllm_config.structured_outputs_config
         self.observability_config = vllm_config.observability_config or ObservabilityConfig(  # noqa
         )
 
@@ -364,10 +362,9 @@ class LLMEngine:
                 self.observability_config.otlp_traces_endpoint)
 
         # Initialize reasoning parser if reasoning backend is set.
-        if self.decoding_config.reasoning_backend and \
-                self.tokenizer:
+        if self.structured_outputs_config.reasoning_parser and self.tokenizer:
             reasoner_class = ReasoningParserManager.get_reasoning_parser(
-                self.decoding_config.reasoning_backend)
+                self.structured_outputs_config.reasoning_parser)
             self.reasoner: ReasoningParser = reasoner_class(
                 self.tokenizer.get_lora_tokenizer())
 
@@ -381,7 +378,8 @@ class LLMEngine:
                 self.seq_counter,
                 stop_checker=StopChecker(
                     self.scheduler_config.max_model_len,
-                    self.reasoner if self.decoding_config.reasoning_backend
+                    self.reasoner
+                    if self.structured_outputs_config.reasoning_parser
                     and self.tokenizer else None,
                 ),
             ))
@@ -771,10 +769,6 @@ class LLMEngine:
     def get_parallel_config(self) -> ParallelConfig:
         """Gets the parallel configuration."""
         return self.parallel_config
-
-    def get_decoding_config(self) -> DecodingConfig:
-        """Gets the decoding configuration."""
-        return self.decoding_config
 
     def get_scheduler_config(self) -> SchedulerConfig:
         """Gets the scheduler configuration."""

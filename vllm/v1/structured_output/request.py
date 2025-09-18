@@ -60,7 +60,7 @@ class StructuredOutputRequest:
 
 def get_structured_output_key(
         sampling_params: SamplingParams) -> StructuredOutputKey:
-    params = sampling_params.guided_decoding
+    params = sampling_params.structured_outputs
     assert params is not None, "params can't be None."
     if params.json is not None:
         if not isinstance(params.json, str):

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-# imports for guided decoding tests
+# imports for structured outputs tests
 import io
 import json
 

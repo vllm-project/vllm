@@ -3,7 +3,7 @@
 
 import io
 
-# imports for guided decoding tests
+# imports for structured outputs tests
 import openai
 import pybase64
 import pytest
