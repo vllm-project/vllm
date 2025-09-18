@@ -30,6 +30,15 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps):
             "cause performance degradation. Please upgrade to torch nightly")
         value_layout, value_layout_opts = StridedLayout, dict()
         scale_layout, scale_layout_opts = StridedLayout, dict()
+    elif current_platform.is_rocm():
+        from triton_kernels.target_info import is_hip
+        from triton_kernels.tensor_details.layout import StridedLayout, BlackwellMXScaleLayout, HopperMXScaleLayout, HopperMXValueLayout, GFX950MXScaleLayout
+        value_layout, value_layout_opts = StridedLayout, dict()
+        scale_layout, scale_layout_opts = StridedLayout, dict()
+        import os
+        use_scale_preshuffling = os.environ.get("TRITON_HIP_PRESHUFFLE_SCALES", "0") == "1"
+        if use_scale_preshuffling:
+            scale_layout = GFX950MXScaleLayout
     else:
         value_layout, value_layout_opts = \
             layout.make_default_matmul_mxfp4_w_layout(mx_axis=1)
