@@ -630,11 +630,13 @@ class CompilationConfig:
             self.level == CompilationLevel.PIECEWISE
             and self.splitting_ops_contain_attention())
 
-        inductor_used = (self.level == CompilationLevel.PIECEWISE and self.use_inductor) or (self.level >= CompilationLevel.DYNAMO_AS_IS and self.backend == "inductor")
+        inductor_used = (self.level == CompilationLevel.PIECEWISE
+                         and self.use_inductor) or (
+                             self.level >= CompilationLevel.DYNAMO_AS_IS
+                             and self.backend == "inductor")
         use_inductor_piecewise_compilation = (
-            inductor_used and
-            self.use_inductor_graph_partition and
-            not self.splitting_ops_contain_attention())
+            inductor_used and self.use_inductor_graph_partition
+            and not self.splitting_ops_contain_attention())
 
         return use_fx_graph_piecewise_compilation or \
             use_inductor_piecewise_compilation

@@ -77,7 +77,7 @@ from vllm.ray.lazy_utils import is_in_ray_actor
 if TYPE_CHECKING:
     from argparse import Namespace
 
-    from vllm.config import ModelConfig, VllmConfig
+    from vllm.config import CUDAGraphMode, ModelConfig, VllmConfig
     from vllm.sequence import IntermediateTensors
 
 logger = init_logger(__name__)
@@ -3443,3 +3443,51 @@ def decorate_logs(process_name: Optional[str] = None) -> None:
     pid = os.getpid()
     _add_prefix(sys.stdout, process_name, pid)
     _add_prefix(sys.stderr, process_name, pid)
+
+
+@contextlib.contextmanager
+def maybe_use_cudagraph_partition_wrapper(vllm_config: VllmConfig):
+    """
+    Context manager to set/unset customized cudagraph partition wrappers.
+
+    If we're using Inductor-based graph partitioning, we currently have the
+    whole `fx.Graph` before Inductor lowering and and the piecewise
+    splitting happens after all graph passes and fusions. Here, we add
+    a custom hook for Inductor to wrap each partition with our static
+    graph wrapper class to maintain more control over static graph
+    capture and replay.
+    """
+    from vllm.platforms import current_platform
+
+    compilation_config = vllm_config.compilation_config
+    if (compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            and compilation_config.use_inductor_graph_partition):
+        from torch._inductor.utils import CUDAGraphWrapperMetadata
+
+        from .cuda_graph import CUDAGraphOptions
+
+        static_graph_wrapper_class = resolve_obj_by_qualname(
+            current_platform.get_static_graph_wrapper_cls())
+
+        def customized_cudagraph_wrapper(f,
+                                         metadata: CUDAGraphWrapperMetadata):
+            partition_id = metadata.partition_index
+            num_partitions = metadata.num_partitions
+            return static_graph_wrapper_class(
+                runnable=f,
+                vllm_config=vllm_config,
+                runtime_mode=CUDAGraphMode.PIECEWISE,
+                cudagraph_options=CUDAGraphOptions(
+                    debug_log_enable=partition_id == 0,
+                    gc_disable=partition_id != 0,
+                    weak_ref_output=partition_id == num_partitions - 1,
+                ))
+
+        torch._inductor.utils.set_customized_partition_wrappers(
+            customized_cudagraph_wrapper)
+
+    yield
+
+    if (compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            and compilation_config.use_inductor_graph_partition):
+        torch._inductor.utils.set_customized_partition_wrappers(None)
