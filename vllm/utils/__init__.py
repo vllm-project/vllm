@@ -77,7 +77,7 @@ from vllm.ray.lazy_utils import is_in_ray_actor
 if TYPE_CHECKING:
     from argparse import Namespace
 
-    from vllm.config import CUDAGraphMode, ModelConfig, VllmConfig
+    from vllm.config import ModelConfig, VllmConfig
     from vllm.sequence import IntermediateTensors
 
 logger = init_logger(__name__)
@@ -3457,14 +3457,15 @@ def maybe_use_cudagraph_partition_wrapper(vllm_config: VllmConfig):
     graph wrapper class to maintain more control over static graph
     capture and replay.
     """
-    from vllm.platforms import current_platform
+    from vllm.config import CUDAGraphMode
 
     compilation_config = vllm_config.compilation_config
     if (compilation_config.cudagraph_mode != CUDAGraphMode.NONE
             and compilation_config.use_inductor_graph_partition):
         from torch._inductor.utils import CUDAGraphWrapperMetadata
 
-        from .cuda_graph import CUDAGraphOptions
+        from vllm.compilation.cuda_graph import CUDAGraphOptions
+        from vllm.platforms import current_platform
 
         static_graph_wrapper_class = resolve_obj_by_qualname(
             current_platform.get_static_graph_wrapper_cls())
