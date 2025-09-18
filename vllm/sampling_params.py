@@ -107,11 +107,12 @@ class SamplingParams(
 
     n: int = 1
     """Number of outputs to return for the given prompt request.
-    Note that `LLMEngine` or `AsyncLLM` stream outputs by default.
-    When `n > 1`, all `n` outputs are generated and streamed
-    per request. But only the last output for the request may be printed
-    depending on the setup. To see all `n` outputs upon completion,
-    use `RequestOutputKind.FINAL_ONLY`."""
+
+    NOTE:
+        `AsyncLLM` streams outputs by default. When `n > 1`, all `n` outputs
+        are generated and streamed cumulatively per request. To see all `n`
+        outputs upon completion, use `output_kind=RequestOutputKind.FINAL_ONLY`
+        in `SamplingParams`."""
     best_of: Optional[int] = None
     """Number of output sequences that are generated from the prompt. From
     these `best_of` sequences, the top `n` sequences are returned. `best_of`
