@@ -169,8 +169,8 @@ class EagleProposer:
         last_token_indices: Optional[torch.Tensor],
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
-        is_mm_embed: Optional[torch.Tensor] = None,
-        mm_embeds: Optional[list[torch.Tensor]] = None,
+        mm_embed_inputs: Optional[tuple[torch.Tensor,
+                                        list[torch.Tensor]]] = None,
     ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
@@ -214,8 +214,8 @@ class EagleProposer:
         self.positions[:num_tokens] = target_positions
         self.hidden_states[:num_tokens] = target_hidden_states
 
-        if mm_embeds:
-            assert is_mm_embed is not None
+        if mm_embed_inputs:
+            is_mm_embed, mm_embeds = mm_embed_inputs
 
             inputs_embeds_scheduled = _merge_multimodal_embeddings(
                 self.input_ids[:num_tokens],

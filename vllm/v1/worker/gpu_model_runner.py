@@ -1911,12 +1911,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             inputs_embeds_scheduled = self.model.get_input_embeddings(
                 self.input_ids.gpu[:num_scheduled_tokens])
 
-            if mm_embeds:
-                inputs_embeds_scheduled = _merge_multimodal_embeddings(
-                    inputs_embeds_scheduled,
-                    is_mm_embed,
-                    multimodal_embeddings=mm_embeds,
-                )
+            inputs_embeds_scheduled = _merge_multimodal_embeddings(
+                inputs_embeds_scheduled,
+                is_mm_embed,
+                multimodal_embeddings=mm_embeds,
+            )
 
             # TODO(woosuk): Avoid the copy. Optimize.
             self.inputs_embeds.gpu[:num_scheduled_tokens].copy_(
@@ -2448,13 +2447,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     target_hidden_states = hidden_states[token_indices]
 
             if self.supports_mm_inputs:
-                is_mm_embed, mm_embeds = self._gather_mm_embeddings(
+                mm_embed_inputs = self._gather_mm_embeddings(
                     scheduler_output,
                     shift_computed_tokens=1,
                 )
             else:
-                is_mm_embed, mm_embeds = torch.tensor(False,
-                                                      device=self.device), []
+                mm_embed_inputs = None
 
             draft_token_ids = self.drafter.propose(
                 target_token_ids=target_token_ids,
@@ -2464,9 +2462,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 last_token_indices=token_indices_to_sample,
                 sampling_metadata=sampling_metadata,
                 common_attn_metadata=common_attn_metadata,
-                is_mm_embed=is_mm_embed,
-                mm_embeds=mm_embeds,
+                mm_embed_inputs=mm_embed_inputs,
             )
+
         return draft_token_ids
 
     def propose_ngram_draft_token_ids(

@@ -951,21 +951,21 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _get_model_inputs(
         self,
         input_ids: torch.Tensor,
-        is_mm_embed: torch.Tensor,
-        mm_embeds: list[torch.Tensor],
+        mm_embed_inputs: Optional[tuple[torch.Tensor, list[torch.Tensor]]],
     ):
-        if self.supports_mm_inputs:
+        if mm_embed_inputs:
+            is_mm_embed, mm_embeds = mm_embed_inputs
+
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
             inputs_embeds = self.model.get_input_embeddings(input_ids)
 
-            if mm_embeds:
-                inputs_embeds = _merge_multimodal_embeddings(
-                    inputs_embeds,
-                    is_mm_embed,
-                    multimodal_embeddings=mm_embeds,
-                )
+            inputs_embeds = _merge_multimodal_embeddings(
+                inputs_embeds,
+                is_mm_embed,
+                multimodal_embeddings=mm_embeds,
+            )
 
             return None, inputs_embeds
         else:
@@ -994,11 +994,9 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.supports_mm_inputs:
             # Run the multimodal encoder if any.
             self._execute_mm_encoder(scheduler_output)
-            is_mm_embed, mm_embeds = self._gather_mm_embeddings(
-                scheduler_output)
+            mm_embed_inputs = self._gather_mm_embeddings(scheduler_output)
         else:
-            is_mm_embed, mm_embeds = torch.tensor(False,
-                                                  device=self.device), []
+            mm_embed_inputs = None
 
         xm.mark_step()
         # Prepare inputs, the requests might be split into multiple
@@ -1016,7 +1014,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             attn_metadata, logits_indices, padded_num_reqs, num_reqs,\
                 end_index = self._prepare_inputs(scheduler_output, start_index)
             input_ids, inputs_embeds = self._get_model_inputs(
-                self.input_ids, is_mm_embed, mm_embeds)
+                self.input_ids, mm_embed_inputs)
             xm.mark_step()
             # Run the decoder
             with set_forward_context(
@@ -1374,8 +1372,10 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         # Assign outputs or the graph will be cut short.
                         a, b = self._get_model_inputs(
                             placeholders_ids,
-                            torch.tensor(True, device=self.device),
-                            [mm_embeds],
+                            mm_embed_inputs=(
+                                torch.tensor(True, device=self.device),
+                                [mm_embeds],
+                            ),
                         )
                         assert a is None
                         xm.mark_step()
@@ -1389,8 +1389,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 placeholders_ids = placeholders_ids.to(self.device)
                 a, b = self._get_model_inputs(
                     placeholders_ids,
-                    torch.tensor(False, device=self.device),
-                    [],
+                    mm_embed_inputs=None,
                 )
                 assert a is None
                 xm.mark_step()
