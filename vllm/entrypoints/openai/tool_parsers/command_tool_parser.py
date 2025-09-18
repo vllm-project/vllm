@@ -29,10 +29,7 @@ class CommandToolParser(ToolParser):
     def __init__(self, tokenizer: PreTrainedTokenizerBase):
         super().__init__(tokenizer)
         # Streaming state
-        self.prev_tool_call_arr: list[dict] = []
-        self.streamed_args_for_tool: list[str] = []
         self.current_tool_id: int = -1
-        self.current_tool_name_sent: bool = False
 
         # Action delimiters
         self.tool_call_start_token = "<|START_ACTION|>"
