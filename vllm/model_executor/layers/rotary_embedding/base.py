@@ -115,8 +115,7 @@ class RotaryEmbedding(CustomOp):
         if is_rocm_triton_rotary_embedding_enabled() and \
             positions.numel() <= 128:
             rocm_aiter_rotary_emb(positions, query, key, self.cos_sin_cache,
-                                  self.head_size, self.head_size,
-                                  self.rotary_dim, offsets)
+                                  self.head_size, self.rotary_dim, offsets)
         else:
             # ops.rotary_embedding()/batched_rotary_embedding()
             # are in-place operations that update the query and key tensors.
@@ -146,7 +145,7 @@ class RotaryEmbedding(CustomOp):
         elif self.is_rocm_aiter_enabled:
             return self.forward_hip_rocm_aiter(positions, query, key, offsets,
                                                is_nope_first)
-        return self.forward_native(positions, query, key, offsets)
+        return self.forward_native(positions, query, key)
 
     def forward_hip_rocm_aiter(
         self,
