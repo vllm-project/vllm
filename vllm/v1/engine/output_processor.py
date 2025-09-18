@@ -245,6 +245,7 @@ class RequestState:
             finished=finished,
             kv_transfer_params=kv_transfer_params,
             num_cached_tokens=self.num_cached_tokens,
+            metrics=self.stats,
         )
 
     def _new_completion_output(

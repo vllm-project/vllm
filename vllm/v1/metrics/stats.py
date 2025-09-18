@@ -68,6 +68,10 @@ class RequestStateStats:
     first_token_ts: float = 0.0
     last_token_ts: float = 0.0
 
+    # These are engine frontend timestamps (wall-clock)
+    first_token_time: float = 0.0
+    last_token_time: float = 0.0
+
     # first token latency
     first_token_latency: float = 0.0
 
@@ -131,11 +135,13 @@ class IterationStats:
         # Process the batch-level "new tokens" engine core event
         if is_prefilling:
             req_stats.first_token_ts = engine_core_timestamp
+            req_stats.first_token_time = time.time()
         else:
             itl = engine_core_timestamp - req_stats.last_token_ts
             self.inter_token_latencies_iter.append(itl)
 
         req_stats.last_token_ts = engine_core_timestamp
+        req_stats.last_token_time = time.time()
 
     def update_from_events(self, req_id: str, events: list["EngineCoreEvent"],
                            is_prefilling: bool, req_stats: RequestStateStats,
