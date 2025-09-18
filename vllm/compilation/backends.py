@@ -327,39 +327,6 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
             ]
             global compilation_start_time
 
-            if (self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-                    and self.compilation_config.use_inductor_graph_partition):
-                # If we're using Inductor-based graph partitioning, we currently
-                # have the whole `fx.Graph` before Inductor lowering and
-                # and the piecewise splitting happens after all graph
-                # passes and fusions. Here, we add a custom hook for Inductor
-                # to wrap each partition with our static graph wrapper class to
-                # maintain more control over static graph capture and replay.
-
-                from torch._inductor.utils import CUDAGraphWrapperMetadata
-
-                from .cuda_graph import CUDAGraphOptions
-
-                static_graph_wrapper_class = resolve_obj_by_qualname(
-                    current_platform.get_static_graph_wrapper_cls())
-
-                def customized_cudagraph_wrapper(
-                        f, metadata: CUDAGraphWrapperMetadata):
-                    partition_id = metadata.partition_index
-                    num_partitions = metadata.num_partitions
-                    return static_graph_wrapper_class(
-                        runnable=f,
-                        vllm_config=self.vllm_config,
-                        runtime_mode=CUDAGraphMode.PIECEWISE,
-                        cudagraph_options=CUDAGraphOptions(
-                            debug_log_enable=partition_id == 0,
-                            gc_disable=partition_id != 0,
-                            weak_ref_output=partition_id == num_partitions - 1,
-                        ))
-
-                torch._inductor.utils.set_customized_partition_wrappers(
-                    customized_cudagraph_wrapper)
-
             compiled_graph_for_dynamic_shape = self.vllm_backend.\
                 compiler_manager.compile(
                 submod,

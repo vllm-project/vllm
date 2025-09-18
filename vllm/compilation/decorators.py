@@ -11,10 +11,11 @@ from torch._dynamo.symbolic_convert import InliningInstructionTranslator
 
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
-from vllm.config import CompilationLevel, VllmConfig
+from vllm.config import CompilationLevel, CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils import supports_dynamo
+from vllm.utils import resolve_obj_by_qualname, supports_dynamo
 
 from .monitor import start_monitoring_torch_compile
 
@@ -302,7 +303,49 @@ def _support_torch_compile(
             with patch.object(InliningInstructionTranslator, 'inline_call',
                               patched_inline_call), torch._dynamo.config.patch(
                                   **dynamo_config_patches):
+                compilation_config = self.vllm_config.compilation_config
+                if (compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+                        and compilation_config.use_inductor_graph_partition):
+                    # If we're using Inductor-based graph partitioning, we
+                    # currently have the whole `fx.Graph` before Inductor
+                    # lowering and and the piecewise splitting happens after
+                    # all graph passes and fusions. Here, we add a custom hook
+                    # for Inductor to wrap each partition with our static
+                    # graph wrapper class to maintain more control over
+                    # static graph capture and replay.
+
+                    from torch._inductor.utils import CUDAGraphWrapperMetadata
+
+                    from .cuda_graph import CUDAGraphOptions
+
+                    static_graph_wrapper_class = resolve_obj_by_qualname(
+                        current_platform.get_static_graph_wrapper_cls())
+
+                    def customized_cudagraph_wrapper(
+                            f, metadata: CUDAGraphWrapperMetadata):
+                        partition_id = metadata.partition_index
+                        num_partitions = metadata.num_partitions
+                        return static_graph_wrapper_class(
+                            runnable=f,
+                            vllm_config=self.vllm_config,
+                            runtime_mode=CUDAGraphMode.PIECEWISE,
+                            cudagraph_options=CUDAGraphOptions(
+                                debug_log_enable=partition_id == 0,
+                                gc_disable=partition_id != 0,
+                                weak_ref_output=partition_id == num_partitions
+                                - 1,
+                            ))
+
+                    torch._inductor.utils.set_customized_partition_wrappers(
+                        customized_cudagraph_wrapper)
+
                 output = self.compiled_callable(*args, **kwargs)
+
+                if (compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+                        and compilation_config.use_inductor_graph_partition):
+                    torch._inductor.utils.set_customized_partition_wrappers(
+                        None)
+
             return output
 
         # usually, capturing the model once is enough, and then we can
