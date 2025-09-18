@@ -864,6 +864,7 @@ class Scheduler(SchedulerInterface):
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:
         sampled_token_ids = model_runner_output.sampled_token_ids
+        num_sampled_tokens = model_runner_output.num_sampled_tokens
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
@@ -878,7 +879,8 @@ class Scheduler(SchedulerInterface):
         # to avoid expensive operations inside the loop.
         stopped_running_reqs: set[Request] = set()
         stopped_preempted_reqs: set[Request] = set()
-        for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
+        for req_index, req_id in enumerate(model_runner_output.req_ids):
+            num_tokens_scheduled = num_scheduled_tokens[req_id]
             assert num_tokens_scheduled > 0
             request = self.requests.get(req_id)
             if request is None:
@@ -887,9 +889,13 @@ class Scheduler(SchedulerInterface):
                 # in pipeline parallelism).
                 continue
 
-            req_index = model_runner_output.req_id_to_index[req_id]
-            generated_token_ids = sampled_token_ids[
-                req_index] if sampled_token_ids else []
+            generated_token_ids = []
+            if sampled_token_ids is not None:
+                assert num_sampled_tokens is not None
+                n = num_sampled_tokens[req_index]
+                if n > 0:
+                    generated_token_ids = sampled_token_ids[req_index, :n]
+                    generated_token_ids = generated_token_ids.tolist()
 
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id))

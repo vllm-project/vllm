@@ -348,7 +348,7 @@ class GPUModelRunner:
         self.req_states.append_token_ids(
             input_batch.idx_mapping_np,
             sampled_token_ids_np,
-            num_sampled_tokens=num_sampled_tokens,
+            num_sampled_tokens,
         )
         return sampled_token_ids_np, num_sampled_tokens
 
@@ -380,14 +380,10 @@ class GPUModelRunner:
         sampler_output = self.sample(logits, input_batch)
         sampled_token_ids_np, num_sampled_tokens = self.postprocess(
             sampler_output, input_batch)
-        req_id_to_index = {
-            req_id: i
-            for i, req_id in enumerate(input_batch.req_ids)
-        }
         return ModelRunnerOutput(
             req_ids=input_batch.req_ids,
-            req_id_to_index=req_id_to_index,
-            sampled_token_ids=sampled_token_ids_np.tolist(),
+            sampled_token_ids=sampled_token_ids_np,
+            num_sampled_tokens=num_sampled_tokens,
             logprobs=sampler_output.logprobs_tensors,
             prompt_logprobs_dict={},
             pooler_output=[],
