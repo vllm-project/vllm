@@ -50,6 +50,12 @@ class GDNAttentionMetadata:
         Tensor] = None  # shape: [num_prefill_tokens + num_decode_tokens,]
     num_accepted_tokens: Optional[torch.Tensor] = None  # shape: [batch,]
 
+    # The following attributes are for triton implementation of causal_conv1d
+    nums_dict: Optional[dict] = None
+    cu_seqlen: Optional[int] = None
+    batch_ptr: Optional[torch.Tensor] = None
+    token_chunk_offset_ptr: Optional[torch.Tensor] = None
+
 
 class GDNAttentionMetadataBuilder(
         AttentionMetadataBuilder[GDNAttentionMetadata]):
