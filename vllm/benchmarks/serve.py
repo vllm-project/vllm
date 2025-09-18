@@ -55,16 +55,14 @@ TERM_PLOTLIB_AVAILABLE = ((importlib.util.find_spec("termplotlib") is not None)
 # TODO: Remove this in v0.11.0
 class DeprecatedEndpointTypeAction(argparse.Action):
     """Argparse action for the deprecated --endpoint-type flag.
-
-    Only emits a warning when the flag is used; does not map values.
     """
 
-    def __call__(self, parser, namespace, values, option_string=None):
+    def __call__(self, _, namespace, values, option_string=None):
         warnings.warn(
             "'--endpoint-type' is deprecated and will be removed in v0.11.0. "
             "Please use '--backend' instead or remove this argument if you "
             "have already set it.",
-            stacklevel=2,
+            stacklevel=1,
         )
         setattr(namespace, self.dest, values)
 
