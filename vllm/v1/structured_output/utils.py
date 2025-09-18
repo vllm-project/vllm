@@ -90,6 +90,9 @@ def apply_grammar_bitmask(
     seq = sorted(scheduler_output.structured_output_request_ids.items(),
                  key=lambda x: x[1])
     for req_id, _ in seq:
+        if req_id not in struct_out_req_batch_indices:
+            # preempted req ids are not in input_batch, we skip in this case
+            continue
         logit_index = struct_out_req_batch_indices[req_id]
         num_spec_tokens = len(
             scheduler_output.scheduled_spec_decode_tokens.get(req_id, []))
