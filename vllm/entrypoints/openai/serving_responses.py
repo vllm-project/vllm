@@ -24,16 +24,16 @@ from openai.types.responses import (
     ResponseCodeInterpreterCallInterpretingEvent,
     ResponseCodeInterpreterToolCallParam, ResponseCompletedEvent,
     ResponseContentPartAddedEvent, ResponseContentPartDoneEvent,
-    ResponseCreatedEvent, ResponseFunctionCallArgumentsDoneEvent,
-    ResponseFunctionToolCall, ResponseFunctionWebSearch,
-    ResponseFunctionCallArgumentsDeltaEvent,
-    ResponseInProgressEvent, ResponseOutputItem, ResponseOutputItemAddedEvent,
-    ResponseOutputItemDoneEvent, ResponseOutputMessage, ResponseOutputText,
-    ResponseReasoningItem, ResponseReasoningTextDeltaEvent,
-    ResponseReasoningTextDoneEvent, ResponseStatus, ResponseTextDeltaEvent,
-    ResponseTextDoneEvent, ResponseWebSearchCallCompletedEvent,
-    ResponseWebSearchCallInProgressEvent, ResponseWebSearchCallSearchingEvent,
-    response_function_web_search, response_text_delta_event)
+    ResponseCreatedEvent, ResponseFunctionCallArgumentsDeltaEvent,
+    ResponseFunctionCallArgumentsDoneEvent, ResponseFunctionToolCall,
+    ResponseFunctionWebSearch, ResponseInProgressEvent, ResponseOutputItem,
+    ResponseOutputItemAddedEvent, ResponseOutputItemDoneEvent,
+    ResponseOutputMessage, ResponseOutputText, ResponseReasoningItem,
+    ResponseReasoningTextDeltaEvent, ResponseReasoningTextDoneEvent,
+    ResponseStatus, ResponseTextDeltaEvent, ResponseTextDoneEvent,
+    ResponseWebSearchCallCompletedEvent, ResponseWebSearchCallInProgressEvent,
+    ResponseWebSearchCallSearchingEvent, response_function_web_search,
+    response_text_delta_event)
 from openai.types.responses.response_output_text import (Logprob,
                                                          LogprobTopLogprob)
 # yapf: enable
@@ -1639,6 +1639,8 @@ class OpenAIServingResponses(OpenAIServing):
                                 status="completed",
                             ),
                         ))
+            # developer tools will be triggered on the commentary channel
+            # and recipient starts with "functions.TOOL_NAME"
             if ctx.parser.current_channel == "commentary" \
                and ctx.parser.current_recipient and \
                ctx.parser.current_recipient.startswith("functions."):

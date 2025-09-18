@@ -420,22 +420,17 @@ class ResponsesRequest(OpenAIBaseModel):
         are created."""
         input_data = data.get("input")
         if isinstance(input_data, list):
-            fixed_input = []
-            for item in input_data:
+
+            def convert(item):
                 if isinstance(item,
                               dict) and item.get('type') == 'function_call':
-                    # Convert dict to ResponseFunctionToolCall object
                     try:
-                        from openai.types.responses.response_function_tool_call import (  # noqa: E501
-                            ResponseFunctionToolCall)
-                        function_call_obj = ResponseFunctionToolCall(**item)
-                        fixed_input.append(function_call_obj)
+                        return ResponseFunctionToolCall(**item)
                     except Exception:
-                        # If conversion fails, keep the original dict
-                        fixed_input.append(item)
-                else:
-                    fixed_input.append(item)
-            data["input"] = fixed_input
+                        return item
+                return item
+
+            data["input"] = [convert(item) for item in input_data]
         return data
 
 
