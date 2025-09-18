@@ -16,19 +16,6 @@ if sys.version_info[:2] >= (3, 11):
     from asyncio import timeout as asyncio_timeout
 else:
 
-    def asyncio_timeout(delay: Optional[float]) -> "Timeout":
-        """timeout context manager.
-        Useful in cases when you want to apply timeout logic around block
-        of code or in cases when asyncio.wait_for is not suitable. For example:
-        >>> async with timeout(0.001):
-        ...     async with aiohttp.get('https://github.com') as r:
-        ...         await r.text()
-        delay - value in seconds or None to disable timeout logic
-        """
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + delay if delay is not None else None
-        return Timeout(deadline, loop)
-
     class _State(enum.Enum):
         INIT = "INIT"
         ENTER = "ENTER"
@@ -171,3 +158,16 @@ else:
             self._state = _State.TIMEOUT
             # drop the reference early
             self._timeout_handler = None
+
+    def asyncio_timeout(delay: Optional[float]) -> Timeout:
+        """timeout context manager.
+        Useful in cases when you want to apply timeout logic around block
+        of code or in cases when asyncio.wait_for is not suitable. For example:
+        >>> async with timeout(0.001):
+        ...     async with aiohttp.get('https://github.com') as r:
+        ...         await r.text()
+        delay - value in seconds or None to disable timeout logic
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + delay if delay is not None else None
+        return Timeout(deadline, loop)
