@@ -679,6 +679,7 @@ class StructuredOutputExecutor:
         #
         # NOTE: We only support a single backend. We do NOT support different
         # backends on a per-request basis in V1 (for now, anyway...).
+        # _backend is set in Processor._validate_structured_output
         if self.backend is None:
             backend = grammar_init_data.guided_decoding_backend
             vocab_size = self.vllm_config.model_config.get_vocab_size()
