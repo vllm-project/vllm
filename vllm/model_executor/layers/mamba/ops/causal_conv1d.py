@@ -932,7 +932,7 @@ def causal_conv1d_update(
     - `[batch, dim]` - single token prediction
     - `[batch, dim, seqlen]` - single or multiple tokens prediction
     - `[num_tokens, dim]` - continuous batching, where num_tokens is
-    the total tokens of all sequences in that batch
+        the total tokens of all sequences in that batch
 
     conv_state: (..., dim, state_len), where state_len >= width - 1
     weight: (dim, width)
