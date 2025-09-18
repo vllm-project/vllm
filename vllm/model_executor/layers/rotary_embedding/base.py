@@ -5,9 +5,12 @@ from typing import Optional
 
 import torch
 
+from vllm import envs
 from vllm.model_executor.custom_op import CustomOp
 
 from .common import apply_rotary_emb_torch
+from .rocm_aiter_rope_ops import (is_rocm_rotary_embedding_enabled,
+                                  is_rocm_triton_rotary_embedding_enabled)
 
 
 @CustomOp.register("rotary_embedding")
@@ -35,6 +38,11 @@ class RotaryEmbedding(CustomOp):
         cache = cache.to(dtype)
         self.cos_sin_cache: torch.Tensor
         self.register_buffer("cos_sin_cache", cache, persistent=False)
+        self.is_rocm_aiter_enabled = \
+            is_rocm_rotary_embedding_enabled()
+        self.is_rocm_aiter_triton_enabled = \
+            is_rocm_triton_rotary_embedding_enabled(
+        )
 
     def _compute_inv_freq(self, base: float) -> torch.Tensor:
         """Compute the inverse frequency."""
@@ -93,6 +101,7 @@ class RotaryEmbedding(CustomOp):
         positions: torch.Tensor,
         query: torch.Tensor,
         key: Optional[torch.Tensor] = None,
+        offsets: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         from vllm import _custom_ops as ops
 
@@ -103,11 +112,130 @@ class RotaryEmbedding(CustomOp):
             self.cos_sin_cache = self.cos_sin_cache.to(query.device,
                                                        dtype=query.dtype)
 
-        # ops.rotary_embedding() is an in-place operation
-        # that updates the query and key tensors.
-        ops.rotary_embedding(positions, query, key, self.head_size,
-                             self.cos_sin_cache, self.is_neox_style)
+        num_tokens = positions.numel()
+        if envs.VLLM_ROCM_USE_AITER and \
+            envs.VLLM_USE_AITER_TRITON_ROPE and num_tokens <= 128:
+
+            import aiter.ops.triton.rope as ops
+            assert key is not None
+
+            cos, sin = self.cos_sin_cache.chunk(2, dim=-1)
+            query_shape = query.shape
+            key_shape = key.shape
+            query = query.view(num_tokens, -1, self.head_size)
+            key = key.view(num_tokens, -1, self.head_size)
+            query_ = query[..., :self.rotary_dim]
+            key_ = key[..., :self.rotary_dim]
+            if offsets is not None:
+                offsets = offsets.view(*query.shape[:1])
+                ops.rope_cached_thd_positions_offsets_2c_gqa_fwd_inplace(
+                    query_,
+                    key_,
+                    cos,
+                    sin,
+                    positions,
+                    offsets,
+                    0,
+                    True,
+                    False,
+                )
+            else:
+                ops.rope_cached_thd_positions_2c_gqa_fwd_inplace(
+                    query_,
+                    key_,
+                    cos,
+                    sin,
+                    positions,
+                    0,
+                    True,
+                    False,
+                )
+            query = query.view(query_shape)
+            key = key.view(key_shape)
+        else:
+            # ops.rotary_embedding()/batched_rotary_embedding()
+            # are in-place operations that update the query and key tensors.
+            if offsets is not None:
+                ops.batched_rotary_embedding(positions, query, key,
+                                             self.head_size,
+                                             self.cos_sin_cache,
+                                             self.is_neox_style,
+                                             self.rotary_dim, offsets)
+            else:
+                ops.rotary_embedding(positions, query, key, self.head_size,
+                                     self.cos_sin_cache, self.is_neox_style)
         return query, key
+
+    def forward_hip(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: Optional[torch.Tensor] = None,
+        offsets: Optional[torch.Tensor] = None,
+        is_nope_first=False,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        # currently only rotary embedding ops from AITER package are
+        # supported for HiP forward.
+        if self.is_rocm_aiter_triton_enabled:
+            return self.forward_cuda(positions, query, key, offsets)
+        elif self.is_rocm_aiter_enabled:
+            return self.forward_hip_rocm_aiter(positions, query, key, offsets,
+                                               is_nope_first)
+        return self.forward_native(positions, query, key, offsets)
+
+    def forward_hip_rocm_aiter(
+        self,
+        positions: torch.Tensor,
+        # if     is_nope_first
+        # [[batch_size, seq_len, num_heads, nope_size+rope_size]
+        # if NOT is_nope_first
+        # [[batch_size, seq_len, num_heads, rope_size+nope_size],
+        query: torch.Tensor,
+        key: Optional[torch.Tensor] = None,
+        offsets: Optional[torch.Tensor] = None,
+        is_nope_first: bool = False,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        if self.cos_sin_cache.device != query.device or \
+            self.cos_sin_cache.dtype != query.dtype:
+            self.cos_sin_cache = self.cos_sin_cache.to(query.device,
+                                                       dtype=query.dtype)
+        cos, sin = self.cos_sin_cache.chunk(2, dim=-1)
+
+        cos = cos.unsqueeze(-2).unsqueeze(-2)
+        sin = sin.unsqueeze(-2).unsqueeze(-2)
+
+        rotate_style = 0 if self.is_neox_style else 1
+
+        num_tokens = positions.numel()
+
+        query_shape = query.shape
+        query = query.view(1, num_tokens, -1, self.head_size)
+        if key is not None:
+            key_shape = key.shape
+            key = key.view(1, num_tokens, -1, self.head_size)
+
+        positions = positions.view(*query.shape[:2])
+        if offsets is not None:
+            offsets = offsets.view(*query.shape[:2])
+
+        if not is_nope_first:
+            query_ = query[..., :self.rotary_dim]
+            key_ = key[..., :self.rotary_dim] if key is not None else None
+        else:
+            query_ = query[..., -self.rotary_dim:]
+            key_ = key[..., -self.rotary_dim:] if key is not None else None
+
+        if key_ is None:
+            torch.ops.vllm.rocm_aiter_rotary_emb_without_key_forward_hip(
+                positions, sin, cos, query_, offsets, rotate_style,
+                is_nope_first)
+            return query.view(query_shape), None
+
+        torch.ops.vllm.rocm_aiter_rotary_emb_with_key_forward_hip(
+            positions, sin, cos, query_, key_, offsets, rotate_style,
+            is_nope_first)
+
+        return query.view(query_shape), key.view(key_shape)
 
     def forward_xpu(
         self,

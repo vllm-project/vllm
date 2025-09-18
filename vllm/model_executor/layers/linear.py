@@ -317,6 +317,12 @@ class ReplicatedLinear(LinearBase):
         return_bias: bool = True,
         disable_tp: bool = False,
     ):
+        # If MergedReplicatedLinear, use output size of each partition.
+        if hasattr(self, "output_sizes"):
+            self.output_partition_sizes = self.output_sizes
+        else:
+            self.output_partition_sizes = [output_size]
+
         super().__init__(input_size,
                          output_size,
                          skip_bias_add,
@@ -329,7 +335,8 @@ class ReplicatedLinear(LinearBase):
         # All the linear layer supports quant method.
         assert self.quant_method is not None
         self.quant_method.create_weights(self,
-                                         self.input_size, [self.output_size],
+                                         self.input_size,
+                                         self.output_partition_sizes,
                                          self.input_size,
                                          self.output_size,
                                          self.params_dtype,
@@ -368,11 +375,26 @@ class ReplicatedLinear(LinearBase):
         param.data.copy_(loaded_weight)
 
     def forward(
-        self, x: torch.Tensor
+        self,
+        x: torch.Tensor,
+        x_quant_scales: torch.Tensor = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         bias = self.bias if not self.skip_bias_add else None
         assert self.quant_method is not None
-        output = self.quant_method.apply(self, x, bias)
+        from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
+        from vllm.model_executor.layers.quantization.quark.schemes.quark_w4a4_mxfp4 import (  # noqa: E501
+            QuarkW4A4MXFP4)
+        if isinstance(self.quant_method, Fp8LinearMethod, QuarkW4A4MXFP4):
+            output = self.quant_method.apply(self,
+                                             x,
+                                             bias,
+                                             x_quant_scales=x_quant_scales)
+        else:
+            assert x_quant_scales is None, f"x_quant_scales input \
+                is not supported for {self.quant_method.__class__}"
+
+            output = self.quant_method.apply(self, x, bias)
+
         output_bias = self.bias if self.skip_bias_add else None
         if not self.return_bias:
             return output
@@ -407,7 +429,7 @@ class ColumnParallelLinear(LinearBase):
         output_sizes: list of output sizes packed into one output, like for QKV
                        the list would be size 3.
         prefix: The name of the layer in the state dict, including all parents
-                        (e.g. model.layers.0.qkv_proj)
+                        (e.g. model.layers.0.qkv_proj) 
         return_bias: If true, return bias together with outputs in forward pass.
         disable_tp: If true, weights matrix won't be sharded through tp rank.
     """
@@ -529,13 +551,26 @@ class ColumnParallelLinear(LinearBase):
         param.load_column_parallel_weight(loaded_weight=loaded_weight)
 
     def forward(
-        self, input_
+        self,
+        input_,
+        x_quant_scales: torch.Tensor = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         bias = self.bias if not self.skip_bias_add else None
 
         # Matrix multiply.
         assert self.quant_method is not None
-        output_parallel = self.quant_method.apply(self, input_, bias)
+        from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
+        from vllm.model_executor.layers.quantization.quark.schemes.quark_w4a4_mxfp4 import (  # noqa: E501
+            QuarkW4A4MXFP4)
+        if isinstance(self.quant_method, Fp8LinearMethod, QuarkW4A4MXFP4):
+            output_parallel = self.quant_method.apply(
+                self, input_, bias, x_quant_scales=x_quant_scales)
+        else:
+            assert x_quant_scales is None, f"x_quant_scales input \
+                is not supported for {self.quant_method.__class__}"
+
+            output_parallel = self.quant_method.apply(self, input_, bias)
+
         if self.gather_output and self.tp_size > 1:
             # All-gather across the partitions.
             output = tensor_model_parallel_all_gather(output_parallel)
@@ -1320,7 +1355,9 @@ class RowParallelLinear(LinearBase):
         param.load_row_parallel_weight(loaded_weight=loaded_weight)
 
     def forward(
-        self, input_
+        self,
+        input_,
+        x_quant_scales=None
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         if self.input_is_parallel:
             input_parallel = input_
@@ -1334,9 +1371,19 @@ class RowParallelLinear(LinearBase):
         # Only fuse bias add into GEMM for rank 0 (this ensures that
         # bias will not get added more than once in TP>1 case)
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
-        output_parallel = self.quant_method.apply(self,
-                                                  input_parallel,
-                                                  bias=bias_)
+        from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
+        from vllm.model_executor.layers.quantization.quark.schemes.quark_w4a4_mxfp4 import (  # noqa: E501
+            QuarkW4A4MXFP4)
+        if isinstance(self.quant_method, Fp8LinearMethod, QuarkW4A4MXFP4):
+            output_parallel = self.quant_method.apply(
+                self, input_parallel, bias_, x_quant_scales=x_quant_scales)
+        else:
+            assert x_quant_scales is None, f"x_quant_scales input \
+                is not supported for {self.quant_method.__class__}"
+
+            output_parallel = self.quant_method.apply(self, input_parallel,
+                                                      bias_)
+
         if self.reduce_results and self.tp_size > 1:
             output = tensor_model_parallel_all_reduce(output_parallel)
         else:
