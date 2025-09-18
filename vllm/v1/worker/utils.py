@@ -16,6 +16,7 @@ from vllm.model_executor.models.utils import extract_layer_index
 from vllm.multimodal.cache import processor_only_cache_from_config
 from vllm.multimodal.registry import MultiModalRegistry
 from vllm.platforms import current_platform
+from vllm.utils import round_up
 from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
 from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
@@ -329,28 +330,7 @@ def is_residual_scattered_for_sp(vllm_config: VllmConfig,
     return (num_input_tokens in vllm_config.compilation_config.compile_sizes)
 
 
-def ar_coordinate_batch_across_dp(
-        should_ubatch: bool, orig_num_tokens_per_ubatch: int,
-        padded_num_tokens_per_ubatch: int, dp_size: int,
-        dp_rank: int) -> tuple[bool, Optional[torch.Tensor]]:
-    """
-    1. Decides if each DP rank is going to microbatch. Either all ranks
-    run with microbatching or none of them do. If this function decides
-    not to run with microbatching. It will "abort" meaning that no padding
-    information will be returned to the caller. It will return (False, None)
-
-    2. Determines the total number of tokens that each rank will run.
-    All ranks will be padded out so that the run with the same number
-    of tokens
-
-    Returns: tuple[
-        should_ubatch: Are all DP ranks going to microbatch
-        num_tokens_after_padding: A tensor containing the total number of
-        tokens per-microbatch for each DP rank including padding. Will be
-        None if should_ubatch if False
-    ]
-    """
-
+def _get_device_and_group():
     from vllm.distributed.parallel_state import get_dp_group
     device = current_platform.device_type
     group = get_dp_group().device_group
@@ -364,13 +344,31 @@ def ar_coordinate_batch_across_dp(
             "Using CPU all reduce to syncronize DP padding between ranks.")
         device = "cpu"
         group = get_dp_group().cpu_group
+    return device, group
 
+
+def _run_ar(should_ubatch: bool, orig_num_tokens_per_ubatch: int,
+            padded_num_tokens_per_ubatch: int, dp_size: int,
+            dp_rank: int) -> torch.Tensor:
+    device, group = _get_device_and_group()
     tensor = torch.zeros(3, dp_size, device=device, dtype=torch.int32)
     tensor[0][dp_rank] = orig_num_tokens_per_ubatch
     tensor[1][dp_rank] = padded_num_tokens_per_ubatch
     tensor[2][dp_rank] = 1 if should_ubatch else 0
-
     dist.all_reduce(tensor, group=group)
+    return tensor
+
+
+def ar_coordinate_batch_across_dp(
+        should_ubatch: bool, orig_num_tokens_per_ubatch: int,
+        padded_num_tokens_per_ubatch: int, dp_size: int,
+        dp_rank: int) -> tuple[bool, Optional[torch.Tensor]]:
+
+    tensor = _run_ar(should_ubatch=should_ubatch,
+                     orig_num_tokens_per_ubatch=orig_num_tokens_per_ubatch,
+                     padded_num_tokens_per_ubatch=padded_num_tokens_per_ubatch,
+                     dp_size=dp_size,
+                     dp_rank=dp_rank)
 
     result: bool = bool(torch.all(tensor[2] == 1).item())
 
@@ -389,3 +387,62 @@ def ar_coordinate_batch_across_dp(
                      padded_max_num_tokens)
         return False, padded_num_tokens_tensor.cpu() * 2
     return result, padded_num_tokens_tensor.cpu()
+
+
+def coordinate_batch_across_dp(
+    num_tokens_unpadded: int,
+    num_tokens_padded: int,
+    should_attempt_ubatching: bool,
+    dp_size: int,
+    dp_rank: int,
+) -> tuple[bool, Optional[torch.Tensor]]:
+    """
+    1. Decides if each DP rank is going to microbatch. Either all ranks
+    run with microbatching or none of them do.
+
+    2. Determines the total number of tokens that each rank will run.
+    All ranks will be padded out so that the run with the same number
+    of tokens
+
+    Returns: tuple[
+        should_ubatch: Are all DP ranks going to microbatch
+        num_tokens_after_padding: A tensor containing the total number of
+        tokens per-microbatch for each DP rank including padding. Will be
+        None if should_ubatch if False
+    ]
+
+    """
+    assert num_tokens_padded >= num_tokens_unpadded
+    if dp_size == 1:
+        # Early exit.
+        return False, None
+
+    # Round up to the next multiple of two for even divisibility
+    num_tokens_padded = round_up(num_tokens_padded, 2)
+    num_tokens_per_ubatch = num_tokens_padded // 2
+    should_ubatch = should_attempt_ubatching
+
+    # Sanity Check that the existing padding isn't giving us an empty second
+    # ubatch. Abort if so
+    if is_second_ubatch_empty(num_tokens_unpadded, num_tokens_padded):
+        logger.debug(
+            "Empty second µbatch detected: unpadded tokens: %s, padded "
+            "tokens: %s", num_tokens_unpadded, num_tokens_padded)
+        should_ubatch = False
+
+    # Note that we compute the number of padded tokens per ubatch
+    (should_ubatch, num_tokens_across_dp) = ar_coordinate_batch_across_dp(
+        should_ubatch=should_ubatch,
+        orig_num_tokens_per_ubatch=num_tokens_unpadded // 2,
+        padded_num_tokens_per_ubatch=num_tokens_per_ubatch,
+        dp_size=dp_size,
+        dp_rank=dp_rank)
+
+    assert num_tokens_across_dp is not None
+
+    max_tokens_across_dp_cpu = int(torch.max(num_tokens_across_dp).item())
+    num_tokens_after_padding = torch.tensor([max_tokens_across_dp_cpu] *
+                                            dp_size,
+                                            device="cpu",
+                                            dtype=torch.int32)
+    return should_ubatch, num_tokens_after_padding

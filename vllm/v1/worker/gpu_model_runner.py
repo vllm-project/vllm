@@ -92,10 +92,10 @@ from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import (
     KVConnectorModelRunnerMixin)
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
-from vllm.v1.worker.ubatch_splitting import (coordinate_batch_across_dp,
-                                             ubatch_split)
+from vllm.v1.worker.ubatch_splitting import ubatch_split
 from vllm.v1.worker.ubatch_utils import UBatchSlice, UBatchSlices
-from vllm.v1.worker.utils import is_residual_scattered_for_sp
+from vllm.v1.worker.utils import (coordinate_batch_across_dp,
+                                  is_residual_scattered_for_sp)
 
 from .utils import (AttentionGroup, MultiModalBudget,
                     add_kv_sharing_layers_to_kv_cache_groups, bind_kv_cache,
