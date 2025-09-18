@@ -30,7 +30,6 @@ class ParallelSetup(NamedTuple):
     tp_size: int
     pp_size: int
     eager_mode: bool
-    chunked_prefill: bool
 
 
 class PPTestOptions(NamedTuple):
@@ -58,24 +57,13 @@ class PPTestSettings:
             parallel_setups=[
                 ParallelSetup(tp_size=tp_base,
                               pp_size=pp_base,
-                              eager_mode=False,
-                              chunked_prefill=False),
+                              eager_mode=False),
                 ParallelSetup(tp_size=tp_base,
                               pp_size=2 * pp_base,
-                              eager_mode=False,
-                              chunked_prefill=True),
+                              eager_mode=False),
                 ParallelSetup(tp_size=tp_base,
                               pp_size=2 * pp_base,
-                              eager_mode=True,
-                              chunked_prefill=False),
-                ParallelSetup(tp_size=2 * tp_base,
-                              pp_size=pp_base,
-                              eager_mode=False,
-                              chunked_prefill=True),
-                ParallelSetup(tp_size=2 * tp_base,
-                              pp_size=pp_base,
-                              eager_mode=True,
-                              chunked_prefill=False),
+                              eager_mode=True),
             ],
             distributed_backends=["mp", "ray"],
             runner=runner,
@@ -97,8 +85,7 @@ class PPTestSettings:
             parallel_setups=[
                 ParallelSetup(tp_size=tp_base,
                               pp_size=pp_base,
-                              eager_mode=True,
-                              chunked_prefill=False),
+                              eager_mode=True),
             ],
             distributed_backends=["mp"],
             runner=runner,
@@ -250,7 +237,6 @@ def _compare_tp(
         tp_size,
         pp_size,
         eager_mode,
-        chunked_prefill,
     ) = parallel_setup
 
     multi_node_only, load_format = test_options
@@ -303,8 +289,6 @@ def _compare_tp(
         "--max-num-seqs",
         "8",
     ]
-    if chunked_prefill:
-        common_args.append("--enable-chunked-prefill")
     if eager_mode:
         common_args.append("--enforce-eager")
     if runner != "auto":
