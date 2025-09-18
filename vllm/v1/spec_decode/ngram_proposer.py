@@ -34,13 +34,17 @@ class NgramProposer:
 
         # Max number of threads for numba parallel processing.
         tp_size = vllm_config.parallel_config.tensor_parallel_size
-        # Divide by 2 to use physical cores
-        # and not logical cores (hyper-threading).
-        # Divide by tp_size to ensure each tensor parallel rank
-        # has some threads since all ranks will run this.
         cpu_count = os.cpu_count()
         if cpu_count:
-            self.num_numba_thread_available = (cpu_count // 2) // tp_size
+            # Divide by 2 to use physical cores
+            # and not logical cores (hyper-threading).
+            # Cap the number of threads to 8 to avoid using too many threads
+            # since other components like frontend (incl tokenization)
+            # and Structured Outputs also use multiple threads.
+            self.num_numba_thread_available = min(8, (cpu_count // 2))
+            # Divide by tp_size to ensure each tensor parallel rank
+            # has some threads since all ranks will run this.
+            self.num_numba_thread_available //= tp_size
         else:
             self.num_numba_thread_available = 1
 
