@@ -346,14 +346,15 @@ class EagleProposer:
             self.input_ids[:batch_size] = input_ids
             self.positions[:batch_size] = clamped_positions
             self.hidden_states[:batch_size] = hidden_states
-            if self.is_multimodal_model:
-                inputs_embeds = self.model.get_input_embeddings(input_ids)
-                self.inputs_embeds[:batch_size] = inputs_embeds
-                inputs_embeds = self.inputs_embeds[:input_batch_size]
+            if mm_embed_inputs:
+                self.inputs_embeds[:batch_size] = \
+                    self.model.get_input_embeddings(input_ids)
+
                 input_ids = None
+                inputs_embeds = self.inputs_embeds[:input_batch_size]
             else:
-                inputs_embeds = None
                 input_ids = self.input_ids[:input_batch_size]
+                inputs_embeds = None
 
             # Run the model.
             with set_forward_context(per_layer_attn_metadata,
