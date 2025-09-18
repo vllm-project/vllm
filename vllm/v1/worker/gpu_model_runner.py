@@ -886,7 +886,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Build encoder_seq_lens array mapping request indices to
         # encoder lengths for inputs scheduled in this batch
-        encoder_seq_lens = np.zeros((int(num_reqs),), dtype=np.int32)
+        encoder_seq_lens = np.zeros((int(num_reqs), ), dtype=np.int32)
         for req_id in scheduler_output.scheduled_encoder_inputs:
             req_index = self.input_batch.req_id_to_index[req_id]
             encoder_seq_lens[req_index] = self.max_encoder_len
