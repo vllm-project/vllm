@@ -74,6 +74,8 @@ class SM100Workspace:
 
 g_sm100_workspace = SM100Workspace(128 * 1024 * 1024)  # 128MB
 
+MAX_HEADS = 128
+
 
 class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
     can_return_lse_for_decode: bool = True
@@ -92,10 +94,18 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
             kv_sharing_target_layer_name: Optional[str],
             # MLA Specific Arguments
             **mla_args) -> None:
-        super().__init__(num_heads, head_size, scale, num_kv_heads,
-                         alibi_slopes, sliding_window, kv_cache_dtype,
-                         logits_soft_cap, attn_type,
-                         kv_sharing_target_layer_name, **mla_args)
+        super().__init__(num_heads,
+                         head_size,
+                         scale,
+                         num_kv_heads,
+                         alibi_slopes,
+                         sliding_window,
+                         kv_cache_dtype,
+                         logits_soft_cap,
+                         attn_type,
+                         kv_sharing_target_layer_name,
+                         q_pad_num_heads=MAX_HEADS,
+                         **mla_args)
 
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
@@ -158,13 +168,15 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
         MAX_HEADS = 128
         assert H <= MAX_HEADS, f"H must be <= {MAX_HEADS}, but got {H}"
         if H < MAX_HEADS:
-            q_nope_padded = q_nope.new_empty((B_q, MAX_HEADS, D_q_nope))
-            q_nope_padded[:, :H] = q_nope
-            q_nope = q_nope_padded
+            # Remove this section after all tests pass
+            pass
+            # q_nope_padded = q_nope.new_empty((B_q, MAX_HEADS, D_q_nope))
+            # q_nope_padded[:, :H] = q_nope
+            # q_nope = q_nope_padded
 
-            q_pe_padded = q_pe.new_empty((B_q, MAX_HEADS, D_q_pe))
-            q_pe_padded[:, :H] = q_pe
-            q_pe = q_pe_padded
+            # q_pe_padded = q_pe.new_empty((B_q, MAX_HEADS, D_q_pe))
+            # q_pe_padded[:, :H] = q_pe
+            # q_pe = q_pe_padded
 
         assert len(page_table.shape) == 2
         B_block_table, block_num = page_table.shape
@@ -207,11 +219,10 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         if H < MAX_HEADS:
             # Extract the subsets of the outputs
-            returned_lse = lse[:, :H].contiguous(
-            ) if self.need_to_return_lse_for_decode else lse
+            lse = lse[:, :H] if self.need_to_return_lse_for_decode else lse
             out = out[:, :H]
 
-        return out, returned_lse
+        return out, lse
 
     def _forward_decode(
         self,

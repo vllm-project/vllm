@@ -941,6 +941,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         qk_head_dim: int,
         v_head_dim: int,
         kv_b_proj: ColumnParallelLinear,
+        q_pad_num_heads: Optional[int] = None,
     ) -> None:
         if kv_sharing_target_layer_name is not None:
             raise NotImplementedError("KV sharing is not supported for MLA")
@@ -958,6 +959,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         self.qk_head_dim = qk_head_dim
         self.v_head_dim = v_head_dim
         self.kv_b_proj = kv_b_proj
+        self.q_pad_num_heads = q_pad_num_heads
 
         if use_flashinfer_prefill():
             logger.debug_once("Using FlashInfer prefill for MLA")
@@ -1133,7 +1135,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             True,  #Indicates actual_seq_lens are on GPU or CPU.
         )
 
-    def _v_up_proj(self, x):
+    def _v_up_proj(self, x, out):
         # Convert from (B, N, L) to (N, B, L)
         x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
         if is_rocm_aiter_fp8bmm_enabled():
@@ -1145,12 +1147,24 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                                      transpose_bm=True)
             # Convert from (B, N, V) to (B, N * V)
             x = x.reshape(-1, self.num_heads * self.v_head_dim)
+            # Copy result
+            out[:] = x
         else:
+            # Convert from (B, N * V) to (N, B, V)
+            out = out.view(-1, self.num_heads, self.v_head_dim).transpose(0, 1)
+
             # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
-            x = torch.bmm(x, self.W_UV)
+            x = torch.bmm(x, self.W_UV,
+                          out=out)  # Reuse "out" to make it "hot"
+
             # Convert from (N, B, V) to (B, N * V)
-            x = x.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
-        return x
+            out_new = out.transpose(0, 1).reshape(
+                -1, self.num_heads * self.v_head_dim)
+
+            # Adjust output buffer shape back to the original (B, N * V)
+            N, B, V = out.shape
+            out.resize_((B, N * V))
+            out[:] = out_new  # Copy result
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
 
@@ -1558,6 +1572,15 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             # Convert from (B, N, P) to (N, B, P)
             decode_q_nope = decode_q_nope.transpose(0, 1)
 
+            # Pads the head_dim if necessary (for the underlying kernel)
+            if self.q_pad_num_heads is not None:
+                B, N, L = decode_q_pe.shape
+                decode_pe_padded = decode_q_pe.new_empty(
+                    (B, self.q_pad_num_heads, L))
+                decode_pe_padded.resize_((B, N, L))
+                decode_pe_padded[:] = decode_q_pe
+                decode_q_pe = decode_pe_padded
+
             if is_rocm_aiter_fp8bmm_enabled():
                 # Multiply+Transpose (N, B, P)x(N, P, L)->(N, B, L)->(B, N, L)
                 decode_ql_nope = aiter_triton_fp8_bmm(decode_q_nope,
@@ -1566,8 +1589,21 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                                                       group_size=128,
                                                       transpose_bm=True)
             else:
+                # Pads the head_dim if necessary (for the underlying kernel)
+                N, B, P = decode_q_nope.shape
+                _, _, L = self.W_UK_T.shape
+                if self.q_pad_num_heads is not None:
+                    decode_ql_nope = decode_q_nope.new_empty(
+                        (self.q_pad_num_heads, B, L))
+                    decode_ql_nope.resize_((N, B, L))
+
+                else:
+                    decode_ql_nope = decode_q_nope.new_empty((N, B, L))
+
                 # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
-                decode_ql_nope = torch.bmm(decode_q_nope, self.W_UK_T)
+                decode_ql_nope = torch.bmm(decode_q_nope,
+                                           self.W_UK_T,
+                                           out=decode_ql_nope)
                 # Convert from (N, B, L) to (B, N, L)
                 decode_ql_nope = decode_ql_nope.transpose(0, 1)
 
@@ -1602,5 +1638,5 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 attn_out = cp_lse_ag_out_rs(attn_out, lse, get_dcp_group())
 
             # v_up projection
-            output[:num_decode_tokens] = self._v_up_proj(attn_out)
+            self._v_up_proj(attn_out, out=output[:num_decode_tokens])
         return output_padded
