@@ -149,10 +149,43 @@
       prompt_tokens: 291
       total_tokens: 295
 
-    
+# Non-zero temperature, random sampling, and token probability selection
+- name: Greedy with temperature 0.7
+  request:
+    params:
+      sampling_params:
+          temperature: 0.7
+          seed: 42
+      max_tokens: 20
+      max_completion_tokens: 20
+    requests:
+      - {"role": "user", "content": "Write a short poem"}
+  response:
+    choices:
+      finish_reason: length
+      message: "The dewdrop clings, a tiny sphere,\nTo velvet leaf, a whispered plea.\nThe"
+    usage: 
+      completion_tokens: 20
+      prompt_tokens: 13
+      total_tokens: 33
 
-               
 
-
-          
-
+# Boundary checks in the API (handling of 0 or negative token limits)
+- name: Greedy with zero max_tokens
+  request:
+    params:
+      sampling_params:
+        temperature: 0.7
+        seed: 42
+      max_tokens: 0
+      max_completion_tokens: 10
+    requests:
+      - {"role": "user", "content": "Write a story"}
+  response:
+    choices:
+      finish_reason: length
+      message: "The fog clung to the cobblestones, thick"
+    usage: 
+      completion_tokens: 10
+      prompt_tokens: 12
+      total_tokens: 22

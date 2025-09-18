@@ -145,7 +145,46 @@
       prompt_tokens: 330
       total_tokens: 333
 
-    
+# Non-zero temperature, random sampling, and token probability selection
+- name: Greedy with temperature 0.7
+  request:
+    params:
+      sampling_params:
+          temperature: 0.7
+          seed: 42
+      max_tokens: 20
+      max_completion_tokens: 20
+    requests:
+      - {"role": "user", "content": "Write a short poem"}
+  response:
+    choices:
+      finish_reason: length
+      message: "Whispers of breeze,\nRustling the leaves,\nNature's symphony"
+    usage: 
+      completion_tokens: 20
+      prompt_tokens: 20
+      total_tokens: 40
+
+
+# Boundary checks in the API (handling of 0 or negative token limits)
+- name: Greedy with zero max_tokens
+  request:
+    params:
+      sampling_params:
+        temperature: 0.7
+        seed: 42
+      max_tokens: 0
+      max_completion_tokens: 10
+    requests:
+      - {"role": "user", "content": "Write a story"}
+  response:
+    choices:
+      finish_reason: length
+      message: "Once upon a time, in a small village per"
+    usage: 
+      completion_tokens: 10
+      prompt_tokens: 19
+      total_tokens: 29
 
                
 
