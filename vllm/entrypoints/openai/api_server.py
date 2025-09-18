@@ -103,6 +103,7 @@ from vllm.transformers_utils.tokenizer import MistralTokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (Device, FlexibleArgumentParser, decorate_logs,
                         is_valid_ipv6_address, set_ulimit)
+from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -351,8 +352,11 @@ def engine_client(request: Request) -> EngineClient:
 @router.get("/health", response_class=Response)
 async def health(raw_request: Request) -> Response:
     """Health check."""
-    await engine_client(raw_request).check_health()
-    return Response(status_code=200)
+    try:
+        await engine_client(raw_request).check_health()
+        return Response(status_code=200)
+    except EngineDeadError:
+        return Response(status_code=503)
 
 
 @router.get("/load")
