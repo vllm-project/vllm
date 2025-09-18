@@ -1065,6 +1065,7 @@ class ModelConfig:
                     quant_method = quantization_override
                     self.quantization = quantization_override
                     break
+            quant_method = quant_method if quant_method != "" else None
 
             # Verify quantization configurations.
             if self.quantization is None:
@@ -1075,7 +1076,6 @@ class ModelConfig:
                     f"({quant_method}) does not match the quantization "
                     f"method specified in the `quantization` argument "
                     f"({self.quantization}).")
-
         if self.quantization is not None:
             if self.quantization not in supported_quantization:
                 raise ValueError(

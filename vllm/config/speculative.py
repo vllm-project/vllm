@@ -261,7 +261,6 @@ class SpeculativeConfig:
         else:
             self.prompt_lookup_max = 0
             self.prompt_lookup_min = 0
-
             if self.model is not None:
                 # TODO: Move this import to the top once `ModelConfig`
                 # lives in `vllm.config.model`.
@@ -527,7 +526,7 @@ class SpeculativeConfig:
                              "speculative decoding is > 1, but got "
                              f"{self.disable_by_batch_size=}")
 
-        eagle3_target_supported = ["llama", "qwen"]
+        eagle3_target_supported = ["llama", "qwen", "gpt_oss"]
         if self.method == "eagle3" and self.target_model_config and not any(
                 supported_model in
                 self.target_model_config.hf_text_config.model_type

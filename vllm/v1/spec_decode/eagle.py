@@ -21,7 +21,7 @@ from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
-from vllm.v1.attention.backends.flashinfer import FlashInferMetadata, FlashInferMetadataBuilder
+from vllm.v1.attention.backends.flashinfer import FlashInferMetadata
 from vllm.v1.attention.backends.tree_attn import (TreeAttentionMetadata,
                                                   TreeAttentionMetadataBuilder)
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
@@ -194,13 +194,14 @@ class EagleProposer:
         self.input_ids[last_token_indices] = next_token_ids
 
         assert self.runner is not None
-        
+
         # ubatch_id = dbo_current_ubatch_id()
         # Select the correct attention metadata builder for EAGLE layers.
-        builder = self._get_attention_metadata_builder()
+        ubatch_id = dbo_current_ubatch_id()
+        builder = self._get_attention_metadata_builder(ubatch_id)
 
         # if isinstance(builder, FlashInferMetadataBuilder):
-        #     builder.reorder_batch_threshold = self.num_speculative_tokens +1 
+        #     builder.reorder_batch_threshold = self.num_speculative_tokens +1
 
         attn_metadata = builder.build_for_drafting(
             common_attn_metadata=common_attn_metadata, draft_index=0)
@@ -336,11 +337,9 @@ class EagleProposer:
                 exceeds_max_model_len, PADDING_SLOT_ID)
 
             # Rebuild attention metadata
-            attn_metadata_builder = \
-                self.runner.attn_groups[0][0].metadata_builders[ubatch_id]
-            attn_metadata = attn_metadata_builder\
-                .build_for_drafting(common_attn_metadata=common_attn_metadata,
-                                draft_index=token_index + 1)
+            attn_metadata = builder.build_for_drafting(
+                common_attn_metadata=common_attn_metadata,
+                draft_index=token_index + 1)
             for layer_name in self.attn_layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata
 
@@ -898,7 +897,7 @@ class EagleProposer:
             ])
         ) == 1, "All eagle layers should belong to the same kv cache group"
 
-    def _get_attention_metadata_builder(self):
+    def _get_attention_metadata_builder(self, ubatch_id):
         """Find and return the attention metadata builder for EAGLE layers.
         
         Returns:
@@ -911,11 +910,9 @@ class EagleProposer:
         chosen_layer = self.attn_layer_names[0]
 
         for kv_cache_group in self.runner.attn_groups:
-            # print(f"kv_cache_group: {kv_cache_group}")
             for attn_group in kv_cache_group:
-                # print(f"attn_group.layer_names: {attn_group.layer_names}")
                 if chosen_layer in attn_group.layer_names:
-                    builder = attn_group.metadata_builder
+                    builder = attn_group.metadata_builders[ubatch_id]
                     break
             if builder is not None:
                 break

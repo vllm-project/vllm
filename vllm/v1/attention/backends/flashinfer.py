@@ -945,13 +945,13 @@ class FlashInferImpl(AttentionImpl):
                 block_tables_decode = attn_metadata.\
                     block_table[:num_decode_tokens]
                 seq_lens_decode = attn_metadata.seq_lens[:num_decode_tokens]
-                q_len_per_request = num_decode_tokens // attn_metadata.num_decodes
-                # if num_decode_tokens % attn_metadata.num_decodes ==0 :
-                #     q_len_per_request = num_decode_tokens // attn_metadata.num_decodes
-                # else:
-                #     raise ValueError(
-                #         f"num_decode_tokens={num_decode_tokens}, batch_size={attn_metadata.num_decodes}. "
-                #         f"Expected uniform batches.")
+                # q_len_per_request = num_decode_tokens // attn_metadata.num_decodes
+                # # if num_decode_tokens % attn_metadata.num_decodes ==0 :
+                # #     q_len_per_request = num_decode_tokens // attn_metadata.num_decodes
+                # # else:
+                # #     raise ValueError(
+                # #         f"num_decode_tokens={num_decode_tokens}, batch_size={attn_metadata.num_decodes}. "
+                # #         f"Expected uniform batches.")
                 # This path needs to be enabled with VLLM_KV_CACHE_LAYOUT = HND
                 assert get_kv_cache_layout() == "HND"
                 assert decode_query.is_contiguous()
@@ -983,7 +983,6 @@ class FlashInferImpl(AttentionImpl):
                     sinks=self.sinks,
                     o_sf_scale=self.o_sf_scale,
                     out=out,
-                    q_len_per_req=q_len_per_request,
                 )
         return output_padded
 

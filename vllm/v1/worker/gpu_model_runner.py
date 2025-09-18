@@ -1100,7 +1100,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.num_draft_tokens.np[:num_reqs] = num_draft_tokens
             self.num_draft_tokens.np[num_reqs:].fill(0)
             self.num_draft_tokens.copy_to_gpu()
-
         logits_indices_padded = None
         if self.cache_config.kv_sharing_fast_prefill:
             logits_indices_padded = self._prepare_kv_sharing_fast_prefill(
@@ -1126,6 +1125,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # in the same group share the same metadata.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
                 self.kv_cache_config.kv_cache_groups):
+            print(f"kv_cache_group_spec: {kv_cache_group_spec}")
             encoder_seq_lens = self._get_encoder_seq_lens(
                 scheduler_output, kv_cache_group_spec.kv_cache_spec, num_reqs)
 
@@ -1177,7 +1177,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
 
             if self.speculative_config and \
-                spec_decode_common_attn_metadata is None:
+                spec_decode_common_attn_metadata is None and isinstance(self.drafter, EagleProposer) and self.drafter.attn_layer_names[0] in kv_cache_group_spec.layer_names:
                 spec_decode_common_attn_metadata = common_attn_metadata
 
             for attn_group in self.attn_groups[kv_cache_group_id]:
