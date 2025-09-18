@@ -130,8 +130,16 @@ class MultiModalBudget:
 @dataclass
 class AttentionGroup:
     backend: type[AttentionBackend]
-    metadata_builder: AttentionMetadataBuilder
+    metadata_builders: list[AttentionMetadataBuilder]
     layer_names: list[str]
+
+    def get_metadata_builder(self,
+                             ubatch_id: Optional[int] = None
+                             ) -> AttentionMetadataBuilder:
+        if ubatch_id is None:
+            return self.metadata_builders[0]
+        assert len(self.metadata_builders) > ubatch_id
+        return self.metadata_builders[ubatch_id]
 
 
 def sanity_check_mm_encoder_outputs(
@@ -274,7 +282,7 @@ def bind_kv_cache(
             # TODO - analyze where runner_kv_caches is used and the right
             # way to ensure it properly reflects multiple attention layers
             # in the same decoder block.
-            if current_platform.is_cuda():
+            if current_platform.is_cuda() or current_platform.is_xpu():
                 # We know that the GPU runner is not impacted by this
                 # case. Some test code depends on runner_kv_caches, but
                 # not in a way that's impacted by ignoring this.
