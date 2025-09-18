@@ -51,7 +51,7 @@ class EngineClient(ABC):
     @abstractmethod
     def generate(
         self,
-        request: Union[EngineCoreRequest, PromptType],
+        prompt: Union[EngineCoreRequest, PromptType],
         sampling_params: SamplingParams,
         request_id: str,
         *,

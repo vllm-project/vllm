@@ -44,7 +44,7 @@ async def stream_response(engine: AsyncLLM, prompt: str, request_id: str) -> Non
     try:
         # Stream tokens from AsyncLLM
         async for output in engine.generate(
-            request_id=request_id, request=prompt, sampling_params=sampling_params
+            request_id=request_id, prompt=prompt, sampling_params=sampling_params
         ):
             # Process each completion in the output
             for completion in output.outputs:
