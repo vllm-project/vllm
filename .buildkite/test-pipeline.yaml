@@ -1043,7 +1043,7 @@ steps:
 - label: Prime-RL Integration Test # 5min
   timeout_in_minutes: 15
   optional: true
-  working_dir: "/vllm-workspace/.buildkit"
+  working_dir: "/vllm-workspace"
   source_file_dependencies:
   - vllm/
   - tests/rl_integration/test_prime_rl.py
