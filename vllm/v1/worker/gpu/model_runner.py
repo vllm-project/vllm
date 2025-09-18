@@ -25,7 +25,6 @@ from vllm.v1.worker.gpu.input_batch import (InputBatch, InputBuffers,
                                             prepare_inputs)
 from vllm.v1.worker.gpu.sampler import Sampler
 from vllm.v1.worker.gpu.states import RequestState
-from vllm.v1.worker.utils import bind_kv_cache
 
 logger = init_logger(__name__)
 
@@ -98,9 +97,6 @@ class GPUModelRunner:
                     m.consumed_memory / GiB_bytes,
                     time_after_load - time_before_load)
 
-    def profile_run(self):
-        pass
-
     def get_kv_cache_spec(self):
         return get_kv_cache_spec(self.vllm_config, self.kv_cache_dtype)
 
@@ -124,16 +120,13 @@ class GPUModelRunner:
             self.device,
         )
 
-        kv_caches = init_kv_cache(
+        self.kv_caches: list[torch.Tensor] = []
+        init_kv_cache(
+            self.kv_caches,
+            self.compilation_config.static_forward_context,
             self.kv_cache_config,
             self.attn_backends,
             self.device,
-        )
-        self.kv_caches: list[torch.Tensor] = []
-        bind_kv_cache(
-            kv_caches,
-            self.compilation_config.static_forward_context,
-            self.kv_caches,
         )
 
     def _dummy_run(self, num_tokens: int, *args, **kwargs) -> None:
@@ -142,6 +135,9 @@ class GPUModelRunner:
     def _dummy_sampler_run(self, hidden_states: torch.Tensor, *args,
                            **kwargs) -> None:
         return None
+
+    def profile_run(self):
+        pass
 
     def update_states(self, scheduler_output: SchedulerOutput) -> None:
         # for req_id in scheduler_output.preempted_req_ids:

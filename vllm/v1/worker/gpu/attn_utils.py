@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Any
+
 import torch
 
 from vllm.attention.backends.abstract import AttentionBackend, AttentionType
@@ -8,6 +10,7 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec, SlidingWindowSpec)
+from vllm.v1.worker.utils import bind_kv_cache
 
 
 def get_kv_cache_spec(
@@ -124,6 +127,8 @@ def _reshape_kv_cache(
 
 
 def init_kv_cache(
+    runner_kv_caches: list[torch.Tensor],
+    forward_context: dict[str, Any],
     kv_cache_config: KVCacheConfig,
     attn_backends: dict[str, AttentionBackend],
     device: torch.device,
@@ -131,4 +136,4 @@ def init_kv_cache(
     kv_cache_raw_tensors = _allocate_kv_cache(kv_cache_config, device)
     kv_caches = _reshape_kv_cache(kv_cache_config, kv_cache_raw_tensors,
                                   attn_backends)
-    return kv_caches
+    bind_kv_cache(forward_context, kv_caches, runner_kv_caches)
