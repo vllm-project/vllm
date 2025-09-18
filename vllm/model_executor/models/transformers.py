@@ -603,11 +603,23 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         Create `Attention` (or `EncoderOnlyAttention`)
         instances to inform KV cache allocation.
         """
+        # TODO(hmellor): Better way to detect encoder models
         # In encoder models, the attention layers will have `is_causal=False`
         is_encoder = lambda m: not getattr(m, "is_causal", True)
         # vLLM does not support encoder-decoder models, so if any encoder layer
         # is found, we assume the whole model is an encoder model
         is_encoder_model = any(is_encoder(m) for m in self.model.modules())
+        # Check minimum transformers version for encoder models support
+        if is_encoder_model:
+            import transformers
+            from packaging.version import Version
+            installed = Version(transformers.__version__)
+            required = Version("4.57.0.dev1")
+            if installed < required:
+                raise ValueError(
+                    "Encoder models with the Transformers backend require "
+                    f"transformers>={required}, but got {installed}")
+
         attention_cls = EncoderOnlyAttention if is_encoder_model else Attention
 
         num_heads = self.model_config.get_num_attention_heads(
