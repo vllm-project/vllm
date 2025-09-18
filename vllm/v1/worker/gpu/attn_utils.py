@@ -136,4 +136,4 @@ def init_kv_cache(
     kv_cache_raw_tensors = _allocate_kv_cache(kv_cache_config, device)
     kv_caches = _reshape_kv_cache(kv_cache_config, kv_cache_raw_tensors,
                                   attn_backends)
-    bind_kv_cache(forward_context, kv_caches, runner_kv_caches)
+    bind_kv_cache(kv_caches, forward_context, runner_kv_caches)
