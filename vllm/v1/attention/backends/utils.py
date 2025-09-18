@@ -703,6 +703,69 @@ def split_decodes_and_prefills(
     return (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens)
 
 
+def reorder_batch_to_split_decodes_and_prefills(
+    input_batch: "InputBatch",
+    scheduler_output: "SchedulerOutput",
+    decode_threshold: int = 1,
+) -> bool:
+    """
+    Reorders the batch to split into prefill and decode requests; places all
+    requests with <= decode_threshold tokens at the front of the batch.
+    
+    Returns:
+        True if the batch was modified, False otherwise.
+    """
+    # We now want to reorder the batch so that the "decode" requests are at
+    # the front and the "prefill" requests are at the back using the least
+    # amount of swaps possible. (NOTE for now we loosely use "decode" to mean
+    # requests where attention is likely memory-bound and "prefill" to mean
+    # requests where attention is likely compute-bound, TODO(lucas): figure out
+    # a better naming here)
+    decodes = []
+    prefills = []
+    num_decode_tokens = 0
+    num_prefill_tokens = 0
+
+    for i, req_id in enumerate(input_batch.req_ids):
+        num_tokens = scheduler_output.num_scheduled_tokens[req_id]
+        # for now treat 1 scheduled token as "decode" even if it's not,
+        # we should update this to something like < 8 in the future but
+        # currently the TritonMLA._forward_decode only supports
+        # num_tokens = 1
+        if num_tokens <= decode_threshold:
+            decodes.append(i)
+            num_decode_tokens += num_tokens
+        else:
+            prefills.append(i)
+            num_prefill_tokens += num_tokens
+
+    # We hope that this is fairly minimal since decodes
+    # should be around for a number of iterations so hopefully they are
+    # relatively stationary (and new request are generally appended to the
+    # persistent batch so already should be at the back)
+    # To achieve this we loop over the decodes in descending order and
+    # the prefills in ascending order. We swap decodes from the  "back"
+    # i.e. past where the last decode should be in the reodorered with
+    # prefills from the front of the batch.
+    # `decodes` and `prefills` are already in ascending order just based on
+    # the above loop
+    num_decodes = len(decodes)
+    num_prefills = len(prefills)
+    modified_batch = False
+
+    for i in range(1, min(num_decodes, num_prefills) + 1):
+        # If the decode is at the "back" of the batch, i, we can swap it
+        # with the prefill closest to the front of the batch
+        decode_idx = decodes[num_decodes - i]
+        if decode_idx < num_decodes:
+            break
+
+        input_batch.swap_states(prefills[i - 1], decode_idx)
+        modified_batch = True
+
+    return modified_batch
+
+
 KV_SHARING_FAST_PREFILL_METADATA_FIELDS = [
     ('logits_indices_padded', Optional[torch.Tensor], None),
     ('num_logits_indices', int, 0),

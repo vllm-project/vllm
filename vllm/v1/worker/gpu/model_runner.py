@@ -79,6 +79,9 @@ class GPUModelRunner:
         )
         self.sampler = Sampler()
 
+    def get_supported_tasks(self) -> tuple[str]:
+        return ("generate", )
+
     def load_model(self, *args, **kwargs) -> None:
         time_before_load = time.perf_counter()
         with DeviceMemoryProfiler() as m:

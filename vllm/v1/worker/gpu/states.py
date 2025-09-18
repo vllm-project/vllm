@@ -9,6 +9,7 @@ import numpy as np
 import torch
 
 from vllm.sampling_params import SamplingParams
+from vllm.v1.utils import CpuGpuBuffer
 
 _NP_INT64_MIN = np.iinfo(np.int64).min
 _NP_INT64_MAX = np.iinfo(np.int64).max
@@ -69,21 +70,21 @@ class RequestState:
         )
 
         # Sampling parameters.
-        self.temperature = self._make_buffer(self.max_num_reqs, torch.float32)
-        self.top_p = self._make_buffer(self.max_num_reqs, torch.float32)
-        self.top_k = self._make_buffer(self.max_num_reqs, torch.int32)
-        self.seeds = self._make_buffer(self.max_num_reqs, torch.int64)
+        self.temperature = self._make_param(self.max_num_reqs, torch.float32)
+        self.top_p = self._make_param(self.max_num_reqs, torch.float32)
+        self.top_k = self._make_param(self.max_num_reqs, torch.int32)
+        self.seeds = self._make_param(self.max_num_reqs, torch.int64)
 
         self.num_logprobs = np.empty(self.max_num_reqs, dtype=np.int32)
         # -1 means no logprobs are requested.
         self.num_logprobs.fill(-1)
         self.needs_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=bool)
 
-    def _make_buffer(self, size, dtype: torch.dtype) -> "Buffer":
-        return Buffer(size,
-                      dtype=dtype,
-                      pin_memory=self.pin_memory,
-                      device=self.device)
+    def _make_param(self, size: int, dtype: torch.dtype) -> "Param":
+        return Param(size,
+                     dtype=dtype,
+                     device=self.device,
+                     pin_memory=self.pin_memory)
 
     @property
     def num_reqs(self) -> int:
@@ -217,27 +218,24 @@ def _append_token_ids(
         num_tokens[req_idx] = end_idx
 
 
-class Buffer:
+class Param:
 
     def __init__(
         self,
-        *args,
+        size: int,
         dtype: torch.dtype,
-        pin_memory: bool,
         device: torch.device,
+        pin_memory: bool,
     ):
-        # NOTE(woosuk): Unlike CpuGpuBuffer, the Numpy array and CPU tensor
-        # in this class do not share the same storage.
-        self.np = np.zeros(*args, dtype=dtype)
-        self.cpu = torch.zeros(
-            *args,
+        self.buffer = CpuGpuBuffer(
+            size,
             dtype=dtype,
-            pin_memory=pin_memory,
             device=device,
+            pin_memory=pin_memory,
         )
-        self.gpu = self.cpu.to(device)
+        self.np = np.zeros_like(self.buffer.np)
 
     def copy_np_to_gpu(self, x: np.ndarray) -> torch.Tensor:
         n = x.shape[0]
-        self.cpu[:n] = x
-        return self.gpu[:n].copy_(self.cpu[:n], non_blocking=True)
+        self.buffer.np[:n] = x
+        return self.buffer.copy_to_gpu(n)
