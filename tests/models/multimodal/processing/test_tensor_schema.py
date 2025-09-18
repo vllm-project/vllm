@@ -31,7 +31,6 @@ from ...utils import dummy_hf_overrides
 
 ARCH_TO_SKIP = {
     "MolmoForCausalLM": "incompatible requirements",
-    "Florence2ForConditionalGeneration": "not supported in V1",
 }
 ARCH_NEEDS_EXTRAS = [
     "InternVLChatModel",

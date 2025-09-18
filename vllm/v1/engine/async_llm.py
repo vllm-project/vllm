@@ -26,10 +26,11 @@ from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
+from vllm.tracing import init_tracer
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
-from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
+from vllm.transformers_utils.tokenizer import (AnyTokenizer,
+                                               init_tokenizer_from_configs)
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (Device, as_list, cancel_task_threadsafe, cdiv,
                         deprecate_kwargs)
@@ -97,6 +98,7 @@ class AsyncLLM(EngineClient):
 
         self.model_config = vllm_config.model_config
         self.vllm_config = vllm_config
+        self.observability_config = vllm_config.observability_config
         self.log_requests = log_requests
 
         self.log_stats = log_stats or (stat_loggers is not None)
@@ -110,9 +112,7 @@ class AsyncLLM(EngineClient):
         else:
             # Tokenizer (+ ensure liveness if running in another process).
             self.tokenizer = init_tokenizer_from_configs(
-                model_config=vllm_config.model_config,
-                scheduler_config=vllm_config.scheduler_config,
-                lora_config=vllm_config.lora_config)
+                model_config=vllm_config.model_config)
 
         # Processor (converts Inputs --> EngineCoreRequests).
         self.processor = Processor(
@@ -124,6 +124,11 @@ class AsyncLLM(EngineClient):
         # OutputProcessor (converts EngineCoreOutputs --> RequestOutput).
         self.output_processor = OutputProcessor(self.tokenizer,
                                                 log_stats=self.log_stats)
+        if self.observability_config.otlp_traces_endpoint is not None:
+            tracer = init_tracer(
+                "vllm.llm_engine",
+                self.observability_config.otlp_traces_endpoint)
+            self.output_processor.tracer = tracer
 
         # EngineCore (starts the engine in background process).
         self.engine_core = EngineCoreClient.make_async_mp_client(
@@ -170,9 +175,6 @@ class AsyncLLM(EngineClient):
                     worker_name=worker_name,
                     use_gzip=True))
         else:
-            logger.info(
-                "Torch profiler disabled. AsyncLLM CPU traces will not be collected."  # noqa: E501
-            )
             self.profiler = None
 
     @classmethod
@@ -586,24 +588,18 @@ class AsyncLLM(EngineClient):
     async def get_model_config(self) -> ModelConfig:
         return self.model_config
 
-    async def get_decoding_config(self):
-        raise ValueError("Not Supported on V1 yet.")
-
     async def get_input_preprocessor(self) -> InputPreprocessor:
         return self.processor.input_preprocessor
 
-    async def get_tokenizer(
-        self,
-        lora_request: Optional[LoRARequest] = None,
-    ) -> AnyTokenizer:
+    async def get_tokenizer(self) -> AnyTokenizer:
         if self.tokenizer is None:
             raise ValueError("Unable to get tokenizer because "
                              "skip_tokenizer_init is True")
 
-        return self.tokenizer.get_lora_tokenizer(lora_request)
+        return self.tokenizer
 
     async def is_tracing_enabled(self) -> bool:
-        return False
+        return self.observability_config.otlp_traces_endpoint is not None
 
     async def do_log_stats(
         self,
