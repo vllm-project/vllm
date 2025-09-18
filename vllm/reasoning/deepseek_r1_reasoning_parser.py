@@ -29,7 +29,7 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
     start_token: str = "<think>"
     end_token: str = "</think>"
 
-    def __init__(self, tokenizer: PreTrainedTokenizerBase):
+    def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
         super().__init__(tokenizer)
 
         if not self.model_tokenizer:
