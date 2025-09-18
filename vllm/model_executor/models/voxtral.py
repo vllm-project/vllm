@@ -23,15 +23,18 @@ from transformers.tokenization_utils_base import TextInput
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models import SupportsPP
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 # yapf: disable
 from vllm.model_executor.models.whisper import WhisperEncoder
 # yapf: enable
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargsItems, NestedTensors)
+                                    MultiModalKwargsItems, MultiModalUUIDDict,
+                                    NestedTensors)
 from vllm.multimodal.parse import (AudioProcessorItems, MultiModalDataItems,
                                    MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -43,8 +46,8 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import (MistralTokenizer,
                                                cached_tokenizer_from_config)
 
-from .interfaces import (MultiModalEmbeddings, SupportsMultiModal,
-                         SupportsTranscription)
+from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
+                         SupportsMultiModal, SupportsTranscription)
 from .utils import (flatten_bn, init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
 
@@ -290,14 +293,14 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo]
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
-        mm_hash_overrides: Optional[dict[str, list[str]]] = None,
+        mm_uuids: Optional[MultiModalUUIDDict] = None,
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         prompt_ids, mm_info, _ = super()._cached_apply_hf_processor(
             prompt=prompt,
             mm_data_items=mm_data_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
             tokenization_kwargs=tokenization_kwargs,
-            mm_hash_overrides=mm_hash_overrides,
+            mm_uuids=mm_uuids,
         )
 
         # NOTE: The tokens are already inserted by the chat template
@@ -312,12 +315,24 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo]
                                         info=VoxtralProcessingInfo,
                                         dummy_inputs=VoxtralDummyInputsBuilder)
 class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                      SupportsPP, SupportsTranscription):
+                                      SupportsPP, SupportsLoRA,
+                                      SupportsTranscription):
     supported_languages = ISO639_1_SUPPORTED_LANGS
+
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"]
+    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
+
+        # update quant config to so that ignored module and target module names
+        # match the vLLM model names
+        if hasattr(vllm_config, "quant_config"):
+            vllm_config.quant_config = self.maybe_update_quant_config(
+                vllm_config.quant_config)
 
         config = vllm_config.model_config.hf_config
         self.config = config
@@ -339,6 +354,14 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
 
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """Get module prefix for multimodal models to filter LoRA modules."""
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector="audio_language_adapter",
+            tower_model=["whisper_encoder"],
+        )
 
     def forward(
         self,
@@ -542,6 +565,72 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         return loaded_weights
 
+    def maybe_update_quant_config(
+            self, quant_config: QuantizationConfig) -> QuantizationConfig:
+        """
+        Update quant config to so that ignored module and target module names
+        match the vLLM model names.
+        Right now this is specific for compressed-tensors format and
+        load_format mistral.
+        """
+        remapping_rules = [
+            (r"output", r"language_model.lm_head"),
+            (r"layers\.(\d+)\.attention\.wo",
+             r"language_model.model.layers.\1.self_attn.out_proj"),
+            (r"layers\.(\d+)\.attention\.w(.*)",
+             r"language_model.model.layers.\1.self_attn.\2_proj"),
+            (r"layers\.(\d+)\.feed_forward\.w1",
+             r"language_model.model.layers.\1.mlp.gate_proj"),
+            (r"layers\.(\d+)\.feed_forward\.w2",
+             r"language_model.model.layers.\1.mlp.down_proj"),
+            (r"layers\.(\d+)\.feed_forward\.w3",
+             r"language_model.model.layers.\1.mlp.up_proj"),
+            (r"mm_whisper_embeddings\.whisper_encoder\.transformer\.layers\.(\d+)\.attention.w(.*)",
+             r"whisper_encoder.whisper_encoder.layers.\1.layers.self_attn.\2_proj"
+             ),
+            (r"mm_whisper_embeddings\.whisper_encoder\.transformer\.layers\.(\d+)\.attention.wo",
+             r"whisper_encoder.whisper_encoder.layers.\1.layers.self_attn.out_proj"
+             ),
+            (r"mm_whisper_embeddings\.whisper_encoder\.transformer\.layers\.(\d+)\.feed_forward.w(\d+)",
+             r"whisper_encoder.whisper_encoder.layers.\1.layers.mlp.fc\2"),
+            (r"mm_whisper_embeddings\.whisper_encoder\.conv_layers\.0",
+             r"whisper_encoder.whisper_encoder.conv1"),
+            (r"mm_whisper_embeddings\.whisper_encoder\.conv_layers\.1",
+             r"whisper_encoder.whisper_encoder.conv2"),
+            (r"mm_whisper_embeddings\.audio_language_projection\.0",
+             r"audio_language_adapter.w_in"),
+            (r"mm_whisper_embeddings\.audio_language_projection\.2",
+             r"audio_language_adapter.w_out"),
+        ]
+
+        # Update ignore list
+        if hasattr(quant_config, "ignore"):
+            mistral_ignore = []
+            for name in quant_config.ignore:
+                mistral_name = name
+                for pattern, repl in remapping_rules:
+                    if re.fullmatch(pattern, name):
+                        mistral_name = re.sub(pattern, repl, name)
+                mistral_ignore.append(mistral_name)
+            quant_config.ignore = mistral_ignore
+
+        # Update target list
+        if hasattr(quant_config, "config_groups"):
+            config_groups = quant_config.config_groups
+            for group_name in config_groups:
+                if "targets" in config_groups[group_name]:
+                    targets = []
+                    for name in config_groups[group_name]["targets"]:
+                        mistral_name = name
+                        for pattern, repl in remapping_rules:
+                            if re.fullmatch(pattern, name):
+                                mistral_name = re.sub(pattern, repl, name)
+                        targets.append(mistral_name)
+                config_groups[group_name]["targets"] = targets
+            quant_config.config_groups = config_groups
+
+        return quant_config
+
 
 class AudioLanguageAdapter(nn.Module):
 
@@ -584,7 +673,6 @@ class VoxtralEncoderModel(nn.Module):
         self.whisper_encoder = WhisperEncoder(vllm_config=vllm_config,
                                               prefix=maybe_prefix(
                                                   prefix, "whisper_encoder"),
-                                              is_standalone_encoder=True,
                                               init_in_fp32=True)
         mel_filters = mel_filter_bank(
             num_frequency_bins=1 + self.config.window_size // 2,

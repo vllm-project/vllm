@@ -6,8 +6,9 @@ from dataclasses import MISSING, Field, asdict, dataclass, field
 import pytest
 
 from vllm.compilation.backends import VllmBackend
-from vllm.config import (LoadConfig, ModelConfig, PoolerConfig, VllmConfig,
-                         get_field, update_config)
+from vllm.config import ModelConfig, PoolerConfig, VllmConfig, update_config
+from vllm.config.load import LoadConfig
+from vllm.config.utils import get_field
 from vllm.model_executor.layers.pooler import PoolingType
 from vllm.platforms import current_platform
 
@@ -298,9 +299,8 @@ def test_rope_customization():
                     reason="Encoder Decoder models not supported on ROCm.")
 @pytest.mark.parametrize(("model_id", "is_encoder_decoder"), [
     ("facebook/opt-125m", False),
-    ("facebook/bart-base", True),
+    ("openai/whisper-tiny", True),
     ("meta-llama/Llama-3.2-1B-Instruct", False),
-    ("meta-llama/Llama-3.2-11B-Vision", True),
 ])
 def test_is_encoder_decoder(model_id, is_encoder_decoder):
     config = ModelConfig(model_id)
