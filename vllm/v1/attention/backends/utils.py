@@ -814,20 +814,18 @@ def reshape_query_for_spec_decode(query: torch.Tensor,
     return query.view(batch_size, seq_len, num_heads, head_dim)
 
 
-def reshape_attn_output_for_spec_decode(attn_output: torch.Tensor,
-                                        batch_size: int) -> torch.Tensor:
+def reshape_attn_output_for_spec_decode(
+        attn_output: torch.Tensor) -> torch.Tensor:
     """
-    Reshapes the attention output tensor for the specified batch size, so that
+    Reshapes the attention output tensor, so that
     the batch_size and seq_len dimensions are combined.
     """
     if attn_output.dim() == 3:
         # Already in the correct shape
         return attn_output
-    assert attn_output.dim(
-    ) == 4, f"attn_output must be 4D, got {attn_output.dim()}D"
+    assert attn_output.dim() == 4, \
+        f"attn_output must be 4D, got {attn_output.dim()}D"
     total_tokens = attn_output.shape[0] * attn_output.shape[1]
-    assert total_tokens % batch_size == 0, (
-        f"{total_tokens=} is not divisible by {batch_size=}")
     return attn_output.view(total_tokens, attn_output.shape[2],
                             attn_output.shape[3])
 
