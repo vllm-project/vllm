@@ -8,6 +8,7 @@ from typing import (TYPE_CHECKING, ClassVar, Literal, Optional, Protocol,
 import numpy as np
 import torch
 from torch import Tensor
+from transformers import PretrainedConfig
 from transformers.models.whisper.tokenization_whisper import LANGUAGES
 from typing_extensions import Self, TypeIs
 
@@ -852,3 +853,70 @@ def supports_eagle3(
     model: Union[type[object], object],
 ) -> Union[TypeIs[type[SupportsEagle3]], TypeIs[SupportsEagle3]]:
     return isinstance(model, SupportsEagle3)
+
+
+@runtime_checkable
+class SupportsMRoPE(Protocol):
+    """The interface required for all models that support M-RoPE."""
+
+    supports_mrope: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model supports M-RoPE.
+    
+    Note:
+        There is no need to redefine this flag if this class is in the
+        MRO of your model class.
+    """
+
+    def get_mrope_input_positions(
+        self,
+        input_tokens: list[int],
+        hf_config: PretrainedConfig,
+        image_grid_thw: Optional[Union[list[list[int]], torch.Tensor]],
+        video_grid_thw: Optional[Union[list[list[int]], torch.Tensor]],
+        second_per_grid_ts: Optional[list[float]] = None,
+        context_len: int = 0,
+        seq_len: Optional[int] = None,
+        audio_feature_lengths: Optional[torch.Tensor] = None,
+        use_audio_in_video: bool = False,
+    ) -> tuple[torch.Tensor, int]:
+        """
+        Get M-RoPE input positions and delta value for this specific model.
+        
+        This method should be implemented by each model that supports M-RoPE
+        to provide model-specific logic for computing input positions.
+        
+        Args:
+            input_tokens: List of input token IDs
+            hf_config: HuggingFace model configuration
+            image_grid_thw: Image grid dimensions (t, h, w)
+            video_grid_thw: Video grid dimensions (t, h, w)
+            second_per_grid_ts: Seconds per grid timestep for videos
+            context_len: Context length
+            seq_len: Sequence length
+            audio_feature_lengths: Audio feature lengths for multimodal models
+            use_audio_in_video: Whether to use audio in video for interleaving
+            
+        Returns:
+            Tuple of (llm_positions, mrope_position_delta)
+            - llm_positions: Tensor of shape [3, num_tokens]
+                with T/H/W positions
+            - mrope_position_delta: Delta for position calculations
+        """
+        ...
+
+
+@overload
+def supports_mrope(model: type[object]) -> TypeIs[type[SupportsMRoPE]]:
+    ...
+
+
+@overload
+def supports_mrope(model: object) -> TypeIs[SupportsMRoPE]:
+    ...
+
+
+def supports_mrope(
+    model: Union[type[object], object],
+) -> Union[TypeIs[type[SupportsMRoPE]], TypeIs[SupportsMRoPE]]:
+    return isinstance(model, SupportsMRoPE)
