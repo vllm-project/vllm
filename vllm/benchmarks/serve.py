@@ -8,8 +8,8 @@ to launch the vLLM OpenAI API server:
 
 On the client side, run:
     vllm bench serve \
-        --endpoint-type <endpoint_type. Default 'openai'> \
-        --label <benchmark result label. Default using endpoint_type> \
+        --backend <backend or endpoint type. Default 'openai'> \
+        --label <benchmark result label. Default using backend> \
         --model <your_model> \
         --dataset-name <dataset_name. Default 'random'> \
         --request-rate <request_rate. Default inf> \
@@ -851,13 +851,6 @@ def save_to_pytorch_benchmark_format(args: argparse.Namespace,
 def add_cli_args(parser: argparse.ArgumentParser):
     add_dataset_parser(parser)
     parser.add_argument(
-        "--endpoint-type",
-        type=str,
-        default="openai",
-        choices=list(ASYNC_REQUEST_FUNCS.keys()),
-        help="The type of endpoint to use for the benchmark.",
-    )
-    parser.add_argument(
         "--label",
         type=str,
         default=None,
@@ -867,10 +860,17 @@ def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--backend",
         type=str,
+        default="openai",
+        choices=list(ASYNC_REQUEST_FUNCS.keys()),
+        help="The type of backend endpoint to use for the benchmark."
+    )
+    parser.add_argument(
+        "--endpoint-type",
+        type=str,
         default=None,
         choices=list(ASYNC_REQUEST_FUNCS.keys()),
-        help="'--backend' is deprecated and will be removed in v0.11.0. "
-        "Please use --endpoint-type instead.",
+        help="'--endpoint-type' is deprecated and will be removed in v0.11.0. "
+        "Please use '--backend' instead.",
     )
     parser.add_argument(
         "--base-url",
@@ -1057,28 +1057,28 @@ def add_cli_args(parser: argparse.ArgumentParser):
         type=float,
         default=None,
         help="Top-p sampling parameter. Only has effect on "
-        "openai-compatible endpoint types.",
+        "openai-compatible backends.",
     )
     sampling_group.add_argument(
         "--top-k",
         type=int,
         default=None,
         help="Top-k sampling parameter. Only has effect on "
-        "openai-compatible endpoint types.",
+        "openai-compatible backends.",
     )
     sampling_group.add_argument(
         "--min-p",
         type=float,
         default=None,
         help="Min-p sampling parameter. Only has effect on "
-        "openai-compatible endpoint types.",
+        "openai-compatible backends.",
     )
     sampling_group.add_argument(
         "--temperature",
         type=float,
         default=None,
         help="Temperature sampling parameter. Only has effect on "
-        "openai-compatible endpoint types. If not specified, default to greedy "
+        "openai-compatible backends. If not specified, default to greedy "
         "decoding (i.e. temperature==0.0).",
     )
 
@@ -1148,15 +1148,14 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     random.seed(args.seed)
     np.random.seed(args.seed)
 
-    endpoint_type = args.endpoint_type
-    if args.backend is not None:
+    if args.endpoint_type is not None:
         warnings.warn(
-            "'--backend' is deprecated and will be removed in v0.11.0. "
-            "Please use `--endpoint-type` instead. Setting endpoint type to "
-            f"{args.backend}.",
+            "'--endpoint-type' is deprecated and will be removed in v0.11.0. "
+            "Please use `--backend` instead or remove this argument if you "
+            "have already set it.",
             stacklevel=2,
         )
-        endpoint_type = args.backend
+
     # Validate ramp-up arguments
     if args.ramp_up_strategy is not None:
         if args.request_rate != float("inf"):
@@ -1227,9 +1226,9 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     }
 
     # Sampling parameters are only supported by openai-compatible backend.
-    if sampling_params and args.endpoint_type not in OPENAI_COMPATIBLE_BACKENDS:
+    if sampling_params and args.backend not in OPENAI_COMPATIBLE_BACKENDS:
         raise ValueError("Sampling parameters are only supported by "
-                         "openai-compatible endpoint types.")
+                         "openai-compatible backends.")
 
     if "temperature" not in sampling_params:
         sampling_params["temperature"] = 0.0  # Default to greedy decoding.
@@ -1239,7 +1238,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     gc.freeze()
 
     benchmark_result = await benchmark(
-        endpoint_type=args.endpoint_type,
+        endpoint_type=args.backend,
         api_url=api_url,
         base_url=base_url,
         model_id=model_id,
@@ -1273,7 +1272,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     # Setup
     current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
     result_json["date"] = current_dt
-    result_json["endpoint_type"] = args.endpoint_type
+    result_json["endpoint_type"] = args.backend
     result_json["label"] = label
     result_json["model_id"] = model_id
     result_json["tokenizer_id"] = tokenizer_id
@@ -1323,7 +1322,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         base_model_id = model_id.split("/")[-1]
         max_concurrency_str = (f"-concurrency{args.max_concurrency}"
                                if args.max_concurrency is not None else "")
-        label = label or endpoint_type
+        label = label or args.backend
         if args.ramp_up_strategy is not None:
             file_name = f"{label}-ramp-up-{args.ramp_up_strategy}-{args.ramp_up_start_rps}qps-{args.ramp_up_end_rps}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  # noqa
         else:
