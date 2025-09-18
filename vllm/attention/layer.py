@@ -277,14 +277,26 @@ class Attention(nn.Module, AttentionLayerBase):
                                  dtype=query.dtype,
                                  device=query.device)
             hidden_size = output_shape[-1]
+
+            if envs.VLLM_FUSE_QUERY_QUANT:
+                # quantizing with a simple torch operation enables
+                # torch.compile to fuse this into previous ops
+                # which reduces overheads during decoding.
+                # Otherwise queries are quantized using custom ops
+                # which causes decoding overheads
+                assert self._q_scale.numel() == 1
+                if self.kv_cache_dtype in ["fp8", "fp8_e4m3"]:
+                    query = (query / self._q_scale).to(torch.float8_e4m3fn)
+                elif self.kv_cache_dtype == "fp8_e5m2":
+                    query = (query / self._q_scale).to(torch.float8_e5m2)
+                else:
+                    raise NotImplementedError(
+                        "VLLM_FUSE_QUERY_QUANT only supported for fp8_e4m3 "
+                        "and fp8_e5m2")
+
             # We skip reshaping query, key and value tensors for the MLA
             # backend since these tensors have different semantics and are
             # processed differently.
-            if (envs.VLLM_FUSE_QUERY_QUANT
-                    and self.kv_cache_dtype.startswith("fp8")):
-                assert self._q_scale.numel() == 1
-                query = (query / self._q_scale).to(torch.float8_e4m3fn)
-
             if not self.use_mla:
                 # Reshape the query, key, and value tensors.
                 # NOTE(woosuk): We do this outside the custom op to minimize the
