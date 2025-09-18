@@ -1284,7 +1284,7 @@ class OpenAIServingResponses(OpenAIServing):
                         if previous_item.recipient.startswith("functions."):
                             function_name = \
                                 previous_item.recipient[len("functions."): ]
-                            yield _send_event(
+                            yield _increment_sequence_number_and_return(
                                 ResponseFunctionCallArgumentsDoneEvent(
                                     type=
                                     "response.function_call_arguments.done",
@@ -1304,7 +1304,7 @@ class OpenAIServingResponses(OpenAIServing):
                                 call_id=f"fc_{random_uuid()}",
                                 status="completed",
                             )
-                            yield _send_event(
+                            yield _increment_sequence_number_and_return(
                                 ResponseOutputItemDoneEvent(
                                     type="response.output_item.done",
                                     sequence_number=-1,
