@@ -32,11 +32,12 @@ from .vlm_utils.types import (CustomTestOptions, ExpandableVLMTestArgs,
 if current_platform.is_rocm():
     os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "0"
 
+# NOTE(woosuk): Skipping these tests until V1 supports them.
 REQUIRES_V0_MODELS = [
-    # V1 Test: not enough KV cache space in C1.
-    "fuyu",
-    # V1 Test: Deadlock issue when processing mm_inputs
-    "llava-onevision-transformers",
+    # # V1 Test: not enough KV cache space in C1.
+    # "fuyu",
+    # # V1 Test: Deadlock issue when processing mm_inputs
+    # "llava-onevision-transformers",
 ]
 
 # yapf: disable

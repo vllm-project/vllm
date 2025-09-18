@@ -42,15 +42,6 @@ ROCM_TRITON_SCALED_MM_SUPPORTED_INT8_MODEL = [
 ]
 
 
-@pytest.fixture(scope="function", autouse=True)
-def use_v0_only(monkeypatch):
-    """
-    This module relies on V0 internals, so set VLLM_USE_V1=0.
-    """
-    if not current_platform.is_cpu():
-        monkeypatch.setenv('VLLM_USE_V1', '0')
-
-
 @pytest.mark.parametrize(
     "model_args",
     [

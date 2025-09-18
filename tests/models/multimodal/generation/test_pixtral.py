@@ -201,9 +201,6 @@ def test_multi_modal_placeholders(vllm_runner, image_urls: list[str],
     local_image_urls = [local_asset_server.url_for(u) for u in image_urls]
     prompt = _create_engine_inputs_hf(local_image_urls)
 
-    # This placeholder checking test only works with V0 engine
-    # where `multi_modal_placeholders` is returned with `RequestOutput`
-    monkeypatch.setenv("VLLM_USE_V1", "0")
     with vllm_runner(
             "mistral-community/pixtral-12b",
             max_model_len=8192,

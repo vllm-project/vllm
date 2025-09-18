@@ -91,8 +91,6 @@ def test_sharded_state_loader(enable_lora, tp_size, num_gpus_available,
     gpu_memory_utilization = 0.8
     input_dir = llama_3p2_1b_files
     ctx = mp.get_context("spawn")
-    # The interface in v1 engine has changed, run in v1 engine will hang.
-    monkeypatch.setenv("VLLM_USE_V1", "0")
 
     # Run in separate processes for memory & CUDA isolation
     with TemporaryDirectory() as output_dir:

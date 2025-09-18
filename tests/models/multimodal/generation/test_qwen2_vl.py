@@ -15,14 +15,7 @@ from ....conftest import (IMAGE_ASSETS, VIDEO_ASSETS, PromptImageInput,
                           PromptVideoInput, VllmRunner)
 from ...utils import check_logprobs_close
 
-
-@pytest.fixture(scope="function", autouse=True)
-def use_v0_only(monkeypatch):
-    """
-    V1 Test: batch_make_xxxxx_embeddings calls a V0 internal
-    """
-    monkeypatch.setenv('VLLM_USE_V1', '0')
-
+pytest.skip("Skipping the test until V1 supports it", allow_module_level=True)
 
 models = ["Qwen/Qwen2-VL-2B-Instruct"]
 target_dtype = "half"

@@ -11,16 +11,6 @@ import pytest
 import torch
 
 from tests.quantization.utils import is_quant_method_supported
-from vllm.platforms import current_platform
-
-
-@pytest.fixture(scope="function", autouse=True)
-def use_v0_only(monkeypatch):
-    """
-    This module relies on V0 internals, so set VLLM_USE_V1=0.
-    """
-    if not current_platform.is_cpu():
-        monkeypatch.setenv('VLLM_USE_V1', '0')
 
 
 @pytest.mark.skipif(not is_quant_method_supported("modelopt"),
