@@ -76,8 +76,9 @@ void invokeFP4Quantization(int m, int n, T const* input, float const* SFScale,
   // Grid, Block size.
   // Each thread converts 8 values.
   dim3 block(std::min(int(n / ELTS_PER_THREAD), 512));
-  // Get number of blocks per SM (assume we can fully utilize the SM).
-  int const numBlocksPerSM = VLLM_BLOCKS_PER_SM(block.x);
+  // Get number of blocks per SM
+  int const numBlocksPerSM =
+      vllm_runtime_blocks_per_sm(static_cast<int>(block.x));
   dim3 grid(std::min(int(m), multiProcessorCount * numBlocksPerSM));
 
   // Launch the cvt kernel.

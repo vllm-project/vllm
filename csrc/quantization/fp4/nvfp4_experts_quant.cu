@@ -234,8 +234,9 @@ void quant_impl(void* output, void* output_scale, void* input,
   int const workSizePerRow = k / ELTS_PER_THREAD;
   int const totalWorkSize = m_topk * workSizePerRow;
   dim3 block(std::min(workSizePerRow, 512));
-  // Get number of blocks per SM (assume we can fully utilize the SM).
-  int const numBlocksPerSM = VLLM_BLOCKS_PER_SM(static_cast<int>(block.x));
+  // Get number of blocks per SM
+  int const numBlocksPerSM =
+      vllm_runtime_blocks_per_sm(static_cast<int>(block.x));
   dim3 grid(std::min(static_cast<int>((totalWorkSize + block.x - 1) / block.x),
                      multiProcessorCount * numBlocksPerSM));
   while (grid.x <= multiProcessorCount && block.x > 64) {

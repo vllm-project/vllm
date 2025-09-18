@@ -132,7 +132,8 @@ void silu_and_mul_nvfp4_quant_sm1xxa(torch::Tensor& output,  // [..., d]
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   auto stream = at::cuda::getCurrentCUDAStream(input.get_device());
   dim3 block(std::min(int(n / ELTS_PER_THREAD), 1024));
-  int const numBlocksPerSM = VLLM_BLOCKS_PER_SM(block.x);
+  int const numBlocksPerSM =
+      vllm_runtime_blocks_per_sm(static_cast<int>(block.x));
   dim3 grid(std::min(int(m), multiProcessorCount * numBlocksPerSM));
 
   VLLM_DISPATCH_HALF_TYPES(
