@@ -248,13 +248,10 @@ class CudaPlatformBase(Platform):
     @classmethod
     def get_valid_backends(
         cls, head_size, dtype, kv_cache_dtype, block_size, use_v1, use_mla,
-        has_sink
+        has_sink, device_capability_int
     ) -> tuple[list[tuple["_Backend", int]], dict["_Backend", list[str]]]:
         valid_backends_priorities = []
         invalid_reasons = {}
-        device_capability = cls.get_device_capability()
-        device_capability_int = device_capability.to_int(
-        ) if device_capability is not None else None
         from vllm.attention.backends.registry import _Backend, backend_to_class
         backend_priorities = _get_backend_priorities()
         for backend in _Backend:
@@ -279,18 +276,21 @@ class CudaPlatformBase(Platform):
                              has_sink: bool) -> str:
         from vllm.attention.backends.registry import (_Backend,
                                                       backend_to_class_str)
+        device_capability = cls.get_device_capability()
+        device_capability_int = device_capability.to_int(
+        ) if device_capability is not None else None
 
         # First try checking just the selected backend, if there is one.
         if selected_backend is not None:
             backend_class_str = backend_to_class_str(selected_backend, use_v1)
             backend_class = resolve_obj_by_qualname(backend_class_str)
-            maybe_invalid_reason = backend_class.validate_configuration(
+            invalid_reasons = backend_class.validate_configuration(
                 head_size, dtype, kv_cache_dtype, block_size, use_v1, use_mla,
-                has_sink)
-            if maybe_invalid_reason is not None:
+                has_sink, device_capability_int)
+            if invalid_reasons:
                 logger.warning(
                     "Selected backend %s is not valid for this configuration. "
-                    "Reason: %s", selected_backend, maybe_invalid_reason)
+                    "Reason: %s", selected_backend, invalid_reasons)
             else:
                 engine_version = 'V1' if use_v1 else 'V0'
                 logger.info("Using %s backend on %s engine.", selected_backend,
@@ -301,7 +301,7 @@ class CudaPlatformBase(Platform):
         # so we try finding a valid backend.
         valid_backends_priorities, invalid_reasons = cls.get_valid_backends(
             head_size, dtype, kv_cache_dtype, block_size, use_v1, use_mla,
-            has_sink)
+            has_sink, device_capability_int)
 
         if len(valid_backends_priorities) == 0:
             reasons_str = "{" + ", ".join(
