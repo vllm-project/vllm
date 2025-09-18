@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterable
 from dataclasses import MISSING, Field, field, fields, is_dataclass
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
@@ -45,3 +46,15 @@ def get_field(cls: ConfigType, name: str) -> Field:
         return field(default=default)
     raise ValueError(
         f"{cls.__name__}.{name} must have a default value or default factory.")
+
+
+def getattr_iter(object: object, names: Iterable[str], default: Any) -> Any:
+    """
+    A helper function that retrieves an attribute from an object which may
+    have multiple possible names. This is useful when fetching attributes from
+    arbitrary `transformers.PretrainedConfig` instances.
+    """
+    for name in names:
+        if hasattr(object, name):
+            return getattr(object, name)
+    return default
