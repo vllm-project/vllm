@@ -50,3 +50,9 @@ uv run python -c "import vllm; print(f'vLLM version: {vllm.__version__}')"
 uv run python -c "import prime_rl; print('Prime-RL imported successfully')"
 
 echo "Prime-RL integration test environment setup complete!"
+
+echo "Running Prime-RL integration tests..."
+export WANDB_MODE=offline # this makes this test not require a WANDB_API_KEY
+uv run pytest -vs tests/integration/test_rl.py -m gpu
+
+echo "Prime-RL integration tests completed!"

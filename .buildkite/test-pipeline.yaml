@@ -1046,11 +1046,6 @@ steps:
   working_dir: "/vllm-workspace"
   source_file_dependencies:
   - vllm/
-  - tests/rl_integration/test_prime_rl.py
-  - .buildkite/scripts/setup-prime-rl.sh
+  - .buildkite/scripts/run-prime-rl-test.sh
   commands:
-    - bash .buildkite/scripts/setup-prime-rl.sh
-    - cd prime-rl
-    - source .venv/bin/activate
-    - export WANDB_MODE=offline # this makes this test not require a WANDB_API_KEY
-    - pytest -vs tests/integration/test_rl.py -m gpu
+    - bash .buildkite/scripts/run-prime-rl-test.sh
