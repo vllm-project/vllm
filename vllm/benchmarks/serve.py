@@ -802,7 +802,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--backend",
         type=str,
-        default="vllm",
+        default=None,
         choices=list(ASYNC_REQUEST_FUNCS.keys()),
         help="'--backend' is deprecated and will be removed in v0.11.0. "
         "Please use --endpoint-type instead.",
