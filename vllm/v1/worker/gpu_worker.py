@@ -257,10 +257,12 @@ class Worker(WorkerBase):
             if (self.cache_config.enable_pp_prop_kv_cache
                     and pp_group.world_size > 1
                     and envs.VLLM_PP_LAYER_PARTITION):
-                num_hidden_layers = self.model_config.hf_text_config.num_hidden_layers
+                hf_config = self.model_config.hf_text_config
+                num_hidden_layers = hf_config.num_hidden_layers
 
                 start_layer, end_layer = get_pp_indices(
-                    num_hidden_layers, pp_group.rank_in_group, pp_group.world_size)
+                    num_hidden_layers, pp_group.rank_in_group,
+                    pp_group.world_size)
                 local_layers = end_layer - start_layer
                 prop_kv_cache_bytes = int(kv_cache_memory_bytes *
                                           local_layers / num_hidden_layers)
@@ -277,17 +279,17 @@ class Worker(WorkerBase):
                 return prop_kv_cache_bytes
 
             msg = (
-                f"Initial free memory {GiB(self.init_snapshot.free_memory):.2f} "
-                f"GiB, reserved {GiB(kv_cache_memory_bytes):.2f} GiB memory for "
-                "KV Cache as specified by kv_cache_memory_bytes config and "
-                "skipped memory profiling. This does not respect the "
-                "gpu_memory_utilization config. Only use kv_cache_memory_bytes "
-                "config when you want manual control of KV cache memory "
-                "size. If OOM'ed, check the difference of initial free "
-                "memory between the current run and the previous run "
-                "where kv_cache_memory_bytes is suggested and update it "
-                "correspondingly."
-            )
+                f"Initial free memory "
+                f"{GiB(self.init_snapshot.free_memory):.2f} "
+                f"GiB, reserved {GiB(kv_cache_memory_bytes):.2f} GiB memory "
+                f"for KV Cache as specified by kv_cache_memory_bytes config "
+                f"and skipped memory profiling. This does not respect the "
+                f"gpu_memory_utilization config. Only use "
+                f"kv_cache_memory_bytes config when you want manual control "
+                f"of KV cache memory size. If OOM'ed, check the difference "
+                f"of initial free memory between the current run and the "
+                f"previous run where kv_cache_memory_bytes is suggested and "
+                f"update it correspondingly.")
             logger.info(msg)
             return kv_cache_memory_bytes
 
