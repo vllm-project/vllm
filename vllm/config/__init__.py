@@ -710,19 +710,17 @@ class ModelConfig:
 
         # Init pooler config if needed
         if self.runner_type == "pooling":
-            if isinstance(self.override_pooler_config, dict):
+            if self.override_pooler_config is not None:
                 logger.warning_once(
                     "`override_pooler_config` is deprecated and will be "
                     "removed in v0.12.0 or v1.0.0, whichever is sooner. "
                     "Please use `pooler_config` instead.")
-                self.pooler_config = PoolerConfig(
-                    **self.override_pooler_config)
-            elif self.override_pooler_config is not None:
-                logger.warning_once(
-                    "`override_pooler_config` is deprecated and will be "
-                    "removed in v0.12.0 or v1.0.0, whichever is sooner. "
-                    "Please use `pooler_config` instead.")
-                self.pooler_config = self.override_pooler_config
+
+                if isinstance(self.override_pooler_config, dict):
+                    self.pooler_config = PoolerConfig(
+                        **self.override_pooler_config)
+                else:
+                    self.pooler_config = self.override_pooler_config
 
             if self.pooler_config is None:
                 self.pooler_config = PoolerConfig()
