@@ -304,8 +304,7 @@ As examples, we provide some ready-to-use quantized mixed precision model to sho
 - amd/Mixtral-8x7B-Instruct-v0.1-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8
 - amd/Qwen3-8B-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8
 
-### 2. inference the quantized mixed precision model in vLLM.
-
+### 2. inference the quantized mixed precision model in vLLM
 
 Models quantized with AMD Quark using mixed precision can natively be reload in vLLM, and e.g. evaluated using lm-evaluation-harness as follow:
 
