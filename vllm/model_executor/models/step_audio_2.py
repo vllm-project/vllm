@@ -4,7 +4,7 @@
 
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
-from typing import Optional, TypedDict, Union
+from typing import Annotated, Literal, Optional, TypedDict, Union
 
 import librosa
 import numpy as np
@@ -19,30 +19,58 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs, NestedTensors)
-from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
+                                    MultiModalKwargs, MultiModalKwargsItems, NestedTensors)
+from vllm.multimodal.parse import (DictEmbeddingItems, MultiModalDataItems,
+                                   MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate, PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (flatten_bn, init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
 
-# Special token IDs
-AUDIO_PATCH_TOKEN_ID = 151690
-AUDIO_START_TOKEN_ID = 151688
-AUDIO_END_TOKEN_ID = 151689
+# Audio placeholder strings
+_AUDIO_PLACEHOLDER = "<audio_patch>"
+_AUDIO_START_PLACEHOLDER = "<audio_start>"
+_AUDIO_END_PLACEHOLDER = "<audio_end>"
 
 
-class StepAudio2AudioInputs(TypedDict):
-    audio_mels: torch.Tensor
-    """Shape: `(num_audios * num_frames, num_mel_bins)`"""
+class StepAudio2AudioFeatureInputs(TensorSchema):
+    """
+    Audio feature inputs as mel spectrograms.
 
-    audio_lens: list[int]
-    """Shape: `(num_audios,)`"""
+    Dimensions:
+    - b: batch size
+    - t: time frames (variable)
+    - nmb: number of mel bins (128)
+    """
+    type: Literal["audio_features"]
+    audio_mels: Annotated[Union[torch.Tensor, list[torch.Tensor]],
+                          TensorShape("b", "t", "nmb", dynamic_dims={"t"})]
+    audio_lens: Annotated[Union[torch.Tensor, list[int]],
+                         TensorShape("b")]
+
+
+class StepAudio2AudioEmbeddingInputs(TensorSchema):
+    """
+    Pre-computed audio embeddings.
+
+    Dimensions:
+    - b: batch size
+    - naf: number of audio features
+    - hs: hidden size
+    """
+    type: Literal["audio_embeds"]
+    audio_embeds: Annotated[Union[torch.Tensor, list[torch.Tensor]],
+                           TensorShape("b", "naf", "hs")]
+
+
+StepAudio2AudioInputs = Union[StepAudio2AudioFeatureInputs,
+                             StepAudio2AudioEmbeddingInputs]
 
 
 def make_non_pad_mask(lengths: torch.Tensor, max_len: int = 0) -> torch.Tensor:
@@ -188,10 +216,25 @@ class Adaptor(nn.Module):
         return x
 
 
+class StepAudio2MultiModalDataParser(MultiModalDataParser):
+    """Custom parser to support dict-based audio embeddings."""
+
+    def _parse_audio_data(self, data: object) -> MultiModalDataItems:
+        if isinstance(data, dict):
+            return DictEmbeddingItems(
+                data,
+                modality="audio",
+                required_fields={"audio_embeds"},
+                fields_factory=lambda hf_inputs: {
+                    "audio_embeds": MultiModalFieldConfig.batched("audio")
+                }
+            )
+        return super()._parse_audio_data(data)
+
+
 class StepAudio2ProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"audio": None}
-
 
     def get_hf_processor(self, **kwargs):
         """Get the HuggingFace processor for Step-Audio2."""
@@ -200,11 +243,25 @@ class StepAudio2ProcessingInfo(BaseProcessingInfo):
         tokenizer = self.get_tokenizer(**kwargs)
         config = self.get_hf_config()
 
-        return StepAudio2Processor(
+        processor = StepAudio2Processor(
             tokenizer=tokenizer,
             config=config,
             **kwargs
         )
+
+        # Set standardized audio token replacement patterns
+        processor.audio_token_replacement = _AUDIO_PLACEHOLDER
+        processor.audio_start_replacement = _AUDIO_START_PLACEHOLDER
+        processor.audio_end_replacement = _AUDIO_END_PLACEHOLDER
+
+        # Get token IDs from config or processor
+        if hasattr(config, 'audio_token_index'):
+            processor.audio_replacement_token_id = config.audio_token_index
+        else:
+            # Use processor's own token ID
+            processor.audio_replacement_token_id = processor.audio_token_id
+
+        return processor
 
     def get_mm_max_tokens_per_item(
         self,
@@ -291,7 +348,9 @@ class StepAudio2ProcessingInfo(BaseProcessingInfo):
         # Validate token count consistency if token_ids are provided
         if token_ids is not None:
             tokenizer = self.get_tokenizer()
-            audio_token_id = tokenizer.get_vocab().get("<audio_patch>", AUDIO_PATCH_TOKEN_ID)
+            processor = self.get_hf_processor()
+            audio_placeholder = getattr(processor, 'audio_token_replacement', _AUDIO_PLACEHOLDER)
+            audio_token_id = tokenizer.get_vocab().get(audio_placeholder)
 
             # Count audio placeholder tokens in token_ids
             placeholder_token_count = sum(
@@ -313,7 +372,12 @@ class StepAudio2ProcessingInfo(BaseProcessingInfo):
 class StepAudio2DummyInputsBuilder(BaseDummyInputsBuilder[StepAudio2ProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_audios = mm_counts.get("audio", 0)
-        return "<audio_patch>" * num_audios
+
+        # Get placeholder from processor for consistency
+        processor = self.info.get_hf_processor()
+        audio_token = getattr(processor, 'audio_token_replacement', _AUDIO_PLACEHOLDER)
+
+        return audio_token * num_audios
 
     def get_dummy_mm_data(self, seq_len: int, mm_counts: Mapping[str, int]) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
@@ -324,11 +388,39 @@ class StepAudio2DummyInputsBuilder(BaseDummyInputsBuilder[StepAudio2ProcessingIn
 
 class StepAudio2MultiModalProcessor(BaseMultiModalProcessor[StepAudio2ProcessingInfo]):
     def _get_data_parser(self) -> MultiModalDataParser:
-        return MultiModalDataParser(target_sr=16000)
+        """Return custom parser that supports dict-based embeddings."""
+        return StepAudio2MultiModalDataParser(target_sr=16000)
+
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        """Process inputs with proper fallback for text-only."""
+        # Handle text-only input
+        if not mm_data.get("audio", []):
+            prompt_ids = self.info.get_tokenizer().encode(
+                prompt, add_special_tokens=False
+            )
+            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
+            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+
+        # Ensure sampling rate is set for audio processing
+        mm_kwargs = dict(**mm_kwargs, sampling_rate=16000)
+
+        # Call parent processor
+        return super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
+        )
 
     def _get_mm_fields_config(
         self,
-        hf_inputs: dict,
+        hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         """Get multimodal field configuration for audio inputs."""
@@ -343,14 +435,20 @@ class StepAudio2MultiModalProcessor(BaseMultiModalProcessor[StepAudio2Processing
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> list[PromptUpdate]:
         """Get prompt updates for audio inputs."""
-        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        audio_token_id = processor.audio_token_id
+        # Check if we have any audio data to process
+        out_mm_data = out_mm_kwargs.get_data() if out_mm_kwargs else {}
 
-        # Get audio data from multimodal kwargs
-        out_mm_data = out_mm_kwargs.get_data()
+        # If no audio data, return empty list
+        if not out_mm_data or ("audio_mels" not in out_mm_data and "audio_lens" not in out_mm_data):
+            return []
+
+        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+
+        # Use string placeholder for standardization
+        audio_placeholder = getattr(processor, 'audio_token_replacement', _AUDIO_PLACEHOLDER)
 
         def get_replacement_audio(item_idx: int):
             # Get audio lengths from processed data
@@ -366,6 +464,9 @@ class StepAudio2MultiModalProcessor(BaseMultiModalProcessor[StepAudio2Processing
             # Get replacement tokens from processor
             _, audio_repl_ids = processor._get_audio_repl(num_feature_len)
 
+            # Get the audio token ID from processor
+            audio_token_id = getattr(processor, 'audio_replacement_token_id', processor.audio_token_id)
+
             return PromptUpdateDetails.select_token_id(
                 seq=audio_repl_ids,
                 embed_token_id=audio_token_id,
@@ -374,7 +475,7 @@ class StepAudio2MultiModalProcessor(BaseMultiModalProcessor[StepAudio2Processing
         return [
             PromptReplacement(
                 modality="audio",
-                target=[audio_token_id],
+                target=audio_placeholder,
                 replacement=get_replacement_audio,
             )
         ]
@@ -390,9 +491,9 @@ class StepAudio2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
-        if modality.startswith("audio"):
-            return "<audio_patch>"
-        raise ValueError("Only audio modality is supported")
+        if modality == "audio" or modality.startswith("audio"):
+            return _AUDIO_PLACEHOLDER
+        return None
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -468,7 +569,8 @@ class StepAudio2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             dim=0
         )
 
-        return StepAudio2AudioInputs(
+        return StepAudio2AudioFeatureInputs(
+            type="audio_features",
             audio_mels=audio_mels.to(self.dtype).to(self.device),
             audio_lens=audio_lens,
         )
@@ -508,10 +610,25 @@ class StepAudio2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
+            # Get audio token ID from config or tokenizer
+            config = self.config
+            audio_token_id = getattr(config, 'audio_token_index', None)
+            if audio_token_id is None:
+                # Fallback to tokenizer to get ID
+                from transformers import AutoTokenizer
+                tokenizer = AutoTokenizer.from_pretrained(
+                    config._name_or_path, trust_remote_code=True
+                )
+                audio_token_id = tokenizer.convert_tokens_to_ids(_AUDIO_PLACEHOLDER)
+
             inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings, AUDIO_PATCH_TOKEN_ID
+                input_ids, inputs_embeds, multimodal_embeddings, audio_token_id
             )
         return inputs_embeds
+
+    def get_language_model(self):
+        """Get the language model component for consistency with other models."""
+        return self.language_model
 
     def forward(
         self,
