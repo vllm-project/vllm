@@ -967,10 +967,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             num_tokens_padded,
                             self.vllm_config)
         else:
-            assert False
             num_tokens_padded = self._get_num_input_tokens(num_tokens_unpadded)
             num_pad, num_tokens_after_padding = self.get_dp_padding(
                 num_tokens_padded)
+            if num_tokens_after_padding is not None:
+                num_tokens_padded = int(num_tokens_after_padding[0])
 
         self.seq_lens.np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
@@ -2796,10 +2797,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 logger.info(f"NUM TOKENS: {num_tokens} {num_tokens_across_dp}")
                 num_tokens = int(num_tokens_across_dp[0])
         else:
-            assert False
             logger.info(f"NUM TOKENS: {num_tokens}")
-            num_pad, num_tokens_across_dp = self.get_dp_padding(num_tokens)
-            num_tokens += num_pad
+            _, num_tokens_across_dp = self.get_dp_padding(num_tokens)
+            if num_tokens_across_dp is not None:
+                num_tokens = int(num_tokens_across_dp[0])
 
         assert cudagraph_runtime_mode in {
             CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
