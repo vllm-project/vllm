@@ -147,7 +147,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                         device=q.device)
         lse = torch.zeros(B,
                         q_num_heads,
-                        dtype=torch.float32,
+                        dtype=q.dtype,
                         device=q.device) 
         num_kv_splits = 4  # TODO: heuristic
 
