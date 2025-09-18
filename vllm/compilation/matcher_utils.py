@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional, Union
+from abc import ABC, abstractmethod
+from typing import Optional
 
 import torch
 from torch._higher_order_ops import auto_functionalized
@@ -31,55 +32,71 @@ QUANT_OPS: dict[QuantKey, OpOverload] = {
 #         kNvfp4Quant] = torch.ops._C.scaled_fp4_quant.default  # noqa: E501
 
 
-class MatcherRMSNorm:  # TODO separate residual and not residual
+class MatcherCustomOp(ABC):
+
+    def __init__(self, enabled: bool):
+        self.model_dtype = get_current_vllm_config().model_config.dtype
+
+        self.enabled = enabled
+        self.forward = self.forward_custom if enabled else self.forward_native
+
+    @abstractmethod
+    def forward_custom(self, *args, **kws):
+        pass
+
+    @abstractmethod
+    def forward_native(self, *args, **kws):
+        pass
+
+    def __call__(self, *args, **kws):
+        return self.forward(*args, **kws)
+
+    def empty(self, *args, **kws):
+        return torch.empty(*args, dtype=self.model_dtype, device="cuda", **kws)
+
+    def empty_f32(self, *args, **kws):
+        return torch.empty(*args, dtype=torch.float32, device="cuda", **kws)
+
+
+class MatcherRMSNorm(MatcherCustomOp):
 
     def __init__(self, epsilon: float, enabled: Optional[bool] = None):
-        self.epsilon = epsilon
-
         if enabled is None:
             # TODO either pass config to enabled or set it globally
             #  (global during pass init seems reasonable)
             enabled = RMSNorm.enabled()
 
-        self.forward = self.forward_custom if enabled else self.forward_native
-        self.model_dtype = get_current_vllm_config().model_config.dtype
-        print(self.model_dtype)
+        super().__init__(enabled)
+        self.epsilon = epsilon
 
     def inputs(self):
-        return
+        input = self.empty(5, 16) if self.enabled else self.empty_f32(5, 16)
+        weight = self.empty(16, )
+        return [input, weight]
 
     def forward_custom(
         self,
         input: torch.Tensor,
         weight: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        if residual is None:
-            result = torch.empty_like(input)
-            _, result = auto_functionalized(
-                RMS_OP,
-                result=result,
-                input=input,
-                weight=weight,
-                epsilon=self.epsilon,
-            )
+    ) -> torch.Tensor:
+        result = torch.empty_like(input)
+        _, result = auto_functionalized(
+            RMS_OP,
+            result=result,
+            input=input,
+            weight=weight,
+            epsilon=self.epsilon,
+        )
 
-            return result
-        else:
-            _, result, residual = auto_functionalized(RMS_ADD_OP,
-                                                      input=input,
-                                                      residual=residual,
-                                                      weight=weight,
-                                                      epsilon=self.epsilon)
-
-            return result, residual
+        return result
 
     def forward_native(
         self,
         input: torch.Tensor,
         weight: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+    ) -> torch.Tensor:
         x = input.to(torch.float32)
         if residual is not None:
             x = x + residual
@@ -94,13 +111,57 @@ class MatcherRMSNorm:  # TODO separate residual and not residual
 
         return x if residual is None else (x, residual)
 
-    def __call__(
+
+class MatcherFusedAddRMSNorm(MatcherCustomOp):
+
+    def __init__(self, epsilon: float, enabled: Optional[bool] = None):
+        if enabled is None:
+            # TODO either pass config to enabled or set it globally
+            #  (global during pass init seems reasonable)
+            enabled = RMSNorm.enabled()
+
+        super().__init__(enabled)
+        self.epsilon = epsilon
+
+    def inputs(self):
+        input = self.empty(5, 16) if self.enabled else self.empty_f32(5, 16)
+        weight = self.empty(16, )
+        residual = self.empty(5, 16)
+        return [input, weight, residual]
+
+    def forward_custom(
         self,
         input: torch.Tensor,
         weight: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        return self.forward(input, weight, residual)
+        residual: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        _, result, residual = auto_functionalized(RMS_ADD_OP,
+                                                  input=input,
+                                                  residual=residual,
+                                                  weight=weight,
+                                                  epsilon=self.epsilon)
+
+        return result, residual
+
+    def forward_native(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        residual: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        x = input.to(torch.float32)
+        if residual is not None:
+            x = x + residual
+            residual = x.to(self.model_dtype)
+
+        variance = x.pow(2).mean(dim=-1, keepdim=True)
+
+        x = x * torch.rsqrt(variance + self.epsilon)
+        x = x.to(self.model_dtype)
+        if weight is not None:
+            x = x * weight
+
+        return x if residual is None else (x, residual)
 
 
 class MatcherQuant:
