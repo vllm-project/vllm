@@ -2,11 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
 
+import pytest
+
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, KVConnectorOutput
 from vllm.v1.request import FinishReason, RequestStatus
 
 from .utils import (assert_scheduler_empty, create_model_runner_output,
                     create_request, create_scheduler, create_vllm_config)
+
+pytestmark = pytest.mark.cpu_test
 
 
 def test_basic_lifecycle():

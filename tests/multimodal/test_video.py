@@ -17,6 +17,8 @@ from vllm.multimodal.video import (VIDEO_LOADER_REGISTRY, VideoLoader,
 
 from .utils import cosine_similarity, create_video_from_image, normalize_image
 
+pytestmark = pytest.mark.cpu_test
+
 NUM_FRAMES = 10
 FAKE_OUTPUT_1 = np.random.rand(NUM_FRAMES, 1280, 720, 3)
 FAKE_OUTPUT_2 = np.random.rand(NUM_FRAMES, 1280, 720, 3)
