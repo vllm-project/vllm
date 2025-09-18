@@ -148,7 +148,7 @@ def test_single_prompt(
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_single_prompt_mamba_size_alignment(
     hf_runner: HfRunner,
-    vllm_runner: VllmRunner,
+    vllm_runner,
     example_prompts,
     model: str,
     dtype: str,
