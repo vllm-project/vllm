@@ -30,7 +30,6 @@ from vllm.model_executor.layers.layernorm import (
     GemmaRMSNorm as Qwen3NextRMSNorm)
 # yapf: enable
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
@@ -138,6 +137,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
                 quant_config=quant_config,
                 reduce_results=self.experts.must_reduce_shared_expert_outputs(
                 ),
+                prefix=f"{prefix}.shared_expert",
             )
         else:
             self.shared_expert = None
@@ -253,12 +253,20 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # projection of the input hidden states
         self.projection_size_qkvz = self.key_dim * 2 + self.value_dim * 2
         self.projection_size_ba = self.num_v_heads * 2
-        self.in_proj = MergedColumnParallelLinear(
+        self.in_proj_qkvz = ColumnParallelLinear(
             input_size=self.hidden_size,
-            output_sizes=[self.projection_size_qkvz, self.projection_size_ba],
+            output_size=self.projection_size_qkvz,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.in_proj",
+            prefix=f"{prefix}.in_proj_qkvz",
+        )
+        # ba_proj doesn't support blockwise fp8 quantization.
+        self.in_proj_ba = ColumnParallelLinear(
+            input_size=self.hidden_size,
+            output_size=self.projection_size_ba,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.in_proj_ba",
         )
 
         query_key_settings = (self.key_dim, 0, False)
@@ -417,23 +425,16 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         self_kv_cache = self.kv_cache[forward_context.virtual_engine]
         conv_state = self_kv_cache[0].transpose(-1, -2)
         ssm_state = self_kv_cache[1]
-        num_actual_tokens = (attn_metadata.num_prefill_tokens +
-                             attn_metadata.num_decode_tokens +
-                             attn_metadata.num_spec_decode_tokens)
+        num_actual_tokens = attn_metadata.num_actual_tokens
         num_accepted_tokens = attn_metadata.num_accepted_tokens
-
-        # 1. Set up dimensions for reshapes later
-        projected_states, _ = self.in_proj(hidden_states[:num_actual_tokens])
         if spec_token_masks is not None:
             spec_token_masks = spec_token_masks[:num_actual_tokens]
-        projected_states_qkvz, projected_states_ba = torch.split(
-            projected_states,
-            [
-                self.projection_size_qkvz // self.tp_size,
-                self.projection_size_ba // self.tp_size
-            ],
-            dim=-1,
-        )
+
+        # 1. Set up dimensions for reshapes later
+        projected_states_qkvz, _ = self.in_proj_qkvz(
+            hidden_states[:num_actual_tokens])
+        projected_states_ba, _ = self.in_proj_ba(
+            hidden_states[:num_actual_tokens])
         query, key, value, z, b, a = self.fix_query_key_value_ordering(
             projected_states_qkvz, projected_states_ba)
         query, key, value = map(lambda x: rearrange(x, 'l p d -> l (p d)'),
@@ -458,9 +459,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
 
         # 2.1: process the mutli-query part
         if spec_sequence_masks is not None:
-            mixed_qkv_spec = mixed_qkv_spec.view(
-                attn_metadata.num_spec_decodes, -1, mixed_qkv_spec.size(-1))
-            mixed_qkv_spec = rearrange(mixed_qkv_spec, 'b l d -> b d l')
             mixed_qkv_spec = causal_conv1d_update(
                 mixed_qkv_spec,
                 conv_state,
@@ -470,9 +468,10 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 conv_state_indices=spec_state_indices_tensor[:, 0]
                 [:attn_metadata.num_spec_decodes],
                 num_accepted_tokens=num_accepted_tokens,
+                query_start_loc=spec_query_start_loc,
+                max_query_len=spec_state_indices_tensor.size(-1),
                 validate_data=False,
             )
-            mixed_qkv_spec = rearrange(mixed_qkv_spec, 'b d l -> (b l) d')
 
         # 2.2: process the remaining part
         if attn_metadata.num_prefills > 0:
@@ -979,8 +978,6 @@ class Qwen3NextModel(nn.Module):
             ("qkv_proj", "v_proj", "v"),
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
-            ("in_proj", "in_proj_qkvz", 0),
-            ("in_proj", "in_proj_ba", 1),
         ]
 
         params_dict = dict(self.named_parameters())
@@ -1058,7 +1055,6 @@ class Qwen3NextForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
             "v_proj",
         ],
         "gate_up_proj": ["gate_proj", "up_proj"],
-        "in_proj": ["in_proj_qkvz", "in_proj_ba"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -1089,7 +1085,7 @@ class Qwen3NextForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
             # We need bigger padding if using lora for kernel
             # compatibility
             if not lora_config else lora_config.lora_vocab_padding_size,
-        )
+            prefix=maybe_prefix(prefix, "lm_head"))
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
         self.make_empty_intermediate_tensors = (

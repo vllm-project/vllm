@@ -805,12 +805,10 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         assert loaded_shard_id < len(self.output_sizes)
 
         if isinstance(param, BlockQuantScaleParameter):
-            from vllm.model_executor.layers.quantization.fp8 import (
-                Fp8LinearMethod, Fp8MoEMethod)
             assert self.quant_method is not None
-            assert isinstance(self.quant_method,
-                              (Fp8LinearMethod, Fp8MoEMethod))
-            weight_block_size = self.quant_method.quant_config.weight_block_size
+            # Assume the weight block size has been set by quant method
+            assert hasattr(self, "weight_block_size")
+            weight_block_size = self.weight_block_size
             assert weight_block_size is not None
             block_n, _ = weight_block_size[0], weight_block_size[1]
             shard_offset = (
@@ -989,8 +987,10 @@ class QKVParallelLinear(ColumnParallelLinear):
         # Note(simon): This is needed for Qwen3's fp8 quantization.
         if isinstance(param, BlockQuantScaleParameter):
             assert self.quant_method is not None
-            assert hasattr(self.quant_method, "quant_config")
-            weight_block_size = self.quant_method.quant_config.weight_block_size
+            # Assume the weight block size has been set by quant method
+            assert hasattr(self, "weight_block_size")
+            weight_block_size = self.weight_block_size
+            assert weight_block_size is not None
             block_n, _ = weight_block_size[0], weight_block_size[1]
             shard_offset = (shard_offset + block_n - 1) // block_n
             shard_size = (shard_size + block_n - 1) // block_n
