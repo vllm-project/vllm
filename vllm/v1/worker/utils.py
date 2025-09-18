@@ -359,25 +359,12 @@ def _run_ar(should_ubatch: bool, orig_num_tokens_per_ubatch: int,
     return tensor
 
 
-def ar_coordinate_batch_across_dp(
-        should_ubatch: bool, orig_num_tokens_per_ubatch: int,
-        padded_num_tokens_per_ubatch: int, dp_size: int,
-        dp_rank: int) -> tuple[bool, Optional[torch.Tensor]]:
-
-    tensor = _run_ar(should_ubatch=should_ubatch,
-                     orig_num_tokens_per_ubatch=orig_num_tokens_per_ubatch,
-                     padded_num_tokens_per_ubatch=padded_num_tokens_per_ubatch,
-                     dp_size=dp_size,
-                     dp_rank=dp_rank)
-
-    result: bool = bool(torch.all(tensor[2] == 1).item())
-
+def post_process_ubatch(tensor: torch.Tensor) -> bool:
     orig_num_tokens_tensor = tensor[0, :]
     padded_num_tokens_tensor = tensor[1, :]
 
-    if not result:
-        return result, padded_num_tokens_tensor.cpu() * 2
-
+    # First determine if we are going to be ubatching.
+    should_ubatch: bool = bool(torch.all(tensor[2] == 1).item())
     # If the DP ranks are planning to ubatch, make sure that
     # there are no "empty" second ubatches
     orig_min_num_tokens = int(orig_num_tokens_tensor.min().item())
@@ -385,8 +372,8 @@ def ar_coordinate_batch_across_dp(
     if is_second_ubatch_empty(orig_min_num_tokens, padded_max_num_tokens):
         logger.debug("Aborting ubatching %s %s", orig_min_num_tokens,
                      padded_max_num_tokens)
-        return False, padded_num_tokens_tensor.cpu() * 2
-    return result, padded_num_tokens_tensor.cpu()
+        should_ubatch = False
+    return should_ubatch
 
 
 def coordinate_batch_across_dp(
@@ -417,32 +404,33 @@ def coordinate_batch_across_dp(
         # Early exit.
         return False, None
 
-    # Round up to the next multiple of two for even divisibility
-    num_tokens_padded = round_up(num_tokens_padded, 2)
-    num_tokens_per_ubatch = num_tokens_padded // 2
-    should_ubatch = should_attempt_ubatching
+    # First we coordinate between the DP ranks via an All Reduce
+    # to determine the total number of tokens that each rank
+    # will run and if we are using ubatching or not.
+    tensor = _run_ar(should_ubatch=should_attempt_ubatching,
+                     orig_num_tokens_per_ubatch=num_tokens_unpadded,
+                     padded_num_tokens_per_ubatch=num_tokens_padded,
+                     dp_size=dp_size,
+                     dp_rank=dp_rank)
 
-    # Sanity Check that the existing padding isn't giving us an empty second
-    # ubatch. Abort if so
-    if is_second_ubatch_empty(num_tokens_unpadded, num_tokens_padded):
-        logger.debug(
-            "Empty second µbatch detected: unpadded tokens: %s, padded "
-            "tokens: %s", num_tokens_unpadded, num_tokens_padded)
-        should_ubatch = False
-
-    # Note that we compute the number of padded tokens per ubatch
-    (should_ubatch, num_tokens_across_dp) = ar_coordinate_batch_across_dp(
-        should_ubatch=should_ubatch,
-        orig_num_tokens_per_ubatch=num_tokens_unpadded // 2,
-        padded_num_tokens_per_ubatch=num_tokens_per_ubatch,
-        dp_size=dp_size,
-        dp_rank=dp_rank)
-
-    assert num_tokens_across_dp is not None
-
-    max_tokens_across_dp_cpu = int(torch.max(num_tokens_across_dp).item())
-    num_tokens_after_padding = torch.tensor([max_tokens_across_dp_cpu] *
-                                            dp_size,
+    # Ensure that each rank is processing the same nuber of tokens
+    num_tokens_across_dp = tensor[1, :]
+    max_num_tokens = int(num_tokens_across_dp.max().item())
+    num_tokens_after_padding = torch.tensor([max_num_tokens] *
+                                            len(num_tokens_across_dp),
                                             device="cpu",
                                             dtype=torch.int32)
+
+    # If we are using ubatching, then we need to divide the num_tokens
+    # in num_tokens_across_dp in half and round up to the next multiple
+    # of two
+    should_ubatch = post_process_ubatch(tensor)
+    if should_ubatch:
+        # Round up to the next multiple of two for even divisibility
+        num_tokens_per_ubatch = round_up(max_num_tokens, 2) // 2
+        num_tokens_after_padding = torch.tensor([num_tokens_per_ubatch] *
+                                                len(num_tokens_across_dp),
+                                                device="cpu",
+                                                dtype=torch.int32)
+
     return should_ubatch, num_tokens_after_padding
