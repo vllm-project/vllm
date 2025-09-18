@@ -1257,9 +1257,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_SLEEP_WHEN_IDLE":
     lambda: bool(int(os.getenv("VLLM_SLEEP_WHEN_IDLE", "0"))),
 
-    # Fuse query quantization into the attention layer instead of
-    # doing it in the attention backend. Then torch.compile can
-    # fuse it into previous ops and reduce overhead.
+    # Quantize the query in the attention layer with a simple
+    # pytorch operation instead of a custom op in the attention backend.
+    # Then torch.compile can fuse it and reduce overhead.
+    # Only relevant for quantized attention w/ FA3
     "VLLM_FUSE_QUERY_QUANT":
     lambda: bool(int(os.getenv("VLLM_FUSE_QUERY_QUANT", "0"))),
 
@@ -1522,6 +1523,7 @@ def compute_hash() -> str:
         "VLLM_USE_CUDNN_PREFILL",
         "VLLM_USE_TRTLLM_ATTENTION",
         "VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION",
+        "VLLM_FUSE_QUERY_QUANT",
         "VLLM_ROCM_USE_AITER",
         "VLLM_ROCM_USE_AITER_PAGED_ATTN",
         "VLLM_ROCM_USE_AITER_LINEAR",
