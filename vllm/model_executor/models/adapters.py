@@ -310,6 +310,7 @@ def as_seq_cls_model(cls: _T) -> _T:
                 params_dtype=vllm_config.model_config.head_dtype,
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "score"),
+                return_bias=False
             )
 
             pooler_config = vllm_config.model_config.pooler_config
