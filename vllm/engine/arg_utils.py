@@ -390,6 +390,7 @@ class EngineArgs:
     cpu_offload_gb: float = CacheConfig.cpu_offload_gb
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
     kv_cache_memory_bytes: Optional[int] = CacheConfig.kv_cache_memory_bytes
+    enable_pp_prop_kv_cache: bool = CacheConfig.enable_pp_prop_kv_cache
     max_num_batched_tokens: Optional[int] = SchedulerConfig.max_num_batched_tokens
     max_num_partial_prefills: int = SchedulerConfig.max_num_partial_prefills
     max_long_partial_prefills: int = SchedulerConfig.max_long_partial_prefills
@@ -824,6 +825,9 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--kv-cache-memory-bytes", **cache_kwargs["kv_cache_memory_bytes"]
+        )
+        cache_group.add_argument(
+            "--enable-pp-prop-kv-cache", **cache_kwargs["enable_pp_prop_kv_cache"]
         )
         cache_group.add_argument("--swap-space", **cache_kwargs["swap_space"])
         cache_group.add_argument("--kv-cache-dtype", **cache_kwargs["cache_dtype"])
@@ -1288,10 +1292,19 @@ class EngineArgs:
             f"dcp_size={self.decode_context_parallel_size}."
         )
 
+        # Validate proportional KV cache flag requirements
+        if self.enable_pp_prop_kv_cache and self.kv_cache_memory_bytes is None:
+            raise ValueError(
+                "--enable-pp-prop-kv-cache requires "
+                "--kv-cache-memory-bytes to be specified. "
+                "Proportional distribution needs an explicit memory budget "
+                "to avoid ambiguity.")
+
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
             kv_cache_memory_bytes=self.kv_cache_memory_bytes,
+            enable_pp_prop_kv_cache=self.enable_pp_prop_kv_cache,
             swap_space=self.swap_space,
             cache_dtype=self.kv_cache_dtype,
             is_attention_free=model_config.is_attention_free,
