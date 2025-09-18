@@ -394,7 +394,10 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
                 assert event.item_id == current_item_id
 
             # verify content_index_id is correct
-            if event.type == "response.content_part.added":
+            if event.type in [
+                    "response.content_part.added",
+                    "response.reasoning_part.added"
+            ]:
                 assert event.content_index != current_content_index
                 current_content_index = event.content_index
             elif event.type in [
