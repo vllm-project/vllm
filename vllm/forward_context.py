@@ -77,6 +77,7 @@ class DPMetadata:
         Gather the num_tokens across all DP ranks and return results in a
         CPU tensor of size dp_size.
         """
+        logger.info(f"num_tokens_across_dp {num_tokens}")
         from vllm.distributed.parallel_state import get_dp_group
         device = current_platform.device_type
         group = get_dp_group().device_group
@@ -99,7 +100,7 @@ class DPMetadata:
         return num_tokens_tensor.cpu()
 
     @staticmethod
-    def should_ubatch_across_dp(
+    def coordinate_batch_across_dp(
             should_ubatch: bool, orig_num_tokens_per_ubatch: int,
             padded_num_tokens_per_ubatch: int, dp_size: int,
             dp_rank: int) -> tuple[bool, Optional[torch.Tensor]]:
@@ -121,6 +122,9 @@ class DPMetadata:
         ]
         """
 
+        logger.info(
+            f"Coordinate batch {orig_num_tokens_per_ubatch}, {padded_num_tokens_per_ubatch} {should_ubatch}"
+        )
         device = current_platform.device_type
         tensor = torch.zeros(3, dp_size, device=device, dtype=torch.int32)
         tensor[0][dp_rank] = orig_num_tokens_per_ubatch
@@ -131,18 +135,21 @@ class DPMetadata:
         dist.all_reduce(tensor, group=get_dp_group().device_group)
 
         result: bool = bool(torch.all(tensor[2] == 1).item())
-        if not result:
-            return result, None
 
         orig_num_tokens_tensor = tensor[0, :]
         padded_num_tokens_tensor = tensor[1, :]
 
+        if not result:
+            return result, padded_num_tokens_tensor.cpu() * 2
+
+        # If the DP ranks are planning to ubatch, make sure that
+        # there are no "empty" second ubatches
         orig_min_num_tokens = int(orig_num_tokens_tensor.min().item())
         padded_max_num_tokens = int(padded_num_tokens_tensor.max().item())
         if is_second_ubatch_empty(orig_min_num_tokens, padded_max_num_tokens):
             logger.debug("Aborting ubatching %s %s", orig_min_num_tokens,
                          padded_max_num_tokens)
-            return False, None
+            return False, padded_num_tokens_tensor.cpu() * 2
         return result, padded_num_tokens_tensor.cpu()
 
     @staticmethod
@@ -170,6 +177,7 @@ class DPMetadata:
         assert (num_tokens_across_dp is None or num_tokens_across_dp[dp_rank]
                 == batchsize), f"{num_tokens_across_dp[dp_rank]} {batchsize}"
         if num_tokens_across_dp is None:
+            assert False
             num_tokens_across_dp = DPMetadata.num_tokens_across_dp(
                 batchsize, dp_size, dp_rank)
         max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp)

@@ -957,13 +957,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         query_start_loc = self.query_start_loc.gpu[:num_reqs + 1]
 
         num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
-        num_tokens_padded = num_tokens_unpadded + self.get_local_padding(
-            num_tokens_unpadded)
-        ubatch_slices, num_tokens_after_padding = \
-            ubatch_split(max_num_scheduled_tokens,
-                         num_tokens_unpadded,
-                         num_tokens_padded,
-                         self.vllm_config)
+        ubatch_slices = None
+        if self.vllm_config.parallel_config.enable_dbo:
+            num_tokens_padded = num_tokens_unpadded + self.get_local_padding(
+                num_tokens_unpadded)
+            ubatch_slices, num_tokens_after_padding = \
+                ubatch_split(max_num_scheduled_tokens,
+                            num_tokens_unpadded,
+                            num_tokens_padded,
+                            self.vllm_config)
+        else:
+            assert False
+            num_tokens_padded = self._get_num_input_tokens(num_tokens_unpadded)
+            num_pad, num_tokens_after_padding = self.get_dp_padding(
+                num_tokens_padded)
 
         self.seq_lens.np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
@@ -1837,23 +1844,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _preprocess(
         self,
         scheduler_output: "SchedulerOutput",
+        num_input_tokens: int,  # Padded
         intermediate_tensors: Optional[IntermediateTensors] = None,
-        ubatch_slices: Optional[UBatchSlices] = None,
-        num_tokens_after_padding: Optional[torch.Tensor] = None,
-    ) -> tuple[int, int, Optional[torch.Tensor], Optional[torch.Tensor],
-               Optional[torch.Tensor], torch.Tensor,
-               Optional[IntermediateTensors], dict[str, Any]]:
+    ) -> tuple[int, Optional[torch.Tensor], Optional[torch.Tensor],
+               torch.Tensor, Optional[IntermediateTensors], dict[str, Any]]:
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        if ubatch_slices:
-            assert num_tokens_after_padding is not None
-            num_input_tokens = int(num_tokens_after_padding[0].item() * 2)
-            self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
-        elif ubatch_slices is None:
-            num_input_tokens = self._get_num_input_tokens(num_scheduled_tokens)
-            num_pad, num_tokens_after_padding = self.get_dp_padding(
-                num_input_tokens)
-            num_input_tokens += num_pad
 
         # _prepare_inputs may reorder the batch, so we must gather multi
         # modal outputs after that to ensure the correct order
@@ -1907,8 +1903,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         return (
             num_scheduled_tokens,
-            num_input_tokens,
-            num_tokens_after_padding,
             input_ids,
             inputs_embeds,
             positions,
@@ -2121,17 +2115,27 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 if self.prepare_inputs_event is not None:
                     self.prepare_inputs_event.record()
 
+            if ubatch_slices:
+                assert num_tokens_after_padding is not None
+                num_input_tokens = int(num_tokens_after_padding[0].item() * 2)
+                self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
+            elif num_tokens_after_padding is not None:
+                logger.info(
+                    f"SETTING NUM INPUT TOKENS TO {num_tokens_after_padding}")
+                num_input_tokens = int(num_tokens_after_padding[0].item())
+            else:
+                num_input_tokens = self._get_num_input_tokens(
+                    scheduler_output.total_num_scheduled_tokens)
+
             (
                 num_scheduled_tokens,
-                num_input_tokens,
-                num_tokens_across_dp,
                 input_ids,
                 inputs_embeds,
                 positions,
                 intermediate_tensors,
                 model_kwargs,
-            ) = self._preprocess(scheduler_output, intermediate_tensors,
-                                 ubatch_slices, num_tokens_after_padding)
+            ) = self._preprocess(scheduler_output, num_input_tokens,
+                                 intermediate_tensors)
 
             if ubatch_slices is not None:
                 num_input_tokens = num_input_tokens // 2
@@ -2151,7 +2155,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 attn_metadata,
                 self.vllm_config,
                 num_tokens=num_input_tokens,
-                num_tokens_across_dp=num_tokens_across_dp,
+                num_tokens_across_dp=num_tokens_after_padding,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
                 batch_descriptor=batch_descriptor,
                 ubatch_slices=ubatch_slices,
@@ -2769,6 +2773,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 (1 token) and prefill (multiple tokens) requests.
             remove_lora: If False, dummy LoRAs are not destroyed after the run
         """
+        logger.info("DUMMY RUN")
         ubatch_enabled = self.parallel_config.enable_dbo
         num_tokens_across_dp = None
         num_pad = 0
@@ -2784,16 +2789,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Currently the dummy run should only be ubatching during
             # cuda graph capture, meaning all DP ranks should already
             # have the same batch size
-            if num_tokens_across_dp is not None:
+            assert num_tokens_across_dp is not None
+            if should_ubatch:
                 assert int(num_tokens_across_dp[0]) == num_tokens // 2
+            else:
+                logger.info(f"NUM TOKENS: {num_tokens} {num_tokens_across_dp}")
+                num_tokens = int(num_tokens_across_dp[0])
+        else:
+            assert False
+            logger.info(f"NUM TOKENS: {num_tokens}")
+            num_pad, num_tokens_across_dp = self.get_dp_padding(num_tokens)
+            num_tokens += num_pad
 
         assert cudagraph_runtime_mode in {
             CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
         }
-
-        if not should_ubatch:
-            num_pad, num_tokens_across_dp = self.get_dp_padding(num_tokens)
-        num_tokens += num_pad
 
         # If cudagraph_mode.decode_mode() == FULL and
         # cudagraph_mode.separate_routine(). This means that we are using

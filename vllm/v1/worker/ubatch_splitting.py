@@ -23,10 +23,10 @@ def should_ubatch_with_num_tokens(
 ) -> tuple[bool, Optional[torch.Tensor]]:
     dp_size = vllm_config.parallel_config.data_parallel_size
     dp_rank = vllm_config.parallel_config.data_parallel_rank
-    return DPMetadata.should_ubatch_across_dp(should_ubatch,
-                                              orig_num_tokens_per_ubatch,
-                                              padded_num_tokens_per_ubatch,
-                                              dp_size, dp_rank)
+    return DPMetadata.coordinate_batch_across_dp(should_ubatch,
+                                                 orig_num_tokens_per_ubatch,
+                                                 padded_num_tokens_per_ubatch,
+                                                 dp_size, dp_rank)
 
 
 def get_dp_padding_ubatch(
@@ -51,24 +51,19 @@ def get_dp_padding_ubatch(
     ]
 
     """
+    logger.info(
+        f"get_dp_padding_ubatch 1 {num_tokens_unpadded} {num_tokens_padded} {should_attempt_ubatching}"
+    )
     assert num_tokens_padded >= num_tokens_unpadded
     dp_size = vllm_config.parallel_config.data_parallel_size
     if dp_size == 1:
         # Early exit.
         return False, None
 
-    # If this DP rank doesn't want to attempt microbatching
-    if not should_attempt_ubatching:
-        (should_ubatch, num_tokens_across_dp) = should_ubatch_with_num_tokens(
-            False, 0, 0, vllm_config)
-        assert should_ubatch is False
-        assert num_tokens_across_dp is None
-        return should_ubatch, num_tokens_across_dp
-
     # Round up to the next multiple of two for even divisibility
     num_tokens_padded = round_up(num_tokens_padded, 2)
     num_tokens_per_ubatch = num_tokens_padded // 2
-    should_ubatch = True
+    should_ubatch = should_attempt_ubatching
 
     # Sanity Check that the existing padding isn't giving us an empty second
     # ubatch. Abort if so
@@ -82,9 +77,6 @@ def get_dp_padding_ubatch(
     (should_ubatch, num_tokens_across_dp) = should_ubatch_with_num_tokens(
         should_ubatch, num_tokens_unpadded // 2, num_tokens_per_ubatch,
         vllm_config)
-    if not should_ubatch:
-        assert num_tokens_across_dp is None
-        return should_ubatch, num_tokens_across_dp
 
     assert num_tokens_across_dp is not None
 
@@ -93,6 +85,9 @@ def get_dp_padding_ubatch(
                                             dp_size,
                                             device="cpu",
                                             dtype=torch.int32)
+    logger.info(
+        f"NUM TOKENS ACROSS DP: {num_tokens_across_dp} NUM TOKENS ACROSS CPU {num_tokens_after_padding}"
+    )
     return should_ubatch, num_tokens_after_padding
 
 
@@ -116,10 +111,6 @@ def ubatch_split(
 
     """
     parallel_config = vllm_config.parallel_config
-    # Don't bother with the should_ubatch handshaking unless microbatching
-    # is enabled
-    if not parallel_config.enable_dbo:
-        return (None, None)
 
     # Check preconditions for microbatching
     should_attempt_ubatching = \
@@ -134,7 +125,7 @@ def ubatch_split(
         num_tokens_unpadded, num_tokens_padded, should_attempt_ubatching,
         vllm_config)
     if not should_ubatch:
-        return (None, None)
+        return (None, num_tokens_after_padding)
 
     # This doesn't actually pad the ubatch slices. It just initializes the
     # split point to the padded value so that padding can be applied
