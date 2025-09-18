@@ -12,7 +12,7 @@ from vllm.engine.output_processor.stop_checker import StopChecker
 from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
-GEN_ENDPOINT = "/v1/generate"
+GEN_ENDPOINT = "/inference/v1/generate"
 
 
 def get_vocab_size(model_name):

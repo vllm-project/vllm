@@ -1208,7 +1208,7 @@ async def invocations(raw_request: Request):
     return JSONResponse(content=res.model_dump(), status_code=res.error.code)
 
 
-@router.post("/v1/generate",
+@router.post("/inference/v1/generate",
              dependencies=[Depends(validate_json_request)],
              responses={
                  HTTPStatus.OK.value: {
