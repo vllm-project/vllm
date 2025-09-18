@@ -365,6 +365,8 @@ def post_process_ubatch(tensor: torch.Tensor) -> bool:
 
     # First determine if we are going to be ubatching.
     should_ubatch: bool = bool(torch.all(tensor[2] == 1).item())
+    if not should_ubatch:
+        return False
     # If the DP ranks are planning to ubatch, make sure that
     # there are no "empty" second ubatches
     orig_min_num_tokens = int(orig_num_tokens_tensor.min().item())
