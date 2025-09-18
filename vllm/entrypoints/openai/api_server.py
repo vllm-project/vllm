@@ -27,7 +27,6 @@ from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from openai import BaseModel
 from prometheus_client import make_asgi_app
 from prometheus_fastapi_instrumentator import Instrumentator
 from starlette.concurrency import iterate_in_threadpool
@@ -67,7 +66,9 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               RerankRequest, RerankResponse,
                                               ResponsesRequest,
                                               ResponsesResponse, ScoreRequest,
-                                              ScoreResponse, TokenizeRequest,
+                                              ScoreResponse,
+                                              StreamingResponsesResponse,
+                                              TokenizeRequest,
                                               TokenizeResponse,
                                               TranscriptionRequest,
                                               TranscriptionResponse,
@@ -481,8 +482,8 @@ async def show_version():
 
 
 async def _convert_stream_to_sse_events(
-        generator: AsyncGenerator[BaseModel,
-                                  None]) -> AsyncGenerator[str, None]:
+    generator: AsyncGenerator[StreamingResponsesResponse, None]
+) -> AsyncGenerator[str, None]:
     """Convert the generator to a stream of events in SSE format"""
     async for event in generator:
         event_type = getattr(event, 'type', 'unknown')
@@ -1677,7 +1678,7 @@ async def init_app_state(
         enable_auto_tools=args.enable_auto_tool_choice,
         tool_parser=args.tool_call_parser,
         tool_server=tool_server,
-        reasoning_parser=args.reasoning_parser,
+        reasoning_parser=args.structured_outputs_config.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
         enable_log_outputs=args.enable_log_outputs,
@@ -1696,7 +1697,7 @@ async def init_app_state(
         exclude_tools_when_tool_choice_none=args.
         exclude_tools_when_tool_choice_none,
         tool_parser=args.tool_call_parser,
-        reasoning_parser=args.reasoning_parser,
+        reasoning_parser=args.structured_outputs_config.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
         enable_log_outputs=args.enable_log_outputs,
@@ -1799,10 +1800,10 @@ def validate_api_server_args(args):
                        f"(chose from {{ {','.join(valid_tool_parses)} }})")
 
     valid_reasoning_parses = ReasoningParserManager.reasoning_parsers.keys()
-    if args.reasoning_parser \
-        and args.reasoning_parser not in valid_reasoning_parses:
+    if ((reasoning_parser := args.structured_outputs_config.reasoning_parser)
+            and reasoning_parser not in valid_reasoning_parses):
         raise KeyError(
-            f"invalid reasoning parser: {args.reasoning_parser} "
+            f"invalid reasoning parser: {reasoning_parser} "
             f"(chose from {{ {','.join(valid_reasoning_parses)} }})")
 
 
