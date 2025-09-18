@@ -317,10 +317,11 @@ Full example: <gh-file:examples/online_serving/pooling/openai_chat_embedding_cli
 
 #### Extra parameters
 
-The following [pooling parameters][pooling-params] are supported.
+The following [pooling parameters][vllm.PoolingParams] are supported.
 
 ```python
---8<-- "vllm/entrypoints/openai/protocol.py:embedding-pooling-params"
+--8<-- "vllm/pooling_params.py:common-pooling-params"
+--8<-- "vllm/pooling_params.py:embedding-pooling-params"
 ```
 
 The following extra parameters are supported by default:
@@ -527,10 +528,11 @@ curl -v "http://127.0.0.1:8000/classify" \
 
 #### Extra parameters
 
-The following [pooling parameters][pooling-params] are supported.
+The following [pooling parameters][vllm.PoolingParams] are supported.
 
 ```python
---8<-- "vllm/entrypoints/openai/protocol.py:classification-pooling-params"
+--8<-- "vllm/pooling_params.py:common-pooling-params"
+--8<-- "vllm/pooling_params.py:classification-pooling-params"
 ```
 
 The following extra parameters are supported:
@@ -733,10 +735,11 @@ Full example: <gh-file:examples/online_serving/openai_cross_encoder_score_for_mu
 
 #### Extra parameters
 
-The following [pooling parameters][pooling-params] are supported.
+The following [pooling parameters][vllm.PoolingParams] are supported.
 
 ```python
---8<-- "vllm/entrypoints/openai/protocol.py:score-pooling-params"
+--8<-- "vllm/pooling_params.py:common-pooling-params"
+--8<-- "vllm/pooling_params.py:classification-pooling-params"
 ```
 
 The following extra parameters are supported:
@@ -815,10 +818,11 @@ Result documents will be sorted by relevance, and the `index` property can be us
 
 #### Extra parameters
 
-The following [pooling parameters][pooling-params] are supported.
+The following [pooling parameters][vllm.PoolingParams] are supported.
 
 ```python
---8<-- "vllm/entrypoints/openai/protocol.py:rerank-pooling-params"
+--8<-- "vllm/pooling_params.py:common-pooling-params"
+--8<-- "vllm/pooling_params.py:classification-pooling-params"
 ```
 
 The following extra parameters are supported:
