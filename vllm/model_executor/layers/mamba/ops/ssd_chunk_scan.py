@@ -215,7 +215,7 @@ def _chunk_scan_fwd_kernel(
                            mask=pid_c >= 1,
                            other=-1)
 
-    if HAS_INITSTATES:
+    if HAS_INITSTATES and (seq_idx != seq_idx_prev):
         prev_states_ptr = initstates_ptr + seq_idx * stride_init_states_batch + pid_h * stride_init_states_head
         prev_states_hdim = stride_init_states_hdim
         prev_states_dstate = stride_init_states_dstate
@@ -250,7 +250,12 @@ def _chunk_scan_fwd_kernel(
                     (offs_k_dstate[None, :] < dstate),
                     other=0.0)
 
-        if (seq_idx != seq_idx_prev and HAS_INITSTATES) or pid_c > 0:
+        if not HAS_INITSTATES and (seq_idx != seq_idx_prev):
+            # if no init states AND starting a new sequence, we need zeros
+            prev_states = tl.zeros((BLOCK_SIZE_DSTATE, BLOCK_SIZE_N),
+                                   dtype=C_ptr.dtype.element_ty)
+        else:
+            # otherwise read the previous state
             prev_states_ptrs = prev_states_ptr \
                     + offs_n[None, :] * prev_states_hdim \
                     + offs_k_dstate[:, None] * prev_states_dstate
@@ -259,9 +264,6 @@ def _chunk_scan_fwd_kernel(
                                   (offs_n[None, :] < hdim),
                                   other=0.0)
             prev_states = prev_states.to(C_ptr.dtype.element_ty)
-        else:
-            prev_states = tl.zeros((BLOCK_SIZE_DSTATE, BLOCK_SIZE_N),
-                                   dtype=C_ptr.dtype.element_ty)
 
         acc = tl.dot(C, prev_states) * scale_m[:, None]
 
@@ -274,16 +276,16 @@ def _chunk_scan_fwd_kernel(
                         mask=(offs_m[:, None] < chunk_size_limit) &
                         (offs_k_dstate[None, :] < dstate - k),
                         other=0.0)
-            if (seq_idx != seq_idx_prev and HAS_INITSTATES) or pid_c > 0:
+            if not HAS_INITSTATES and (seq_idx != seq_idx_prev):
+                prev_states = tl.zeros((BLOCK_SIZE_DSTATE, BLOCK_SIZE_K),
+                                       dtype=C_ptr.dtype.element_ty)
+            else:
                 prev_states = tl.load(
                     prev_states_ptrs,
                     mask=(offs_k_dstate[:, None] < dstate - k) &
                     (offs_n[None, :] < hdim),
                     other=0.0)
                 prev_states = prev_states.to(C_ptr.dtype.element_ty)
-            else:
-                prev_states = tl.zeros((BLOCK_SIZE_DSTATE, BLOCK_SIZE_K),
-                                       dtype=C_ptr.dtype.element_ty)
             acc += tl.dot(C, prev_states)
             C_ptrs += BLOCK_SIZE_K
             prev_states_ptrs += BLOCK_SIZE_K
