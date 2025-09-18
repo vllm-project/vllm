@@ -959,7 +959,6 @@ class EngineArgs:
         if (not isinstance(self, AsyncEngineArgs) and envs.VLLM_CI_USE_S3
                 and self.model in MODELS_ON_S3 and self.load_format == "auto"):
             self.model = f"{MODEL_WEIGHTS_S3_BUCKET}/{self.model}"
-            self.load_format = "runai_streamer"
 
         if self.disable_mm_preprocessor_cache:
             logger.warning(
