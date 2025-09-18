@@ -4,7 +4,6 @@ from typing import Callable, Optional
 
 import torch
 
-from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 
 
@@ -76,7 +75,7 @@ class SharedFusedMoE(FusedMoE):
 
             output = self._shared_fused_combine(shared_out, fused_out)
 
-            if self.tp_size > 1:
+            if self.tp_size > 1 or self.ep_size > 1:
                 output = self.maybe_all_reduce_tensor_model_parallel(output)
         else:
             output = super().forward(

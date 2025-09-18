@@ -267,7 +267,7 @@ class DeepseekV2MoE(nn.Module):
                 top_k=config.num_experts_per_tok,
                 hidden_size=config.hidden_size,
                 intermediate_size=config.moe_intermediate_size,
-                reduce_results=False,  # remove?
+                reduce_results=True,  # remove?
                 renormalize=config.norm_topk_prob,
                 quant_config=quant_config,
                 use_grouped_topk=True,
