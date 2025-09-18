@@ -1921,6 +1921,8 @@ def test_chunked_prefill_disabled_for_encoder_decoder(
         is_encoder_decoder=is_encoder_decoder,
     )
 
+    # `is_encoder_decoder` should only be used during construction of the config
+    assert not hasattr(scheduler_config, "is_encoder_decoder")
     _validate_chunked_prefill_settings_for_encoder_decoder(
         scheduler_config, is_encoder_decoder, expect_enabled)
 
