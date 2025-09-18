@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-# imports for guided decoding tests
+# imports for structured outputs tests
 import json
 from typing import Optional
 
@@ -471,8 +471,11 @@ async def test_chat_completion_stream_options(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-async def test_guided_choice_chat(client: openai.AsyncOpenAI,
-                                  sample_guided_choice):
+async def test_structured_outputs_choice_chat(
+        client: openai.AsyncOpenAI, sample_structured_outputs_choices,
+        is_v1_server: bool):
+    if not is_v1_server:
+        pytest.skip("Structured outputs is only supported in v1 engine")
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -487,9 +490,10 @@ async def test_guided_choice_chat(client: openai.AsyncOpenAI,
         messages=messages,
         max_completion_tokens=10,
         temperature=0.7,
-        extra_body=dict(guided_choice=sample_guided_choice))
+        extra_body=dict(
+            structured_outputs={"choice": sample_structured_outputs_choices}))
     choice1 = chat_completion.choices[0].message.content
-    assert choice1 in sample_guided_choice
+    assert choice1 in sample_structured_outputs_choices
 
     messages.append({"role": "assistant", "content": choice1})
     messages.append({
@@ -501,17 +505,19 @@ async def test_guided_choice_chat(client: openai.AsyncOpenAI,
         messages=messages,
         max_completion_tokens=10,
         temperature=0.7,
-        extra_body=dict(guided_choice=sample_guided_choice))
+        extra_body=dict(
+            structured_outputs={"choice": sample_structured_outputs_choices}))
     choice2 = chat_completion.choices[0].message.content
-    assert choice2 in sample_guided_choice
+    assert choice2 in sample_structured_outputs_choices
     assert choice1 != choice2
 
 
 @pytest.mark.asyncio
-async def test_guided_json_chat(
-    client: openai.AsyncOpenAI,
-    sample_json_schema,
-):
+async def test_structured_outputs_json_chat(client: openai.AsyncOpenAI,
+                                            sample_json_schema,
+                                            is_v1_server: bool):
+    if not is_v1_server:
+        pytest.skip("Structured outputs is only supported in v1 engine")
 
     messages = [{
         "role": "system",
@@ -527,7 +533,7 @@ async def test_guided_json_chat(
         model=MODEL_NAME,
         messages=messages,
         max_completion_tokens=1000,
-        extra_body=dict(guided_json=sample_json_schema))
+        extra_body=dict(structured_outputs={"json": sample_json_schema}))
     message = chat_completion.choices[0].message
     assert message.content is not None
     json1 = json.loads(message.content)
@@ -544,7 +550,7 @@ async def test_guided_json_chat(
         model=MODEL_NAME,
         messages=messages,
         max_completion_tokens=1000,
-        extra_body=dict(guided_json=sample_json_schema))
+        extra_body=dict(structured_outputs={"json": sample_json_schema}))
     message = chat_completion.choices[0].message
     assert message.content is not None
     json2 = json.loads(message.content)
@@ -554,10 +560,10 @@ async def test_guided_json_chat(
 
 
 @pytest.mark.asyncio
-async def test_guided_regex_chat(
-    client: openai.AsyncOpenAI,
-    sample_regex,
-):
+async def test_structured_outputs_regex_chat(client: openai.AsyncOpenAI,
+                                             sample_regex, is_v1_server: bool):
+    if not is_v1_server:
+        pytest.skip("Structured outputs is only supported in v1 engine")
 
     messages = [{
         "role": "system",
@@ -572,7 +578,7 @@ async def test_guided_regex_chat(
         model=MODEL_NAME,
         messages=messages,
         max_completion_tokens=20,
-        extra_body=dict(guided_regex=sample_regex))
+        extra_body=dict(structured_outputs={"regex": sample_regex}))
     ip1 = chat_completion.choices[0].message.content
     assert ip1 is not None
     assert re.fullmatch(sample_regex, ip1) is not None
@@ -583,7 +589,7 @@ async def test_guided_regex_chat(
         model=MODEL_NAME,
         messages=messages,
         max_completion_tokens=20,
-        extra_body=dict(guided_regex=sample_regex))
+        extra_body=dict(structured_outputs={"regex": sample_regex}))
     ip2 = chat_completion.choices[0].message.content
     assert ip2 is not None
     assert re.fullmatch(sample_regex, ip2) is not None
@@ -591,7 +597,7 @@ async def test_guided_regex_chat(
 
 
 @pytest.mark.asyncio
-async def test_guided_decoding_type_error(client: openai.AsyncOpenAI):
+async def test_structured_outputs_type_error(client: openai.AsyncOpenAI):
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -603,17 +609,19 @@ async def test_guided_decoding_type_error(client: openai.AsyncOpenAI):
     }]
 
     with pytest.raises(openai.BadRequestError):
-        _ = await client.chat.completions.create(model=MODEL_NAME,
-                                                 messages=messages,
-                                                 extra_body=dict(guided_regex={
-                                                     1: "Python",
-                                                     2: "C++"
-                                                 }))
+        _ = await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=messages,
+            extra_body=dict(
+                structured_outputs={"regex": {
+                    1: "Python",
+                    2: "C++"
+                }}))
 
 
 @pytest.mark.asyncio
-async def test_guided_choice_chat_logprobs(client: openai.AsyncOpenAI,
-                                           sample_guided_choice):
+async def test_structured_outputs_choice_chat_logprobs(
+        client: openai.AsyncOpenAI, sample_structured_outputs_choices):
 
     messages = [{
         "role": "system",
@@ -630,7 +638,8 @@ async def test_guided_choice_chat_logprobs(client: openai.AsyncOpenAI,
         max_completion_tokens=10,
         logprobs=True,
         top_logprobs=5,
-        extra_body=dict(guided_choice=sample_guided_choice))
+        extra_body=dict(
+            structured_outputs={"choice": sample_structured_outputs_choices}))
 
     assert chat_completion.choices[0].logprobs is not None
     assert chat_completion.choices[0].logprobs.content is not None
@@ -652,10 +661,23 @@ async def test_named_tool_use(
     }, {
         "role":
         "user",
-        "content":
-        f"Give an example JSON for an employee profile that "
-        f"fits this schema: {sample_json_schema}"
+        "content": ("Give an example JSON for an employee "
+                    "profile using the specified tool.")
     }]
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "dummy_function_name",
+            "description": "This is a dummy function",
+            "parameters": sample_json_schema
+        }
+    }]
+    tool_choice = {
+        "type": "function",
+        "function": {
+            "name": "dummy_function_name"
+        }
+    }
 
     # non-streaming
 
@@ -663,20 +685,8 @@ async def test_named_tool_use(
         model=MODEL_NAME,
         messages=messages,
         max_completion_tokens=1000,
-        tools=[{
-            "type": "function",
-            "function": {
-                "name": "dummy_function_name",
-                "description": "This is a dummy function",
-                "parameters": sample_json_schema
-            }
-        }],
-        tool_choice={
-            "type": "function",
-            "function": {
-                "name": "dummy_function_name"
-            }
-        },
+        tools=tools,
+        tool_choice=tool_choice,
     )
     message = chat_completion.choices[0].message
     assert len(message.content) == 0
@@ -694,25 +704,12 @@ async def test_named_tool_use(
 
     # streaming
 
-    stream = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=messages,
-        max_completion_tokens=1000,
-        tools=[{
-            "type": "function",
-            "function": {
-                "name": "dummy_function_name",
-                "description": "This is a dummy function",
-                "parameters": sample_json_schema
-            }
-        }],
-        tool_choice={
-            "type": "function",
-            "function": {
-                "name": "dummy_function_name"
-            }
-        },
-        stream=True)
+    stream = await client.chat.completions.create(model=MODEL_NAME,
+                                                  messages=messages,
+                                                  max_completion_tokens=1000,
+                                                  tools=tools,
+                                                  tool_choice=tool_choice,
+                                                  stream=True)
 
     output = []
     finish_reason_count = 0
