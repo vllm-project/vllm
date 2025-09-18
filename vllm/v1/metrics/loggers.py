@@ -19,6 +19,8 @@ from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
 logger = init_logger(__name__)
 
 StatLoggerFactory = Callable[[VllmConfig, int], "StatLoggerBase"]
+GlobalStatLoggerFactory = Callable[[VllmConfig, list[int]],
+                                   "GlobalStatLoggerBase"]
 
 
 class StatLoggerBase(ABC):
@@ -46,6 +48,15 @@ class StatLoggerBase(ABC):
 
     def log(self):  # noqa
         pass
+
+
+class GlobalStatLoggerBase(StatLoggerBase):
+    """Interface for logging metrics for multiple engines."""
+
+    @abstractmethod
+    def __init__(self, vllm_config: VllmConfig,
+                 engine_indexes: Optional[list[int]]):
+        ...
 
 
 class LoggingStatLogger(StatLoggerBase):
@@ -142,6 +153,63 @@ class LoggingStatLogger(StatLoggerBase):
             logger.info(
                 "Engine %03d: vllm cache_config_info with initialization "
                 "after num_gpu_blocks is: %d", self.engine_index,
+                self.vllm_config.cache_config.num_gpu_blocks)
+
+
+class GlobalStatLogger(LoggingStatLogger, GlobalStatLoggerBase):
+
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 engine_indexes: Optional[list[int]] = None):
+        super().__init__(vllm_config, -1)
+        if engine_indexes is None:
+            engine_indexes = [0]
+        self.engine_index = -1
+        self.engine_indexes = engine_indexes
+        self.vllm_config = vllm_config
+
+    def log(self):
+        now = time.monotonic()
+        prompt_throughput = self._get_throughput(self.num_prompt_tokens, now)
+        generation_throughput = self._get_throughput(
+            self.num_generation_tokens, now)
+
+        self._reset(now)
+
+        scheduler_stats = self.last_scheduler_stats
+
+        log_fn = logger.info
+        if not any(
+            (prompt_throughput, generation_throughput,
+             self.last_prompt_throughput, self.last_generation_throughput)):
+            # Avoid log noise on an idle production system
+            log_fn = logger.debug
+        self.last_generation_throughput = generation_throughput
+        self.last_prompt_throughput = prompt_throughput
+
+        # Format and print output.
+        log_fn(
+            "%s Engines Aggregated: "
+            "Avg prompt throughput: %.1f tokens/s, "
+            "Avg generation throughput: %.1f tokens/s, "
+            "Running: %d reqs, Waiting: %d reqs, "
+            "GPU KV cache usage: %.1f%%, "
+            "Prefix cache hit rate: %.1f%%",
+            len(self.engine_indexes),
+            prompt_throughput,
+            generation_throughput,
+            scheduler_stats.num_running_reqs,
+            scheduler_stats.num_waiting_reqs,
+            scheduler_stats.kv_cache_usage * 100,
+            self.prefix_caching_metrics.hit_rate * 100,
+        )
+        self.spec_decoding_logging.log(log_fn=log_fn)
+
+    def log_engine_initialized(self):
+        if self.vllm_config.cache_config.num_gpu_blocks:
+            logger.info(
+                "%d Engines: vllm cache_config_info with initialization "
+                "after num_gpu_blocks is: %d", len(self.engine_indexes),
                 self.vllm_config.cache_config.num_gpu_blocks)
 
 
@@ -655,6 +723,7 @@ class StatLoggerManager:
         vllm_config: VllmConfig,
         engine_idxs: Optional[list[int]] = None,
         custom_stat_loggers: Optional[list[StatLoggerFactory]] = None,
+        custom_stat_logger_global: Optional[GlobalStatLoggerFactory] = None,
         enable_default_loggers: bool = True,
         client_count: int = 1,
     ):
@@ -688,9 +757,14 @@ class StatLoggerManager:
                                               engine_idx))  # type: ignore
             self.per_engine_logger_dict[engine_idx] = loggers
 
-        # For Prometheus, need to share the metrics between EngineCores.
+        # For Prometheus or custom global logger,
+        # need to share the metrics between EngineCores.
         # Each EngineCore's metrics are expressed as a unique label.
         self.prometheus_logger = prometheus_factory(vllm_config, engine_idxs)
+        self.global_logger: Optional[StatLoggerBase] = None
+        if custom_stat_logger_global is not None:
+            self.global_logger = custom_stat_logger_global(
+                vllm_config, self.engine_idxs)
 
     def record(
         self,
@@ -707,15 +781,21 @@ class StatLoggerManager:
 
         self.prometheus_logger.record(scheduler_stats, iteration_stats,
                                       engine_idx)
+        if self.global_logger is not None:
+            self.global_logger.record(scheduler_stats, iteration_stats,
+                                      engine_idx)
 
     def log(self):
         for per_engine_loggers in self.per_engine_logger_dict.values():
             for logger in per_engine_loggers:
                 logger.log()
+        if self.global_logger is not None:
+            self.global_logger.log()
 
     def log_engine_initialized(self):
         self.prometheus_logger.log_engine_initialized()
-
+        if self.global_logger is not None:
+            self.global_logger.log_engine_initialized()
         for per_engine_loggers in self.per_engine_logger_dict.values():
             for logger in per_engine_loggers:
                 logger.log_engine_initialized()
