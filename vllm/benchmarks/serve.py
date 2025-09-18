@@ -52,6 +52,23 @@ TERM_PLOTLIB_AVAILABLE = ((importlib.util.find_spec("termplotlib") is not None)
                           and (shutil.which("gnuplot") is not None))
 
 
+# TODO: Remove this in v0.11.0
+class DeprecatedEndpointTypeAction(argparse.Action):
+    """Argparse action for the deprecated --endpoint-type flag.
+
+    Only emits a warning when the flag is used; does not map values.
+    """
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        warnings.warn(
+            "'--endpoint-type' is deprecated and will be removed in v0.11.0. "
+            "Please use `--backend` instead or remove this argument if you "
+            "have already set it.",
+            stacklevel=2,
+        )
+        setattr(namespace, self.dest, values)
+
+
 class TaskType(Enum):
     GENERATION = "generation"
     EMBEDDING = "embedding"
@@ -869,6 +886,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         type=str,
         default=None,
         choices=list(ASYNC_REQUEST_FUNCS.keys()),
+        action=DeprecatedEndpointTypeAction,
         help="'--endpoint-type' is deprecated and will be removed in v0.11.0. "
         "Please use '--backend' instead.",
     )
@@ -1148,14 +1166,6 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     random.seed(args.seed)
     np.random.seed(args.seed)
 
-    if args.endpoint_type is not None:
-        warnings.warn(
-            "'--endpoint-type' is deprecated and will be removed in v0.11.0. "
-            "Please use `--backend` instead or remove this argument if you "
-            "have already set it.",
-            stacklevel=2,
-        )
-
     # Validate ramp-up arguments
     if args.ramp_up_strategy is not None:
         if args.request_rate != float("inf"):
@@ -1272,7 +1282,8 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     # Setup
     current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
     result_json["date"] = current_dt
-    result_json["endpoint_type"] = args.backend
+    result_json["endpoint_type"] = args.backend # for backward compatibility
+    result_json["backend"] = args.backend
     result_json["label"] = label
     result_json["model_id"] = model_id
     result_json["tokenizer_id"] = tokenizer_id
