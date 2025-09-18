@@ -210,7 +210,7 @@ def gumbel_sample(
     if seeds is not None:
         # Per-request seed.
         assert pos is not None
-        gumbel_seeds = seeds + pos
+        gumbel_seeds = seeds ^ (pos * 0x9E3779B9)
     else:
         # Global seed.
         assert pos is None
