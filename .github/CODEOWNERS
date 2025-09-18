@@ -37,8 +37,8 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /vllm/v1/attention/backends/triton_attn.py @tdoublep
 /vllm/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @comaniac @alexm-redhat @heheda12345 @ApostaC
 /vllm/v1/kv_cache_interface.py @heheda12345
+/vllm/v1/worker/kv_cache_initializer_mixin.py @heheda12345
 /vllm/v1/offloading @ApostaC
-
 # Test ownership
 /.buildkite/lm-eval-harness @mgoin @simon-mo
 /tests/async_engine @njhill @robertgshaw2-redhat @simon-mo
