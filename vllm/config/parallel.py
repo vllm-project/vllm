@@ -21,10 +21,13 @@ if TYPE_CHECKING:
     from ray.runtime_env import RuntimeEnv
     from ray.util.placement_group import PlacementGroup
 
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+        KVConnectorHandshakeMetadata)
     from vllm.executor.executor_base import ExecutorBase
 else:
     RuntimeEnv = Any
     PlacementGroup = Any
+    KVConnectorHandshakeMetadata = Any
     ExecutorBase = Any
 
 logger = init_logger(__name__)
@@ -192,6 +195,11 @@ class ParallelConfig:
     """Number of decode context parallel groups, because the world size does
     not change by dcp, it simply reuse the GPUs of TP group, and tp_size
     needs to be divisible by dcp_size."""
+
+    kv_conn_endpoint_metadata: Optional[dict[int, dict[
+        int, KVConnectorHandshakeMetadata]]] = None
+    """ Metadata for KV transfer handshake between prefill and decode engine
+    processes."""
 
     @property
     def world_size_across_dp(self) -> int:

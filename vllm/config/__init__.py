@@ -11,6 +11,7 @@ import json
 import os
 import textwrap
 import warnings
+from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import InitVar, field, fields, is_dataclass, replace
 from functools import cached_property, lru_cache
@@ -1770,7 +1771,7 @@ class ModelConfig:
         return max_model_len
 
 
-Device = Literal["auto", "cuda", "cpu", "tpu", "xpu"]
+Device = Literal["auto", "cuda", "neuron", "cpu", "tpu", "xpu"]
 
 
 @config
@@ -2802,6 +2803,9 @@ class VllmConfig:
             if self.kv_transfer_config is not None:
                 # Hybrid KV cache manager is not compatible with KV transfer.
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True
+                if self.kv_transfer_config.is_kv_transfer_instance:
+                    self.parallel_config.kv_conn_endpoint_metadata = (
+                        defaultdict(dict))
             if self.kv_events_config is not None:
                 # Hybrid KV cache manager is not compatible with KV events.
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True
