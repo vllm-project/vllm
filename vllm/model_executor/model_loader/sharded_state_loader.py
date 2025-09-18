@@ -98,7 +98,8 @@ class ShardedStateLoader(BaseModelLoader):
         self._prepare_weights(model_config.model, model_config.revision)
 
     def _get_ignored_parameters(
-            self, state_dict: dict[str, torch.Tensor]) -> set[str]:
+            self, model_config: ModelConfig,
+            state_dict: dict[str, torch.Tensor]) -> set[str]:
         """
         Get the set of parameters that can be safely ignored when checking for 
         missing keys. Currently this includes MLA scaling parameters for 
@@ -107,20 +108,26 @@ class ShardedStateLoader(BaseModelLoader):
         
         Args:
             state_dict: The state dictionary with missing keys
+            model_config: The model configuration
             
         Returns:
             Set of key names that correspond to ignored parameters
         """
-        # Filter out MLA scaling parameters for DeepSeek models - these
-        # parameters are dynamically created during model initialization,
-        # not loaded from checkpoints
-        mla_scale_suffixes = ('.q_scale', '.k_scale', '.v_scale',
-                              '.prob_scale')
-        return {
-            k
-            for k in state_dict if any(
-                k.endswith(suffix) for suffix in mla_scale_suffixes)
-        }
+        # Only apply this logic for DeepSeek models
+        if "deepseek" in model_config.model.lower():
+            # Filter out MLA scaling parameters for DeepSeek models - these
+            # parameters are dynamically created during model initialization,
+            # not loaded from checkpoints
+            mla_scale_suffixes = ('.q_scale', '.k_scale', '.v_scale',
+                                  '.prob_scale')
+            return {
+                k
+                for k in state_dict if any(
+                    k.endswith(suffix) for suffix in mla_scale_suffixes)
+            }
+
+        # For non-DeepSeek models, return an empty set
+        return set()
 
     def load_weights(self, model: nn.Module,
                      model_config: ModelConfig) -> None:
@@ -173,7 +180,8 @@ class ShardedStateLoader(BaseModelLoader):
         # Filter out parameters that can be safely ignored (e.g., MLA scaling
         # parameters for DeepSeek models)
         if state_dict:
-            ignored_params = self._get_ignored_parameters(state_dict)
+            ignored_params = self._get_ignored_parameters(
+                model_config, state_dict)
             # Remove ignored parameters from state_dict
             for param_name in ignored_params:
                 state_dict.pop(param_name)
