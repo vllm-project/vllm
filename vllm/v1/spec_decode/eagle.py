@@ -3,7 +3,7 @@
 import ast
 from dataclasses import replace
 from importlib.util import find_spec
-from typing import Optional, Protocol
+from typing import Optional
 
 import numpy as np
 import torch
@@ -21,6 +21,7 @@ from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.v1.attention.backends.flashinfer import FlashInferMetadata
 from vllm.v1.attention.backends.tree_attn import (TreeAttentionMetadata,
                                                   TreeAttentionMetadataBuilder)
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
@@ -35,17 +36,6 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 logger = init_logger(__name__)
 
 PADDING_SLOT_ID = -1
-
-
-class EagleAttentionMetadata(Protocol):
-    # Required attributes
-    num_actual_tokens: int
-    max_query_len: int
-    query_start_loc: torch.Tensor
-    max_seq_len: int
-    seq_lens: torch.Tensor
-    block_table: torch.Tensor
-    slot_mapping: torch.Tensor
 
 
 class EagleProposer:
@@ -118,7 +108,7 @@ class EagleProposer:
             with_numpy=True)
 
         # Determine allowed attention backends once during initialization.
-        self.allowed_attn_types: tuple[type[EagleAttentionMetadata], ...]
+        self.allowed_attn_types: tuple
         if current_platform.is_rocm():
             rocm_types = [TritonAttentionMetadata, FlashAttentionMetadata]
             # vllm.v1.attention.backends.rocm_aiter_fa is an optional backend
@@ -129,7 +119,8 @@ class EagleProposer:
             self.allowed_attn_types = tuple(rocm_types)
         else:
             self.allowed_attn_types = (FlashAttentionMetadata,
-                                       TreeAttentionMetadata)
+                                       TreeAttentionMetadata,
+                                       FlashInferMetadata)
 
         # Parse the speculative token tree.
         spec_token_tree = self.speculative_config.speculative_token_tree

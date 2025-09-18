@@ -25,7 +25,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv, is_pin_memory_available
-from vllm.utils.flashinfer import (flashinfer_disable_q_quantization,
+from vllm.utils.flashinfer import (can_use_trtllm_attention,
+                                   flashinfer_disable_q_quantization,
                                    supports_trtllm_attention,
                                    use_trtllm_attention)
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
@@ -292,6 +293,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         else:
             self.q_data_type = self.model_config.dtype
 
+        supports_spec_as_decode = \
+            can_use_trtllm_attention(self.num_qo_heads, self.num_kv_heads)
+        self._init_reorder_batch_threshold(1, supports_spec_as_decode)
+
         self._cascade_wrapper = None  # Wrapper for cascade attention
 
         # Global hyperparameters shared by all attention layers
@@ -406,7 +411,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens =\
             split_decodes_and_prefills(common_attn_metadata,
-                                       decode_threshold=self.reorder_batch_threshold)
+                                       decode_threshold=self.reorder_batch_threshold,
+                                       require_uniform=True)
 
         page_size = self.page_size
         max_q_len = common_attn_metadata.max_query_len
@@ -487,6 +493,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                                                   max_seq_len,
                                                   self.cache_dtype,
                                                   self.q_data_type,
+                                                  is_prefill=True,
                                                   has_sinks=self.has_sinks)
         decode_use_trtllm = use_trtllm_attention(self.num_qo_heads,
                                                  self.num_kv_heads,
@@ -494,6 +501,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                                                  max_seq_len,
                                                  self.cache_dtype,
                                                  self.q_data_type,
+                                                 is_prefill=False,
                                                  has_sinks=self.has_sinks)
         if self.has_sinks and not (prefill_use_trtllm and decode_use_trtllm):
             raise NotImplementedError(
@@ -596,7 +604,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                                  num_decodes <= self._decode_cudagraph_max_bs)
                 if use_cudagraph:
                     num_input_tokens = (
-                        self.vllm_config.pad_for_cudagraph(num_decodes))
+                        self.vllm_config.pad_for_cudagraph(num_decode_tokens))
                     # Carefully fulfill the padding region with reasonable value
                     # on cpu.
                     # Make sure paged_kv_indptr_cpu is not decreasing
@@ -610,7 +618,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         num_decodes:num_input_tokens].fill_(1)
 
                 else:
-                    num_input_tokens = num_decodes
+                    num_input_tokens = num_decode_tokens
 
                 attn_metadata.decode_wrapper = self._get_decode_wrapper(
                     num_input_tokens, use_cudagraph)
@@ -831,6 +839,9 @@ class FlashInferImpl(AttentionImpl):
             output.copy_(attn_metadata.cascade_wrapper.run(query, kv_cache))
             return output
 
+        # When using spec decoding, num_decodes can be < num_decode_tokens
+        # because some decode requests may have more than one query token.
+        num_decodes = attn_metadata.num_decodes
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_prefill_tokens = attn_metadata.num_prefill_tokens
 
@@ -863,8 +874,8 @@ class FlashInferImpl(AttentionImpl):
                 prefill_query = prefill_query.contiguous()
                 workspace_buffer = prefill_wrapper._float_workspace_buffer
                 block_tables_prefill = attn_metadata.block_table_tensor[
-                    num_decode_tokens:]
-                seq_lens_prefill = attn_metadata.seq_lens[num_decode_tokens:]
+                    num_decodes:]
+                seq_lens_prefill = attn_metadata.seq_lens[num_decodes:]
 
                 # This path needs to be enabled with VLLM_KV_CACHE_LAYOUT = HND
                 assert get_kv_cache_layout() == "HND"
@@ -965,6 +976,14 @@ class FlashInferImpl(AttentionImpl):
                     assert self.o_sf_scale is None
                     out = output[:num_decode_tokens]
 
+                if num_decode_tokens % attn_metadata.num_decodes != 0:
+                    # This gets triggered when the dummy_run forces
+                    # attention to be initialized with q_len = 0
+                    q_len_per_req = 1
+                else:
+                    q_len_per_req = \
+                        num_decode_tokens // attn_metadata.num_decodes
+
                 trtllm_batch_decode_with_kv_cache(
                     query=decode_query,
                     kv_cache=kv_cache_permute,
@@ -978,7 +997,7 @@ class FlashInferImpl(AttentionImpl):
                     sinks=self.sinks,
                     o_sf_scale=self.o_sf_scale,
                     out=out,
-                )
+                    q_len_per_req=q_len_per_req)
         return output_padded
 
 
