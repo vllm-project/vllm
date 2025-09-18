@@ -149,8 +149,11 @@ if TYPE_CHECKING:
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5557
-    VLLM_ALL2ALL_BACKEND: Literal["naive", "pplx", "deepep_high_throughput",
-                                  "deepep_low_latency"] = "naive"
+    VLLM_ALL2ALL_BACKEND: Literal["naive", "pplx",
+                                  "deepep_high_throughput",
+                                  "deepep_low_latency",
+                                  "allgather_reducescatter"] = \
+                                  "allgather_reducescatter"
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_SLEEP_WHEN_IDLE: bool = False
@@ -1124,14 +1127,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # all2all backend for vllm's expert parallel communication
     # Available options:
-    # - "naive": naive all2all implementation using all-reduce
+    # - "naive": naive all2all implementation using broadcasts
+    # - "allgather_reducescatter": all2all implementation based on allgather and
+    #  reducescatter
     # - "pplx": use pplx kernels
     # - "deepep_high_throughput", use deepep high-throughput kernels
     # - "deepep_low_latency", use deepep low-latency kernels
     "VLLM_ALL2ALL_BACKEND":
-    env_with_choices("VLLM_ALL2ALL_BACKEND", "naive",
+    env_with_choices("VLLM_ALL2ALL_BACKEND", "allgather_reducescatter",
                      ["naive", "pplx",
-                     "deepep_high_throughput", "deepep_low_latency"]),
+                     "deepep_high_throughput",
+                     "deepep_low_latency",
+                     "allgather_reducescatter"]),
 
     # Flashinfer MoE backend for vLLM's fused Mixture-of-Experts support.
     # Both require compute capability 10.0 or above.
