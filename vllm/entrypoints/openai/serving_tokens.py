@@ -83,7 +83,7 @@ class OpenAIServingTokens(OpenAIServing):
         lora_request = self._maybe_get_adapters(request,
             supports_default_mm_loras=True)
 
-        model_name = self._get_model_name(request.model, lora_request)
+        model_name = self.models.model_name(lora_request)
 
         request_id = "generate-tokens-" \
                      f"{self._base_request_id(raw_request, request.request_id)}"

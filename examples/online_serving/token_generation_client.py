@@ -3,7 +3,7 @@
 import httpx
 from transformers import AutoTokenizer
 
-GEN_ENDPOINT = "http://localhost:8000/v1/generate"
+GEN_ENDPOINT = "http://localhost:8000/inference/v1/generate"
 DUMMY_API_KEY = "empty"
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 
