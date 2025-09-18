@@ -26,6 +26,7 @@ from openai.types.responses import (
     ResponseContentPartAddedEvent, ResponseContentPartDoneEvent,
     ResponseCreatedEvent, ResponseFunctionCallArgumentsDoneEvent,
     ResponseFunctionToolCall, ResponseFunctionWebSearch,
+    ResponseFunctionCallArgumentsDeltaEvent,
     ResponseInProgressEvent, ResponseOutputItem, ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent, ResponseOutputMessage, ResponseOutputText,
     ResponseReasoningItem, ResponseReasoningTextDeltaEvent,
@@ -1652,16 +1653,16 @@ class OpenAIServingResponses(OpenAIServing):
                 )
                 if sent_function_call_item_added is False:
                     sent_function_call_item_added = True
-                    yield _send_event(
-                        openai_responses_types.ResponseOutputItemAddedEvent(
+                    current_item_id = f"fc_{random_uuid()}"
+                    yield _increment_sequence_number_and_return(
+                        ResponseOutputItemAddedEvent(
                             type="response.output_item.added",
                             sequence_number=-1,
                             output_index=current_output_index,
                             item=tool_call_item,
                         ))
                 else:
-                    yield _send_event(
-                        openai_responses_types.
+                    yield _increment_sequence_number_and_return(
                         ResponseFunctionCallArgumentsDeltaEvent(
                             item_id=current_item_id,
                             delta=ctx.parser.last_content_delta,
