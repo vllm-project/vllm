@@ -53,7 +53,6 @@ def parse_args():
         "--method",
         type=str,
         default="eagle",
-        choices=["ngram", "eagle", "eagle3", "mtp", "draft_model"],
     )
     parser.add_argument("--num-spec-tokens", type=int, default=2)
     parser.add_argument("--prompt-lookup-max", type=int, default=5)
@@ -130,6 +129,11 @@ def main():
             "num_speculative_tokens": args.num_spec_tokens,
             "enforce_eager": args.enforce_eager,
             "max_model_len": args.max_model_len,
+        }
+    elif args.method.endswith("mtp"):
+        speculative_config = {
+            "method": args.method,
+            "num_speculative_tokens": args.num_spec_tokens,
         }
     else:
         raise ValueError(f"unknown method: {args.method}")
