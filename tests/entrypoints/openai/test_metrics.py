@@ -22,7 +22,7 @@ MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 PREV_MINOR_VERSION = version._prev_minor_version()
 
 
-@pytest.fixture(scope="module", params=[True, False])
+@pytest.fixture(scope="module", params=[True])
 def use_v1(request):
     # Module-scoped variant of run_with_both_engines
     #
