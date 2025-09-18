@@ -8,8 +8,8 @@ to launch the vLLM OpenAI API server:
 
 On the client side, run:
     vllm bench serve \
-        --endpoint-type <endpoint_type. Default 'openai'> \
-        --label <benchmark result label. Default using endpoint_type> \
+        --backend <backend or endpoint type. Default 'openai'> \
+        --label <benchmark result label. Default using backend> \
         --model <your_model> \
         --dataset-name <dataset_name. Default 'random'> \
         --request-rate <request_rate. Default inf> \
@@ -18,9 +18,11 @@ On the client side, run:
 import argparse
 import asyncio
 import gc
+import importlib.util
 import json
 import os
 import random
+import shutil
 import time
 import warnings
 from collections.abc import AsyncGenerator, Iterable
@@ -45,6 +47,24 @@ from vllm.benchmarks.lib.utils import (convert_to_pytorch_benchmark_format,
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
+
+TERM_PLOTLIB_AVAILABLE = ((importlib.util.find_spec("termplotlib") is not None)
+                          and (shutil.which("gnuplot") is not None))
+
+
+# TODO: Remove this in v0.11.0
+class DeprecatedEndpointTypeAction(argparse.Action):
+    """Argparse action for the deprecated --endpoint-type flag.
+    """
+
+    def __call__(self, _, namespace, values, option_string=None):
+        warnings.warn(
+            "'--endpoint-type' is deprecated and will be removed in v0.11.0. "
+            "Please use '--backend' instead or remove this argument if you "
+            "have already set it.",
+            stacklevel=1,
+        )
+        setattr(namespace, self.dest, values)
 
 
 class TaskType(Enum):
@@ -80,17 +100,22 @@ class BenchmarkMetrics:
     median_e2el_ms: float
     std_e2el_ms: float
     percentiles_e2el_ms: list[tuple[float, float]]
+    # Max output tokens per second and concurrent requests at that peak
+    max_output_tokens_per_s: float
+    max_concurrent_requests: int
+
 
 @dataclass
 class EmbedBenchmarkMetrics:
     completed: int
     total_input: int
     request_throughput: float
-    total_token_throughput :float
+    total_token_throughput: float
     mean_e2el_ms: float
     std_e2el_ms: float
     median_e2el_ms: float
     percentiles_e2el_ms: float
+
 
 def _get_current_request_rate(
     ramp_up_strategy: Optional[Literal["linear", "exponential"]],
@@ -139,7 +164,7 @@ async def get_request(
             A lower burstiness value (0 < burstiness < 1) results
             in more bursty requests, while a higher burstiness value
             (burstiness > 1) results in a more uniform arrival of requests.
-         ramp_up_strategy (optional):
+        ramp_up_strategy (optional):
             The ramp-up strategy. Can be "linear" or "exponential".
             If None, uses constant request rate (specified by request_rate).
         ramp_up_start_rps (optional):
@@ -150,8 +175,8 @@ async def get_request(
     assert burstiness > 0, (
         f"A positive burstiness factor is expected, but given {burstiness}.")
     # Convert to list to get length for ramp-up calculations
-    if isinstance(input_requests, Iterable) and not isinstance(
-            input_requests, list):
+    if isinstance(input_requests,
+                  Iterable) and not isinstance(input_requests, list):
         input_requests = list(input_requests)
 
     total_requests = len(input_requests)
@@ -161,12 +186,9 @@ async def get_request(
     request_rates = []
     delay_ts = []
     for request_index, request in enumerate(input_requests):
-        current_request_rate = _get_current_request_rate(ramp_up_strategy,
-                                                         ramp_up_start_rps,
-                                                         ramp_up_end_rps,
-                                                         request_index,
-                                                         total_requests,
-                                                         request_rate)
+        current_request_rate = _get_current_request_rate(
+            ramp_up_strategy, ramp_up_start_rps, ramp_up_end_rps,
+            request_index, total_requests, request_rate)
         request_rates.append(current_request_rate)
         if current_request_rate == float("inf"):
             delay_ts.append(0)
@@ -189,7 +211,7 @@ async def get_request(
         # NOTE: If we simply accumulate the random delta values
         # from the gamma distribution, their sum would have 1-2% gap
         # from target_total_delay_s. The purpose of the following logic is to
-        # close the gap for stablizing the throughput data
+        # close the gap for stabilizing the throughput data
         # from different random seeds.
         target_total_delay_s = total_requests / request_rate
         normalize_factor = target_total_delay_s / delay_ts[-1]
@@ -206,10 +228,8 @@ async def get_request(
 
 
 def calculate_metrics_for_embeddings(
-    outputs: list[RequestFuncOutput], 
-    dur_s: float, 
-    selected_percentiles: list[float]
-) -> EmbedBenchmarkMetrics:
+        outputs: list[RequestFuncOutput], dur_s: float,
+        selected_percentiles: list[float]) -> EmbedBenchmarkMetrics:
     """Calculate the metrics for the embedding requests.
 
     Args:
@@ -242,10 +262,8 @@ def calculate_metrics_for_embeddings(
         mean_e2el_ms=np.mean(e2els or 0) * 1000,
         std_e2el_ms=np.std(e2els or 0) * 1000,
         median_e2el_ms=np.median(e2els or 0) * 1000,
-        percentiles_e2el_ms=[
-            (p, np.percentile(e2els or 0, p) * 1000) 
-            for p in selected_percentiles
-        ],
+        percentiles_e2el_ms=[(p, np.percentile(e2els or 0, p) * 1000)
+                             for p in selected_percentiles],
     )
     return metrics
 
@@ -336,6 +354,67 @@ def calculate_metrics(
             "All requests failed. This is likely due to a misconfiguration "
             "on the benchmark arguments.",
             stacklevel=2)
+
+    # Calculate max output tokens per second metric
+    max_output_tokens_per_s = 0.0
+    max_concurrent_requests = 0
+
+    # Find the time range across all successful requests
+    successful_outputs = [output for output in outputs if output.success]
+    if successful_outputs:
+        min_start_time = min(output.start_time
+                             for output in successful_outputs)
+        max_end_time = max(output.start_time + output.latency
+                           for output in successful_outputs)
+
+        # Create second buckets (ceiling to ensure we capture all time)
+        duration_seconds = int(np.ceil(max_end_time - min_start_time)) + 1
+        tokens_per_second = np.zeros(duration_seconds)
+        concurrent_requests_per_second = np.zeros(duration_seconds)
+
+        for i, output in enumerate(successful_outputs):
+            # Calculate token generation timestamp using
+            # start_time, ttft, and itl
+            token_times = [output.start_time + output.ttft]
+            current_time = token_times[0]
+            for itl_value in output.itl:
+                current_time += itl_value
+                token_times.append(current_time)
+
+            # Add tokens to second buckets
+            for token_time in token_times:
+                second_bucket = int(token_time - min_start_time)
+                if 0 <= second_bucket < duration_seconds:
+                    tokens_per_second[second_bucket] += 1
+
+            # Track concurrent requests for each second this request was active
+            request_start_second = int(output.start_time - min_start_time)
+            request_end_second = int((output.start_time + output.latency) -
+                                     min_start_time)
+
+            for second in range(request_start_second, request_end_second + 1):
+                concurrent_requests_per_second[second] += 1
+
+        # Find the maximum tokens per second and corresponding
+        # concurrent requests
+        if len(tokens_per_second) > 0:
+            max_output_tokens_per_s = float(np.max(tokens_per_second))
+            max_concurrent_requests = int(
+                np.max(concurrent_requests_per_second))
+
+        if TERM_PLOTLIB_AVAILABLE:
+            import termplotlib as tpl
+            fig = tpl.figure()
+            fig.plot(np.arange(len(tokens_per_second)),
+                     tokens_per_second,
+                     title="Output tokens per second")
+            fig.plot(np.arange(len(concurrent_requests_per_second)),
+                     concurrent_requests_per_second,
+                     title="Concurrent requests per second")
+            fig.show()
+        else:
+            print("tip: install termplotlib and gnuplot to plot the metrics")
+
     metrics = BenchmarkMetrics(
         completed=completed,
         total_input=total_input,
@@ -365,6 +444,8 @@ def calculate_metrics(
         median_e2el_ms=np.median(e2els or 0) * 1000,
         percentiles_e2el_ms=[(p, np.percentile(e2els or 0, p) * 1000)
                              for p in selected_percentiles],
+        max_output_tokens_per_s=max_output_tokens_per_s,
+        max_concurrent_requests=max_concurrent_requests,
     )
 
     return metrics, actual_output_lens
@@ -389,24 +470,22 @@ async def benchmark(
     goodput_config_dict: dict[str, float],
     max_concurrency: Optional[int],
     lora_modules: Optional[Iterable[str]],
+    extra_headers: Optional[dict],
     extra_body: Optional[dict],
     ramp_up_strategy: Optional[Literal["linear", "exponential"]] = None,
     ramp_up_start_rps: Optional[int] = None,
     ramp_up_end_rps: Optional[int] = None,
     ready_check_timeout_sec: int = 600,
 ):
-    task_type = (
-        TaskType.EMBEDDING
-        if api_url.endswith("/v1/embeddings")
-        else TaskType.GENERATION
-    )
+    task_type = (TaskType.EMBEDDING if api_url.endswith("/v1/embeddings") else
+                 TaskType.GENERATION)
     if endpoint_type in ASYNC_REQUEST_FUNCS:
         if task_type == TaskType.EMBEDDING:
             request_func = ASYNC_REQUEST_FUNCS["openai-embeddings"]
         else:
             request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
     else:
-        raise ValueError(f"Unknown endpoint_type: {endpoint_type}")
+        raise ValueError(f"Unknown backend: {endpoint_type}")
 
     # Reuses connections across requests to reduce TLS handshake overhead.
     connector = aiohttp.TCPConnector(
@@ -434,14 +513,10 @@ async def benchmark(
         input_requests[0].multi_modal_data,
     )
 
-    assert (
-        test_mm_content is None
-        or isinstance(test_mm_content, dict)
-        or (
-            isinstance(test_mm_content, list)
-            and all(isinstance(item, dict) for item in test_mm_content)
-        )
-    ), "multi_modal_data must be a dict or list[dict]"
+    assert (test_mm_content is None or isinstance(test_mm_content, dict)
+            or (isinstance(test_mm_content, list)
+                and all(isinstance(item, dict) for item in test_mm_content))
+            ), "multi_modal_data must be a dict or list[dict]"
     test_input = RequestFuncInput(
         model=model_id,
         model_name=model_name,
@@ -452,6 +527,7 @@ async def benchmark(
         logprobs=logprobs,
         multi_modal_content=test_mm_content,
         ignore_eos=ignore_eos,
+        extra_headers=extra_headers,
         extra_body=extra_body,
     )
 
@@ -484,14 +560,15 @@ async def benchmark(
                                          logprobs=logprobs,
                                          multi_modal_content=test_mm_content,
                                          ignore_eos=ignore_eos,
+                                         extra_headers=extra_headers,
                                          extra_body=extra_body)
-        profile_output = await request_func(
-            request_func_input=profile_input, session=session)
+        profile_output = await request_func(request_func_input=profile_input,
+                                            session=session)
         if profile_output.success:
             print("Profiler started")
 
-    distribution = ("Poisson process" if burstiness == 1.0
-                    else "Gamma distribution")
+    distribution = ("Poisson process"
+                    if burstiness == 1.0 else "Gamma distribution")
 
     if ramp_up_strategy is not None:
         print(f"Traffic ramp-up strategy: {ramp_up_strategy}.")
@@ -559,17 +636,20 @@ async def benchmark(
             req_lora_module = next(lora_modules)
             req_model_id, req_model_name = req_lora_module, req_lora_module
 
-        request_func_input = RequestFuncInput(model=req_model_id,
-                                              model_name=req_model_name,
-                                              prompt=prompt,
-                                              api_url=api_url,
-                                              prompt_len=prompt_len,
-                                              output_len=output_len,
-                                              logprobs=logprobs,
-                                              multi_modal_content=mm_content,
-                                              ignore_eos=ignore_eos,
-                                              extra_body=extra_body,
-                                              request_id=request_id,)
+        request_func_input = RequestFuncInput(
+            model=req_model_id,
+            model_name=req_model_name,
+            prompt=prompt,
+            api_url=api_url,
+            prompt_len=prompt_len,
+            output_len=output_len,
+            logprobs=logprobs,
+            multi_modal_content=mm_content,
+            ignore_eos=ignore_eos,
+            extra_headers=extra_headers,
+            extra_body=extra_body,
+            request_id=request_id,
+        )
         tasks.append(
             asyncio.create_task(
                 limited_request_func(request_func_input=request_func_input,
@@ -611,19 +691,21 @@ async def benchmark(
                                     benchmark_duration))
     print("{:<40} {:<10}".format("Total input tokens:", metrics.total_input))
     if isinstance(metrics, BenchmarkMetrics):
-        print("{:<40} {:<10}".format(
-            "Total generated tokens:", metrics.total_output))
+        print("{:<40} {:<10}".format("Total generated tokens:",
+                                     metrics.total_output))
     print("{:<40} {:<10.2f}".format("Request throughput (req/s):",
                                     metrics.request_throughput))
     if goodput_config_dict:
         print("{:<40} {:<10.2f}".format("Request goodput (req/s):",
                                         metrics.request_goodput))
     if isinstance(metrics, BenchmarkMetrics):
-        print(
-            "{:<40} {:<10.2f}".format(
-                "Output token throughput (tok/s):", metrics.output_throughput
-            )
-        )
+        print("{:<40} {:<10.2f}".format("Output token throughput (tok/s):",
+                                        metrics.output_throughput))
+        print("{:<40} {:<10.2f}".format(
+            "Peak output token throughput (tok/s):",
+            metrics.max_output_tokens_per_s))
+        print("{:<40} {:<10.2f}".format("Peak concurrent requests:",
+                                        metrics.max_concurrent_requests))
     print("{:<40} {:<10.2f}".format("Total Token throughput (tok/s):",
                                     metrics.total_token_throughput))
 
@@ -644,6 +726,8 @@ async def benchmark(
             "itls": [output.itl for output in outputs],
             "generated_texts": [output.generated_text for output in outputs],
             "errors": [output.error for output in outputs],
+            "max_output_tokens_per_s": metrics.max_output_tokens_per_s,
+            "max_concurrent_requests": metrics.max_concurrent_requests,
         }
     else:
         result = {
@@ -693,8 +777,8 @@ async def benchmark(
 
     if task_type == TaskType.GENERATION:
         process_one_metric("ttft", "TTFT", "Time to First Token")
-        process_one_metric(
-            "tpot", "TPOT", "Time per Output Token (excl. 1st token)")
+        process_one_metric("tpot", "TPOT",
+                           "Time per Output Token (excl. 1st token)")
         process_one_metric("itl", "ITL", "Inter-token Latency")
     process_one_metric("e2el", "E2EL", "End-to-end Latency")
 
@@ -710,8 +794,8 @@ async def benchmark(
             output_len=test_output_len,
             logprobs=logprobs,
         )
-        profile_output = await request_func(
-            request_func_input=profile_input, session=session)
+        profile_output = await request_func(request_func_input=profile_input,
+                                            session=session)
         if profile_output.success:
             print("Profiler stopped")
 
@@ -782,23 +866,27 @@ def save_to_pytorch_benchmark_format(args: argparse.Namespace,
 def add_cli_args(parser: argparse.ArgumentParser):
     add_dataset_parser(parser)
     parser.add_argument(
-        "--endpoint-type",
-        type=str,
-        default="openai",
-        choices=list(ASYNC_REQUEST_FUNCS.keys()),
-    )
-    parser.add_argument(
         "--label",
         type=str,
         default=None,
         help="The label (prefix) of the benchmark results. If not specified, "
-        "the endpoint type will be used as the label.",
+        "the value of '--backend' will be used as the label.",
     )
     parser.add_argument(
         "--backend",
         type=str,
-        default="vllm",
+        default="openai",
         choices=list(ASYNC_REQUEST_FUNCS.keys()),
+        help="The type of backend or endpoint to use for the benchmark."
+    )
+    parser.add_argument(
+        "--endpoint-type",
+        type=str,
+        default=None,
+        choices=list(ASYNC_REQUEST_FUNCS.keys()),
+        action=DeprecatedEndpointTypeAction,
+        help="'--endpoint-type' is deprecated and will be removed in v0.11.0. "
+        "Please use '--backend' instead.",
     )
     parser.add_argument(
         "--base-url",
@@ -814,6 +902,15 @@ def add_cli_args(parser: argparse.ArgumentParser):
         type=str,
         default="/v1/completions",
         help="API endpoint.",
+    )
+    parser.add_argument(
+        "--header",
+        metavar="KEY=VALUE",
+        nargs="*",
+        help="Key-value pairs (e.g, --header x-additional-info=0.3.3) "
+        "for headers to be passed with each request. These headers override " \
+        "per backend constants and values set via environment variable, and " \
+        "will be overriden by other arguments (such as request ids)."
     )
     parser.add_argument(
         "--max-concurrency",
@@ -838,7 +935,8 @@ def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--tokenizer",
         type=str,
-        help="Name or path of the tokenizer, if not using the default tokenizer.",  # noqa: E501
+        help=
+        "Name or path of the tokenizer, if not using the default tokenizer.",  # noqa: E501
     )
     parser.add_argument("--use-beam-search", action="store_true")
     parser.add_argument(
@@ -969,7 +1067,6 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="Specify the prefix of request id.",
     )
 
-
     sampling_group = parser.add_argument_group("sampling parameters")
     sampling_group.add_argument(
         "--top-p",
@@ -1034,8 +1131,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="The ramp-up strategy. This would be used to "
         "ramp up the request rate from initial RPS to final "
         "RPS rate (specified by --ramp-up-start-rps and "
-        "--ramp-up-end-rps.) over the duration of the benchmark."
-    )
+        "--ramp-up-end-rps.) over the duration of the benchmark.")
     parser.add_argument(
         "--ramp-up-start-rps",
         type=int,
@@ -1074,13 +1170,11 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             raise ValueError(
                 "When using ramp-up, do not specify --request-rate. "
                 "The request rate will be controlled by ramp-up parameters. "
-                "Please remove the --request-rate argument."
-            )
+                "Please remove the --request-rate argument.")
         if args.ramp_up_start_rps is None or args.ramp_up_end_rps is None:
             raise ValueError(
                 "When using --ramp-up-strategy, both --ramp-up-start-rps and "
-                "--ramp-up-end-rps must be specified"
-            )
+                "--ramp-up-end-rps must be specified")
         if args.ramp_up_start_rps < 0 or args.ramp_up_end_rps < 0:
             raise ValueError("Ramp-up start and end RPS must be non-negative")
         if args.ramp_up_start_rps > args.ramp_up_end_rps:
@@ -1090,7 +1184,6 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             raise ValueError(
                 "For exponential ramp-up, the start RPS cannot be 0.")
 
-    endpoint_type = args.endpoint_type
     label = args.label
     model_id = args.model
     model_name = args.served_model_name
@@ -1103,6 +1196,18 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     else:
         api_url = f"http://{args.host}:{args.port}{args.endpoint}"
         base_url = f"http://{args.host}:{args.port}"
+
+    # Headers
+    headers = None
+    if args.header:
+        headers = {}
+        for item in args.header:
+            if "=" in item:
+                kvstring = item.split("=", 1)
+                headers[kvstring[0].strip()] = kvstring[1].strip()
+            else:
+                raise ValueError(
+                    "Invalid header format. Please use KEY=VALUE format.")
 
     tokenizer = get_tokenizer(tokenizer_id,
                               tokenizer_mode=tokenizer_mode,
@@ -1141,7 +1246,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     gc.freeze()
 
     benchmark_result = await benchmark(
-        endpoint_type=args.endpoint_type,
+        endpoint_type=args.backend,
         api_url=api_url,
         base_url=base_url,
         model_id=model_id,
@@ -1161,6 +1266,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         goodput_config_dict=goodput_config_dict,
         max_concurrency=args.max_concurrency,
         lora_modules=args.lora_modules,
+        extra_headers=headers,
         extra_body=sampling_params,
         ramp_up_strategy=args.ramp_up_strategy,
         ramp_up_start_rps=args.ramp_up_start_rps,
@@ -1174,7 +1280,8 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     # Setup
     current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
     result_json["date"] = current_dt
-    result_json["endpoint_type"] = args.endpoint_type
+    result_json["endpoint_type"] = args.backend # for backward compatibility
+    result_json["backend"] = args.backend
     result_json["label"] = label
     result_json["model_id"] = model_id
     result_json["tokenizer_id"] = tokenizer_id
@@ -1184,12 +1291,11 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     if args.metadata:
         for item in args.metadata:
             if "=" in item:
-                kvstring = item.split("=")
+                kvstring = item.split("=", 1)
                 result_json[kvstring[0].strip()] = kvstring[1].strip()
             else:
                 raise ValueError(
-                    "Invalid metadata format. Please use KEY=VALUE format."
-                )
+                    "Invalid metadata format. Please use KEY=VALUE format.")
 
     # Traffic
     result_json["request_rate"] = (args.request_rate if args.request_rate
@@ -1225,7 +1331,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         base_model_id = model_id.split("/")[-1]
         max_concurrency_str = (f"-concurrency{args.max_concurrency}"
                                if args.max_concurrency is not None else "")
-        label = label or endpoint_type
+        label = label or args.backend
         if args.ramp_up_strategy is not None:
             file_name = f"{label}-ramp-up-{args.ramp_up_strategy}-{args.ramp_up_start_rps}qps-{args.ramp_up_end_rps}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  # noqa
         else:

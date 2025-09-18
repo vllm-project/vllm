@@ -492,7 +492,7 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
-        # transformers InternVLProcessor uses <IMG_CONTEXT> as the seperator
+        # transformers InternVLProcessor uses <IMG_CONTEXT> as the separator
         # refer to https://github.com/huggingface/transformers/blob/f90de364c2484c7c325bbe05befdcf487bd75b63/src/transformers/models/internvl/processing_internvl.py#L116
         if modality.startswith("image"):
             return '<IMG_CONTEXT>'
@@ -738,7 +738,7 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
             return []
 
         # The result multimodal_embeddings is tuple of tensors, with each
-        # tensor correspoending to a multimodal data item (image or video).
+        # tensor corresponding to a multimodal data item (image or video).
         multimodal_embeddings: tuple[torch.Tensor, ...] = ()
 
         # NOTE: It is important to iterate over the keys in this dictionary

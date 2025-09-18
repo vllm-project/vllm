@@ -2,14 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from typing import Callable, List
+from typing import List
 
 from vllm.config import SchedulerConfig
 from vllm.core.scheduler import Scheduler
 from vllm.engine.output_processor.stop_checker import StopChecker
-from vllm.sequence import Sequence, SequenceGroup, SequenceGroupOutput
+from vllm.sequence import SequenceGroup, SequenceGroupOutput
 from vllm.transformers_utils.detokenizer import Detokenizer
-from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import Counter
 
 
@@ -31,7 +30,6 @@ class SequenceGroupOutputProcessor(ABC):
         detokenizer: Detokenizer,
         scheduler: List[Scheduler],
         seq_counter: Counter,
-        get_tokenizer_for_seq: Callable[[Sequence], AnyTokenizer],
         stop_checker: "StopChecker",
     ):
         """Create an output processor.

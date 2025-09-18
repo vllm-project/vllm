@@ -76,6 +76,20 @@ async def test_basic_with_reasoning_effort(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_max_tokens(client: OpenAI, model_name: str):
+    response = await client.responses.create(
+        model=model_name,
+        input="What is the first paragraph of Moby Dick?",
+        reasoning={"effort": "low"},
+        max_output_tokens=30,
+    )
+    assert response is not None
+    assert response.status == "incomplete"
+    assert response.incomplete_details.reason == "max_output_tokens"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_chat(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
@@ -275,7 +289,8 @@ async def test_stateful_multi_turn(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_streaming(client: OpenAI, model_name: str):
+@pytest.mark.parametrize("background", [True, False])
+async def test_streaming(client: OpenAI, model_name: str, background: bool):
     # TODO: Add back when web search and code interpreter are available in CI
     prompts = [
         "tell me a story about a cat in 20 words",
@@ -300,14 +315,42 @@ async def test_streaming(client: OpenAI, model_name: str):
                 # },
             ],
             stream=True,
+            background=background,
         )
+
+        current_item_id = ""
+        current_content_index = -1
 
         events = []
         current_event_mode = None
+        resp_id = None
         async for event in response:
+            if event.type == "response.created":
+                resp_id = event.response.id
+
             if current_event_mode != event.type:
                 current_event_mode = event.type
                 print(f"\n[{event.type}] ", end="", flush=True)
+
+            # verify current_item_id is correct
+            if event.type == "response.output_item.added":
+                assert event.item.id != current_item_id
+                current_item_id = event.item.id
+            elif event.type in [
+                    "response.output_text.delta",
+                    "response.reasoning_text.delta"
+            ]:
+                assert event.item_id == current_item_id
+
+            # verify content_index_id is correct
+            if event.type == "response.content_part.added":
+                assert event.content_index != current_content_index
+                current_content_index = event.content_index
+            elif event.type in [
+                    "response.output_text.delta",
+                    "response.reasoning_text.delta"
+            ]:
+                assert event.content_index == current_content_index
 
             if "text.delta" in event.type:
                 print(event.delta, end="", flush=True)
@@ -321,6 +364,19 @@ async def test_streaming(client: OpenAI, model_name: str):
             events.append(event)
 
         assert len(events) > 0
+        response_completed_event = events[-1]
+        assert len(response_completed_event.response.output) > 0
+
+        if background:
+            starting_after = 5
+            async with await client.responses.retrieve(
+                    response_id=resp_id,
+                    stream=True,
+                    starting_after=starting_after) as stream:
+                counter = starting_after
+                async for event in stream:
+                    counter += 1
+                    assert event == events[counter]
 
 
 @pytest.mark.asyncio

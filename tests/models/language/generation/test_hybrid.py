@@ -25,8 +25,7 @@ SSM_MODELS = [
 
 HYBRID_MODELS = [
     "ai21labs/Jamba-tiny-dev",
-    # skipping until vLLM implementation issues are resolved
-    # "pfnet/plamo-2-1b",
+    "pfnet/plamo-2-1b",
     "Zyphra/Zamba2-1.2B-instruct",
     "hmellor/tiny-random-BambaForCausalLM",
     "ibm-granite/granite-4.0-tiny-preview",
@@ -37,6 +36,7 @@ HYBRID_MODELS = [
 V1_SUPPORTED_MODELS = [
     "state-spaces/mamba-130m-hf",
     "ai21labs/Jamba-tiny-dev",
+    "pfnet/plamo-2-1b",
     "yujiepan/mamba2-codestral-v0.1-tiny-random",
     "Zyphra/Zamba2-1.2B-instruct",
     "hmellor/tiny-random-BambaForCausalLM",
@@ -47,6 +47,7 @@ V1_SUPPORTED_MODELS = [
 
 FULL_CUDA_GRAPH_MODELS = [
     "ai21labs/Jamba-tiny-dev",
+    "pfnet/plamo-2-1b",
     "Zyphra/Zamba2-1.2B-instruct",
 ]
 
@@ -300,7 +301,7 @@ def test_fail_upon_inc_requests_and_finished_requests_lt_available_blocks(
     finished_requests_ids is larger than the maximum mamba block capacity.
 
     This could generally happen due to the fact that hybrid does support
-    statelessness mechanism where it can cleanup new incoming requests in
+    statelessness mechanism where it can clean up new incoming requests in
     a single step.
     """
     try:
@@ -321,7 +322,7 @@ def test_state_cleanup(
     This test is for verifying that the Hybrid state is cleaned up between
     steps.
     
-    If its not cleaned, an error would be expected.
+    If it's not cleaned, an error would be expected.
     """
     try:
         with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
@@ -417,7 +418,9 @@ def test_full_cuda_graph(
 @pytest.mark.parametrize("model", FP32_STATE_MODELS)
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
-def test_fp32_state(
+@pytest.mark.parametrize("cache_dtype_param",
+                         ["mamba_ssm_cache_dtype", "mamba_cache_dtype"])
+def test_fp32_cache_state(
     hf_runner,
     vllm_runner,
     example_prompts,
@@ -425,6 +428,7 @@ def test_fp32_state(
     model: str,
     max_tokens: int,
     num_logprobs: int,
+    cache_dtype_param: str,
 ) -> None:
 
     try:
@@ -442,13 +446,13 @@ def test_fp32_state(
         m.setenv("VLLM_USE_V1", "0")
         with vllm_runner(model,
                          max_num_seqs=MAX_NUM_SEQS,
-                         mamba_ssm_cache_dtype="float32") as vllm_model:
+                         **{cache_dtype_param: "float32"}) as vllm_model:
             vllm_v0_outputs = vllm_model.generate_greedy_logprobs(
                 example_prompts, max_tokens, num_logprobs)
 
     with vllm_runner(model,
                      max_num_seqs=MAX_NUM_SEQS,
-                     mamba_ssm_cache_dtype="float32") as vllm_model:
+                     **{cache_dtype_param: "float32"}) as vllm_model:
         vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
