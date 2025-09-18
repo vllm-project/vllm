@@ -679,6 +679,11 @@ class EagleProposer:
         num_tokens: int,
         use_cudagraphs=True,
     ) -> None:
+        if use_cudagraphs:
+            num_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
+            
+        print(f"Doing dummy run with {num_tokens} tokens")
+        
         with set_forward_context(
                 None,
                 self.vllm_config,
@@ -699,6 +704,8 @@ class EagleProposer:
                 hidden_states=self.hidden_states[:num_tokens],
                 inputs_embeds=inputs_embeds,
             )
+            
+        print(f"Dummy run done with {num_tokens} tokens")
 
     def validate_same_kv_cache_group(self,
                                      kv_cache_config: KVCacheConfig) -> None:
