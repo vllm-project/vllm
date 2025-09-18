@@ -472,10 +472,9 @@ async def test_chat_completion_stream_options(client: openai.AsyncOpenAI,
 
 @pytest.mark.asyncio
 async def test_structured_outputs_choice_chat(
-        client: openai.AsyncOpenAI, sample_structured_outputs_choices,
-        is_v1_server: bool):
-    if not is_v1_server:
-        pytest.skip("Structured outputs is only supported in v1 engine")
+    client: openai.AsyncOpenAI,
+    sample_structured_outputs_choices,
+):
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -513,12 +512,10 @@ async def test_structured_outputs_choice_chat(
 
 
 @pytest.mark.asyncio
-async def test_structured_outputs_json_chat(client: openai.AsyncOpenAI,
-                                            sample_json_schema,
-                                            is_v1_server: bool):
-    if not is_v1_server:
-        pytest.skip("Structured outputs is only supported in v1 engine")
-
+async def test_structured_outputs_json_chat(
+    client: openai.AsyncOpenAI,
+    sample_json_schema,
+):
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -560,10 +557,10 @@ async def test_structured_outputs_json_chat(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-async def test_structured_outputs_regex_chat(client: openai.AsyncOpenAI,
-                                             sample_regex, is_v1_server: bool):
-    if not is_v1_server:
-        pytest.skip("Structured outputs is only supported in v1 engine")
+async def test_structured_outputs_regex_chat(
+    client: openai.AsyncOpenAI,
+    sample_regex,
+):
 
     messages = [{
         "role": "system",
