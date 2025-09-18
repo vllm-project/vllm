@@ -1076,6 +1076,7 @@ class ModelConfig:
                     f"({quant_method}) does not match the quantization "
                     f"method specified in the `quantization` argument "
                     f"({self.quantization}).")
+
         if self.quantization is not None:
             if self.quantization not in supported_quantization:
                 raise ValueError(

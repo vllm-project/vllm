@@ -261,6 +261,7 @@ class SpeculativeConfig:
         else:
             self.prompt_lookup_max = 0
             self.prompt_lookup_min = 0
+
             if self.model is not None:
                 # TODO: Move this import to the top once `ModelConfig`
                 # lives in `vllm.config.model`.
