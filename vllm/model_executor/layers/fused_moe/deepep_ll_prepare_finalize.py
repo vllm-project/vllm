@@ -12,8 +12,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input, normalize_batched_scales_shape)
 from vllm.v1.worker.ubatching import (dbo_current_ubatch_id, dbo_enabled,
-                                      dbo_maybe_run_recv_hook,
-                                      dbo_register_recv_hook, dbo_yield)
+                                      dbo_maybe_run_recv_hook)
 
 # DeepEP kernels quantize dispatch inputs in 128 element chunks.
 DEEPEP_QUANT_BLOCK_SIZE = 128
@@ -198,7 +197,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         hook()
         return receiver()
 
-    def finalize(
+    def _finalize(
         self,
         output: torch.Tensor,
         fused_expert_output: torch.Tensor,
@@ -206,13 +205,14 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
-    ) -> None:
+        do_async: bool,
+    ) -> Optional[Callable]:
         assert isinstance(
             weight_and_reduce_impl, TopKWeightAndReduceDelegate
         ), ("Weight application and reduction happens in the combine kernel.")
 
         a2a_idx = dbo_current_ubatch_id()
-        do_recv_hook = dbo_enabled()
+        do_recv_hook = dbo_enabled() or do_async
         handle = self.handles[a2a_idx]
         assert handle is not None
 
@@ -232,6 +232,45 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             zero_copy=False,
             return_recv_hook=do_recv_hook,
             out=output)
-        if recv_hook is not None:
-            dbo_register_recv_hook(recv_hook)
-        dbo_yield()
+
+        return recv_hook
+
+    def finalize_async(
+        self,
+        output: torch.Tensor,
+        fused_expert_output: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        apply_router_weight_on_input: bool,
+        weight_and_reduce_impl: mk.TopKWeightAndReduce,
+    ) -> Callable:
+        recv_hook = self._finalize(
+            output,
+            fused_expert_output,
+            topk_weights,
+            topk_ids,
+            apply_router_weight_on_input,
+            weight_and_reduce_impl,
+            do_async=True,
+        )
+        assert recv_hook is not None
+        return recv_hook
+
+    def finalize(
+        self,
+        output: torch.Tensor,
+        fused_expert_output: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        apply_router_weight_on_input: bool,
+        weight_and_reduce_impl: mk.TopKWeightAndReduce,
+    ) -> None:
+        self._finalize(
+            output,
+            fused_expert_output,
+            topk_weights,
+            topk_ids,
+            apply_router_weight_on_input,
+            weight_and_reduce_impl,
+            do_async=False,
+        )
