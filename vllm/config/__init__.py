@@ -845,7 +845,8 @@ class ModelConfig:
                 object_storage_model.pull_files(model,
                                                 ignore_pattern=[
                                                     "*.pt", "*.safetensors",
-                                                    "*.bin", "*.tensors"
+                                                    "*.bin", "*.tensors",
+                                                    "*.pth"
                                                 ])
                 self.tokenizer = object_storage_model.dir
                 return
@@ -853,9 +854,12 @@ class ModelConfig:
         # Only download tokenizer if needed and not already handled
         if is_runai_obj_uri(tokenizer):
             object_storage_tokenizer = ObjectStorageModel()
-            object_storage_tokenizer.pull_files(
-                model,
-                ignore_pattern=["*.pt", "*.safetensors", "*.bin", "*.tensors"])
+            object_storage_tokenizer.pull_files(model,
+                                                ignore_pattern=[
+                                                    "*.pt", "*.safetensors",
+                                                    "*.bin", "*.tensors",
+                                                    "*.pth"
+                                                ])
             self.tokenizer = object_storage_tokenizer.dir
 
     def _get_encoder_config(self):
@@ -3024,6 +3028,18 @@ class VllmConfig:
             from vllm.model_executor.models.adapters import (
                 SequenceClassificationConfig)
             SequenceClassificationConfig.verify_and_update_config(self)
+
+        if hasattr(self.model_config, "model_weights") and is_runai_obj_uri(
+                self.model_config.model_weights):
+            if self.load_config.load_format == "auto":
+                logger.info("Detected Run:ai model config. "
+                            "Overriding `load_format` to 'runai_streamer'")
+                self.load_config.load_format = "runai_streamer"
+            elif self.load_config.load_format != "runai_streamer":
+                raise ValueError(f"To load a model from S3, 'load_format' "
+                                 f"must be 'runai_streamer', "
+                                 f"but got '{self.load_config.load_format}'. "
+                                 f"Model: {self.model_config.model}")
 
     def __str__(self):
         return (
