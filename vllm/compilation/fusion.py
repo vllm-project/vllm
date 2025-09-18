@@ -26,7 +26,7 @@ FP4_DTYPE = torch.uint8
 
 
 def empty_bf16(*args, **kwargs):
-    return torch.empty(*args, **kwargs, dtype=torch.bfloat16, device="cuda")
+    return torch.empty(*args, **kwargs, dtype=torch.float16, device="cuda")
 
 
 def empty_fp32(*args, **kwargs):
@@ -133,7 +133,7 @@ class RMSNormStaticQuantPattern(RMSNormQuantPattern):
             return at[1]
 
         inputs = [
-            empty_bf16(5, 4),  # input
+            empty_fp32(5, 4),  # input # TODO: rms_input
             empty_bf16(4, ),  # weight
             empty_fp32(1, 1)  # scale
         ]
@@ -185,8 +185,8 @@ class FusedAddRMSNormStaticQuantPattern(RMSNormQuantPattern):
             return at[1], at[2]
 
         inputs = [
-            # TODO: maybe 32bit for torch impl?
-            #  TODO dtype doesn't seem to matter?
+            # TODO: maybe 32bit for torch impl? yes to resolve bug
+            #  TODO dtype doesn't seem to matter? it does matter for what cvts get traced
             empty_bf16(5, 4),  # input
             empty_bf16(5, 4),  # residual
             empty_bf16(4, ),  # weight
