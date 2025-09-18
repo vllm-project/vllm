@@ -13,10 +13,9 @@ import torch
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor as RequestLogitsProcessor
 from vllm.sampling_params import SamplingParams
-from vllm.v1.sample.logits_processor.builtin import (LogitBiasLogitsProcessor,
-                                                     MinPLogitsProcessor,
-                                                     MinTokensLogitsProcessor,
-                                                     process_dict_updates)
+from vllm.v1.sample.logits_processor.builtin import (
+    LogitBiasLogitsProcessor, MinPLogitsProcessor, MinTokensLogitsProcessor,
+    ThinkingTokenBudgetLogitsProcessor, process_dict_updates)
 from vllm.v1.sample.logits_processor.interface import (BatchUpdate,
                                                        LogitsProcessor,
                                                        MoveDirectionality)
@@ -39,6 +38,7 @@ BUILTIN_LOGITS_PROCESSORS: list[type[LogitsProcessor]] = [
     MinTokensLogitsProcessor,
     LogitBiasLogitsProcessor,
     MinPLogitsProcessor,
+    ThinkingTokenBudgetLogitsProcessor,
 ]
 
 
@@ -290,5 +290,5 @@ __all__ = [
     "MinTokensLogitsProcessor", "BatchUpdate", "BatchUpdateBuilder",
     "MoveDirectionality", "LogitsProcessors", "build_logitsprocs",
     "STR_POOLING_REJECTS_LOGITSPROCS", "LOGITSPROCS_GROUP",
-    "AdapterLogitsProcessor"
+    "AdapterLogitsProcessor", "ThinkingTokenBudgetLogitsProcessor"
 ]
