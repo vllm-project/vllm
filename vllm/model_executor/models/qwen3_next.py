@@ -138,6 +138,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
                 quant_config=quant_config,
                 reduce_results=self.experts.must_reduce_shared_expert_outputs(
                 ),
+                prefix=f"{prefix}.shared_expert",
             )
         else:
             self.shared_expert = None
