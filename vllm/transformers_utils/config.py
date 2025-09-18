@@ -75,6 +75,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     eagle="EAGLEConfig",
     speculators="SpeculatorsConfig",
     nemotron="NemotronConfig",
+    olmo3="Olmo3Config",
     ovis="OvisConfig",
     ultravox="UltravoxConfig",
     step3_vl="Step3VLConfig",
@@ -88,11 +89,6 @@ _CONFIG_ATTRS_MAPPING: dict[str, str] = {
 _AUTO_CONFIG_KWARGS_OVERRIDES: dict[str, dict[str, Any]] = {
     "internvl_chat": {
         "has_no_defaults_at_init": True
-    },
-    # transformers regards mllama as is_encoder_decoder=False
-    # vllm needs is_encoder_decoder=True to enable cross-attention
-    "mllama": {
-        "is_encoder_decoder": True
     },
     "NVLM_D": {
         "has_no_defaults_at_init": True
@@ -678,20 +674,21 @@ def get_hf_file_to_dict(file_name: str,
 
 
 @cache
-def get_pooling_config(model: str, revision: Optional[str] = 'main'):
+def get_pooling_config(model: str,
+                       revision: Optional[str] = 'main') -> Optional[dict]:
     """
     This function gets the pooling and normalize
     config from the model - only applies to
     sentence-transformers models.
 
     Args:
-        model (str): The name of the Hugging Face model.
-        revision (str, optional): The specific version
-        of the model to use. Defaults to 'main'.
+        model: The name of the Hugging Face model.
+        revision: The specific version of the model to use. 
+            Defaults to 'main'.
 
     Returns:
-        dict: A dictionary containing the pooling
-        type and whether normalization is used.
+        A dictionary containing the pooling type and whether 
+            normalization is used, or None if no pooling configuration is found.
     """
 
     modules_file_name = "modules.json"
