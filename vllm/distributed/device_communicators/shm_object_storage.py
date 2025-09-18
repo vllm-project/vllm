@@ -253,7 +253,7 @@ class SingleWriterShmRingBuffer:
 
         Args:
             nbytes (int, optional): The size of the buffer to free. If None,
-            frees the maximum size of the ring buffer.
+                frees the maximum size of the ring buffer.
         '''
 
         assert self.is_writer, "Only the writer can free buffers."
