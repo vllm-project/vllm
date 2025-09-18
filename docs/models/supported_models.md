@@ -35,6 +35,7 @@ If the Transformers model implementation follows all the steps in [writing a cus
     - Tensor parallel
 
 Checking if the modeling backend is Transformers is as simple as:
+
 ```python
 from vllm import LLM
 llm = LLM(model=...)  # Name or path of your model
