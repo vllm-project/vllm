@@ -20,10 +20,7 @@ from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
-<<<<<<< HEAD
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
-=======
->>>>>>> ef59c6c79 (unit test for prepare_input_deferred. more tests coming soon)
 
 model_dir = "meta-llama/Llama-3.1-8B-Instruct"
 eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
