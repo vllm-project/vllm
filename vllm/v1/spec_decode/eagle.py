@@ -161,8 +161,6 @@ class EagleProposer:
         sampling_metadata: SamplingMetadata,
         mm_embeds: Optional[list[torch.Tensor]] = None,
     ) -> torch.Tensor:
-        # Ensure locals are always initialized to avoid UnboundLocalError
-        inputs_embeds = None
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
 
@@ -184,13 +182,9 @@ class EagleProposer:
 
         assert self.runner is not None
 
-        # ubatch_id = dbo_current_ubatch_id()
         # Select the correct attention metadata builder for EAGLE layers.
         ubatch_id = dbo_current_ubatch_id()
         builder = self._get_attention_metadata_builder(ubatch_id)
-
-        # if isinstance(builder, FlashInferMetadataBuilder):
-        #     builder.reorder_batch_threshold = self.num_speculative_tokens +1
 
         attn_metadata = builder.build_for_drafting(
             common_attn_metadata=common_attn_metadata, draft_index=0)
