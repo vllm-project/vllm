@@ -100,7 +100,6 @@ def get_ep_ranks_with_expert(
     return ranks_to_send, ranks_to_recv_actual
 
 
-
 def move_to_buffer(
         num_local_experts: int, old_indices: Sequence[int],
         new_indices: Sequence[int], expert_weights: Iterable[torch.Tensor],
@@ -228,13 +227,14 @@ def move_to_buffer(
         with torch.cuda.stream(cuda_stream):
             reqs = batch_isend_irecv(p2p_ops)
             for req in reqs:
-                req.wait()  
+                req.wait() 
     elif p2p_ops:
         reqs = batch_isend_irecv(p2p_ops)
         for req in reqs:
             req.wait()
     # wait for the communication to finish
     return is_unchanged, is_received_locally, experts_recv_loc
+
 
 def move_from_buffer(
     expert_weights: Iterable[torch.Tensor],
@@ -265,7 +265,7 @@ def move_from_buffer(
             src = experts_recv_loc[expert]
             for weight, buffer in zip(expert_weights, expert_weights_buffer):
                 weight[dst].copy_(buffer[src], non_blocking=True)
-    
+
 
 async def transfer_layer(
         old_global_expert_indices: torch.Tensor,
@@ -336,6 +336,7 @@ async def transfer_layer(
     # NOTE(bowen): We need this synchronize to run, but I don't know why.
     # If you figure out the reason, please let me know -- thank you!
     return is_unchanged, is_received_locally, experts_recv_loc
+
 
 def rearrange_expert_weights_inplace(
     old_global_expert_indices: torch.Tensor,
@@ -435,6 +436,7 @@ def rearrange_expert_weights_inplace(
                          experts_recv_loc=experts_recv_loc,
                          new_indices=new_global_expert_indices[layer].tolist(),
                          ep_group=ep_group)
+
 
 def _map_old_expert_indices_with_rank_mapping(
     old_global_expert_indices: torch.Tensor,
