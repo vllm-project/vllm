@@ -62,8 +62,6 @@ class UBatchContext:
         self.maybe_run_recv_hook()
         self.cpu_signal_event.set()
         self.cpu_wait_event.clear()
-        self.current_stream = self.compute_stream
-        torch.cuda.set_stream(self.current_stream)
         return False
 
     def _restore_context(self):
@@ -102,6 +100,11 @@ class UBatchContext:
     def switch_to_comm_sync(self):
         self._signal_compute_done()
         self.update_stream(self.comm_stream)
+        self._wait_compute_done()
+
+    def switch_to_compute_sync(self):
+        self._signal_comm_done()
+        self.update_stream(self.compute_stream)
         self._wait_comm_done()
 
     def maybe_run_recv_hook(self):
@@ -157,6 +160,10 @@ dbo_yield_and_switch_from_compute_to_comm = _register_ubatch_function(
     UBatchContext.yield_and_switch_from_compute_to_comm)
 dbo_yield_and_switch_from_comm_to_compute = _register_ubatch_function(
     UBatchContext.yield_and_switch_from_comm_to_compute)
+dbo_switch_to_comm_sync = _register_ubatch_function(
+    UBatchContext.switch_to_comm_sync)
+dbo_switch_to_compute_sync = _register_ubatch_function(
+    UBatchContext.switch_to_compute_sync)
 dbo_yield = _register_ubatch_function(UBatchContext.yield_)
 dbo_maybe_run_recv_hook = _register_ubatch_function(
     UBatchContext.maybe_run_recv_hook)

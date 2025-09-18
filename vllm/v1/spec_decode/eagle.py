@@ -27,7 +27,6 @@ from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)
 
@@ -180,9 +179,8 @@ class EagleProposer:
         assert self.runner is not None
 
         # FIXME: need to consider multiple kv_cache_groups
-        ubatch_id = dbo_current_ubatch_id()
         attn_metadata_builder = \
-            self.runner.attn_groups[0][0].metadata_builders[ubatch_id]
+            self.runner.attn_groups[0][0].get_metadata_builder()
         attn_metadata = attn_metadata_builder.build_for_drafting(
             common_attn_metadata=common_attn_metadata, draft_index=0)
 
@@ -358,9 +356,8 @@ class EagleProposer:
         hidden_states: torch.Tensor,
         common_attn_metadata: CommonAttentionMetadata,
     ) -> list[torch.Tensor]:
-        ubatch_id = dbo_current_ubatch_id()
         tree_attn_metadata_builder = \
-            self.runner.attn_groups[0][0].metadata_builders[ubatch_id]
+            self.runner.attn_groups[0][0].get_metadata_builder()
         assert isinstance(tree_attn_metadata_builder,
                           TreeAttentionMetadataBuilder)
 

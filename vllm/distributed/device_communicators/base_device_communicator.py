@@ -60,6 +60,9 @@ class All2AllManagerBase:
         # and reuse it for the same config.
         raise NotImplementedError
 
+    def set_num_sms(self, num_sms: int):
+        pass
+
     def dispatch(self, hidden_states: torch.Tensor,
                  router_logits: torch.Tensor):
         raise NotImplementedError

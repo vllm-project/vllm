@@ -144,6 +144,10 @@ class ParallelConfig:
     """The threshold for microbatching. If the number of tokens in the
     request is greater than this threshold, microbatching will be used.
     Otherwise, the request will be processed in a single batch."""
+    dbo_prefill_token_threshold: int = 32
+    """The threshold for microbatching. If the number of tokens in the
+    request is greater than this threshold, microbatching will be used.
+    Otherwise, the request will be processed in a single batch."""
 
     ray_workers_use_nsight: bool = False
     """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
