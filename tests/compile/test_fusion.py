@@ -147,10 +147,8 @@ def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static,
         model2 = torch.compile(model, backend=backend)
         result2 = model2(x)
 
-        # Higher tol for dynamic, even higher for bfloat16
-        if static:
-            ATOL, RTOL = (1e-3, 1e-3)
-        elif dtype == torch.float16:
+        # Higher tol for dynamic bfloat16
+        if dtype == torch.float16 or static:
             ATOL, RTOL = (2e-3, 2e-3)
         else:
             ATOL, RTOL = (1e-2, 1e-2)

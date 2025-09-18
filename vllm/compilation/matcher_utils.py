@@ -43,6 +43,10 @@ class MatcherRMSNorm:  # TODO separate residual and not residual
 
         self.forward = self.forward_custom if enabled else self.forward_native
         self.model_dtype = get_current_vllm_config().model_config.dtype
+        print(self.model_dtype)
+
+    def inputs(self):
+        return
 
     def forward_custom(
         self,
@@ -76,10 +80,10 @@ class MatcherRMSNorm:  # TODO separate residual and not residual
         weight: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        x = input  # .to(torch.float32)
+        x = input.to(torch.float32)
         if residual is not None:
-            x = x + residual.to(torch.float32)
-            residual = x  # conversion to 16-bit is eliminated in full graph
+            x = x + residual
+            residual = x.to(self.model_dtype)
 
         variance = x.pow(2).mean(dim=-1, keepdim=True)
 
