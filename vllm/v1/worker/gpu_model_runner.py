@@ -193,17 +193,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.observability_config = vllm_config.observability_config
 
         reasoning_config = self.vllm_config.reasoning_config
-        if reasoning_config is not None:
+        has_reasoning_strings = (reasoning_config.think_start_str is not None
+                                 and reasoning_config.think_end_str
+                                 is not None)
+        if has_reasoning_strings:
             tokenizer = init_tokenizer_from_configs(
                 model_config=self.vllm_config.model_config)
-            if reasoning_config.think_start_str is not None:
-                reasoning_config.think_start_token_ids = \
-                    tokenizer.convert_tokens_to_ids(
-                        tokenizer.tokenize(reasoning_config.think_start_str))
-            if reasoning_config.think_end_str is not None:
-                reasoning_config.think_end_token_ids = \
-                    tokenizer.convert_tokens_to_ids(
-                        tokenizer.tokenize(reasoning_config.think_end_str))
+            reasoning_config.think_start_token_ids = \
+                tokenizer.convert_tokens_to_ids(
+                    tokenizer.tokenize(reasoning_config.think_start_str))
+            reasoning_config.think_end_token_ids = \
+                tokenizer.convert_tokens_to_ids(
+                    tokenizer.tokenize(reasoning_config.think_end_str))
 
         from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
         set_cpu_offload_max_bytes(
