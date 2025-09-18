@@ -24,7 +24,7 @@ fi
 if ! command -v uv &> /dev/null; then
     echo "Installing UV package manager..."
     curl -LsSf https://astral.sh/uv/install.sh | sh
-    export PATH="$HOME/.local/bin:$PATH"
+    source $HOME/.local/bin/env
 fi
 
 # Clone Prime-RL repository
