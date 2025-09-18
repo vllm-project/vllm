@@ -169,7 +169,7 @@ class ModelOptFp8Config(QuantizationConfig):
 
         # First check exact matching with fused layer support
         if is_layer_skipped(prefix, self.exclude_modules,
-                           self.packed_modules_mapping):
+                            self.packed_modules_mapping):
             return True
 
         # Then check substring matching for patterns not caught by exact match
@@ -177,8 +177,8 @@ class ModelOptFp8Config(QuantizationConfig):
             # Skip exact matches already handled above
             if (module != prefix and
                 (module in prefix or
-                 (prefix.startswith("language_model.") and
-                  module in prefix.removeprefix("language_model.")))):
+                 (prefix.startswith("language_model.")
+                  and module in prefix.removeprefix("language_model.")))):
                 return True
         return False
 
@@ -781,7 +781,7 @@ class ModelOptNvFp4Config(QuantizationConfig):
         """
         # First check exact matching with fused layer support
         if is_layer_skipped(prefix, self.exclude_modules,
-                           self.packed_modules_mapping):
+                            self.packed_modules_mapping):
             return True
 
         # Check regex pattern matching for patterns not caught by exact match
