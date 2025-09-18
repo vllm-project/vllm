@@ -27,10 +27,13 @@ if ! command -v uv &> /dev/null; then
     source $HOME/.local/bin/env
 fi
 
-# Clone Prime-RL repository
-echo "Cloning Prime-RL repository..."
-git clone "${PRIME_RL_REPO}" "${PRIME_RL_DIR}"
+# Clone Prime-RL repository at specific commit for reproducible tests
+PRIME_RL_COMMIT="2d49e45c463eb2918aaa518f3505ea3dc2551e55"
+echo "Cloning Prime-RL repository at commit: ${PRIME_RL_COMMIT}..."
+git clone --depth 1 "${PRIME_RL_REPO}" "${PRIME_RL_DIR}"
 cd "${PRIME_RL_DIR}"
+git fetch --depth 1 origin "${PRIME_RL_COMMIT}"
+git checkout "${PRIME_RL_COMMIT}"
 
 # Sync Prime-RL dependencies
 echo "Installing Prime-RL dependencies..."
