@@ -17,4 +17,8 @@
   #warning "unsupported vLLM cpu implementation"
 #endif
 
+#ifdef _OPENMP
+  #include <omp.h>
+#endif
+
 #endif
