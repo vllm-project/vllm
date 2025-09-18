@@ -21,10 +21,7 @@ CONFIG = AutoConfig.from_pretrained(MODEL_NAME)
 
 
 @pytest.fixture(scope="module")
-def default_server_args(
-    zephyr_lora_files,
-    zephyr_lora_added_tokens_files,
-) -> list[str]:
+def default_server_args() -> list[str]:
     return [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -231,3 +228,20 @@ async def test_completions_with_logprobs_and_prompt_embeds(
             assert max(logprobs_arg,
                        1) <= len(top_logprobs) <= logprobs_arg + 1
         assert len(logprobs.tokens) == 5
+
+
+@pytest.mark.asyncio
+async def test_prompt_logprobs_raises_error(
+        client_with_prompt_embeds: openai.AsyncOpenAI):
+    with pytest.raises(BadRequestError, match="not compatible"):
+        encoded_embeds = create_dummy_embeds()
+        await client_with_prompt_embeds.completions.create(
+            model=MODEL_NAME,
+            prompt="",
+            max_tokens=5,
+            temperature=0.0,
+            extra_body={
+                "prompt_embeds": encoded_embeds,
+                "prompt_logprobs": True
+            },
+        )
