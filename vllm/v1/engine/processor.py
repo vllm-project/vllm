@@ -487,7 +487,7 @@ class Processor:
             else:
                 raise ValueError(f"The {prompt_type} prompt cannot be empty")
 
-        if self.model_config.skip_tokenizer_init or self.tokenizer is None:
+        if self.model_config.skip_tokenizer_init:
             tokenizer = None
         else:
             tokenizer = self.tokenizer

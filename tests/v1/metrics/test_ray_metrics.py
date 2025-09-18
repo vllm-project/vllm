@@ -56,7 +56,7 @@ def test_engine_log_metrics_ray(
             for i, prompt in enumerate(example_prompts):
                 results = engine.generate(
                     request_id=f"request-id-{i}",
-                    request=prompt,
+                    prompt=prompt,
                     sampling_params=SamplingParams(max_tokens=max_tokens),
                 )
 

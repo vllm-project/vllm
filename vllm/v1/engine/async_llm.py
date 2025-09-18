@@ -261,7 +261,7 @@ class AsyncLLM(EngineClient):
     async def add_request(
         self,
         request_id: str,
-        request: Union[EngineCoreRequest, PromptType],
+        prompt: Union[EngineCoreRequest, PromptType],
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
@@ -282,6 +282,7 @@ class AsyncLLM(EngineClient):
         queue = RequestOutputCollector(output_kind=params.output_kind)
 
         # Convert Input --> Request.
+        request = prompt
         if not isinstance(request, EngineCoreRequest):
             assert prompt_str is None
             logger.warning_once(
@@ -335,7 +336,7 @@ class AsyncLLM(EngineClient):
     # re-multiplexed in the API server anyhow.
     async def generate(
         self,
-        request: Union[EngineCoreRequest, PromptType],
+        prompt: Union[EngineCoreRequest, PromptType],
         sampling_params: SamplingParams,
         request_id: str,
         *,
@@ -385,7 +386,7 @@ class AsyncLLM(EngineClient):
                 )
 
             q = await self.add_request(request_id,
-                                       request,
+                                       prompt,
                                        sampling_params,
                                        lora_request=lora_request,
                                        tokenization_kwargs=tokenization_kwargs,
