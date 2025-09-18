@@ -61,6 +61,10 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /tests/v1/kv_connector @ApostaC
 /tests/v1/offloading @ApostaC
 
+# Transformers backend
+/vllm/model_executor/models/transformers.py @hmellor
+/tests/models/test_transformers.py @hmellor
+
 # Docs
 /docs @hmellor
 mkdocs.yaml @hmellor
