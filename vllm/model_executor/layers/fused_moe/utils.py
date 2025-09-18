@@ -271,7 +271,7 @@ def _validate_scale_shape(
         expected = (a.shape[0], cdiv(a.shape[1], block_shape[1]))
         assert a_scale.shape == expected, f"{a_scale.shape} == {expected}"
 
-
+        
 def restrict_dispatch_to_tp_leader(
         *tensors: torch.Tensor) -> tuple[torch.Tensor, ...]:
     """Restrict dispatch to the TP leader rank.
@@ -292,3 +292,7 @@ def restrict_dispatch_to_tp_leader(
         return tuple(t[:0] for t in tensors)
 
     return tensors
+
+  
+def activation_without_mul(activation: str) -> str:
+    return activation + "_no_mul"
