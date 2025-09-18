@@ -412,9 +412,8 @@ class CudaPlatformBase(Platform):
     @classmethod
     def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
                                     model_config: "ModelConfig") -> bool:
-        fp8_attention = kv_cache_dtype.startswith("fp8")
         if not envs.VLLM_ATTENTION_BACKEND:
-            return not fp8_attention
+            return True
         from vllm.attention.backends.registry import _Backend, backend_to_class
         attention_backend = _Backend[envs.VLLM_ATTENTION_BACKEND]
         backend_class = backend_to_class(attention_backend)
