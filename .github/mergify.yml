@@ -308,8 +308,10 @@ pull_request_rules:
   conditions:
     - or:
       - files~=^examples/online_serving/disaggregated[^/]*/.*
+      - files~=^examples/offline_inference/disaggregated[^/]*/.*
+      - files~=^examples/others/lmcache/
       - files~=^tests/v1/kv_connector/
-      - files~=^vllm/distributed/kv_transfer/kv_connector
+      - files~=^vllm/distributed/kv_transfer/
       - title~=(?i)P[/]?D
       - title~=(?i)NIXL
       - title~=(?i)LMCache
