@@ -414,13 +414,9 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
                                     vllm_config=vllm_config_unfused)
         model_unfused = model_unfused.to(device)
 
-        # TODO(boyuan): the attn_metadata with quantization does not
-        # work on my server. So skip for inductor graph partition
-        # test for now.
-        if not use_inductor_graph_partition:
-            forward_ctx = get_forward_context()
-            forward_ctx.attn_metadata = model_unfused.build_attn_metadata(
-                batch_size, use_hnd=split_attention)
+        forward_ctx = get_forward_context()
+        forward_ctx.attn_metadata = model_unfused.build_attn_metadata(
+            batch_size, use_hnd=split_attention)
 
         # Run model directly without compilation and fusion
         result_unfused = model_unfused(q, k, v)
@@ -440,11 +436,9 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
                                   w=model_unfused.w)
         model_fused = model_fused.to(device)
 
-        # TODO(boyuan)
-        if not use_inductor_graph_partition:
-            forward_ctx = get_forward_context()
-            forward_ctx.attn_metadata = model_fused.build_attn_metadata(
-                batch_size, use_hnd=split_attention)
+        forward_ctx = get_forward_context()
+        forward_ctx.attn_metadata = model_fused.build_attn_metadata(
+            batch_size, use_hnd=split_attention)
 
         # Create test backend with fusion passes enabled
         noop_pass = NoOpEliminationPass(vllm_config)
@@ -469,12 +463,11 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
             if use_inductor_graph_partition:
                 assert ("Fused quantization onto 1 attention nodes"
                         in caplog_vllm.text)
-            else:
-                assert model_compiled.attn._o_scale_float is not None
+
+            assert model_compiled.attn._o_scale_float is not None
             result_fused_2 = model_compiled(q, k, v)
 
-            if not use_inductor_graph_partition:
-                assert model_compiled.attn._o_scale_float is not None
+            assert model_compiled.attn._o_scale_float is not None
 
             torch.testing.assert_close(result_unfused,
                                        result_fused_2,

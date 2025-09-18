@@ -1863,21 +1863,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self._execute_mm_encoder(scheduler_output)
             mm_embeds = self._gather_mm_embeddings(scheduler_output)
 
-            # Inductor graph partition attempts to wrap all inductor-generated
-            # functions with CUDAGraph wrapper. Set CUDAGraphMode.None to
-            # avoid that for computing input embeddings.
-            with set_forward_context(
-                    None,
-                    self.vllm_config,
-                    cudagraph_runtime_mode=CUDAGraphMode.NONE,
-            ):
-                # NOTE(woosuk): To unify token ids and soft tokens (vision
-                # embeddings), we always use embeddings (rather than token ids)
-                # as input to the multimodal model, even when the input is text.
-                inputs_embeds_scheduled = self.model.get_input_embeddings(
-                    input_ids=self.input_ids.gpu[:num_scheduled_tokens],
-                    multimodal_embeddings=mm_embeds or None,
-                )
+            # NOTE(woosuk): To unify token ids and soft tokens (vision
+            # embeddings), we always use embeddings (rather than token ids)
+            # as input to the multimodal model, even when the input is text.
+            inputs_embeds_scheduled = self.model.get_input_embeddings(
+                input_ids=self.input_ids.gpu[:num_scheduled_tokens],
+                multimodal_embeddings=mm_embeds or None,
+            )
 
             # TODO(woosuk): Avoid the copy. Optimize.
             self.inputs_embeds.gpu[:num_scheduled_tokens].copy_(
