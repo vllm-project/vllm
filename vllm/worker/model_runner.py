@@ -1819,6 +1819,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         if self.vllm_config.kv_transfer_config is None:
             return False
 
+        if model_input.attn_metadata is None:
+            return False
+
         prefill_meta = model_input.attn_metadata.prefill_metadata
 
         # check if the current run is profiling
@@ -1843,6 +1846,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         """
 
         if self.vllm_config.kv_transfer_config is None:
+            return False
+
+        if model_input.attn_metadata is None:
             return False
 
         prefill_meta = model_input.attn_metadata.prefill_metadata
