@@ -964,14 +964,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             ubatch_slices, num_tokens_after_padding = \
                 ubatch_split(max_num_scheduled_tokens,
                             num_tokens_unpadded,
-                            num_tokens_padded,
+                            num_tokens_padde,
                             self.vllm_config)
         else:
             num_tokens_padded = self._get_num_input_tokens(num_tokens_unpadded)
-            num_pad, num_tokens_after_padding = self.get_dp_padding(
-                num_tokens_padded)
-            if num_tokens_after_padding is not None:
-                num_tokens_padded = int(num_tokens_after_padding[0])
+            should_ubatch, num_tokens_after_padding = get_dp_padding_ubatch(
+                num_tokens_unpadded=num_tokens_unpadded, 
+                num_tokens_padded=num_tokens_padded, 
+                should_attempt_ubatching=False, 
+                vllm_config=self.vllm_config)
+            assert should_ubatch is False
+            assert num_tokens_after_padding is not None
 
         self.seq_lens.np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
@@ -1717,42 +1720,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             log_stats=self.parallel_config.eplb_config.log_balancedness,
         )
 
-    def get_dp_padding(self,
-                       num_tokens: int) -> tuple[int, Optional[torch.Tensor]]:
-        """
-        Determines the total number of tokens that each rank will run.
-        All ranks will be padded out so that they run with the same number
-        of tokens
-
-        Returns: tuple[
-            num_pad_tokens: The number of tokens that will be added to the batch
-            num_tokens_after_padding: A tensor containing the total number of
-            tokens for each DP rank including padding.
-        ]
-        """
-        dp_size = self.vllm_config.parallel_config.data_parallel_size
-        dp_rank = self.vllm_config.parallel_config.data_parallel_rank
-
-        # For DP: Don't pad when setting enforce_eager.
-        # This lets us set enforce_eager on the prefiller in a P/D setup and
-        # still use CUDA graphs (enabled by this padding) on the decoder.
-        #
-        # TODO(tms) : There are many cases where padding is enabled for
-        # prefills, causing unnecessary and excessive padding of activations.
-
-        if dp_size == 1 or self.vllm_config.model_config.enforce_eager:
-            # Early exit.
-            return 0, None
-
-        num_tokens_across_dp = DPMetadata.num_tokens_across_dp(
-            num_tokens, dp_size, dp_rank)
-        max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp).item()
-        num_tokens_after_padding = torch.tensor([max_tokens_across_dp_cpu] *
-                                                dp_size,
-                                                device="cpu",
-                                                dtype=torch.int32)
-        return max_tokens_across_dp_cpu - num_tokens, num_tokens_after_padding
-
     def get_local_padding(self, num_tokens_unpadded: int) -> int:
 
         num_tokens_padded = num_tokens_unpadded
@@ -2116,6 +2083,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 if self.prepare_inputs_event is not None:
                     self.prepare_inputs_event.record()
 
+            assert num_tokens_after_padding is not None
             if ubatch_slices:
                 assert num_tokens_after_padding is not None
                 num_input_tokens = int(num_tokens_after_padding[0].item() * 2)
@@ -2784,23 +2752,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.parallel_config.dbo_decode_token_threshold and \
                 allow_microbatching
 
-            (should_ubatch, num_tokens_across_dp) = get_dp_padding_ubatch(
-                num_tokens, num_tokens, should_ubatch, self.vllm_config)
+        (should_ubatch, num_tokens_across_dp) = get_dp_padding_ubatch(
+            num_tokens, num_tokens, should_ubatch, self.vllm_config)
 
-            # Currently the dummy run should only be ubatching during
-            # cuda graph capture, meaning all DP ranks should already
-            # have the same batch size
-            assert num_tokens_across_dp is not None
-            if should_ubatch:
-                assert int(num_tokens_across_dp[0]) == num_tokens // 2
-            else:
-                logger.info(f"NUM TOKENS: {num_tokens} {num_tokens_across_dp}")
-                num_tokens = int(num_tokens_across_dp[0])
+        # Currently the dummy run should only be ubatching during
+        # cuda graph capture, meaning all DP ranks should already
+        # have the same batch size
+        assert num_tokens_across_dp is not None
+        if should_ubatch:
+            assert int(num_tokens_across_dp[0]) == num_tokens // 2
         else:
-            logger.info(f"NUM TOKENS: {num_tokens}")
-            _, num_tokens_across_dp = self.get_dp_padding(num_tokens)
-            if num_tokens_across_dp is not None:
-                num_tokens = int(num_tokens_across_dp[0])
+            logger.info(f"NUM TOKENS: {num_tokens} {num_tokens_across_dp}")
+            num_tokens = int(num_tokens_across_dp[0])
 
         assert cudagraph_runtime_mode in {
             CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
