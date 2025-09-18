@@ -446,7 +446,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0 AND SCALED_MM_ARCHS)
     cuda_archs_loose_intersection(SCALED_MM_ARCHS "12.0f" "${CUDA_ARCHS}")
   else()
-    cuda_archs_loose_intersection(SCALED_MM_ARCHS "12.0;12.0a" "${CUDA_ARCHS}")
+    cuda_archs_loose_intersection(SCALED_MM_ARCHS "12.0a" "${CUDA_ARCHS}")
   endif()
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND SCALED_MM_ARCHS)
     set(SRCS
