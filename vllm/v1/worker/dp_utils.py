@@ -43,7 +43,7 @@ def _run_ar(should_ubatch: bool, orig_num_tokens_per_ubatch: int,
     return tensor
 
 
-def post_process_ubatch(tensor: torch.Tensor) -> bool:
+def _post_process_ubatch(tensor: torch.Tensor) -> bool:
     orig_num_tokens_tensor = tensor[0, :]
     padded_num_tokens_tensor = tensor[1, :]
 
@@ -109,7 +109,7 @@ def coordinate_batch_across_dp(
     # If we are using ubatching, then we need to divide the num_tokens
     # in num_tokens_after_padding in half and round up to the next multiple
     # of two
-    should_ubatch = post_process_ubatch(tensor)
+    should_ubatch = _post_process_ubatch(tensor)
     if should_ubatch:
         # Round up to the next multiple of two for even divisibility
         num_tokens_per_ubatch = round_up(max_num_tokens, 2) // 2
