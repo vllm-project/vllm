@@ -17,20 +17,30 @@ from openai.types.chat.chat_completion_audio import (
     ChatCompletionAudio as OpenAIChatCompletionAudio)
 from openai.types.chat.chat_completion_message import (
     Annotation as OpenAIAnnotation)
-# yapf: enable
 from openai.types.responses import (
     ResponseCodeInterpreterCallCodeDeltaEvent,
     ResponseCodeInterpreterCallCodeDoneEvent,
     ResponseCodeInterpreterCallCompletedEvent,
     ResponseCodeInterpreterCallInProgressEvent,
-    ResponseCodeInterpreterCallInterpretingEvent, ResponseCompletedEvent,
-    ResponseContentPartAddedEvent, ResponseContentPartDoneEvent,
-    ResponseCreatedEvent, ResponseFunctionToolCall, ResponseInProgressEvent,
-    ResponseInputItemParam, ResponseOutputItem, ResponseOutputItemAddedEvent,
-    ResponseOutputItemDoneEvent, ResponsePrompt, ResponseReasoningItem,
-    ResponseReasoningTextDeltaEvent, ResponseReasoningTextDoneEvent,
-    ResponseStatus, ResponseWebSearchCallCompletedEvent,
-    ResponseWebSearchCallInProgressEvent, ResponseWebSearchCallSearchingEvent)
+    ResponseCodeInterpreterCallInterpretingEvent)
+from openai.types.responses import (
+    ResponseCompletedEvent as OpenAIResponseCompletedEvent)
+from openai.types.responses import (ResponseContentPartAddedEvent,
+                                    ResponseContentPartDoneEvent,
+                                    ResponseCreatedEvent,
+                                    ResponseFunctionToolCall,
+                                    ResponseInProgressEvent,
+                                    ResponseInputItemParam, ResponseOutputItem,
+                                    ResponseOutputItemAddedEvent,
+                                    ResponseOutputItemDoneEvent,
+                                    ResponsePrompt, ResponseReasoningItem,
+                                    ResponseReasoningTextDeltaEvent,
+                                    ResponseReasoningTextDoneEvent,
+                                    ResponseStatus,
+                                    ResponseWebSearchCallCompletedEvent,
+                                    ResponseWebSearchCallInProgressEvent,
+                                    ResponseWebSearchCallSearchingEvent)
+# yapf: enable
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent)
 
@@ -1955,6 +1965,12 @@ class ResponseReasoningPartAddedEvent(OpenAIBaseModel):
 
     type: Literal["response.reasoning_part.added"]
     """The type of the event. Always `response.reasoning_part.added`."""
+
+
+# TODO: move this to a separate file
+# Streaming Events
+class ResponseCompletedEvent(OpenAIResponseCompletedEvent):
+    response: ResponsesResponse  # type: ignore[override]
 
 
 StreamingResponsesResponse: TypeAlias = Union[
