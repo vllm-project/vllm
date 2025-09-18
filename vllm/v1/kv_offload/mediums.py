@@ -4,7 +4,7 @@ from abc import ABC
 
 import numpy as np
 
-from vllm.v1.offloading.abstract import LoadStoreSpec
+from vllm.v1.kv_offload.abstract import LoadStoreSpec
 
 
 class BlockIDsLoadStoreSpec(LoadStoreSpec, ABC):
