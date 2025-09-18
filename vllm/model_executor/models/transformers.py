@@ -452,8 +452,9 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         self.pp_rank = self.pp_group.rank_in_group
         self.tp_size = get_tensor_model_parallel_world_size()
 
-        # To be updated in child classes for use in `load_weights`
-        self.skip_prefixes: Optional[list[str]] = None
+        # Weights to skip in `self.load_weights`
+        self.skip_prefixes: list[str] = []
+        self.skip_substrs: list[str] = []
 
         # Set correct attn and init on "meta" to delay allocating GPU tensors
         # TODO: @raushan, use the public `model.set_attn_implementation()`
@@ -685,7 +686,11 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=self.skip_prefixes)
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=self.skip_prefixes,
+            skip_substrs=self.skip_substrs,
+        )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
@@ -700,6 +705,14 @@ class TransformersModel(TransformersBase):
             "model.score": "score",
         })
 
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+
+        # Some encoder models have the position_ids buffer in the checkpoint
+        # vLLM will always pass position_ids as an argument, so we skip loading
+        # the buffer if it exists
+        self.skip_substrs.append("position_ids")
+
 
 @support_torch_compile(enable_if=can_enable_torch_compile)
 class TransformersForCausalLM(TransformersBase):
@@ -710,7 +723,7 @@ class TransformersForCausalLM(TransformersBase):
         # Tell `TransformersBase.load_weights` to skip
         # `lm_head` if the model has tied word embeddings
         if self.text_config.tie_word_embeddings:
-            self.skip_prefixes = ["lm_head."]
+            self.skip_prefixes.append("lm_head.")
 
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = self.text_config.vocab_size
