@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional, Union
+from typing import Optional, Union
 
 import torch
 
@@ -11,10 +11,11 @@ from vllm.distributed import get_dp_group, get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape)
-from vllm.utils import cdiv, has_triton_kernels
+from vllm.utils import cdiv
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 
-if TYPE_CHECKING and has_triton_kernels:
+# if TYPE_CHECKING and has_triton_kernels:
+if 1:
     from triton_kernels.matmul_ogs import PrecisionConfig
 
 logger = init_logger(__name__)

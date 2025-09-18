@@ -8,7 +8,6 @@ from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
                                                   FusedMoEMethodBase,
@@ -793,6 +792,28 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkMoEMethod):
             self.w2_precision_config = PrecisionConfig(
                 weight_scale=w2_scale, flex_ctx=FlexCtx(rhs_data=w2_flex))
 
+    def get_fused_moe_quant_config(
+            self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
+        w1_scale = self.w13_precision_config
+        w2_scale = self.w2_precision_config
+
+        if self.static_input_scales:
+            # TODO: how to set scale?
+            return mxfp4_w4a4_moe_quant_config(
+                w1_bias=layer.w13_bias,
+                w2_bias=layer.w2_bias,
+                w1_scale=w1_scale,
+                w2_scale=w2_scale,
+            )
+
+        else:
+            return mxfp4_w4a4_moe_quant_config(
+                w1_bias=layer.w13_bias,
+                w2_bias=layer.w2_bias,
+                w1_scale=w1_scale,
+                w2_scale=w2_scale,
+            )
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -834,9 +855,6 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkMoEMethod):
             renormalize=renormalize,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
-            w1_bias=layer.w13_bias,
-            w2_bias=layer.w2_bias,
-            w1_precision=self.w13_precision_config,
-            w2_precision=self.w2_precision_config,
+            quant_config=self.moe_quant_config,
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
