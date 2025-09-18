@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from typing import Optional, Union
 
+import numba
+import numba.types as types
 import numpy as np
 import torch
 
@@ -160,3 +162,47 @@ class RequestState:
         if self.pin_memory:
             cpu_tensor = cpu_tensor.pin_memory()
         return cpu_tensor.to(device=self.device, non_blocking=True)
+
+    def append_token_ids(
+        self,
+        req_indices: np.ndarray,
+        sampled_ids: np.ndarray,
+        num_sampled_tokens: np.ndarray,
+    ) -> None:
+        _append_token_ids(
+            req_indices,
+            sampled_ids,
+            num_sampled_tokens,
+            self.token_ids,
+            self.num_tokens,
+        )
+
+
+@numba.jit(
+    [
+        types.none(
+            types.int32[:],
+            types.int64[:, :],
+            types.int32[:],
+            types.int32[:, :],
+            types.int32[:],
+        )
+    ],
+    nopython=True,
+    cache=True,
+)
+def _append_token_ids(
+    req_indices: np.ndarray,
+    sampled_ids: np.ndarray,
+    num_sampled_tokens: np.ndarray,
+    token_ids: np.ndarray,
+    num_tokens: np.ndarray,
+) -> None:
+    num_reqs = num_sampled_tokens.shape[0]
+    for i in range(num_reqs):
+        req_idx = req_indices[i]
+        n = num_sampled_tokens[i]
+        start_idx = num_tokens[req_idx]
+        end_idx = start_idx + n
+        token_ids[req_idx, start_idx:end_idx] = sampled_ids[i, :n]
+        num_tokens[req_idx] = end_idx
