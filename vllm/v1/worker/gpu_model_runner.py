@@ -2706,7 +2706,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 (1 token) and prefill (multiple tokens) requests.
             remove_lora: If False, dummy LoRAs are not destroyed after the run
         """
-        logger.info("DUMMY RUN")
         ubatch_enabled = self.parallel_config.enable_dbo
         num_tokens_across_dp = None
         should_ubatch = False

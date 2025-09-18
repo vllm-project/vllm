@@ -77,7 +77,6 @@ class DPMetadata:
         Gather the num_tokens across all DP ranks and return results in a
         CPU tensor of size dp_size.
         """
-        logger.info(f"num_tokens_across_dp {num_tokens}")
         from vllm.distributed.parallel_state import get_dp_group
         device = current_platform.device_type
         group = get_dp_group().device_group
@@ -122,9 +121,6 @@ class DPMetadata:
         ]
         """
 
-        logger.info(
-            f"Coordinate batch {orig_num_tokens_per_ubatch}, {padded_num_tokens_per_ubatch} {should_ubatch}"
-        )
         device = current_platform.device_type
         tensor = torch.zeros(3, dp_size, device=device, dtype=torch.int32)
         tensor[0][dp_rank] = orig_num_tokens_per_ubatch
@@ -154,14 +150,13 @@ class DPMetadata:
 
     @staticmethod
     def make(
-            parallel_config: ParallelConfig,
-            attn_metadata: Any,
-            num_tokens: int,
-            num_tokens_across_dp: Optional[torch.Tensor] = None
+        parallel_config: ParallelConfig,
+        attn_metadata: Any,
+        num_tokens: int,
+        num_tokens_across_dp: torch.Tensor,
     ) -> "DPMetadata":
 
         assert parallel_config.data_parallel_size > 1
-        dp_size = parallel_config.data_parallel_size
         dp_rank = parallel_config.data_parallel_rank
         if attn_metadata is not None and hasattr(attn_metadata,
                                                  "num_prefill_tokens"):
@@ -174,12 +169,8 @@ class DPMetadata:
 
         # If num_tokens_across_dp is None, it will be computed by all_reduce
         # Otherwise, num_tokens_across_dp[dp_rank] should be equal to batchsize
-        assert (num_tokens_across_dp is None or num_tokens_across_dp[dp_rank]
-                == batchsize), f"{num_tokens_across_dp[dp_rank]} {batchsize}"
-        if num_tokens_across_dp is None:
-            assert False
-            num_tokens_across_dp = DPMetadata.num_tokens_across_dp(
-                batchsize, dp_size, dp_rank)
+        assert (num_tokens_across_dp[dp_rank] == batchsize
+                ), f"{num_tokens_across_dp[dp_rank]} {batchsize}"
         max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp)
         cu_tokens_across_dp_cpu = torch.cumsum(num_tokens_across_dp, dim=0)
         return DPMetadata(max_tokens_across_dp_cpu, cu_tokens_across_dp_cpu,
