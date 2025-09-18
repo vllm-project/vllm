@@ -7,8 +7,8 @@ import torch
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
+from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ubatch_utils import UBatchSlice, UBatchSlices
-from vllm.v1.worker.utils import coordinate_batch_across_dp
 
 logger = init_logger(__name__)
 
