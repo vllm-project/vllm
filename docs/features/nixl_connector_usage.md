@@ -17,8 +17,8 @@ NixlConnector uses NIXL library for underlying communication, which supports mul
 
 ```bash
 # Example UCX configuration, adjust according to your enviroment
-export UCX_TLS=all  # or specify specific transports like "rc,ud,sm"
-export UCX_NET_DEVICES=all  # or specify network devices like "mlx5_0:1"
+export UCX_TLS=all  # or specify specific transports like "rc,ud,sm,^cuda_ipc" ..etc
+export UCX_NET_DEVICES=all  # or specify network devices like "mlx5_0:1,mlx5_1:1"
 ```
 
 !!! tode
@@ -75,15 +75,16 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
     - Default: 5600
     - **Required for both prefiller and decoder instances**
     - Each vLLM worker needs a unique port on its host; using the same port number across different hosts is fine
-    - For TP/DP setups: base_port + dp_rank * tp_size
-    - Used for initial connection establishment between prefiller and decoder
+    - For TP/DP deployments, each worker's port on a node is computed as: base_port + dp_rank * tp_size + tp_rank (e.g., with `--tensor-parallel-size=4` and base_port=5600, tp_rank 0..3 use ports 5600, 5601, 5602, 5603 on that node).
+    - Used for the initial NIXL handshake between the prefiller and the decoder
 
 - `VLLM_NIXL_SIDE_CHANNEL_HOST`: Host for side channel communication
     - Default: "localhost"
     - Set when prefiller and decoder are on different machines
     - Connection info is passed via KVTransferParams from prefiller to decoder for handshake
 
-- `VLLM_NIXL_ABORT_REQUEST_TIMEOUT`: Timeout for request abortion (seconds) (optional)
+- `VLLM_NIXL_ABORT_REQUEST_TIMEOUT`: Auto-release timeout for prefiller's KV cache when decoder unresponsive (seconds) (optional)
+  - When nixl connection is aborted, before decoder reads kv-cache blocks through nixl channel, after this timeout value, prefill will release its kv cache blocks, to avoid holding them indefinitely.
     - Default: 120
 
 ## Multi-Instance Setup
@@ -144,6 +145,11 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
 - **kv_producer**: For prefiller instances that generate KV caches
 - **kv_consumer**: For decoder instances that consume KV caches from prefiller
 - **kv_both**: Enables symmetric functionality where the connector can act as both producer and consumer. This provides flexibility for experimental setups and scenarios where the role distinction is not predetermined.
+
+!!! tip
+    NixlConnector currently does not distinguish `kv_role`; the actual prefiller/decoder roles are determined by the upper-level proxy (e.g., `toy_proxy_server.py` using `--prefiller-hosts` and `--decoder-hosts`).
+    Therefore, `kv_role` in `--kv-transfer-config` is effectively a placeholder and does not affect NixlConnector's behavior.
+
 
 ## Example Scripts/Code
 
