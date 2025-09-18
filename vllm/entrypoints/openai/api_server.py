@@ -103,6 +103,7 @@ from vllm.transformers_utils.tokenizer import MistralTokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (Device, FlexibleArgumentParser, decorate_logs,
                         is_valid_ipv6_address, set_ulimit)
+from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -351,8 +352,11 @@ def engine_client(request: Request) -> EngineClient:
 @router.get("/health", response_class=Response)
 async def health(raw_request: Request) -> Response:
     """Health check."""
-    await engine_client(raw_request).check_health()
-    return Response(status_code=200)
+    try:
+        await engine_client(raw_request).check_health()
+        return Response(status_code=200)
+    except EngineDeadError:
+        return Response(status_code=503)
 
 
 @router.get("/load")
@@ -1678,7 +1682,7 @@ async def init_app_state(
         enable_auto_tools=args.enable_auto_tool_choice,
         tool_parser=args.tool_call_parser,
         tool_server=tool_server,
-        reasoning_parser=args.reasoning_parser,
+        reasoning_parser=args.structured_outputs_config.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
         enable_log_outputs=args.enable_log_outputs,
@@ -1697,7 +1701,7 @@ async def init_app_state(
         exclude_tools_when_tool_choice_none=args.
         exclude_tools_when_tool_choice_none,
         tool_parser=args.tool_call_parser,
-        reasoning_parser=args.reasoning_parser,
+        reasoning_parser=args.structured_outputs_config.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
         enable_log_outputs=args.enable_log_outputs,
@@ -1800,10 +1804,10 @@ def validate_api_server_args(args):
                        f"(chose from {{ {','.join(valid_tool_parses)} }})")
 
     valid_reasoning_parses = ReasoningParserManager.reasoning_parsers.keys()
-    if args.reasoning_parser \
-        and args.reasoning_parser not in valid_reasoning_parses:
+    if ((reasoning_parser := args.structured_outputs_config.reasoning_parser)
+            and reasoning_parser not in valid_reasoning_parses):
         raise KeyError(
-            f"invalid reasoning parser: {args.reasoning_parser} "
+            f"invalid reasoning parser: {reasoning_parser} "
             f"(chose from {{ {','.join(valid_reasoning_parses)} }})")
 
 
