@@ -203,7 +203,7 @@ if __name__ == "__main__":
 
     if args.test:
         # takes ~30s to run on 1xH100
-        assert args.method == "eagle"
+        assert args.method in ["eagle", "eagle3"]
         assert args.tp == 1
         assert args.num_spec_tokens == 3
         assert args.dataset_name == "hf"
@@ -216,7 +216,11 @@ if __name__ == "__main__":
 
         # check acceptance length is within 1% of expected value
         rtol = 0.01
-        expected_acceptance_length = 2.29
+        if args.method == "eagle":
+            expected_acceptance_length = 2.29
+        else:
+            expected_acceptance_length = 2.783
+        
         assert (
             acceptance_length <= (1 + rtol) * expected_acceptance_length
             and acceptance_length >= (1 - rtol) * expected_acceptance_length
@@ -225,4 +229,4 @@ if __name__ == "__main__":
             f"within {rtol * 100}% of {expected_acceptance_length}"
         )
 
-        print("Test passed!")
+        print(f"Test passed! Expected AL: {expected_acceptance_length}, got {acceptance_length}")
