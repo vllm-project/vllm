@@ -583,7 +583,7 @@ class Mistral3ForConditionalGeneration(nn.Module, SupportsLoRA,
             inputs_embeds: Optional tensor of input embeddings.
 
         Info:
-            [Mistral3ImagePixelInputs][]
+            [`Mistral3ImagePixelInputs`][vllm.model_executor.models.mistral3.Mistral3ImagePixelInputs]
         """
         if intermediate_tensors is not None:
             inputs_embeds = None
