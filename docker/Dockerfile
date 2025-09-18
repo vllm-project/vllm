@@ -207,12 +207,12 @@ ARG SCCACHE_S3_NO_CREDENTIALS=0
 ARG VLLM_USE_PRECOMPILED=""
 ARG VLLM_MAIN_CUDA_VERSION=""
 
-COPY tools/setup_sccache.sh /usr/local/bin/setup_sccache.sh
+COPY --chmod=755 tools/setup_sccache.sh /usr/local/bin/setup_sccache.sh
 
 # if USE_SCCACHE is set, use sccache to speed up compilation
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=.git,target=.git \
-    bash /usr/local/bin/setup_sccache.sh && \
+    /usr/local/bin/setup_sccache.sh && \
     if [ "$USE_SCCACHE" = "1" ]; then \
       export CMAKE_BUILD_TYPE=Release \
       VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" \
