@@ -265,7 +265,8 @@ class ParallelConfig:
     @property
     def use_sequence_parallel_moe(self) -> bool:
         return (envs.VLLM_ALL2ALL_BACKEND
-                in ("deepep_high_throughput", "deepep_low_latency")
+                in ("allgather_reducescatter", "naive",
+                    "deepep_high_throughput", "deepep_low_latency")
                 and self.enable_expert_parallel
                 and self.tensor_parallel_size > 1)
 

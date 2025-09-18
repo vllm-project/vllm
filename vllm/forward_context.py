@@ -14,6 +14,7 @@ import vllm.envs as envs
 from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils import cdiv
 from vllm.v1.worker.ubatch_utils import UBatchSlices, is_second_ubatch_empty
 
 if TYPE_CHECKING:
@@ -50,15 +51,18 @@ class BatchDescriptor(NamedTuple):
 
 
 def _compute_chunked_local_num_tokens(num_tokens_across_dp_cpu: list[int],
+                                      sequence_parallel_size: int,
                                       max_num_tokens: int,
                                       chunk_idx: int) -> list[int]:
     dp_size = len(num_tokens_across_dp_cpu)
 
     local_size = [-1] * dp_size
     for i in range(dp_size):
-        dp_tokens = num_tokens_across_dp_cpu[i]
+        # Take into account sharding if MoE activation is sequence parallel.
+        dp_sp_tokens = cdiv(num_tokens_across_dp_cpu[i],
+                            sequence_parallel_size)
         local_size[i] = min(max_num_tokens,
-                            dp_tokens - (max_num_tokens * chunk_idx))
+                            dp_sp_tokens - (max_num_tokens * chunk_idx))
         if local_size[i] <= 0:
             local_size[i] = 1  # ensure lockstep even if done
     return local_size
@@ -178,7 +182,8 @@ class DPMetadata:
                           num_tokens_across_dp)
 
     @contextmanager
-    def chunked_sizes(self, max_chunk_size_per_rank: int, chunk_idx: int):
+    def chunked_sizes(self, sequence_parallel_size: int,
+                      max_chunk_size_per_rank: int, chunk_idx: int):
         """
         Context manager to compute and temporarily set the per-rank local token
         sizes for a specific chunk during chunked forward execution.
@@ -199,6 +204,10 @@ class DPMetadata:
         `self.local_sizes` is only valid inside the context.
 
         Args:
+            sequence_parallel_size: When Attn is TP and MoE layers are EP,
+                                    we use SP between the layers to avoid
+                                    redundant ops. We need this value to
+                                    compute the chunked sizes.
             max_chunk_size_per_rank: The max number of tokens each rank is 
                                      allowed to process in this chunk.
             chunk_idx: The index of the chunk to compute sizes for.
@@ -210,7 +219,8 @@ class DPMetadata:
             for i in range(len(cu_sizes))
         ]
         self.local_sizes = _compute_chunked_local_num_tokens(
-            num_tokens_across_dp_cpu, max_chunk_size_per_rank, chunk_idx)
+            num_tokens_across_dp_cpu, sequence_parallel_size,
+            max_chunk_size_per_rank, chunk_idx)
         try:
             yield self.local_sizes
         finally:
