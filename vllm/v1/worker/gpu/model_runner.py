@@ -344,15 +344,6 @@ class GPUModelRunner:
             # No request in the batch needs prompt logprobs.
             return None
 
-        num_prompt_tokens_scheduled = ...
-        if not np.any((num_prompt_tokens_scheduled > 0)
-                      & needs_prompt_logprobs):
-            # The request already computed prompt logprobs.
-            return None
-
-        # TODO
-        return
-
     def postprocess(
         self,
         sampler_output: SamplerOutput,
