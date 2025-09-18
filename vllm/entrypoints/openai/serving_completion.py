@@ -26,21 +26,18 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               PromptTokenUsageInfo,
                                               RequestResponseMetadata,
                                               UsageInfo)
-from vllm.entrypoints.openai.serving_engine import (
-    EmbedsPrompt as ServingEngineEmbedsPrompt)
 from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
-                                                    TextTokensPrompt,
-                                                    clamp_prompt_logprobs,
-                                                    is_text_tokens_prompt)
+                                                    clamp_prompt_logprobs)
 # yapf: enable
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.renderer import RenderConfig
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.inputs.data import (EmbedsPrompt, TokensPrompt, is_embeds_prompt,
                               is_tokens_prompt)
 from vllm.logger import init_logger
+from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
-from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import as_list, merge_async_iterators
 
@@ -115,6 +112,11 @@ class OpenAIServingCompletion(OpenAIServing):
             return self.create_error_response(
                 "Echo is unsupported with prompt embeds.")
 
+        if (request.prompt_logprobs is not None
+                and request.prompt_embeds is not None):
+            return self.create_error_response(
+                "prompt_logprobs is not compatible with prompt embeds.")
+
         request_id = (
             f"cmpl-"
             f"{self._base_request_id(raw_request, request.request_id)}")
@@ -130,14 +132,13 @@ class OpenAIServingCompletion(OpenAIServing):
             if self.model_config.skip_tokenizer_init:
                 tokenizer = None
             else:
-                tokenizer = await self.engine_client.get_tokenizer(lora_request
-                                                                   )
+                tokenizer = await self.engine_client.get_tokenizer()
+            renderer = self._get_renderer(tokenizer)
 
-            request_prompts, engine_prompts = await self._preprocess_completion(
-                request,
-                tokenizer,
-                request.prompt,
-                add_special_tokens=request.add_special_tokens,
+            engine_prompts = await renderer.render_prompt_and_embeds(
+                prompt_or_prompts=request.prompt,
+                prompt_embeds=request.prompt_embeds,
+                config=self._build_render_config(request),
             )
         except ValueError as e:
             logger.exception("Error in preprocessing prompt inputs")
@@ -198,7 +199,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
                 self._log_inputs(
                     request_id_item,
-                    request_prompts[i],
+                    engine_prompt,
                     params=sampling_params,
                     lora_request=lora_request,
                 )
@@ -235,7 +236,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
         result_generator = merge_async_iterators(*generators)
 
-        model_name = self._get_model_name(request.model, lora_request)
+        model_name = self.models.model_name(lora_request)
         num_prompts = len(engine_prompts)
 
         # Similar to the OpenAI API, when n != best_of, we do not stream the
@@ -249,7 +250,7 @@ class OpenAIServingCompletion(OpenAIServing):
         if stream:
             return self.completion_stream_generator(
                 request,
-                request_prompts,
+                engine_prompts,
                 result_generator,
                 request_id,
                 created_time,
@@ -273,11 +274,9 @@ class OpenAIServingCompletion(OpenAIServing):
                 # We did not pass it into vLLM engine to avoid being redundant
                 # with the inputs token IDs
                 if final_res.prompt is None:
-                    request_prompt = request_prompts[i]
-                    if is_text_tokens_prompt(request_prompt):
-                        final_res.prompt = request_prompt["prompt"]
-                    else:
-                        final_res.prompt = None
+                    engine_prompt = engine_prompts[i]
+                    final_res.prompt = None if is_embeds_prompt(
+                        engine_prompt) else engine_prompt.get("prompt")
 
             final_res_batch_checked = cast(list[RequestOutput],
                                            final_res_batch)
@@ -313,8 +312,7 @@ class OpenAIServingCompletion(OpenAIServing):
     async def completion_stream_generator(
         self,
         request: CompletionRequest,
-        request_prompts: list[Union[TextTokensPrompt,
-                                    ServingEngineEmbedsPrompt]],
+        engine_prompts: list[Union[TokensPrompt, EmbedsPrompt]],
         result_generator: AsyncIterator[tuple[int, RequestOutput]],
         request_id: str,
         created_time: int,
@@ -350,14 +348,11 @@ class OpenAIServingCompletion(OpenAIServing):
                     num_cached_tokens = res.num_cached_tokens
                     first_iteration = False
 
-                if res.prompt is not None:
-                    prompt_text = res.prompt
-                else:
-                    request_prompt = request_prompts[prompt_idx]
-                    if is_text_tokens_prompt(request_prompt):
-                        prompt_text = request_prompt["prompt"]
-                    else:
-                        prompt_text = None
+                prompt_text = res.prompt
+                if prompt_text is None:
+                    engine_prompt = engine_prompts[prompt_idx]
+                    prompt_text = None if is_embeds_prompt(
+                        engine_prompt) else engine_prompt.get("prompt")
 
                 # Prompt details are excluded from later streamed outputs
                 if prompt_token_ids is not None:
@@ -378,6 +373,8 @@ class OpenAIServingCompletion(OpenAIServing):
                     assert request.max_tokens is not None
                     if request.echo and not has_echoed[i]:
                         assert prompt_token_ids is not None
+                        if request.return_token_ids:
+                            prompt_text = ""
                         assert prompt_text is not None
                         if request.max_tokens == 0:
                             # only return the prompt
@@ -525,6 +522,8 @@ class OpenAIServingCompletion(OpenAIServing):
             for output in final_res.outputs:
                 assert request.max_tokens is not None
                 if request.echo:
+                    if request.return_token_ids:
+                        prompt_text = ""
                     assert prompt_text is not None
                     if request.max_tokens == 0:
                         token_ids = prompt_token_ids
@@ -675,4 +674,19 @@ class OpenAIServingCompletion(OpenAIServing):
             token_logprobs=out_token_logprobs,
             tokens=out_tokens,
             top_logprobs=out_top_logprobs,
+        )
+
+    def _build_render_config(
+        self,
+        request: CompletionRequest,
+        max_input_length: Optional[int] = None,
+    ) -> RenderConfig:
+        max_input_tokens_len = self.max_model_len - (request.max_tokens or 0)
+        return RenderConfig(
+            max_length=max_input_tokens_len,
+            truncate_prompt_tokens=request.truncate_prompt_tokens,
+            add_special_tokens=request.add_special_tokens,
+            cache_salt=request.cache_salt,
+            needs_detokenization=bool(request.echo
+                                      and not request.return_token_ids),
         )

@@ -257,7 +257,7 @@ class BloomModel(nn.Module):
                                                     config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.word_embeddings_layernorm(self.word_embeddings(input_ids))
+        return self.word_embeddings(input_ids)
 
     def forward(
         self,
@@ -271,6 +271,7 @@ class BloomModel(nn.Module):
                 hidden_states = inputs_embeds
             else:
                 hidden_states = self.get_input_embeddings(input_ids)
+            hidden_states = self.word_embeddings_layernorm(hidden_states)
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
@@ -329,7 +330,9 @@ class BloomForCausalLM(nn.Module, SupportsPP, SupportsQuant):
             self.lm_head = self.transformer.word_embeddings
         else:
             self.lm_head = ParallelLMHead(self.config.vocab_size,
-                                          self.config.hidden_size)
+                                          self.config.hidden_size,
+                                          prefix=maybe_prefix(
+                                              prefix, "lm_head"))
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (

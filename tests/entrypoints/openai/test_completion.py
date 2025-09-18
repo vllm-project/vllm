@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# imports for guided decoding tests
+# imports for structured outputs tests
 import json
 import os
-import shutil
-from tempfile import TemporaryDirectory
 from typing import Optional
 
 import jsonschema
@@ -14,9 +12,7 @@ import pytest_asyncio
 import regex as re
 import requests
 # downloading lora to test lora requests
-from huggingface_hub import snapshot_download
 from openai import BadRequestError
-from transformers import AutoTokenizer
 
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
@@ -26,34 +22,10 @@ from ...utils import RemoteOpenAIServer
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 # technically these adapters use a different base model,
 # but we're not testing generation quality here
-LORA_NAME = "typeof/zephyr-7b-beta-lora"
-
-GUIDED_DECODING_BACKENDS = ["outlines", "xgrammar", "guidance"]
 
 
 @pytest.fixture(scope="module")
-def zephyr_lora_files():
-    return snapshot_download(repo_id=LORA_NAME)
-
-
-@pytest.fixture(scope="module")
-def zephyr_lora_added_tokens_files(zephyr_lora_files):
-    tmp_dir = TemporaryDirectory()
-    tmp_model_dir = f"{tmp_dir.name}/zephyr"
-    shutil.copytree(zephyr_lora_files, tmp_model_dir)
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    # Copy tokenizer to adapter and add some unique tokens
-    # 32000, 32001, 32002
-    added = tokenizer.add_tokens(["vllm1", "vllm2", "vllm3"],
-                                 special_tokens=True)
-    assert added == 3
-    tokenizer.save_pretrained(tmp_model_dir)
-    yield tmp_model_dir
-    tmp_dir.cleanup()
-
-
-@pytest.fixture(scope="module")
-def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files):
+def default_server_args(zephyr_lora_files):
     return [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -67,7 +39,6 @@ def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files):
         "--enable-lora",
         "--lora-modules",
         f"zephyr-lora={zephyr_lora_files}",
-        f"zephyr-lora2={zephyr_lora_added_tokens_files}",
         "--max-lora-rank",
         "64",
         "--max-cpu-loras",
@@ -113,7 +84,7 @@ async def client(server):
 @pytest.mark.parametrize(
     # first test base model, then test loras
     "model_name",
-    [MODEL_NAME, "zephyr-lora", "zephyr-lora2"],
+    [MODEL_NAME, "zephyr-lora"],
 )
 async def test_single_completion(client: openai.AsyncOpenAI, model_name: str):
     completion = await client.completions.create(model=model_name,
@@ -142,20 +113,6 @@ async def test_single_completion(client: openai.AsyncOpenAI, model_name: str):
 
 
 @pytest.mark.asyncio
-async def test_added_lora_tokens(client: openai.AsyncOpenAI):
-    # test using token IDs
-    completion = await client.completions.create(
-        model="zephyr-lora2",
-        prompt=[0, 0, 32000, 32001, 32002],
-        echo=True,
-        max_tokens=5,
-        temperature=0.0,
-    )
-    # Added tokens should appear in tokenized prompt
-    assert completion.choices[0].text.startswith("<unk><unk>vllm1vllm2vllm3")
-
-
-@pytest.mark.asyncio
 async def test_added_lora_tokens_base_model(client: openai.AsyncOpenAI):
     # test using token IDs
     with pytest.raises(openai.BadRequestError, match="out of vocabulary"):
@@ -173,7 +130,7 @@ async def test_added_lora_tokens_base_model(client: openai.AsyncOpenAI):
 @pytest.mark.parametrize(
     # first test base model, then test loras
     "model_name",
-    [MODEL_NAME, "zephyr-lora", "zephyr-lora2"],
+    [MODEL_NAME, "zephyr-lora"],
 )
 async def test_no_logprobs(client: openai.AsyncOpenAI, model_name: str):
     # test using token IDs
@@ -636,12 +593,13 @@ async def test_allowed_token_ids(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
-async def test_guided_json_completion(client: openai.AsyncOpenAI,
-                                      guided_decoding_backend: str,
-                                      sample_json_schema, is_v1_server: bool):
+async def test_structured_outputs_json_completion(
+    client: openai.AsyncOpenAI,
+    sample_json_schema,
+    is_v1_server: bool,
+):
     if not is_v1_server:
-        pytest.skip("Guided decoding is only supported in v1 engine")
+        pytest.skip("structured outputs is only supported in v1 engine")
 
     completion = await client.completions.create(
         model=MODEL_NAME,
@@ -650,8 +608,7 @@ async def test_guided_json_completion(client: openai.AsyncOpenAI,
         n=3,
         temperature=1.0,
         max_tokens=500,
-        extra_body=dict(guided_json=sample_json_schema,
-                        guided_decoding_backend=guided_decoding_backend))
+        extra_body=dict(structured_outputs=dict(json=sample_json_schema)))
 
     assert completion.id is not None
     assert len(completion.choices) == 3
@@ -661,12 +618,13 @@ async def test_guided_json_completion(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
-async def test_guided_regex_completion(client: openai.AsyncOpenAI,
-                                       guided_decoding_backend: str,
-                                       sample_regex, is_v1_server: bool):
+async def test_structured_outputs_regex_completion(
+    client: openai.AsyncOpenAI,
+    sample_regex,
+    is_v1_server: bool,
+):
     if not is_v1_server:
-        pytest.skip("Guided decoding is only supported in v1 engine")
+        pytest.skip("structured outputs is only supported in v1 engine")
 
     completion = await client.completions.create(
         model=MODEL_NAME,
@@ -674,8 +632,7 @@ async def test_guided_regex_completion(client: openai.AsyncOpenAI,
         n=3,
         temperature=1.0,
         max_tokens=20,
-        extra_body=dict(guided_regex=sample_regex,
-                        guided_decoding_backend=guided_decoding_backend))
+        extra_body=dict(structured_outputs=dict(regex=sample_regex)))
 
     assert completion.id is not None
     assert len(completion.choices) == 3
@@ -685,13 +642,13 @@ async def test_guided_regex_completion(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
-async def test_guided_choice_completion(client: openai.AsyncOpenAI,
-                                        guided_decoding_backend: str,
-                                        sample_guided_choice,
-                                        is_v1_server: bool):
+async def test_structured_outputs_choice_completion(
+    client: openai.AsyncOpenAI,
+    sample_structured_outputs_choices,
+    is_v1_server: bool,
+):
     if not is_v1_server:
-        pytest.skip("Guided decoding is only supported in v1 engine")
+        pytest.skip("structured outputs is only supported in v1 engine")
 
     completion = await client.completions.create(
         model=MODEL_NAME,
@@ -699,20 +656,21 @@ async def test_guided_choice_completion(client: openai.AsyncOpenAI,
         n=2,
         temperature=1.0,
         max_tokens=10,
-        extra_body=dict(guided_choice=sample_guided_choice,
-                        guided_decoding_backend=guided_decoding_backend))
+        extra_body=dict(structured_outputs=dict(
+            choice=sample_structured_outputs_choices)))
 
     assert completion.id is not None
     assert len(completion.choices) == 2
     for i in range(2):
-        assert completion.choices[i].text in sample_guided_choice
+        assert completion.choices[i].text in sample_structured_outputs_choices
 
 
 @pytest.mark.asyncio
-async def test_guided_grammar(client: openai.AsyncOpenAI,
-                              sample_sql_statements, is_v1_server: bool):
+async def test_structured_outputs_grammar(client: openai.AsyncOpenAI,
+                                          sample_sql_statements,
+                                          is_v1_server: bool):
     if not is_v1_server:
-        pytest.skip("Guided grammar is only supported in v1 engine")
+        pytest.skip("grammar is only supported in v1 engine")
 
     completion = await client.completions.create(
         model=MODEL_NAME,
@@ -720,7 +678,8 @@ async def test_guided_grammar(client: openai.AsyncOpenAI,
                 "table_1 where it is equals to 1"),
         temperature=1.0,
         max_tokens=500,
-        extra_body=dict(guided_grammar=sample_sql_statements))
+        extra_body=dict(
+            structured_outputs=dict(grammar=sample_sql_statements), ))
 
     content = completion.choices[0].text
 
@@ -739,7 +698,7 @@ async def test_guided_grammar(client: openai.AsyncOpenAI,
 @pytest.mark.parametrize(
     # first test base model, then test loras
     "model_name",
-    [MODEL_NAME, "zephyr-lora", "zephyr-lora2"],
+    [MODEL_NAME, "zephyr-lora"],
 )
 @pytest.mark.parametrize("logprobs_arg", [1, 0])
 async def test_echo_logprob_completion(client: openai.AsyncOpenAI,
@@ -771,27 +730,26 @@ async def test_echo_logprob_completion(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
-async def test_guided_decoding_type_error(client: openai.AsyncOpenAI,
-                                          guided_decoding_backend: str,
-                                          sample_json_schema, sample_regex,
-                                          is_v1_server: bool):
+async def test_structured_outputs_type_error(client: openai.AsyncOpenAI,
+                                             sample_json_schema, sample_regex,
+                                             is_v1_server: bool):
     if not is_v1_server:
-        pytest.skip("Guided decoding is only supported in v1 engine")
+        pytest.skip("structured outputs is only supported in v1 engine")
 
     with pytest.raises(openai.BadRequestError):
         _ = await client.completions.create(
             model=MODEL_NAME,
             prompt="Give an example JSON that fits this schema: 42",
-            extra_body=dict(guided_json=42,
-                            guided_decoding_backend=guided_decoding_backend))
+            extra_body=dict(structured_outputs=dict(json=42)))
 
     with pytest.raises(openai.BadRequestError):
         _ = await client.completions.create(
             model=MODEL_NAME,
             prompt="Give an example string that fits this regex",
-            extra_body=dict(guided_regex=sample_regex,
-                            guided_json=sample_json_schema))
+            extra_body=dict(structured_outputs=dict(
+                regex=sample_regex,
+                json=sample_json_schema,
+            )))
 
 
 @pytest.mark.asyncio
