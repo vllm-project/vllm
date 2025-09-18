@@ -25,6 +25,8 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.quantization.utils.disable_mem_pool import (
+    disable_mem_pool)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend, apply_flashinfer_per_tensor_scale_fp8,
     build_flashinfer_fp8_cutlass_moe_prepare_finalize,
@@ -311,14 +313,22 @@ class Fp8LinearMethod(LinearMethodBase):
                         if self.quant_config.is_checkpoint_fp8_serialized else
                         params_dtype)
 
-        weight = ModelWeightParameter(data=torch.empty(
-            output_size_per_partition,
-            input_size_per_partition,
-            dtype=weight_dtype),
-                                      input_dim=1,
-                                      output_dim=0,
-                                      weight_loader=weight_loader)
-        layer.register_parameter("weight", weight)
+        # WEIGHTS
+        # if not fp8_serialized, quantization will be performed in `process_weights_after_loading`
+        # and the parameter created here will not be used, disable mem pool to avoid
+        # memory release failure, when setting `enable_sleep_mode=True`. The issue is
+        # first reported in https://github.com/vllm-project/vllm/issues/19855, together with
+        # the solutions used here.
+        with disable_mem_pool(
+                disable=not self.quant_config.is_checkpoint_fp8_serialized):
+            weight = ModelWeightParameter(data=torch.empty(
+                output_size_per_partition,
+                input_size_per_partition,
+                dtype=weight_dtype),
+                                          input_dim=1,
+                                          output_dim=0,
+                                          weight_loader=weight_loader)
+            layer.register_parameter("weight", weight)
 
         # If checkpoint is serialized fp8, load them.
         # Otherwise, wait until process_weights_after_loading.
@@ -615,23 +625,30 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     f"weight quantization block_k = {block_k}.")
 
         # WEIGHTS
-        w13_weight = torch.nn.Parameter(torch.empty(
-            num_experts,
-            2 * intermediate_size_per_partition,
-            hidden_size,
-            dtype=params_dtype),
-                                        requires_grad=False)
-        layer.register_parameter("w13_weight", w13_weight)
-        set_weight_attrs(w13_weight, extra_weight_attrs)
+        # if not fp8_serialized, quantization will be performed in `process_weights_after_loading
+        # and the parameter created here will not be used, disable mem pool to avoid
+        # memory release failure, when setting `enable_sleep_mode=True`. The issue is
+        # first reported in https://github.com/vllm-project/vllm/issues/19855, together with
+        # the solutions used here.
+        with disable_mem_pool(
+                disable=not self.quant_config.is_checkpoint_fp8_serialized):
+            w13_weight = torch.nn.Parameter(torch.empty(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                hidden_size,
+                dtype=params_dtype),
+                                            requires_grad=False)
+            layer.register_parameter("w13_weight", w13_weight)
+            set_weight_attrs(w13_weight, extra_weight_attrs)
 
-        w2_weight = torch.nn.Parameter(torch.empty(
-            num_experts,
-            hidden_size,
-            intermediate_size_per_partition,
-            dtype=params_dtype),
-                                       requires_grad=False)
-        layer.register_parameter("w2_weight", w2_weight)
-        set_weight_attrs(w2_weight, extra_weight_attrs)
+            w2_weight = torch.nn.Parameter(torch.empty(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition,
+                dtype=params_dtype),
+                                           requires_grad=False)
+            layer.register_parameter("w2_weight", w2_weight)
+            set_weight_attrs(w2_weight, extra_weight_attrs)
 
         # WEIGHT_SCALES
         if not self.block_quant:
