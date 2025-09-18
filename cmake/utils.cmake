@@ -310,8 +310,8 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
   list(REMOVE_DUPLICATES _PTX_ARCHS)
   list(REMOVE_DUPLICATES _SRC_CUDA_ARCHS)
 
-  # if x.0a is in SRC_CUDA_ARCHS and x.0 is in CUDA_ARCHS then we should
-  # remove x.0a from SRC_CUDA_ARCHS and add x.0a to _CUDA_ARCHS
+  # If x.0a or x.0f is in SRC_CUDA_ARCHS and x.0 is in CUDA_ARCHS then we should
+  # remove x.0a or x.0f from SRC_CUDA_ARCHS and add x.0a or x.0f to _CUDA_ARCHS
   set(_CUDA_ARCHS)
   foreach(_arch ${_SRC_CUDA_ARCHS})
     if(_arch MATCHES "[af]$")
