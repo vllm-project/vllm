@@ -90,10 +90,6 @@ class DummyAFDConnector(AFDConnectorBase):
         """
         return self._is_initialized
 
-    # ========================================
-    # Attention Worker Interface Implementation (returns zero tensors)
-    # ========================================
-
     def send_attn_output(
         self,
         hidden_states: torch.Tensor,
@@ -139,10 +135,6 @@ class DummyAFDConnector(AFDConnectorBase):
             dtype=metadata.dtype,
             device=metadata.device,
         )
-
-    # ========================================
-    # FFN Server Interface Implementation (simulates receiving requests)
-    # ========================================
 
     def recv_attn_output(
         self,

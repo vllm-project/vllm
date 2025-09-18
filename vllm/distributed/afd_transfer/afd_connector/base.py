@@ -73,10 +73,6 @@ class AFDConnectorBase(ABC):
         """Get the local rank of this connector."""
         return getattr(self, 'local_rank', 0)
 
-    # ========================================
-    # Attention Worker端接口 (主动发送FFN请求)
-    # ========================================
-
     @abstractmethod
     def send_attn_output(
         self,
@@ -108,10 +104,6 @@ class AFDConnectorBase(ABC):
             torch.Tensor: FFN computation result
         """
         raise NotImplementedError
-
-    # ========================================
-    # FFN Server端接口 (被动接收并响应)
-    # ========================================
 
     @abstractmethod
     def recv_attn_output(
