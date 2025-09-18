@@ -49,10 +49,10 @@ logger = init_logger(__name__)
 
 class EplbState:
     def __init__(self, model):
-        self.eplb_data = Optional[EplbData]
-        self.eplb_updator = Optional[EplbUpdator]
-        self._async_processor = Optional[EplbProcess]
-        self.eplb_policy = Optional[EplbPolicy]
+        self.eplb_data: Optional[EplbData] = None
+        self.eplb_updator: Optional[EplbUpdator] = None
+        self._async_processor: Optional[EplbProcess] = None
+        self.eplb_policy: Optional[EplbPolicy] = EplbPolicy()
         self.model = model
         self.eplb_adaptor = VllmEplbAdaptor(self.model)
         self.eplb_loader = EplbWeightLoader(self.eplb_adaptor)

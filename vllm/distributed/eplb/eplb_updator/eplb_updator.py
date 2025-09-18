@@ -12,10 +12,11 @@ from vllm.distributed.eplb.eplb_loader.eplb_weight_loader import EplbWeightLoade
 from vllm.distributed.eplb.eplb_data.eplb_data import EplbData
 from vllm.distributed.eplb.eplb_updator.abstract_updator import BaseUpdator
 from vllm.distributed.eplb.eplb_process.eplb_process import EplbProcess
+from vllm.distributed.eplb.eplb_policy.abstract_policy import EplbPolicy
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.utils import logger
 import numpy
-import torch.distrubuted as dist
+import torch.distributed as dist
 
 from overrides import override
 
@@ -30,7 +31,7 @@ class EplbUpdator(BaseUpdator):
     It interacts with `EplbData` for shared state, `EplbWeightLoader` for
     weight transfer, and `EplbProcess` for expert mapping calculations.
     """
-    def __init__(self, eplb_data: EplbData, eplb_loader: EplbWeightLoader,adaptor, eplb_process: EplbProcess):
+    def __init__(self, eplb_data: EplbData, eplb_loader: EplbWeightLoader, adaptor, eplb_process: EplbProcess):
         """
         Initializes the EplbUpdator.
 
@@ -40,11 +41,11 @@ class EplbUpdator(BaseUpdator):
             adaptor: An adaptor to interact with the vLLM model's expert parameters.
             eplb_process: An instance of EplbProcess for handling expert mapping logic.
         """
-        self.cur_iterations = None
+        self.cur_iterations = 0
         self.device = None
         self.world_size = None
         self._gather_buffer = None
-        self.eplb_policy = None
+        self.eplb_policy = EplbPolicy()
         self.reqs = None
         self.eplb_process = eplb_process
         self.eplb_data = eplb_data
@@ -406,10 +407,10 @@ class EplbUpdator(BaseUpdator):
         if not is_profile:
             if self.eplb_data.physical_to_logical_map.shape[
                 1] != new_physical_to_logical_map.shape[1]:
-                self.physical_to_logical_map = new_physical_to_logical_map.to(
+                self.eplb_data.physical_to_logical_map = new_physical_to_logical_map.to(
                     self.eplb_data.physical_to_logical_map.device)
             else:
-                self.physical_to_logical_map.copy_(new_physical_to_logical_map)
+                self.eplb_data.physical_to_logical_map.copy_(new_physical_to_logical_map)
             max_physical_slots = new_logical_to_physical_map.shape[-1]
             assert max_physical_slots <= self.eplb_data.logical_to_physical_map.shape[-1]
             new_logical_to_physical_map = torch.nn.functional.pad(
