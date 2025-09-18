@@ -13,8 +13,9 @@ from transformers.models.qwen2_vl import Qwen2VLProcessor
 
 from vllm.attention.layer import check_upstream_fa_availability
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (ColumnParallelLinear, QKVParallelLinear,
+from vllm.model_executor.layers.linear import (ColumnParallelLinear, MergedColumnParallelLinear, QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
@@ -366,32 +367,52 @@ class DotsSwiGLUFFN(nn.Module):
         in_features = config.embed_dim
         bias = config.use_bias
 
-        # Reuse vLLM parallel linear layers. Disable TP to match vision DP.
-        self.fc1 = ColumnParallelLinear(in_features,
-                                        hidden_features,
-                                        bias=bias,
-                                        quant_config=quant_config,
-                                        prefix=f"{prefix}.fc1",
-                                        disable_tp=True)
+        # Referenced aimv2.py AIMv2SwiGLUFFN
+        self.fc13 = MergedColumnParallelLinear(
+            in_features,
+            [hidden_features] * 2,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.fc13",
+            disable_tp=True)
         self.fc2 = RowParallelLinear(hidden_features,
                                      in_features,
                                      bias=bias,
                                      quant_config=quant_config,
                                      prefix=f"{prefix}.fc2",
                                      disable_tp=True)
-        self.fc3 = ColumnParallelLinear(in_features,
-                                        hidden_features,
-                                        bias=bias,
-                                        quant_config=quant_config,
-                                        prefix=f"{prefix}.fc3",
-                                        disable_tp=True)
+        self.act_fn = SiluAndMul()
+
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x1, _ = self.fc1(x)
-        x3, _ = self.fc3(x)
-        x = F.silu(x1) * x3
+        x, _ = self.fc13(x)
+        x = self.act_fn(x)
         x, _ = self.fc2(x)
         return x
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        params = dict(self.named_parameters())
+        loaded: set[str] = set()
+        for name, w in weights:
+            # Map fc1 -> fc13 (shard 0)
+            if name.startswith("fc1."):
+                tgt = name.replace("fc1.", "fc13.")
+                if tgt in params:
+                    params[tgt].weight_loader(params[tgt], w, 0)
+                    loaded.add(tgt)
+                continue
+            # Map fc3 -> fc13 (shard 1)
+            if name.startswith("fc3."):
+                tgt = name.replace("fc3.", "fc13.")
+                if tgt in params:
+                    params[tgt].weight_loader(params[tgt], w, 1)
+                    loaded.add(tgt)
+                continue
+            # Pass-through for fc2 and others
+            if name in params:
+                params[name].weight_loader(params[name], w)
+                loaded.add(name)
+        return loaded
 
 
 class DotsPatchEmbed(nn.Module):
