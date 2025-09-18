@@ -561,3 +561,48 @@ async def collect_outputs(
             outputs_list.append(output)
         final_output = output
     return final_output
+
+
+@pytest.mark.asyncio
+async def test_request_id_reuse_after_abort(monkeypatch: pytest.MonkeyPatch):
+    """Test for issue #23697: ensure request ID can be safely reused.
+    
+    Prevents race condition where aborting request A then immediately
+    starting a new request with ID A causes new request to be aborted.
+    """
+    with monkeypatch.context() as m, ExitStack() as after:
+        m.setenv("VLLM_USE_V1", "1")
+
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
+        after.callback(engine.shutdown)
+
+        request_id = "reuse-test"
+
+        # Start first request
+        long_params = SamplingParams(max_tokens=500, ignore_eos=True, seed=42)
+        first_outputs: list[RequestOutput] = []
+        first_task = asyncio.create_task(
+            collect_outputs(engine, request_id, TEXT_PROMPT, long_params,
+                            first_outputs))
+
+        await asyncio.sleep(0.3)  # Let it generate some tokens
+        await engine.abort(request_id)  # Abort first request
+        first_result = await first_task
+
+        # Verify first request was aborted
+        assert first_result is not None
+        assert first_result.outputs[0].finish_reason == "abort"
+
+        # Immediately reuse same request ID
+        short_params = SamplingParams(max_tokens=5, temperature=0.0, seed=123)
+        second_outputs: list[RequestOutput] = []
+        second_result = await collect_outputs(engine, request_id,
+                                              "New request", short_params,
+                                              second_outputs)
+
+        # Second request should complete normally, not be aborted
+        assert second_result is not None
+        assert second_result.outputs[0].finish_reason != "abort"
+        assert len(second_result.outputs[0].token_ids) > 0
+        assert not engine.output_processor.has_unfinished_requests()
