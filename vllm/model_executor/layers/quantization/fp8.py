@@ -68,6 +68,25 @@ def _is_col_major(x: torch.Tensor) -> bool:
     return x.stride(0) == m * n and x.stride(1) == 1 and x.stride(2) == m
 
 
+def _wrap_parameter_or_copy(layer: torch.nn.Module, name: str,
+                            weight: torch.Tensor):
+    layer_weight = getattr(layer, name)
+    if isinstance(layer_weight, Parameter):
+        # If it is already a Parameter, we assume it is the right shape
+        # directly copy it from weight to keep pointer unchanged in CUDA Graph
+        layer_weight.copy_(weight)
+    else:
+        # torch.compile() cannot use Parameter subclasses.
+        # but these weights are already Parameter
+        # so this can be compatible with torch.compile
+        param = Parameter(weight, requires_grad=False)
+        if hasattr(layer_weight, "weight_loader"):
+            # keep the weight_loader attribute to make sure
+            # the weight can be loaded correctly in weight update
+            param.weight_loader = layer_weight.weight_loader
+        setattr(layer, name, param)
+
+
 class Fp8Config(QuantizationConfig):
     """Config class for FP8."""
 
@@ -390,10 +409,9 @@ class Fp8LinearMethod(LinearMethodBase):
 
             weight = self._maybe_pad_weight(weight)
 
-            # Torch.compile cannot use Parameter subclasses.
-            layer.weight = Parameter(weight, requires_grad=False)
-            layer.weight_scale_inv = Parameter(weight_scale_inv,
-                                               requires_grad=False)
+            _wrap_parameter_or_copy(layer, "weight", weight)
+            _wrap_parameter_or_copy(layer, "weight_scale_inv",
+                                    weight_scale_inv)
 
         # If checkpoint not serialized fp8, quantize the weights.
         elif not self.quant_config.is_checkpoint_fp8_serialized:
@@ -738,13 +756,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 w2_weight = layer.w2_weight
                 w2_weight_scale_inv = layer.w2_weight_scale_inv
 
-            # torch.compile() cannot use Parameter subclasses.
-            layer.w13_weight = Parameter(w13_weight, requires_grad=False)
-            layer.w13_weight_scale_inv = Parameter(w13_weight_scale_inv,
-                                                   requires_grad=False)
-            layer.w2_weight = Parameter(w2_weight, requires_grad=False)
-            layer.w2_weight_scale_inv = Parameter(w2_weight_scale_inv,
-                                                  requires_grad=False)
+            _wrap_parameter_or_copy(layer, "w13_weight", w13_weight)
+            _wrap_parameter_or_copy(layer, "w13_weight_scale_inv",
+                                    w13_weight_scale_inv)
+            _wrap_parameter_or_copy(layer, "w2_weight", w2_weight)
+            _wrap_parameter_or_copy(layer, "w2_weight_scale_inv",
+                                    w2_weight_scale_inv)
+
             if self.rocm_aiter_moe_enabled:
                 # reshaping weights is required for aiter moe kernel.
                 shuffled_w13, shuffled_w2 = shuffle_weights(
