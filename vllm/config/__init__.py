@@ -3032,6 +3032,8 @@ class VllmConfig:
         if hasattr(self.model_config, "model_weights") and is_runai_obj_uri(
                 self.model_config.model_weights):
             if self.load_config.load_format == "auto":
+                logger.info("Detected Run:ai model config. "
+                            "Overriding `load_format` to 'runai_streamer'")
                 self.load_config.load_format = "runai_streamer"
             elif self.load_config.load_format != "runai_streamer":
                 raise ValueError(f"To load a model from S3, 'load_format' "
