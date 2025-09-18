@@ -1038,3 +1038,17 @@ steps:
   num_gpus: 2
   commands:
     - pytest -v -s tests/distributed/test_context_parallel.py
+
+##### RL Integration Tests #####
+- label: Prime-RL Integration Test # 8min
+  timeout_in_minutes: 20
+  optional: true
+  working_dir: "/vllm-workspace/.buildkit"
+  source_file_dependencies:
+  - vllm/
+  - tests/rl_integration/test_prime_rl.py
+  - .buildkite/scripts/setup-prime-rl.sh
+  commands:
+    - bash .buildkite/scripts/setup-prime-rl.sh
+    - source prime-rl/.venv/bin/activate
+    - pytest -vs prime-rl/tests/integration/test_rl.py -m gpu
