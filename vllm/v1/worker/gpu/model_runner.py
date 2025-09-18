@@ -219,9 +219,10 @@ class GPUModelRunner:
         idx_mapping_list = [
             self.req_states.req_id_to_index[req_id] for req_id in req_ids
         ]
-        self.input_buffers.idx_mapping.np[:num_reqs] = idx_mapping_list
-        idx_mapping_np = self.input_buffers.idx_mapping.np[:num_reqs]
-        idx_mapping = self.input_buffers.idx_mapping.copy_to_gpu(num_reqs)
+        idx_mapping = self.input_buffers.idx_mapping
+        idx_mapping.np[:num_reqs] = idx_mapping_list
+        idx_mapping_np = idx_mapping.np[:num_reqs]
+        idx_mapping = idx_mapping.copy_to_gpu(num_reqs)
 
         # Block tables: num_kv_cache_groups x [num_reqs, max_num_blocks]
         block_tables = self.block_tables.gather_block_tables(idx_mapping)
