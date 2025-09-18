@@ -137,6 +137,7 @@ if TYPE_CHECKING:
     VLLM_USE_DEEP_GEMM_E8M0_HOPPER: bool = False
     VLLM_SKIP_DEEP_GEMM_WARMUP: bool = False
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
+    VLLM_USE_FLASHINFER_MOE_FP16: bool = False
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
     VLLM_FLASHINFER_MOE_BACKEND: str = "throughput"
@@ -1006,6 +1007,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: bool(int(os.getenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", "1"))),
 
     # Allow use of FlashInfer MoE kernels for fused moe ops.
+    "VLLM_USE_FLASHINFER_MOE_FP16":
+    lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP16", "0"))),
+
+    # Allow use of FlashInfer MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_FP8":
     lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP8", "0"))),
 
@@ -1330,6 +1335,7 @@ def compute_hash() -> str:
         "VLLM_USE_DEEP_GEMM_E8M0_HOPPER",
         "VLLM_USE_TRTLLM_FP4_GEMM",
         "VLLM_USE_FUSED_MOE_GROUPED_TOPK",
+        "VLLM_USE_FLASHINFER_MOE_FP16",
         "VLLM_USE_FLASHINFER_MOE_FP8",
         "VLLM_USE_FLASHINFER_MOE_FP4",
         "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8",

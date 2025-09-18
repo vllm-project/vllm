@@ -261,12 +261,20 @@ def flashinfer_cutlass_moe(
     global_num_experts: int = -1,
     expert_map: Optional[torch.Tensor] = None,
     apply_router_weight_on_input: bool = False,
+    tp_rank: int = 0,
+    tp_size: int = 1,
+    ep_rank: int = 0,
+    ep_size: int = 1,
 ) -> torch.Tensor:
     fused_experts = mk.FusedMoEModularKernel(
         FlashInferCutlassMoEPrepareAndFinalize(use_dp=False),
         FlashInferExperts(
             out_dtype=hidden_states.dtype,
             quant_dtype=None,
+            tp_rank=tp_rank,
+            tp_size=tp_size,
+            ep_rank=ep_rank,
+            ep_size=ep_size,
         ))
 
     return fused_experts(
