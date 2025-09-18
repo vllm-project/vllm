@@ -450,6 +450,8 @@ class ModelConfig:
 
     # Multimodal config and init vars
     multimodal_config: Optional[MultiModalConfig] = None
+    """Configuration for multimodal model. If `None`, this will be inferred
+    from the architecture of `self.model`."""
     limit_mm_per_prompt: InitVar[Optional[dict[str, int]]] = None
     media_io_kwargs: InitVar[Optional[dict[str, dict[str, Any]]]] = None
     mm_processor_kwargs: InitVar[Optional[dict[str, Any]]] = None
