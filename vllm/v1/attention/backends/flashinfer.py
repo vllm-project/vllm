@@ -215,7 +215,7 @@ class FlashInferMetadata:
     max_q_len: int
     max_seq_len: int
     seq_lens: torch.Tensor
-    block_table_tensor: torch.Tensor
+    block_table: torch.Tensor
     prefill_use_trtllm: bool
     decode_use_trtllm: bool
 
@@ -407,7 +407,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens =\
             split_decodes_and_prefills(common_attn_metadata,
                                        decode_threshold=self.reorder_batch_threshold)
-
         page_size = self.page_size
         max_q_len = common_attn_metadata.max_query_len
         max_seq_len = common_attn_metadata.max_seq_len
@@ -513,7 +512,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             max_q_len=max_q_len,
             max_seq_len=max_seq_len,
             seq_lens=seq_lens,
-            block_table_tensor=block_table_tensor,
+            block_table=block_table_tensor,
             prefill_use_trtllm=prefill_use_trtllm,
             decode_use_trtllm=decode_use_trtllm,
             num_decodes=num_decodes,
@@ -862,7 +861,7 @@ class FlashInferImpl(AttentionImpl):
                 # prefill_query may be non-contiguous
                 prefill_query = prefill_query.contiguous()
                 workspace_buffer = prefill_wrapper._float_workspace_buffer
-                block_tables_prefill = attn_metadata.block_table_tensor[
+                block_tables_prefill = attn_metadata.block_table[
                     num_decode_tokens:]
                 seq_lens_prefill = attn_metadata.seq_lens[num_decode_tokens:]
 
@@ -944,9 +943,15 @@ class FlashInferImpl(AttentionImpl):
                 decode_query = decode_query.contiguous()
                 workspace_buffer = decode_wrapper._float_workspace_buffer
                 block_tables_decode = attn_metadata.\
-                    block_table_tensor[:num_decode_tokens]
+                    block_table[:num_decode_tokens]
                 seq_lens_decode = attn_metadata.seq_lens[:num_decode_tokens]
-
+                q_len_per_request = num_decode_tokens // attn_metadata.num_decodes
+                # if num_decode_tokens % attn_metadata.num_decodes ==0 :
+                #     q_len_per_request = num_decode_tokens // attn_metadata.num_decodes
+                # else:
+                #     raise ValueError(
+                #         f"num_decode_tokens={num_decode_tokens}, batch_size={attn_metadata.num_decodes}. "
+                #         f"Expected uniform batches.")
                 # This path needs to be enabled with VLLM_KV_CACHE_LAYOUT = HND
                 assert get_kv_cache_layout() == "HND"
                 assert decode_query.is_contiguous()
@@ -978,6 +983,7 @@ class FlashInferImpl(AttentionImpl):
                     sinks=self.sinks,
                     o_sf_scale=self.o_sf_scale,
                     out=out,
+                    q_len_per_req=q_len_per_request,
                 )
         return output_padded
 

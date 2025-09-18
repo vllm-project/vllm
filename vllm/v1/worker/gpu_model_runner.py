@@ -60,6 +60,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         length_from_prompt_token_ids_or_embeds, round_up,
                         supports_dynamo)
 from vllm.v1.attention.backends.flash_attn import AttentionMetadata
+from vllm.v1.attention.backends.flashinfer import FlashInferMetadataBuilder
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
@@ -1175,8 +1176,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 encoder_seq_lens=encoder_seq_lens,
             )
 
-            if self.speculative_config and \
-                spec_decode_common_attn_metadata is None:
+            if (
+                self.speculative_config
+                and hasattr(self.drafter, 'attn_layer_names')
+                and self.drafter.attn_layer_names[0]
+                in kv_cache_group_spec.layer_names
+                and spec_decode_common_attn_metadata is None
+            ):
                 spec_decode_common_attn_metadata = common_attn_metadata
 
             for attn_group in self.attn_groups[kv_cache_group_id]:
@@ -2385,6 +2391,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         elif self.speculative_config.use_eagle():
             assert isinstance(self.drafter, EagleProposer)
 
+<<<<<<< HEAD
+<<<<<<< HEAD
             if self.speculative_config.disable_padded_drafter_batch:
                 # When padded-batch is disabled, the sampled_token_ids should be
                 # the cpu-side list[list[int]] of valid sampled tokens for each
@@ -2405,6 +2413,32 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     "padded-batch is enabled."
                 next_token_ids, valid_sampled_tokens_count = \
                     self.drafter.prepare_next_token_ids_padded(
+=======
+            if self.speculative_config.disable_padded_batch:
+                # When padded-batch is disabled, the sampled_token_ids should be
+                # the cpu-side list[list[int]] of valid sampled tokens for each
+                # request, with invalid requests having empty lists.
+                assert isinstance(sampled_token_ids, list), \
+                    "sampled_token_ids should be a python list when" \
+                    "padded-batch is disabled."
+                next_token_ids = self.drafter.prepare_next_token_ids_cpu(
+                    sampled_token_ids, self.requests, self.input_batch,
+                    scheduler_output.num_scheduled_tokens)
+            else:
+                # When using padded-batch, the sampled_token_ids should be
+                # the gpu tensor of sampled tokens for each request, of shape
+                # (num_reqs, num_spec_tokens + 1) with rejected tokens having
+                # value -1.
+                assert isinstance(sampled_token_ids, torch.Tensor), \
+                    "sampled_token_ids should be a torch.Tensor when" \
+                    "padded-batch is enabled."
+                next_token_ids, valid_sampled_tokens_count = \
+<<<<<<< HEAD
+                    self.drafter.prepare_next_token_ids_device(
+>>>>>>> 8a5bdac29 (add back cpu-side eagle input prep after perf degradation)
+=======
+                    self.drafter.prepare_next_token_ids_gpu(
+>>>>>>> a1e8f73a4 (tweaks for clarity)
                         common_attn_metadata,
                         sampled_token_ids,
                         self.requests,
@@ -2412,6 +2446,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         self.discard_request_indices.gpu,
                         self.num_discarded_requests
                     )
+<<<<<<< HEAD
+=======
+            next_token_ids, valid_sampled_tokens_count = \
+                self.drafter.prepare_next_token_ids(
+                    common_attn_metadata,
+                    spec_decode_metadata,
+                    sampled_token_ids,
+                    self.requests,
+                    self.input_batch,
+                    self.discard_request_indices.gpu,
+                    self.num_discarded_requests
+                )
+>>>>>>> fe748a669 (refactor and feature-flag padded batch)
+=======
+>>>>>>> 8a5bdac29 (add back cpu-side eagle input prep after perf degradation)
 
             if spec_decode_metadata is None:
                 token_indices_to_sample = None
@@ -2426,11 +2475,23 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 else:
                     target_hidden_states = hidden_states[:num_scheduled_tokens]
             else:
+<<<<<<< HEAD
+<<<<<<< HEAD
                 if self.speculative_config.disable_padded_drafter_batch:
+=======
+                num_rejected_tokens = self.drafter.prepare_num_rejected_tokens(
+                    spec_decode_metadata, valid_sampled_tokens_count)
+
+=======
+>>>>>>> 8a5bdac29 (add back cpu-side eagle input prep after perf degradation)
+                if self.speculative_config.disable_padded_batch:
+>>>>>>> fe748a669 (refactor and feature-flag padded batch)
                     token_indices_to_sample = None
                     common_attn_metadata, token_indices =\
                         self.drafter.prepare_inputs(
                             common_attn_metadata,
+<<<<<<< HEAD
+<<<<<<< HEAD
                             sampled_token_ids,
                             spec_decode_metadata.num_draft_tokens)
                 else:
@@ -2440,6 +2501,24 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             common_attn_metadata,
                             spec_decode_metadata,
                             valid_sampled_tokens_count)
+=======
+                            num_rejected_tokens.to('cpu').int())
+=======
+                            sampled_token_ids,
+                            spec_decode_metadata.num_draft_tokens)
+>>>>>>> 8a5bdac29 (add back cpu-side eagle input prep after perf degradation)
+                else:
+                    common_attn_metadata, token_indices, \
+                        token_indices_to_sample =\
+                        self.drafter.prepare_inputs_deferred(
+<<<<<<< HEAD
+                            common_attn_metadata, num_rejected_tokens)
+>>>>>>> fe748a669 (refactor and feature-flag padded batch)
+=======
+                            common_attn_metadata,
+                            spec_decode_metadata,
+                            valid_sampled_tokens_count)
+>>>>>>> 8a5bdac29 (add back cpu-side eagle input prep after perf degradation)
 
                 target_token_ids = self.input_ids.gpu[token_indices]
                 # TODO(woosuk): Support M-RoPE.

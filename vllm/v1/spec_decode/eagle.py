@@ -21,6 +21,7 @@ from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.v1.attention.backends.flashinfer import FlashInferMetadata, FlashInferMetadataBuilder
 from vllm.v1.attention.backends.tree_attn import (TreeAttentionMetadata,
                                                   TreeAttentionMetadataBuilder)
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
@@ -129,7 +130,8 @@ class EagleProposer:
             self.allowed_attn_types = tuple(rocm_types)
         else:
             self.allowed_attn_types = (FlashAttentionMetadata,
-                                       TreeAttentionMetadata)
+                                       TreeAttentionMetadata,
+                                       FlashInferMetadata)
 
         # Parse the speculative token tree.
         spec_token_tree = self.speculative_config.speculative_token_tree
@@ -170,6 +172,8 @@ class EagleProposer:
         sampling_metadata: SamplingMetadata,
         mm_embeds: Optional[list[torch.Tensor]] = None,
     ) -> torch.Tensor:
+        # Ensure locals are always initialized to avoid UnboundLocalError
+        inputs_embeds = None
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
 
@@ -190,12 +194,15 @@ class EagleProposer:
         self.input_ids[last_token_indices] = next_token_ids
 
         assert self.runner is not None
+        
+        # ubatch_id = dbo_current_ubatch_id()
+        # Select the correct attention metadata builder for EAGLE layers.
+        builder = self._get_attention_metadata_builder()
 
-        # FIXME: need to consider multiple kv_cache_groups
-        ubatch_id = dbo_current_ubatch_id()
-        attn_metadata_builder = \
-            self.runner.attn_groups[0][0].metadata_builders[ubatch_id]
-        attn_metadata = attn_metadata_builder.build_for_drafting(
+        # if isinstance(builder, FlashInferMetadataBuilder):
+        #     builder.reorder_batch_threshold = self.num_speculative_tokens +1 
+
+        attn_metadata = builder.build_for_drafting(
             common_attn_metadata=common_attn_metadata, draft_index=0)
 
         # At this moment, we assume all eagle layers belong to the same KV
@@ -341,6 +348,7 @@ class EagleProposer:
             self.input_ids[:batch_size] = input_ids
             self.positions[:batch_size] = clamped_positions
             self.hidden_states[:batch_size] = hidden_states
+
             if self.is_multimodal_model:
                 inputs_embeds = self.model.get_input_embeddings(input_ids)
                 self.inputs_embeds[:batch_size] = inputs_embeds
@@ -840,13 +848,15 @@ class EagleProposer:
                 "The EAGLE head's vocab embedding will be loaded separately"
                 " from the target model.")
 
-        # share lm_head with the target model if needed
-        # some model definition do not define lm_head explicitly
-        # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
-        if self.vllm_config.speculative_config.method != "eagle3" and \
-                hasattr(target_language_model, "lm_head"):
-            logger.info("Loading EAGLE LM head weights from the target model.")
+        if (get_pp_group().world_size == 1 and self.model.lm_head.weight.shape
+                == target_language_model.lm_head.weight.shape):
+            logger.info("Assuming the EAGLE head shares the same lm_head"
+                        " with the target model.")
+            del self.model.lm_head
             self.model.lm_head = target_language_model.lm_head
+        else:
+            logger.info("The EAGLE head's lm_head will be loaded separately"
+                        " from the target model.")
 
     @torch.inference_mode()
     def dummy_run(
@@ -887,6 +897,32 @@ class EagleProposer:
                 for layer_name in self.attn_layer_names
             ])
         ) == 1, "All eagle layers should belong to the same kv cache group"
+
+    def _get_attention_metadata_builder(self):
+        """Find and return the attention metadata builder for EAGLE layers.
+        
+        Returns:
+            The metadata builder for EAGLE layers.
+            
+        Raises:
+            AssertionError: If no metadata builder is found for EAGLE layers.
+        """
+        builder = None
+        chosen_layer = self.attn_layer_names[0]
+
+        for kv_cache_group in self.runner.attn_groups:
+            # print(f"kv_cache_group: {kv_cache_group}")
+            for attn_group in kv_cache_group:
+                # print(f"attn_group.layer_names: {attn_group.layer_names}")
+                if chosen_layer in attn_group.layer_names:
+                    builder = attn_group.metadata_builder
+                    break
+            if builder is not None:
+                break
+
+        assert builder is not None, (
+            "Failed to find attention metadata builder for EAGLE layers.")
+        return builder
 
 
 # NOTE(woosuk): Currently, the below code is not used and we always use argmax
