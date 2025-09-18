@@ -258,7 +258,11 @@ class CudaPlatformBase(Platform):
             if backend not in backend_priorities:
                 continue
             priority = backend_priorities[backend]
-            backend_class = backend_to_class(backend)
+            try:
+                backend_class = backend_to_class(backend)
+            except ImportError:
+                invalid_reasons[backend] = ["ImportError"]
+                continue
             invalid_reasons_i = backend_class.validate_configuration(
                 head_size, dtype, kv_cache_dtype, block_size, use_v1, use_mla,
                 has_sink, device_capability_int)
@@ -283,10 +287,14 @@ class CudaPlatformBase(Platform):
         # First try checking just the selected backend, if there is one.
         if selected_backend is not None:
             backend_class_str = backend_to_class_str(selected_backend, use_v1)
-            backend_class = resolve_obj_by_qualname(backend_class_str)
-            invalid_reasons = backend_class.validate_configuration(
-                head_size, dtype, kv_cache_dtype, block_size, use_v1, use_mla,
-                has_sink, device_capability_int)
+            try:
+                backend_class = resolve_obj_by_qualname(backend_class_str)
+                invalid_reasons = backend_class.validate_configuration(
+                    head_size, dtype, kv_cache_dtype, block_size, use_v1,
+                    use_mla, has_sink, device_capability_int)
+            except ImportError:
+                invalid_reasons = ["ImportError"]
+
             if invalid_reasons:
                 logger.warning(
                     "Selected backend %s is not valid for this configuration. "
