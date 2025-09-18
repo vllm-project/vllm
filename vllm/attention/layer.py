@@ -432,7 +432,7 @@ class MultiHeadAttention(nn.Module):
     ) -> torch.Tensor:
         """Input shape: batch_size x seq_len x hidden_size"""
         # TODO(Isotr0py): Use existing backend implementations and support FA3
-        bsz, q_len, _ = query.size()
+        bsz, q_len = query.size()[:2]
         kv_len = key.size(1)
 
         query = query.view(bsz, q_len, self.num_heads, self.head_size)
