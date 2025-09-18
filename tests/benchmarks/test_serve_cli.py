@@ -68,7 +68,7 @@ def test_bench_serve_chat(server):
         "5",
         "--endpoint",
         "/v1/chat/completions",
-        "--endpoint-type",
+        "--backend",
         "openai-chat",
     ]
     result = subprocess.run(command, capture_output=True, text=True)
