@@ -4,8 +4,8 @@
 #include <algorithm>
 
 // maximum blocks per SM cap
-#ifndef VLLM_LAUNCH_MAX_BLOCKS
-  #define VLLM_LAUNCH_MAX_BLOCKS 8
+#ifndef VLLM_LAUNCH_BLOCKS_CAP
+  #define VLLM_LAUNCH_BLOCKS_CAP 4
 #endif
 
 // compile-time estimate of max threads per SM for launch bounds.
@@ -17,11 +17,11 @@
   #endif
 #endif
 
-// compute the maximum number of blocks per SM to request in __launch_bounds__
+// compute the number of blocks per SM to request in __launch_bounds__
 #define VLLM_BLOCKS_DIV(VAL) (VLLM_MAX_THREADS_PER_SM / (VAL))
 #define VLLM_CLAMP_BLOCKS_PER_SM(VAL) \
   (((VAL) <= 0)                       \
        ? 1                            \
-       : (((VAL) < VLLM_LAUNCH_MAX_BLOCKS) ? (VAL) : VLLM_LAUNCH_MAX_BLOCKS))
+       : (((VAL) < VLLM_LAUNCH_BLOCKS_CAP) ? (VAL) : VLLM_LAUNCH_BLOCKS_CAP))
 #define VLLM_BLOCKS_PER_SM(BLOCK_THREADS) \
   VLLM_CLAMP_BLOCKS_PER_SM(VLLM_BLOCKS_DIV(BLOCK_THREADS))
