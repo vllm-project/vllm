@@ -207,27 +207,19 @@ ARG SCCACHE_S3_NO_CREDENTIALS=0
 ARG VLLM_USE_PRECOMPILED=""
 ARG VLLM_MAIN_CUDA_VERSION=""
 
+COPY tools/setup_sccache.sh /usr/local/bin/setup_sccache.sh
+
 # if USE_SCCACHE is set, use sccache to speed up compilation
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=.git,target=.git \
+    bash /usr/local/bin/setup_sccache.sh && \
     if [ "$USE_SCCACHE" = "1" ]; then \
-        echo "Installing sccache..." \
-        && curl -L -o sccache.tar.gz ${SCCACHE_DOWNLOAD_URL} \
-        && tar -xzf sccache.tar.gz \
-        && sudo mv sccache-v0.8.1-x86_64-unknown-linux-musl/sccache /usr/bin/sccache \
-        && rm -rf sccache.tar.gz sccache-v0.8.1-x86_64-unknown-linux-musl \
-        && if [ ! -z ${SCCACHE_ENDPOINT} ] ; then export SCCACHE_ENDPOINT=${SCCACHE_ENDPOINT} ; fi \
-        && export SCCACHE_BUCKET=${SCCACHE_BUCKET_NAME} \
-        && export SCCACHE_REGION=${SCCACHE_REGION_NAME} \
-        && export SCCACHE_S3_NO_CREDENTIALS=${SCCACHE_S3_NO_CREDENTIALS} \
-        && export SCCACHE_IDLE_TIMEOUT=0 \
-        && export CMAKE_BUILD_TYPE=Release \
-        && export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" \
-        && export VLLM_MAIN_CUDA_VERSION="${VLLM_MAIN_CUDA_VERSION}" \
-        && export VLLM_DOCKER_BUILD_CONTEXT=1 \
-        && sccache --show-stats \
-        && python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 \
-        && sccache --show-stats; \
+      export CMAKE_BUILD_TYPE=Release \
+      VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" \
+      VLLM_MAIN_CUDA_VERSION="${VLLM_MAIN_CUDA_VERSION}" \
+      VLLM_DOCKER_BUILD_CONTEXT=1 && \
+      python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38; \
+      sccache --show-stats; \
     fi
 
 ARG vllm_target_device="cuda"
@@ -257,6 +249,60 @@ RUN if [ "$RUN_WHEEL_CHECK" = "true" ]; then \
         echo "Skipping wheel size check."; \
     fi
 
+# If we need to build FlashInfer wheel before its release:
+# $ # Note we remove 7.0 from the arch list compared to the list below, since FlashInfer only supports sm75+
+# $ export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0a 10.0a 12.0'
+# $ git clone https://github.com/flashinfer-ai/flashinfer.git --recursive
+# $ cd flashinfer
+# $ git checkout v0.2.6.post1
+# $ python -m flashinfer.aot
+# $ python -m build --no-isolation --wheel
+# $ ls -la dist
+# -rw-rw-r-- 1 mgoin mgoin 205M Jun  9 18:03 flashinfer_python-0.2.6.post1-cp39-abi3-linux_x86_64.whl
+# $ # upload the wheel to a public location, e.g. https://wheels.vllm.ai/flashinfer/v0.2.6.post1/flashinfer_python-0.2.6.post1-cp39-abi3-linux_x86_64.whl
+
+# Install FlashInfer from source
+ARG FLASHINFER_GIT_REPO="https://github.com/flashinfer-ai/flashinfer.git"
+# Keep this in sync with "flashinfer" extra in setup.py
+ARG FLASHINFER_GIT_REF="v0.3.1"
+# Flag to control whether to compile FlashInfer AOT kernels
+# Set to "true" to enable AOT compilation:
+# docker build --build-arg FLASHINFER_AOT_COMPILE=true ...
+ARG FLASHINFER_AOT_COMPILE=false
+
+RUN --mount=type=cache,target=/root/.cache/uv bash -e <<'BASH'
+    /usr/local/bin/setup_sccache.sh
+    git clone --depth 1 --recursive --branch "${FLASHINFER_GIT_REF}" "${FLASHINFER_GIT_REPO}" /tmp/flashinfer
+    cd /tmp/flashinfer
+    if [ "${FLASHINFER_AOT_COMPILE}" = "true" ]; then
+        # Exclude CUDA arches for older versions (11.x and 12.0-12.7)
+        # TODO: Update this to allow setting TORCH_CUDA_ARCH_LIST as a build arg.
+        if [[ "${CUDA_VERSION}" == 11.* ]]; then
+            FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9"
+        elif [[ "${CUDA_VERSION}" == 12.[0-7]* ]]; then
+            FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a"
+        else
+            # CUDA 12.8+ supports 10.0a and 12.0
+            FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a 10.0a 12.0"
+        fi
+        echo "🏗️  Installing FlashInfer with AOT compilation for arches: ${FI_TORCH_CUDA_ARCH_LIST}"
+        # Install with no-build-isolation since we already built AOT kernels
+        TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" python3 -m flashinfer.aot
+        # Install with no-build-isolation since we already built AOT kernels
+        TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
+            uv pip install --system --no-build-isolation . \
+                --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+        # Download pre-compiled cubins
+        TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
+            python3 -m flashinfer --download-cubin || echo "WARNING: Failed to download flashinfer cubins."
+    else
+        python3 -m build --no-isolation --wheel -o /tmp/flashinfer/dist
+    fi
+    if command -v sccache &>/dev/null; then
+        sccache --show-stats
+    fi
+BASH
+
 # Install DeepGEMM from source
 ARG DEEPGEMM_GIT_REF
 COPY tools/install_deepgemm.sh /tmp/install_deepgemm.sh
@@ -266,7 +312,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Install EP kernels(pplx-kernels and DeepEP)
 COPY tools/ep_kernels/install_python_libraries.sh install_python_libraries.sh
 ENV CUDA_HOME=/usr/local/cuda
-RUN export TORCH_CUDA_ARCH_LIST='9.0a+PTX' \
+RUN --mount=type=cache,target=/root/.cache/uv \
+    export TORCH_CUDA_ARCH_LIST='9.0a+PTX' \
     && bash install_python_libraries.sh /tmp/ep_kernels_workspace wheel
 
 #################### EXTENSION Build IMAGE ####################
@@ -401,62 +448,12 @@ RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm
     uv pip install --system ep_kernels/dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
-# If we need to build FlashInfer wheel before its release:
-# $ # Note we remove 7.0 from the arch list compared to the list below, since FlashInfer only supports sm75+
-# $ export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0a 10.0a 12.0'
-# $ git clone https://github.com/flashinfer-ai/flashinfer.git --recursive
-# $ cd flashinfer
-# $ git checkout v0.2.6.post1
-# $ python -m flashinfer.aot
-# $ python -m build --no-isolation --wheel
-# $ ls -la dist
-# -rw-rw-r-- 1 mgoin mgoin 205M Jun  9 18:03 flashinfer_python-0.2.6.post1-cp39-abi3-linux_x86_64.whl
-# $ # upload the wheel to a public location, e.g. https://wheels.vllm.ai/flashinfer/v0.2.6.post1/flashinfer_python-0.2.6.post1-cp39-abi3-linux_x86_64.whl
+# Install FlashInfer wheel built in "build" stage
+COPY --from=build /tmp/flashinfer/dist /tmp/flashinfer/dist
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system /tmp/flashinfer/dist/*.whl --verbose \
+        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
-# Install FlashInfer from source
-ARG FLASHINFER_GIT_REPO="https://github.com/flashinfer-ai/flashinfer.git"
-# Keep this in sync with "flashinfer" extra in setup.py
-ARG FLASHINFER_GIT_REF="v0.3.1"
-# Flag to control whether to compile FlashInfer AOT kernels
-# Set to "true" to enable AOT compilation:
-# docker build --build-arg FLASHINFER_AOT_COMPILE=true ...
-ARG FLASHINFER_AOT_COMPILE=false
-RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
-  . /etc/environment
-    git clone --depth 1 --recursive --shallow-submodules \
-        --branch ${FLASHINFER_GIT_REF} \
-        ${FLASHINFER_GIT_REPO} flashinfer
-    pushd flashinfer
-        if [ "${FLASHINFER_AOT_COMPILE}" = "true" ]; then
-            # Exclude CUDA arches for older versions (11.x and 12.0-12.7)
-            # TODO: Update this to allow setting TORCH_CUDA_ARCH_LIST as a build arg.
-            if [[ "${CUDA_VERSION}" == 11.* ]]; then
-                FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9"
-            elif [[ "${CUDA_VERSION}" == 12.[0-7]* ]]; then
-                FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a"
-            else
-                # CUDA 12.8+ supports 10.0a and 12.0
-                FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a 10.0a 12.0"
-            fi
-            echo "🏗️  Installing FlashInfer with AOT compilation for arches: ${FI_TORCH_CUDA_ARCH_LIST}"
-            # Build AOT kernels
-            TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
-                python3 -m flashinfer.aot
-            # Install with no-build-isolation since we already built AOT kernels
-            TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
-                uv pip install --system --no-build-isolation . \
-                --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
-            # Download pre-compiled cubins
-            TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
-                python3 -m flashinfer --download-cubin || echo "WARNING: Failed to download flashinfer cubins."
-        else
-            echo "🏗️  Installing FlashInfer without AOT compilation in JIT mode"
-            uv pip install --system . \
-                --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
-        fi
-    popd
-    rm -rf flashinfer
-BASH
 COPY examples examples
 COPY benchmarks benchmarks
 COPY ./vllm/collect_env.py .
