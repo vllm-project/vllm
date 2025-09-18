@@ -170,6 +170,10 @@ class XPUPlatform(Platform):
         return True
 
     @classmethod
+    def support_graph_mode(cls) -> bool:
+        return True
+
+    @classmethod
     def is_pin_memory_available(cls):
         return True
 
