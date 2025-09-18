@@ -481,6 +481,7 @@ def _fwd_kernel_stage2(
     stride_mid_os,
     stride_obs,
     stride_oh,
+    stride_lse_bs,
     NUM_KV_SPLITS: tl.constexpr,
     BLOCK_DV: tl.constexpr,
     Lv: tl.constexpr,
@@ -528,9 +529,8 @@ def _fwd_kernel_stage2(
     )
     lse_val = e_max + tl.log(e_sum)
     tl.store(
-        lse + cur_batch * stride_obs + cur_head * stride_oh + offs_d,
+        lse + cur_batch * stride_lse_bs + cur_head,
         lse_val,
-        mask=mask_d,
     )
 
 
@@ -570,6 +570,7 @@ def _decode_softmax_reducev_fwd(
         logits.stride(2),
         o.stride(0),
         o.stride(1),
+        lse.stride(0),
         NUM_KV_SPLITS=NUM_KV_SPLITS,
         BLOCK_DV=BLOCK_DV,
         Lv=Lv,
