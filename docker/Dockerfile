@@ -211,16 +211,18 @@ COPY --chmod=755 tools/setup_sccache.sh /usr/local/bin/setup_sccache.sh
 
 # if USE_SCCACHE is set, use sccache to speed up compilation
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,source=.git,target=.git \
-    /usr/local/bin/setup_sccache.sh && \
-    if [ "$USE_SCCACHE" = "1" ]; then \
-      CMAKE_BUILD_TYPE=Release \
-      VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" \
-      VLLM_MAIN_CUDA_VERSION="${VLLM_MAIN_CUDA_VERSION}" \
-      VLLM_DOCKER_BUILD_CONTEXT=1 \
-      python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38; \
-      sccache --show-stats; \
+    --mount=type=bind,source=.git,target=.git bash -e <<'BASH'
+    if [ "${USE_SCCACHE:-}" = "1" ]; then
+        /usr/local/bin/setup_sccache.sh
+        export CMAKE_BUILD_TYPE=Release
+        export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}"
+        export VLLM_MAIN_CUDA_VERSION="${VLLM_MAIN_CUDA_VERSION}"
+        export VLLM_DOCKER_BUILD_CONTEXT=1
+
+        python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
+        sccache --show-stats
     fi
+BASH
 
 ARG vllm_target_device="cuda"
 ENV VLLM_TARGET_DEVICE=${vllm_target_device}
