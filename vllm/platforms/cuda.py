@@ -191,14 +191,17 @@ class CudaPlatformBase(Platform):
         compilation_config = vllm_config.compilation_config
         if (envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
                 and parallel_config.data_parallel_size > 1
-                and compilation_config.cudagraph_mode
-                not in [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE]):
+                and compilation_config.cudagraph_mode != CUDAGraphMode.NONE):
+            # TODO: Piecewise Cuda graph might be enabled
+            # if torch compile cache key issue fixed
+            # See https://github.com/vllm-project/vllm/pull/25093
             logger.info(
-                "Data Parallel with DeepEP high-throughput: using PIECEWISE "
-                "CUDA graphs and excluding MoE ops from capture. Set "
-                "VLLM_ALL2ALL_BACKEND=deepep_low_latency if you need MoE "
-                "graphs captured as well.")
-            compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+                "Data Parallel: disabling cudagraphs since DP "
+                "with DeepEP high-throughput kernels are not CUDA Graph "
+                "compatible. The DeepEP low-latency kernels are CUDA Graph "
+                "compatible. Set the all_to_all backend to deepep_low_latency "
+                "to use those kernels instead.")
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
     @classmethod
     def get_current_memory_usage(cls,
