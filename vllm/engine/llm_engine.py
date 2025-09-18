@@ -671,10 +671,13 @@ class LLMEngine:
             arrival_time = time.time()
 
         if (isinstance(prompt, dict)
-                and prompt.get("prompt_embeds", None) is not None
-                and not prompt.get("prompt_token_ids", None)):
-            seq_len = prompt["prompt_embeds"].shape[0]
-            prompt["prompt_token_ids"] = [0] * seq_len
+                and prompt.get("prompt_embeds", None) is not None):
+            if not prompt.get("prompt_token_ids", None):
+                seq_len = prompt["prompt_embeds"].shape[0]
+                prompt["prompt_token_ids"] = [0] * seq_len
+            if params.prompt_logprobs is not None:
+                raise ValueError(
+                    "prompt_logprobs is not compatible with prompt embeds.")
 
         processed_inputs = self.input_preprocessor.preprocess(
             prompt,
