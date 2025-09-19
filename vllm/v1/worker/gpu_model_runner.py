@@ -101,11 +101,11 @@ else:
 
 logger = init_logger(__name__)
 
-def save_stats(forward_time, input_ids_shape):
+def save_stats(forward_time, input_ids_shape, model_type):
     import pathlib
     outputs_dir = pathlib.Path("outputs/")
     latest_dir = max([d for d in outputs_dir.iterdir() if d.is_dir()], key=lambda x: x.name, default=None)
-    with open(latest_dir / "target.csv", 'a') as f:
+    with open(latest_dir / f"{model_type}.csv", 'a') as f:
         print(f"{forward_time},{input_ids_shape}", file=f)
 
 # Wrapper for ModelRunnerOutput to support overlapped execution.
@@ -1921,7 +1921,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 **model_kwargs,
             )
             et = time.perf_counter()
-            save_stats(et - st, input_ids.shape)
+            save_stats(et - st, input_ids.shape, "target")
 
         with record_function_or_nullcontext("Postprocess"):
             if self.use_aux_hidden_state_outputs:

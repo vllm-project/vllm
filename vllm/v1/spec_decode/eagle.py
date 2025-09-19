@@ -703,30 +703,73 @@ class EagleProposer:
             logger.info(f"Loading draft model vocabulary scores from {vocab_freq_path}")
             vocab_freq = load_vocab_freq(vocab_freq_path)
 
-            logger.info(f"Pruning draft vocabulary with ratio {keep_threshold}")
+            logger.info(f"Keep {keep_threshold}% of the draft vocabulary.")
             self.pruned_vocab = prune_draft_vocab(vocab_freq, keep_threshold)
             self.pruned_vocab = self.pruned_vocab.to(self.model.lm_head.weight.device)
 
             # Update lm_head weights with pruned vocabulary
             if hasattr(self.model, "lm_head"):
-                ic(self.model.lm_head.weight.shape, target_language_model.lm_head.weight.shape)
+                # ic(self.model.lm_head.weight.shape, target_language_model.lm_head.weight.shape)
+                # print(torch.cuda.memory_summary())
+                # for i in range(torch.cuda.device_count()):
+                #     print(f"Device {i}: {torch.cuda.get_device_name(i)}")
+                #     print(f"  Allocated: {torch.cuda.memory_allocated(i)/1024**2:.2f} MB")
+                #     print(f"  Reserved:  {torch.cuda.memory_reserved(i)/1024**2:.2f} MB")
+
+
+                # # to prune the vocab, the draft lm_head cannot be shared with the target model lm_head
+                # if self.model.lm_head == target_language_model.lm_head:
+                #     self.model.lm_head = copy.deepcopy(self.model.lm_head)
+
+                # self.model.lm_head.weight.data = self.model.lm_head.weight.data[self.pruned_vocab]
+
+                # # # ensure we pruned correctly
+                # # model_vocab_size = self.model.lm_head.weight.shape[0]
+                # # target_vocab_size = target_language_model.lm_head.weight.shape[0]
+                # # print(model_vocab_size, target_vocab_size, keep_threshold, int(target_vocab_size * keep_threshold))
+                # # assert int(target_vocab_size * keep_threshold) == model_vocab_size, f'pruned vocab incorrectly'
+
+                # torch.cuda.empty_cache()
+                # torch.cuda.synchronize()
+                # logger.info("Updated lm_head weights with pruned vocabulary.")
+                # ic(self.model.lm_head.weight.shape, target_language_model.lm_head.weight.shape)
+                # print(torch.cuda.memory_summary())
+                # for i in range(torch.cuda.device_count()):
+                #     print(f"Device {i}: {torch.cuda.get_device_name(i)}")
+                #     print(f"  Allocated: {torch.cuda.memory_allocated(i)/1024**2:.2f} MB")
+                #     print(f"  Reserved:  {torch.cuda.memory_reserved(i)/1024**2:.2f} MB")
+
 
                 # to prune the vocab, the draft lm_head cannot be shared with the target model lm_head
                 if self.model.lm_head == target_language_model.lm_head:
                     self.model.lm_head = copy.deepcopy(self.model.lm_head)
 
-                self.model.lm_head.weight.data = self.model.lm_head.weight.data[self.pruned_vocab]
+                ic(self.model.lm_head.weight.shape, target_language_model.lm_head.weight.shape)
+                for i in range(torch.cuda.device_count()):
+                    print(f"Device {i}: {torch.cuda.get_device_name(i)}")
+                    print(f"  Allocated: {torch.cuda.memory_allocated(i)/1024**2:.2f} MB")
+                    print(f"  Reserved:  {torch.cuda.memory_reserved(i)/1024**2:.2f} MB")
+                print(torch.cuda.memory_summary())
 
-                # # ensure we pruned correctly
-                # model_vocab_size = self.model.lm_head.weight.shape[0]
-                # target_vocab_size = target_language_model.lm_head.weight.shape[0]
-                # print(model_vocab_size, target_vocab_size, keep_threshold, int(target_vocab_size * keep_threshold))
-                # assert int(target_vocab_size * keep_threshold) == model_vocab_size, f'pruned vocab incorrectly'
+                # Keep old weight reference to allow memory release
+                old_weight = self.model.lm_head.weight
 
+                # In-place pruning of the weight
+                self.model.lm_head.weight.data = self.model.lm_head.weight.data[self.pruned_vocab].clone().detach()
+
+                # Free old memory
+                del old_weight
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
-                logger.info("Updated lm_head weights with pruned vocabulary.")
+
                 ic(self.model.lm_head.weight.shape, target_language_model.lm_head.weight.shape)
+                for i in range(torch.cuda.device_count()):
+                    print(f"Device {i}: {torch.cuda.get_device_name(i)}")
+                    print(f"  Allocated: {torch.cuda.memory_allocated(i)/1024**2:.2f} MB")
+                    print(f"  Reserved:  {torch.cuda.memory_reserved(i)/1024**2:.2f} MB")
+                print(torch.cuda.memory_summary())
+
+
             elif hasattr(self.model.model, "embed_tokens"):
                 logger.info("Assuming lm_head is tied to embed_tokens; skipping direct weight update.")
             else:
@@ -794,10 +837,14 @@ def load_vocab_freq(vocab_frequency_path: str) -> torch.Tensor:
     file_path_in_repo = "/".join(parts[2:])
 
     # Download the file
-    local_path = hf_hub_download(repo_id=repo_id, filename=file_path_in_repo, repo_type="dataset")
+    try:
+        local_path = hf_hub_download(repo_id=repo_id, filename=file_path_in_repo, repo_type="dataset")
+    except Exception as e:
+        local_path = hf_hub_download(repo_id=repo_id, filename=file_path_in_repo)
 
     # Load as a tensor of integers
-    vocab_freq = torch.load(local_path, weights_only=True).to(torch.int64)
+    vocab_freq = torch.load(local_path, weights_only=True)
+    vocab_freq = torch.tensor(vocab_freq).to(torch.int64)
     return vocab_freq
 
 
@@ -814,8 +861,8 @@ def prune_draft_vocab(vocab_freq: torch.Tensor, keep_threshold: float) -> torch.
     """
     if not isinstance(vocab_freq, torch.Tensor):
         raise TypeError("`vocab_freq` must be a torch.Tensor.")
-    if not (0 < keep_threshold < 1):
-        raise ValueError(f"`keep_threshold` must be in (0, 1), got {keep_threshold}")
+    if not (0 <= keep_threshold <= 1):
+        raise ValueError(f"`keep_threshold` must be in [0, 1], got {keep_threshold}")
 
     # Sort frequencies descending
     _, sorted_indices = torch.sort(vocab_freq, descending=True)

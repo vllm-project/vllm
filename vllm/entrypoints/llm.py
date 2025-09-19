@@ -63,6 +63,12 @@ logger = init_logger(__name__)
 
 _R = TypeVar("_R", default=Any)
 
+def save_stats(forward_time, input_ids_shape, model_type):
+    import pathlib
+    outputs_dir = pathlib.Path("outputs/")
+    latest_dir = max([d for d in outputs_dir.iterdir() if d.is_dir()], key=lambda x: x.name, default=None)
+    with open(latest_dir / f"{model_type}.csv", 'a') as f:
+        print(f"{forward_time},{input_ids_shape}", file=f)
 
 class LLM:
     """An LLM for generating texts from given prompts and sampling parameters.
@@ -1502,6 +1508,8 @@ class LLM:
             step_outputs = self.llm_engine.step()
             for output in step_outputs:
                 if output.finished:
+                    # save_stats(None, None, "drafter")
+                    # save_stats(None, None, "target")
                     outputs.append(output)
                     if use_tqdm:
                         if isinstance(output, RequestOutput):
