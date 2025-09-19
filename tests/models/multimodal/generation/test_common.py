@@ -10,8 +10,7 @@ from pathlib import PosixPath
 
 import pytest
 from transformers import (AutoModel, AutoModelForImageTextToText,
-                          AutoModelForTextToWaveform, AutoModelForVision2Seq)
-from transformers.utils import is_flash_attn_2_available
+                          AutoModelForTextToWaveform)
 
 from vllm.platforms import current_platform
 from vllm.utils import identity
@@ -138,7 +137,7 @@ VLM_TEST_SETTINGS = {
         video_idx_to_prompt=lambda idx: "<|vision_start|><|video_pad|><|vision_end|>", # noqa: E501
         max_model_len=4096,
         max_num_seqs=2,
-        auto_cls=AutoModelForVision2Seq,
+        auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
@@ -190,23 +189,21 @@ VLM_TEST_SETTINGS = {
         },
         marks=[pytest.mark.core_model],
     ),
-    # FIXME(Isotr0py): Enable this test after
-    # https://github.com/huggingface/transformers/pull/39470 released
-    # "idefics3-transformers": VLMTestInfo(
-    #     models=["HuggingFaceTB/SmolVLM-256M-Instruct"],
-    #     test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-    #     prompt_formatter=lambda img_prompt:f"<|begin_of_text|>User:{img_prompt}<end_of_utterance>\nAssistant:",  # noqa: E501
-    #     img_idx_to_prompt=lambda idx: "<image>",
-    #     max_model_len=8192,
-    #     max_num_seqs=2,
-    #     auto_cls=AutoModelForImageTextToText,
-    #     hf_output_post_proc=model_utils.idefics3_trunc_hf_output,
-    #     image_size_factors=[(0.25, 0.5, 1.0)],
-    #     vllm_runner_kwargs={
-    #         "model_impl": "transformers",
-    #     },
-    #     marks=[pytest.mark.core_model],
-    # ),
+    "idefics3-transformers": VLMTestInfo(
+        models=["HuggingFaceTB/SmolVLM-256M-Instruct"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt:f"<|begin_of_text|>User:{img_prompt}<end_of_utterance>\nAssistant:",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "<image>",
+        max_model_len=8192,
+        max_num_seqs=2,
+        auto_cls=AutoModelForImageTextToText,
+        hf_output_post_proc=model_utils.idefics3_trunc_hf_output,
+        image_size_factors=[(0.25, 0.5, 1.0)],
+        vllm_runner_kwargs={
+            "model_impl": "transformers",
+        },
+        marks=[pytest.mark.core_model],
+    ),
     # Pixel values from processor are not 4D or 5D arrays
     "qwen2_5_vl-transformers": VLMTestInfo(
         models=["Qwen/Qwen2.5-VL-3B-Instruct"],
@@ -222,21 +219,6 @@ VLM_TEST_SETTINGS = {
             "model_impl": "transformers",
         },
         marks=[large_gpu_mark(min_gb=32)],
-    ),
-    # Check "auto" with fallback to transformers
-    "internvl-transformers": VLMTestInfo(
-        models=["OpenGVLab/InternVL3-1B-hf"],
-        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n", # noqa: E501
-        img_idx_to_prompt=lambda idx: "<IMG_CONTEXT>",
-        max_model_len=4096,
-        use_tokenizer_eos=True,
-        image_size_factors=[(0.25, 0.5, 1.0)],
-        vllm_runner_kwargs={
-            "model_impl": "auto",
-        },
-        auto_cls=AutoModelForImageTextToText,
-        marks=[pytest.mark.core_model],
     ),
     #### Extended model tests
     "aria": VLMTestInfo(
@@ -338,10 +320,6 @@ VLM_TEST_SETTINGS = {
         vllm_output_post_proc=model_utils.fuyu_vllm_to_hf_output,
         num_logprobs=10,
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
-        # FIXME(Isotr0py): This model is broken in Transformers v4.54.1, we
-        # should enable this again after the fix is released:
-        # https://github.com/huggingface/transformers/pull/39915
-        marks=[pytest.mark.skip("HF model is broken")],
     ),
     "gemma3": VLMTestInfo(
         models=["google/gemma-3-4b-it"],
@@ -462,6 +440,20 @@ VLM_TEST_SETTINGS = {
         use_tokenizer_eos=True,
         patch_hf_runner=model_utils.internvl_patch_hf_runner,
     ),
+    "intern_vl-hf": VLMTestInfo(
+        models=["OpenGVLab/InternVL3-1B-hf"],
+        test_type=(
+            VLMTestType.IMAGE,
+            VLMTestType.MULTI_IMAGE,
+            VLMTestType.VIDEO,
+        ),
+        prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n", # noqa: E501
+        img_idx_to_prompt=lambda idx: "<IMG_CONTEXT>",
+        video_idx_to_prompt=lambda idx: "<video>",
+        max_model_len=8192,
+        use_tokenizer_eos=True,
+        auto_cls=AutoModelForImageTextToText,
+    ),
     "kimi_vl": VLMTestInfo(
         models=["moonshotai/Kimi-VL-A3B-Instruct"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
@@ -510,7 +502,7 @@ VLM_TEST_SETTINGS = {
         num_video_frames=16,
         max_model_len=16384,
         hf_model_kwargs=model_utils.llava_onevision_hf_model_kwargs("llava-hf/llava-onevision-qwen2-0.5b-ov-hf"),   # noqa: E501
-        auto_cls=AutoModelForVision2Seq,
+        auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.llava_onevision_vllm_to_hf_output,
         custom_test_opts=[CustomTestOptions(
             inputs=custom_inputs.multi_video_multi_aspect_ratio_inputs(
@@ -526,7 +518,7 @@ VLM_TEST_SETTINGS = {
         num_video_frames=16,
         max_model_len=4096,
         max_num_seqs=2,
-        auto_cls=AutoModelForVision2Seq,
+        auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.llava_video_vllm_to_hf_output,
     ),
     "mantis": VLMTestInfo(
@@ -637,10 +629,7 @@ VLM_TEST_SETTINGS = {
         dtype="half",
         num_logprobs=10,
         patch_hf_runner=model_utils.ovis2_5_patch_hf_runner,
-        marks=[pytest.mark.skipif(
-            not is_flash_attn_2_available(),
-            reason="HF model needs `flash_attn` installed"
-        )],
+        hf_model_kwargs={"revision": "refs/pr/5"},
     ),
     "phi3v": VLMTestInfo(
         models=["microsoft/Phi-3.5-vision-instruct"],
@@ -691,7 +680,7 @@ VLM_TEST_SETTINGS = {
         multi_image_prompt="Picture 1: <vlm_image>\nPicture 2: <vlm_image>\nDescribe these two images with one paragraph respectively.",    # noqa: E501
         max_model_len=4096,
         max_num_seqs=2,
-        auto_cls=AutoModelForVision2Seq,
+        auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[pytest.mark.cpu_model],
@@ -795,7 +784,7 @@ VLM_TEST_SETTINGS = {
         test_type=VLMTestType.CUSTOM_INPUTS,
         max_model_len=16384,
         max_num_seqs=2,
-        auto_cls=AutoModelForVision2Seq,
+        auto_cls=AutoModelForImageTextToText,
         hf_model_kwargs=model_utils.llava_onevision_hf_model_kwargs("llava-hf/llava-onevision-qwen2-0.5b-ov-hf"),   # noqa: E501
         vllm_output_post_proc=model_utils.llava_onevision_vllm_to_hf_output,
         custom_test_opts=[CustomTestOptions(
@@ -811,7 +800,7 @@ VLM_TEST_SETTINGS = {
         test_type=VLMTestType.CUSTOM_INPUTS,
         max_model_len=4096,
         max_num_seqs=2,
-        auto_cls=AutoModelForVision2Seq,
+        auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
         custom_test_opts=[CustomTestOptions(
             inputs=custom_inputs.windows_attention_image_qwen2_5_vl(),

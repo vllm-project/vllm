@@ -13,7 +13,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 
 from .inputs import (MultiModalDataDict, MultiModalEncDecInputs,
-                     MultiModalInputs, MultiModalKwargsItems,
+                     MultiModalInputs, MultiModalKwargsOptionalItems,
                      MultiModalPlaceholderDict)
 from .processing import (BaseMultiModalProcessor, BaseProcessingInfo,
                          EncDecMultiModalProcessor)
@@ -43,7 +43,7 @@ class DummyDecoderData(NamedTuple):
     """Dummy data used for profiling."""
 
     prompt_token_ids: list[int]
-    multi_modal_data: MultiModalKwargsItems
+    multi_modal_data: MultiModalKwargsOptionalItems
     multi_modal_placeholders: MultiModalPlaceholderDict
 
 
@@ -301,7 +301,7 @@ class MultiModalProfiler(Generic[_I]):
         Returns the maximum length of the multimodal (image placeholders+text)
         tokens, including any break/text tokens in-between image embeddings.
 
-        <im_start> [IMG] [IMG] [IMG] <row_break> [IMG] [IMG] [IMG] <im_end>
+        `<im_start> [IMG] [IMG] [IMG] <row_break> [IMG] [IMG] [IMG] <im_end>`
         Returns 9, even when the number of image embeddings is 6.
         
         This is important to take into account when profiling and

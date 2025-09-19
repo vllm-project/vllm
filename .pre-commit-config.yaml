@@ -21,7 +21,7 @@ repos:
   - id: ruff-format
     files: ^(.buildkite|benchmarks|examples)/.*
 - repo: https://github.com/crate-ci/typos
-  rev: v1.34.0
+  rev: v1.35.5
   hooks:
   - id: typos
 - repo: https://github.com/PyCQA/isort
@@ -164,9 +164,7 @@ repos:
     name: Validate configuration has default values and that each field has a docstring
     entry: python tools/validate_config.py
     language: python
-    types: [python]
-    pass_filenames: true
-    files: vllm/config.py|tests/test_config.py|vllm/entrypoints/openai/cli_args.py
+    additional_dependencies: [regex]
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion

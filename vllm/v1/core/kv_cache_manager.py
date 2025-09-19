@@ -24,8 +24,9 @@ class KVCacheBlocks:
     """
     blocks: tuple[list[KVCacheBlock], ...]
     """
-    blocks[i][j] refers to the i-th kv_cache_group and the j-th block of tokens.
-    We don't use block of tokens as the outer dimension because it assumes all
+    `blocks[i][j]` refers to the i-th kv_cache_group
+    and the j-th block of tokens.We don't use block of
+    tokens as the outer dimension because it assumes all
     kv_cache_groups have the same number of blocks, which is true for now but 
     will be broken if we want to give different block_size to different 
     kv_cache_groups in the future.
@@ -54,14 +55,15 @@ class KVCacheBlocks:
     def get_block_ids(
         self,
         allow_none: bool = False,
-    ):
+    ) -> Optional[tuple[list[int], ...]]:
         """
         Converts the KVCacheBlocks instance to block_ids.
-        
+
         Returns:
-            tuple[list[int], ...]: A tuple of lists where
-            * the outer tuple corresponds to KV cache groups
-            * each inner list contains the block_ids of the blocks in that group
+            tuple[list[int], ...]: A tuple of lists where:
+                - the outer tuple corresponds to KV cache groups
+                - each inner list contains the block_ids of the blocks in that
+                  group
         """
         if allow_none and all(len(group) == 0 for group in self.blocks):
             return None
@@ -90,6 +92,7 @@ class KVCacheManager:
         use_eagle: bool = False,
         log_stats: bool = False,
         enable_kv_cache_events: bool = False,
+        dcp_world_size: int = 1,
     ) -> None:
         self.max_model_len = max_model_len
 
@@ -108,12 +111,20 @@ class KVCacheManager:
             self.block_size = kv_cache_config.kv_cache_groups[
                 0].kv_cache_spec.block_size
 
+            if dcp_world_size > 1:
+                assert len(kv_cache_config.kv_cache_groups) == 1
+                # Note(hc): need revisit. When both DCP and any future
+                # PCP are enabled, the block_size may need to be scaled
+                # by a factor of dcp_size × pcp_size?
+                self.block_size *= dcp_world_size
+
         self.coordinator = get_kv_cache_coordinator(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
             use_eagle=self.use_eagle,
             enable_caching=self.enable_caching,
             enable_kv_cache_events=enable_kv_cache_events,
+            dcp_world_size=dcp_world_size,
         )
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
@@ -187,6 +198,7 @@ class KVCacheManager:
         new_computed_blocks: Optional[KVCacheBlocks] = None,
         num_lookahead_tokens: int = 0,
         delay_cache_blocks: bool = False,
+        num_encoder_tokens: int = 0,
     ) -> Optional[KVCacheBlocks]:
         """Add slots for a request with new tokens to append.
 
@@ -253,6 +265,7 @@ class KVCacheManager:
             request_id=request.request_id,
             num_tokens=num_tokens_need_slot,
             new_computed_blocks=new_computed_block_list,
+            num_encoder_tokens=num_encoder_tokens,
         )
 
         if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
@@ -273,7 +286,7 @@ class KVCacheManager:
                                                   new_computed_block_list)
 
         new_blocks = self.coordinator.allocate_new_blocks(
-            request.request_id, num_tokens_need_slot)
+            request.request_id, num_tokens_need_slot, num_encoder_tokens)
 
         # P/D: delay caching blocks if we have to recv from
         # remote. Update state for locally cached blocks.
@@ -292,7 +305,7 @@ class KVCacheManager:
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
-        We free the blocks in reverse order so that he tail blocks are evicted 
+        We free the blocks in reverse order so that the tail blocks are evicted
         first when caching is enabled.
 
         Args:

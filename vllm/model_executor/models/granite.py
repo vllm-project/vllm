@@ -24,6 +24,7 @@
 # limitations under the License.
 """Inference-only IBM Granite model compatible with HuggingFace weights."""
 from collections.abc import Iterable
+from itertools import islice
 from typing import Any, Optional, Union
 
 import torch
@@ -316,7 +317,7 @@ class GraniteModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in self.layers[self.start_layer:self.end_layer]:
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states = layer(positions, hidden_states)
 
         if not get_pp_group().is_last_rank:
@@ -433,6 +434,7 @@ class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 # compatibility
                 if not lora_config else lora_config.lora_vocab_padding_size,
                 quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
             )
             if config.tie_word_embeddings:
                 self.lm_head.weight = self.model.embed_tokens.weight

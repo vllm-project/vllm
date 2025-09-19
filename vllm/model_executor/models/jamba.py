@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Jamba model."""
 from collections.abc import Iterable
+from itertools import islice
 from typing import Optional
 
 import torch
@@ -350,7 +351,7 @@ class JambaModel(nn.Module):
 
         kv_cache_index = 0
         mamba_cache_index = 0
-        for layer in self.layers[self.start_layer:self.end_layer]:
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             layer_mamba_cache_params = None
             if isinstance(layer, JambaAttentionDecoderLayer):
                 kv_cache_index += 1
@@ -501,6 +502,7 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
             # We need bigger padding if using lora for kernel
             # compatibility
             if not lora_config else lora_config.lora_vocab_padding_size,
+            prefix=maybe_prefix(prefix, "lm_head"),
         )
         # Used to track and store by the Mamba cache between steps.
         self.mamba_cache: Optional[MambaCacheManager] = None
@@ -612,7 +614,7 @@ class JambaForSequenceClassification(JambaForCausalLM):
             config.hidden_size,
             num_labels,
             bias=score_bias,
-            dtype=torch.float32,
+            dtype=vllm_config.model_config.head_dtype,
         )
 
         pooler_config = vllm_config.model_config.pooler_config

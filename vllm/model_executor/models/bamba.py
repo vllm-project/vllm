@@ -345,8 +345,7 @@ class BambaModel(nn.Module):
 
         residual = None
         num_attn = 0
-        for i in range(len(self.layers)):
-            layer = self.layers[i]
+        for i, layer in enumerate(self.layers):
             if isinstance(layer, BambaAttentionDecoderLayer):
                 num_attn += 1
 
@@ -515,6 +514,7 @@ class BambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
             # We need bigger padding if using lora for kernel
             # compatibility
             if not lora_config else lora_config.lora_vocab_padding_size,
+            prefix=maybe_prefix(prefix, "lm_head"),
         )
         # Used to track and store by the Mamba cache between steps.
         self.mamba_cache: Optional[MambaCacheManager] = None
