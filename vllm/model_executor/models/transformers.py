@@ -704,11 +704,11 @@ class TransformersModel(TransformersBase):
         orig_to_new_prefix={
             # Handle BERT-like models
             "bert": "model",
-            # Add 'model.' prefix for base model checkpoints
+            # Add `model.` prefix for base model checkpoints
             "": "model.",
-            # Remove 'model.' prefix if it was already there
+            # Remove `model.` prefix if it was already there
             "model.model.": "model.",
-            # Pooling adapters will be adjacent to 'model'
+            # Pooling adapters will be adjacent to `model`
             "model.pooler": "pooler",
             "model.score": "score",
             # Classifier adapter's classifier layer is renamed to score
