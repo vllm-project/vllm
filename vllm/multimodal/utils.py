@@ -24,7 +24,6 @@ from vllm.connections import HTTPConnection, global_http_connection
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_gather)
-from vllm.platforms import current_platform
 
 from .audio import AudioMediaIO
 from .base import MediaIO
@@ -373,12 +372,7 @@ def allocate_gpu_mm_processors(
         (device_idx, ) = map(int, rest)
         processor_gpu_idxs = [device_idx] * mm_processor_count
 
-    device_map = current_platform.device_id_to_physical_device_id
-
-    return [
-        f"{device_type}:{device_map(gpu_idx)}"
-        for gpu_idx in processor_gpu_idxs
-    ]
+    return [f"{device_type}:{gpu_idx}" for gpu_idx in processor_gpu_idxs]
 
 
 def argsort_mm_positions(
