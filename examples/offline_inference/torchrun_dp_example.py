@@ -7,6 +7,7 @@ no internal lb supported in external_launcher mode.
 """
 
 from vllm import LLM, SamplingParams
+
 # Create prompts, the same across all ranks
 prompts = [
     "Hello, my name is",
@@ -24,13 +25,13 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 # all ranks have the same random seed, so that sampling can be
 # deterministic across ranks.
 llm = LLM(
-    model="/data/local/models/oss/qwen1.5_2.7B_moe_chat",
+    model="microsoft/Phi-mini-MoE-instruct",
     tensor_parallel_size=1,
     data_parallel_size=2,
     pipeline_parallel_size=1,
-    enable_expert_parallel=True,
+    enable_expert_parallel=False,
     distributed_executor_backend="external_launcher",
-    max_model_len=32768,
+    max_model_len=4096,
     gpu_memory_utilization=0.6,
     seed=1,
 )

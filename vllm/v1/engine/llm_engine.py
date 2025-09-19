@@ -121,8 +121,9 @@ class LLMEngine:
             # for v0 compatibility
             self.model_executor = self.engine_core.engine_core.model_executor  # type: ignore
 
-        if parallel_config.data_parallel_size > 1 \
-            and executor_backend == "external_launcher":
+        self.external_launcher_dp = (parallel_config.data_parallel_size > 1 and
+                                     executor_backend == "external_launcher")
+        if self.external_launcher_dp:
             from vllm.distributed.parallel_state import get_dp_group
             self.dp_group = get_dp_group().cpu_group
         # Don't keep the dummy data in memory
@@ -333,5 +334,6 @@ class LLMEngine:
         return self.engine_core.collective_rpc(method, timeout, args, kwargs)
 
     def __del__(self):
-        if dp_group := getattr(self, "dp_group", None):
+        if dp_group := getattr(self, "dp_group",
+                               None) and not self.external_launcher_dp:
             stateless_destroy_torch_distributed_process_group(dp_group)
