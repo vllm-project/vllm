@@ -53,8 +53,6 @@ for output in outputs:
     generated_text = output.outputs[0].text
     print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}\n")
     print("-" * 50)
-
-del llm
 """
 Further tips:
 

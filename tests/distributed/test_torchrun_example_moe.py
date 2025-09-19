@@ -79,5 +79,3 @@ for output in outputs:
     test_consistent_across_ranks(generated_text)
     print(f"Rank {group_rank}, Prompt: {prompt!r}, "
           f"Generated text: {generated_text!r}")
-
-del llm

@@ -193,7 +193,6 @@ def _support_torch_compile(
     cls.__bases__ = cls.__bases__ + (TorchCompileWrapperWithCustomDispatcher, )
 
     old_init = cls.__init__
-    old_del = cls.__del__ if hasattr(cls, '__del__') else None
 
     setattr(cls, IGNORE_COMPILE_KEY, False)
 
@@ -215,17 +214,7 @@ def _support_torch_compile(
         TorchCompileWrapperWithCustomDispatcher.__init__(
             self, compilation_level=vllm_config.compilation_config.level)
 
-    def __del__(self):
-        assert self is not None
-        if hasattr(self, 'backend'):
-            # cleanup the backend explicitly to avoid hanging
-            # before program exits
-            del self.backend
-        if old_del is not None:
-            old_del(self)
-
     cls.__init__ = __init__
-    cls.__del__ = __del__
 
     def __call__(self, *args, **kwargs):
         # torch.compiler.is_compiling() means we are inside the compilation
