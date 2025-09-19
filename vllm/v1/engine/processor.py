@@ -39,8 +39,6 @@ from vllm.v1.worker.utils import MultiModalBudget, check_enough_init_memory
 
 logger = init_logger(__name__)
 
-logger = init_logger(__name__)
-
 
 class Processor:
 
