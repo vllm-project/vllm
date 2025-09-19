@@ -883,7 +883,10 @@ def qwen3_vl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     def processor(*args, videos=None, **kwargs):
         if videos is not None and is_list_of(videos, tuple):
             # batched multi videos
-            do_sample_frames = {video[1].pop("do_sample_frames") for video in videos}
+            do_sample_frames = {
+                video[1].pop("do_sample_frames")
+                for video in videos
+            }
             assert len(do_sample_frames) == 1
             if kwargs.get("do_sample_frames") is None:
                 kwargs["do_sample_frames"] = do_sample_frames
