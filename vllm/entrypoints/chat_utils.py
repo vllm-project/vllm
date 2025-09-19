@@ -1454,9 +1454,9 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
                 function_name = item["function"]["name"]
                 try:
                   item["function"]["arguments"] = json.loads(arguments)
-                except Exception as e:
-                  logger.exception(f"load function arguments to json error, info: {e}, function name: {function_name}, arguments: {arguments} !!!")
-                  raise ValueError(str(e)) from e
+                except json.JSONDecodeError as e:
+                  logger.exception("Failed to decode JSON for function '%s'. Arguments: %s", function_name, arguments)
+                  raise ValueError(f"Invalid JSON arguments for function '{function_name}'") from e
 
 
 def parse_chat_messages(
