@@ -67,6 +67,7 @@ backend_configs = {
     BackendConfig(name="FlashAttentionMLA",
                   env_vars={
                       "VLLM_ATTENTION_BACKEND": "FLASH_ATTN_MLA",
+                      "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH": 16,
                   },
                   comp_config={
                       "cudagraph_mode": "FULL_DECODE_ONLY",
