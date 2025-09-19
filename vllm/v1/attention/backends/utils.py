@@ -4,6 +4,7 @@ import abc
 import enum
 import functools
 from abc import abstractmethod
+from collections import deque
 from dataclasses import dataclass, field, fields, make_dataclass
 from typing import (
     TYPE_CHECKING,
@@ -728,6 +729,70 @@ def subclass_attention_backend(
     )
 
 
+def split_decodes_prefills_and_chunk(
+    common_attn_metadata: CommonAttentionMetadata,
+    decode_threshold: int = 1,
+) -> tuple[int, int, int, int, int, int]:
+    """
+    Assuming a reordered batch, finds the boundary between prefill and decode
+    requests.
+
+    Args:
+        common_attn_metadata: CommonAttentionMetadata object containing the
+            batch metadata.
+        decode_threshold: The maximum query length to be considered a decode.
+
+    Returns:
+        num_decodes: The number of decode requests.
+        num_prefills: The number of prefill requests.
+        num_decode_tokens: The number of tokens in the decode requests.
+        num_prefill_tokens: The number of tokens in the prefill requests.
+    """
+    max_query_len = common_attn_metadata.max_query_len
+    num_reqs = common_attn_metadata.num_reqs
+    num_tokens = common_attn_metadata.num_actual_tokens
+    query_start_loc = common_attn_metadata.query_start_loc_cpu
+    seq_lens = common_attn_metadata.seq_lens_cpu
+
+    if max_query_len <= decode_threshold:
+        return num_reqs, 0, 0, num_tokens, 0, 0
+
+    query_lens = query_start_loc[1:] - query_start_loc[:-1]
+    is_prefill = query_lens > decode_threshold
+    if not torch.any(is_prefill):
+        return num_reqs, 0, 0, num_tokens, 0, 0
+
+    first_prefill = is_prefill.int().argmax(dim=-1).item()
+    assert torch.all(query_lens[first_prefill:] > decode_threshold)
+    assert torch.all(query_lens[:first_prefill] <= decode_threshold)
+    num_decodes = first_prefill
+    num_decode_tokens = query_start_loc[first_prefill].item()
+
+    query_lens_prefill = query_lens[first_prefill:]
+    seq_lens_prefill = seq_lens[first_prefill:]
+    is_pure_prefill = seq_lens_prefill == query_lens_prefill
+
+    if torch.all(is_pure_prefill):
+        num_pure_prefills = num_reqs - num_decodes
+        num_pure_prefill_tokens = num_tokens - num_decode_tokens
+        return (num_decodes, 0, num_pure_prefills, num_decode_tokens, 0,
+                num_pure_prefill_tokens)
+
+    num_prefills = num_reqs - num_decodes
+    first_chunk_prefill = is_pure_prefill.int().argmax(dim=-1).item()
+
+    num_chunk_prefills = first_chunk_prefill
+    num_pure_prefills = num_prefills - first_chunk_prefill
+
+    num_chunk_prefill_tokens = query_start_loc[
+        num_chunk_prefills + num_decodes].item() - num_decode_tokens
+    num_pure_prefill_tokens = num_tokens - num_decode_tokens - \
+        num_chunk_prefill_tokens
+    return (num_decodes, num_chunk_prefills, num_pure_prefills,
+            num_decode_tokens, num_chunk_prefill_tokens,
+            num_pure_prefill_tokens)
+
+
 def split_decodes_and_prefills(
     common_attn_metadata: CommonAttentionMetadata,
     decode_threshold: int = 1,
@@ -783,10 +848,119 @@ def split_decodes_and_prefills(
     return (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens)
 
 
+def reorder_batch_to_split_decodes_prefills_and_chunks(
+    input_batch: "InputBatch",
+    scheduler_output: "SchedulerOutput",
+    decode_threshold: int = 1,
+) -> bool:
+    """
+    Reorders the batch to split into prefill, chunk_prefill 
+    and decode requests; places all requests in the order of 
+    [decodes:chunked_prefills:pure_prefills].
+
+    Returns:
+        True if the batch was modified, False otherwise.
+    """
+
+    # We assume most of the request is already in the order of what
+    # we desired since this function should only be opened after the
+    # `SchedulerConfig.split_prefill_from_chunk` is True. So we only
+    # need to spot all mismatched request and swap their positions
+    # for efficiency.
+
+    decodes = []
+    prefills = []
+    chunk_prefills = []
+
+    for i, req_id in enumerate(input_batch.req_ids):
+        num_tokens = scheduler_output.num_scheduled_tokens[req_id]
+        if num_tokens <= decode_threshold:
+            decodes.append(i)
+        elif input_batch.num_computed_tokens_cpu[i] > 0:
+            chunk_prefills.append(i)
+        else:
+            prefills.append(i)
+
+    num_decodes = len(decodes)
+    num_chunk_prefills = len(chunk_prefills)
+    # We define the reorder matrix here to help on the request reorder
+    # reorder_matrix[(i, j)] means the id the the requests that suppose
+    # to be in zone i but actually spot on zone j
+    # The decode, chunk prefill and pure prefill are separated into 3
+    # different zone here, 0 for decode, 1 for chunk prefill and 2 for
+    # pure prefill
+    reorder_matrix: dict[tuple[int, int], deque[int]] = {
+        (i, j): deque()
+        for i in range(3)
+        for j in range(3) if i != j
+    }
+
+    # collect mismatch
+
+    def target_idx(idx):
+        if idx < num_decodes:
+            # decode as zone 0
+            return 0
+        elif idx < num_decodes + num_chunk_prefills:
+            # chunk prefill as zone 1
+            return 1
+        else:
+            # pure prefill as zone 2
+            return 2
+
+    def fill_reorder_matrix(request_lists, reorder_sequence):
+        for idx, seq in enumerate(reorder_sequence):
+            request_list = request_lists[idx]
+            for req_idx in request_list:
+                req_target_id = target_idx(req_idx)
+                if seq != req_target_id:
+                    reorder_matrix[(seq, req_target_id)].append(req_idx)
+
+    def direct_zone_swap(i, j):
+        assert i != j
+        modified_batch = False
+        while reorder_matrix[(i, j)] and reorder_matrix[(j, i)]:
+            swap_req1 = reorder_matrix[(i, j)].pop()
+            swap_req2 = reorder_matrix[(j, i)].pop()
+            input_batch.swap_states(swap_req1, swap_req2)
+            modified_batch = True
+
+        return modified_batch
+
+    # in order 1,2,3, out order 3, 1, 2
+    def indirect_zone_swap(zone_list):
+        assert len(zone_list) == 3
+        modified_batch = False
+        while reorder_matrix[zone_list[0]] and reorder_matrix[
+                zone_list[1]] and reorder_matrix[zone_list[2]]:
+            swap_req1 = reorder_matrix[zone_list[0]].pop()
+            swap_req2 = reorder_matrix[zone_list[1]].pop()
+            swap_req3 = reorder_matrix[zone_list[2]].pop()
+
+            input_batch.swap_states(swap_req1, swap_req2)
+            input_batch.swap_states(swap_req2, swap_req3)
+            modified_batch = True
+        return modified_batch
+
+    fill_reorder_matrix([decodes, chunk_prefills, prefills], [0, 1, 2])
+
+    modified_batch = False
+    # do directly swap for
+    modified_batch |= direct_zone_swap(0, 1)  # decode <--> chunk prefill
+    modified_batch |= direct_zone_swap(0, 2)  # decode <--> pure prefill
+    modified_batch |= direct_zone_swap(1, 2)  # chunk prefill <--> pure prefill
+
+    modified_batch |= indirect_zone_swap(((0, 1), (1, 2), (2, 0)))
+    modified_batch |= indirect_zone_swap(((2, 1), (0, 2), (1, 0)))
+
+    return modified_batch
+
+
 def reorder_batch_to_split_decodes_and_prefills(
     input_batch: "InputBatch",
     scheduler_output: "SchedulerOutput",
     decode_threshold: int = 1,
+    reorder_append_prefills: bool = False,
 ) -> bool:
     """
     Reorders the batch to split into prefill and decode requests; places all
