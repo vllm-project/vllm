@@ -31,8 +31,8 @@ from vllm.config.kv_events import KVEventsConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.config.load import LoadConfig
 from vllm.config.lora import LoRAConfig
-from vllm.config.model import (LogprobsMode, ModelConfig, ModelDType,
-                               TokenizerMode)
+from vllm.config.model import (ConvertOption, LogprobsMode, ModelConfig,
+                               ModelDType, TokenizerMode)
 from vllm.config.multimodal import (MMCacheType, MMEncoderTPMode,
                                     MultiModalConfig)
 from vllm.config.parallel import (DistributedExecutorBackend, EPLBConfig,
