@@ -13,8 +13,7 @@ from torch import nn
 from typing_extensions import assert_never
 
 from vllm.attention import Attention
-from vllm.config import (ModelConfig, ModelImpl, VllmConfig,
-                         set_current_vllm_config)
+from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import QKVCrossParallelLinear
 from vllm.model_executor.layers.quantization.base_config import (
@@ -176,8 +175,8 @@ def get_model_architecture(
     )
 
     if arch == model_config._get_transformers_backend_cls():
-        assert model_config.model_impl != ModelImpl.VLLM
-        if model_config.model_impl == ModelImpl.AUTO:
+        assert model_config.model_impl != "vllm"
+        if model_config.model_impl == "auto":
             logger.warning_once(
                 "%s has no vLLM implementation, falling back to Transformers "
                 "implementation. Some features may not be supported and "

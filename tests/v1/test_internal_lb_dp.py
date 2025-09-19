@@ -10,6 +10,7 @@ from typing import Optional, cast
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
+import requests
 
 from tests.utils import RemoteOpenAIServer
 from tests.v1.test_utils import check_request_balancing
@@ -101,6 +102,8 @@ class MultinodeInternalLBServerManager:
                         sargs,
                         auto_port=False,
                         env_dict={
+                            "VLLM_SERVER_DEV_MODE":
+                            "1",
                             current_platform.device_control_env_var:
                             ",".join(
                                 str(
@@ -214,7 +217,10 @@ class APIOnlyServerManager:
                     self.model_name,
                     api_server_args,
                     auto_port=False,
-                    env_dict={})  # No GPUs needed for API-only server
+                    env_dict={
+                        "VLLM_SERVER_DEV_MODE": "1",
+                        # No GPUs needed for API-only server
+                    })
                 server.__enter__()
                 print(f"API-only server started successfully with "
                       f"{self.api_server_count} API servers")
@@ -293,14 +299,21 @@ def default_server_args():
 
 
 @pytest.fixture(scope="module", params=[1, 4])
-def servers(request, default_server_args):
+def server_manager(request, default_server_args):
     api_server_count = request.param
-    with MultinodeInternalLBServerManager(MODEL_NAME, DP_SIZE,
-                                          api_server_count,
-                                          default_server_args,
-                                          DP_SIZE // NUM_NODES,
-                                          TP_SIZE) as server_list:
-        yield server_list
+    server_manager = MultinodeInternalLBServerManager(MODEL_NAME, DP_SIZE,
+                                                      api_server_count,
+                                                      default_server_args,
+                                                      DP_SIZE // NUM_NODES,
+                                                      TP_SIZE)
+
+    with server_manager:
+        yield server_manager
+
+
+@pytest.fixture
+def servers(server_manager):
+    return server_manager.servers
 
 
 @pytest.fixture(scope="module", params=[1, 4])
@@ -329,6 +342,34 @@ async def api_only_client(api_only_servers: list[tuple[RemoteOpenAIServer,
     api_server = api_only_servers[0][0]
     async with api_server.get_async_client() as client:
         yield client
+
+
+def _get_parallel_config(server: RemoteOpenAIServer):
+    response = requests.get(server.url_for("server_info?config_format=json"))
+    response.raise_for_status()
+
+    vllm_config = response.json()["vllm_config"]
+    return vllm_config["parallel_config"]
+
+
+def test_multinode_dp_server_info(server_manager):
+    head_server = server_manager.servers[0][0]
+    api_server_count = server_manager.api_server_count
+
+    # Each request will hit one of the API servers
+    # `n_reqs` is set so that there is a good chance each server
+    # receives at least one request
+    n_reqs = 2 * api_server_count * api_server_count
+    parallel_configs = [
+        _get_parallel_config(head_server) for _ in range(n_reqs)
+    ]
+    api_process_counts = [c["_api_process_count"] for c in parallel_configs]
+    api_process_ranks = [c["_api_process_rank"] for c in parallel_configs]
+
+    assert all(c == api_server_count
+               for c in api_process_counts), api_process_counts
+    assert all(0 <= r < api_server_count
+               for r in api_process_ranks), api_process_ranks
 
 
 @pytest.mark.asyncio

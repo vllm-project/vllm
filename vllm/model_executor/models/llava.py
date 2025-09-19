@@ -737,7 +737,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             inputs_embeds: Optional tensor of input embeddings.
 
         Info:
-            [LlavaImageInputs][]
+            [`LlavaImageInputs`][vllm.model_executor.models.llava.LlavaImageInputs]
         """
         if intermediate_tensors is not None:
             inputs_embeds = None

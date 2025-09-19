@@ -29,15 +29,12 @@ class TopKTopPSampler(nn.Module):
     Implementations may update the logits tensor in-place.
     """
 
-    def __init__(
-            self,
-            logprobs_mode: LogprobsMode = LogprobsMode.RAW_LOGPROBS) -> None:
+    def __init__(self, logprobs_mode: LogprobsMode = "raw_logprobs") -> None:
         super().__init__()
         self.logprobs_mode = logprobs_mode
         # flashinfer optimization does not apply if intermediate
         # logprobs/logits after top_k/top_p need to be returned
-        if logprobs_mode not in (LogprobsMode.PROCESSED_LOGITS,
-                                 LogprobsMode.PROCESSED_LOGPROBS
+        if logprobs_mode not in ("processed_logits", "processed_logprobs"
                                  ) and current_platform.is_cuda():
             if is_flashinfer_available:
                 flashinfer_version = flashinfer.__version__
@@ -90,9 +87,9 @@ class TopKTopPSampler(nn.Module):
         """
         logits = self.apply_top_k_top_p(logits, k, p)
         logits_to_return = None
-        if self.logprobs_mode == LogprobsMode.PROCESSED_LOGITS:
+        if self.logprobs_mode == "processed_logits":
             logits_to_return = logits
-        elif self.logprobs_mode == LogprobsMode.PROCESSED_LOGPROBS:
+        elif self.logprobs_mode == "processed_logprobs":
             logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
         probs = logits.softmax(dim=-1, dtype=torch.float32)
         return random_sample(probs, generators), logits_to_return
@@ -115,7 +112,7 @@ class TopKTopPSampler(nn.Module):
                                     "PyTorch-native implementation.")
             return self.forward_native(logits, generators, k, p)
         assert self.logprobs_mode not in (
-            LogprobsMode.PROCESSED_LOGITS, LogprobsMode.PROCESSED_LOGPROBS
+            "processed_logits", "processed_logprobs"
         ), "FlashInfer does not support returning logits/logprobs"
         # flashinfer sampling functions expect contiguous logits.
         # In flex_attn/triton_attn fp32 inference, logits can be non-contiguous
