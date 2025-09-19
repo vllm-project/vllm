@@ -173,6 +173,9 @@ class XPUPlatform(Platform):
     def support_hybrid_kv_cache(cls) -> bool:
         return True
 
+    def is_sleep_mode_available(self) -> bool:
+        return True
+
     @classmethod
     def is_pin_memory_available(cls):
         return True
