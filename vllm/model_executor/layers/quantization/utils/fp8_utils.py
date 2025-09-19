@@ -281,10 +281,10 @@ class W8A8BlockFp8LinearOp:
         if self.is_hopper:
             output = torch.ops.vllm.padded_cutlass_scaled_mm(
                 q_input, weight, x_scale, weight_scale,
-                tuple(self.weight_group_shape), input_2d.dtype)
+                list(self.weight_group_shape), input_2d.dtype)
         else:
             output = cutlass_scaled_mm(q_input, weight, x_scale, weight_scale,
-                                       tuple(self.weight_group_shape),
+                                       list(self.weight_group_shape),
                                        input_2d.dtype, False)
         return output
 
