@@ -260,7 +260,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
 
   # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages when building.
-  set(CUTLASS_REVISION "v4.0.0" CACHE STRING "CUTLASS revision to use")
+  # Updated to v4.2.0 (Sept 15, 2025) for improved SM120 support
+  set(CUTLASS_REVISION "v4.2.0" CACHE STRING "CUTLASS revision to use")
 
   # Use the specified CUTLASS source directory for compilation if VLLM_CUTLASS_SRC_DIR is provided
   if (DEFINED ENV{VLLM_CUTLASS_SRC_DIR})
@@ -271,6 +272,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     if(NOT IS_ABSOLUTE VLLM_CUTLASS_SRC_DIR)
       get_filename_component(VLLM_CUTLASS_SRC_DIR "${VLLM_CUTLASS_SRC_DIR}" ABSOLUTE)
     endif()
+  
     message(STATUS "The VLLM_CUTLASS_SRC_DIR is set, using ${VLLM_CUTLASS_SRC_DIR} for compilation")
     FetchContent_Declare(cutlass SOURCE_DIR ${VLLM_CUTLASS_SRC_DIR})
   else()

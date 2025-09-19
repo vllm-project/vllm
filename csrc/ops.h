@@ -232,6 +232,13 @@ void cutlass_fp4_group_mm(
     const torch::Tensor& alphas, const torch::Tensor& problem_sizes,
     const torch::Tensor& expert_offsets, const torch::Tensor& sf_offsets);
 
+// SM120 kernel for NVFP4 MoE
+void cutlass_fp4_group_mm_sm120(
+    torch::Tensor& output, const torch::Tensor& a, const torch::Tensor& b,
+    const torch::Tensor& a_blockscale, const torch::Tensor& b_blockscales,
+    const torch::Tensor& alphas, const torch::Tensor& problem_sizes,
+    const torch::Tensor& expert_offsets, const torch::Tensor& sf_offsets);
+
 void get_cutlass_moe_mm_data(
     const torch::Tensor& topk_ids, torch::Tensor& expert_offsets,
     torch::Tensor& problem_sizes1, torch::Tensor& problem_sizes2,
