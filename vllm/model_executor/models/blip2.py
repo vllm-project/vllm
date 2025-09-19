@@ -680,7 +680,7 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
                 batch.
         
         Info:
-            [Blip2ImageInputs][]
+            [`Blip2ImageInputs`][vllm.model_executor.models.blip2.Blip2ImageInputs]
         """
 
         if intermediate_tensors is not None:
