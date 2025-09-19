@@ -1,5 +1,5 @@
 # Design Document  
-**Hybrid Tensor and Token Parallelism for Distributed LLM Inference**
+**Token Parallelism for Distributed LLM Inference**
 
 ## Overview
 

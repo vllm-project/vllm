@@ -1,7 +1,7 @@
 # Example usage:
 # Without token parallelism: torchrun --nproc-per-node=2 TKNP/test_torchrun.py --tensor-parallel-size 1 --pipeline-parallel-size 1 --enable-token-parallel --token-parallel-size 2
 # With token parallelism: torchrun --nproc-per-node=8 TKNP/test_torchrun.py --tensor-parallel-size 4 --pipeline-parallel-size 1 --data-parallel-size 1 --enable-token-parallel --token-parallel-size 2
-
+# General tests: torchrun --nproc-per-node=1 TKNP/test_torchrun.py
 
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
@@ -25,8 +25,8 @@ from vllm import LLM, SamplingParams
 def parse_args():
     """Parse command line arguments for distributed vLLM inference."""
     parser = argparse.ArgumentParser(description="Distributed vLLM inference with torchrun")
-    parser.add_argument("--tensor-parallel-size", type=int, default=4,
-                        help="Number of tensor parallel processes (default: 4)")
+    parser.add_argument("--tensor-parallel-size", type=int, default=1,
+                        help="Number of tensor parallel processes (default: 1)")
     parser.add_argument("--pipeline-parallel-size", type=int, default=1,
                         help="Number of pipeline parallel processes (default: 1)")
     parser.add_argument("--data-parallel-size", type=int, default=1,
