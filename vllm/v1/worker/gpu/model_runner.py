@@ -307,6 +307,7 @@ class GPUModelRunner:
         # Slot mappings: [num_kv_cache_groups, num_tokens]
         slot_mappings = self.block_tables.compute_slot_mappings(
             query_start_loc_gpu, positions.gpu[:num_tokens])
+
         logits_indices = query_start_loc_gpu[1:] - 1
         num_logits_indices = logits_indices.size(0)
 
@@ -366,6 +367,7 @@ class GPUModelRunner:
         # TODO(woosuk): Support DP sampler + CUDA graphs.
         sample_hidden_states = hidden_states[input_batch.logits_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
+
         pos = input_batch.positions[input_batch.logits_indices]
         sampling_metadata = self.req_states.make_sampling_metadata(
             input_batch.idx_mapping_np, pos)
