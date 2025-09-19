@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import math
 from typing import Optional
 
 import torch
@@ -44,7 +43,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         self.device = device
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
-        self.sharded_to_full_mapping = sharded_to_full_mapping
+        self.sharded_to_full_mapping = None
 
     @property
     def logits_as_input(self):
@@ -84,10 +83,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         lora_config: LoRAConfig,
         model_config: Optional[PretrainedConfig] = None,
     ) -> None:
-        # TODO: Verify if this condition can be further relaxed
-        if 32000 < self.base_layer.vocab_size > 257024:
-            raise ValueError("When using LoRA, vocab size must be "
-                             "32000 >= vocab_size <= 257024")
+
         self.lora_a_stacked = torch.zeros(
             (
                 max_loras,
@@ -98,14 +94,12 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             dtype=lora_config.lora_dtype,
             device=self.device,
         )
-        padding_size = max(1, current_platform.get_lora_vocab_padding_size())
+
         self.lora_b_stacked = torch.zeros(
             (
                 max_loras,
                 1,
-                # Pad for kernel compatibility
-                math.ceil(self.base_layer.vocab_size / padding_size) *
-                padding_size,
+                self.base_layer.vocab_size,
                 lora_config.max_lora_rank,
             ),
             dtype=lora_config.lora_dtype,
@@ -178,8 +172,9 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         indices_padded = self.punica_wrapper.sampler_indices_padded
 
         if current_platform.is_tpu() or current_platform.is_xpu():
-            indices_padded = indices_padded[:logits.size(0)]       # Continue with the base logits without additional vocabulary
-        
+            indices_padded = indices_padded[:logits.size(
+                0
+            )]  # Continue with the base logits without additional vocabulary
 
         lora_output: Optional[
             torch.Tensor] = self.punica_wrapper.add_lora_logits(
