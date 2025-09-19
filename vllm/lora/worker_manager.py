@@ -28,10 +28,6 @@ class WorkerLoRAManager:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        # max_num_seqs: int,
-        # max_num_batched_tokens: int,
-        # vocab_size: int,
-        # lora_config: LoRAConfig,
         device: torch.device,
         embedding_modules: dict[str, str],
         embedding_padding_modules: list[str],

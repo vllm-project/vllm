@@ -527,10 +527,20 @@ def test_worker_adapter_manager(dist_init, dummy_model_gate_up, device,
                              max_cpu_loras=4,
                              max_loras=4,
                              lora_dtype=DEFAULT_DTYPE)
-    worker_adapter_manager = WorkerLoRAManager(
-        4, 2, dummy_model_gate_up.unpadded_vocab_size -
-        lora_config.lora_extra_vocab_size, lora_config, device,
-        EMBEDDING_MODULES, EMBEDDING_PADDING_MODULES)
+
+    model_config = ModelConfig(max_model_len=16)
+    vllm_config = VllmConfig(model_config=model_config,
+                             lora_config=lora_config)
+
+    vllm_config.scheduler_config.max_num_seqs = 4
+    vllm_config.scheduler_config.max_num_batched_tokens = 2
+
+    worker_adapter_manager = WorkerLoRAManager(vllm_config, device,
+                                               EMBEDDING_MODULES,
+                                               EMBEDDING_PADDING_MODULES)
+    worker_adapter_manager.vocab_size = (
+        dummy_model_gate_up.unpadded_vocab_size -
+        lora_config.lora_extra_vocab_size)
     worker_adapter_manager.create_lora_manager(dummy_model_gate_up)
 
     dummy_lora_files = f"{tmp_path}/lora_adapter"
