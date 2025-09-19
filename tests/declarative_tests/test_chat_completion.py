@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import logging
 import os
 import random
 
@@ -16,6 +17,8 @@ TESTS_DIR = os.path.abspath(
     os.path.join(os.path.dirname(os.path.realpath(__file__)),
                  "..")) + "/declarative_tests/"
 
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 @pytest_asyncio.fixture
 async def client(server):
@@ -102,7 +105,7 @@ async def run_unary_test_case(server_fixture, case):
         top_logprobs=0)
 
     print_case_details(case)
-    print(response)
+    logger.info(response)
     dic_value = filter_response_by_expected(response.to_dict(), expected)
     assert dic_value["choices"][0]["message"]["content"] == expected[
         "choices"]["message"]
@@ -124,7 +127,8 @@ def get_logprobs(response):
     contents = response.choices[0].logprobs.content
     logprobs = []
     for token in contents:
-        print(token.logprob)
+        # print(token.logprob)
+        logger.info(token.logprob)
         logprobs.append(token.logprob)
     return logprobs
 
@@ -149,18 +153,19 @@ def filter_response_by_expected(response, expected):
 
 
 def print_case_details(case):
-    print("----------------------Case details------------------------")
+    logger.info("----------------------Case details------------------------")
     name = case["name"]
     request = case["request"]
     skip_check = "skip_check" in case
     expected = case.get("response")
     expected_err = case.get("error")
-    print(f"Case name: {name}")
-    print(f"request: {request}")
-    print(f"skip_check: {skip_check}")
-    print(f"expected: {expected}")
-    print(f"expected_err: {expected_err}")
-    print("----------------------------------------------------------")
+    logger.info("Case name: %s", name)
+    logger.info("request: %s", request)
+    logger.info("skip_check: %s", skip_check)
+    logger.info("expected: %s", expected)
+    logger.info("expected_err: %s", expected_err)
+
+    logger.info("----------------------------------------------------------")
 
 
 # To avoid errors related to event loop shutdown timing
