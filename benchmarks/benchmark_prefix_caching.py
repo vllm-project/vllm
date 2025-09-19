@@ -19,6 +19,7 @@ ShareGPT example usage:
     # This command samples 20 prompts with input lengths
     # between 128 and 256 tokens from the ShareGPT dataset,
     # then replicates each prompt 5 times.
+    # the repeatation will re-use the paged kv-cache.
     python benchmark_prefix_caching.py \
         --model meta-llama/Llama-2-7b-chat-hf \
         --dataset-path /path/to/ShareGPT_V3_unfiltered_cleaned_split.json \
@@ -26,6 +27,28 @@ ShareGPT example usage:
         --num-prompts 20 \
         --repeat-count 5 \
         --input-length-range 128:256
+
+
+Random input example usage:
+    # Random example usage with prefix length:
+    # specified length common prefix added for each prompt.
+    python benchmark_prefix_caching.py \
+        --model meta-llama/Llama-2-7b-chat-hf \
+        --enable-prefix-caching \
+        --num-prompts 10 \
+        --repeat-count 20 \
+        --input-length-range 128:256 \
+        --prefix-len 16
+
+    # About `--prefix-len`,
+    # refer to https://github.com/vllm-project/vllm/blob/main/docs/design/prefix_caching.md
+    # If --prefix-len is set to an exact multiple of the `block size`,
+    # ll prompts will share fully cacheable blocks in their prefix.
+    # If not, only the aligned portion will benefit from caching, and
+    # any extra tokens beyond the last full block will not be cached.
+
+
+
 """
 
 import dataclasses
