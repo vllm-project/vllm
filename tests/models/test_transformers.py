@@ -172,6 +172,14 @@ def test_embed_loading(vllm_runner, model):
         "BAAI/bge-base-en-v1.5",
     ])
 def test_embed_correctness(hf_runner, vllm_runner, example_prompts, model):
+    import transformers
+    from packaging.version import Version
+    installed = Version(transformers.__version__)
+    required = Version("4.57.0.dev0")
+    if installed < required:
+        pytest.skip("Encoder models with the Transformers backend require "
+                    f"transformers>={required}, but got {installed}")
+
     with vllm_runner(model, max_model_len=512,
                      model_impl="transformers") as vllm_model:
         model_config = vllm_model.llm.llm_engine.model_config
