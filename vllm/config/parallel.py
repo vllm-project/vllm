@@ -212,6 +212,15 @@ class ParallelConfig:
         should only be set by API server scale-out.
     """
 
+    _renderer_gpu_allocation: list[str] = field(default_factory=list)
+    """
+    The GPU allocated to the renderer of each API process.
+
+    Note:
+        This is an internal config that is only valid for and
+        should only be set by API server scale-out.
+    """
+
     @property
     def world_size_across_dp(self) -> int:
         """world_size_across_dp is TPxPPxDP, it is the size of the world

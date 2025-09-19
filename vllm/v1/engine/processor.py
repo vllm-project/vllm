@@ -17,8 +17,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.cache import processor_cache_from_config
 from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalUUIDDict
 from vllm.multimodal.processing import EncDecMultiModalProcessor
-from vllm.multimodal.utils import (allocate_gpu_mm_processors,
-                                   argsort_mm_positions)
+from vllm.multimodal.utils import argsort_mm_positions
 from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
@@ -560,25 +559,13 @@ class Processor:
         if not mm_config:
             return
 
+        parallel_config = self.parallel_config
+        api_process_rank = parallel_config._api_process_rank
+        gpu_allocation = parallel_config._renderer_gpu_allocation
+        device = gpu_allocation[api_process_rank]
+        mm_config.update_mm_processor_kwargs({"device": device})
+
         if mm_config.mm_processing_device != "cpu":
-            # Try to avoid using the same GPU as EngineCore
-            parallel_config = self.parallel_config
-            device_count = current_platform.device_count()  # type: ignore
-
-            gpu_allocation = allocate_gpu_mm_processors(
-                mm_config.mm_processing_device,
-                parallel_config._api_process_count,
-                available_device_count=device_count,
-                engine_device_count=parallel_config.world_size_across_dp,
-            )
-
-            api_process_rank = parallel_config._api_process_rank
-            new_device = gpu_allocation[api_process_rank]
-
-            logger.info("Multi-modal processor will be run on device %s",
-                        new_device)
-            mm_config.update_mm_processor_kwargs({"device": new_device})
-
             # Peak memory usage (required for this profiling)
             # is only tracked for CUDA
             if not current_platform.is_cuda_alike():
@@ -589,7 +576,7 @@ class Processor:
             # device.
             # Compared to running profiling on every Processor in parallel,
             # this avoids non-deterministic peak memory usage calculation.
-            if api_process_rank != gpu_allocation.index(new_device):
+            if api_process_rank != gpu_allocation.index(device):
                 return
 
             scheduler_config = self.scheduler_config
@@ -599,18 +586,18 @@ class Processor:
                 self.mm_registry,
             )
 
-            baseline_snapshot = MemorySnapshot(device=new_device)
+            baseline_snapshot = MemorySnapshot(device=device)
 
             # Only check init memory if we are sure that the EngineCore is not
             # loading weights or running profiling on the same GPU
-            # TODO: world_size_across_dp is too conservative for multi-node
-            new_device_index = torch.device(new_device).index or 0
-            if new_device_index < parallel_config.world_size_across_dp:
+            new_device_index = torch.device(device).index or 0
+            local_engine_count = parallel_config.data_parallel_size_local
+            if new_device_index < local_engine_count:
                 logger.warning(
                     "Both EngineCore and multi-modal processor are using "
                     "the same GPU (%s). This may result in inaccurate memory "
                     "profiling, and resource contention during inference.",
-                    new_device,
+                    device,
                 )
             else:
                 check_enough_init_memory(baseline_snapshot, self.cache_config)
@@ -624,16 +611,16 @@ class Processor:
                         mm_counts={modality: max_items_per_prompt},
                     )
 
-            usage_mult = gpu_allocation.count(new_device)
+            usage_mult = gpu_allocation.count(device)
             memory_usage = diff.torch_peak_increase * usage_mult
             logger.info(
                 "Multi-modal processing took %.4f GiB and %.6f seconds on %s",
                 memory_usage / GiB_bytes,
                 diff.profile_time,
-                new_device,
+                device,
             )
             if memory_usage > diff.before_profile.free_memory:
-                raise ValueError(f"Not enough memory in {new_device} "
+                raise ValueError(f"Not enough memory in {device} "
                                  f"for multi-modal processor. "
                                  f"Try reducing `api_server_count`.")
 
