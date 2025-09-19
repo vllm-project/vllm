@@ -5,9 +5,11 @@ from dataclasses import dataclass
 from typing import Any
 
 import numba
+import numba.types as types
 import numpy as np
 import torch
-from numba import types
+import triton
+import triton.language as tl
 
 from vllm.v1.utils import CpuGpuBuffer
 
@@ -161,3 +163,49 @@ def prepare_inputs(
     query_start_loc[num_reqs + 1:].fill(cu_num_tokens)
     # Fill unused with 0 for full cuda graph mode.
     seq_lens[num_reqs:].fill(0)
+
+
+@triton.jit
+def _combine_last_token_ids_kernel(
+    input_ids_ptr,
+    idx_mapping_ptr,
+    last_token_ids_ptr,
+    query_start_loc_ptr,
+    seq_lens_ptr,
+    num_tokens_ptr,
+):
+    batch_idx = tl.program_id(0)
+    req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
+
+    seq_len = tl.load(seq_lens_ptr + batch_idx)
+    num_tokens = tl.load(num_tokens_ptr + req_state_idx)
+    if seq_len < num_tokens:
+        # Chunked prefilling.
+        return
+
+    last_token_id = tl.load(last_token_ids_ptr + req_state_idx)
+    if last_token_id == -1:
+        return
+
+    end = tl.load(query_start_loc_ptr + batch_idx + 1)
+    tl.store(input_ids_ptr + end - 1, last_token_id)
+
+
+def combine_last_token_ids(
+    input_ids: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    last_token_ids: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    num_tokens: torch.Tensor,
+) -> torch.Tensor:
+    num_reqs = seq_lens.shape[0]
+    _combine_last_token_ids_kernel[(num_reqs, )](
+        input_ids,
+        idx_mapping,
+        last_token_ids,
+        query_start_loc,
+        seq_lens,
+        num_tokens,
+    )
+    return input_ids

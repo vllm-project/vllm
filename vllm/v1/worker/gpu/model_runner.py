@@ -27,6 +27,7 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.dist_utils import (all_gather_sampler_output,
                                            evenly_split)
 from vllm.v1.worker.gpu.input_batch import (InputBatch, InputBuffers,
+                                            combine_last_token_ids,
                                             prepare_inputs)
 from vllm.v1.worker.gpu.sampler import Sampler
 from vllm.v1.worker.gpu.states import RequestState, SamplingMetadata
@@ -158,8 +159,8 @@ class GPUModelRunner:
                 num_tokens=num_tokens,
         ):
             hidden_states = self.model(
-                input_ids=input_batch.input_ids[:num_tokens],
-                positions=input_batch.positions[:num_tokens],
+                input_ids=input_batch.input_ids,
+                positions=input_batch.positions,
             )
         sample_hidden_states = hidden_states[input_batch.logits_indices]
         return hidden_states, sample_hidden_states
@@ -205,7 +206,7 @@ class GPUModelRunner:
             [] for _ in range(self.block_tables.num_kv_cache_groups))
         overwrite: list[bool] = []
 
-        # Add new requests to the cached states.
+        # Add new requests.
         for new_req_data in scheduler_output.scheduled_new_reqs:
             req_id = new_req_data.req_id
             self.req_states.add_request(
@@ -223,7 +224,7 @@ class GPUModelRunner:
                 new_block_ids[i].extend(block_ids)
             overwrite.append(True)
 
-        # Update the states of the running/resumed requests.
+        # Add new blocks for the existing requests.
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for i, req_id in enumerate(cached_reqs.req_ids):
             req_index = self.req_states.req_id_to_index[req_id]
@@ -236,9 +237,6 @@ class GPUModelRunner:
                     cu_num_new_blocks[group_id].append(x + len(block_ids))
                     new_block_ids[group_id].extend(block_ids)
                 overwrite.append(False)
-
-            self.req_states.num_computed_tokens[req_index] = (
-                cached_reqs.num_computed_tokens[i])
 
         if req_indices:
             self.block_tables.append_block_ids(
@@ -275,54 +273,61 @@ class GPUModelRunner:
         # Block tables: num_kv_cache_groups x [num_reqs, max_num_blocks]
         block_tables = self.block_tables.gather_block_tables(idx_mapping)
 
-        input_ids = self.input_buffers.input_ids
-        positions = self.input_buffers.positions
-        query_start_loc = self.input_buffers.query_start_loc
-        seq_lens = self.input_buffers.seq_lens
         prepare_inputs(
             idx_mapping_np,
-            self.req_states.token_ids,
+            self.req_states.prompt_token_ids,
             self.req_states.num_computed_tokens,
             num_scheduled_tokens,
-            input_ids.np,
-            positions.np,
-            query_start_loc.np,
-            seq_lens.np,
+            self.input_buffers.input_ids.np,
+            self.input_buffers.positions.np,
+            self.input_buffers.query_start_loc.np,
+            self.input_buffers.seq_lens.np,
         )
-        input_ids.copy_to_gpu(num_tokens)
-        positions.copy_to_gpu(num_tokens)
-
+        self.input_buffers.input_ids.copy_to_gpu(num_tokens)
+        self.input_buffers.positions.copy_to_gpu(num_tokens)
         # NOTE(woosuk): We should copy the whole query_start_loc and seq_lens
         # tensors from CPU to GPU, because they may include paddings needed
         # for full CUDA graph mode.
-        query_start_loc.copy_to_gpu()
-        query_start_loc_cpu = query_start_loc.cpu[:num_reqs + 1]
+        self.input_buffers.query_start_loc.copy_to_gpu()
+        self.input_buffers.seq_lens.copy_to_gpu()
+        query_start_loc = self.input_buffers.query_start_loc
         query_start_loc_gpu = query_start_loc.gpu[:num_reqs + 1]
+        query_start_loc_cpu = query_start_loc.cpu[:num_reqs + 1]
         max_query_len = int(num_scheduled_tokens.max())
-
-        seq_lens.copy_to_gpu()
-        seq_lens_cpu = seq_lens.cpu[:num_reqs]
-        seq_lens_np = seq_lens.np[:num_reqs]
+        seq_lens_gpu = self.input_buffers.seq_lens.gpu[:num_reqs]
+        seq_lens_cpu = self.input_buffers.seq_lens.np[:num_reqs]
+        seq_lens_np = self.input_buffers.seq_lens.np[:num_reqs]
         max_seq_len = int(seq_lens_np.max())
-        seq_lens_gpu = seq_lens.gpu[:num_reqs]
 
-        num_computed_tokens_np = self.req_states.num_computed_tokens[
-            idx_mapping_np]
-        num_computed_tokens_cpu = torch.from_numpy(num_computed_tokens_np)
-        is_chunked_prefilling = (seq_lens_np
-                                 < self.req_states.num_tokens[idx_mapping_np])
+        # Some input token ids are directly read from the last sampled tokens.
+        combine_last_token_ids(
+            self.input_buffers.input_ids.gpu,
+            idx_mapping,
+            self.req_states.last_sampled_tokens,
+            query_start_loc_gpu,
+            seq_lens_gpu,
+            self.req_states.num_tokens.copy_to_gpu(),
+        )
 
-        # Slot mappings: [num_kv_cache_groups, num_tokens]
+        # Compute slot mappings: [num_kv_cache_groups, num_tokens]
         slot_mappings = self.block_tables.compute_slot_mappings(
-            query_start_loc_gpu, positions.gpu[:num_tokens])
+            query_start_loc_gpu, self.input_buffers.positions.gpu[:num_tokens])
 
+        num_computed_tokens_cpu = torch.from_numpy(
+            self.req_states.num_computed_tokens[idx_mapping_np])
+
+        # Whether the request is chunked-prefilling or not.
+        is_chunked_prefilling = (
+            seq_lens_np < self.req_states.num_tokens.np[idx_mapping_np])
+
+        # Logits indices to sample next token from.
         logits_indices = query_start_loc_gpu[1:] - 1
         num_logits_indices = logits_indices.size(0)
 
         # Layer name -> attention metadata.
         attn_metadata: dict[str, Any] = {}
-        for i, kv_cache_spec in enumerate(
-                self.kv_cache_config.kv_cache_groups):
+        kv_cache_groups = self.kv_cache_config.kv_cache_groups
+        for i, kv_cache_spec in enumerate(kv_cache_groups):
             block_table = block_tables[i]
             slot_mapping = slot_mappings[i]
 
@@ -352,6 +357,8 @@ class GPUModelRunner:
             for layer_name in kv_cache_spec.layer_names:
                 attn_metadata[layer_name] = metadata
 
+        input_ids = self.input_buffers.input_ids.gpu[:num_tokens_after_padding]
+        positions = self.input_buffers.positions.gpu[:num_tokens_after_padding]
         return InputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -361,8 +368,8 @@ class GPUModelRunner:
             num_tokens=num_tokens,
             num_tokens_after_padding=num_tokens_after_padding,
             is_chunked_prefilling=is_chunked_prefilling,
-            input_ids=input_ids.gpu,
-            positions=positions.gpu,
+            input_ids=input_ids,
+            positions=positions,
             attn_metadata=attn_metadata,
             logits_indices=logits_indices,
         )
@@ -412,10 +419,20 @@ class GPUModelRunner:
         sampler_output: SamplerOutput,
         input_batch: InputBatch,
     ) -> AsyncOutput:
+        # Store the last sampled token ids.
+        self.req_states.last_sampled_tokens[input_batch.idx_mapping] = (
+            sampler_output.sampled_token_ids)
+
         # Get the number of sampled tokens.
         # 0 if chunked-prefilling, 1 if not.
         is_chunked_prefilling = input_batch.is_chunked_prefilling
         num_sampled_tokens = (~is_chunked_prefilling).astype(np.int32)
+        # Increment the number of tokens.
+        idx_mapping_np = input_batch.idx_mapping_np
+        self.req_states.num_tokens.np[idx_mapping_np] += num_sampled_tokens
+        # Increment the number of computed tokens.
+        self.req_states.num_computed_tokens[idx_mapping_np] += (
+            input_batch.num_scheduled_tokens)
 
         model_runner_output = ModelRunnerOutput(
             req_ids=input_batch.req_ids,
@@ -450,8 +467,8 @@ class GPUModelRunner:
                 num_tokens=num_tokens,
         ):
             hidden_states = self.model(
-                input_ids=input_batch.input_ids[:num_tokens],
-                positions=input_batch.positions[:num_tokens],
+                input_ids=input_batch.input_ids,
+                positions=input_batch.positions,
             )
 
         sampler_output = self.sample(hidden_states, input_batch)

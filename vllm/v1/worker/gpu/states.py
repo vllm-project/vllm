@@ -3,8 +3,6 @@
 from dataclasses import dataclass
 from typing import Optional
 
-import numba
-import numba.types as types
 import numpy as np
 import torch
 
@@ -76,21 +74,22 @@ class RequestState:
         self.index_to_req_id: dict[int, str] = {}
         self.free_indices = list(range(max_num_reqs))
 
-        # TODO(woosuk): Because the token_ids tensor can be very big, we only
-        # initialize it on CPU memory.
-        self.token_ids = np.zeros(
+        # NOTE(woosuk): Strictly speaking, it contains prompt + some output
+        # because of preemption.
+        self.prompt_token_ids = np.zeros(
             (self.max_num_reqs, self.max_model_len),
             dtype=np.int32,
         )
-        self.num_tokens = np.zeros(self.max_num_reqs, dtype=np.int32)
+        self.num_tokens = self._make_buffer(self.max_num_reqs,
+                                            dtype=torch.int32)
         self.num_computed_tokens = np.zeros(self.max_num_reqs, dtype=np.int32)
-        self.num_prompt_tokens = np.zeros(self.max_num_reqs, dtype=np.int32)
 
-        # Last sampled token ids.
-        self.last_token = torch.zeros(
+        # Last sampled tokens.
+        self.last_sampled_tokens = torch.zeros(
             self.max_num_reqs,
-            dtype=torch.int32,
-            device=self.device,
+            1,
+            dtype=torch.int64,
+            device=device,
         )
 
         # Sampling parameters.
@@ -110,6 +109,12 @@ class RequestState:
                      device=self.device,
                      pin_memory=self.pin_memory)
 
+    def _make_buffer(self, size: int, dtype: torch.dtype) -> CpuGpuBuffer:
+        return CpuGpuBuffer(size,
+                            dtype=dtype,
+                            device=self.device,
+                            pin_memory=self.pin_memory)
+
     @property
     def num_reqs(self) -> int:
         return len(self.req_id_to_index)
@@ -126,11 +131,14 @@ class RequestState:
         self.req_id_to_index[req_id] = req_idx
         self.index_to_req_id[req_idx] = req_id
 
+        # NOTE(woosuk): Strictly speaking, "prompt_len" here may include
+        # output tokens, if the request is resumed from preemption.
         prompt_len = len(prompt_token_ids)
-        self.num_tokens[req_idx] = prompt_len
-        self.num_prompt_tokens[req_idx] = prompt_len
-        self.token_ids[req_idx, :prompt_len] = prompt_token_ids
+        self.prompt_token_ids[req_idx, :prompt_len] = prompt_token_ids
+        self.num_tokens.np[req_idx] = prompt_len
         self.num_computed_tokens[req_idx] = num_computed_tokens
+        # TODO(woosuk): Optimize.
+        self.last_sampled_tokens[req_idx].fill_(-1)
 
         self.temperature.np[req_idx] = sampling_params.temperature
         self.top_p.np[req_idx] = sampling_params.top_p
@@ -196,50 +204,6 @@ class RequestState:
             pos=pos,
             max_num_logprobs=max_num_logprobs,
         )
-
-    def append_token_ids(
-        self,
-        req_indices: np.ndarray,
-        sampled_ids: np.ndarray,
-        num_sampled_tokens: np.ndarray,
-    ) -> None:
-        _append_token_ids(
-            req_indices,
-            sampled_ids,
-            num_sampled_tokens,
-            self.token_ids,
-            self.num_tokens,
-        )
-
-
-@numba.jit(
-    [
-        types.none(
-            types.int32[:],
-            types.int64[:, :],
-            types.int32[:],
-            types.int32[:, :],
-            types.int32[:],
-        )
-    ],
-    nopython=True,
-    cache=True,
-)
-def _append_token_ids(
-    req_indices: np.ndarray,
-    sampled_ids: np.ndarray,
-    num_sampled_tokens: np.ndarray,
-    token_ids: np.ndarray,
-    num_tokens: np.ndarray,
-) -> None:
-    num_reqs = num_sampled_tokens.shape[0]
-    for i in range(num_reqs):
-        req_idx = req_indices[i]
-        n = num_sampled_tokens[i]
-        start_idx = num_tokens[req_idx]
-        end_idx = start_idx + n
-        token_ids[req_idx, start_idx:end_idx] = sampled_ids[i, :n]
-        num_tokens[req_idx] = end_idx
 
 
 class Param:
