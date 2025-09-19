@@ -326,8 +326,8 @@ async def test_no_args_tool_call(client: openai.AsyncOpenAI, model_name: str,
             # Test both empty string and "{}" for no-arg tool calls
             tool_call.function.arguments = arguments
             messages.append(message)
-            current_time = datetime.datetime.now(datetime.UTC)
-            result = current_time.isoformat() + "Z"
+            current_time = datetime.datetime.now()
+            result = current_time.isoformat()
             messages.append({
                 "role": "tool",
                 "tool_call_id": tool_call.id,
