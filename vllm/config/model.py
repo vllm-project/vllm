@@ -992,6 +992,7 @@ class ModelConfig:
                     quant_method = quantization_override
                     self.quantization = quantization_override
                     break
+            quant_method = quant_method if quant_method != "" else None
 
             # Verify quantization configurations.
             if self.quantization is None:

@@ -60,7 +60,6 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         length_from_prompt_token_ids_or_embeds, round_up,
                         supports_dynamo)
 from vllm.v1.attention.backends.flash_attn import AttentionMetadata
-from vllm.v1.attention.backends.flashinfer import FlashInferMetadataBuilder
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
