@@ -499,6 +499,9 @@ class EngineCore:
             self.structured_output_manager.grammar_init(req)
         return req, request.current_wave
 
+    def get_request_count(self) -> tuple[int, int]:
+        return self.scheduler.get_request_counts()
+
 
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""

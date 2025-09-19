@@ -249,6 +249,9 @@ class EngineCoreClient(ABC):
     ) -> list[_R]:
         raise NotImplementedError
 
+    async def get_request_count(self) -> tuple[int, int]:
+        raise NotImplementedError
+
 
 class InprocClient(EngineCoreClient):
     """
@@ -330,6 +333,9 @@ class InprocClient(EngineCoreClient):
 
     def dp_engines_running(self) -> bool:
         return False
+
+    async def get_request_count(self) -> tuple[int, int]:
+        return self.engine_core.get_request_count()
 
 
 @dataclass
@@ -791,6 +797,9 @@ class SyncMPClient(MPClient):
     ) -> None:
         self.call_utility("save_sharded_state", path, pattern, max_size)
 
+    async def get_request_count(self) -> tuple[int, int]:
+        return self.call_utility("get_request_count")
+
 
 class AsyncMPClient(MPClient):
     """Asyncio-compatible client for multi-proc EngineCore."""
@@ -996,6 +1005,9 @@ class AsyncMPClient(MPClient):
         return await self.call_utility_async(
             "collective_rpc", method, timeout, args, kwargs
         )
+
+    async def get_request_count(self) -> tuple[int, int]:
+        return await self.call_utility_async("get_request_count")
 
 
 class DPAsyncMPClient(AsyncMPClient):

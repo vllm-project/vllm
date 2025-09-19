@@ -774,10 +774,14 @@ class AsyncLLM(EngineClient):
             )
 
     async def minimal_generation(self) -> str:
-        prompt = "Hi"
+        prompt = "Ping"
         sampling_params = SamplingParams(temperature=0, max_tokens=2)
         request_id = random_uuid()
         result_text = ""
+        count = await self.engine_core.get_request_count()
+        num_running_reqs, num_waiting_reqs = count[0], count[1]
+        if num_running_reqs > 0 or num_waiting_reqs > 0:
+            return result_text
         async for output in self.generate(prompt, sampling_params, request_id):
             for completion in output.outputs:
                 result_text = completion.text

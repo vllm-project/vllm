@@ -109,8 +109,6 @@ from vllm.entrypoints.utils import (
 )
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
-from vllm.transformers_utils.config import (
-    maybe_register_config_serialize_by_value)
 from vllm.transformers_utils.tokenizer import MistralTokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (
@@ -118,8 +116,6 @@ from vllm.utils import (
     FlexibleArgumentParser,
     decorate_logs,
     is_valid_ipv6_address,
-    get_open_zmq_ipc_path,
-    random_uuid, 
     set_ulimit,
 )
 from vllm.v1.engine.exceptions import EngineDeadError
