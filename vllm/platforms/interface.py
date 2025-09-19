@@ -533,12 +533,6 @@ class Platform:
             " attribute.", self.device_type, key)
             return None
 
-    def get_global_graph_pool(self) -> Any:
-        """
-        Return the global graph pool for this platform.
-        """
-        return self.graph_pool_handle()
-
     @classmethod
     def get_cu_count(cls, device_id: int = 0) -> int:
         """
