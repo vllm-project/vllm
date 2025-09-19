@@ -504,7 +504,9 @@ class OpenAIServingResponses(OpenAIServing):
             # TODO: context for non-gptoss models doesn't use messages
             # so we can't get them out yet
             if request.enable_response_messages:
-                pass
+                raise NotImplementedError(
+                    "enable_response_messages is currently"
+                    " only supported for gpt-oss")
             # Calculate usage.
             assert final_res.prompt_token_ids is not None
             num_tool_output_tokens = 0
