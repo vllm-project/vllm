@@ -678,14 +678,12 @@ class EplbState:
 
             # Process all layers for this rearrangement
             current_num_layers = model.num_moe_layers
-            while self.layer_to_transfer < current_num_layers and not self.shutdown_event.is_set(
-            ):
+            while (self.layer_to_transfer < current_num_layers
+                   and not self.shutdown_event.is_set()):
                 if not self.ep_buffer_ready and self.rebalanced:
-                    # get lock
                     assert self.new_physical_to_logical_map is not None
                     await asyncio.to_thread(self.buffer_lock.acquire)
                     try:
-                        # Re-check layer_to_transfer after acquiring lock in case it was updated
                         if self.layer_to_transfer >= current_num_layers:
                             break
 
@@ -721,6 +719,7 @@ class EplbState:
         if not self.buffer_lock.acquire(blocking=False):
             return
         try:
+            assert self.new_physical_to_logical_map is not None
             move_from_buffer(
                 expert_weights=model.expert_weights[self.layer_to_transfer],
                 expert_weights_buffer=self.expert_buffer,
@@ -738,8 +737,8 @@ class EplbState:
                 self.buffer_lock.release()
             except Exception as e:
                 logger.error(
-                    f"Rank {ep_group.rank()}: buffer_lock release failed in move_to_workspace: {e}"
-                )
+                    "Rank %d: buffer_lock release failed in "
+                    "move_to_workspace: %s", ep_group.rank(), str(e))
 
     def post_eplb(self,
                   model: MixtureOfExperts,
