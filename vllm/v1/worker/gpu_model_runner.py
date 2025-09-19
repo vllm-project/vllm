@@ -46,7 +46,6 @@ from vllm.model_executor.models.interfaces import (is_mixture_of_experts,
                                                    supports_transcription)
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling, is_pooling_model, is_text_generation_model)
-from vllm.model_executor.models.utils import _merge_multimodal_embeddings
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargsItem,
                                     PlaceholderRange)
@@ -1559,7 +1558,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
         shift_computed_tokens: int = 0,
-    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
+    ) -> tuple[list[torch.Tensor], torch.Tensor]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
 
         is_mm_embed = self.is_mm_embed.cpu
@@ -1620,7 +1619,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         is_mm_embed = self.is_mm_embed.copy_to_gpu(total_num_scheduled_tokens)
 
-        return is_mm_embed, mm_embeds
+        return mm_embeds, is_mm_embed
 
     def _extract_encoder_inputs(
         self,
@@ -1905,19 +1904,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 and not self.model_config.is_encoder_decoder):
             # Run the multimodal encoder if any.
             self._execute_mm_encoder(scheduler_output)
-            is_mm_embed, mm_embeds = self._gather_mm_embeddings(
+            mm_embeds, is_mm_embed = self._gather_mm_embeddings(
                 scheduler_output)
 
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
             inputs_embeds_scheduled = self.model.get_input_embeddings(
-                self.input_ids.gpu[:num_scheduled_tokens])
-
-            inputs_embeds_scheduled = _merge_multimodal_embeddings(
-                inputs_embeds_scheduled,
-                is_mm_embed,
+                self.input_ids.gpu[:num_scheduled_tokens],
                 multimodal_embeddings=mm_embeds,
+                is_multimodal=is_mm_embed,
             )
 
             # TODO(woosuk): Avoid the copy. Optimize.

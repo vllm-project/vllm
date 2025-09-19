@@ -809,12 +809,18 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
             multimodal_embeds = self.get_multimodal_embeddings(**kwargs)
             if multimodal_embeds is not None:
                 inputs_embeds = self.get_input_embeddings(
-                    input_ids, multimodal_embeds)
+                    input_ids,
+                    multimodal_embeds,
+                    is_multimodal=input_ids == self.config.image_token_id,
+                )
                 input_ids = None
 
         model_output = super().forward(input_ids, positions,
                                        intermediate_tensors, inputs_embeds)
         return model_output
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.model
 
     def get_multimodal_embeddings(self, **kwargs):
         pixel_values = kwargs.pop("pixel_values", None)
@@ -866,19 +872,3 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
                 ]
 
             return vision_embeddings
-
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings=None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.model.get_input_embeddings()(input_ids)
-        if (multimodal_embeddings is not None
-                and len(multimodal_embeddings) != 0):
-            mask = (input_ids == self.config.image_token_id)
-            mask = mask.unsqueeze(-1).expand_as(inputs_embeds)
-            multimodal_embeddings = torch.cat(multimodal_embeddings)
-
-            inputs_embeds = inputs_embeds.masked_scatter(
-                mask, multimodal_embeddings)
-        return inputs_embeds

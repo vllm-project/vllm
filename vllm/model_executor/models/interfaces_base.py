@@ -43,6 +43,13 @@ class VllmModel(Protocol[T_co]):
     ) -> None:
         ...
 
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """Apply token embeddings to `input_ids`."""
+        ...
+
     def forward(
         self,
         input_ids: torch.Tensor,

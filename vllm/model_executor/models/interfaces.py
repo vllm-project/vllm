@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable, Mapping, MutableSequence
-from typing import (TYPE_CHECKING, ClassVar, Literal, Optional, Protocol,
-                    Union, overload, runtime_checkable)
+from typing import (TYPE_CHECKING, Callable, ClassVar, Literal, Optional,
+                    Protocol, Union, overload, runtime_checkable)
 
 import numpy as np
 import torch
@@ -20,7 +20,8 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.utils import supports_kw
 
-from .interfaces_base import is_pooling_model
+from .interfaces_base import VllmModel, is_pooling_model
+from .utils import _merge_multimodal_embeddings
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -84,7 +85,7 @@ class SupportsMultiModal(Protocol):
         """
         ...
 
-    def get_language_model(self) -> torch.nn.Module:
+    def get_language_model(self) -> VllmModel:
         """
         Returns the underlying language model used for text generation.
 
@@ -96,17 +97,81 @@ class SupportsMultiModal(Protocol):
         """
         ...
 
+    @overload
+    def get_input_embeddings(self, input_ids: Tensor) -> Tensor:
+        ...
+
+    @overload
+    def get_input_embeddings(
+        self,
+        input_ids: Tensor,
+        multimodal_embeddings: MultiModalEmbeddings,
+        *,
+        is_multimodal: torch.Tensor,
+        do_language_embed_multimodal: bool = True,
+    ) -> Tensor:
+        ...
+
+    def _get_text_embeddings(
+        self,
+        input_ids: Tensor,
+        get_input_embeddings: Callable[[Tensor], Tensor],
+        *,
+        is_multimodal: Optional[Tensor],
+        do_language_embed_multimodal: bool,
+    ) -> Tensor:
+        if not do_language_embed_multimodal and is_multimodal is not None:
+            is_text = ~is_multimodal
+            text_embeds = get_input_embeddings(input_ids[is_text])
+
+            return torch.empty(
+                (input_ids.shape[0], text_embeds.shape[1]),
+                dtype=text_embeds.dtype,
+                device=text_embeds.device,
+            ).masked_scatter_(is_text.unsqueeze_(-1), text_embeds)
+
+        return get_input_embeddings(input_ids)
+
     def get_input_embeddings(
         self,
         input_ids: Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        *,
+        is_multimodal: Optional[Tensor] = None,
+        do_language_embed_multimodal: bool = True,
     ) -> Tensor:
         """
-        Returns the input embeddings merged from the text embeddings from 
-        input_ids and the multimodal embeddings generated from multimodal 
-        kwargs.
+        Apply token embeddings to `input_ids`.
+
+        If `multimodal_embeddings` is passed, scatter them into
+        `input_ids` according to the mask `is_multimodal`.
+
+        In case the multi-modal token IDs exceed the vocabulary size of
+        the language model, you can set `do_language_embed_multimodal=False`
+        to avoid calling the language model's `get_input_embeddings` method
+        on those tokens.
         """
-        ...
+        inputs_embeds = self._get_text_embeddings(
+            input_ids,
+            self.get_language_model().get_input_embeddings,
+            is_multimodal=is_multimodal,
+            do_language_embed_multimodal=do_language_embed_multimodal,
+        )
+
+        if multimodal_embeddings is None:
+            return inputs_embeds
+
+        if is_multimodal is None:
+            raise ValueError(
+                "`get_input_embeddings` now requires `is_multimodal` arg, "
+                "please update your model runner according to "
+                "https://github.com/vllm-project/vllm/pull/16229.")
+
+        return _merge_multimodal_embeddings(
+            inputs_embeds=inputs_embeds,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+        )
 
 
 @overload

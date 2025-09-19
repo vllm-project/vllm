@@ -4,7 +4,7 @@
 import itertools
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal, Optional, Protocol, Union, overload
+from typing import Any, Literal, Optional, Protocol, Union, overload
 
 import torch
 import torch.nn as nn
@@ -391,8 +391,8 @@ def _embedding_count_expression(embeddings: NestedTensors) -> str:
 
 def _merge_multimodal_embeddings(
     inputs_embeds: torch.Tensor,
-    is_multimodal: torch.Tensor,
     multimodal_embeddings: NestedTensors,
+    is_multimodal: torch.Tensor,
 ) -> torch.Tensor:
     """
     Merge ``multimodal_embeddings`` into ``inputs_embeds`` by overwriting the
@@ -433,42 +433,6 @@ def _merge_multimodal_embeddings(
     return inputs_embeds
 
 
-def embed_multimodal(
-    input_ids: torch.Tensor,
-    multimodal_token_id: int,
-    get_text_embeds: Callable[[torch.Tensor], torch.Tensor],
-    multimodal_embeds: NestedTensors,
-) -> torch.Tensor:
-    """
-    Embed token IDs and multimodal inputs and combine their embeddings.
-
-    ``multimodal_token_id`` is used to determine whether a token ID should
-    be embedded using ``get_text_embeds`` or ``get_multimodal_embeds``.
-
-    Compared to ``merge_multimodal_embeddings`, this avoids running
-    ``get_text_embeds`` on ``input_ids[input_ids == multimodal_token_id]``
-    which causes issues when the placeholder token ID exceeds the
-    vocabulary size of the language model.
-    """
-    is_multimodal = input_ids == multimodal_token_id
-    is_text = ~is_multimodal
-
-    text_embeds = get_text_embeds(input_ids[is_text])
-    merged_embeds = torch.empty(
-        (input_ids.shape[0], text_embeds.shape[1]),
-        dtype=text_embeds.dtype,
-        device=text_embeds.device,
-    )
-
-    merged_embeds[is_text] = text_embeds
-
-    return _merge_multimodal_embeddings(
-        merged_embeds,
-        is_multimodal,
-        multimodal_embeds,
-    )
-
-
 def merge_multimodal_embeddings(
     input_ids: torch.Tensor,
     inputs_embeds: torch.Tensor,
@@ -501,13 +465,9 @@ def merge_multimodal_embeddings(
         This updates ``inputs_embeds`` in place.
     """
     if isinstance(placeholder_token_id, list):
-        placeholder_token_id = torch.tensor(
-            placeholder_token_id,
-            pin_memory=is_pin_memory_available()).to(device=input_ids.device,
-                                                     non_blocking=True)
         return _merge_multimodal_embeddings(
             inputs_embeds,
-            torch.isin(input_ids, placeholder_token_id),
+            isin_list(input_ids, placeholder_token_id),
             multimodal_embeddings,
         )
 
@@ -516,6 +476,18 @@ def merge_multimodal_embeddings(
         (input_ids == placeholder_token_id),
         multimodal_embeddings,
     )
+
+
+def isin_list(
+    elements: torch.Tensor,
+    test_elements_list: list[int],
+) -> torch.Tensor:
+    test_elements = torch.tensor(
+        test_elements_list,
+        pin_memory=is_pin_memory_available(),
+    ).to(device=elements.device, non_blocking=True)
+
+    return torch.isin(elements, test_elements)
 
 
 class LayerFn(Protocol):

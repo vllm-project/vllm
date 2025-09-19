@@ -32,7 +32,6 @@ from vllm.model_executor.model_loader.tpu import TPUModelLoader
 from vllm.model_executor.models.interfaces import supports_transcription
 from vllm.model_executor.models.interfaces_base import (
     is_pooling_model, is_text_generation_model)
-from vllm.model_executor.models.utils import _merge_multimodal_embeddings
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargsItem,
                                     PlaceholderRange)
@@ -883,7 +882,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _gather_mm_embeddings(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
+    ) -> tuple[list[torch.Tensor], torch.Tensor]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         padded_total_num_scheduled_tokens = _get_padded_token_len(
             self.num_tokens_paddings, total_num_scheduled_tokens)
@@ -947,27 +946,24 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         is_mm_embed = is_mm_embed[:padded_total_num_scheduled_tokens] \
             .to(self.device)
 
-        return is_mm_embed, mm_embeds
+        return mm_embeds, is_mm_embed
 
     def _get_model_inputs(
         self,
         input_ids: torch.Tensor,
-        mm_embed_inputs: Optional[tuple[torch.Tensor, list[torch.Tensor]]],
+        mm_embed_inputs: Optional[tuple[list[torch.Tensor], torch.Tensor]],
     ):
         if self.supports_mm_inputs:
+            mm_embeds, is_mm_embed = mm_embed_inputs or (None, None)
+
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
-            inputs_embeds = self.model.get_input_embeddings(input_ids)
-
-            if mm_embed_inputs:
-                is_mm_embed, mm_embeds = mm_embed_inputs
-
-                inputs_embeds = _merge_multimodal_embeddings(
-                    inputs_embeds,
-                    is_mm_embed,
-                    multimodal_embeddings=mm_embeds,
-                )
+            inputs_embeds = self.model.get_input_embeddings(
+                input_ids,
+                multimodal_embeddings=mm_embeds,
+                is_multimodal=is_mm_embed,
+            )
 
             return None, inputs_embeds
         else:
@@ -1378,10 +1374,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         # Assign outputs or the graph will be cut short.
                         a, b = self._get_model_inputs(
                             placeholders_ids,
-                            mm_embed_inputs=(
-                                mm_mask,
-                                [mm_embeds],
-                            ),
+                            mm_embed_inputs=([mm_embeds], mm_mask),
                         )
                         assert a is None
                         xm.mark_step()

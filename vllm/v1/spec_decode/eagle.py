@@ -18,7 +18,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
-from vllm.model_executor.models.utils import _merge_multimodal_embeddings
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available
@@ -172,8 +171,8 @@ class EagleProposer:
         last_token_indices: Optional[torch.Tensor],
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
-        mm_embed_inputs: Optional[tuple[torch.Tensor,
-                                        list[torch.Tensor]]] = None,
+        mm_embed_inputs: Optional[tuple[list[torch.Tensor],
+                                        torch.Tensor]] = None,
     ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
@@ -218,14 +217,12 @@ class EagleProposer:
         self.hidden_states[:num_tokens] = target_hidden_states
 
         if self.supports_mm_inputs:
-            assert mm_embed_inputs is not None, (
-                "Multi-modal embeddings should be passed from model runner")
-            is_mm_embed, mm_embeds = mm_embed_inputs
+            mm_embeds, is_mm_embed = mm_embed_inputs or (None, None)
 
-            self.inputs_embeds[:num_tokens] = _merge_multimodal_embeddings(
+            self.inputs_embeds[:num_tokens] = self.model.get_input_embeddings(
                 self.input_ids[:num_tokens],
-                is_mm_embed,
                 multimodal_embeddings=mm_embeds,
+                is_multimodal=is_mm_embed,
             )
 
             input_ids = None
