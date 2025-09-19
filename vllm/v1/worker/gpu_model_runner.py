@@ -116,10 +116,12 @@ AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 PerLayerAttnMetadata: TypeAlias = Union[list[AttnMetadataDict],
                                         AttnMetadataDict]
 
+
 def explicit_cleanup_submodule(model: nn.Module):
     for module in model.children():
         if hasattr(module, "__del__") and callable(module.__del__):
             module.__del__()
+
 
 # Wrapper for ModelRunnerOutput to support overlapped execution.
 class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
@@ -4051,4 +4053,5 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return pinned.tolist()
 
     def __del__(self):
-        explicit_cleanup_submodule(self.model)
+        if isinstance(self.model, nn.Module):
+            explicit_cleanup_submodule(self.model)
