@@ -939,14 +939,22 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 is_mm_embed[req_start_pos+start_idx:req_start_pos + end_idx] \
                     = True
 
-                mm_embeds_item = encoder_output[start_idx:end_idx]
-                mm_embeds.append(mm_embeds_item)
+                # Only whole mm items are processed
+                mm_embeds.append(encoder_output)
 
             req_start_idx += num_scheduled_tokens
 
-        is_mm_embed = is_mm_embed[:padded_total_num_scheduled_tokens] \
-            .to(self.device)
+        is_mm_embed = is_mm_embed[:padded_total_num_scheduled_tokens]
 
+        if not len(mm_embeds) and is_mm_embed.any():
+            # Do this safety check here, on CPU, to avoid precompiling faulty
+            # cases to check on device tensors.
+            num_expected_tokens = is_mm_embed.sum().item()
+            raise ValueError(
+                f"Attempted to assign 0 "
+                f"multimodal tokens to {num_expected_tokens} placeholders")
+
+        is_mm_embed = is_mm_embed.to(self.device)
         return is_mm_embed, mm_embeds
 
     def _get_model_inputs(
@@ -1371,11 +1379,15 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             hf_config.image_token_index
 
                         placeholders_ids = placeholders_ids.to(self.device)
+
+                        mm_mask = torch.tensor([False] * num_tokens)
+                        mm_mask[:items_size] = True
+                        mm_mask = mm_mask.to(self.device)
                         # Assign outputs or the graph will be cut short.
                         a, b = self._get_model_inputs(
                             placeholders_ids,
                             mm_embed_inputs=(
-                                torch.tensor(True, device=self.device),
+                                mm_mask,
                                 [mm_embeds],
                             ),
                         )
