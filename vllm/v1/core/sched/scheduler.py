@@ -578,8 +578,10 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_decode_tokens,
             req_to_new_blocks,
         )
+        scheduled_requests = (scheduled_new_reqs + scheduled_running_reqs +
+                              scheduled_resumed_reqs)
         structured_output_request_ids, grammar_bitmask = (
-            self.get_grammar_bitmask(self.running,
+            self.get_grammar_bitmask(scheduled_requests,
                                      scheduled_spec_decode_tokens))
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
