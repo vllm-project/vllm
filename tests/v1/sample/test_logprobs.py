@@ -3,6 +3,7 @@
 
 import itertools
 from collections.abc import Generator
+from typing import get_args
 
 import pytest
 import torch
@@ -464,7 +465,7 @@ def test_all_logprobs(example_prompts, monkeypatch: pytest.MonkeyPatch):
                 assert len(prompt_logprob) == vocab_size
 
 
-@pytest.mark.parametrize("logprobs_mode", list(LogprobsMode))
+@pytest.mark.parametrize("logprobs_mode", get_args(LogprobsMode))
 def test_logprobs_mode(logprobs_mode: LogprobsMode,
                        monkeypatch: pytest.MonkeyPatch):
     """Test with LLM engine with different logprobs_mode.
@@ -493,14 +494,12 @@ def test_logprobs_mode(logprobs_mode: LogprobsMode,
             for logprobs in output.logprobs:
                 for token_id in logprobs:
                     logprob = logprobs[token_id]
-                    if logprobs_mode in (LogprobsMode.RAW_LOGPROBS,
-                                         LogprobsMode.PROCESSED_LOGPROBS):
+                    if logprobs_mode in ("raw_logprobs", "processed_logprobs"):
                         assert logprob.logprob <= 0
                     if logprob.logprob > 0:
                         positive_values = positive_values + 1
                     total_token_with_logprobs = total_token_with_logprobs + 1
         assert total_token_with_logprobs >= len(results[0].outputs)
-        if logprobs_mode in (LogprobsMode.RAW_LOGITS,
-                             LogprobsMode.PROCESSED_LOGITS):
+        if logprobs_mode in ("raw_logits", "processed_logits"):
             assert positive_values > 0
         del llm
