@@ -2492,9 +2492,36 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Skip requests that have already reached the max model length.
                 draft_token_ids.append([])
                 continue
-
-            drafter_output = self.drafter.propose(
-                self.input_batch.token_ids_cpu[i, :num_tokens])
+            req_state = self.requests[req_id]
+            # Prepare context for drafter.
+            # If predicted_outputs is set, use predicted tokens + output tokens
+            # as context. Otherwise, use the input tokens + output tokens
+            # as context as before. If predicted_outputs is set and no
+            # predicted tokens are provided, skip speculative decoding for the
+            # request.
+            if req_state.sampling_params is not None \
+                    and self.speculative_config.predicted_outputs \
+                    and isinstance(req_state.sampling_params.prediction, list):
+                context_token_ids = req_state.sampling_params.prediction.copy()
+                output_token_ids = self.input_batch.token_ids_cpu[
+                    i, self.input_batch.num_prompt_tokens[i]:num_tokens]
+                context_token_ids.extend(output_token_ids)
+                context_token_ids = np.array(context_token_ids)
+            elif not self.speculative_config.predicted_outputs:
+                context_token_ids = self.input_batch.token_ids_cpu[
+                    i, :num_tokens]
+            else:
+                context_token_ids = None
+            drafter_output = None
+            if req_state.sampling_params is not None:
+                extra_args = req_state.sampling_params.extra_args
+            else:
+                extra_args = None
+            if context_token_ids is not None:
+                drafter_output = self.drafter.propose(
+                    context_token_ids=context_token_ids,
+                    vllm_xargs=extra_args,
+                )
             if drafter_output is None or len(drafter_output) == 0:
                 draft_token_ids.append([])
             else:

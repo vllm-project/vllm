@@ -95,6 +95,8 @@ class RequestState:
         arrival_time: float,
         queue: Optional[RequestOutputCollector],
         log_stats: bool,
+        accepted_prediction_tokens: Optional[int],
+        rejected_prediction_tokens: Optional[int],
         top_p: Optional[float] = None,
         n: Optional[int] = None,
         temperature: Optional[float] = None,
@@ -118,6 +120,8 @@ class RequestState:
         self.is_prefilling = True
         self.queue = queue
         self.num_cached_tokens = 0
+        self.accepted_prediction_tokens = accepted_prediction_tokens
+        self.rejected_prediction_tokens = rejected_prediction_tokens
 
         self.stats = RequestStateStats(
             arrival_time=arrival_time) if log_stats else None
@@ -179,6 +183,8 @@ class RequestState:
             arrival_time=request.arrival_time,
             queue=queue,
             log_stats=log_stats,
+            accepted_prediction_tokens=None,
+            rejected_prediction_tokens=None,
         )
 
     def make_request_output(
@@ -257,6 +263,8 @@ class RequestState:
             finished=finished,
             kv_transfer_params=kv_transfer_params,
             num_cached_tokens=self.num_cached_tokens,
+            accepted_prediction_tokens=self.accepted_prediction_tokens,
+            rejected_prediction_tokens=self.rejected_prediction_tokens,
         )
 
     def _new_completion_output(
@@ -420,6 +428,10 @@ class OutputProcessor:
             kv_transfer_params = engine_core_output.kv_transfer_params
             req_state.num_cached_tokens = engine_core_output.num_cached_tokens
             req_state.is_prefilling = False
+            req_state.accepted_prediction_tokens = \
+                engine_core_output.accepted_prediction_tokens
+            req_state.rejected_prediction_tokens = \
+                engine_core_output.rejected_prediction_tokens
 
             if pooling_output is None:
                 assert req_state.detokenizer is not None

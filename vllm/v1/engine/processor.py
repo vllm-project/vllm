@@ -416,7 +416,11 @@ class Processor:
             sampling_params.update_from_generation_config(
                 self.generation_config_fields, eos_token_id)
             if self.tokenizer is not None:
-                sampling_params.update_from_tokenizer(self.tokenizer)
+                predicted_outputs = (
+                    self.vllm_config.speculative_config is not None
+                    and self.vllm_config.speculative_config.predicted_outputs)
+                sampling_params.update_from_tokenizer(
+                    self.tokenizer, predicted_outputs=predicted_outputs)
         else:
             pooling_params = params.clone()
 
