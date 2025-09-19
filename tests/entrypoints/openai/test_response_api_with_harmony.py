@@ -744,3 +744,18 @@ async def test_function_calling_full_history(client: OpenAI, model_name: str):
     assert response_2 is not None
     assert response_2.status == "completed"
     assert response_2.output_text is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_output_messages_enabled(client: OpenAI, model_name: str,
+                                       server):
+    response = await client.responses.create(
+        model=model_name,
+        input="What is the capital of South Korea?",
+        extra_body={"enable_response_messages": True})
+
+    assert response is not None
+    assert response.status == "completed"
+    assert len(response.input_messages) > 0
+    assert len(response.output_messages) > 0
