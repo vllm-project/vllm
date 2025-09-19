@@ -41,7 +41,8 @@ from vllm.model_executor.layers.sampler import (Sampler, SamplerOutput,
                                                 get_sampler)
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-from vllm.model_executor.models import supports_lora, supports_multimodal
+from vllm.model_executor.models import (supports_lora, supports_mrope,
+                                        supports_multimodal)
 from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalKwargs, MultiModalPlaceholderMap,
@@ -670,18 +671,33 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                     inter_data.seq_ids[seq_idx]]
                 token_ids = seq_data.get_token_ids()
 
-                mrope_input_positions, mrope_position_delta = \
-                    MRotaryEmbedding.get_input_positions(
-                        token_ids,
-                        hf_config=hf_config,
-                        image_grid_thw=image_grid_thw,
-                        video_grid_thw=video_grid_thw,
-                        second_per_grid_ts=second_per_grid_ts,
-                        context_len=inter_data.context_lens[seq_idx],
-                        seq_len=inter_data.seq_lens[seq_idx],
-                        audio_feature_lengths=audio_feature_lengths,
-                        use_audio_in_video=use_audio_in_video,
-                    )
+                if supports_mrope(self.runner.model):
+                    mrope_input_positions, mrope_position_delta = \
+                        self.runner.model.get_mrope_input_positions(
+                            token_ids,
+                            hf_config=hf_config,
+                            image_grid_thw=image_grid_thw,
+                            video_grid_thw=video_grid_thw,
+                            second_per_grid_ts=second_per_grid_ts,
+                            context_len=inter_data.context_lens[seq_idx],
+                            seq_len=inter_data.seq_lens[seq_idx],
+                            audio_feature_lengths=audio_feature_lengths,
+                            use_audio_in_video=use_audio_in_video,
+                        )
+                    mrope_input_positions = mrope_input_positions.tolist()
+                else:
+                    mrope_input_positions, mrope_position_delta = \
+                        MRotaryEmbedding.get_input_positions(
+                            token_ids,
+                            hf_config=hf_config,
+                            image_grid_thw=image_grid_thw,
+                            video_grid_thw=video_grid_thw,
+                            second_per_grid_ts=second_per_grid_ts,
+                            context_len=inter_data.context_lens[seq_idx],
+                            seq_len=inter_data.seq_lens[seq_idx],
+                            audio_feature_lengths=audio_feature_lengths,
+                            use_audio_in_video=use_audio_in_video,
+                        )
 
                 seq_data.mrope_position_delta = mrope_position_delta
                 inter_data.mrope_input_positions[
@@ -1337,8 +1353,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         return self.lora_manager.list_adapters()
 
     @torch.inference_mode()
-    def capture_model(self, kv_caches: List[List[torch.Tensor]]) -> None:
-        """Cuda graph capture a model.
+    def capture_model(self, kv_caches: List[List[torch.Tensor]]) -> int:
+        """Cuda graph capture a model and return cudagraph memory
+        consumption in bytes.
 
         Note that CUDA graph's performance gain is negligible if number
         of batched tokens are larger than 200. And since CUDA graph
@@ -1505,6 +1522,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         # This usually takes < 10 seconds.
         logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
                     elapsed_time, cuda_graph_size / GiB_bytes)
+        return cuda_graph_size
 
     def _update_inputs_to_capture_for_enc_dec_model(self,
                                                     capture_inputs: Dict[str,

@@ -342,7 +342,7 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
             raise ValueError(f"Incorrect type of {name}. "
                              f"Got type: {type(mm_input)}")
         if isinstance(mm_input, torch.Tensor):
-            return torch.concat(list(mm_input))
+            return mm_input.reshape(-1, *mm_input.shape[2:])
         else:
             return torch.concat(mm_input)
 
