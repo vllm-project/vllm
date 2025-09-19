@@ -501,7 +501,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         zero_expert_num = getattr(layer, 'zero_expert_num', 0)
         zero_expert_type = getattr(layer, 'zero_expert_type', None)
 
-        select_result = FusedMoE.select_experts(
+        topk_weights, topk_ids, zero_expert_result = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
             use_grouped_topk=use_grouped_topk,
@@ -522,12 +522,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             global_num_experts=global_num_experts,
             zero_expert_num=zero_expert_num,
             zero_expert_type=zero_expert_type)
-
-        if len(select_result) == 3:
-            topk_weights, topk_ids, zero_expert_result = select_result
-        else:
-            topk_weights, topk_ids = select_result
-            zero_expert_result = None
 
         if self.rocm_aiter_moe_enabled:
             assert self.fused_experts is None
@@ -1582,19 +1576,12 @@ class FusedMoE(CustomOp):
         global_num_experts: Optional[int] = None,
         zero_expert_num: Optional[int] = None,
         zero_expert_type: Optional[str] = None,
-    ) -> Union[tuple[torch.Tensor, torch.Tensor], tuple[
-            torch.Tensor, torch.Tensor, torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Route the input hidden states to the top-k experts based on the
         router logits.
 
         Returns:
-            When zero experts are not used:
-                (topk_weights, topk_ids) (tuple[torch.Tensor, torch.Tensor]):
-                The weights and *global physical* expert ids of the top-k
-                experts.
-
-            When zero experts are used:
                 (topk_weights, topk_ids, zero_expert_result) 
                 (tuple[torch.Tensor, torch.Tensor, torch.Tensor]):
                 The weights, expert ids, and zero expert computation result.
@@ -1609,7 +1596,7 @@ class FusedMoE(CustomOp):
         # Check if we should use a routing simulation strategy
         routing_strategy = envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY
         if routing_strategy != "":
-            return RoutingSimulator.simulate_routing(
+            topk_weights, topk_ids = RoutingSimulator.simulate_routing(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
                 strategy_name=routing_strategy,
@@ -1726,9 +1713,9 @@ class FusedMoE(CustomOp):
                 zero_expert_type=zero_expert_type,
                 hidden_states=hidden_states,
             )
-            return topk_weights, topk_ids, zero_expert_result
         else:
-            return topk_weights, topk_ids
+            zero_expert_result = None
+        return topk_weights, topk_ids, zero_expert_result
 
     def must_reduce_shared_expert_outputs(self) -> bool:
         """
