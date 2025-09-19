@@ -1148,11 +1148,11 @@ class FusedMoE(CustomOp):
         self.batched_router_logits: Optional[torch.Tensor] = None
         if self.use_dp_chunking:
             if vllm_config.parallel_config.enable_dbo:
-                states_shape = (2, moe.max_num_tokens, self.hidden_size),
-                logits_shape = (2, moe.max_num_tokens, num_experts),
+                states_shape = (2, moe.max_num_tokens, self.hidden_size)
+                logits_shape = (2, moe.max_num_tokens, num_experts)
             else:
-                states_shape = (moe.max_num_tokens, self.hidden_size),
-                logits_shape = (moe.max_num_tokens, num_experts),
+                states_shape = (moe.max_num_tokens, self.hidden_size)
+                logits_shape = (moe.max_num_tokens, num_experts)
 
             self.batched_hidden_states = torch.zeros(
                 states_shape,
@@ -1637,8 +1637,8 @@ class FusedMoE(CustomOp):
 
         return [
             weight.view(self.local_num_experts, -1) for name, weight in weights
-            if name not in NON_EXPERT_WEIGHTS and weight.shape != torch.Size([])
-            and not name.startswith("_shared_experts.")
+            if name not in NON_EXPERT_WEIGHTS and weight.shape != torch.Size(
+                []) and not name.startswith("_shared_experts.")
             and not name.startswith("_shared_fused_combine.")
         ]
 
