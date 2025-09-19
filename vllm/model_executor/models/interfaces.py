@@ -21,7 +21,6 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.utils import supports_kw
 
 from .interfaces_base import VllmModel, is_pooling_model
-from .utils import _merge_multimodal_embeddings
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -151,6 +150,8 @@ class SupportsMultiModal(Protocol):
         to avoid calling the language model's `get_input_embeddings` method
         on those tokens.
         """
+        from .utils import _merge_multimodal_embeddings
+
         inputs_embeds = self._get_text_embeddings(
             input_ids,
             self.get_language_model().get_input_embeddings,
