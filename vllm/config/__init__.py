@@ -30,20 +30,28 @@ from vllm.config.utils import (ConfigType, SupportsMetricsInfo, config,
                                is_init_field, update_config)
 
 __all__ = [
+    # From vllm.config.cache
     "BlockSize",
     "CacheConfig",
     "CacheDType",
     "MambaDType",
     "PrefixCachingHashAlgo",
+    # From vllm.config.compilation
     "CompilationConfig",
     "CompilationLevel",
     "CUDAGraphMode",
     "PassConfig",
+    # From vllm.config.device
     "DeviceConfig",
+    # From vllm.config.kv_events
     "KVEventsConfig",
+    # From vllm.config.kv_transfer
     "KVTransferConfig",
+    # From vllm.config.load
     "LoadConfig",
+    # From vllm.config.lora
     "LoRAConfig",
+    # From vllm.config.model
     "ConvertOption",
     "HfOverrides",
     "LogprobsMode",
@@ -55,26 +63,35 @@ __all__ = [
     "TokenizerMode",
     "iter_architecture_defaults",
     "try_match_architecture_defaults",
+    # From vllm.config.multimodal
     "MMCacheType",
     "MMEncoderTPMode",
     "MultiModalConfig",
+    # From vllm.config.observability
     "DetailedTraceModules",
     "ObservabilityConfig",
+    # From vllm.config.parallel
     "DistributedExecutorBackend",
     "EPLBConfig",
     "ParallelConfig",
+    # From vllm.config.pooler
     "PoolerConfig",
+    # From vllm.config.scheduler
     "RunnerType",
-    "ConfigType",
     "SchedulerConfig",
     "SchedulerPolicy",
+    # From vllm.config.speculative
     "SpeculativeConfig",
+    # From vllm.config.speech_to_text
     "SpeechToTextConfig",
+    # From vllm.config.structured_outputs
     "StructuredOutputsConfig",
+    # From vllm.config.utils
+    "ConfigType",
+    "SupportsMetricsInfo",
     "config",
     "get_attr_docs",
-    "is_init_field",
-    "SupportsMetricsInfo",
     "get_layers_from_vllm_config",
+    "is_init_field",
     "update_config",
 ]
