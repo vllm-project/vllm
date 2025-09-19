@@ -32,6 +32,8 @@ logger = init_logger(__name__)
 SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "medusa",
                             "mlp_speculator", "draft_model", "deepseek_mtp",
                             "ernie_mtp", "qwen3_next_mtp", "mtp"]
+MTP_MODEL_TYPES = ("deepseek_mtp", "mimo_mtp", "glm4_moe_mtp", "ernie_mtp",
+                   "qwen3_next_mtp")
 
 
 @config
@@ -311,8 +313,7 @@ class SpeculativeConfig:
                       "mlp_speculator"):
                     self.method = "mlp_speculator"
                 elif (self.draft_model_config.hf_config.model_type
-                      in ("deepseek_mtp", "mimo_mtp", "glm4_moe_mtp",
-                          "ernie_mtp", "qwen3_next_mtp")):
+                      in MTP_MODEL_TYPES):
                     self.method = "mtp"
                     if self.num_speculative_tokens > 1:
                         logger.warning(
