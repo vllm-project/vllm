@@ -405,6 +405,23 @@ def merge_multimodal_embeddings_from_map(
     return inputs_embeds
 
 
+def merge_multimodal_embeddings_from_mask(
+    inputs_embeds: torch.Tensor,
+    is_multimodal: torch.Tensor,
+    multimodal_embeddings: NestedTensors,
+) -> torch.Tensor:
+    """
+    Merge multimodal embeddings using a precomputed boolean mask.
+
+    This updates inputs_embeds in place.
+    """
+    return _merge_multimodal_embeddings(
+        inputs_embeds=inputs_embeds,
+        is_multimodal=is_multimodal,
+        multimodal_embeddings=multimodal_embeddings,
+    )
+
+
 def _merge_multimodal_embeddings(
     inputs_embeds: torch.Tensor,
     is_multimodal: torch.Tensor,
