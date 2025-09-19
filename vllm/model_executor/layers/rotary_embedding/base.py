@@ -6,6 +6,8 @@ from typing import Optional
 import torch
 
 from vllm.model_executor.custom_op import CustomOp
+from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer
 
 from .common import apply_rotary_emb_torch
 
@@ -30,9 +32,17 @@ class RotaryEmbedding(CustomOp):
         self.base = base
         self.is_neox_style = is_neox_style
         self.dtype = dtype
+        # Flashinfer only supports head_size=64, 128, 256, 512.
+        # https://github.com/flashinfer-ai/flashinfer/blob/ebfd655efe830048dba5d582aaa61d61d1cf9a87/include/flashinfer/utils.cuh#L174-L202
+        self.use_flashinfer = (self.enabled()
+                               and dtype in (torch.float16, torch.bfloat16)
+                               and current_platform.is_cuda()
+                               and has_flashinfer()
+                               and self.head_size in [64, 128, 256, 512])
 
         cache = self._compute_cos_sin_cache()
-        cache = cache.to(dtype)
+        if not self.use_flashinfer:
+            cache = cache.to(dtype)
         self.cos_sin_cache: torch.Tensor
         self.register_buffer("cos_sin_cache", cache, persistent=False)
 
@@ -56,6 +66,14 @@ class RotaryEmbedding(CustomOp):
         sin = freqs.sin()
         cache = torch.cat((cos, sin), dim=-1)
         return cache
+
+    def _match_cos_sin_cache_dtype(self, query: torch.Tensor) -> None:
+        # __setattr__ in nn.Module (called by `self.cos_sin_cache = ...`)
+        # is expensive, so avoid calling it if possible
+        if self.cos_sin_cache.device != query.device or \
+            self.cos_sin_cache.dtype != query.dtype:
+            self.cos_sin_cache = self.cos_sin_cache.to(query.device,
+                                                       dtype=query.dtype)
 
     def forward_native(
         self,
@@ -94,15 +112,16 @@ class RotaryEmbedding(CustomOp):
         query: torch.Tensor,
         key: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        if self.use_flashinfer:
+            torch.ops.vllm.flashinfer_rotary_embedding(positions, query, key,
+                                                       self.head_size,
+                                                       self.cos_sin_cache,
+                                                       self.is_neox_style)
+            return query, key
+
         from vllm import _custom_ops as ops
 
-        # __setattr__ in nn.Module (called by `self.cos_sin_cache = ...`)
-        # is expensive, so avoid calling it if possible
-        if self.cos_sin_cache.device != query.device or \
-            self.cos_sin_cache.dtype != query.dtype:
-            self.cos_sin_cache = self.cos_sin_cache.to(query.device,
-                                                       dtype=query.dtype)
-
+        self._match_cos_sin_cache_dtype(query)
         # ops.rotary_embedding() is an in-place operation
         # that updates the query and key tensors.
         ops.rotary_embedding(positions, query, key, self.head_size,
@@ -117,8 +136,7 @@ class RotaryEmbedding(CustomOp):
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         from vllm._ipex_ops import ipex_ops as ops
 
-        self.cos_sin_cache = self.cos_sin_cache.to(positions.device,
-                                                   dtype=query.dtype)
+        self._match_cos_sin_cache_dtype(query)
         # ops.rotary_embedding() is an in-place operation
         # that updates the query and key tensors.
         if key is None:
