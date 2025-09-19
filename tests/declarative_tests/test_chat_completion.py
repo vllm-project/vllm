@@ -20,6 +20,7 @@ TESTS_DIR = os.path.abspath(
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+
 @pytest_asyncio.fixture
 async def client(server):
     async with server.get_async_client() as async_client:
