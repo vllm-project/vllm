@@ -228,7 +228,7 @@ if (has_flashinfer_cutlass_fused_moe()
     register_prepare_and_finalize(
         FlashInferCutlassMoEPrepareAndFinalize,
         standard_format,
-        nv_fp4_types,  # + fp8_types,
+        nvfp4_types + fp8_types,
         blocked_quantization_support=True,
         backend=None,
         force_multigpu=True,
@@ -238,7 +238,7 @@ if (has_flashinfer_cutlass_fused_moe()
     register_experts(
         FlashInferExperts,
         standard_format,
-        nvfp4_types,
+        nvfp4_types + fp8_types,
         blocked_quantization_support=True,
         supports_chunking=True,
         # Note: this is a hack to get it to run for now
