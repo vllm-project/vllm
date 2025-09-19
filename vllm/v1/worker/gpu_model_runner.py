@@ -3071,11 +3071,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if cudagraph_runtime_mode == CUDAGraphMode.NONE:
                 batch_descriptor = None
             else:
-                # filter out the valid batch descriptor
+                max_num_seqs = self.scheduler_config.max_num_seqs
+                if uniform_decode:
+                    from math import ceil
+                    num_reqs = min(
+                        ceil(num_tokens / self.uniform_decode_query_len),
+                        max_num_seqs)
+                else:
+                    num_reqs = min(num_tokens, max_num_seqs)
+
                 _cg_mode, batch_descriptor = \
                     self.cudagraph_dispatcher.dispatch(
                         BatchDescriptor(num_tokens=num_tokens,
-                                        uniform_decode=uniform_decode))
+                                        uniform_decode=uniform_decode,
+                                        num_reqs=num_reqs))
                 # sanity check
                 assert cudagraph_runtime_mode == _cg_mode, (
                     f"Cudagraph runtime mode mismatch at dummy_run. "
