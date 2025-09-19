@@ -585,9 +585,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         kv_data_type=self.kv_cache_dtype,
                     )
                 else:
-                    attn_metadata.qo_indptr_gpu = qo_indptr_cpu.to(self.device)
+                    attn_metadata.qo_indptr_gpu = qo_indptr_cpu.to(
+                        self.device, non_blocking=True)
                     attn_metadata.paged_kv_indptr_gpu = paged_kv_indptr_cpu.to(
-                        self.device)
+                        self.device, non_blocking=True)
 
             if num_decodes > 0:
                 pure_decode = num_prefills == 0
