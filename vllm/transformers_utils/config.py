@@ -463,15 +463,29 @@ def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
     return config
 
 
-def maybe_override_with_speculators_target_model(
+def maybe_override_with_speculators(
     model: str,
     tokenizer: str,
     trust_remote_code: bool,
     revision: Optional[str] = None,
+    vllm_speculative_config: Optional[dict[str, Any]] = None,
     **kwargs,
-) -> tuple[str, str]:
+) -> tuple[str, str, Optional[dict[str, Any]]]:
     """
-    If running a speculators config, override running model with target model
+    Resolve model configuration when speculators are detected.
+
+    Checks if the provided model is a speculators model and if so, extracts
+    the target model configuration and builds the speculative config.
+
+    Args:
+        model: Model name or path
+        tokenizer: Tokenizer name or path
+        trust_remote_code: Whether to trust remote code
+        revision: Model revision
+        vllm_speculative_config: Existing vLLM speculative config
+
+    Returns:
+        Tuple of (resolved_model, resolved_tokenizer, speculative_config)
     """
     is_gguf = check_gguf_file(model)
     if is_gguf:
@@ -487,11 +501,27 @@ def maybe_override_with_speculators_target_model(
         token=_get_hf_token(),
         **kwargs,
     )
-    spec_config = config_dict.get("speculators_config", None)
-    # Return the target model
-    if spec_config is not None:
-        model = tokenizer = spec_config["verifier"]["name_or_path"]
-    return model, tokenizer
+    speculators_config = config_dict.get("speculators_config")
+
+    if speculators_config is None:
+        # No speculators config found, return original values
+        return model, tokenizer, vllm_speculative_config
+
+    # Speculators format detected - process overrides
+    from vllm.transformers_utils.configs.speculators.base import (
+        SpeculatorsConfig)
+
+    vllm_speculative_config = SpeculatorsConfig.extract_vllm_speculative_config(
+        config_dict=config_dict)
+
+    # Set the draft model to the speculators model
+    vllm_speculative_config["model"] = model
+
+    # Override model and tokenizer with the verifier model from config
+    verifier_model = speculators_config["verifier"]["name_or_path"]
+    model = tokenizer = verifier_model
+
+    return model, tokenizer, vllm_speculative_config
 
 
 def get_config(
