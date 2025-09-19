@@ -89,7 +89,7 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
         # It does not depend on scales or azp, so it is the same for
         # static and dynamic quantization.
         # For more details, see csrc/quantization/w8a8/cutlass/Epilogues.md
-        # https://github.com/vllm-project/vllm/blob/8d59dbb00044a588cab96bcdc028006ed922eb06/csrc/quantization/w8a8/cutlass/Epilogues.md
+        # https://github.com/vllm-project/vllm/blob/main/csrc/quantization/w8a8/cutlass/Epilogues.md
         if not self.config.input_symmetric:
             weight = getattr(layer, self.w_q_name)
             azp_adj = weight.sum(dim=0, keepdim=True, dtype=torch.int32)
