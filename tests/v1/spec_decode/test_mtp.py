@@ -33,7 +33,7 @@ def _create_mtp_proposer(num_speculative_tokens: int) -> EagleProposer:
         target_model_config=model_config,
         target_parallel_config=ParallelConfig(),
         model=mimo_7b_dir,
-        method="mimo_mtp",
+        method="mtp",
         num_speculative_tokens=num_speculative_tokens,
     )
 
